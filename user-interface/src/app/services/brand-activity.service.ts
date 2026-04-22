@@ -19,11 +19,9 @@ import type { BrandJobListItem, BrandJobStatus } from './branding-api.service';
 export class BrandActivityService {
   private readonly subject = new BehaviorSubject<BrandActivity[]>([]);
 
-  readonly activities$: Observable<BrandActivity[]> = this.subject.asObservable();
-
   /** Reactive view of activities for a single brand, sorted newest first. */
   forBrand(brandId: string): Observable<BrandActivity[]> {
-    return this.activities$.pipe(
+    return this.subject.pipe(
       map((list) =>
         list
           .filter((a) => a.brandId === brandId)
@@ -40,7 +38,7 @@ export class BrandActivityService {
   /** Create and return a new activity in `queued` state. */
   start(kind: BrandActivityKind, brandId: string, jobId?: string | null): BrandActivity {
     const activity: BrandActivity = {
-      id: this.generateId(),
+      id: crypto.randomUUID(),
       brandId,
       kind,
       status: 'queued',
@@ -66,11 +64,6 @@ export class BrandActivityService {
     this.subject.next(this.subject.getValue().filter((a) => a.id !== id));
   }
 
-  /** Drop every activity belonging to a brand (e.g. brand deleted). */
-  clearForBrand(brandId: string): void {
-    this.subject.next(this.subject.getValue().filter((a) => a.brandId !== brandId));
-  }
-
   /**
    * Seed the store with running jobs fetched from the backend on page load,
    * so a refresh during an in-flight run does not hide the chip. Jobs whose
@@ -87,7 +80,7 @@ export class BrandActivityService {
       const status = mapJobStatus(job.status);
       if (!runningLike.includes(status)) continue;
       additions.push({
-        id: this.generateId(),
+        id: crypto.randomUUID(),
         brandId: job.brand_id,
         kind: 'run',
         status,
@@ -111,13 +104,6 @@ export class BrandActivityService {
       error: status.error ?? null,
       completedAt: isTerminal ? status.updated_at ?? new Date().toISOString() : null,
     });
-  }
-
-  private generateId(): string {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID();
-    }
-    return `act-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
 }
 

@@ -17,7 +17,7 @@ describe('BrandActivityStripComponent', () => {
     fixture = TestBed.createComponent(BrandActivityStripComponent);
     component = fixture.componentInstance;
     store = TestBed.inject(BrandActivityService);
-    component.brandId = 'b1';
+    fixture.componentRef.setInput('brandId', 'b1');
     fixture.detectChanges();
   });
 
@@ -25,15 +25,15 @@ describe('BrandActivityStripComponent', () => {
     store.start('run', 'b1');
     store.start('research', 'b-other');
     fixture.detectChanges();
-    expect(component.items.map((a) => a.brandId)).toEqual(['b1']);
+    expect(component.items().map((a) => a.brandId)).toEqual(['b1']);
   });
 
   it('label() describes running activities with phase and progress', () => {
     const activity = store.start('run', 'b1');
     store.update(activity.id, { status: 'running', phase: 'Visual Identity', progress: 60 });
     fixture.detectChanges();
-    expect(component.label(component.items[0])).toContain('Visual Identity');
-    expect(component.label(component.items[0])).toContain('60%');
+    expect(component.label(component.items()[0])).toContain('Visual Identity');
+    expect(component.label(component.items()[0])).toContain('60%');
   });
 
   it('isOpenable() is true only for completed activities', () => {
@@ -42,8 +42,8 @@ describe('BrandActivityStripComponent', () => {
     const failed = store.start('run', 'b1');
     store.update(failed.id, { status: 'failed' });
     fixture.detectChanges();
-    expect(component.isOpenable(component.items.find((a) => a.status === 'completed')!)).toBe(true);
-    expect(component.isOpenable(component.items.find((a) => a.status === 'failed')!)).toBe(false);
+    expect(component.isOpenable(component.items().find((a) => a.status === 'completed')!)).toBe(true);
+    expect(component.isOpenable(component.items().find((a) => a.status === 'failed')!)).toBe(false);
   });
 
   it('onOpen() emits only for completed activities', () => {
@@ -52,12 +52,12 @@ describe('BrandActivityStripComponent', () => {
     const running = store.start('run', 'b1');
     store.update(running.id, { status: 'running' });
     fixture.detectChanges();
-    component.onOpen(new Event('click'), component.items[0]);
+    component.onOpen(new Event('click'), component.items()[0]);
     expect(spy).not.toHaveBeenCalled();
 
     store.update(running.id, { status: 'completed' });
     fixture.detectChanges();
-    component.onOpen(new Event('click'), component.items[0]);
+    component.onOpen(new Event('click'), component.items()[0]);
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
@@ -67,7 +67,7 @@ describe('BrandActivityStripComponent', () => {
     const failed = store.start('run', 'b1');
     store.update(failed.id, { status: 'failed', error: 'boom' });
     fixture.detectChanges();
-    component.onRetry(new Event('click'), component.items[0]);
+    component.onRetry(new Event('click'), component.items()[0]);
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
@@ -77,7 +77,7 @@ describe('BrandActivityStripComponent', () => {
     const done = store.start('run', 'b1');
     store.update(done.id, { status: 'completed' });
     fixture.detectChanges();
-    component.onDismiss(new Event('click'), component.items[0]);
+    component.onDismiss(new Event('click'), component.items()[0]);
     expect(spy).toHaveBeenCalledTimes(1);
   });
 });

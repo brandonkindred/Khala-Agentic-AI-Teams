@@ -1,6 +1,6 @@
-@if (items.length > 0) {
+@if (items().length > 0) {
   <mat-chip-set class="brand-activity-strip" aria-label="Brand activity">
-    @for (a of items; track trackById($index, a)) {
+    @for (a of items(); track a.id) {
       <mat-chip
         [class]="chipClass(a)"
         [disabled]="false"
@@ -16,8 +16,6 @@
           <mat-icon matChipAvatar class="chip-icon chip-icon--failed">error</mat-icon>
         } @else if (a.status === 'cancelled') {
           <mat-icon matChipAvatar class="chip-icon chip-icon--cancelled">cancel</mat-icon>
-        } @else {
-          <mat-icon matChipAvatar class="chip-icon">{{ icon(a.kind) }}</mat-icon>
         }
         <span class="chip-label">{{ label(a) }}</span>
         @if (isRetryable(a)) {

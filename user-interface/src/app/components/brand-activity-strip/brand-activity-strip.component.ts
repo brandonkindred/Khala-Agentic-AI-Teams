@@ -1,13 +1,13 @@
-import { Component, Input, OnChanges, OnDestroy, OnInit, SimpleChanges, inject, output } from '@angular/core';
+import { Component, inject, input, output } from '@angular/core';
+import { toObservable, toSignal } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { Subject } from 'rxjs';
-import { switchMap, takeUntil } from 'rxjs/operators';
-import type { BrandActivity, BrandActivityKind } from '../../models';
+import { switchMap } from 'rxjs/operators';
+import type { BrandActivity, BrandActivityKind, BrandActivityStatus } from '../../models';
 import { BrandActivityService } from '../../services/brand-activity.service';
 
 const KIND_LABEL: Record<BrandActivityKind, string> = {
@@ -16,10 +16,15 @@ const KIND_LABEL: Record<BrandActivityKind, string> = {
   design: 'Design assets',
 };
 
-const KIND_ICON: Record<BrandActivityKind, string> = {
-  run: 'bolt',
-  research: 'travel_explore',
-  design: 'palette',
+const STATUS_SUFFIX: Record<BrandActivityStatus, (a: BrandActivity) => string> = {
+  queued: () => 'queued',
+  running: (a) =>
+    a.phase
+      ? `${a.phase}${a.progress != null ? ` · ${a.progress}%` : ''}`
+      : 'running',
+  completed: (a) => `completed${relative(a.completedAt)}`,
+  failed: () => 'failed',
+  cancelled: () => 'cancelled',
 };
 
 /**
@@ -43,76 +48,22 @@ const KIND_ICON: Record<BrandActivityKind, string> = {
   templateUrl: './brand-activity-strip.component.html',
   styleUrl: './brand-activity-strip.component.scss',
 })
-export class BrandActivityStripComponent implements OnInit, OnChanges, OnDestroy {
+export class BrandActivityStripComponent {
   private readonly activities = inject(BrandActivityService);
 
-  @Input({ required: true }) brandId!: string;
+  readonly brandId = input.required<string>();
 
   readonly retry = output<BrandActivity>();
   readonly open = output<BrandActivity>();
   readonly dismiss = output<BrandActivity>();
 
-  items: BrandActivity[] = [];
-
-  private readonly brandIdChanges = new Subject<string>();
-  private readonly destroy = new Subject<void>();
-
-  constructor() {
-    this.brandIdChanges
-      .pipe(
-        switchMap((id) => this.activities.forBrand(id)),
-        takeUntil(this.destroy)
-      )
-      .subscribe((list) => (this.items = list));
-  }
-
-  ngOnInit(): void {
-    if (this.brandId) {
-      this.brandIdChanges.next(this.brandId);
-    }
-  }
-
-  ngOnChanges(changes: SimpleChanges): void {
-    if (changes['brandId'] && !changes['brandId'].firstChange && this.brandId) {
-      this.brandIdChanges.next(this.brandId);
-    }
-  }
-
-  ngOnDestroy(): void {
-    this.destroy.next();
-    this.destroy.complete();
-  }
-
-  trackById(_: number, a: BrandActivity): string {
-    return a.id;
-  }
+  readonly items = toSignal(
+    toObservable(this.brandId).pipe(switchMap((id) => this.activities.forBrand(id))),
+    { initialValue: [] as BrandActivity[] }
+  );
 
   label(a: BrandActivity): string {
-    const base = KIND_LABEL[a.kind];
-    if (a.status === 'running' && a.phase) {
-      const percent = typeof a.progress === 'number' ? ` · ${a.progress}%` : '';
-      return `${base} · ${a.phase}${percent}`;
-    }
-    if (a.status === 'running') {
-      return `${base} · running`;
-    }
-    if (a.status === 'queued') {
-      return `${base} · queued`;
-    }
-    if (a.status === 'completed') {
-      return `${base} · completed${this.relative(a.completedAt)}`;
-    }
-    if (a.status === 'failed') {
-      return `${base} · failed`;
-    }
-    if (a.status === 'cancelled') {
-      return `${base} · cancelled`;
-    }
-    return base;
-  }
-
-  icon(kind: BrandActivityKind): string {
-    return KIND_ICON[kind];
+    return `${KIND_LABEL[a.kind]} · ${STATUS_SUFFIX[a.status](a)}`;
   }
 
   chipClass(a: BrandActivity): string {
@@ -151,17 +102,17 @@ export class BrandActivityStripComponent implements OnInit, OnChanges, OnDestroy
     event.stopPropagation();
     this.dismiss.emit(a);
   }
+}
 
-  private relative(iso?: string | null): string {
-    if (!iso) return '';
-    const then = Date.parse(iso);
-    if (Number.isNaN(then)) return '';
-    const diffMs = Date.now() - then;
-    if (diffMs < 60_000) return ' · just now';
-    const mins = Math.round(diffMs / 60_000);
-    if (mins < 60) return ` · ${mins}m ago`;
-    const hours = Math.round(mins / 60);
-    if (hours < 24) return ` · ${hours}h ago`;
-    return '';
-  }
+function relative(iso?: string | null): string {
+  if (!iso) return '';
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '';
+  const diffMs = Date.now() - then;
+  if (diffMs < 60_000) return ' · just now';
+  const mins = Math.round(diffMs / 60_000);
+  if (mins < 60) return ` · ${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return ` · ${hours}h ago`;
+  return '';
 }
