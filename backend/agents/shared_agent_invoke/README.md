@@ -1,23 +1,28 @@
 # shared_agent_invoke
 
-One-line-mount FastAPI shim that exposes specialist agents to the Agent
-Console **Runner** (Phase 2).
+FastAPI shim mounted inside the `khala-agent-sandbox` image. Exposes the
+single specialist agent loaded by the sandbox runtime to the Agent Console
+**Runner** over `POST /_agents/{agent_id}/invoke`.
 
-## Mount in your team's `api/main.py`
+The shim does **not** run inside production team services; it lives only
+inside the sandbox container started by
+`backend/agents/agent_provisioning_team/sandbox/`. The sandbox's
+`agent_sandbox_runtime/entrypoint.py` mounts it and adds a per-container
+middleware that restricts dispatch to the one agent id bound via
+`SANDBOX_AGENT_ID`.
+
+## Mount
 
 ```python
 from shared_agent_invoke import mount_invoke_shim
 
 app = FastAPI(...)
-mount_invoke_shim(app, team_key="blogging")
+mount_invoke_shim(app)
 ```
 
-That adds `POST /_agents/{agent_id}/invoke` to the team service. The Runner's
-unified API proxy calls this endpoint through a warm sandbox container.
-
 The underscore prefix on the path signals "internal sandbox route" — not
-part of the team's public API. The unified_api proxy strips public traffic
-before reaching it.
+part of any team's public API. The unified API proxies public traffic
+through `POST /api/agents/{id}/invoke` before it reaches this endpoint.
 
 ## Response envelope
 
@@ -32,10 +37,13 @@ before reaching it.
 ```
 
 - **200** on successful invocation (even if `output` is empty).
+- **404** when the agent is unknown to the registry.
+- **409** when the agent carries the `requires-live-integration` tag.
 - **422** with the envelope in `detail` when the agent's entrypoint raised a
   user-space exception. `logs_tail` captures the last 50 records.
-- **404** when the agent is unknown to this service's team.
-- **409** when the agent carries the `requires-live-integration` tag.
+- **500** with the envelope in `detail` when the dispatcher can't load the
+  entrypoint (missing symbol, bad factory, etc.) — infra failures must not
+  look like a successful invocation to the proxy's run-persistence layer.
 
 ## Dispatch rules
 
@@ -49,7 +57,7 @@ handles three shapes:
    get the agent, then dispatched as in (2).
 
 Constructor args, missing symbols, malformed entrypoints, and missing methods
-all raise `AgentNotRunnableError`, which the shim turns into an HTTP-422
+all raise `AgentNotRunnableError`, which the shim turns into an HTTP-500
 envelope with the error text.
 
 ## Tests
@@ -59,15 +67,12 @@ cd backend
 python3 -m pytest agents/shared_agent_invoke/tests/ --asyncio-mode=auto
 ```
 
-## Adding new team support
+## Adding a new agent to the Runner
 
-1. Ensure the team's agents have manifests under
-   `backend/agents/<team>/agent_console/manifests/`.
-2. Add the one-line `mount_invoke_shim(app, team_key=...)` call to the
-   team's `api/main.py`.
-3. Add a sandbox service entry to `docker/sandbox.compose.yml` and register
-   it in `backend/agents/agent_sandbox/config.py`.
+1. Add a manifest under `backend/agents/<team>/agent_console/manifests/` with
+   a valid `source.entrypoint` (and optional `sandbox.env` / `sandbox.extra_pip`).
+2. Generate a golden sample with
+   `python3 -m agent_registry.scripts.generate_sample_skeletons`.
 
-Phase 2 wires four teams: `blogging`, `software_engineering`, `planning_v3`,
-`branding`. Others can be added incrementally — the catalog shows all 29
-agents today; invocation becomes possible per team as the shim lands.
+No per-team wiring is needed — the sandbox image is team-agnostic and the
+unified API resolves the agent via its manifest at invoke time.

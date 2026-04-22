@@ -1,11 +1,14 @@
-"""FastAPI shim mounted inside each team service.
+"""FastAPI shim mounted inside the agent sandbox runtime.
 
 Usage::
 
     from shared_agent_invoke import mount_invoke_shim
-    mount_invoke_shim(app, team_key="blogging")
+    mount_invoke_shim(app)
 
-Mounts ``POST /_agents/{agent_id}/invoke`` on ``app``.
+Mounts ``POST /_agents/{agent_id}/invoke`` on ``app``. The per-agent
+``SANDBOX_AGENT_ID`` guard is enforced by a middleware in
+``agent_sandbox_runtime/entrypoint.py``; this shim only resolves the
+manifest and dispatches.
 """
 
 from __future__ import annotations
@@ -35,8 +38,8 @@ class InvokeEnvelope(BaseModel):
     error: str | None = None
 
 
-def mount_invoke_shim(app: FastAPI, *, team_key: str) -> None:
-    """Attach ``/_agents/{agent_id}/invoke`` to ``app`` for agents belonging to ``team_key``."""
+def mount_invoke_shim(app: FastAPI) -> None:
+    """Attach ``/_agents/{agent_id}/invoke`` to ``app``."""
 
     @app.post(
         "/_agents/{agent_id}/invoke",
@@ -45,20 +48,12 @@ def mount_invoke_shim(app: FastAPI, *, team_key: str) -> None:
         summary="Invoke a single specialist agent (Agent Console internal).",
     )
     async def _invoke(agent_id: str, request: Request) -> InvokeEnvelope:
-        # Lazy import to avoid registry/agents load at team-service startup.
+        # Lazy import to avoid registry/agents load at sandbox startup.
         from agent_registry import get_registry
 
         manifest = get_registry().get(agent_id)
         if manifest is None:
             raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
-        if manifest.team != team_key:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"Agent {agent_id} belongs to team {manifest.team!r}, "
-                    f"not this service ({team_key!r})."
-                ),
-            )
         if "requires-live-integration" in manifest.tags:
             raise HTTPException(
                 status_code=409,

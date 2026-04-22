@@ -120,7 +120,7 @@ def client(tmp_path: Path):
     agent_registry.get_registry = lambda: rebuilt  # type: ignore[assignment]
 
     app = FastAPI()
-    mount_invoke_shim(app, team_key="blogging")
+    mount_invoke_shim(app)
 
     try:
         yield TestClient(app)
@@ -168,17 +168,3 @@ def test_requires_live_integration_returns_409(client: TestClient) -> None:
 def test_unknown_agent_returns_404(client: TestClient) -> None:
     resp = client.post("/_agents/does.not.exist/invoke", json={})
     assert resp.status_code == 404
-
-
-def test_wrong_team_returns_404(client: TestClient) -> None:
-    # Mount the shim on a different team and hit a blogging agent.
-    from agent_registry import loader
-    from shared_agent_invoke import mount_invoke_shim as _mount
-
-    app = FastAPI()
-    _mount(app, team_key="branding")
-    c = TestClient(app)
-    # Registry still has blogging.good from the fixture.
-    resp = c.post("/_agents/blogging.good/invoke", json={})
-    assert resp.status_code == 404
-    assert hasattr(loader, "get_registry")

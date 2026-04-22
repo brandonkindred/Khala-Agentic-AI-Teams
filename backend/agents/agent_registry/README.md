@@ -57,9 +57,13 @@ invoke:                          # consumed by Phase 2 (Runner)
   kind: http                     # http | function | temporal
   method: POST
   path: /api/blogging/plan
-sandbox:                         # consumed by Phase 4 (sandbox reuse)
+sandbox:                         # consumed by the per-agent sandbox lifecycle
   manifest_path: default.yaml
   access_tier: standard          # minimal | standard | elevated | full
+  env:                           # optional: extra env vars forwarded into the container
+    FEATURE_FLAG_X: "true"
+  extra_pip:                     # optional: extra pip packages baked into the image
+    - pandas==2.2.*
 source:
   entrypoint: blogging.blog_planning_agent.agent:BlogPlanningAgent
   anatomy_ref: backend/agents/blogging/blog_planning_agent/ANATOMY.md
@@ -124,7 +128,7 @@ python3 -m pytest agents/agent_registry/tests/ unified_api/tests/test_agents_rou
 ## Roadmap
 
 1. **Phase 1 — Catalog** *(shipped)*: registry + API + browsable UI.
-2. **Phase 2 — Runner + Sandboxes** *(shipped)*: `POST /api/agents/{id}/invoke`, warm per-team Docker sandboxes (`agent_sandbox`), invoke shim (`shared_agent_invoke`), auto-generated golden samples. See [`agent_sandbox/README.md`](../agent_sandbox/README.md) and [`shared_agent_invoke/README.md`](../shared_agent_invoke/README.md).
+2. **Phase 2 — Runner + Sandboxes** *(shipped)*: `POST /api/agents/{id}/invoke`, per-agent ephemeral Docker sandboxes (`agent_provisioning_team.sandbox`, unified `khala-agent-sandbox` image), invoke shim (`shared_agent_invoke`), auto-generated golden samples. See [`agent_provisioning_team/sandbox/README.md`](../agent_provisioning_team/sandbox/README.md) and [`shared_agent_invoke/README.md`](../shared_agent_invoke/README.md).
 3. **Phase 3 — Runs**: Postgres-backed run history, user-saved ad-hoc inputs, run diffing, JSON-schema-driven form UI.
 4. **Phase 4 — Breadth**: manifest coverage for all 20 teams, pre-warming, batch invocation.
 

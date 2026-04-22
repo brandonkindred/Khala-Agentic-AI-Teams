@@ -9,9 +9,9 @@ Invariants:
   * Must not write to ``/app`` at runtime (image will be run ``--read-only``).
   * Fail fast with non-zero exit codes so the lifecycle owner can observe failures.
   * Only the single bound ``SANDBOX_AGENT_ID`` is invocable. Requests for any
-    other agent id — even same-team — return 404. The shared shim's guard is
-    team-scoped, so we add a middleware here to enforce the tighter
-    single-agent contract.
+    other agent id — even same-team — return 404. The shared shim resolves
+    any manifest in the registry, so the middleware below is the sole gate
+    that enforces the single-agent-per-sandbox contract.
 """
 
 from __future__ import annotations
@@ -76,11 +76,10 @@ def _build_app() -> FastAPI:
     async def _single_agent_guard(request: Request, call_next):
         """Reject invoke requests for any agent other than the bound one.
 
-        The shared shim's guard (shim.py:54) is team-scoped, so without this
-        middleware a sandbox started for ``blogging.planner`` would still
-        serve ``blogging.writer`` et al. via the same ``/_agents/{id}/invoke``
-        route. That violates the single-agent-per-sandbox contract this phase
-        establishes.
+        The shared shim resolves any manifest in the registry, so this
+        middleware is the sole gate that ensures a sandbox started for
+        ``blogging.planner`` can't be tricked into invoking
+        ``blogging.writer`` via the same ``/_agents/{id}/invoke`` route.
         """
         path = request.url.path
         if path.startswith(_INVOKE_PATH_PREFIX):
@@ -103,12 +102,11 @@ def _build_app() -> FastAPI:
     def health() -> dict:
         return {"status": "ok", "agent_id": bound_agent_id, "team": manifest.team}
 
-    # Mount the existing shim. Its team-guard still runs (defense in depth),
-    # and the middleware above restricts to the single bound agent. Phase 5
-    # generalizes the shim; Phase 1 reuses it unchanged.
+    # Mount the shared invoke shim; the middleware above restricts dispatch
+    # to the single bound agent.
     from shared_agent_invoke import mount_invoke_shim
 
-    mount_invoke_shim(app, team_key=manifest.team)
+    mount_invoke_shim(app)
 
     return app
 

@@ -76,14 +76,6 @@ async def _lifespan(application: FastAPI):
 app = FastAPI(title="Branding Team API", version="2.0.0", lifespan=_lifespan)
 instrument_fastapi_app(app, team_key="branding")
 
-# Agent Console Runner — mounts POST /_agents/{agent_id}/invoke for the sandbox proxy.
-try:
-    from shared_agent_invoke import mount_invoke_shim
-
-    mount_invoke_shim(app, team_key="branding")
-except Exception:  # pragma: no cover — shim is optional
-    logger.warning("Agent Console invoke shim unavailable for branding", exc_info=True)
-
 branding_store = get_default_store()
 orchestrator = BrandingTeamOrchestrator()
 conversation_store = get_conversation_store()

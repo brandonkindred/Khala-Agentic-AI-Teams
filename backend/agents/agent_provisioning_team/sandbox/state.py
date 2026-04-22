@@ -1,8 +1,7 @@
 """On-disk checkpoint for per-agent sandbox lifecycle state.
 
-Mirrors ``agent_sandbox/state.py`` but keyed by ``agent_id`` (not team) so the
-Phase 2 lifecycle owner can run one sandbox per specialist agent rather than
-one per team.
+Keyed by ``agent_id`` so the lifecycle owner can run one sandbox per
+specialist agent.
 
 Restart safety: if the unified API or the provisioning process restarts, the
 Lifecycle reloads the last-known state from disk and reconciles with
@@ -134,7 +133,11 @@ def sandbox_image() -> str:
 
 
 def sandbox_network() -> str:
-    """Docker bridge network already created by ``docker/sandbox.compose.yml``."""
+    """Docker bridge network for sandbox containers.
+
+    Created on demand by :func:`provisioner.ensure_network` the first time a
+    sandbox is provisioned; override with ``AGENT_PROVISIONING_SANDBOX_NETWORK``.
+    """
     return os.environ.get("AGENT_PROVISIONING_SANDBOX_NETWORK", "khala-sandbox")
 
 

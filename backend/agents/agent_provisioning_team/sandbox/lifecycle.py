@@ -14,8 +14,7 @@ State machine per ``agent_id``:
         COLD --> [*]
 
 Provisions the unified ``khala-agent-sandbox`` image from Phase 1 (#263) one
-container per specialist agent. Blocks Phases 3–5. Replaces — in parallel,
-without deleting — the per-team state machine in ``backend/agents/agent_sandbox``.
+container per specialist agent.
 """
 
 from __future__ import annotations
@@ -62,9 +61,8 @@ def _resolve_team(agent_id: str) -> str:
 class Lifecycle:
     """Per-process owner of agent-keyed sandboxes.
 
-    Mirrors the public shape of ``agent_sandbox.manager.SandboxManager`` but
-    rekeyed by ``agent_id`` and talking to ``docker run`` / ``docker inspect``
-    directly (Phase 2), not ``docker compose`` (legacy per-team path).
+    Keyed by ``agent_id``; talks to ``docker run`` / ``docker inspect``
+    directly.
     """
 
     def __init__(self, *, state_file: Path | None = None) -> None:
