@@ -51,15 +51,14 @@ def test_agent_destructive_rm_rf_returns_findings():
     assert "rm" in findings[0].lower() or "destructive" in findings[0].lower()
 
 
-def test_agent_path_traversal_returns_findings():
-    """Path or body with '../' returns (False, findings) with path traversal message."""
-    body = b'{"path": "../../../etc/passwd"}'
+def test_agent_path_traversal_in_url_path_returns_findings():
+    """A '../' sequence in the request path is flagged with a path-traversal message."""
     passed, findings = scan(
-        "POST",
-        "/api/blogging/jobs/123/artifacts/outline.md",
+        "GET",
+        "/api/blogging/jobs/../../etc/passwd",
         b"",
         [],
-        body,
+        b"",
     )
     assert passed is False
     assert len(findings) >= 1
@@ -77,6 +76,73 @@ def test_agent_path_traversal_in_path():
     )
     assert passed is False
     assert len(findings) >= 1
+
+
+def test_agent_path_traversal_in_query_string_returns_findings():
+    """A '../' sequence in the query string is flagged."""
+    passed, findings = scan(
+        "GET",
+        "/api/blogging/jobs/123/artifact",
+        b"file=../../etc/passwd",
+        [],
+        b"",
+    )
+    assert passed is False
+    assert len(findings) >= 1
+    assert "path" in findings[0].lower() or "traversal" in findings[0].lower()
+
+
+def test_agent_path_traversal_in_body_is_ignored():
+    """
+    '../' and '..\\\\' appearing only inside a request body must NOT be flagged.
+
+    Bodies in this system are free-form content (LLM specs, blog drafts, code
+    snippets) and frequently contain benign path-ish substrings. Path-traversal
+    rules are a URL/filesystem-layer defense; scanning bodies for '../' just
+    produces false positives.
+    """
+    body = (
+        b'{"spec": "Open a terminal and run `cd ../foo` to reach the project, '
+        b'or on Windows navigate to C:\\\\temp\\\\..\\\\bar for the equivalent."}'
+    )
+    passed, findings = scan(
+        "POST",
+        "/api/software-engineering/product-analysis/start-from-spec",
+        b"",
+        _headers(("content-type", "application/json")),
+        body,
+    )
+    assert passed is True
+    assert findings == []
+
+
+def test_agent_path_traversal_in_body_with_encoded_form_is_ignored():
+    """Encoded path-traversal sequences (%2e%2e%2f, ..%2f) in a body are not flagged."""
+    body = b'{"note": "example of an encoded sequence: %2e%2e%2f and ..%2f"}'
+    passed, findings = scan(
+        "POST",
+        "/api/blogging/full-pipeline",
+        b"",
+        _headers(("content-type", "application/json")),
+        body,
+    )
+    assert passed is True
+    assert findings == []
+
+
+def test_agent_body_still_scanned_for_non_traversal_rules():
+    """Non-traversal rules (e.g. destructive shell commands) must still scan bodies."""
+    body = b'{"spec": "Then run rm -rf / on the target."}'
+    passed, findings = scan(
+        "POST",
+        "/api/software-engineering/product-analysis/start-from-spec",
+        b"",
+        _headers(("content-type", "application/json")),
+        body,
+    )
+    assert passed is False
+    assert len(findings) >= 1
+    assert "rm" in findings[0].lower() or "destructive" in findings[0].lower()
 
 
 def test_agent_prompt_injection_returns_findings():
