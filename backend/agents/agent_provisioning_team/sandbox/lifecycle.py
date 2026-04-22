@@ -1,12 +1,17 @@
 """Per-agent sandbox lifecycle owner (issue #264, Phase 2).
 
-State machine per ``agent_id``::
+State machine per ``agent_id``:
 
-    COLD ──(acquire)──► WARMING ──(health OK)──► WARM
-                           │                       │
-                           │                       └──(teardown / idle)──► COLD
-                           │
-                           └──(run/health fail)────► ERROR ──► COLD
+.. mermaid::
+
+    stateDiagram-v2
+        [*] --> COLD
+        COLD --> WARMING: acquire
+        WARMING --> WARM: health OK
+        WARMING --> ERROR: run / health fail
+        WARM --> COLD: teardown / idle reap
+        ERROR --> COLD: teardown
+        COLD --> [*]
 
 Provisions the unified ``khala-agent-sandbox`` image from Phase 1 (#263) one
 container per specialist agent. Blocks Phases 3–5. Replaces — in parallel,
