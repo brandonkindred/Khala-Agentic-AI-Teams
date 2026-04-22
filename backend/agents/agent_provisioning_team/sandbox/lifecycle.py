@@ -99,6 +99,10 @@ class Lifecycle:
             # Sweep any zombie container from a prior run. `docker rm -f` is
             # idempotent against missing containers; timeouts are surfaced.
             await provisioner_mod.stop_container(container_name)
+            # And any stale secrets file the previous sandbox may have left
+            # behind before the host process died — run_container will write
+            # a fresh one.
+            provisioner_mod.cleanup_secrets_file(container_name)
 
             logger.info("Provisioning sandbox for %s (container %s)", agent_id, container_name)
             st = state_mod.new_state(agent_id=agent_id, team=team, container_name=container_name)
@@ -106,7 +110,7 @@ class Lifecycle:
 
             try:
                 container_id = await provisioner_mod.run_container(
-                    agent_id=agent_id, container_name=container_name
+                    agent_id=agent_id, container_name=container_name, team=team
                 )
                 host_port = await provisioner_mod.inspect_host_port(container_id)
                 st.container_id = container_id
@@ -164,6 +168,10 @@ class Lifecycle:
             logger.info("Tearing down sandbox for %s", agent_id)
             if st.container_id:
                 await provisioner_mod.stop_container(st.container_id)
+            # Secrets file is keyed by container_name; clean it up after the
+            # container is confirmed gone so we don't leave 0400 files on the
+            # host when an agent never runs again.
+            provisioner_mod.cleanup_secrets_file(st.container_name)
             self._state.pop(agent_id, None)
             self._persist()
 

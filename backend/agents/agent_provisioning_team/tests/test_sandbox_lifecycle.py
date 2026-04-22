@@ -275,6 +275,149 @@ def test_build_run_argv_applies_hardening() -> None:
     assert argv[n_index + 1] == "khala-sandbox"
 
 
+def test_build_run_argv_excludes_secret_env_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #257: secrets must never reach the sandbox via ``-e``.
+
+    With a secrets bind-mount path supplied, ``_build_run_argv`` must carry the
+    mount + the ``SANDBOX_SECRETS_FILE`` pointer, and must NOT emit any ``-e``
+    entry whose value matches a host secret.
+    """
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-secret-xyz")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "pg-secret-xyz")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ant-secret-xyz")
+
+    argv = _build_run_argv(
+        agent_id="blogging.planner",
+        container_name="khala-sbx-blogging.planner",
+        secrets_host_path=Path("/tmp/secrets/blogging.env"),
+    )
+
+    joined = " ".join(argv)
+    for secret in ("ollama-secret-xyz", "pg-secret-xyz", "ant-secret-xyz"):
+        assert secret not in joined, f"{secret!r} leaked into docker run argv"
+    # Bind-mount + pointer env are present.
+    assert any(
+        a.startswith("type=bind,source=/tmp/secrets/blogging.env,target=/run/secrets/sandbox-env")
+        for a in argv
+    )
+    assert "SANDBOX_SECRETS_FILE=/run/secrets/sandbox-env" in argv
+
+
+def test_build_run_argv_without_secrets_skips_mount() -> None:
+    """The bind-mount flags only appear when the caller supplies a path.
+
+    Tests that don't care about secrets (e.g. the hardening assertions above)
+    still get a clean argv.
+    """
+    argv = _build_run_argv(
+        agent_id="blogging.planner",
+        container_name="khala-sbx-blogging.planner",
+    )
+    assert not any("sandbox-env" in a for a in argv)
+    assert not any(a.startswith("SANDBOX_SECRETS_FILE=") for a in argv)
+
+
+def test_write_sandbox_secrets_file_per_team_creds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Per-team password var wins over the global POSTGRES_* creds."""
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    monkeypatch.setenv("POSTGRES_USER", "global_user")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "global_pw")
+    monkeypatch.setenv("POSTGRES_DB", "global_db")
+    monkeypatch.setenv("POSTGRES_PASSWORD_SANDBOX_BLOGGING", "team-pw-xyz")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-xyz")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    path = provisioner_mod._write_sandbox_secrets_file("khala-sbx-blog", "blogging")
+    assert path.exists()
+    # Permissions: 0400 — read-only for the owning process, no group/other.
+    assert (path.stat().st_mode & 0o777) == 0o400
+    body = path.read_text(encoding="utf-8")
+    assert "POSTGRES_USER=sandbox_blogging\n" in body
+    assert "POSTGRES_PASSWORD=team-pw-xyz\n" in body
+    assert "POSTGRES_DB=sandbox_blogging\n" in body
+    assert "OLLAMA_API_KEY=ollama-xyz\n" in body
+    # Values not in the host env must not appear with an empty RHS.
+    assert "ANTHROPIC_API_KEY" not in body
+    # Global creds must NOT leak when the per-team var is set.
+    assert "global_user" not in body
+    assert "global_pw" not in body
+    assert "global_db" not in body
+
+
+def test_write_sandbox_secrets_file_falls_back_to_global(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No team-scoped password → warn and fall back to global POSTGRES_* creds."""
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    monkeypatch.setenv("POSTGRES_USER", "global_user")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "global_pw")
+    monkeypatch.setenv("POSTGRES_DB", "global_db")
+    monkeypatch.delenv("POSTGRES_PASSWORD_SANDBOX_BRANDING", raising=False)
+
+    with caplog.at_level("WARNING", logger="agent_provisioning_team.sandbox.provisioner"):
+        path = provisioner_mod._write_sandbox_secrets_file("khala-sbx-brand", "branding")
+
+    body = path.read_text(encoding="utf-8")
+    assert "POSTGRES_USER=global_user\n" in body
+    assert "POSTGRES_PASSWORD=global_pw\n" in body
+    assert "POSTGRES_DB=global_db\n" in body
+    assert any("POSTGRES_PASSWORD_SANDBOX_BRANDING" in record.message for record in caplog.records)
+
+
+def test_cleanup_secrets_file_removes_host_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``cleanup_secrets_file`` unlinks the host-side tmpfile; missing file is a no-op."""
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    monkeypatch.setenv("POSTGRES_PASSWORD_SANDBOX_BLOGGING", "x")
+    path = provisioner_mod._write_sandbox_secrets_file("khala-sbx-blog", "blogging")
+    assert path.exists()
+
+    provisioner_mod.cleanup_secrets_file("khala-sbx-blog")
+    assert not path.exists()
+    # Idempotent: second call on the same name is a no-op.
+    provisioner_mod.cleanup_secrets_file("khala-sbx-blog")
+
+
+@pytest.mark.asyncio
+async def test_run_container_writes_and_mounts_secrets_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The public ``run_container`` path must write a 0400 secrets file and
+    mount it into the sandbox; on docker failure it must clean up."""
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    monkeypatch.setenv("POSTGRES_PASSWORD_SANDBOX_BLOGGING", "team-pw")
+
+    captured_argv: list[list[str]] = []
+
+    async def fake_exec(cmd: list[str], *, timeout_s: int = 30):
+        captured_argv.append(cmd)
+        return 0, "abc123\n", ""
+
+    async def fake_network() -> None:
+        return None
+
+    monkeypatch.setattr(provisioner_mod, "_exec", fake_exec)
+    monkeypatch.setattr(provisioner_mod, "ensure_network", fake_network)
+
+    container_id = await provisioner_mod.run_container(
+        agent_id="blogging.planner", container_name="khala-sbx-blog", team="blogging"
+    )
+    assert container_id == "abc123"
+
+    # The argv passed to docker carries the bind-mount spec.
+    argv = captured_argv[-1]
+    mount_specs = [a for a in argv if a.startswith("type=bind,source=")]
+    assert len(mount_specs) == 1
+    secrets_path = Path(mount_specs[0].split("source=", 1)[1].split(",", 1)[0])
+    assert secrets_path.exists()
+    assert (secrets_path.stat().st_mode & 0o777) == 0o400
+
+
 def test_container_name_is_dns_safe() -> None:
     name = container_name_for("blogging.planner")
     assert name.startswith("khala-sbx-blogging.planner-")

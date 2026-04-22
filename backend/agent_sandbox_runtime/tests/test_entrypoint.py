@@ -10,6 +10,9 @@ Covers:
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -103,3 +106,63 @@ def test_invoke_cross_team_agent_is_rejected(monkeypatch: pytest.MonkeyPatch) ->
 
     resp = client.post("/_agents/branding.creative_director/invoke", json={})
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Sandbox secrets loader (issue #257)
+# ---------------------------------------------------------------------------
+
+
+def test_secrets_loader_populates_environ_and_unlinks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Loader reads KEY=VALUE pairs into ``os.environ`` and unlinks the file."""
+    from agent_sandbox_runtime.entrypoint import _load_sandbox_secrets
+
+    secrets = tmp_path / "sandbox-env"
+    secrets.write_text(
+        "\n".join(
+            [
+                "OLLAMA_API_KEY=ollama-xyz",
+                "POSTGRES_PASSWORD=pg-xyz",
+                "# comment line",
+                "",
+                "POSTGRES_USER=sandbox_blogging",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SANDBOX_SECRETS_FILE", str(secrets))
+    # Make sure these aren't pre-set in the test process.
+    for key in ("OLLAMA_API_KEY", "POSTGRES_PASSWORD", "POSTGRES_USER"):
+        monkeypatch.delenv(key, raising=False)
+
+    _load_sandbox_secrets()
+
+    assert os.environ["OLLAMA_API_KEY"] == "ollama-xyz"
+    assert os.environ["POSTGRES_PASSWORD"] == "pg-xyz"
+    assert os.environ["POSTGRES_USER"] == "sandbox_blogging"
+    # After loading, the in-sandbox view is unlinked so agent code can't cat it.
+    assert not secrets.exists()
+
+
+def test_secrets_loader_noop_when_env_marker_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ``SANDBOX_SECRETS_FILE`` set → loader is a silent no-op.
+
+    This keeps unit tests (and non-sandbox invocations) working unchanged.
+    """
+    from agent_sandbox_runtime.entrypoint import _load_sandbox_secrets
+
+    monkeypatch.delenv("SANDBOX_SECRETS_FILE", raising=False)
+    # Must not raise.
+    _load_sandbox_secrets()
+
+
+def test_secrets_loader_noop_when_file_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``SANDBOX_SECRETS_FILE`` pointing at a nonexistent file is a no-op too.
+
+    Guards against races where the file was already unlinked by a prior call.
+    """
+    from agent_sandbox_runtime.entrypoint import _load_sandbox_secrets
+
+    monkeypatch.setenv("SANDBOX_SECRETS_FILE", str(tmp_path / "does-not-exist"))
+    _load_sandbox_secrets()

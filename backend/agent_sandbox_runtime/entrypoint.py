@@ -16,9 +16,11 @@ Invariants:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -38,7 +40,47 @@ EXIT_REGISTRY_LOAD_ERROR = 4
 _INVOKE_PATH_PREFIX = "/_agents/"
 
 
+def _load_sandbox_secrets() -> None:
+    """Read ``KEY=VALUE`` pairs from ``SANDBOX_SECRETS_FILE`` into ``os.environ``.
+
+    The provisioner bind-mounts a 0400 file at ``/run/secrets/sandbox-env``
+    and sets ``SANDBOX_SECRETS_FILE`` pointing at it — so agent-consumed libs
+    (``ollama``, ``shared_postgres``, etc.) keep reading creds from the env
+    while the container's startup env (as seen by ``docker inspect`` /
+    ``docker exec env``) stays free of them.
+
+    After a successful load we unlink the in-sandbox view so agent code can't
+    ``cat /run/secrets/sandbox-env``. The host-side file is cleaned up by the
+    lifecycle when the container is torn down.
+
+    No-op when the env marker is unset or the file is missing; keeps unit
+    tests and non-sandbox invocations working unchanged.
+    """
+    path_str = os.environ.get("SANDBOX_SECRETS_FILE")
+    if not path_str:
+        return
+    path = Path(path_str)
+    if not path.exists():
+        return
+    loaded = 0
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        os.environ[key] = value
+        loaded += 1
+    log.info("Loaded %d sandbox secrets", loaded)
+    # Bind-mounted read-only view can't always be unlinked; best-effort.
+    with contextlib.suppress(OSError):
+        path.unlink()
+
+
 def _build_app() -> FastAPI:
+    _load_sandbox_secrets()
     agent_id = os.environ.get("SANDBOX_AGENT_ID")
     if not agent_id:
         log.error("FATAL: SANDBOX_AGENT_ID env var is required")
@@ -90,10 +132,7 @@ def _build_app() -> FastAPI:
                 return JSONResponse(
                     status_code=404,
                     content={
-                        "detail": (
-                            f"Sandbox is bound to {bound_agent_id!r}; "
-                            f"refusing invoke for {requested_id!r}."
-                        ),
+                        "detail": (f"Sandbox is bound to {bound_agent_id!r}; refusing invoke for {requested_id!r}."),
                     },
                 )
         return await call_next(request)
