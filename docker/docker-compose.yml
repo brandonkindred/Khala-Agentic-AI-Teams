@@ -14,6 +14,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      # Per-team sandbox roles (issue #257). Consumed by
+      # postgres/init/04-create-sandbox-team-roles.sh on first boot. Unset
+      # values skip that team's role; provisioner falls back to the global
+      # POSTGRES_* creds for sandboxes in that team.
+      POSTGRES_PASSWORD_SANDBOX_BLOGGING: ${POSTGRES_PASSWORD_SANDBOX_BLOGGING:-}
+      POSTGRES_PASSWORD_SANDBOX_SOFTWARE_ENGINEERING: ${POSTGRES_PASSWORD_SANDBOX_SOFTWARE_ENGINEERING:-}
+      POSTGRES_PASSWORD_SANDBOX_PLANNING_V3: ${POSTGRES_PASSWORD_SANDBOX_PLANNING_V3:-}
+      POSTGRES_PASSWORD_SANDBOX_BRANDING: ${POSTGRES_PASSWORD_SANDBOX_BRANDING:-}
     ports:
       - "5432:5432"
     volumes:

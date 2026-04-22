@@ -17,26 +17,26 @@ import hashlib
 import logging
 import os
 import re
+from pathlib import Path
 
 from .state import sandbox_image, sandbox_network
 
 logger = logging.getLogger(__name__)
 
-# Host env vars forwarded into the sandbox so the loaded agent can reach
-# Postgres / the LLM service. Intentionally narrow — sandbox secret isolation
-# is #257.
+# Non-sensitive host env vars forwarded into the sandbox via `-e KEY=VALUE`.
+# Secrets (POSTGRES_USER/PASSWORD/DB, *_API_KEY) are NEVER on this path — they
+# flow through a 0400 bind-mounted file the in-sandbox loader reads once at
+# startup. See `_write_sandbox_secrets_file` and issue #257.
 _FORWARDED_ENV = (
     "POSTGRES_HOST",
     "POSTGRES_PORT",
-    "POSTGRES_USER",
-    "POSTGRES_PASSWORD",
-    "POSTGRES_DB",
     "LLM_PROVIDER",
     "LLM_BASE_URL",
     "LLM_MODEL",
-    "OLLAMA_API_KEY",
-    "ANTHROPIC_API_KEY",
 )
+
+# In-sandbox path where the per-sandbox secrets file is bind-mounted read-only.
+_SANDBOX_SECRETS_TARGET = "/run/secrets/sandbox-env"
 
 _CONTAINER_NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
 
@@ -47,6 +47,91 @@ class DockerError(RuntimeError):
 
 def _fail(argv: list[str], rc: int, stderr: str) -> DockerError:
     return DockerError(f"docker failed (exit {rc}): {' '.join(argv)}\n{stderr[:500]}")
+
+
+def _secrets_host_path(container_name: str) -> Path:
+    """Deterministic host path for a sandbox's 0400 secrets file.
+
+    Keyed off ``container_name`` so teardown can clean it up without needing to
+    remember the path separately. Lives under ``AGENT_CACHE`` for parity with
+    the rest of the provisioning state.
+    """
+    cache = os.environ.get("AGENT_CACHE", "/tmp/agents")
+    return Path(cache) / "agent_provisioning" / "sandboxes" / "secrets" / f"{container_name}.env"
+
+
+def _team_postgres_credentials(team: str) -> tuple[str | None, str | None, str | None]:
+    """Resolve team-scoped ``(user, password, db)`` for a sandbox's Postgres creds.
+
+    Reads ``POSTGRES_PASSWORD_SANDBOX_<TEAM>`` and uses the convention
+    ``sandbox_<team>`` for both role and database. If the team-scoped password
+    is unset, falls back to the global ``POSTGRES_USER`` / ``POSTGRES_PASSWORD``
+    / ``POSTGRES_DB`` with a warning so local dev keeps working when per-team
+    roles haven't been provisioned yet.
+    """
+    env_key = f"POSTGRES_PASSWORD_SANDBOX_{team.upper()}"
+    password = os.environ.get(env_key)
+    if password:
+        return (f"sandbox_{team}", password, f"sandbox_{team}")
+    logger.warning(
+        "No %s set; sandbox for team %r will fall back to the global "
+        "POSTGRES_USER/PASSWORD/DB. See docker/README.md § Per-team Postgres "
+        "isolation.",
+        env_key,
+        team,
+    )
+    return (
+        os.environ.get("POSTGRES_USER"),
+        os.environ.get("POSTGRES_PASSWORD"),
+        os.environ.get("POSTGRES_DB"),
+    )
+
+
+def _write_sandbox_secrets_file(container_name: str, team: str) -> Path:
+    """Atomically write a 0400 ``KEY=VALUE`` file with the sandbox's secrets.
+
+    The file is bind-mounted read-only at :data:`_SANDBOX_SECRETS_TARGET` in
+    the sandbox, where the entrypoint loader reads it into ``os.environ`` and
+    unlinks the in-sandbox view. Values absent from the host environment are
+    simply omitted — the loader treats missing keys as no-ops.
+    """
+    pg_user, pg_pass, pg_db = _team_postgres_credentials(team)
+    values: dict[str, str] = {}
+    if pg_user is not None:
+        values["POSTGRES_USER"] = pg_user
+    if pg_pass is not None:
+        values["POSTGRES_PASSWORD"] = pg_pass
+    if pg_db is not None:
+        values["POSTGRES_DB"] = pg_db
+    for key in ("OLLAMA_API_KEY", "ANTHROPIC_API_KEY"):
+        v = os.environ.get(key)
+        if v is not None:
+            values[key] = v
+
+    path = _secrets_host_path(container_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "".join(f"{k}={v}\n" for k, v in values.items())
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    os.chmod(tmp, 0o400)
+    os.replace(tmp, path)
+    return path
+
+
+def cleanup_secrets_file(container_name: str) -> None:
+    """Remove the host-side sandbox secrets file for ``container_name``.
+
+    Idempotent: missing-file is treated as success. Called from the lifecycle
+    after ``docker rm -f`` succeeds and before provisioning a fresh sandbox
+    so stale creds don't linger if the host process was killed between
+    sandbox teardowns.
+    """
+    try:
+        _secrets_host_path(container_name).unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("Could not remove sandbox secrets file for %s: %s", container_name, exc)
 
 
 def container_name_for(agent_id: str) -> str:
@@ -84,11 +169,18 @@ async def _exec(cmd: list[str], *, timeout_s: int = 30) -> tuple[int, str, str]:
     )
 
 
-def _build_run_argv(*, agent_id: str, container_name: str) -> list[str]:
+def _build_run_argv(
+    *,
+    agent_id: str,
+    container_name: str,
+    secrets_host_path: Path | None = None,
+) -> list[str]:
     """Assemble the hardened ``docker run`` argument vector for a sandbox.
 
     Kept as a pure function so tests can assert on the exact flags without
-    invoking subprocess.
+    invoking subprocess. When ``secrets_host_path`` is provided, the file is
+    bind-mounted read-only at :data:`_SANDBOX_SECRETS_TARGET` and the sandbox
+    is told where to find it via ``SANDBOX_SECRETS_FILE``.
     """
     argv: list[str] = [
         "docker",
@@ -127,6 +219,15 @@ def _build_run_argv(*, agent_id: str, container_name: str) -> list[str]:
         value = os.environ.get(key)
         if value is not None:
             argv.extend(["-e", f"{key}={value}"])
+    if secrets_host_path is not None:
+        argv.extend(
+            [
+                "--mount",
+                f"type=bind,source={secrets_host_path},target={_SANDBOX_SECRETS_TARGET},readonly",
+                "-e",
+                f"SANDBOX_SECRETS_FILE={_SANDBOX_SECRETS_TARGET}",
+            ]
+        )
     argv.append(sandbox_image())
     return argv
 
@@ -148,20 +249,35 @@ async def ensure_network() -> None:
         raise _fail(argv, rc2, stderr or stdout)
 
 
-async def run_container(agent_id: str, container_name: str) -> str:
+async def run_container(agent_id: str, container_name: str, team: str) -> str:
     """Start a hardened sandbox for ``agent_id`` and return its container id.
+
+    Writes a per-sandbox 0400 secrets file (team-scoped Postgres creds +
+    any ``*_API_KEY`` values present on the host) and bind-mounts it read-only
+    into the container — secrets are never passed via ``-e`` flags.
 
     Caller is responsible for polling ``/health`` before treating the sandbox
     as ready — this coroutine returns as soon as the Docker daemon accepts
     the container, not when uvicorn is listening.
     """
     await ensure_network()
-    argv = _build_run_argv(agent_id=agent_id, container_name=container_name)
-    rc, stdout, stderr = await _exec(argv, timeout_s=60)
+    secrets_host_path = _write_sandbox_secrets_file(container_name, team)
+    argv = _build_run_argv(
+        agent_id=agent_id,
+        container_name=container_name,
+        secrets_host_path=secrets_host_path,
+    )
+    try:
+        rc, stdout, stderr = await _exec(argv, timeout_s=60)
+    except DockerError:
+        cleanup_secrets_file(container_name)
+        raise
     if rc != 0:
+        cleanup_secrets_file(container_name)
         raise _fail(argv, rc, stderr or stdout)
     container_id = stdout.strip()
     if not container_id:
+        cleanup_secrets_file(container_name)
         raise _fail(argv, rc, "docker run printed no container id")
     return container_id
 
