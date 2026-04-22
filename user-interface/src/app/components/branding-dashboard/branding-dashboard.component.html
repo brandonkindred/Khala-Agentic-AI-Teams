@@ -193,18 +193,56 @@
                     [class.brand-item--highlight]="highlightedBrandId === b.id"
                     [attr.data-brand-id]="b.id"
                   >
-                    <strong>{{ b.name }}</strong> ({{ b.status }}, v{{ b.version }})
-                    <span class="brand-actions">
-                      <button mat-stroked-button type="button" [disabled]="brandFormBusy" (click)="runBrand(b)">
-                        Run
-                      </button>
-                      <button mat-stroked-button type="button" [disabled]="brandFormBusy" (click)="requestMarketResearchForBrand(b)">
-                        Market Research
-                      </button>
-                      <button mat-stroked-button type="button" [disabled]="brandFormBusy" (click)="requestDesignAssetsForBrand(b)">
-                        Design Assets
-                      </button>
-                    </span>
+                    <div class="brand-item__header">
+                      <strong>{{ b.name }}</strong> ({{ b.status }}, v{{ b.version }})
+                      <span class="brand-actions">
+                        <span class="split-button">
+                          <button
+                            mat-stroked-button
+                            type="button"
+                            class="split-button__primary"
+                            (click)="runBrand(b)"
+                            [disabled]="isGenerating(b.id)"
+                          >
+                            <mat-icon>bolt</mat-icon>
+                            Generate
+                          </button>
+                          <button
+                            mat-stroked-button
+                            type="button"
+                            class="split-button__menu"
+                            [matMenuTriggerFor]="generateMenu"
+                            [disabled]="isGenerating(b.id)"
+                            aria-label="Generate options"
+                          >
+                            <mat-icon>arrow_drop_down</mat-icon>
+                          </button>
+                        </span>
+                        <mat-menu #generateMenu="matMenu" xPosition="before">
+                          <button mat-menu-item type="button" (click)="runBrand(b)">
+                            <mat-icon>bolt</mat-icon>
+                            <span class="menu-item__title">Run full pipeline</span>
+                            <span class="menu-item__subtitle">Strategic core through governance (5-phase)</span>
+                          </button>
+                          <button mat-menu-item type="button" (click)="requestMarketResearchForBrand(b)">
+                            <mat-icon>travel_explore</mat-icon>
+                            <span class="menu-item__title">Market research only</span>
+                            <span class="menu-item__subtitle">Competitor and audience analysis</span>
+                          </button>
+                          <button mat-menu-item type="button" (click)="requestDesignAssetsForBrand(b)">
+                            <mat-icon>palette</mat-icon>
+                            <span class="menu-item__title">Design assets only</span>
+                            <span class="menu-item__subtitle">Palettes, typography, moodboards</span>
+                          </button>
+                        </mat-menu>
+                      </span>
+                    </div>
+                    <app-brand-activity-strip
+                      [brandId]="b.id"
+                      (open)="onActivityOpen($event)"
+                      (retry)="onActivityRetry(b, $event)"
+                      (dismiss)="onActivityDismiss($event)"
+                    />
                   </li>
                 }
               </ul>

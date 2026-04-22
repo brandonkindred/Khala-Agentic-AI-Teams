@@ -14,13 +14,16 @@ import { MatMenuModule } from '@angular/material/menu';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { BrandingApiService } from '../../services/branding-api.service';
+import { BrandActivityService } from '../../services/brand-activity.service';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { BrandingChatComponent } from '../branding-chat/branding-chat.component';
 import { BrandPreviewComponent } from '../brand-preview/brand-preview.component';
+import { BrandActivityStripComponent } from '../brand-activity-strip/brand-activity-strip.component';
 import type {
   Brand,
+  BrandActivity,
   BrandingMissionSnapshot,
   BrandingQuestion,
   BrandingSessionResponse,
@@ -56,6 +59,7 @@ const WORKSPACE_CLIENT_NAME = 'My brands';
     HealthIndicatorComponent,
     BrandingChatComponent,
     BrandPreviewComponent,
+    BrandActivityStripComponent,
   ],
   templateUrl: './branding-dashboard.component.html',
   styleUrl: './branding-dashboard.component.scss',
@@ -67,6 +71,9 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   private readonly breakpoint = inject(BreakpointObserver);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
+  private readonly activityStore = inject(BrandActivityService);
+  /** Per-activity-id polling subscriptions so we can clean up on destroy. */
+  private readonly activityPolls = new Map<string, Subscription>();
 
   @ViewChild('brandListWrap') private brandListWrap?: ElementRef<HTMLElement>;
 
@@ -343,6 +350,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         this.brands = list;
         this.applyDefaultBrandSelection();
         this.syncBrandPreviewFromSelection();
+        this.hydrateRunningJobs();
         this.loading = false;
       },
       error: () => {
@@ -505,59 +513,190 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * True when this brand currently has a running or queued activity of any
+   * kind. Disables the split-button so users can't double-fire pipelines for
+   * the same brand.
+   */
+  isGenerating(brandId: string): boolean {
+    return this.activityStore
+      .snapshot()
+      .some(
+        (a) => a.brandId === brandId && (a.status === 'running' || a.status === 'queued')
+      );
+  }
+
   runBrand(brand: Brand): void {
     if (!this.selectedClient) return;
-    this.brandFormBusy = true;
+    const activity = this.activityStore.start('run', brand.id);
     this.brandActionMessage = null;
-    this.api.runBrand(this.selectedClient.id, brand.id).subscribe({
-      next: () => {
-        this.brandActionMessage = 'Brand run completed. Output saved to brand version.';
-        this.brandFormBusy = false;
-        this.snackBar.open(this.brandActionMessage, 'Dismiss', { duration: 5000 });
-        this.api.getBrand(this.selectedClient!.id, brand.id).subscribe({
-          next: (updated) => {
-            this.brands = this.brands.map((b) => (b.id === brand.id ? updated : b));
-            this.selectedBrand = this.selectedBrand?.id === brand.id ? updated : this.selectedBrand;
-          },
+    const clientId = this.selectedClient.id;
+    this.api.submitRun(clientId, brand.id).subscribe({
+      next: (submission) => {
+        this.activityStore.update(activity.id, {
+          jobId: submission.job_id,
+          status: 'queued',
         });
+        this.trackRunActivity(clientId, brand, activity.id, submission.job_id);
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Run failed';
-        this.brandFormBusy = false;
+        this.finishActivityWithError(activity.id, err, 'Run failed');
       },
     });
   }
 
   requestMarketResearchForBrand(brand: Brand): void {
     if (!this.selectedClient) return;
-    this.brandFormBusy = true;
+    const activity = this.activityStore.start('research', brand.id);
+    this.activityStore.update(activity.id, { status: 'running' });
     this.brandActionMessage = null;
     this.api.requestMarketResearch(this.selectedClient.id, brand.id).subscribe({
       next: (snapshot) => {
+        this.activityStore.update(activity.id, {
+          status: 'completed',
+          completedAt: new Date().toISOString(),
+        });
         this.brandActionMessage = `Market research: ${snapshot.summary.slice(0, 80)}...`;
-        this.brandFormBusy = false;
         this.snackBar.open(this.brandActionMessage, 'Dismiss', { duration: 6000 });
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Market research request failed';
-        this.brandFormBusy = false;
+        this.finishActivityWithError(activity.id, err, 'Market research request failed');
       },
     });
   }
 
   requestDesignAssetsForBrand(brand: Brand): void {
     if (!this.selectedClient) return;
-    this.brandFormBusy = true;
+    const activity = this.activityStore.start('design', brand.id);
+    this.activityStore.update(activity.id, { status: 'running' });
     this.brandActionMessage = null;
     this.api.requestDesignAssets(this.selectedClient.id, brand.id).subscribe({
       next: (result) => {
+        this.activityStore.update(activity.id, {
+          status: 'completed',
+          completedAt: new Date().toISOString(),
+        });
         this.brandActionMessage = `Design request ${result.request_id} (${result.status}).`;
-        this.brandFormBusy = false;
         this.snackBar.open(this.brandActionMessage, 'Dismiss', { duration: 5000 });
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Design assets request failed';
-        this.brandFormBusy = false;
+        this.finishActivityWithError(activity.id, err, 'Design assets request failed');
+      },
+    });
+  }
+
+  /**
+   * Subscribe to `observeJob` and mirror each status poll onto the matching
+   * activity chip. On terminal success, refresh the brand so the preview panel
+   * reflects the new output.
+   */
+  private trackRunActivity(clientId: string, brand: Brand, activityId: string, jobId: string): void {
+    this.activityPolls.get(activityId)?.unsubscribe();
+    const sub = this.api.observeJob(jobId).subscribe({
+      next: (status) => {
+        this.activityStore.applyJobStatus(activityId, status);
+        if (status.status === 'completed') {
+          this.api.getBrand(clientId, brand.id).subscribe({
+            next: (updated) => {
+              this.brands = this.brands.map((b) => (b.id === brand.id ? updated : b));
+              if (this.selectedBrand?.id === brand.id) {
+                this.selectedBrand = updated;
+                this.conversationLatestOutput =
+                  (updated.latest_output as BrandingTeamOutput | null) ?? null;
+              }
+              this.snackBar.open(
+                `Brand "${brand.name}" run completed.`,
+                'View',
+                { duration: 5000 }
+              ).onAction().subscribe(() => this.openActivityArtifacts(brand.id));
+            },
+          });
+        } else if (status.status === 'failed' || status.status === 'cancelled') {
+          this.snackBar.open(
+            status.error || `Brand run ${status.status}.`,
+            'Dismiss',
+            { duration: 6000 }
+          );
+        }
+      },
+      error: (err) => this.finishActivityWithError(activityId, err, 'Run failed'),
+      complete: () => {
+        this.activityPolls.delete(activityId);
+      },
+    });
+    this.activityPolls.set(activityId, sub);
+  }
+
+  private finishActivityWithError(activityId: string, err: unknown, fallback: string): void {
+    const message = (err as { error?: { detail?: string }; message?: string })?.error?.detail
+      ?? (err as { message?: string })?.message
+      ?? fallback;
+    this.activityStore.update(activityId, {
+      status: 'failed',
+      error: message,
+      completedAt: new Date().toISOString(),
+    });
+    this.snackBar.open(message, 'Dismiss', { duration: 6000 });
+  }
+
+  onActivityOpen(activity: BrandActivity): void {
+    this.openActivityArtifacts(activity.brandId);
+  }
+
+  onActivityRetry(brand: Brand, activity: BrandActivity): void {
+    this.activityStore.remove(activity.id);
+    switch (activity.kind) {
+      case 'run':
+        this.runBrand(brand);
+        break;
+      case 'research':
+        this.requestMarketResearchForBrand(brand);
+        break;
+      case 'design':
+        this.requestDesignAssetsForBrand(brand);
+        break;
+    }
+  }
+
+  onActivityDismiss(activity: BrandActivity): void {
+    this.activityStore.remove(activity.id);
+  }
+
+  /**
+   * Jump to the brand preview. Today this selects the brand and switches to
+   * the Chat tab (which hosts the preview panel) — precise per-phase anchoring
+   * will arrive with the phase stepper in #277.
+   */
+  private openActivityArtifacts(brandId: string): void {
+    const brand = this.brands.find((b) => b.id === brandId);
+    if (brand) {
+      this.resumeOrStartBrand(brand);
+    }
+    this.selectedTabIndex = 0;
+  }
+
+  /**
+   * Fetch in-flight jobs for the current workspace and seed the activity
+   * strip so a page reload mid-run does not hide the chip.
+   */
+  private hydrateRunningJobs(): void {
+    if (!this.brands.length) return;
+    const knownBrandIds = new Set(this.brands.map((b) => b.id));
+    this.api.listJobs(true).subscribe({
+      next: (jobs) => {
+        const before = new Set(this.activityStore.snapshot().map((a) => a.id));
+        this.activityStore.hydrateFromJobs(jobs, knownBrandIds);
+        for (const activity of this.activityStore.snapshot()) {
+          if (before.has(activity.id)) continue;
+          if (activity.kind !== 'run' || !activity.jobId) continue;
+          const brand = this.brands.find((b) => b.id === activity.brandId);
+          const clientId = this.selectedClient?.id;
+          if (!brand || !clientId) continue;
+          this.trackRunActivity(clientId, brand, activity.id, activity.jobId);
+        }
+      },
+      error: () => {
+        /* Silent: hydration is best-effort. */
       },
     });
   }
@@ -574,6 +713,10 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.pollSub?.unsubscribe();
     this.layoutSub?.unsubscribe();
+    for (const sub of this.activityPolls.values()) {
+      sub.unsubscribe();
+    }
+    this.activityPolls.clear();
   }
 
   startSession(): void {

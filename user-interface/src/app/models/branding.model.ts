@@ -248,3 +248,41 @@ export interface ConversationSummary {
   updated_at: string;
   message_count: number;
 }
+
+/**
+ * Which generate action an activity represents. These map onto the Form-tab
+ * split-button menu ("Run full pipeline", "Market research only", "Design
+ * assets only") and the section the user jumps to when opening a completed
+ * chip.
+ */
+export type BrandActivityKind = 'run' | 'research' | 'design';
+
+export type BrandActivityStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/**
+ * A single in-flight or recently-finished job against a brand. Shown as a
+ * status chip under each brand row. `jobId` is set for async runs (where the
+ * backend returns a job id); synchronous requests (market research, design
+ * assets) track only in the client.
+ */
+export interface BrandActivity {
+  /** Client-generated id so we can update/retry a specific chip. */
+  id: string;
+  brandId: string;
+  kind: BrandActivityKind;
+  status: BrandActivityStatus;
+  /** Present when `kind === 'run'` and the backend accepted the submission. */
+  jobId?: string | null;
+  /** Human-readable phase label emitted by the backend, e.g. "Visual Identity". */
+  phase?: string | null;
+  /** Optional numeric progress; 0-100 if the backend reports it. */
+  progress?: number | null;
+  error?: string | null;
+  startedAt: string;
+  completedAt?: string | null;
+}

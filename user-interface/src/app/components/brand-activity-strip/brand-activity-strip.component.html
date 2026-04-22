@@ -1,0 +1,49 @@
+@if (items.length > 0) {
+  <mat-chip-set class="brand-activity-strip" aria-label="Brand activity">
+    @for (a of items; track trackById($index, a)) {
+      <mat-chip
+        [class]="chipClass(a)"
+        [disabled]="false"
+        [matTooltip]="a.error || ''"
+        [matTooltipDisabled]="!a.error"
+        (click)="onOpen($event, a)"
+      >
+        @if (a.status === 'running' || a.status === 'queued') {
+          <mat-spinner matChipAvatar diameter="16" strokeWidth="2" />
+        } @else if (a.status === 'completed') {
+          <mat-icon matChipAvatar class="chip-icon chip-icon--completed">check_circle</mat-icon>
+        } @else if (a.status === 'failed') {
+          <mat-icon matChipAvatar class="chip-icon chip-icon--failed">error</mat-icon>
+        } @else if (a.status === 'cancelled') {
+          <mat-icon matChipAvatar class="chip-icon chip-icon--cancelled">cancel</mat-icon>
+        } @else {
+          <mat-icon matChipAvatar class="chip-icon">{{ icon(a.kind) }}</mat-icon>
+        }
+        <span class="chip-label">{{ label(a) }}</span>
+        @if (isRetryable(a)) {
+          <button
+            matChipTrailingIcon
+            mat-icon-button
+            type="button"
+            aria-label="Retry"
+            matTooltip="Retry"
+            (click)="onRetry($event, a)"
+          >
+            <mat-icon>refresh</mat-icon>
+          </button>
+        }
+        @if (isDismissable(a)) {
+          <button
+            matChipRemove
+            mat-icon-button
+            type="button"
+            aria-label="Dismiss"
+            (click)="onDismiss($event, a)"
+          >
+            <mat-icon>close</mat-icon>
+          </button>
+        }
+      </mat-chip>
+    }
+  </mat-chip-set>
+}
