@@ -195,7 +195,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
         this.loadSamples(id);
         this.loadSavedInputs(id);
         this.loadInputSchema(id);
-        this.startSandboxPolling(detail.manifest.team);
+        this.startSandboxPolling(id);
       },
       error: (err) => {
         console.error('Failed to load agent detail', err);
@@ -357,24 +357,24 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   // Sandbox lifecycle
   // ---------------------------------------------------------------
 
-  private startSandboxPolling(team: string): void {
+  private startSandboxPolling(agentId: string): void {
     this.sandboxPollSub?.unsubscribe();
-    this.runner.getSandbox(team).subscribe({
+    this.runner.getSandbox(agentId).subscribe({
       next: (handle) => this.sandbox.set(handle),
       error: () => this.sandbox.set(null),
     });
     this.sandboxPollSub = interval(5000).subscribe(() => {
-      this.runner.getSandbox(team).subscribe({
+      this.runner.getSandbox(agentId).subscribe({
         next: (handle) => this.sandbox.set(handle),
       });
     });
   }
 
   warmSandbox(): void {
-    const team = this.selectedAgent()?.manifest.team;
-    if (!team) return;
+    const agentId = this.selectedAgentId();
+    if (!agentId) return;
     this.sandboxPolling.set(true);
-    this.runner.ensureWarm(team).subscribe({
+    this.runner.ensureWarm(agentId).subscribe({
       next: (handle) => {
         this.sandbox.set(handle);
         this.sandboxPolling.set(false);
@@ -387,10 +387,11 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   }
 
   tearDownSandbox(): void {
-    const team = this.selectedAgent()?.manifest.team;
-    if (!team) return;
-    if (!confirm(`Tear down the ${team} sandbox?`)) return;
-    this.runner.teardown(team).subscribe({
+    const agentId = this.selectedAgentId();
+    if (!agentId) return;
+    const label = this.selectedAgent()?.manifest.name ?? agentId;
+    if (!confirm(`Tear down the ${label} sandbox?`)) return;
+    this.runner.teardown(agentId).subscribe({
       next: () => {
         this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
       },
@@ -468,7 +469,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           logs_tail: record.logs_tail,
           error: record.error,
           sandbox: record.sandbox_url
-            ? { team: record.team, url: record.sandbox_url }
+            ? { agent_id: record.agent_id, url: record.sandbox_url }
             : undefined,
         });
         this.lastError.set(null);

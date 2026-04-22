@@ -36,17 +36,20 @@ export class AgentRunnerApiService {
     return this.http.get<SandboxHandle[]>(this.sandboxesUrl);
   }
 
-  ensureWarm(team: string): Observable<SandboxHandle> {
-    return this.http.post<SandboxHandle>(`${this.sandboxesUrl}/${encodeURIComponent(team)}`, {});
+  ensureWarm(agentId: string): Observable<SandboxHandle> {
+    return this.http.post<SandboxHandle>(
+      `${this.sandboxesUrl}/${encodeURIComponent(agentId)}/warm`,
+      {},
+    );
   }
 
-  getSandbox(team: string): Observable<SandboxHandle> {
-    return this.http.get<SandboxHandle>(`${this.sandboxesUrl}/${encodeURIComponent(team)}`);
+  getSandbox(agentId: string): Observable<SandboxHandle> {
+    return this.http.get<SandboxHandle>(`${this.sandboxesUrl}/${encodeURIComponent(agentId)}`);
   }
 
-  teardown(team: string): Observable<{ team: string; status: string }> {
-    return this.http.delete<{ team: string; status: string }>(
-      `${this.sandboxesUrl}/${encodeURIComponent(team)}`,
+  teardown(agentId: string): Observable<{ agent_id: string; status: string }> {
+    return this.http.delete<{ agent_id: string; status: string }>(
+      `${this.sandboxesUrl}/${encodeURIComponent(agentId)}`,
     );
   }
 
