@@ -297,6 +297,42 @@ describe('BrandingDashboardComponent', () => {
 
     expect(apiSpy.createClient).toHaveBeenCalledWith({ name: 'New' });
   });
+
+  it('onSelectPalette patches brands so syncBrandPreviewFromSelection does not revert the choice', () => {
+    const mission = {
+      company_name: 'Acme',
+      company_description: 'desc',
+      target_audience: 'devs',
+      color_palettes: [
+        { name: 'Sunset', description: '', colors: ['#f00'], sentiment: 'warm' },
+        { name: 'Ocean', description: '', colors: ['#00f'], sentiment: 'cool' },
+      ],
+    };
+    const brand: Brand = {
+      id: 'b-palette',
+      client_id: 'w1',
+      name: 'Acme',
+      status: 'draft',
+      mission,
+      version: 1,
+      history: [],
+      created_at: '',
+      updated_at: '',
+    };
+    component.brands = [brand];
+    component.selectedBrand = brand;
+
+    component.onSelectPalette(1);
+
+    expect(component.selectedBrand?.mission.selected_palette_index).toBe(1);
+    expect(component.brands[0].mission.selected_palette_index).toBe(1);
+
+    // Simulate a subsequent chat state update which calls
+    // syncBrandPreviewFromSelection → selectedBrand = brands.find(...).
+    // Without the brands patch, this would revert the choice.
+    (component as unknown as { syncBrandPreviewFromSelection: () => void }).syncBrandPreviewFromSelection();
+    expect(component.selectedBrand?.mission.selected_palette_index).toBe(1);
+  });
 });
 
 describe('BrandingDashboardComponent query-param restore', () => {

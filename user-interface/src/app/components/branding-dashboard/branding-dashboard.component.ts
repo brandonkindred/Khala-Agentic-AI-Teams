@@ -145,10 +145,14 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
       this.conversationMission = { ...this.conversationMission, selected_palette_index: index };
     }
     if (this.selectedBrand) {
-      this.selectedBrand = {
+      const updated: Brand = {
         ...this.selectedBrand,
         mission: { ...this.selectedBrand.mission, selected_palette_index: index },
       };
+      this.selectedBrand = updated;
+      // Also patch `brands` so syncBrandPreviewFromSelection() doesn't
+      // rehydrate selectedBrand from a stale entry and revert the choice.
+      this.brands = this.brands.map((b) => (b.id === updated.id ? updated : b));
     }
   }
 
