@@ -119,13 +119,20 @@ class AgentProvisioningWorkflowV2:
             return_exceptions=True,
         )
 
-        succeeded: list[str] = []
+        # Carry the registry key through with each success so compensation
+        # can look the provisioner back up (see #293).
+        succeeded: list[dict] = []
         failures: list[str] = []
         for name, res in zip(tool_names, results):
             if isinstance(res, BaseException):
                 failures.append(f"{name}: {res}")
             elif isinstance(res, dict) and res.get("success"):
-                succeeded.append(name)
+                succeeded.append(
+                    {
+                        "tool_name": res.get("tool_name", name),
+                        "provisioner_key": res.get("provisioner_key"),
+                    }
+                )
             else:
                 failures.append(f"{name}: {res.get('error') if isinstance(res, dict) else 'unknown'}")
 

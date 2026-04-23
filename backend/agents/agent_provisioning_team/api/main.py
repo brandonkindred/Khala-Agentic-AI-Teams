@@ -125,6 +125,10 @@ def _submit_provisioning_job(job_id: str, *args: Any, **kwargs: Any) -> None:
 
 def _safe_compensate(agent_id: str) -> None:
     try:
+        # Passes [] so the orchestrator only runs the tail (docker teardown,
+        # credential delete, env cleanup). Per-tool rollback on SIGTERM isn't
+        # wired up from here — per-job tool_results aren't plumbed through
+        # job_store today. Tracked alongside #258/#293; out of scope for #293.
         orchestrator._compensate(agent_id, [])  # noqa: SLF001
     except Exception:
         logger.exception("Compensate raised for agent=%s", agent_id)

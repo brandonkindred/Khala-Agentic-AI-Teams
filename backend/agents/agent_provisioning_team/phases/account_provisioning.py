@@ -71,6 +71,7 @@ def run_account_provisioning(
                     tool_name=tool_name,
                     success=False,
                     error=f"Unknown provisioner: {provisioner_name}",
+                    provisioner_key=provisioner_name,
                 )
             )
             continue
@@ -82,6 +83,7 @@ def run_account_provisioning(
                     tool_name=tool_name,
                     success=False,
                     error=f"No credentials generated for {tool_name}",
+                    provisioner_key=provisioner_name,
                 )
             )
             continue
@@ -97,6 +99,10 @@ def run_account_provisioning(
                 access_tier=tool_tier,
             )
 
+            # Stamp the registry key so _compensate() can look the provisioner
+            # back up by key rather than by the fragile class attribute
+            # `tool_name` (see #293).
+            result.provisioner_key = provisioner_name
             tool_results.append(result)
 
             if result.success:
@@ -109,6 +115,7 @@ def run_account_provisioning(
                     tool_name=tool_name,
                     success=False,
                     error=str(e),
+                    provisioner_key=provisioner_name,
                 )
             )
 

@@ -314,15 +314,33 @@ class ProvisioningOrchestrator:
         Docker environment, and removes encrypted credentials so a failed
         run doesn't leak resources or secrets to disk.
         """
-        succeeded = [r.tool_name for r in tool_results if getattr(r, "success", False)]
-        for tool_name in succeeded:
-            provisioner = self.tool_agents.get(f"{tool_name}_provisioner")
+        # Look each successfully-provisioned tool back up by its registry key
+        # (stamped onto the result in run_account_provisioning). Prior to #293
+        # this used f"{r.tool_name}_provisioner", which silently missed for
+        # provisioners whose class `tool_name` differs from the registry stem
+        # (e.g. PostgresProvisionerTool.tool_name == "postgresql" vs key
+        # "postgres_provisioner"), leaking accounts + encrypted credentials.
+        for r in tool_results:
+            if not getattr(r, "success", False):
+                continue
+            key = getattr(r, "provisioner_key", None)
+            if not key:
+                logger.warning(
+                    "Compensation: tool_result for %s has no provisioner_key; "
+                    "skipping rollback (stale result pre-#293).",
+                    getattr(r, "tool_name", "?"),
+                )
+                continue
+            provisioner = self.tool_agents.get(key)
             if provisioner is None:
+                logger.warning(
+                    "Compensation: no provisioner registered for key=%s", key
+                )
                 continue
             try:
                 provisioner.deprovision(agent_id)
             except Exception:  # noqa: BLE001 — best-effort cleanup
-                logger.exception("Compensation: deprovision failed for %s", tool_name)
+                logger.exception("Compensation: deprovision failed for %s", key)
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker is not None:

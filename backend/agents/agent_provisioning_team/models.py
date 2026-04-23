@@ -83,6 +83,11 @@ class ToolProvisionResult(BaseModel):
     permissions: List[str] = Field(default_factory=list)
     error: Optional[str] = None
     details: Dict[str, Any] = Field(default_factory=dict)
+    # Registry key of the provisioner that produced this result (e.g.
+    # "postgres_provisioner"). Used by ProvisioningOrchestrator._compensate()
+    # to look the provisioner back up for rollback. Optional/None for
+    # backward compatibility with results serialized before #293.
+    provisioner_key: Optional[str] = None
 
 
 class AccessVerification(BaseModel):
