@@ -207,9 +207,17 @@ docs(readme): add docker port mapping table
 ### Adding a New Agent Team
 
 1. Create `agents/<team_name>/` with `__init__.py`, `api/main.py`, models, and agents.
-2. Add `requirements.txt` if the team has unique dependencies.
-3. Add a supervisord program in `agents/supervisord.conf` if running in Docker.
-4. Update `agents/Dockerfile` to copy the new team and install its requirements.
+2. Add `requirements.txt` if the team has unique dependencies (and wire it into
+   `backend/agents/Dockerfile`'s consolidated `pip install` block so the agent
+   provisioning supervisor image picks it up).
+3. Register the team in `backend/unified_api/config.py` `TEAM_CONFIGS` — the
+   unified API and per-service Docker images (`team_service/Dockerfile`) pick
+   up new teams automatically from this registry.
+4. For the agent-provisioning supervisor image (`backend/agents/Dockerfile`):
+   the team's source lands in the image via the wholesale `COPY agents /app/`,
+   so no per-team copy is needed. Add a `supervisord` program in
+   `agents/supervisord.conf` only if the team needs its HTTP API served
+   inside that supervisor container.
 5. Add a dashboard and service in `user-interface/` if the team has an HTTP API.
 6. Document the team in `agents/README.md` and the root `README.md`.
 

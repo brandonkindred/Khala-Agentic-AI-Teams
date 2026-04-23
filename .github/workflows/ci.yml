@@ -21,6 +21,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
       - run: pip install ruff
       - run: ruff check agents/ unified_api/ blogging_service/ team_service/
 
@@ -91,10 +93,16 @@ jobs:
         env:
           PYTHONPATH: ..
         run: python -c "from shared_postgres import register_all_team_schemas; r = register_all_team_schemas(); assert all(r.values()), r"
-      - run: pytest shared_postgres/tests/ -v --tb=short
+      - run: pytest shared_postgres/tests/ -v --tb=short -n auto
 
-  test-software-engineering:
-    name: Test – Software Engineering Team
+  # All non-Postgres backend test suites run as a single matrix job so the CI
+  # config stays DRY and adding/removing a suite is one matrix entry. Matrix
+  # entries still run in parallel; fail-fast is off so one red suite doesn't
+  # kill the others. The shared_postgres suite stays standalone because it
+  # needs a live Postgres `services:` block that we don't want to spin up for
+  # the other six suites.
+  test-backend:
+    name: "Test – ${{ matrix.name }}"
     runs-on: ubuntu-latest
     needs: lint-python
     defaults:
@@ -102,110 +110,55 @@ jobs:
         working-directory: backend/agents
     env:
       LLM_PROVIDER: dummy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Software Engineering Team
+            tests: software_engineering_team/tests/
+            extra_requirements: software_engineering_team/requirements.txt
+            editable_install: software_engineering_team
+            needs_node: true
+          - name: Blogging
+            tests: blogging/tests/
+            extra_requirements: blogging/requirements.txt
+          - name: Market Research
+            tests: market_research_team/tests/
+          - name: SOC2 Compliance
+            tests: soc2_compliance_team/tests/
+          - name: Investment Strategy Lab
+            tests: investment_team/tests/
+            extra_requirements: investment_team/requirements-test.txt
+          - name: Social Marketing
+            tests: social_media_marketing_team/tests/
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - if: matrix.needs_node
+        uses: actions/setup-node@v4
         with:
           node-version: "22"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+          # Listing every team's requirements in the cache key means the key
+          # is shared across matrix entries (so pip's wheel cache is reused)
+          # and invalidates whenever any team's reqs change.
           cache-dependency-path: |
             backend/agents/requirements.txt
             backend/agents/software_engineering_team/requirements.txt
-      - run: pip install -r requirements.txt -r software_engineering_team/requirements.txt
-      - run: pip install -e software_engineering_team
-      - run: pytest software_engineering_team/tests/ -v --tb=short
-
-  test-blogging:
-    name: Test – Blogging
-    runs-on: ubuntu-latest
-    needs: lint-python
-    defaults:
-      run:
-        working-directory: backend/agents
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            backend/agents/requirements.txt
             backend/agents/blogging/requirements.txt
-      - run: pip install -r requirements.txt -r blogging/requirements.txt
-      - run: pytest blogging/tests/ -v --tb=short
-
-  test-market-research:
-    name: Test – Market Research
-    runs-on: ubuntu-latest
-    needs: lint-python
-    defaults:
-      run:
-        working-directory: backend/agents
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/agents/requirements.txt
-      - run: pip install -r requirements.txt
-      - run: pytest market_research_team/tests/ -v --tb=short
-
-  test-soc2:
-    name: Test – SOC2 Compliance
-    runs-on: ubuntu-latest
-    needs: lint-python
-    defaults:
-      run:
-        working-directory: backend/agents
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/agents/requirements.txt
-      - run: pip install -r requirements.txt
-      - run: pytest soc2_compliance_team/tests/ -v --tb=short
-
-  test-investment:
-    name: Test – Investment Strategy Lab
-    runs-on: ubuntu-latest
-    needs: lint-python
-    defaults:
-      run:
-        working-directory: backend/agents
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            backend/agents/requirements.txt
             backend/agents/investment_team/requirements-test.txt
-      - run: pip install -r requirements.txt -r investment_team/requirements-test.txt
-      - run: pytest investment_team/tests/ -v --tb=short
-
-  test-social-marketing:
-    name: Test – Social Marketing
-    runs-on: ubuntu-latest
-    needs: lint-python
-    defaults:
-      run:
-        working-directory: backend/agents
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/agents/requirements.txt
-      - run: pip install -r requirements.txt
-      - run: pytest social_media_marketing_team/tests/ -v --tb=short
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          if [ -n "${{ matrix.extra_requirements }}" ]; then
+            pip install -r "${{ matrix.extra_requirements }}"
+          fi
+          if [ -n "${{ matrix.editable_install }}" ]; then
+            pip install -e "${{ matrix.editable_install }}"
+          fi
+      - run: pytest ${{ matrix.tests }} -v --tb=short -n auto
 
   test-ui:
     name: Test – Angular UI
@@ -237,12 +190,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test-shared-postgres
-      - test-software-engineering
-      - test-blogging
-      - test-market-research
-      - test-soc2
-      - test-investment
-      - test-social-marketing
+      - test-backend
       - test-ui
     steps:
       - run: echo "All lint, test, and build checks passed."
@@ -295,8 +243,12 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Explicit scope keeps this image's cache separate from the team
+          # service matrix and frontend images; without scope, default is the
+          # job name which still works but isn't future-proof if the job is
+          # renamed.
+          cache-from: type=gha,scope=build-backend
+          cache-to: type=gha,mode=max,scope=build-backend
 
   build-team-services:
     name: "Build ${{ matrix.service }} Docker image"
@@ -345,8 +297,11 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Per-service scope keeps the two matrix entries from clobbering
+          # each other's cache (default scope is the job name, which is
+          # shared across all matrix entries).
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
   build-frontend:
     name: Build Frontend Docker image
@@ -387,5 +342,5 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=build-frontend
+          cache-to: type=gha,mode=max,scope=build-frontend

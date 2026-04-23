@@ -38,7 +38,9 @@ known-first-party = ["shared", "backend_agent", "frontend_team", "devops_agent",
 "unified_api/tests/**" = ["E402"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=agents --cov=unified_api --cov-report=term-missing --cov-fail-under=85"
+# Coverage is enforced in CI via `make coverage` (see .github/workflows/ci.yml `coverage` job),
+# not on every pytest invocation. Keep local `make test` / `pytest` fast; run
+# `make coverage` when you want the 85% gate.
 
 [tool.coverage.run]
 source = ["agents", "unified_api"]

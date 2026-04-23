@@ -1,5 +1,17 @@
+# syntax=docker/dockerfile:1.7
 # Multi-stage Dockerfile for khala
-# Packages all 6 agent teams with pre-installed tools, UI, PostgreSQL, and nginx
+# This is the agent-provisioning supervisor image: bundles Docker Engine
+# (DinD), PostgreSQL, nginx, Node/Angular, and every enabled agent team so
+# the agent_provisioning_team can spawn isolated per-agent sandbox
+# containers INSIDE this container (see agent_provisioning_team/tool_agents/
+# docker_provisioner.py). This is NOT the production runtime — for that
+# see backend/team_service/Dockerfile and backend/blogging_service/Dockerfile.
+#
+# Build speed notes:
+#   * BuildKit cache mounts (--mount=type=cache) keep apt/pip caches across
+#     builds without bloating the final image.
+#   * docker-clean is removed from apt config so cache mounts actually work
+#     (debian base images ship a hook that wipes /var/cache/apt after install).
 
 # ---------------------------------------------------------------------------
 # Stage 1: Base with system dependencies and full Docker Engine
@@ -9,35 +21,42 @@ FROM python:3.11-slim AS base
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Let BuildKit cache mounts retain downloaded packages between builds.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
     gnupg \
     build-essential \
-    lsb-release \
-    && rm -rf /var/lib/apt/lists/*
+    lsb-release
 
 # Install full Docker Engine (daemon + CLI) for Docker-in-Docker
-RUN install -m 0755 -d /etc/apt/keyrings \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
     && chmod a+r /etc/apt/keyrings/docker.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
     | tee /etc/apt/sources.list.d/docker.list > /dev/null \
     && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io
 
 # Install PostgreSQL 15 and nginx
-RUN echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         postgresql-15 \
         postgresql-contrib-15 \
-        nginx \
-    && rm -rf /var/lib/apt/lists/*
+        nginx
 
 # ---------------------------------------------------------------------------
 # Stage 2: Node.js and Angular CLI via NVM
@@ -90,29 +109,35 @@ ENV NVM_DIR=/usr/local/nvm
 ENV NODE_VERSION=22.12
 ENV PATH="${NVM_DIR}/versions/node/v${NODE_VERSION}/bin:${PATH}"
 
-# Install supervisor for process management
-RUN pip install --no-cache-dir supervisor
-
 # Set working directory
 WORKDIR /app
 
-# Copy consolidated requirements and install Python dependencies
+# Requirements files for every team that ships one. Copied BEFORE the source
+# tree so the pip layer only busts when a requirements file actually changes.
 COPY agents/requirements.txt /app/requirements.txt
 COPY agents/software_engineering_team/requirements.txt /app/software_engineering_team/requirements.txt
 COPY agents/blogging/requirements.txt /app/blogging/requirements.txt
+COPY agents/personal_assistant_team/requirements.txt /app/personal_assistant_team/requirements.txt
+COPY agents/agent_provisioning_team/requirements.txt /app/agent_provisioning_team/requirements.txt
 
-# Merge and install - root has most deps, add any unique from other teams
-RUN pip install --no-cache-dir -r /app/requirements.txt \
-    && pip install --no-cache-dir -r /app/software_engineering_team/requirements.txt \
-    && pip install --no-cache-dir -r /app/blogging/requirements.txt
+# One pip invocation with a BuildKit cache mount — wheel cache survives
+# across builds instead of being redownloaded every time. supervisor is
+# installed here too so it shares the same pip cache layer.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
+        supervisor \
+        -r /app/requirements.txt \
+        -r /app/software_engineering_team/requirements.txt \
+        -r /app/blogging/requirements.txt \
+        -r /app/personal_assistant_team/requirements.txt \
+        -r /app/agent_provisioning_team/requirements.txt
 
-# Copy application source
-COPY agents/software_engineering_team /app/software_engineering_team
-COPY agents/blogging /app/blogging
-COPY agents/market_research_team /app/market_research_team
-COPY agents/soc2_compliance_team /app/soc2_compliance_team
-COPY agents/social_media_marketing_team /app/social_media_marketing_team
-COPY agents/api /app/api
+# Copy every team and shared module (llm_service, shared_postgres,
+# shared_temporal, integrations, etc.) into /app/ so PYTHONPATH=/app can
+# import them by package name (e.g. `software_engineering_team.api.main`).
+# This covers all 20 enabled teams in unified_api/config.py TEAM_CONFIGS
+# plus the shared infrastructure they depend on.
+COPY agents /app/
 
 # Copy the built Angular UI
 COPY --from=ui-build /build/dist/user-interface/browser /app/ui
@@ -122,9 +147,8 @@ RUN groupadd -g 999 docker 2>/dev/null || true \
     && useradd -m -u 1000 -G docker -s /bin/bash agent 2>/dev/null || true \
     && mkdir -p /var/run
 
-# Copy config files
-COPY agents/supervisord.conf /app/supervisord.conf
-COPY agents/entrypoint.sh /app/entrypoint.sh
+# supervisord.conf and entrypoint.sh already landed at /app/ via the wholesale
+# `COPY agents /app/` above. Only nginx.conf needs relocation to /etc/nginx/.
 COPY agents/nginx.conf /etc/nginx/nginx.conf
 RUN chmod +x /app/entrypoint.sh
 
