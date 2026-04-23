@@ -4,7 +4,7 @@ Generic provisioner tool agent template.
 Base implementation that can be extended for custom tools.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..models import (
     AccessTier,
@@ -13,6 +13,7 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
+from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner
 
 
@@ -33,7 +34,9 @@ class GenericProvisionerTool(BaseToolProvisioner):
 
     def __init__(self, tool_name: str = "generic") -> None:
         self.tool_name = tool_name
-        self._provisioned: Dict[str, Dict[str, Any]] = {}
+        # Per-tool-name namespacing so two GenericProvisionerTool instances with
+        # different ``tool_name`` don't collide in the shared state dir.
+        self._state = ProvisionerStateStore(f"generic_{tool_name}_provisioner")
 
     def provision(
         self,
@@ -44,33 +47,44 @@ class GenericProvisionerTool(BaseToolProvisioner):
     ) -> ToolProvisionResult:
         """Provision access for the agent (generic implementation).
 
-        This stores the provisioning info but doesn't perform actual
-        external operations. Override this method for real integrations.
+        Stores the provisioning info but doesn't perform actual external
+        operations. Override this method for real integrations.
         """
-        try:
-            permissions = config.get("permissions", [access_tier.value])
+        return self.run_idempotent(
+            agent_id,
+            credentials=credentials,
+            create=lambda: self._do_provision(config, credentials, access_tier),
+            reuse=lambda existing: self._on_reuse(existing, credentials),
+        )
 
-            credentials.extra["tool_name"] = self.tool_name
-            credentials.extra["config"] = config
+    def _do_provision(
+        self,
+        config: Dict[str, Any],
+        credentials: GeneratedCredentials,
+        access_tier: AccessTier,
+    ) -> Tuple[List[str], Dict[str, Any]]:
+        permissions = config.get("permissions", [access_tier.value])
 
-            self._provisioned[agent_id] = {
-                "config": config,
-                "access_tier": access_tier.value,
-                "permissions": permissions,
-            }
+        credentials.extra["tool_name"] = self.tool_name
+        credentials.extra["config"] = config
 
-            return self._make_success_result(
-                credentials=credentials,
-                permissions=permissions,
-                details={
-                    "tool_name": self.tool_name,
-                    "access_tier": access_tier.value,
-                    "config_applied": True,
-                },
-            )
+        details = {
+            "tool_name": self.tool_name,
+            "access_tier": access_tier.value,
+            "config": config,
+            "config_applied": True,
+            "permissions": permissions,
+        }
+        return permissions, details
 
-        except Exception as e:
-            return self._make_error_result(f"Generic provisioning error: {str(e)}")
+    def _on_reuse(
+        self,
+        existing: Dict[str, Any],
+        credentials: GeneratedCredentials,
+    ) -> List[str]:
+        credentials.extra.setdefault("tool_name", existing.get("tool_name", self.tool_name))
+        credentials.extra.setdefault("config", existing.get("config", {}))
+        return list(existing.get("permissions", []))
 
     def verify_access(
         self,
@@ -78,7 +92,7 @@ class GenericProvisionerTool(BaseToolProvisioner):
         expected_tier: AccessTier,
     ) -> AccessVerification:
         """Verify access for the agent (generic implementation)."""
-        prov_info = self._provisioned.get(agent_id)
+        prov_info = self._state.get(agent_id)
 
         if not prov_info:
             return self._make_verification(
@@ -108,7 +122,7 @@ class GenericProvisionerTool(BaseToolProvisioner):
 
     def deprovision(self, agent_id: str) -> DeprovisionResult:
         """Remove agent access (generic implementation)."""
-        prov_info = self._provisioned.get(agent_id)
+        prov_info = self._state.get(agent_id)
 
         if not prov_info:
             return DeprovisionResult(
@@ -118,7 +132,7 @@ class GenericProvisionerTool(BaseToolProvisioner):
             )
 
         try:
-            del self._provisioned[agent_id]
+            self._state.delete(agent_id)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,

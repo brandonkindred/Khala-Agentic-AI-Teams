@@ -17,7 +17,14 @@ from ..models import (
     ToolProvisionResult,
 )
 from ..shared.access_policy import get_permissions
+from ..shared.provisioner_state import ProvisionerStateStore
+from ..shared.tool_manifest import assert_path_within_base
 from .base import BaseToolProvisioner
+
+# Every git subprocess gets bounded wall-clock; unbounded calls could hang the
+# provisioning worker if the git remote or filesystem stalled. Matches the
+# timeout style already used in docker_provisioner.py.
+_GIT_SUBPROCESS_TIMEOUT_S = 30
 
 
 class GitProvisionerTool(BaseToolProvisioner):
@@ -27,7 +34,7 @@ class GitProvisionerTool(BaseToolProvisioner):
 
     def __init__(self, workspace_base: str = "/workspace") -> None:
         self.workspace_base = workspace_base
-        self._provisioned: Dict[str, Dict[str, Any]] = {}
+        self._state = ProvisionerStateStore("git_provisioner")
 
     def provision(
         self,
@@ -37,27 +44,41 @@ class GitProvisionerTool(BaseToolProvisioner):
         access_tier: AccessTier,
     ) -> ToolProvisionResult:
         """Set up Git for the agent with optional SSH keys and repos."""
-        try:
-            workspace_path = config.get("workspace_path", f"{self.workspace_base}/{agent_id}")
-            init_repos = config.get("init_repos", ["workspace"])
-            generate_ssh_key = config.get("generate_ssh_key", True)
+        return self.run_idempotent(
+            agent_id,
+            credentials=credentials,
+            create=lambda: self._do_provision(agent_id, config, credentials, access_tier),
+            reuse=lambda existing: self._on_reuse(existing, credentials),
+        )
 
-            workspace = Path(workspace_path)
-            workspace.mkdir(parents=True, exist_ok=True)
+    def _do_provision(
+        self,
+        agent_id: str,
+        config: Dict[str, Any],
+        credentials: GeneratedCredentials,
+        access_tier: AccessTier,
+    ) -> Tuple[List[str], Dict[str, Any]]:
+        workspace_path = config.get("workspace_path", f"{self.workspace_base}/{agent_id}")
+        init_repos = config.get("init_repos", ["workspace"])
+        generate_ssh_key = config.get("generate_ssh_key", True)
 
-            ssh_dir = workspace / ".ssh"
-            ssh_dir.mkdir(mode=0o700, exist_ok=True)
+        # Defence-in-depth: manifest validation already rejects `..` paths, but
+        # the workspace_base (set at provisioner construction time) is only
+        # known here, so the containment check runs at provisioning time too.
+        workspace = assert_path_within_base(workspace_path, self.workspace_base)
+        workspace.mkdir(parents=True, exist_ok=True)
 
-            if generate_ssh_key:
-                private_key, public_key = self._generate_ssh_keypair(
-                    agent_id,
-                    ssh_dir,
-                )
-                credentials.ssh_private_key = private_key
-                credentials.ssh_public_key = public_key
+        ssh_dir = workspace / ".ssh"
+        ssh_dir.mkdir(mode=0o700, exist_ok=True)
 
-            git_config_path = workspace / ".gitconfig"
-            git_config_content = f"""[user]
+        if generate_ssh_key:
+            private_key, public_key = self._generate_ssh_keypair(agent_id, ssh_dir)
+            credentials.ssh_private_key = private_key
+            credentials.ssh_public_key = public_key
+
+        git_config_path = workspace / ".gitconfig"
+        git_config_path.write_text(
+            f"""[user]
     name = Agent {agent_id}
     email = agent-{agent_id}@provisioning.local
 [init]
@@ -66,39 +87,42 @@ class GitProvisionerTool(BaseToolProvisioner):
     autocrlf = input
     editor = vim
 """
-            git_config_path.write_text(git_config_content)
+        )
 
-            initialized_repos: List[str] = []
-            for repo_name in init_repos:
-                repo_path = workspace / repo_name
-                if self._init_repo(repo_path):
-                    initialized_repos.append(str(repo_path))
+        initialized_repos: List[str] = []
+        for repo_name in init_repos:
+            # Manifest validation also guards init_repos, but re-assert the
+            # flat-segment invariant here in case a caller bypasses manifest
+            # parsing.
+            assert_path_within_base(str(workspace / repo_name), str(workspace))
+            repo_path = workspace / repo_name
+            if self._init_repo(repo_path):
+                initialized_repos.append(str(repo_path))
 
-            permissions = get_permissions("git", access_tier)
+        permissions = get_permissions("git", access_tier)
 
-            credentials.extra["workspace_path"] = str(workspace)
-            credentials.extra["git_config"] = str(git_config_path)
-            credentials.extra["repos"] = initialized_repos
+        credentials.extra["workspace_path"] = str(workspace)
+        credentials.extra["git_config"] = str(git_config_path)
+        credentials.extra["repos"] = initialized_repos
 
-            self._provisioned[agent_id] = {
-                "workspace_path": str(workspace),
-                "repos": initialized_repos,
-                "ssh_key_path": str(ssh_dir / "id_ed25519") if generate_ssh_key else None,
-                "permissions": permissions,
-            }
+        details = {
+            "workspace_path": str(workspace),
+            "repos": initialized_repos,
+            "repos_initialized": initialized_repos,
+            "ssh_key_path": str(ssh_dir / "id_ed25519") if generate_ssh_key else None,
+            "ssh_key_generated": generate_ssh_key,
+            "permissions": permissions,
+        }
+        return permissions, details
 
-            return self._make_success_result(
-                credentials=credentials,
-                permissions=permissions,
-                details={
-                    "workspace_path": str(workspace),
-                    "repos_initialized": initialized_repos,
-                    "ssh_key_generated": generate_ssh_key,
-                },
-            )
-
-        except Exception as e:
-            return self._make_error_result(f"Git provisioning error: {str(e)}")
+    def _on_reuse(
+        self,
+        existing: Dict[str, Any],
+        credentials: GeneratedCredentials,
+    ) -> List[str]:
+        credentials.extra.setdefault("workspace_path", existing.get("workspace_path", ""))
+        credentials.extra.setdefault("repos", existing.get("repos", []))
+        return list(existing.get("permissions", []))
 
     def _generate_ssh_keypair(
         self,
@@ -128,6 +152,7 @@ class GitProvisionerTool(BaseToolProvisioner):
             ],
             check=True,
             capture_output=True,
+            timeout=_GIT_SUBPROCESS_TIMEOUT_S,
         )
 
         private_key_path.chmod(0o600)
@@ -152,6 +177,7 @@ class GitProvisionerTool(BaseToolProvisioner):
                 cwd=str(repo_path),
                 check=True,
                 capture_output=True,
+                timeout=_GIT_SUBPROCESS_TIMEOUT_S,
             )
 
             readme = repo_path / "README.md"
@@ -176,12 +202,14 @@ class GitProvisionerTool(BaseToolProvisioner):
                 cwd=str(repo_path),
                 check=True,
                 capture_output=True,
+                timeout=_GIT_SUBPROCESS_TIMEOUT_S,
             )
             subprocess.run(
                 ["git", "commit", "-m", "Initial commit"],
                 cwd=str(repo_path),
                 check=True,
                 capture_output=True,
+                timeout=_GIT_SUBPROCESS_TIMEOUT_S,
                 env={
                     **os.environ,
                     "GIT_AUTHOR_NAME": "Provisioner",
@@ -202,7 +230,7 @@ class GitProvisionerTool(BaseToolProvisioner):
         expected_tier: AccessTier,
     ) -> AccessVerification:
         """Verify Git access for the agent."""
-        prov_info = self._provisioned.get(agent_id)
+        prov_info = self._state.get(agent_id)
 
         if not prov_info:
             return self._make_verification(
@@ -237,7 +265,7 @@ class GitProvisionerTool(BaseToolProvisioner):
 
     def deprovision(self, agent_id: str) -> DeprovisionResult:
         """Clean up Git provisioning (removes SSH keys, keeps repos)."""
-        prov_info = self._provisioned.get(agent_id)
+        prov_info = self._state.get(agent_id)
 
         if not prov_info:
             return DeprovisionResult(
@@ -257,7 +285,7 @@ class GitProvisionerTool(BaseToolProvisioner):
                 if public_key.exists():
                     public_key.unlink()
 
-            del self._provisioned[agent_id]
+            self._state.delete(agent_id)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,

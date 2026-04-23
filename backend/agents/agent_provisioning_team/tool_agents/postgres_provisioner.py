@@ -5,7 +5,7 @@ Creates databases and users with scoped permissions.
 """
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..models import (
     AccessTier,
@@ -74,96 +74,85 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         if not HAS_PSYCOPG2:
             return self._make_error_result("psycopg2 is not installed")
 
-        # Idempotency: short-circuit if we already provisioned this agent.
-        existing = self._state.get(agent_id)
-        if existing:
-            permissions = existing.get("permissions", get_permissions("postgresql", access_tier))
-            credentials.extra.setdefault("database", existing["database"])
-            credentials.extra.setdefault("host", self.host)
-            credentials.extra.setdefault("port", self.port)
-            return self._make_success_result(
-                credentials=credentials,
-                permissions=permissions,
-                details={
-                    "database": existing["database"],
-                    "username": existing["username"],
-                    "host": self.host,
-                    "port": self.port,
-                    "reused": True,
-                },
+        return self.run_idempotent(
+            agent_id,
+            credentials=credentials,
+            create=lambda: self._do_provision(agent_id, config, credentials, access_tier),
+            reuse=lambda existing: self._on_reuse(existing, credentials, access_tier),
+        )
+
+    def _do_provision(
+        self,
+        agent_id: str,
+        config: Dict[str, Any],
+        credentials: GeneratedCredentials,
+        access_tier: AccessTier,
+    ) -> Tuple[List[str], Dict[str, Any]]:
+        db_prefix = config.get("database_prefix", "agent_")
+        db_name = f"{db_prefix}{agent_id}".replace("-", "_")[:63]
+        username = credentials.username or f"agent_{agent_id}".replace("-", "_")[:63]
+        password = credentials.password
+
+        if not password:
+            raise ValueError("No password provided in credentials")
+
+        conn = self._get_admin_connection()
+        conn.autocommit = True
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
+                [password],
+            )
+        except psycopg2.errors.DuplicateObject:
+            cursor.execute(
+                sql.SQL("ALTER USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
+                [password],
             )
 
         try:
-            db_prefix = config.get("database_prefix", "agent_")
-            db_name = f"{db_prefix}{agent_id}".replace("-", "_")[:63]
-            username = credentials.username or f"agent_{agent_id}".replace("-", "_")[:63]
-            password = credentials.password
-
-            if not password:
-                return self._make_error_result("No password provided in credentials")
-
-            conn = self._get_admin_connection()
-            conn.autocommit = True
-            cursor = conn.cursor()
-
-            try:
-                cursor.execute(
-                    sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
-                    [password],
+            cursor.execute(
+                sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                    sql.Identifier(db_name),
+                    sql.Identifier(username),
                 )
-            except psycopg2.errors.DuplicateObject:
-                cursor.execute(
-                    sql.SQL("ALTER USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
-                    [password],
-                )
-
-            try:
-                cursor.execute(
-                    sql.SQL("CREATE DATABASE {} OWNER {}").format(
-                        sql.Identifier(db_name),
-                        sql.Identifier(username),
-                    )
-                )
-            except psycopg2.errors.DuplicateDatabase:
-                pass
-
-            permissions = get_permissions("postgresql", access_tier)
-            self._apply_permissions(cursor, db_name, username, permissions)
-
-            cursor.close()
-            conn.close()
-
-            connection_string = (
-                f"postgresql://{username}:{password}@{self.host}:{self.port}/{db_name}"
             )
+        except psycopg2.errors.DuplicateDatabase:
+            pass
 
-            credentials.connection_string = connection_string
-            credentials.extra["database"] = db_name
-            credentials.extra["host"] = self.host
-            credentials.extra["port"] = self.port
+        permissions = get_permissions("postgresql", access_tier)
+        self._apply_permissions(cursor, db_name, username, permissions)
 
-            self._state.put(
-                agent_id,
-                {
-                    "database": db_name,
-                    "username": username,
-                    "permissions": permissions,
-                },
-            )
+        cursor.close()
+        conn.close()
 
-            return self._make_success_result(
-                credentials=credentials,
-                permissions=permissions,
-                details={
-                    "database": db_name,
-                    "username": username,
-                    "host": self.host,
-                    "port": self.port,
-                },
-            )
+        connection_string = f"postgresql://{username}:{password}@{self.host}:{self.port}/{db_name}"
 
-        except Exception as e:
-            return self._make_error_result(f"PostgreSQL provisioning error: {str(e)}")
+        credentials.connection_string = connection_string
+        credentials.extra["database"] = db_name
+        credentials.extra["host"] = self.host
+        credentials.extra["port"] = self.port
+
+        details = {
+            "database": db_name,
+            "username": username,
+            "host": self.host,
+            "port": self.port,
+            "permissions": permissions,
+        }
+        return permissions, details
+
+    def _on_reuse(
+        self,
+        existing: Dict[str, Any],
+        credentials: GeneratedCredentials,
+        access_tier: AccessTier,
+    ) -> List[str]:
+        credentials.extra.setdefault("database", existing["database"])
+        credentials.extra.setdefault("host", self.host)
+        credentials.extra.setdefault("port", self.port)
+        return existing.get("permissions", get_permissions("postgresql", access_tier))
 
     def _apply_permissions(
         self,

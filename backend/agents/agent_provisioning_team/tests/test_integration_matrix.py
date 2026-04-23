@@ -136,6 +136,30 @@ class TestManifestValidation:
         )
         assert m.get_tool("postgresql").config["database_prefix"] == "x_"
 
+    def test_workspace_path_traversal_rejected(self):
+        with pytest.raises(ValueError, match="traversal"):
+            validate_provisioner_config("git_provisioner", {"workspace_path": "../../etc"})
+        with pytest.raises(ValueError, match="traversal"):
+            validate_provisioner_config(
+                "docker_provisioner", {"workspace_path": "/workspace/../etc"}
+            )
+
+    def test_init_repo_name_traversal_rejected(self):
+        with pytest.raises(ValueError, match="traverse|path separators"):
+            validate_provisioner_config("git_provisioner", {"init_repos": ["../escape"]})
+        with pytest.raises(ValueError, match="path separators"):
+            validate_provisioner_config("git_provisioner", {"init_repos": ["nested/segment"]})
+
+    def test_workspace_path_accepts_clean_absolute(self):
+        # Regression guard: manifest-level rejection must not touch legitimate
+        # absolute workspace paths (used throughout the existing integration
+        # matrix and production manifests).
+        out = validate_provisioner_config(
+            "git_provisioner", {"workspace_path": "/tmp/ws", "init_repos": ["workspace"]}
+        )
+        assert out["workspace_path"] == "/tmp/ws"
+        assert out["init_repos"] == ["workspace"]
+
 
 # ---------------------------------------------------------------------------
 # ProvisionerStateStore
@@ -170,6 +194,90 @@ class TestProvisionerStateStore:
         assert s.delete("agent-1") is True
         assert s.delete("agent-1") is False
         assert s.get("agent-1") is None
+
+
+# ---------------------------------------------------------------------------
+# Unified provisioner scaffolding (BaseToolProvisioner.run_idempotent)
+# ---------------------------------------------------------------------------
+
+
+class TestProvisionerScaffolding:
+    """Covers the shared helper that owns idempotency + exception handling."""
+
+    def test_git_subprocess_timeout_is_surfaced_as_error_result(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression for the original bug: no timeout on `ssh-keygen` / `git init`
+        would hang the provisioning worker. With timeouts wired through
+        ``run_idempotent``, a ``subprocess.TimeoutExpired`` must become an
+        error ``ToolProvisionResult`` — not a raised exception.
+        """
+        import subprocess as _subprocess
+
+        from agent_provisioning_team.tool_agents.git_provisioner import GitProvisionerTool
+
+        tool = GitProvisionerTool(workspace_base=str(tmp_path))
+        # Point state store at tmp_path so the test is hermetic.
+        tool._state = ProvisionerStateStore("git_provisioner", storage_dir=tmp_path)
+
+        def _always_timeout(*args, **kwargs):  # noqa: ARG001
+            raise _subprocess.TimeoutExpired(cmd=args[0] if args else "git", timeout=30)
+
+        monkeypatch.setattr(_subprocess, "run", _always_timeout)
+
+        creds = GeneratedCredentials(tool_name="git")
+        result = tool.provision(
+            agent_id="agent-timeout",
+            config={"workspace_path": str(tmp_path / "ws"), "generate_ssh_key": True},
+            credentials=creds,
+            access_tier=AccessTier.STANDARD,
+        )
+        assert result.success is False
+        assert result.error is not None
+        assert "timed out" in result.error.lower()
+
+    def test_provisioner_idempotency_persists_across_instances(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A fresh GenericProvisionerTool pointed at the same state dir must
+        see the prior agent's record and return ``reused: True`` — proves the
+        in-memory ``_provisioned`` dict was replaced with ``ProvisionerStateStore``.
+        """
+        from agent_provisioning_team.tool_agents.generic_provisioner import (
+            GenericProvisionerTool,
+        )
+
+        store_dir = tmp_path / "state"
+
+        tool_a = GenericProvisionerTool(tool_name="myservice")
+        tool_a._state = ProvisionerStateStore(
+            "generic_myservice_provisioner", storage_dir=store_dir
+        )
+        first = tool_a.provision(
+            agent_id="agent-1",
+            config={"permissions": ["read"]},
+            credentials=GeneratedCredentials(tool_name="myservice"),
+            access_tier=AccessTier.STANDARD,
+        )
+        assert first.success is True
+        assert first.details.get("reused") is not True
+
+        # Fresh instance — no in-memory handle — pointed at the same dir.
+        tool_b = GenericProvisionerTool(tool_name="myservice")
+        tool_b._state = ProvisionerStateStore(
+            "generic_myservice_provisioner", storage_dir=store_dir
+        )
+        second = tool_b.provision(
+            agent_id="agent-1",
+            config={"permissions": ["read"]},
+            credentials=GeneratedCredentials(tool_name="myservice"),
+            access_tier=AccessTier.STANDARD,
+        )
+        assert second.success is True
+        assert second.details.get("reused") is True
 
 
 # ---------------------------------------------------------------------------

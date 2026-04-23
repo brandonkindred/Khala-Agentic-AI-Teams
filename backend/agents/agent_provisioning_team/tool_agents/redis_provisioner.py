@@ -5,7 +5,7 @@ Sets up Redis ACL with key prefix restrictions.
 """
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..models import (
     AccessTier,
@@ -15,6 +15,7 @@ from ..models import (
     ToolProvisionResult,
 )
 from ..shared.access_policy import get_permissions, validate_permissions
+from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner
 
 try:
@@ -39,7 +40,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
         self.host = host or os.environ.get("REDIS_HOST", "localhost")
         self.port = port or int(os.environ.get("REDIS_PORT", "6379"))
         self.admin_password = admin_password or os.environ.get("REDIS_PASSWORD")
-        self._provisioned: Dict[str, Dict[str, Any]] = {}
+        self._state = ProvisionerStateStore("redis_provisioner")
 
     def _get_admin_client(self):
         """Get a Redis client with admin privileges."""
@@ -64,58 +65,70 @@ class RedisProvisionerTool(BaseToolProvisioner):
         if not HAS_REDIS:
             return self._make_error_result("redis package is not installed")
 
+        return self.run_idempotent(
+            agent_id,
+            credentials=credentials,
+            create=lambda: self._do_provision(agent_id, config, credentials, access_tier),
+            reuse=lambda existing: self._on_reuse(existing, credentials),
+        )
+
+    def _do_provision(
+        self,
+        agent_id: str,
+        config: Dict[str, Any],
+        credentials: GeneratedCredentials,
+        access_tier: AccessTier,
+    ) -> Tuple[List[str], Dict[str, Any]]:
+        key_prefix = config.get("key_prefix", f"agent:{agent_id}:")
+        username = credentials.username or f"agent_{agent_id}".replace("-", "_")
+        password = credentials.password
+
+        if not password:
+            raise ValueError("No password provided in credentials")
+
+        client = self._get_admin_client()
+
+        permissions = get_permissions("redis", access_tier)
+        acl_rules = self._build_acl_rules(permissions, key_prefix)
+
         try:
-            key_prefix = config.get("key_prefix", f"agent:{agent_id}:")
-            username = credentials.username or f"agent_{agent_id}".replace("-", "_")
-            password = credentials.password
+            client.acl_deluser(username)
+        except redis.exceptions.ResponseError:
+            pass
 
-            if not password:
-                return self._make_error_result("No password provided in credentials")
+        client.acl_setuser(
+            username,
+            enabled=True,
+            passwords=[f"+{password}"],
+            keys=[f"{key_prefix}*"],
+            commands=acl_rules,
+        )
 
-            client = self._get_admin_client()
+        connection_url = f"redis://{username}:{password}@{self.host}:{self.port}"
 
-            permissions = get_permissions("redis", access_tier)
-            acl_rules = self._build_acl_rules(permissions, key_prefix)
+        credentials.connection_string = connection_url
+        credentials.extra["key_prefix"] = key_prefix
+        credentials.extra["host"] = self.host
+        credentials.extra["port"] = self.port
 
-            try:
-                client.acl_deluser(username)
-            except redis.exceptions.ResponseError:
-                pass
+        details = {
+            "username": username,
+            "key_prefix": key_prefix,
+            "host": self.host,
+            "port": self.port,
+            "permissions": permissions,
+        }
+        return permissions, details
 
-            client.acl_setuser(
-                username,
-                enabled=True,
-                passwords=[f"+{password}"],
-                keys=[f"{key_prefix}*"],
-                commands=acl_rules,
-            )
-
-            connection_url = f"redis://{username}:{password}@{self.host}:{self.port}"
-
-            credentials.connection_string = connection_url
-            credentials.extra["key_prefix"] = key_prefix
-            credentials.extra["host"] = self.host
-            credentials.extra["port"] = self.port
-
-            self._provisioned[agent_id] = {
-                "username": username,
-                "key_prefix": key_prefix,
-                "permissions": permissions,
-            }
-
-            return self._make_success_result(
-                credentials=credentials,
-                permissions=permissions,
-                details={
-                    "username": username,
-                    "key_prefix": key_prefix,
-                    "host": self.host,
-                    "port": self.port,
-                },
-            )
-
-        except Exception as e:
-            return self._make_error_result(f"Redis provisioning error: {str(e)}")
+    def _on_reuse(
+        self,
+        existing: Dict[str, Any],
+        credentials: GeneratedCredentials,
+    ) -> List[str]:
+        credentials.extra.setdefault("key_prefix", existing.get("key_prefix", ""))
+        credentials.extra.setdefault("host", self.host)
+        credentials.extra.setdefault("port", self.port)
+        return list(existing.get("permissions", []))
 
     def _build_acl_rules(
         self,
@@ -156,7 +169,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
         expected_tier: AccessTier,
     ) -> AccessVerification:
         """Verify Redis ACL access for the agent."""
-        prov_info = self._provisioned.get(agent_id)
+        prov_info = self._state.get(agent_id)
 
         if not prov_info:
             return self._make_verification(
@@ -189,7 +202,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
                 error="redis package is not installed",
             )
 
-        prov_info = self._provisioned.get(agent_id)
+        prov_info = self._state.get(agent_id)
         if not prov_info:
             return DeprovisionResult(
                 tool_name=self.tool_name,
@@ -206,7 +219,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
             except redis.exceptions.ResponseError:
                 pass
 
-            del self._provisioned[agent_id]
+            self._state.delete(agent_id)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,

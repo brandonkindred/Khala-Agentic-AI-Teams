@@ -4,8 +4,9 @@ Base interface for tool provisioner agents.
 All tool provisioners implement this protocol to ensure consistent behavior.
 """
 
+import subprocess
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from ..models import (
     AccessTier,
@@ -14,6 +15,7 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
+from ..shared.provisioner_state import ProvisionerStateStore
 
 
 @runtime_checkable
@@ -132,6 +134,78 @@ class BaseToolProvisioner(ABC):
             success=False,
             error=error,
         )
+
+    def run_idempotent(
+        self,
+        agent_id: str,
+        *,
+        credentials: GeneratedCredentials,
+        create: Callable[[], Tuple[List[str], Dict[str, Any]]],
+        reuse: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
+    ) -> ToolProvisionResult:
+        """Run ``create`` once per (provisioner, agent_id); reuse stored state on subsequent calls.
+
+        State lookup, short-circuit on prior success, uniform exception → error-result
+        translation, and persistence of the success payload all live here. Each
+        provisioner's ``create`` function does only the tool-specific work.
+
+        Contract:
+
+        * ``create()`` returns ``(permissions, details)``. ``details`` is both
+          returned in ``ToolProvisionResult.details`` and persisted as the
+          idempotency state payload. It may mutate ``credentials`` in place.
+        * ``reuse(stored_details)`` returns ``permissions`` for the cached
+          record. It may mutate ``credentials`` in place (e.g. to re-hydrate
+          ``credentials.extra`` from the stored payload). Defaults to reading
+          ``stored_details.get("permissions", [])``.
+        * Exceptions from infrastructure boundaries (missing binaries, subprocess
+          timeouts, permission errors) are caught and converted to error results.
+          Domain validation failures should ``return self._make_error_result(...)``
+          from inside ``create``.
+        """
+        state = self._state_store()
+        try:
+            existing = state.get(agent_id)
+            if existing is not None:
+                if reuse is not None:
+                    permissions = reuse(existing)
+                else:
+                    permissions = list(existing.get("permissions", []))
+                return self._make_success_result(
+                    credentials=credentials,
+                    permissions=permissions,
+                    details={**existing, "reused": True},
+                )
+
+            permissions, details = create()
+            state.put(agent_id, details)
+            return self._make_success_result(
+                credentials=credentials,
+                permissions=permissions,
+                details=details,
+            )
+        except FileNotFoundError as e:
+            return self._make_error_result(f"{self.tool_name}: required binary not found: {e}")
+        except subprocess.TimeoutExpired:
+            return self._make_error_result(f"{self.tool_name}: provisioning subprocess timed out")
+        except PermissionError as e:
+            return self._make_error_result(f"{self.tool_name}: permission denied: {e}")
+        except Exception as e:  # noqa: BLE001 — last-resort guard with explicit prior cases
+            return self._make_error_result(f"{self.tool_name} provisioning error: {e}")
+
+    def _state_store(self) -> ProvisionerStateStore:
+        """Return this provisioner's ``ProvisionerStateStore``, creating one on demand.
+
+        Subclasses may assign ``self._state`` eagerly in ``__init__`` to override
+        the storage directory or namespacing. When they don't, a default store
+        keyed on ``tool_name`` is lazily initialized here so ``run_idempotent``
+        always has somewhere to read/write.
+        """
+        store = getattr(self, "_state", None)
+        if store is None:
+            store = ProvisionerStateStore(f"{self.tool_name}_provisioner")
+            self._state = store
+        return store
 
     def _make_verification(
         self,

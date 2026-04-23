@@ -43,104 +43,89 @@ class DockerProvisionerTool(BaseToolProvisioner):
         access_tier: AccessTier,
     ) -> ToolProvisionResult:
         """Create and start a Docker container for the agent (idempotent)."""
-        # Idempotency: if we already have a running container for this
-        # agent, return the existing info instead of trying to create a
-        # second one (which would fail with "container name already in use").
-        existing = self._state.get(agent_id)
-        if existing:
-            permissions = get_permissions("docker", access_tier)
-            credentials.extra["container_id"] = existing.get("container_id", "")
-            credentials.extra["container_name"] = existing.get("container_name", "")
-            credentials.extra["workspace_path"] = existing.get("workspace_path", "")
-            return self._make_success_result(
-                credentials=credentials,
-                permissions=permissions,
-                details={**existing, "reused": True},
-            )
-        try:
-            container_name = f"agent-{agent_id}"
-            base_image = config.get("base_image", "python:3.11-slim")
-            workspace_path = config.get("workspace_path", f"{self.workspace_base}/{agent_id}")
-            ssh_port = config.get("ssh_port", self._allocate_port(agent_id))
+        return self.run_idempotent(
+            agent_id,
+            credentials=credentials,
+            create=lambda: self._do_provision(agent_id, config, credentials, access_tier),
+            reuse=lambda existing: self._on_reuse(existing, credentials, access_tier),
+        )
 
-            build_cmd = [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                container_name,
-                "--hostname",
-                container_name,
-                "-v",
-                f"{workspace_path}:/workspace",
-                "-w",
-                "/workspace",
-                "--restart",
-                "unless-stopped",
-            ]
+    def _do_provision(
+        self,
+        agent_id: str,
+        config: Dict[str, Any],
+        credentials: GeneratedCredentials,
+        access_tier: AccessTier,
+    ) -> Tuple[List[str], Dict[str, Any]]:
+        container_name = f"agent-{agent_id}"
+        base_image = config.get("base_image", "python:3.11-slim")
+        workspace_path = config.get("workspace_path", f"{self.workspace_base}/{agent_id}")
+        ssh_port = config.get("ssh_port", self._allocate_port(agent_id))
 
-            env_vars = config.get("environment", {})
-            for key, value in env_vars.items():
-                build_cmd.extend(["-e", f"{key}={value}"])
+        build_cmd = [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container_name,
+            "--hostname",
+            container_name,
+            "-v",
+            f"{workspace_path}:/workspace",
+            "-w",
+            "/workspace",
+            "--restart",
+            "unless-stopped",
+        ]
 
-            if config.get("expose_ssh", False):
-                build_cmd.extend(["-p", f"{ssh_port}:22"])
+        env_vars = config.get("environment", {})
+        for key, value in env_vars.items():
+            build_cmd.extend(["-e", f"{key}={value}"])
 
-            build_cmd.append(base_image)
+        if config.get("expose_ssh", False):
+            build_cmd.extend(["-p", f"{ssh_port}:22"])
 
-            init_cmd = config.get("init_command", "tail -f /dev/null")
-            build_cmd.extend(["sh", "-c", init_cmd])
+        build_cmd.append(base_image)
 
-            result = subprocess.run(
-                build_cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+        init_cmd = config.get("init_command", "tail -f /dev/null")
+        build_cmd.extend(["sh", "-c", init_cmd])
 
-            if result.returncode != 0:
-                return self._make_error_result(f"Docker run failed: {result.stderr}")
+        result = subprocess.run(
+            build_cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
 
-            container_id = result.stdout.strip()[:12]
+        if result.returncode != 0:
+            raise RuntimeError(f"Docker run failed: {result.stderr}")
 
-            self._state.put(
-                agent_id,
-                {
-                    "container_id": container_id,
-                    "container_name": container_name,
-                    "ssh_port": ssh_port,
-                    "workspace_path": workspace_path,
-                    "status": "running",
-                },
-            )
+        container_id = result.stdout.strip()[:12]
+        permissions = get_permissions("docker", access_tier)
 
-            permissions = get_permissions("docker", access_tier)
+        credentials.extra["container_id"] = container_id
+        credentials.extra["container_name"] = container_name
+        credentials.extra["workspace_path"] = workspace_path
 
-            credentials.extra["container_id"] = container_id
-            credentials.extra["container_name"] = container_name
-            credentials.extra["workspace_path"] = workspace_path
+        details = {
+            "container_id": container_id,
+            "container_name": container_name,
+            "ssh_port": ssh_port,
+            "workspace_path": workspace_path,
+            "status": "running",
+        }
+        return permissions, details
 
-            return self._make_success_result(
-                credentials=credentials,
-                permissions=permissions,
-                details={
-                    "container_id": container_id,
-                    "container_name": container_name,
-                    "ssh_port": ssh_port,
-                    "workspace_path": workspace_path,
-                },
-            )
-
-        except FileNotFoundError:
-            return self._make_error_result(
-                "Docker CLI not found on PATH — install Docker or run inside a host with docker.sock mounted"
-            )
-        except subprocess.TimeoutExpired:
-            return self._make_error_result("Docker container creation timed out")
-        except PermissionError as e:
-            return self._make_error_result(f"Docker permission denied: {e}")
-        except Exception as e:  # noqa: BLE001 — last-resort guard with explicit prior cases
-            return self._make_error_result(f"Docker provisioning error: {str(e)}")
+    def _on_reuse(
+        self,
+        existing: Dict[str, Any],
+        credentials: GeneratedCredentials,
+        access_tier: AccessTier,
+    ) -> List[str]:
+        credentials.extra["container_id"] = existing.get("container_id", "")
+        credentials.extra["container_name"] = existing.get("container_name", "")
+        credentials.extra["workspace_path"] = existing.get("workspace_path", "")
+        return get_permissions("docker", access_tier)
 
     def verify_access(
         self,

@@ -12,8 +12,17 @@ Validation is layered:
 3. Manifest-level ``environment`` dict is checked against a
    secrets/metachar allowlist — manifests must not smuggle credentials
    through env vars.
+4. Filesystem paths in provisioner configs (``workspace_path``, ``init_repos``)
+   are checked for ``..`` traversal at manifest-parse time; the runtime
+   containment check against each provisioner's ``workspace_base`` lives in
+   :func:`assert_path_within_base`.
+
+The allowlist constants (``_ENV_*``) below are the single source of truth for
+any new provisioners that need to validate manifest-supplied env vars or
+shell-like strings.
 """
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
@@ -21,6 +30,60 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DEFAULT_MANIFESTS_DIR = Path(__file__).parent.parent / "manifests"
+
+
+# ---------------------------------------------------------------------------
+# Filesystem path containment
+# ---------------------------------------------------------------------------
+
+
+def _reject_traversal_components(value: str, *, field: str) -> str:
+    """Reject path strings whose components include ``..``.
+
+    This runs at manifest-parse time — before any provisioner is instantiated
+    — and doesn't know the workspace base. Its job is to bar the trivial
+    escapes (``../../etc/passwd``). The runtime containment check against
+    the actual workspace base is :func:`assert_path_within_base`.
+    """
+    parts = Path(value).parts
+    if ".." in parts:
+        raise ValueError(f"{field} must not contain '..' traversal components: {value!r}")
+    return value
+
+
+def _reject_path_separators(value: str, *, field: str) -> str:
+    """Reject strings that are meant to be single flat segments (e.g. repo names)."""
+    if not value:
+        raise ValueError(f"{field} entry must be a non-empty string")
+    if ".." in Path(value).parts or value == "..":
+        raise ValueError(f"{field} entry must not traverse: {value!r}")
+    for bad in ("/", "\\", os.sep):
+        if bad in value:
+            raise ValueError(
+                f"{field} entry must be a flat name without path separators: {value!r}"
+            )
+    return value
+
+
+def assert_path_within_base(path: str, base: str) -> Path:
+    """Resolve ``path`` and assert it lives under ``base``; return the resolved Path.
+
+    Used by :class:`GitProvisionerTool._do_provision` as defence-in-depth after
+    manifest validation. The workspace base is only known at provisioner-
+    construction time, so this check cannot be expressed as a Pydantic
+    validator.
+
+    Raises:
+        ValueError: when the resolved ``path`` is not equal to, or a descendant
+        of, the resolved ``base``.
+    """
+    resolved = Path(path).resolve()
+    base_resolved = Path(base).resolve()
+    try:
+        resolved.relative_to(base_resolved)
+    except ValueError as e:
+        raise ValueError(f"path {path!r} escapes provisioner workspace base {base!r}") from e
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +110,13 @@ class DockerProvisionerConfig(_ToolBaseConfig):
     init_command: Optional[str] = None
     environment: Dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("workspace_path")
+    @classmethod
+    def _workspace_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return v
+        return _reject_traversal_components(v, field="workspace_path")
+
 
 class PostgresProvisionerConfig(_ToolBaseConfig):
     database_prefix: str = "agent_"
@@ -67,6 +137,7 @@ class GitProvisionerConfig(_ToolBaseConfig):
     default_branch: str = "main"
     visibility: str = "private"
     generate_ssh_key: bool = False
+    workspace_path: Optional[str] = None
     init_repos: List[str] = Field(default_factory=list)
 
     @field_validator("visibility")
@@ -75,6 +146,18 @@ class GitProvisionerConfig(_ToolBaseConfig):
         if v not in {"private", "internal", "public"}:
             raise ValueError("visibility must be one of: private, internal, public")
         return v
+
+    @field_validator("workspace_path")
+    @classmethod
+    def _workspace_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return v
+        return _reject_traversal_components(v, field="workspace_path")
+
+    @field_validator("init_repos")
+    @classmethod
+    def _init_repos(cls, v: List[str]) -> List[str]:
+        return [_reject_path_separators(r, field="init_repos") for r in v]
 
 
 class GenericProvisionerConfig(_ToolBaseConfig):
@@ -113,8 +196,16 @@ def validate_provisioner_config(provisioner: str, raw: Dict[str, Any]) -> Dict[s
 # ---------------------------------------------------------------------------
 
 _ENV_KEY_SECRET_SUBSTRINGS = (
-    "password", "passwd", "secret", "token", "api_key", "apikey",
-    "private_key", "privatekey", "credential", "auth",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "private_key",
+    "privatekey",
+    "credential",
+    "auth",
 )
 _ENV_KEY_MAX_LEN = 128
 _ENV_VALUE_MAX_LEN = 4096
@@ -137,9 +228,7 @@ def validate_manifest_environment(env: Dict[str, str]) -> Dict[str, str]:
         if len(key) > _ENV_KEY_MAX_LEN:
             raise ValueError(f"Env key too long: {key[:32]}…")
         if not all(c.isupper() or c.isdigit() or c == "_" for c in key):
-            raise ValueError(
-                f"Env key '{key}' must be UPPER_SNAKE_CASE (A-Z, 0-9, _)"
-            )
+            raise ValueError(f"Env key '{key}' must be UPPER_SNAKE_CASE (A-Z, 0-9, _)")
         low = key.lower()
         if any(s in low for s in _ENV_KEY_SECRET_SUBSTRINGS):
             raise ValueError(
@@ -154,9 +243,7 @@ def validate_manifest_environment(env: Dict[str, str]) -> Dict[str, str]:
         if len(s) > _ENV_VALUE_MAX_LEN:
             raise ValueError(f"Env value for '{key}' exceeds {_ENV_VALUE_MAX_LEN} chars")
         if any(c in _ENV_METACHARS for c in s):
-            raise ValueError(
-                f"Env value for '{key}' contains disallowed shell metacharacters"
-            )
+            raise ValueError(f"Env value for '{key}' contains disallowed shell metacharacters")
         normalized[key] = s
     return normalized
 
