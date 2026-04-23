@@ -71,19 +71,19 @@
     <!-- Phase stepper: spatial progress through the 5-phase pipeline. -->
     <div class="phase-stepper" data-testid="phase-stepper">
       @for (p of phases; track p.phase; let isLast = $last) {
+        @let status = phaseStatus(p.phase);
+        @let hasContent = phaseHasOutput(p.phase) || p.phase === 'strategic_core';
         <section
           class="phase-step"
-          [class.phase-completed]="phaseStatus(p.phase) === 'completed'"
-          [class.phase-in-progress]="phaseStatus(p.phase) === 'in_progress'"
-          [class.phase-not-started]="phaseStatus(p.phase) === 'not_started'"
+          [class.phase-completed]="status === 'completed'"
+          [class.phase-in-progress]="status === 'in_progress'"
+          [class.phase-not-started]="status === 'not_started'"
           [class.phase-last]="isLast"
           [attr.data-phase]="p.phase"
         >
           <div class="phase-rail">
             <div class="phase-node">
-              <mat-icon>
-                {{ phaseStatus(p.phase) === 'completed' ? 'check' : p.icon }}
-              </mat-icon>
+              <mat-icon>{{ status === 'completed' ? 'check' : p.icon }}</mat-icon>
             </div>
             @if (!isLast) {
               <div class="phase-connector"></div>
@@ -94,15 +94,15 @@
               <h3 class="phase-label">{{ p.label }}</h3>
               <span
                 class="phase-chip"
-                [class.chip-completed]="phaseStatus(p.phase) === 'completed'"
-                [class.chip-in-progress]="phaseStatus(p.phase) === 'in_progress'"
-                [class.chip-not-started]="phaseStatus(p.phase) === 'not_started'"
+                [class.chip-completed]="status === 'completed'"
+                [class.chip-in-progress]="status === 'in_progress'"
+                [class.chip-not-started]="status === 'not_started'"
               >
                 {{ phaseStatusLabel(p.phase) }}
               </span>
             </header>
 
-            @if (phaseHasOutput(p.phase) || p.phase === 'strategic_core') {
+            @if (hasContent) {
               <div class="phase-content" [@sectionEnter]>
                 @switch (p.phase) {
                   @case ('strategic_core') {

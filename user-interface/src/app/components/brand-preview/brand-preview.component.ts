@@ -29,6 +29,12 @@ const PHASES: readonly PhaseSpec[] = [
   { phase: 'governance', label: 'Governance', icon: 'verified' },
 ];
 
+const STATUS_LABELS: Record<PhaseRenderStatus, string> = {
+  completed: 'Completed',
+  in_progress: 'In progress',
+  not_started: 'Not started',
+};
+
 @Component({
   selector: 'app-brand-preview',
   standalone: true,
@@ -58,14 +64,12 @@ export class BrandPreviewComponent {
 
   readonly phases = PHASES;
 
-  /** True when the brand-book overlay is visible. */
   brandBookOpen = false;
 
   get hasOutput(): boolean {
     return this.latestOutput != null;
   }
 
-  /** True when mission has at least basic info worth showing. */
   get hasMissionData(): boolean {
     const m = this.mission;
     if (!m) return false;
@@ -79,7 +83,6 @@ export class BrandPreviewComponent {
     );
   }
 
-  /** True when there is anything to display (mission or output). */
   get hasContent(): boolean {
     return this.hasOutput || this.hasMissionData;
   }
@@ -111,20 +114,6 @@ export class BrandPreviewComponent {
     return idx >= 0 && idx < palettes.length ? palettes[idx] : null;
   }
 
-  get colorStories(): string[] {
-    const out = this.latestOutput;
-    if (!out?.mood_boards?.length) {
-      return out?.design_system?.foundation_tokens ?? [];
-    }
-    const colors: string[] = [];
-    for (const mb of out.mood_boards) {
-      if (mb.color_story.length) {
-        colors.push(...mb.color_story);
-      }
-    }
-    return [...new Set(colors)];
-  }
-
   /** Return a CSS color for swatch display; supports hex or leaves as-is for names. */
   parseColor(token: string): string {
     const t = (token || '').trim();
@@ -146,30 +135,19 @@ export class BrandPreviewComponent {
    * back to `phaseHasOutput` when gates are absent (e.g. older fixtures).
    */
   phaseStatus(phase: BrandPhase): PhaseRenderStatus {
-    const gates = this.latestOutput?.phase_gates;
-    if (gates?.length) {
-      const gate = gates.find((g) => g.phase === phase);
-      if (gate) {
-        if (gate.status === 'approved') return 'completed';
-        if (gate.status === 'in_progress' || gate.status === 'pending_review') return 'in_progress';
-        return 'not_started';
-      }
+    const gate = this.latestOutput?.phase_gates?.find((g) => g.phase === phase);
+    if (gate) {
+      if (gate.status === 'approved') return 'completed';
+      if (gate.status === 'in_progress' || gate.status === 'pending_review') return 'in_progress';
+      return 'not_started';
     }
     return this.phaseHasOutput(phase) ? 'completed' : 'not_started';
   }
 
   phaseStatusLabel(phase: BrandPhase): string {
-    switch (this.phaseStatus(phase)) {
-      case 'completed':
-        return 'Completed';
-      case 'in_progress':
-        return 'In progress';
-      default:
-        return 'Not started';
-    }
+    return STATUS_LABELS[this.phaseStatus(phase)];
   }
 
-  /** True when backend output contains an artifact produced by this phase. */
   phaseHasOutput(phase: BrandPhase): boolean {
     const out = this.latestOutput;
     if (!out) return false;
@@ -199,7 +177,6 @@ export class BrandPreviewComponent {
     this.brandBookOpen = false;
   }
 
-  /** Trigger a browser download of the brand book Markdown. */
   downloadBrandBook(): void {
     const content = this.latestOutput?.brand_book?.content;
     if (!content) return;
