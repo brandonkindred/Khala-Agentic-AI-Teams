@@ -14,7 +14,7 @@ Two activity surfaces are exposed:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from temporalio import activity
 
@@ -153,17 +153,26 @@ def provision_tool_activity(
 @activity.defn(name="agent_provisioning_compensate")
 def compensate_activity_v2(
     agent_id: str,
-    succeeded_tools: List[str],
+    succeeded_tools: List[Dict[str, Any]],
 ) -> None:
-    """Roll back a partially-provisioned agent (best effort)."""
+    """Roll back a partially-provisioned agent (best effort).
+
+    ``succeeded_tools`` entries are dicts with ``tool_name`` and
+    ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
+    Post-#293 the orchestrator looks provisioners back up by the registry
+    key, not by a class attribute derived from ``tool_name``.
+    """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
     orch = ProvisioningOrchestrator()
-    # Reuse the orchestrator's compensation path by synthesizing minimal
-    # tool_results with success=True for the ones that completed.
+
     class _R:  # noqa: D401 — local shim
-        def __init__(self, name: str) -> None:
-            self.tool_name = name
+        def __init__(self, tool_name: str, provisioner_key: Optional[str]) -> None:
+            self.tool_name = tool_name
+            self.provisioner_key = provisioner_key
             self.success = True
 
-    orch._compensate(agent_id, [_R(t) for t in succeeded_tools])
+    orch._compensate(
+        agent_id,
+        [_R(t.get("tool_name", ""), t.get("provisioner_key")) for t in succeeded_tools],
+    )

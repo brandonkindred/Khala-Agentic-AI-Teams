@@ -322,14 +322,6 @@ tools:
 
 
 class TestOrchestratorCompensation:
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "orchestrator._compensate lookup uses `{tool_name}_provisioner` but tool_name "
-            "is the class attribute (e.g. 'postgresql') which does not match the registry "
-            "stem ('postgres_provisioner'). Tracked in issue #293."
-        ),
-    )
     def test_compensation_deprovisions_successful_tools(self, tmp_path, monkeypatch):
         # Fake tool agents: toola succeeds, toolb fails.
         pg = _FakeProvisioner("toola")
@@ -374,6 +366,87 @@ class TestOrchestratorCompensation:
         assert "agent-1" in pg.deprovisioned
         # Docker teardown too.
         assert "agent-1" in docker.deprovisioned
+
+    def test_compensation_when_tool_name_differs_from_registry_key(self, tmp_path, monkeypatch):
+        """Regression test for #293.
+
+        The production `PostgresProvisionerTool` has
+        ``tool_name = "postgresql"`` while its registry key is
+        ``"postgres_provisioner"``. Before #293 the orchestrator looked up
+        the provisioner as ``f"{tool_name}_provisioner"`` which silently
+        missed for this exact case, leaking the DB account + encrypted
+        credential file. This test simulates that mismatch with a fake
+        provisioner whose ``tool_name`` does NOT match its registry key and
+        asserts compensation still rolls it back.
+        """
+        # tool_name intentionally mismatched with registry stem.
+        pg_like = _FakeProvisioner("postgresql")
+        redis_ = _FakeProvisioner("redis", fail=True)
+        docker = _FakeProvisioner("docker")
+
+        fake_agents: Dict[str, Any] = {
+            "postgres_provisioner": pg_like,
+            "redis_provisioner": redis_,
+            "docker_provisioner": docker,
+            "git_provisioner": _FakeProvisioner("git"),
+            "generic_provisioner": _FakeProvisioner("generic"),
+        }
+
+        from agent_provisioning_team import orchestrator as orch_mod
+
+        def _fake_run_setup(**kwargs):
+            return SetupResult(
+                success=True,
+                environment=EnvironmentInfo(
+                    container_id="c1",
+                    container_name="c1",
+                    workspace_path="/tmp/ws",
+                    status="running",
+                ),
+            )
+
+        monkeypatch.setattr(orch_mod, "run_setup", _fake_run_setup)
+
+        manifest = _write_manifest(tmp_path)
+        orch = ProvisioningOrchestrator(tool_agents=fake_agents)
+        result = orch.run_workflow(
+            agent_id="agent-2",
+            manifest_path=manifest,
+            access_tier=AccessTier.STANDARD,
+        )
+
+        assert result.success is False
+        assert result.current_phase == Phase.ACCOUNT_PROVISIONING
+        # The postgres-like provisioner (registered under
+        # "postgres_provisioner" but exposing tool_name="postgresql") must
+        # still be deprovisioned — lookup must use the registry key.
+        assert "agent-2" in pg_like.deprovisioned, (
+            "Compensation dropped a provisioner whose tool_name differs from "
+            "its registry key — the #293 regression."
+        )
+        assert "agent-2" in docker.deprovisioned
+
+    def test_every_default_provisioner_has_registry_key_roundtrip(self):
+        """Cheap invariant: every default provisioner's registry key round-trips.
+
+        Catches future drift where someone adds a provisioner whose registry
+        key isn't exactly what downstream code stamps onto
+        ``ToolProvisionResult.provisioner_key``.
+        """
+        from agent_provisioning_team.shared.tool_agent_registry import (
+            build_default_tool_agents,
+        )
+
+        registry = build_default_tool_agents()
+        for key, prov in registry.items():
+            result = ToolProvisionResult(
+                tool_name=prov.tool_name,
+                success=True,
+                provisioner_key=key,
+            )
+            assert result.provisioner_key in registry, (
+                f"Registry key {key!r} not round-trippable via ToolProvisionResult.provisioner_key"
+            )
 
 
 # ---------------------------------------------------------------------------
