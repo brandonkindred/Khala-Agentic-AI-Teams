@@ -15,7 +15,6 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
-from ..shared.provisioner_state import ProvisionerStateStore
 
 
 @runtime_checkable
@@ -141,6 +140,7 @@ class BaseToolProvisioner(ABC):
         *,
         credentials: GeneratedCredentials,
         create: Callable[[], Tuple[List[str], Dict[str, Any]]],
+        hydrate_extras: Tuple[str, ...] = (),
         reuse: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
     ) -> ToolProvisionResult:
         """Run ``create`` once per (provisioner, agent_id); reuse stored state on subsequent calls.
@@ -154,19 +154,30 @@ class BaseToolProvisioner(ABC):
         * ``create()`` returns ``(permissions, details)``. ``details`` is both
           returned in ``ToolProvisionResult.details`` and persisted as the
           idempotency state payload. It may mutate ``credentials`` in place.
-        * ``reuse(stored_details)`` returns ``permissions`` for the cached
-          record. It may mutate ``credentials`` in place (e.g. to re-hydrate
-          ``credentials.extra`` from the stored payload). Defaults to reading
-          ``stored_details.get("permissions", [])``.
+        * On the reuse path:
+          - ``hydrate_extras`` lists ``details`` keys whose stored values are
+            copied into ``credentials.extra`` via ``setdefault`` — the common
+            case ("restore what create populated"), so most provisioners don't
+            need a ``reuse`` callback.
+          - ``reuse(stored_details)`` is a full-control override: returns
+            ``permissions`` and may mutate ``credentials`` arbitrarily. Used
+            when the reuse path needs to consult live env (e.g. Postgres host
+            from env, not the stored value) or recompute permissions from the
+            current access tier.
+          - When neither is enough to derive permissions, the default is
+            ``stored_details.get("permissions", [])``.
         * Exceptions from infrastructure boundaries (missing binaries, subprocess
           timeouts, permission errors) are caught and converted to error results.
           Domain validation failures should ``return self._make_error_result(...)``
           from inside ``create``.
         """
-        state = self._state_store()
+        state = self._state
         try:
             existing = state.get(agent_id)
             if existing is not None:
+                for key in hydrate_extras:
+                    if key in existing:
+                        credentials.extra.setdefault(key, existing[key])
                 if reuse is not None:
                     permissions = reuse(existing)
                 else:
@@ -192,20 +203,6 @@ class BaseToolProvisioner(ABC):
             return self._make_error_result(f"{self.tool_name}: permission denied: {e}")
         except Exception as e:  # noqa: BLE001 — last-resort guard with explicit prior cases
             return self._make_error_result(f"{self.tool_name} provisioning error: {e}")
-
-    def _state_store(self) -> ProvisionerStateStore:
-        """Return this provisioner's ``ProvisionerStateStore``, creating one on demand.
-
-        Subclasses may assign ``self._state`` eagerly in ``__init__`` to override
-        the storage directory or namespacing. When they don't, a default store
-        keyed on ``tool_name`` is lazily initialized here so ``run_idempotent``
-        always has somewhere to read/write.
-        """
-        store = getattr(self, "_state", None)
-        if store is None:
-            store = ProvisionerStateStore(f"{self.tool_name}_provisioner")
-            self._state = store
-        return store
 
     def _make_verification(
         self,

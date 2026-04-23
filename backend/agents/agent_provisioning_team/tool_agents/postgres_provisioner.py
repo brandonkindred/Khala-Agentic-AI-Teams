@@ -46,10 +46,6 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         # Persistent idempotency store — survives process restarts.
         self._state = ProvisionerStateStore("postgres_provisioner")
 
-    @property
-    def _provisioned(self) -> Dict[str, Dict[str, Any]]:
-        return self._state.list_agents()
-
     def _get_admin_connection(self):
         """Get a connection with admin privileges."""
         if not HAS_PSYCOPG2:

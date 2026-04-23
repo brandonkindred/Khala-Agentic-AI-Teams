@@ -48,7 +48,7 @@ class GitProvisionerTool(BaseToolProvisioner):
             agent_id,
             credentials=credentials,
             create=lambda: self._do_provision(agent_id, config, credentials, access_tier),
-            reuse=lambda existing: self._on_reuse(existing, credentials),
+            hydrate_extras=("workspace_path", "repos"),
         )
 
     def _do_provision(
@@ -65,6 +65,8 @@ class GitProvisionerTool(BaseToolProvisioner):
         # Defence-in-depth: manifest validation already rejects `..` paths, but
         # the workspace_base (set at provisioner construction time) is only
         # known here, so the containment check runs at provisioning time too.
+        # ``init_repos`` entries are separator-free per manifest validation, so
+        # they don't need a second pass.
         workspace = assert_path_within_base(workspace_path, self.workspace_base)
         workspace.mkdir(parents=True, exist_ok=True)
 
@@ -91,10 +93,6 @@ class GitProvisionerTool(BaseToolProvisioner):
 
         initialized_repos: List[str] = []
         for repo_name in init_repos:
-            # Manifest validation also guards init_repos, but re-assert the
-            # flat-segment invariant here in case a caller bypasses manifest
-            # parsing.
-            assert_path_within_base(str(workspace / repo_name), str(workspace))
             repo_path = workspace / repo_name
             if self._init_repo(repo_path):
                 initialized_repos.append(str(repo_path))
@@ -114,15 +112,6 @@ class GitProvisionerTool(BaseToolProvisioner):
             "permissions": permissions,
         }
         return permissions, details
-
-    def _on_reuse(
-        self,
-        existing: Dict[str, Any],
-        credentials: GeneratedCredentials,
-    ) -> List[str]:
-        credentials.extra.setdefault("workspace_path", existing.get("workspace_path", ""))
-        credentials.extra.setdefault("repos", existing.get("repos", []))
-        return list(existing.get("permissions", []))
 
     def _generate_ssh_keypair(
         self,

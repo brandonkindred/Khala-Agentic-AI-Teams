@@ -54,7 +54,7 @@ class GenericProvisionerTool(BaseToolProvisioner):
             agent_id,
             credentials=credentials,
             create=lambda: self._do_provision(config, credentials, access_tier),
-            reuse=lambda existing: self._on_reuse(existing, credentials),
+            hydrate_extras=("tool_name", "config"),
         )
 
     def _do_provision(
@@ -76,15 +76,6 @@ class GenericProvisionerTool(BaseToolProvisioner):
             "permissions": permissions,
         }
         return permissions, details
-
-    def _on_reuse(
-        self,
-        existing: Dict[str, Any],
-        credentials: GeneratedCredentials,
-    ) -> List[str]:
-        credentials.extra.setdefault("tool_name", existing.get("tool_name", self.tool_name))
-        credentials.extra.setdefault("config", existing.get("config", {}))
-        return list(existing.get("permissions", []))
 
     def verify_access(
         self,

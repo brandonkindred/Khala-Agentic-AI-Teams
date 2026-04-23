@@ -29,12 +29,6 @@ class DockerProvisionerTool(BaseToolProvisioner):
         # Persistent state: survives restarts, makes provision() idempotent.
         self._state = ProvisionerStateStore("docker_provisioner")
 
-    @property
-    def _containers(self) -> Dict[str, Dict[str, Any]]:
-        # Backwards-compat view over the persistent store for tests/callers
-        # that still read `_containers` directly.
-        return self._state.list_agents()
-
     def provision(
         self,
         agent_id: str,
