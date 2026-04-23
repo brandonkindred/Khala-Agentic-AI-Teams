@@ -131,6 +131,9 @@ jobs:
             extra_requirements: investment_team/requirements-test.txt
           - name: Social Marketing
             tests: social_media_marketing_team/tests/
+          - name: Agent Provisioning
+            tests: agent_provisioning_team/tests/
+            extra_requirements: agent_provisioning_team/requirements.txt
     steps:
       - uses: actions/checkout@v4
       - if: matrix.needs_node
@@ -149,6 +152,7 @@ jobs:
             backend/agents/software_engineering_team/requirements.txt
             backend/agents/blogging/requirements.txt
             backend/agents/investment_team/requirements-test.txt
+            backend/agents/agent_provisioning_team/requirements.txt
       - name: Install dependencies
         run: |
           pip install -r requirements.txt

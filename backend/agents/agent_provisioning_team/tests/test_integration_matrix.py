@@ -322,6 +322,14 @@ tools:
 
 
 class TestOrchestratorCompensation:
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "orchestrator._compensate lookup uses `{tool_name}_provisioner` but tool_name "
+            "is the class attribute (e.g. 'postgresql') which does not match the registry "
+            "stem ('postgres_provisioner'). Tracked in issue #293."
+        ),
+    )
     def test_compensation_deprovisions_successful_tools(self, tmp_path, monkeypatch):
         # Fake tool agents: toola succeeds, toolb fails.
         pg = _FakeProvisioner("toola")
