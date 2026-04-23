@@ -18,11 +18,13 @@ Two activity surfaces are exposed:
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from temporalio import activity
 
 from agent_provisioning_team.models import AccessTier
+from agent_provisioning_team.shared import job_store as _js
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +42,9 @@ def run_provisioning_activity(
     access_tier_str: str,
 ) -> None:
     """Run the provisioning workflow. Converts access_tier_str to AccessTier."""
-    try:
-        from agent_provisioning_team.api.main import _run_provisioning_background
+    from agent_provisioning_team.api.main import _run_provisioning_background
 
-        access_tier = AccessTier(access_tier_str)
-        _run_provisioning_background(job_id, agent_id, manifest_path, access_tier)
-    except Exception:
-        logger.exception("Agent Provisioning activity failed for job %s", job_id)
-        raise
+    _run_provisioning_background(job_id, agent_id, manifest_path, AccessTier(access_tier_str))
 
 
 # ---------------------------------------------------------------------------
@@ -66,32 +63,24 @@ def _load_ctx(manifest_path: str, access_tier_str: str):
     return orch, manifest, access_tier
 
 
-def _update_job_safe(job_id: str, **fields: Any) -> None:
-    """Best-effort progress write. Must not fail the activity if job_store hiccups."""
+def _safe(fn_name: str, *args: Any, **kwargs: Any) -> None:
+    """Best-effort job_store call. A job_store hiccup must never fail the activity."""
     try:
-        from agent_provisioning_team.shared.job_store import update_job
-
-        update_job(job_id, **fields)
+        getattr(_js, fn_name)(*args, **kwargs)
     except Exception:
-        logger.exception("update_job failed for job=%s fields=%s", job_id, list(fields))
+        logger.exception("job_store.%s failed: args=%s kwargs=%s", fn_name, args, list(kwargs))
 
 
-def _mark_running_safe(job_id: str) -> None:
-    try:
-        from agent_provisioning_team.shared.job_store import mark_job_running
-
-        mark_job_running(job_id)
-    except Exception:
-        logger.exception("mark_job_running failed for job=%s", job_id)
-
-
-def _add_completed_phase_safe(job_id: str, phase: str, result: Dict[str, Any]) -> None:
-    try:
-        from agent_provisioning_team.shared.job_store import add_completed_phase
-
-        add_completed_phase(job_id, phase, result)
-    except Exception:
-        logger.exception("add_completed_phase failed for job=%s phase=%s", job_id, phase)
+def _restored(job_id: str, phase: str, progress: int) -> None:
+    """Common 'phase skipped, restored from prior_results' progress write."""
+    logger.info("Skipping %s for job=%s (restored from prior_results)", phase, job_id)
+    _safe(
+        "update_job",
+        job_id,
+        current_phase=phase,
+        progress=progress,
+        status_text=f"Restored {phase} from previous run",
+    )
 
 
 @activity.defn(name="agent_provisioning_setup")
@@ -105,23 +94,18 @@ def setup_activity_v2(
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.phase_state import restore_setup
 
-    _mark_running_safe(job_id)
+    _safe("mark_job_running", job_id)
 
     if prior_setup is not None:
         snap = restore_setup(prior_setup)
-        logger.info("Skipping setup for job=%s (restored from prior_results)", job_id)
-        _update_job_safe(
-            job_id,
-            current_phase="setup",
-            progress=15,
-            status_text="Restored setup from previous run",
-        )
+        _restored(job_id, "setup", 15)
         return {
             "success": snap.success,
             "environment": snap.environment.model_dump() if snap.environment else None,
         }
 
-    _update_job_safe(
+    _safe(
+        "update_job",
         job_id,
         current_phase="setup",
         progress=5,
@@ -143,8 +127,8 @@ def setup_activity_v2(
         "success": True,
         "environment": result.environment.model_dump() if result.environment else None,
     }
-    _add_completed_phase_safe(job_id, "setup", payload)
-    _update_job_safe(job_id, progress=15, status_text="Setup complete")
+    _safe("add_completed_phase", job_id, "setup", payload)
+    _safe("update_job", job_id, progress=15, status_text="Setup complete")
     return payload
 
 
@@ -162,19 +146,14 @@ def credentials_activity_v2(
 
     if prior_credentials is not None:
         snap = restore_credentials(prior_credentials)
-        logger.info("Skipping credential_generation for job=%s (restored)", job_id)
-        _update_job_safe(
-            job_id,
-            current_phase="credential_generation",
-            progress=30,
-            status_text="Restored credentials from previous run",
-        )
+        _restored(job_id, "credential_generation", 30)
         return {
             "success": snap.success,
             "credentials": {k: v.model_dump() for k, v in snap.credentials.items()},
         }
 
-    _update_job_safe(
+    _safe(
+        "update_job",
         job_id,
         current_phase="credential_generation",
         progress=20,
@@ -195,8 +174,8 @@ def credentials_activity_v2(
         "success": True,
         "credentials": {k: v.model_dump() for k, v in result.credentials.items()},
     }
-    _add_completed_phase_safe(job_id, "credential_generation", payload)
-    _update_job_safe(job_id, progress=30, status_text="Credentials generated")
+    _safe("add_completed_phase", job_id, "credential_generation", payload)
+    _safe("update_job", job_id, progress=30, status_text="Credentials generated")
     return payload
 
 
@@ -217,7 +196,8 @@ def provision_tool_activity(
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
-    _update_job_safe(
+    _safe(
+        "update_job",
         job_id,
         current_phase="account_provisioning",
         current_tool=tool_name,
@@ -265,16 +245,11 @@ def audit_activity_v2(
 
     if prior_audit is not None:
         result = restore_access_audit(prior_audit)
-        logger.info("Skipping access_audit for job=%s (restored)", job_id)
-        _update_job_safe(
-            job_id,
-            current_phase="access_audit",
-            progress=75,
-            status_text="Restored audit from previous run",
-        )
+        _restored(job_id, "access_audit", 75)
         return result.model_dump()
 
-    _update_job_safe(
+    _safe(
+        "update_job",
         job_id,
         current_phase="access_audit",
         progress=70,
@@ -292,8 +267,8 @@ def audit_activity_v2(
         provisioners=build_default_tool_agents(),
     )
     payload = result.model_dump()
-    _add_completed_phase_safe(job_id, "access_audit", payload)
-    _update_job_safe(job_id, progress=80, status_text="Access audit complete")
+    _safe("add_completed_phase", job_id, "access_audit", payload)
+    _safe("update_job", job_id, progress=80, status_text="Access audit complete")
     return payload
 
 
@@ -315,19 +290,14 @@ def documentation_activity_v2(
 
     if prior_documentation is not None:
         snap = restore_documentation(prior_documentation)
-        logger.info("Skipping documentation for job=%s (restored)", job_id)
-        _update_job_safe(
-            job_id,
-            current_phase="documentation",
-            progress=90,
-            status_text="Restored documentation from previous run",
-        )
+        _restored(job_id, "documentation", 90)
         return {
             "success": snap.success,
             "onboarding": snap.onboarding.model_dump() if snap.onboarding else None,
         }
 
-    _update_job_safe(
+    _safe(
+        "update_job",
         job_id,
         current_phase="documentation",
         progress=85,
@@ -350,8 +320,8 @@ def documentation_activity_v2(
         "success": result.success,
         "onboarding": result.onboarding.model_dump() if result.onboarding else None,
     }
-    _add_completed_phase_safe(job_id, "documentation", payload)
-    _update_job_safe(job_id, progress=92, status_text="Documentation complete")
+    _safe("add_completed_phase", job_id, "documentation", payload)
+    _safe("update_job", job_id, progress=92, status_text="Documentation complete")
     return payload
 
 
@@ -378,9 +348,9 @@ def deliver_activity_v2(
         redact_credentials_for_response,
         run_deliver,
     )
-    from agent_provisioning_team.shared.job_store import mark_job_completed, mark_job_failed
 
-    _update_job_safe(
+    _safe(
+        "update_job",
         job_id,
         current_phase="deliver",
         progress=95,
@@ -417,15 +387,9 @@ def deliver_activity_v2(
 
     if final.success:
         redacted = redact_credentials_for_response(final)
-        try:
-            mark_job_completed(job_id, result=redacted.model_dump())
-        except Exception:
-            logger.exception("mark_job_completed failed for job=%s", job_id)
+        _safe("mark_job_completed", job_id, result=redacted.model_dump())
     else:
-        try:
-            mark_job_failed(job_id, error=final.error or "Provisioning failed")
-        except Exception:
-            logger.exception("mark_job_failed failed for job=%s", job_id)
+        _safe("mark_job_failed", job_id, error=final.error or "Provisioning failed")
 
     return {"success": final.success, "error": final.error}
 
@@ -445,14 +409,12 @@ def compensate_activity_v2(
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
     orch = ProvisioningOrchestrator()
-
-    class _R:  # noqa: D401 — local shim
-        def __init__(self, tool_name: str, provisioner_key: Optional[str]) -> None:
-            self.tool_name = tool_name
-            self.provisioner_key = provisioner_key
-            self.success = True
-
-    orch._compensate(
-        agent_id,
-        [_R(t.get("tool_name", ""), t.get("provisioner_key")) for t in succeeded_tools],
-    )
+    shims = [
+        SimpleNamespace(
+            tool_name=t.get("tool_name", ""),
+            provisioner_key=t.get("provisioner_key"),
+            success=True,
+        )
+        for t in succeeded_tools
+    ]
+    orch._compensate(agent_id, shims)

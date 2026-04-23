@@ -72,23 +72,19 @@ def _provision_thread_fallback() -> bool:
     return os.getenv("PROVISION_THREAD_FALLBACK", "").strip().lower() in ("1", "true", "yes")
 
 
-def _load_temporal_routing():
-    """Return (is_temporal_enabled_bool, start_workflow_callable). Any import
-    error degrades to the thread path so Temporal being half-installed never
-    breaks /provision."""
+def _temporal_starter():
+    """Return ``start_provisioning_workflow`` when /provision should dispatch
+    to Temporal (V2), else ``None``. Returns None on import error or when the
+    PROVISION_THREAD_FALLBACK escape hatch is set, so callers can branch on a
+    single value."""
+    if _provision_thread_fallback():
+        return None
     try:
         from agent_provisioning_team.temporal.client import is_temporal_enabled
         from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
-
-        return bool(is_temporal_enabled()), start_provisioning_workflow
     except ImportError:
-        return False, None
-
-
-def _temporal_active() -> bool:
-    """True when `/provision` should dispatch to Temporal (V2) instead of the thread pool."""
-    enabled, starter = _load_temporal_routing()
-    return enabled and starter is not None and not _provision_thread_fallback()
+        return None
+    return start_provisioning_workflow if is_temporal_enabled() else None
 
 
 _executor: Optional[ThreadPoolExecutor] = None
@@ -308,14 +304,9 @@ def _run_provisioning_background(
 )
 def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
     """Start a new provisioning job."""
-    # Check Temporal availability up front so we only apply thread-pool
-    # backpressure to the thread path (Temporal has its own queueing).
-    enabled, start_temporal_workflow = _load_temporal_routing()
-    use_temporal = (
-        enabled and start_temporal_workflow is not None and not _provision_thread_fallback()
-    )
-
-    if not use_temporal:
+    # Apply thread-pool backpressure only on the thread path; Temporal has its own queueing.
+    starter = _temporal_starter()
+    if starter is None:
         _reject_if_saturated()
 
     job_id = str(uuid.uuid4())
@@ -326,8 +317,8 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
         access_tier=request.access_tier.value,
     )
 
-    if use_temporal:
-        start_temporal_workflow(
+    if starter is not None:
+        starter(
             job_id,
             request.agent_id,
             request.manifest_path,
@@ -490,15 +481,11 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
     completed_values = [p for p in completed if p in phase_values]
     access_tier_str = data.get("access_tier", "standard")
 
-    enabled, start_temporal_workflow = _load_temporal_routing()
-    use_temporal = (
-        enabled and start_temporal_workflow is not None and not _provision_thread_fallback()
-    )
-
+    starter = _temporal_starter()
     update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
 
-    if use_temporal:
-        start_temporal_workflow(
+    if starter is not None:
+        starter(
             job_id,
             agent_id,
             manifest_path,
@@ -548,15 +535,11 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
         raise HTTPException(status_code=400, detail="Job is missing agent_id or manifest_path.")
 
     access_tier_str = data.get("access_tier", "standard")
-    enabled, start_temporal_workflow = _load_temporal_routing()
-    use_temporal = (
-        enabled and start_temporal_workflow is not None and not _provision_thread_fallback()
-    )
-
+    starter = _temporal_starter()
     store_reset_job(job_id)
 
-    if use_temporal:
-        start_temporal_workflow(
+    if starter is not None:
+        starter(
             job_id,
             agent_id,
             manifest_path,
