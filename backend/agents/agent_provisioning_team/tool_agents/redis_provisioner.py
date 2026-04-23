@@ -68,7 +68,9 @@ class RedisProvisionerTool(BaseToolProvisioner):
         return self.run_idempotent(
             agent_id,
             credentials=credentials,
-            create=lambda: self._do_provision(agent_id, config, credentials, access_tier),
+            create=lambda _register: self._do_provision(
+                agent_id, config, credentials, access_tier
+            ),
             reuse=lambda existing: self._on_reuse(existing, credentials),
         )
 

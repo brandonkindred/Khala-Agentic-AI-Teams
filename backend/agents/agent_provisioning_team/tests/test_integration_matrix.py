@@ -17,8 +17,9 @@ touches Docker / Postgres / Temporal.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pytest
 
@@ -41,7 +42,10 @@ from agent_provisioning_team.shared.credential_store import (
     CredentialStoreConfigError,
 )
 from agent_provisioning_team.shared.llm_client import LLMClient, sanitize_prompt_var
-from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
+from agent_provisioning_team.shared.provisioner_state import (
+    CompensationRecord,
+    ProvisionerStateStore,
+)
 from agent_provisioning_team.shared.tool_manifest import (
     ToolManifest,
     validate_manifest_environment,
@@ -54,6 +58,22 @@ from agent_provisioning_team.tool_agents.base import BaseToolProvisioner
 # ---------------------------------------------------------------------------
 
 
+class _FakeState:
+    """Minimal stand-in for ProvisionerStateStore on ``_FakeProvisioner``.
+
+    The orchestrator's compensation path calls ``provisioner._state.delete``
+    after replaying persisted records; the fake tracks that here so tests
+    can assert the row was cleaned up without hitting the filesystem.
+    """
+
+    def __init__(self) -> None:
+        self.deleted: List[str] = []
+
+    def delete(self, agent_id: str) -> bool:
+        self.deleted.append(agent_id)
+        return True
+
+
 class _FakeProvisioner(BaseToolProvisioner):
     """In-memory provisioner that records calls; can be told to fail."""
 
@@ -62,6 +82,9 @@ class _FakeProvisioner(BaseToolProvisioner):
         self.fail = fail
         self.provisioned: List[str] = []
         self.deprovisioned: List[str] = []
+        self.replays: List[Tuple[str, Dict[str, Any]]] = []
+        self._seeded_comps: Dict[str, List[CompensationRecord]] = {}
+        self._state = _FakeState()
 
     def provision(self, agent_id, config, credentials, access_tier):
         if self.fail:
@@ -83,6 +106,19 @@ class _FakeProvisioner(BaseToolProvisioner):
     def deprovision(self, agent_id):
         self.deprovisioned.append(agent_id)
         return DeprovisionResult(tool_name=self.tool_name, success=True)
+
+    # ---- Compensation-hook overrides (bypass real state store) ----
+    def seed_compensations(self, agent_id: str, records: List[CompensationRecord]) -> None:
+        self._seeded_comps[agent_id] = list(records)
+
+    def list_compensations(self, agent_id):
+        return list(self._seeded_comps.get(agent_id, []))
+
+    def clear_compensations(self, agent_id):
+        self._seeded_comps.pop(agent_id, None)
+
+    def replay_compensation(self, agent_id, kind, payload):
+        self.replays.append((kind, payload))
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +570,68 @@ class TestOrchestratorCompensation:
         )
         assert "agent-2" in docker.deprovisioned
 
+    def test_compensation_replays_registered_hooks_instead_of_deprovision(
+        self, tmp_path, monkeypatch
+    ):
+        """When a provisioner has persisted compensations the orchestrator
+        must replay them (LIFO) and **not** fall through to ``deprovision``.
+        """
+        pg = _FakeProvisioner("toola")
+        redis_ = _FakeProvisioner("toolb", fail=True)
+        docker = _FakeProvisioner("docker")
+
+        # Pre-seed two compensations on the tool that will succeed.
+        pg.seed_compensations(
+            "agent-r1",
+            [
+                CompensationRecord(kind="postgres.drop_role", payload={"username": "u1"}),
+                CompensationRecord(kind="postgres.drop_database", payload={"database": "d1"}),
+            ],
+        )
+
+        fake_agents: Dict[str, Any] = {
+            "postgres_provisioner": pg,
+            "redis_provisioner": redis_,
+            "docker_provisioner": docker,
+            "git_provisioner": _FakeProvisioner("git"),
+            "generic_provisioner": _FakeProvisioner("generic"),
+        }
+
+        from agent_provisioning_team import orchestrator as orch_mod
+
+        def _fake_run_setup(**kwargs):
+            return SetupResult(
+                success=True,
+                environment=EnvironmentInfo(
+                    container_id="c1",
+                    container_name="c1",
+                    workspace_path="/tmp/ws",
+                    status="running",
+                ),
+            )
+
+        monkeypatch.setattr(orch_mod, "run_setup", _fake_run_setup)
+
+        manifest = _write_manifest(tmp_path)
+        orch = ProvisioningOrchestrator(tool_agents=fake_agents)
+        result = orch.run_workflow(
+            agent_id="agent-r1",
+            manifest_path=manifest,
+            access_tier=AccessTier.STANDARD,
+        )
+        assert result.success is False
+
+        # Replays happened in LIFO order (drop_database registered second,
+        # replayed first) — so drop_database precedes drop_role.
+        assert [kind for kind, _ in pg.replays] == [
+            "postgres.drop_database",
+            "postgres.drop_role",
+        ]
+        # Legacy `deprovision` path was NOT taken for the compensated provisioner.
+        assert "agent-r1" not in pg.deprovisioned
+        # State row was dropped after replay.
+        assert "agent-r1" in pg._state.deleted
+
     def test_every_default_provisioner_has_registry_key_roundtrip(self):
         """Cheap invariant: every default provisioner's registry key round-trips.
 
@@ -585,3 +683,152 @@ class TestPhaseSnapshotRestore:
 
         with pytest.raises(Exception):
             restore_setup({"success": "maybe"})  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Compensation-hook registration (issue #295)
+# ---------------------------------------------------------------------------
+
+
+class _RegisteringProvisioner(BaseToolProvisioner):
+    """Minimal provisioner whose ``create`` closure registers N compensations.
+
+    Uses a real ``ProvisionerStateStore`` pointed at a caller-supplied dir so
+    tests can exercise the write-through persistence path end-to-end.
+    """
+
+    tool_name = "demo"
+
+    def __init__(self, storage_dir: Path, kinds: List[str], fail_at_end: bool = True) -> None:
+        self._state = ProvisionerStateStore("demo_provisioner", storage_dir=storage_dir)
+        self.kinds = kinds
+        self.fail_at_end = fail_at_end
+        self.replayed: List[Tuple[str, Dict[str, Any]]] = []
+
+    def provision(self, agent_id, config, credentials, access_tier):
+        def _create(register):
+            for i, kind in enumerate(self.kinds):
+                register(kind, {"i": i, "name": kind})
+            if self.fail_at_end:
+                raise RuntimeError("boom")
+            return [], {"n": len(self.kinds)}
+
+        return self.run_idempotent(agent_id, credentials=credentials, create=_create)
+
+    def verify_access(self, agent_id, expected_tier):
+        return self._make_verification(
+            passed=True, expected_tier=expected_tier, actual_permissions=[]
+        )
+
+    def deprovision(self, agent_id):
+        return DeprovisionResult(tool_name=self.tool_name, success=True)
+
+    def replay_compensation(self, agent_id, kind, payload):
+        self.replayed.append((kind, payload))
+
+
+class TestCompensationRegistration:
+    def test_registrations_persist_and_replay_in_lifo_order(self, tmp_path: Path):
+        """Register three compensations then raise from inside create.
+
+        - ``run_idempotent`` must convert the raise to an error result.
+        - The three records must be persisted write-through (a fresh store
+          instance pointed at the same dir sees them).
+        - Replaying them in reverse order walks ``["c", "b", "a"]``.
+        """
+        prov = _RegisteringProvisioner(tmp_path, kinds=["a", "b", "c"], fail_at_end=True)
+        result = prov.provision(
+            agent_id="agent-1",
+            config={},
+            credentials=GeneratedCredentials(tool_name="demo"),
+            access_tier=AccessTier.STANDARD,
+        )
+        assert result.success is False
+        assert result.error is not None and "boom" in result.error
+
+        # Fresh store instance — records survived the exception.
+        fresh = ProvisionerStateStore("demo_provisioner", storage_dir=tmp_path)
+        records = fresh.list_compensations("agent-1")
+        assert [r.kind for r in records] == ["a", "b", "c"]
+        # Payloads roundtripped cleanly.
+        assert records[0].payload == {"i": 0, "name": "a"}
+
+        # LIFO replay walks reverse order.
+        for rec in reversed(records):
+            prov.replay_compensation("agent-1", rec.kind, rec.payload)
+        assert [k for k, _ in prov.replayed] == ["c", "b", "a"]
+
+        # After a successful replay the caller clears the list.
+        fresh.clear_compensations("agent-1")
+        assert fresh.list_compensations("agent-1") == []
+
+    def test_cold_start_replay_via_orchestrator(self, tmp_path: Path, monkeypatch):
+        """A fresh provisioner instance loaded from disk must be able to
+        replay compensations registered by a prior (now-gone) instance.
+        """
+        # First instance registers; process "dies" (discarded).
+        first = _RegisteringProvisioner(tmp_path, kinds=["x1", "x2"], fail_at_end=True)
+        first.provision(
+            agent_id="agent-cold",
+            config={},
+            credentials=GeneratedCredentials(tool_name="demo"),
+            access_tier=AccessTier.STANDARD,
+        )
+
+        # Fresh instance — reads from the same storage dir.
+        second = _RegisteringProvisioner(tmp_path, kinds=["x1", "x2"], fail_at_end=False)
+
+        # Simulate the orchestrator's replay path inline (we don't need the
+        # full workflow: this is the core behaviour we're proving).
+        records = second.list_compensations("agent-cold")
+        assert [r.kind for r in records] == ["x1", "x2"]
+        for rec in reversed(records):
+            second.replay_compensation("agent-cold", rec.kind, rec.payload)
+        second.clear_compensations("agent-cold")
+        second._state.delete("agent-cold")
+
+        assert [k for k, _ in second.replayed] == ["x2", "x1"]
+        assert second.list_compensations("agent-cold") == []
+        assert second._state.get("agent-cold") is None
+
+    def test_record_rejects_non_json_payload(self):
+        with pytest.raises(ValueError, match="JSON-serializable"):
+            CompensationRecord(kind="x", payload={"f": lambda: None})  # type: ignore[dict-item]
+
+    def test_store_migrates_legacy_flat_rows_on_read(self, tmp_path: Path):
+        """Legacy on-disk rows (``{"agent-x": {<details>}}``) must be
+        transparently readable after the nested-schema migration.
+        """
+        # Hand-write a legacy flat file the store will see on _load.
+        storage = tmp_path / "state"
+        storage.mkdir()
+        legacy = {"agent-x": {"database": "db1", "username": "u1"}}
+        (storage / "demo_provisioner.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+        store = ProvisionerStateStore("demo_provisioner", storage_dir=storage)
+        assert store.get("agent-x") == {"database": "db1", "username": "u1"}
+        assert store.list_compensations("agent-x") == []
+
+        # Adding a compensation now must preserve the pre-existing details.
+        store.add_compensation(
+            "agent-x", CompensationRecord(kind="demo.cleanup", payload={"k": "v"})
+        )
+        assert store.get("agent-x") == {"database": "db1", "username": "u1"}
+        comps = store.list_compensations("agent-x")
+        assert [c.kind for c in comps] == ["demo.cleanup"]
+
+    def test_put_preserves_existing_compensations(self, tmp_path: Path):
+        store = ProvisionerStateStore("demo_provisioner", storage_dir=tmp_path)
+        store.add_compensation("a1", CompensationRecord(kind="k1", payload={}))
+        store.put("a1", {"database": "db"})
+        # Both survive the round-trip.
+        assert store.get("a1") == {"database": "db"}
+        assert [c.kind for c in store.list_compensations("a1")] == ["k1"]
+
+    def test_delete_drops_whole_row(self, tmp_path: Path):
+        store = ProvisionerStateStore("demo_provisioner", storage_dir=tmp_path)
+        store.put("a1", {"database": "db"})
+        store.add_compensation("a1", CompensationRecord(kind="k1", payload={}))
+        assert store.delete("a1") is True
+        assert store.get("a1") is None
+        assert store.list_compensations("a1") == []

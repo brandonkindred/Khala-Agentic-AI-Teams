@@ -53,7 +53,7 @@ class GenericProvisionerTool(BaseToolProvisioner):
         return self.run_idempotent(
             agent_id,
             credentials=credentials,
-            create=lambda: self._do_provision(config, credentials, access_tier),
+            create=lambda _register: self._do_provision(config, credentials, access_tier),
             hydrate_extras=("tool_name", "config"),
         )
 

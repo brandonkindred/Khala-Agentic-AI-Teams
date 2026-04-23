@@ -337,10 +337,38 @@ class ProvisioningOrchestrator:
                     "Compensation: no provisioner registered for key=%s", key
                 )
                 continue
+            # Prefer persisted per-step compensations when the provisioner
+            # registered any during `_do_provision`: replay in LIFO order,
+            # then drop the whole state row. Provisioners that register
+            # nothing keep the legacy whole-tool `deprovision()` fallback.
+            records: List[Any] = []
             try:
-                provisioner.deprovision(agent_id)
-            except Exception:  # noqa: BLE001 — best-effort cleanup
-                logger.exception("Compensation: deprovision failed for %s", key)
+                records = list(provisioner.list_compensations(agent_id))
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Compensation: could not read records for %s; falling back to deprovision",
+                    key,
+                )
+            if records:
+                for rec in reversed(records):
+                    try:
+                        provisioner.replay_compensation(agent_id, rec.kind, rec.payload)
+                    except Exception:  # noqa: BLE001 — best-effort cleanup
+                        logger.exception(
+                            "Compensation: replay failed kind=%s for %s", rec.kind, key
+                        )
+                try:
+                    provisioner.clear_compensations(agent_id)
+                    provisioner._state.delete(agent_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Compensation: post-replay state cleanup failed for %s", key
+                    )
+            else:
+                try:
+                    provisioner.deprovision(agent_id)
+                except Exception:  # noqa: BLE001 — best-effort cleanup
+                    logger.exception("Compensation: deprovision failed for %s", key)
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker is not None:

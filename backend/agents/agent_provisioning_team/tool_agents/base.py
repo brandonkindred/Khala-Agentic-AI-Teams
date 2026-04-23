@@ -4,6 +4,7 @@ Base interface for tool provisioner agents.
 All tool provisioners implement this protocol to ensure consistent behavior.
 """
 
+import logging
 import subprocess
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, runtime_checkable
@@ -15,6 +16,16 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
+from ..shared.provisioner_state import CompensationRecord
+
+logger = logging.getLogger(__name__)
+
+# Callable passed into ``create(...)`` so provisioners can register per-step
+# rollbacks as each side effect lands. ``kind`` is a stable, provisioner-
+# namespaced string (e.g. ``"postgres.drop_database"``); ``payload`` must be
+# JSON-serializable — the record is persisted write-through so a crash
+# mid-provision can still be replayed on cold start.
+CompensationRegistrar = Callable[[str, Dict[str, Any]], None]
 
 
 @runtime_checkable
@@ -139,7 +150,7 @@ class BaseToolProvisioner(ABC):
         agent_id: str,
         *,
         credentials: GeneratedCredentials,
-        create: Callable[[], Tuple[List[str], Dict[str, Any]]],
+        create: Callable[[CompensationRegistrar], Tuple[List[str], Dict[str, Any]]],
         hydrate_extras: Tuple[str, ...] = (),
         reuse: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
     ) -> ToolProvisionResult:
@@ -151,9 +162,17 @@ class BaseToolProvisioner(ABC):
 
         Contract:
 
-        * ``create()`` returns ``(permissions, details)``. ``details`` is both
-          returned in ``ToolProvisionResult.details`` and persisted as the
-          idempotency state payload. It may mutate ``credentials`` in place.
+        * ``create(register_compensation)`` returns ``(permissions, details)``.
+          ``details`` is both returned in ``ToolProvisionResult.details`` and
+          persisted as the idempotency state payload. It may mutate
+          ``credentials`` in place.
+        * ``register_compensation(kind, payload)`` records a LIFO rollback
+          step, persisted write-through. Provisioners should call it *after*
+          each destructive side effect lands (e.g. after ``CREATE DATABASE``
+          succeeds, register ``"postgres.drop_database"``). On failure the
+          orchestrator replays these in reverse via
+          :meth:`replay_compensation`; provisioners that register nothing
+          keep the legacy :meth:`deprovision` fallback.
         * On the reuse path:
           - ``hydrate_extras`` lists ``details`` keys whose stored values are
             copied into ``credentials.extra`` via ``setdefault`` — the common
@@ -168,10 +187,15 @@ class BaseToolProvisioner(ABC):
             ``stored_details.get("permissions", [])``.
         * Exceptions from infrastructure boundaries (missing binaries, subprocess
           timeouts, permission errors) are caught and converted to error results.
-          Domain validation failures should ``return self._make_error_result(...)``
-          from inside ``create``.
+          Compensation records already registered before the exception remain
+          persisted for the orchestrator to replay. Domain validation failures
+          should ``return self._make_error_result(...)`` from inside ``create``.
         """
         state = self._state
+
+        def _register(kind: str, payload: Dict[str, Any]) -> None:
+            state.add_compensation(agent_id, CompensationRecord(kind=kind, payload=payload))
+
         try:
             existing = state.get(agent_id)
             if existing is not None:
@@ -188,7 +212,7 @@ class BaseToolProvisioner(ABC):
                     details={**existing, "reused": True},
                 )
 
-            permissions, details = create()
+            permissions, details = create(_register)
             state.put(agent_id, details)
             return self._make_success_result(
                 credentials=credentials,
@@ -203,6 +227,36 @@ class BaseToolProvisioner(ABC):
             return self._make_error_result(f"{self.tool_name}: permission denied: {e}")
         except Exception as e:  # noqa: BLE001 — last-resort guard with explicit prior cases
             return self._make_error_result(f"{self.tool_name} provisioning error: {e}")
+
+    # ---- Compensation hooks ---------------------------------------------
+    def list_compensations(self, agent_id: str) -> List[CompensationRecord]:
+        """Return compensation records registered for ``agent_id``."""
+        return self._state.list_compensations(agent_id)
+
+    def clear_compensations(self, agent_id: str) -> None:
+        """Clear compensation records for ``agent_id`` (leaves details intact)."""
+        self._state.clear_compensations(agent_id)
+
+    def replay_compensation(
+        self,
+        agent_id: str,
+        kind: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        """Dispatch a single compensation record back to live infrastructure.
+
+        Default: log a warning and skip. Provisioners that register
+        compensations in ``create(...)`` must override this to map each
+        ``kind`` back to the corresponding cleanup (e.g.
+        ``"postgres.drop_database"`` → terminate sessions + ``DROP DATABASE``).
+        """
+        logger.warning(
+            "%s: no replay handler for compensation kind=%r (agent=%s, payload keys=%s); skipping",
+            self.tool_name,
+            kind,
+            agent_id,
+            sorted(payload.keys()),
+        )
 
     def _make_verification(
         self,
