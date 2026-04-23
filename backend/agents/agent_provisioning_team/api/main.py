@@ -66,6 +66,31 @@ PROVISION_MAX_QUEUE_DEPTH = int(os.getenv("PROVISION_MAX_QUEUE_DEPTH", "32"))
 SHUTDOWN_GRACE_S = float(os.getenv("SHUTDOWN_GRACE_S", "30"))
 COMPENSATE_TIMEOUT_S = float(os.getenv("COMPENSATE_TIMEOUT_S", "15"))
 
+
+def _provision_thread_fallback() -> bool:
+    """Escape hatch: force the legacy thread path even when TEMPORAL_ADDRESS is set."""
+    return os.getenv("PROVISION_THREAD_FALLBACK", "").strip().lower() in ("1", "true", "yes")
+
+
+def _load_temporal_routing():
+    """Return (is_temporal_enabled_bool, start_workflow_callable). Any import
+    error degrades to the thread path so Temporal being half-installed never
+    breaks /provision."""
+    try:
+        from agent_provisioning_team.temporal.client import is_temporal_enabled
+        from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
+
+        return bool(is_temporal_enabled()), start_provisioning_workflow
+    except ImportError:
+        return False, None
+
+
+def _temporal_active() -> bool:
+    """True when `/provision` should dispatch to Temporal (V2) instead of the thread pool."""
+    enabled, starter = _load_temporal_routing()
+    return enabled and starter is not None and not _provision_thread_fallback()
+
+
 _executor: Optional[ThreadPoolExecutor] = None
 _shutdown_event: threading.Event = threading.Event()
 _inflight: Dict[str, Future] = {}
@@ -152,9 +177,7 @@ async def _graceful_shutdown() -> None:
                 timeout=SHUTDOWN_GRACE_S,
             )
         except asyncio.TimeoutError:
-            logger.warning(
-                "Provisioning executor did not drain within %.1fs", SHUTDOWN_GRACE_S
-            )
+            logger.warning("Provisioning executor did not drain within %.1fs", SHUTDOWN_GRACE_S)
 
     try:
         active_jobs = list_jobs(running_only=True)
@@ -172,7 +195,8 @@ async def _graceful_shutdown() -> None:
         if t.is_alive():
             logger.warning(
                 "Compensate for agent=%s exceeded %.1fs; moving on",
-                agent_id, COMPENSATE_TIMEOUT_S,
+                agent_id,
+                COMPENSATE_TIMEOUT_S,
             )
 
     try:
@@ -286,18 +310,12 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
     """Start a new provisioning job."""
     # Check Temporal availability up front so we only apply thread-pool
     # backpressure to the thread path (Temporal has its own queueing).
-    temporal_enabled = False
-    start_temporal_workflow = None
-    try:
-        from agent_provisioning_team.temporal.client import is_temporal_enabled
-        from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
+    enabled, start_temporal_workflow = _load_temporal_routing()
+    use_temporal = (
+        enabled and start_temporal_workflow is not None and not _provision_thread_fallback()
+    )
 
-        temporal_enabled = is_temporal_enabled()
-        start_temporal_workflow = start_provisioning_workflow
-    except ImportError:
-        pass
-
-    if not temporal_enabled:
+    if not use_temporal:
         _reject_if_saturated()
 
     job_id = str(uuid.uuid4())
@@ -308,12 +326,14 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
         access_tier=request.access_tier.value,
     )
 
-    if temporal_enabled:
+    if use_temporal:
         start_temporal_workflow(
             job_id,
             request.agent_id,
             request.manifest_path,
             request.access_tier.value,
+            skip_phases=None,
+            prior_results=None,
         )
         return ProvisionJobResponse(
             job_id=job_id,
@@ -466,21 +486,46 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
 
     from ..models import Phase
 
-    skip = {Phase(p) for p in completed if p in {ph.value for ph in Phase}}
+    phase_values = {ph.value for ph in Phase}
+    completed_values = [p for p in completed if p in phase_values]
+    access_tier_str = data.get("access_tier", "standard")
 
-    _reject_if_saturated()
+    enabled, start_temporal_workflow = _load_temporal_routing()
+    use_temporal = (
+        enabled and start_temporal_workflow is not None and not _provision_thread_fallback()
+    )
+
     update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
 
+    if use_temporal:
+        start_temporal_workflow(
+            job_id,
+            agent_id,
+            manifest_path,
+            access_tier_str,
+            skip_phases=completed_values,
+            prior_results=phase_results,
+        )
+        return ProvisionJobResponse(
+            job_id=job_id,
+            status="running",
+            message="Job resumed (Temporal). Skipping completed phases.",
+        )
+
+    _reject_if_saturated()
+    skip = {Phase(p) for p in completed_values}
     _submit_provisioning_job(
         job_id,
         agent_id,
         manifest_path,
-        data.get("access_tier", "standard"),
+        access_tier_str,
         skip_phases=skip,
         prior_results=phase_results,
     )
 
-    return ProvisionJobResponse(job_id=job_id, status="running", message="Job resumed. Skipping completed phases.")
+    return ProvisionJobResponse(
+        job_id=job_id, status="running", message="Job resumed. Skipping completed phases."
+    )
 
 
 @app.post(
@@ -502,17 +547,40 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
     if not agent_id or not manifest_path:
         raise HTTPException(status_code=400, detail="Job is missing agent_id or manifest_path.")
 
-    _reject_if_saturated()
+    access_tier_str = data.get("access_tier", "standard")
+    enabled, start_temporal_workflow = _load_temporal_routing()
+    use_temporal = (
+        enabled and start_temporal_workflow is not None and not _provision_thread_fallback()
+    )
+
     store_reset_job(job_id)
 
+    if use_temporal:
+        start_temporal_workflow(
+            job_id,
+            agent_id,
+            manifest_path,
+            access_tier_str,
+            skip_phases=None,
+            prior_results=None,
+        )
+        return ProvisionJobResponse(
+            job_id=job_id,
+            status="running",
+            message="Job restarted (Temporal) from scratch.",
+        )
+
+    _reject_if_saturated()
     _submit_provisioning_job(
         job_id,
         agent_id,
         manifest_path,
-        data.get("access_tier", "standard"),
+        access_tier_str,
     )
 
-    return ProvisionJobResponse(job_id=job_id, status="running", message="Job restarted from scratch.")
+    return ProvisionJobResponse(
+        job_id=job_id, status="running", message="Job restarted from scratch."
+    )
 
 
 @app.delete(
