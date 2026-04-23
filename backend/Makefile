@@ -49,13 +49,13 @@ lint-fix:
 	$(VENV_PYTHON) -m ruff format .
 
 test:
-	$(VENV_PYTHON) -m pytest -v
+	$(VENV_PYTHON) -m pytest -v -n auto
 
 coverage:
-	$(VENV_PYTHON) -m pytest --cov=agents --cov=unified_api --cov-report=term-missing --cov-fail-under=85
+	$(VENV_PYTHON) -m pytest -n auto --cov=agents --cov=unified_api --cov-report=term-missing --cov-fail-under=85
 
 coverage-html:
-	$(VENV_PYTHON) -m pytest --cov=agents --cov=unified_api --cov-report=html --cov-report=term-missing
+	$(VENV_PYTHON) -m pytest -n auto --cov=agents --cov=unified_api --cov-report=html --cov-report=term-missing
 	@echo "HTML report: htmlcov/index.html"
 
 build: install-dev lint test

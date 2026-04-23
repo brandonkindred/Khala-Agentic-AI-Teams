@@ -1,4 +1,6 @@
 pytest>=9.0,<10.0
+pytest-xdist>=3.5,<4.0
+pytest-cov>=7.1,<8.0
 pydantic>=2.12,<3.0
 httpx>=0.28,<1.0
 json-repair>=0.28,<1.0
