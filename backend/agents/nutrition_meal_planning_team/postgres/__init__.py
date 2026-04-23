@@ -94,6 +94,19 @@ SCHEMA = TeamSchema(
         "ALTER TABLE nutrition_plans ADD COLUMN IF NOT EXISTS profile_cache_vector TEXT",
         """CREATE INDEX IF NOT EXISTS idx_nutrition_plans_cache_key
             ON nutrition_plans(client_id, calculator_version, profile_cache_vector)""",
+        # --- SPEC-006 additions (restriction resolution) ---
+        # ``restriction_resolution`` mirrors the RestrictionResolution
+        # field inside ``profile`` JSONB; the separate column exists only
+        # so future scanners can query without parsing the whole profile.
+        # ``restriction_resolver_kb_version`` is a denormalized index key
+        # for the SPEC-006 W9 background re-resolver (finds profiles with
+        # an older KB version).
+        "ALTER TABLE nutrition_profiles ADD COLUMN IF NOT EXISTS "
+        "restriction_resolution JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE nutrition_profiles ADD COLUMN IF NOT EXISTS "
+        "restriction_resolver_kb_version TEXT",
+        """CREATE INDEX IF NOT EXISTS idx_nutrition_profiles_resolver_kb_version
+            ON nutrition_profiles(restriction_resolver_kb_version)""",
     ],
     table_names=[
         "nutrition_profiles",

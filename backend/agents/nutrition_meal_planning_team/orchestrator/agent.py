@@ -107,6 +107,67 @@ class NutritionMealPlanningOrchestrator:
         self.profile_store.save_profile(client_id, profile)
         return profile
 
+    # --- SPEC-006: restriction resolution routes -------------------------
+
+    def get_restrictions(self, client_id: str):
+        """Return the stored :class:`RestrictionResolution` for a client."""
+        profile = self.profile_store.get_profile(client_id)
+        if profile is None:
+            raise LookupError(f"profile not found: {client_id}")
+        return profile.restriction_resolution
+
+    def resolve_ambiguous(self, client_id: str, req):
+        """Promote a user-chosen candidate from ``ambiguous[]`` to
+        ``resolved[]`` and persist. Raises :class:`LookupError` if the
+        profile is missing; :class:`ValueError` if the raw doesn't
+        match any ambiguity.
+        """
+        profile = self.profile_store.get_profile(client_id)
+        if profile is None:
+            raise LookupError(f"profile not found: {client_id}")
+        rr = profile.restriction_resolution
+        remaining = [a for a in rr.ambiguous if a.raw != req.raw]
+        if len(remaining) == len(rr.ambiguous):
+            raise ValueError(f"no ambiguous entry for raw={req.raw!r}")
+        chosen = req.chosen_candidate.model_copy(update={"raw": req.raw})
+        rr.ambiguous = remaining
+        rr.resolved.append(chosen)
+        profile.restriction_resolution = rr
+        self.profile_store.save_profile(client_id, profile)
+        return rr
+
+    def reresolve_restrictions(self, client_id: str):
+        """Re-run the resolver against the current ``KB_VERSION`` and
+        persist. Previously-confirmed resolutions are preserved
+        (additive-only behavior, spec §4.4).
+        """
+        from ..restriction_resolver import resolve_restrictions
+
+        profile = self.profile_store.get_profile(client_id)
+        if profile is None:
+            raise LookupError(f"profile not found: {client_id}")
+        fresh = resolve_restrictions(
+            profile.allergies_and_intolerances or [],
+            profile.dietary_needs or [],
+        )
+        # Preserve prior user-confirmed resolutions: anything in the old
+        # ``resolved[]`` whose raw re-surfaces as ambiguous keeps the
+        # prior resolution. New raws flow through normally.
+        old_confirmed = {r.raw: r for r in profile.restriction_resolution.resolved}
+        kept_resolved = list(fresh.resolved)
+        kept_ambiguous = []
+        for amb in fresh.ambiguous:
+            prior = old_confirmed.get(amb.raw)
+            if prior is not None:
+                kept_resolved.append(prior)
+            else:
+                kept_ambiguous.append(amb)
+        fresh.resolved = kept_resolved
+        fresh.ambiguous = kept_ambiguous
+        profile.restriction_resolution = fresh
+        self.profile_store.save_profile(client_id, profile)
+        return fresh
+
     def _get_or_generate_nutrition_plan(self, profile: ClientProfile) -> NutritionPlan:
         """Return cached nutrition plan if inputs unchanged, otherwise rebuild.
 

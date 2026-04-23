@@ -1,0 +1,67 @@
+# SPEC-006 shorthand table v1.
+#
+# Closed table. Every ``forbid_dietary`` value must exist in
+# ``ingredient_kb.taxonomy.DietaryTag``; every ``forbid_allergen``
+# must exist in ``AllergenTag``. The loader fails fast on unknowns;
+# the parity test (test_shorthand_against_taxonomy) enforces the
+# same invariant against the raw YAML to catch drift the loader
+# might mask.
+#
+# Synonyms are normalized through
+# ``ingredient_kb.normalizer.normalize`` before comparison, so
+# lowercase/whitespace/diacritics don't need to be covered here.
+#
+# Adding a row requires team-lead sign-off per spec §4.2.
+
+- name: vegan
+  synonyms: ["vegan", "plant-based", "plant based"]
+  forbid_dietary: [animal, dairy, egg, honey, gelatin]
+
+- name: vegetarian
+  synonyms: ["vegetarian", "veggie"]
+  forbid_dietary: [animal]
+  note: "allows dairy and eggs by default"
+
+- name: pescatarian
+  synonyms: ["pescatarian", "pescetarian"]
+  forbid_dietary: [animal]
+  note: "allows fish, shellfish, dairy, eggs"
+
+- name: gluten_free
+  # Note: we forbid BOTH the dietary ``gluten`` tag AND the
+  # allergen ``gluten`` + ``wheat`` tags. The taxonomy docstring
+  # explicitly treats gluten and wheat as separate allergens
+  # (spelt/barley/rye are gluten-bearing non-wheat); GF users need
+  # both blocked.
+  synonyms: ["gluten-free", "gluten free", "gf"]
+  forbid_dietary: [gluten]
+  forbid_allergen: [gluten, wheat]
+
+- name: dairy_free
+  synonyms: ["dairy-free", "dairy free", "lactose-free", "lactose free"]
+  forbid_dietary: [dairy]
+  forbid_allergen: [dairy]
+
+- name: paleo
+  synonyms: ["paleo", "paleolithic"]
+  forbid_dietary: [dairy, grain, legume]
+
+- name: halal
+  synonyms: ["halal"]
+  forbid_dietary: [alcohol]
+  note: "requires halal-certified meat preparation (not enforced in v1)"
+
+- name: kosher
+  synonyms: ["kosher"]
+  forbid_dietary: []
+  note: "requires kosher preparation (not enforced in v1)"
+
+- name: keto
+  synonyms: ["keto", "ketogenic"]
+  soft_constraint: low_carb
+  note: "advisory only; not enforced as forbid in v1"
+
+- name: low_sodium
+  synonyms: ["low-sodium", "low sodium", "low salt", "low-salt"]
+  soft_constraint: sodium_very_high
+  note: "maps to InteractionTag.sodium_very_high at SPEC-007 enforcement"

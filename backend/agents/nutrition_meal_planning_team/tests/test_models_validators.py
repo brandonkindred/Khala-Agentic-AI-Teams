@@ -215,3 +215,77 @@ def test_clinician_override_roundtrip():
     )
     assert r.overrides["bmi_floor"] == 19.5
     assert r.author == "dietitian-1234"
+
+
+# --- SPEC-006: restriction resolution model ------------------------------
+
+
+def test_client_profile_default_has_empty_restriction_resolution():
+    from nutrition_meal_planning_team.models import RestrictionResolution
+
+    p = ClientProfile(client_id="c")
+    assert isinstance(p.restriction_resolution, RestrictionResolution)
+    assert p.restriction_resolution.resolved == []
+    assert p.restriction_resolution.ambiguous == []
+    assert p.restriction_resolution.unresolved == []
+
+
+def test_restriction_resolution_active_allergen_union():
+    from nutrition_meal_planning_team.ingredient_kb.taxonomy import AllergenTag
+    from nutrition_meal_planning_team.models import (
+        AmbiguousRestriction,
+        ResolvedRestriction,
+        RestrictionResolution,
+    )
+
+    rr = RestrictionResolution(
+        resolved=[
+            ResolvedRestriction(
+                raw="cashew",
+                allergen_tags=[AllergenTag.tree_nut],
+                confidence=1.0,
+                rule="exact_alias",
+            )
+        ],
+        ambiguous=[
+            AmbiguousRestriction(
+                raw="nuts",
+                candidates=[
+                    ResolvedRestriction(raw="nuts", allergen_tags=[AllergenTag.peanut]),
+                    ResolvedRestriction(raw="nuts", allergen_tags=[AllergenTag.tree_nut]),
+                ],
+                question="?",
+            )
+        ],
+    )
+    active = rr.active_allergen_tags()
+    # Default-strict: union of resolved + strictest candidate tags.
+    assert AllergenTag.peanut in active
+    assert AllergenTag.tree_nut in active
+
+
+def test_client_profile_roundtrips_restriction_resolution_through_json():
+    from nutrition_meal_planning_team.ingredient_kb.taxonomy import DietaryTag
+    from nutrition_meal_planning_team.models import (
+        ResolvedRestriction,
+        RestrictionResolution,
+    )
+
+    rr = RestrictionResolution(
+        resolved=[
+            ResolvedRestriction(
+                raw="vegan",
+                dietary_tags_forbid=[DietaryTag.animal, DietaryTag.dairy],
+                source="shorthand",
+                rule="shorthand",
+                confidence=1.0,
+            )
+        ],
+        kb_version="1.0.0",
+        resolved_at="2026-04-23T00:00:00+00:00",
+    )
+    p = ClientProfile(client_id="c", restriction_resolution=rr)
+    p2 = ClientProfile.model_validate(p.model_dump())
+    assert p2.restriction_resolution.kb_version == "1.0.0"
+    assert p2.restriction_resolution.resolved[0].raw == "vegan"
+    assert DietaryTag.dairy in p2.restriction_resolution.resolved[0].dietary_tags_forbid

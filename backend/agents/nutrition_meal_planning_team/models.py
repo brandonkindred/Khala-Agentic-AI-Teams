@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field, field_validator
+
+# SPEC-006: import only the taxonomy enums. ``ingredient_kb.taxonomy`` is a
+# pure stdlib module, so this is cycle-safe. Never import from
+# ``ingredient_kb.catalog`` or ``parser`` here — those pull yaml + file I/O.
+from .ingredient_kb.taxonomy import AllergenTag, DietaryTag
 
 # SPEC-002 schema version. Bump when the ClientProfile shape changes
 # in a way downstream consumers must observe. Kept as a plain string
@@ -189,6 +194,75 @@ class GoalsInfo(BaseModel):
     notes: str = ""
 
 
+# --- Restriction resolution (SPEC-006) -----------------------------------
+
+
+class ResolvedRestriction(BaseModel):
+    """One user restriction string resolved to canonical tags."""
+
+    raw: str
+    allergen_tags: List[AllergenTag] = Field(default_factory=list)
+    dietary_tags_forbid: List[DietaryTag] = Field(default_factory=list)
+    dietary_tags_require: List[DietaryTag] = Field(default_factory=list)
+    matched_canonical_ids: List[str] = Field(default_factory=list)
+    confidence: float = 1.0
+    source: str = "user"  # "user" | "shorthand" | "clinician"
+    rule: str = "exact_alias"  # exact_alias|shorthand|category|negation|fuzzy
+    soft_constraint: Optional[str] = None  # e.g. "low_carb", "sodium_very_high"
+    note: str = ""
+
+
+class AmbiguousRestriction(BaseModel):
+    """A user input that mapped to multiple plausible resolutions.
+
+    SPEC-006 §4.3: e.g. ``"nuts"`` could mean peanut, tree_nut, or both.
+    The resolver never picks silently — it emits candidates and a
+    human-readable question. Default-strict: the strictest candidate's
+    tags are still exposed via ``RestrictionResolution.active_*`` so
+    SPEC-007 can fail-closed before the user confirms.
+    """
+
+    raw: str
+    candidates: List[ResolvedRestriction]  # len >= 2
+    question: str
+
+
+class RestrictionResolution(BaseModel):
+    """SPEC-006 §4.1 — canonical tag resolution of a profile's raw lists."""
+
+    resolved: List[ResolvedRestriction] = Field(default_factory=list)
+    ambiguous: List[AmbiguousRestriction] = Field(default_factory=list)
+    unresolved: List[str] = Field(default_factory=list)
+    kb_version: str = ""
+    resolved_at: Optional[str] = None
+
+    def active_allergen_tags(self) -> Set[AllergenTag]:
+        """Union of resolved allergen tags plus the strictest candidate
+        from each unresolved ambiguity (default-strict, spec §6.2)."""
+        out: Set[AllergenTag] = set()
+        for r in self.resolved:
+            out.update(r.allergen_tags)
+        for amb in self.ambiguous:
+            strictest: Set[AllergenTag] = set()
+            for cand in amb.candidates:
+                strictest.update(cand.allergen_tags)
+            out.update(strictest)
+        return out
+
+    def active_dietary_forbid(self) -> Set[DietaryTag]:
+        """Union of resolved dietary-forbid tags plus the strictest
+        candidate from each unresolved ambiguity (default-strict)."""
+        out: Set[DietaryTag] = set()
+        for r in self.resolved:
+            out.update(r.dietary_tags_forbid)
+        for amb in self.ambiguous:
+            strictest: Set[DietaryTag] = set()
+            for cand in amb.candidates:
+                strictest.update(cand.dietary_tags_forbid)
+            out.update(strictest)
+        return out
+
+
 class ClientProfile(BaseModel):
     """Single source of truth for nutritionist and meal planning agents."""
 
@@ -205,6 +279,10 @@ class ClientProfile(BaseModel):
     goals: GoalsInfo = Field(default_factory=GoalsInfo)
     biometrics: BiometricInfo = Field(default_factory=BiometricInfo)
     clinical: ClinicalInfo = Field(default_factory=ClinicalInfo)
+    # SPEC-006: canonical tag resolution of the raw restriction lists.
+    # Populated by the resolver at intake time when the feature flag is on;
+    # otherwise left as the empty default.
+    restriction_resolution: RestrictionResolution = Field(default_factory=RestrictionResolution)
     # Monotonic write counter; bumped by the store on every save.
     profile_version: int = 1
     # Data-model version. Migrations that reshape ClientProfile bump
@@ -351,6 +429,21 @@ class ProfileUpdateRequest(BaseModel):
     goals: Optional[GoalsInfo] = None
     biometrics: Optional[BiometricInfo] = None
     clinical: Optional[ClinicalInfo] = None
+
+
+# --- SPEC-006 request models --------------------------------------------
+
+
+class ResolveAmbiguousRequest(BaseModel):
+    """Body for POST /profile/{client_id}/restrictions/resolve-ambiguous.
+
+    ``raw`` identifies the ambiguity (must match an entry in
+    ``RestrictionResolution.ambiguous[*].raw``). ``chosen_candidate`` is
+    the candidate the user picked; it is moved into ``resolved[]``.
+    """
+
+    raw: str
+    chosen_candidate: ResolvedRestriction
 
 
 # --- SPEC-002 additive request/response models ---------------------------

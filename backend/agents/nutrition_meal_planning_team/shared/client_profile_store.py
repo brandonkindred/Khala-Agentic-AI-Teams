@@ -53,18 +53,30 @@ def get_profile(client_id: str) -> Optional[ClientProfile]:
 @timed_query(store=_STORE, op="save_profile")
 def save_profile(client_id: str, profile: ClientProfile) -> None:
     """Save client profile via upsert. Mutates ``profile.updated_at`` and
-    bumps ``profile_version`` as a side effect."""
+    bumps ``profile_version`` as a side effect.
+
+    SPEC-006: ``restriction_resolver_kb_version`` is a denormalized
+    index key mirroring ``profile.restriction_resolution.kb_version``.
+    The JSONB ``profile`` column remains the source of truth; this
+    column exists only so the background re-resolver can scan without
+    parsing every JSONB row.
+    """
     profile.client_id = client_id
     profile.updated_at = _now_iso()
     profile.profile_version = (profile.profile_version or 0) + 1
     ts = datetime.now(tz=timezone.utc)
+    rr = profile.restriction_resolution
+    kb_version = (rr.kb_version or None) if rr is not None else None
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO nutrition_profiles (client_id, profile, updated_at) "
-            "VALUES (%s, %s, %s) "
+            "INSERT INTO nutrition_profiles "
+            "(client_id, profile, updated_at, restriction_resolver_kb_version) "
+            "VALUES (%s, %s, %s, %s) "
             "ON CONFLICT (client_id) DO UPDATE "
-            "SET profile = EXCLUDED.profile, updated_at = EXCLUDED.updated_at",
-            (client_id, Json(profile.model_dump()), ts),
+            "SET profile = EXCLUDED.profile, "
+            "    updated_at = EXCLUDED.updated_at, "
+            "    restriction_resolver_kb_version = EXCLUDED.restriction_resolver_kb_version",
+            (client_id, Json(profile.model_dump()), ts, kb_version),
         )
 
 

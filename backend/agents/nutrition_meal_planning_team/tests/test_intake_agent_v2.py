@@ -128,3 +128,44 @@ def test_structural_merge_ed_flag_survives_no_update():
     merged = _merge_profile_structural("c1", existing, patch)
     assert merged.clinical.ed_history_flag is True
     assert merged.dietary_needs == ["vegan"]
+
+
+# --- SPEC-006: resolver hook ---------------------------------------------
+
+
+def test_apply_resolver_flag_off_is_noop(monkeypatch):
+    """When the flag is unset, ``apply_resolver`` returns the profile
+    untouched."""
+    from nutrition_meal_planning_team.agents.intake_profile_agent.restriction_hook import (
+        apply_resolver,
+    )
+
+    monkeypatch.delenv("NUTRITION_RESTRICTION_RESOLVER", raising=False)
+    p = ClientProfile(
+        client_id="c1",
+        allergies_and_intolerances=["cashew"],
+        dietary_needs=["vegan"],
+    )
+    out = apply_resolver(p)
+    assert out.restriction_resolution.resolved == []
+    assert out.restriction_resolution.kb_version == ""
+
+
+def test_apply_resolver_flag_on_populates_resolution(monkeypatch):
+    """When the flag is on, ``apply_resolver`` runs the cascade and
+    populates ``restriction_resolution`` from the raw lists.
+    """
+    from nutrition_meal_planning_team.agents.intake_profile_agent.restriction_hook import (
+        apply_resolver,
+    )
+
+    monkeypatch.setenv("NUTRITION_RESTRICTION_RESOLVER", "1")
+    p = ClientProfile(
+        client_id="c1",
+        allergies_and_intolerances=["cashew"],
+        dietary_needs=["vegan"],
+    )
+    out = apply_resolver(p)
+    raws = {r.raw for r in out.restriction_resolution.resolved}
+    assert raws == {"cashew", "vegan"}
+    assert out.restriction_resolution.kb_version  # non-empty

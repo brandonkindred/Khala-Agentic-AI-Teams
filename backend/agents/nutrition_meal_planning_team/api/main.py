@@ -28,6 +28,8 @@ from ..models import (
     MealPlanRequest,
     NutritionPlanRequest,
     ProfileUpdateRequest,
+    ResolveAmbiguousRequest,
+    RestrictionResolution,
 )
 from ..orchestrator.agent import NutritionMealPlanningOrchestrator
 from ..shared.job_store import (
@@ -230,6 +232,62 @@ def get_profile_completeness_route(client_id: str):
     response with ``no_profile`` in blockers.
     """
     return orchestrator.get_completeness(client_id)
+
+
+# --- SPEC-006: restriction resolution routes ----------------------------
+
+
+@app.get(
+    "/profile/{client_id}/restrictions",
+    response_model=RestrictionResolution,
+)
+def get_restrictions_route(client_id: str):
+    """SPEC-006: canonical tag resolution of the client's raw
+    ``allergies_and_intolerances`` and ``dietary_needs`` lists.
+
+    Returns the resolution stored on the profile. When the feature
+    flag was off at intake time, this is the empty default (equivalent
+    to ``RestrictionResolution()``).
+    """
+    try:
+        return orchestrator.get_restrictions(client_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@app.post(
+    "/profile/{client_id}/restrictions/resolve-ambiguous",
+    response_model=RestrictionResolution,
+)
+def resolve_ambiguous_route(client_id: str, body: ResolveAmbiguousRequest):
+    """SPEC-006: user confirms a choice for an ambiguous restriction.
+
+    The chosen candidate is moved into ``resolved[]`` and persisted.
+    Subsequent reads no longer re-ask for the same ``raw``.
+    """
+    try:
+        return orchestrator.resolve_ambiguous(client_id, body)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post(
+    "/profile/{client_id}/restrictions/reresolve",
+    response_model=RestrictionResolution,
+)
+def reresolve_restrictions_route(client_id: str):
+    """SPEC-006: force a re-run of the resolver against the current
+    KB version. Previously-confirmed resolutions are preserved.
+
+    Rate limiting is tracked as a follow-up (spec §4.5); v1 ships
+    unlimited.
+    """
+    try:
+        return orchestrator.reresolve_restrictions(client_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 def _run_nutrition_plan_job(job_id: str, body: NutritionPlanRequest) -> None:
