@@ -172,6 +172,23 @@ export interface BrandBook {
   sections?: Record<string, unknown>;
 }
 
+/** Sequential branding pipeline phases. Mirrors backend `BrandPhase` enum. */
+export type BrandPhase =
+  | 'strategic_core'
+  | 'narrative_messaging'
+  | 'visual_identity'
+  | 'channel_activation'
+  | 'governance'
+  | 'complete';
+
+/** Per-phase approval gate status. Mirrors backend `PhaseStatus`. */
+export type PhaseStatus = 'not_started' | 'in_progress' | 'pending_review' | 'approved';
+
+export interface PhaseGate {
+  phase: BrandPhase;
+  status: PhaseStatus;
+}
+
 /** Response from running the branding team for a brand. */
 export interface BrandingTeamOutput {
   status: string;
@@ -188,6 +205,8 @@ export interface BrandingTeamOutput {
   competitive_snapshot?: CompetitiveSnapshot | null;
   design_asset_result?: DesignAssetRequestResult | null;
   brand_book?: BrandBook | null;
+  current_phase?: BrandPhase;
+  phase_gates?: PhaseGate[];
 }
 
 export interface BrandingQuestion {

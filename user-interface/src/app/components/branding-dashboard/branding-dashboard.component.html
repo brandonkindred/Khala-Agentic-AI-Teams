@@ -65,6 +65,7 @@
                 [mission]="selectedBrand?.mission ?? conversationMission"
                 [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
                 (saveAsBrand)="onOpenSaveAsBrand()"
+                (selectPalette)="onSelectPalette($event)"
               />
             </mat-expansion-panel>
           } @else {
@@ -72,6 +73,7 @@
               [mission]="selectedBrand?.mission ?? conversationMission"
               [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
               (saveAsBrand)="onOpenSaveAsBrand()"
+              (selectPalette)="onSelectPalette($event)"
             />
           }
         </div>

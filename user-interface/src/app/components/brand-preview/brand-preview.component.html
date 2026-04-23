@@ -18,21 +18,26 @@
         </span>
       </div>
     </div>
-    @if (hasOutput) {
-      <button class="save-btn" (click)="saveAsBrand.emit()">
-        <mat-icon>bookmark_add</mat-icon>
-        Save brand
-      </button>
-    }
-  </div>
-
-  <!-- Progress indicator -->
-  @if (hasMissionData && !hasOutput) {
-    <div class="progress-track">
-      <div class="progress-bar" [style.width]="completionPercent + '%'"></div>
+    <div class="header-actions">
+      @if (latestOutput?.brand_book?.content) {
+        <button
+          type="button"
+          class="brand-book-btn"
+          (click)="openBrandBook()"
+          data-testid="brand-book-btn"
+        >
+          <mat-icon>menu_book</mat-icon>
+          Brand Book
+        </button>
+      }
+      @if (hasOutput) {
+        <button type="button" class="save-btn" (click)="saveAsBrand.emit()">
+          <mat-icon>bookmark_add</mat-icon>
+          Save brand
+        </button>
+      }
     </div>
-    <div class="progress-label">{{ completionPercent }}% defined</div>
-  }
+  </div>
 
   <!-- Empty State -->
   @if (!hasContent) {
@@ -62,460 +67,419 @@
         </div>
       </div>
     </div>
-  } @else if (!hasOutput) {
-    <!-- Live Mission Preview -->
-    <div class="live-preview">
-      <!-- Foundation -->
-      @if (mission?.company_name && mission!.company_name !== 'TBD') {
-        <section class="preview-section" [@sectionEnter]>
-          <div class="section-header">
-            <div class="section-icon foundation-icon">
-              <mat-icon>domain</mat-icon>
+  } @else {
+    <!-- Phase stepper: spatial progress through the 5-phase pipeline. -->
+    <div class="phase-stepper" data-testid="phase-stepper">
+      @for (p of phases; track p.phase; let isLast = $last) {
+        <section
+          class="phase-step"
+          [class.phase-completed]="phaseStatus(p.phase) === 'completed'"
+          [class.phase-in-progress]="phaseStatus(p.phase) === 'in_progress'"
+          [class.phase-not-started]="phaseStatus(p.phase) === 'not_started'"
+          [class.phase-last]="isLast"
+          [attr.data-phase]="p.phase"
+        >
+          <div class="phase-rail">
+            <div class="phase-node">
+              <mat-icon>
+                {{ phaseStatus(p.phase) === 'completed' ? 'check' : p.icon }}
+              </mat-icon>
             </div>
-            <h3 class="section-label">Foundation</h3>
-          </div>
-          <div class="foundation-grid">
-            <div class="foundation-card">
-              <span class="field-label">Company</span>
-              <span class="field-value">{{ mission!.company_name }}</span>
-            </div>
-            @if (mission!.company_description && mission!.company_description !== 'To be discussed.') {
-              <div class="foundation-card full-width">
-                <span class="field-label">Description</span>
-                <span class="field-value">{{ mission!.company_description }}</span>
-              </div>
-            }
-            @if (mission!.target_audience && mission!.target_audience !== 'TBD') {
-              <div class="foundation-card">
-                <span class="field-label">Target audience</span>
-                <span class="field-value">{{ mission!.target_audience }}</span>
-              </div>
+            @if (!isLast) {
+              <div class="phase-connector"></div>
             }
           </div>
-        </section>
-      }
+          <div class="phase-body">
+            <header class="phase-header">
+              <h3 class="phase-label">{{ p.label }}</h3>
+              <span
+                class="phase-chip"
+                [class.chip-completed]="phaseStatus(p.phase) === 'completed'"
+                [class.chip-in-progress]="phaseStatus(p.phase) === 'in_progress'"
+                [class.chip-not-started]="phaseStatus(p.phase) === 'not_started'"
+              >
+                {{ phaseStatusLabel(p.phase) }}
+              </span>
+            </header>
 
-      <!-- Values & Differentiators -->
-      @if (missionValues.length > 0 || missionDifferentiators.length > 0) {
-        <section class="preview-section" [@sectionEnter]>
-          <div class="section-header">
-            <div class="section-icon values-icon">
-              <mat-icon>diamond</mat-icon>
-            </div>
-            <h3 class="section-label">Values &amp; Differentiators</h3>
-          </div>
-          @if (missionValues.length > 0) {
-            <div class="tag-group">
-              <span class="tag-group-label">Core values</span>
-              <div class="tag-row">
-                @for (v of missionValues; track v) {
-                  <span class="tag tag-value">{{ v }}</span>
-                }
-              </div>
-            </div>
-          }
-          @if (missionDifferentiators.length > 0) {
-            <div class="tag-group">
-              <span class="tag-group-label">Differentiators</span>
-              <div class="tag-row">
-                @for (d of missionDifferentiators; track d) {
-                  <span class="tag tag-diff">{{ d }}</span>
-                }
-              </div>
-            </div>
-          }
-        </section>
-      }
+            @if (phaseHasOutput(p.phase) || p.phase === 'strategic_core') {
+              <div class="phase-content" [@sectionEnter]>
+                @switch (p.phase) {
+                  @case ('strategic_core') {
+                    <!-- Strategic Core: mission foundation, values, codification -->
+                    @if (mission?.company_name && mission!.company_name !== 'TBD') {
+                      <div class="foundation-grid">
+                        <div class="foundation-card">
+                          <span class="field-label">Company</span>
+                          <span class="field-value">{{ mission!.company_name }}</span>
+                        </div>
+                        @if (mission!.company_description && mission!.company_description !== 'To be discussed.') {
+                          <div class="foundation-card full-width">
+                            <span class="field-label">Description</span>
+                            <span class="field-value">{{ mission!.company_description }}</span>
+                          </div>
+                        }
+                        @if (mission!.target_audience && mission!.target_audience !== 'TBD') {
+                          <div class="foundation-card">
+                            <span class="field-label">Target audience</span>
+                            <span class="field-value">{{ mission!.target_audience }}</span>
+                          </div>
+                        }
+                      </div>
+                    }
 
-      <!-- Voice -->
-      @if (mission?.desired_voice && mission!.desired_voice !== 'clear, confident, human') {
-        <section class="preview-section" [@sectionEnter]>
-          <div class="section-header">
-            <div class="section-icon voice-icon">
-              <mat-icon>record_voice_over</mat-icon>
-            </div>
-            <h3 class="section-label">Brand Voice</h3>
-          </div>
-          <div class="voice-card">
-            <p class="voice-text">{{ mission!.desired_voice }}</p>
-          </div>
-        </section>
-      }
+                    @if (missionValues.length > 0 || missionDifferentiators.length > 0) {
+                      <div class="subsection">
+                        @if (missionValues.length > 0) {
+                          <div class="tag-group">
+                            <span class="tag-group-label">Core values</span>
+                            <div class="tag-row">
+                              @for (v of missionValues; track v) {
+                                <span class="tag tag-value">{{ v }}</span>
+                              }
+                            </div>
+                          </div>
+                        }
+                        @if (missionDifferentiators.length > 0) {
+                          <div class="tag-group">
+                            <span class="tag-group-label">Differentiators</span>
+                            <div class="tag-row">
+                              @for (d of missionDifferentiators; track d) {
+                                <span class="tag tag-diff">{{ d }}</span>
+                              }
+                            </div>
+                          </div>
+                        }
+                      </div>
+                    }
 
-      <!-- Color Inspiration -->
-      @if (missionColorInspiration.length > 0) {
-        <section class="preview-section" [@sectionEnter]>
-          <div class="section-header">
-            <div class="section-icon color-icon">
-              <mat-icon>color_lens</mat-icon>
-            </div>
-            <h3 class="section-label">Color Inspiration</h3>
-          </div>
-          <div class="tag-row">
-            @for (c of missionColorInspiration; track c) {
-              <span class="tag tag-color">{{ c }}</span>
-            }
-          </div>
-        </section>
-      }
+                    @if (latestOutput?.mission_summary) {
+                      <div class="output-block">
+                        <h4 class="block-title">Summary</h4>
+                        <p class="block-text">{{ latestOutput!.mission_summary }}</p>
+                      </div>
+                    }
 
-      <!-- Color Palettes -->
-      @if (missionPalettes.length > 0) {
-        <section class="preview-section" [@sectionEnter]>
-          <div class="section-header">
-            <div class="section-icon palette-icon">
-              <mat-icon>palette</mat-icon>
-            </div>
-            <h3 class="section-label">Color Palettes</h3>
-          </div>
-          <div class="palettes-grid">
-            @for (palette of missionPalettes; track palette.name; let i = $index) {
-              <div class="palette-card" [class.palette-selected]="isPaletteSelected(i)">
-                <div class="palette-top">
-                  <span class="palette-name">{{ palette.name }}</span>
-                  @if (isPaletteSelected(i)) {
-                    <span class="selected-badge">
-                      <mat-icon>check</mat-icon>
-                      Selected
-                    </span>
+                    @if (latestOutput?.codification; as cod) {
+                      <div class="output-block">
+                        <h4 class="block-title">Positioning</h4>
+                        <p class="block-text">{{ cod.positioning_statement }}</p>
+                      </div>
+                      <div class="output-block">
+                        <h4 class="block-title">Brand promise</h4>
+                        <p class="block-text">{{ cod.brand_promise }}</p>
+                      </div>
+                      <div class="output-block">
+                        <h4 class="block-title">Narrative pillars</h4>
+                        <ul class="block-list">
+                          @for (pillar of cod.narrative_pillars; track pillar) {
+                            <li>{{ pillar }}</li>
+                          }
+                        </ul>
+                      </div>
+                    }
+
+                    @if (!hasMissionData && !latestOutput?.mission_summary && !latestOutput?.codification) {
+                      <p class="phase-empty">Start by describing your company, audience, and core values.</p>
+                    }
                   }
-                </div>
-                @if (palette.description) {
-                  <p class="palette-description">{{ palette.description }}</p>
-                }
-                <div class="swatch-strip">
-                  @for (color of palette.colors; track color) {
-                    <div class="swatch-block" [style.background]="parseColor(color)" [title]="color">
-                      <span class="swatch-hex">{{ color }}</span>
-                    </div>
+
+                  @case ('narrative_messaging') {
+                    @if (latestOutput?.writing_guidelines; as wg) {
+                      @if (mission?.desired_voice && mission!.desired_voice !== 'clear, confident, human') {
+                        <div class="voice-card">
+                          <p class="voice-text">{{ mission!.desired_voice }}</p>
+                        </div>
+                      }
+                      <div class="output-block">
+                        <h4 class="block-title">Voice principles</h4>
+                        <ul class="block-list">
+                          @for (v of wg.voice_principles; track v) {
+                            <li>{{ v }}</li>
+                          }
+                        </ul>
+                      </div>
+                      <div class="do-dont-grid">
+                        <div class="output-block do-block">
+                          <h4 class="block-title do-title">
+                            <mat-icon>check_circle</mat-icon>
+                            Do
+                          </h4>
+                          <ul class="block-list">
+                            @for (d of wg.style_dos; track d) {
+                              <li>{{ d }}</li>
+                            }
+                          </ul>
+                        </div>
+                        <div class="output-block dont-block">
+                          <h4 class="block-title dont-title">
+                            <mat-icon>cancel</mat-icon>
+                            Don't
+                          </h4>
+                          <ul class="block-list">
+                            @for (d of wg.style_donts; track d) {
+                              <li>{{ d }}</li>
+                            }
+                          </ul>
+                        </div>
+                      </div>
+                    }
                   }
-                </div>
-                @if (palette.sentiment) {
-                  <p class="palette-mood">{{ palette.sentiment }}</p>
+
+                  @case ('visual_identity') {
+                    @if (missionColorInspiration.length > 0) {
+                      <div class="subsection">
+                        <span class="tag-group-label">Color inspiration</span>
+                        <div class="tag-row">
+                          @for (c of missionColorInspiration; track c) {
+                            <span class="tag tag-color">{{ c }}</span>
+                          }
+                        </div>
+                      </div>
+                    }
+
+                    @if (missionPalettes.length > 0) {
+                      <div class="subsection">
+                        <span class="tag-group-label">Color palettes</span>
+                        <div class="palettes-grid">
+                          @for (palette of missionPalettes; track palette.name; let i = $index) {
+                            <div class="palette-card" [class.palette-selected]="isPaletteSelected(i)">
+                              <div class="palette-top">
+                                <span class="palette-name">{{ palette.name }}</span>
+                                @if (isPaletteSelected(i)) {
+                                  <span class="selected-badge">
+                                    <mat-icon>check</mat-icon>
+                                    Selected
+                                  </span>
+                                }
+                              </div>
+                              @if (palette.description) {
+                                <p class="palette-description">{{ palette.description }}</p>
+                              }
+                              <div class="swatch-strip">
+                                @for (color of palette.colors; track color) {
+                                  <div class="swatch-block" [style.background]="parseColor(color)" [title]="color">
+                                    <span class="swatch-hex">{{ color }}</span>
+                                  </div>
+                                }
+                              </div>
+                              @if (palette.sentiment) {
+                                <p class="palette-mood">{{ palette.sentiment }}</p>
+                              }
+                              <button
+                                type="button"
+                                class="palette-select-btn"
+                                [class.is-selected]="isPaletteSelected(i)"
+                                [disabled]="isPaletteSelected(i)"
+                                (click)="onSelectPalette(i)"
+                                data-testid="palette-select-btn"
+                              >
+                                <mat-icon>{{ isPaletteSelected(i) ? 'check' : 'radio_button_unchecked' }}</mat-icon>
+                                {{ isPaletteSelected(i) ? 'Selected' : 'Select this palette' }}
+                              </button>
+                            </div>
+                          }
+                        </div>
+                      </div>
+                    }
+
+                    @if (latestOutput?.mood_boards?.length) {
+                      <div class="subsection">
+                        <span class="tag-group-label">Moodboards</span>
+                        <div class="moodboard-grid">
+                          @for (mb of latestOutput!.mood_boards!; track mb.title) {
+                            <div class="moodboard-card">
+                              <h4 class="moodboard-title">{{ mb.title }}</h4>
+                              <div class="moodboard-detail">
+                                <span class="detail-label">Visual direction</span>
+                                <p>{{ mb.visual_direction }}</p>
+                              </div>
+                              @if (mb.color_story.length) {
+                                <div class="moodboard-colors">
+                                  @for (c of mb.color_story; track c) {
+                                    <div class="mini-swatch" [style.background]="parseColor(c)" [title]="c"></div>
+                                  }
+                                </div>
+                              }
+                              <div class="moodboard-detail">
+                                <span class="detail-label">Typography</span>
+                                <p>{{ mb.typography_direction }}</p>
+                              </div>
+                              @if (mb.image_style.length) {
+                                <div class="moodboard-detail">
+                                  <span class="detail-label">Image style</span>
+                                  <div class="tag-row compact">
+                                    @for (s of mb.image_style; track s) {
+                                      <span class="tag tag-muted">{{ s }}</span>
+                                    }
+                                  </div>
+                                </div>
+                              }
+                            </div>
+                          }
+                        </div>
+                      </div>
+                    }
+
+                    @if (latestOutput?.design_system; as ds) {
+                      <div class="subsection">
+                        <div class="output-block">
+                          <h4 class="block-title">Design principles</h4>
+                          <ul class="block-list">
+                            @for (pr of ds.design_principles; track pr) {
+                              <li>{{ pr }}</li>
+                            }
+                          </ul>
+                        </div>
+                        <div class="output-block">
+                          <h4 class="block-title">Foundation tokens</h4>
+                          <ul class="block-list">
+                            @for (t of ds.foundation_tokens; track t) {
+                              <li>{{ t }}</li>
+                            }
+                          </ul>
+                        </div>
+                        <div class="output-block">
+                          <h4 class="block-title">Component standards</h4>
+                          <ul class="block-list">
+                            @for (c of ds.component_standards; track c) {
+                              <li>{{ c }}</li>
+                            }
+                          </ul>
+                        </div>
+                      </div>
+                    }
+
+                    @if (mission?.visual_style || mission?.typography_preference || mission?.interface_density) {
+                      <div class="foundation-grid subsection">
+                        @if (mission!.visual_style) {
+                          <div class="foundation-card">
+                            <span class="field-label">Style</span>
+                            <span class="field-value">{{ mission!.visual_style }}</span>
+                          </div>
+                        }
+                        @if (mission!.typography_preference) {
+                          <div class="foundation-card">
+                            <span class="field-label">Typography</span>
+                            <span class="field-value">{{ mission!.typography_preference }}</span>
+                          </div>
+                        }
+                        @if (mission!.interface_density) {
+                          <div class="foundation-card">
+                            <span class="field-label">Layout density</span>
+                            <span class="field-value">{{ mission!.interface_density }}</span>
+                          </div>
+                        }
+                      </div>
+                    }
+                  }
+
+                  @case ('channel_activation') {
+                    @if (latestOutput?.creative_refinement; as cr) {
+                      @if (cr.phases.length) {
+                        <div class="output-block">
+                          <h4 class="block-title">Creative phases</h4>
+                          <ul class="block-list">
+                            @for (ph of cr.phases; track ph) {
+                              <li>{{ ph }}</li>
+                            }
+                          </ul>
+                        </div>
+                      }
+                      @if (cr.workshop_prompts.length) {
+                        <div class="output-block">
+                          <h4 class="block-title">Workshop prompts</h4>
+                          <ul class="block-list">
+                            @for (wp of cr.workshop_prompts; track wp) {
+                              <li>{{ wp }}</li>
+                            }
+                          </ul>
+                        </div>
+                      }
+                      @if (cr.decision_criteria.length) {
+                        <div class="output-block">
+                          <h4 class="block-title">Decision criteria</h4>
+                          <ul class="block-list">
+                            @for (dc of cr.decision_criteria; track dc) {
+                              <li>{{ dc }}</li>
+                            }
+                          </ul>
+                        </div>
+                      }
+                    }
+                    @if (latestOutput?.design_asset_result; as dar) {
+                      <div class="output-block">
+                        <h4 class="block-title">Design assets</h4>
+                        <p class="block-text">
+                          Request {{ dar.request_id }} · {{ dar.status }} · {{ dar.artifacts.length }} artifact(s)
+                        </p>
+                      </div>
+                    }
+                  }
+
+                  @case ('governance') {
+                    @if (latestOutput?.brand_guidelines?.length) {
+                      <div class="output-block">
+                        <h4 class="block-title">Brand guidelines</h4>
+                        <ul class="block-list">
+                          @for (g of latestOutput!.brand_guidelines; track g) {
+                            <li>{{ g }}</li>
+                          }
+                        </ul>
+                      </div>
+                    }
+                    @if (latestOutput?.wiki_backlog?.length) {
+                      <div class="output-block">
+                        <h4 class="block-title">Wiki backlog</h4>
+                        <ul class="block-list">
+                          @for (w of latestOutput!.wiki_backlog!; track w.title) {
+                            <li>
+                              <strong>{{ w.title }}</strong> — {{ w.summary }}
+                              <span class="wiki-meta">({{ w.update_cadence }})</span>
+                            </li>
+                          }
+                        </ul>
+                      </div>
+                    }
+                  }
                 }
               </div>
             }
-          </div>
-        </section>
-      }
-
-      <!-- Visual Style -->
-      @if (mission?.visual_style || mission?.interface_density) {
-        <section class="preview-section" [@sectionEnter]>
-          <div class="section-header">
-            <div class="section-icon style-icon">
-              <mat-icon>dashboard_customize</mat-icon>
-            </div>
-            <h3 class="section-label">Visual Style</h3>
-          </div>
-          <div class="foundation-grid">
-            @if (mission!.visual_style) {
-              <div class="foundation-card">
-                <span class="field-label">Style</span>
-                <span class="field-value">{{ mission!.visual_style }}</span>
-              </div>
-            }
-            @if (mission!.interface_density) {
-              <div class="foundation-card">
-                <span class="field-label">Layout density</span>
-                <span class="field-value">{{ mission!.interface_density }}</span>
-              </div>
-            }
-          </div>
-        </section>
-      }
-
-      <!-- Typography -->
-      @if (mission?.typography_preference) {
-        <section class="preview-section" [@sectionEnter]>
-          <div class="section-header">
-            <div class="section-icon type-icon">
-              <mat-icon>format_size</mat-icon>
-            </div>
-            <h3 class="section-label">Typography</h3>
-          </div>
-          <div class="voice-card">
-            <p class="voice-text">{{ mission!.typography_preference }}</p>
           </div>
         </section>
       }
     </div>
-  } @else {
-    <!-- Full Output — Tabbed View -->
-    <mat-tab-group class="output-tabs" animationDuration="200ms">
-      <mat-tab>
-        <ng-template mat-tab-label>
-          <mat-icon>summarize</mat-icon>
-          <span>Summary</span>
-        </ng-template>
-        <div class="tab-body">
-          @if (latestOutput?.mission_summary) {
-            <p class="summary-text">{{ latestOutput!.mission_summary }}</p>
-          } @else {
-            <div class="empty-tab">
-              <mat-icon>summarize</mat-icon>
-              <p>Your brand summary will be created during the strategic core phase, where your mission, positioning, and brand promise are defined.</p>
-            </div>
-          }
-        </div>
-      </mat-tab>
+  }
 
-      <mat-tab>
-        <ng-template mat-tab-label>
-          <mat-icon>hub</mat-icon>
-          <span>Codification</span>
-        </ng-template>
-        @if (latestOutput?.codification; as cod) {
-          <div class="tab-body">
-            <div class="output-block">
-              <h4 class="block-title">Positioning</h4>
-              <p class="block-text">{{ cod.positioning_statement }}</p>
-            </div>
-            <div class="output-block">
-              <h4 class="block-title">Brand promise</h4>
-              <p class="block-text">{{ cod.brand_promise }}</p>
-            </div>
-            <div class="output-block">
-              <h4 class="block-title">Narrative pillars</h4>
-              <ul class="block-list">
-                @for (p of cod.narrative_pillars; track p) {
-                  <li>{{ p }}</li>
-                }
-              </ul>
-            </div>
+  <!-- Brand Book overlay: viewer + download, triggered from the header action. -->
+  @if (brandBookOpen && latestOutput?.brand_book?.content; as content) {
+    <div
+      class="brand-book-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Brand book"
+      data-testid="brand-book-overlay"
+    >
+      <div class="brand-book-dialog">
+        <header class="brand-book-dialog-header">
+          <h3>Brand Book</h3>
+          <div class="brand-book-dialog-actions">
+            <button type="button" class="brand-book-download" (click)="downloadBrandBook()">
+              <mat-icon>download</mat-icon>
+              Download
+            </button>
+            <button
+              type="button"
+              class="brand-book-close"
+              (click)="closeBrandBook()"
+              aria-label="Close brand book"
+            >
+              <mat-icon>close</mat-icon>
+            </button>
           </div>
-        } @else {
-          <div class="tab-body">
-            <div class="empty-tab">
-              <mat-icon>hub</mat-icon>
-              <p>Brand codification — positioning, promise, and narrative pillars — will be generated during the strategic core phase.</p>
-            </div>
-          </div>
-        }
-      </mat-tab>
-
-      <mat-tab>
-        <ng-template mat-tab-label>
-          <mat-icon>dashboard</mat-icon>
-          <span>Moodboards</span>
-        </ng-template>
-        <div class="tab-body">
-          @if (latestOutput?.mood_boards?.length) {
-            <div class="moodboard-grid">
-              @for (mb of latestOutput!.mood_boards!; track mb.title) {
-                <div class="moodboard-card">
-                  <h4 class="moodboard-title">{{ mb.title }}</h4>
-                  <div class="moodboard-detail">
-                    <span class="detail-label">Visual direction</span>
-                    <p>{{ mb.visual_direction }}</p>
-                  </div>
-                  @if (mb.color_story.length) {
-                    <div class="moodboard-colors">
-                      @for (c of mb.color_story; track c) {
-                        <div class="mini-swatch" [style.background]="parseColor(c)" [title]="c"></div>
-                      }
-                    </div>
-                  }
-                  <div class="moodboard-detail">
-                    <span class="detail-label">Typography</span>
-                    <p>{{ mb.typography_direction }}</p>
-                  </div>
-                  @if (mb.image_style.length) {
-                    <div class="moodboard-detail">
-                      <span class="detail-label">Image style</span>
-                      <div class="tag-row compact">
-                        @for (s of mb.image_style; track s) {
-                          <span class="tag tag-muted">{{ s }}</span>
-                        }
-                      </div>
-                    </div>
-                  }
-                </div>
-              }
-            </div>
-          } @else {
-            <div class="empty-tab">
-              <mat-icon>dashboard</mat-icon>
-              <p>Moodboards with visual direction, color stories, and typography guidance will be created during the visual identity phase.</p>
-            </div>
-          }
-        </div>
-      </mat-tab>
-
-      <mat-tab>
-        <ng-template mat-tab-label>
-          <mat-icon>palette</mat-icon>
-          <span>Colors</span>
-        </ng-template>
-        <div class="tab-body">
-          @if (selectedPalette) {
-            <div class="palette-card palette-selected featured">
-              <div class="palette-top">
-                <span class="palette-name">{{ selectedPalette.name }}</span>
-                <span class="selected-badge">
-                  <mat-icon>check</mat-icon>
-                  Active
-                </span>
-              </div>
-              <div class="swatch-strip large">
-                @for (color of selectedPalette.colors; track color) {
-                  <div class="swatch-block" [style.background]="parseColor(color)" [title]="color">
-                    <span class="swatch-hex">{{ color }}</span>
-                  </div>
-                }
-              </div>
-              @if (selectedPalette.sentiment) {
-                <p class="palette-mood">{{ selectedPalette.sentiment }}</p>
-              }
-            </div>
-          }
-          @if (colorStories.length) {
-            <h4 class="block-title">Color stories</h4>
-            <div class="color-story-strip">
-              @for (c of colorStories; track c) {
-                <div class="story-swatch" [style.background]="parseColor(c)" [title]="c"></div>
-              }
-            </div>
-          } @else if (!selectedPalette) {
-            <div class="empty-tab">
-              <mat-icon>palette</mat-icon>
-              <p>Your color palette and color stories will be generated during the visual identity phase, alongside moodboards and typography.</p>
-            </div>
-          }
-        </div>
-      </mat-tab>
-
-      <mat-tab>
-        <ng-template mat-tab-label>
-          <mat-icon>edit_note</mat-icon>
-          <span>Writing</span>
-        </ng-template>
-        @if (latestOutput?.writing_guidelines; as wg) {
-          <div class="tab-body">
-            <div class="output-block">
-              <h4 class="block-title">Voice principles</h4>
-              <ul class="block-list">
-                @for (v of wg.voice_principles; track v) {
-                  <li>{{ v }}</li>
-                }
-              </ul>
-            </div>
-            <div class="do-dont-grid">
-              <div class="output-block do-block">
-                <h4 class="block-title do-title">
-                  <mat-icon>check_circle</mat-icon>
-                  Do
-                </h4>
-                <ul class="block-list">
-                  @for (d of wg.style_dos; track d) {
-                    <li>{{ d }}</li>
-                  }
-                </ul>
-              </div>
-              <div class="output-block dont-block">
-                <h4 class="block-title dont-title">
-                  <mat-icon>cancel</mat-icon>
-                  Don't
-                </h4>
-                <ul class="block-list">
-                  @for (d of wg.style_donts; track d) {
-                    <li>{{ d }}</li>
-                  }
-                </ul>
-              </div>
-            </div>
-          </div>
-        } @else {
-          <div class="tab-body">
-            <div class="empty-tab">
-              <mat-icon>edit_note</mat-icon>
-              <p>Voice principles and writing style guidelines will be crafted during the narrative and messaging phase.</p>
-            </div>
-          </div>
-        }
-      </mat-tab>
-
-      <mat-tab>
-        <ng-template mat-tab-label>
-          <mat-icon>design_services</mat-icon>
-          <span>Design</span>
-        </ng-template>
-        @if (latestOutput?.design_system; as ds) {
-          <div class="tab-body">
-            <div class="output-block">
-              <h4 class="block-title">Design principles</h4>
-              <ul class="block-list">
-                @for (p of ds.design_principles; track p) {
-                  <li>{{ p }}</li>
-                }
-              </ul>
-            </div>
-            <div class="output-block">
-              <h4 class="block-title">Foundation tokens</h4>
-              <ul class="block-list">
-                @for (t of ds.foundation_tokens; track t) {
-                  <li>{{ t }}</li>
-                }
-              </ul>
-            </div>
-            <div class="output-block">
-              <h4 class="block-title">Component standards</h4>
-              <ul class="block-list">
-                @for (c of ds.component_standards; track c) {
-                  <li>{{ c }}</li>
-                }
-              </ul>
-            </div>
-          </div>
-        } @else {
-          <div class="tab-body">
-            <div class="empty-tab">
-              <mat-icon>design_services</mat-icon>
-              <p>Design principles, tokens, and component standards will be defined during the visual identity phase.</p>
-            </div>
-          </div>
-        }
-      </mat-tab>
-
-      <mat-tab>
-        <ng-template mat-tab-label>
-          <mat-icon>menu_book</mat-icon>
-          <span>Guidelines</span>
-        </ng-template>
-        <div class="tab-body">
-          @if (latestOutput?.brand_guidelines?.length) {
-            <ul class="block-list">
-              @for (g of latestOutput!.brand_guidelines; track g) {
-                <li>{{ g }}</li>
-              }
-            </ul>
-          } @else {
-            <div class="empty-tab">
-              <mat-icon>menu_book</mat-icon>
-              <p>Brand guidelines covering usage rules and approval workflows will be produced during the governance phase.</p>
-            </div>
-          }
-        </div>
-      </mat-tab>
-
-      <mat-tab>
-        <ng-template mat-tab-label>
-          <mat-icon>auto_stories</mat-icon>
-          <span>Brand Book</span>
-        </ng-template>
-        @if (latestOutput?.brand_book?.content; as content) {
-          <div class="tab-body">
-            <div class="brand-book-prose">{{ content }}</div>
-          </div>
-        } @else {
-          <div class="tab-body">
-            <div class="empty-tab">
-              <mat-icon>auto_stories</mat-icon>
-              <p>The complete brand book will be compiled during the governance phase, bringing together all elements of your brand identity.</p>
-            </div>
-          </div>
-        }
-      </mat-tab>
-    </mat-tab-group>
+        </header>
+        <pre class="brand-book-prose">{{ content }}</pre>
+      </div>
+    </div>
   }
 </div>
