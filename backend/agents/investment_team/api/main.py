@@ -1574,6 +1574,11 @@ def _strategy_lab_worker(
                 remaining = remaining[max_parallel:]
 
                 wave_futures: Dict[Any, int] = {}
+                # Issue #269 — retain each cycle's orchestrator so the wave
+                # can merge its post-run ``convergence_tracker`` back into
+                # ``primary_tracker`` below. Keyed by 0-based cycle index
+                # for O(1) lookup during the deterministic merge loop.
+                wave_orchestrators: Dict[int, "StrategyLabOrchestrator"] = {}
                 with ThreadPoolExecutor(
                     max_workers=len(wave_indices), thread_name_prefix="strat-lab"
                 ) as pool:
@@ -1595,6 +1600,7 @@ def _strategy_lab_worker(
                         cycle_orchestrator = StrategyLabOrchestrator(
                             convergence_tracker=primary_tracker.snapshot(),
                         )
+                        wave_orchestrators[i] = cycle_orchestrator
                         future = pool.submit(
                             _run_one_strategy_lab_cycle,
                             config,
@@ -1691,6 +1697,13 @@ def _strategy_lab_worker(
                         for g in record.quality_gate_results
                     ]
                     primary_tracker.record(record.strategy, gate_results)
+                    # Issue #269 — fold the cycle-local trial-count delta
+                    # back into the primary. Diversity state was already
+                    # merged via ``record()`` above, so ``merge_from`` only
+                    # touches ``_trial_count``.
+                    cycle_orch = wave_orchestrators.get(_idx)
+                    if cycle_orch is not None:
+                        primary_tracker.merge_from(cycle_orch.convergence_tracker)
 
                 # Check for external cancellation between waves
                 if not run_failed and _is_run_cancelled():

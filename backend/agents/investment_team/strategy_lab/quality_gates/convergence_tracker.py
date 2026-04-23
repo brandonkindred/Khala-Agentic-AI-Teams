@@ -34,6 +34,11 @@ class ConvergenceTracker:
         # loop completes; ``record()`` does not touch this so parallel cycle
         # snapshots can keep their accounting independent of diversity state.
         self._trial_count: int = 0
+        # Issue #269 — baseline captured inside ``snapshot()`` so that
+        # ``merge_from`` folds only the delta accumulated during the cycle
+        # back into the primary, avoiding double-counting the pre-snapshot
+        # trial total. Zero on directly-constructed instances.
+        self._trial_count_at_snapshot: int = 0
 
     # ------------------------------------------------------------------
     # Recording
@@ -154,7 +159,35 @@ class ConvergenceTracker:
         clone._failure_modes = Counter(self._failure_modes)
         clone._asset_class_history = list(self._asset_class_history)
         clone._trial_count = self._trial_count
+        clone._trial_count_at_snapshot = self._trial_count
         return clone
+
+    def merge_from(self, other: "ConvergenceTracker") -> None:
+        """Fold a cycle snapshot's trial-count delta back into this tracker.
+
+        Called at parallel-batch wave completion so the primary tracker
+        accumulates the refinement rounds each cycle observed on its own
+        snapshot. Without this, DSR deflation during concurrent waves
+        sees only prior-wave trials and under-deflates by the current
+        wave's sibling increments.
+
+        Only ``_trial_count`` is merged. Diversity state (signatures,
+        asset-class history, failure-mode counters) flows back via the
+        wave-completion ``record()`` loop in the orchestration layer;
+        merging it here would double-count.
+
+        The delta is computed against ``other._trial_count_at_snapshot``
+        (captured in ``snapshot()``), so ``self`` need not equal the
+        baseline at merge time.
+        """
+        baseline = other._trial_count_at_snapshot
+        delta = other._trial_count - baseline
+        if delta < 0:
+            raise ValueError(
+                f"snapshot trial_count ({other._trial_count}) is below its "
+                f"baseline ({baseline}); merge_from expects monotonic increments"
+            )
+        self._trial_count += delta
 
     # ------------------------------------------------------------------
     # Internals

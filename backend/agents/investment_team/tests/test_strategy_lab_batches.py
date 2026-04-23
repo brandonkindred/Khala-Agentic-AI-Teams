@@ -154,6 +154,11 @@ def test_multi_batch_run_completes_all_cycles_and_learns_from_priors(
         def record(self, *_a: Any, **_kw: Any) -> None:
             pass
 
+        def merge_from(self, *_a: Any, **_kw: Any) -> None:
+            # Issue #269 — wave-completion loop now calls merge_from on the
+            # primary for each cycle snapshot; stub is a no-op.
+            pass
+
     monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _StubOrchestrator)
     monkeypatch.setattr(lab_main, "ConvergenceTracker", _StubTracker)
     monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
@@ -236,6 +241,11 @@ def test_signal_brief_regenerates_once_per_batch(
         def record(self, *_a: Any, **_kw: Any) -> None:
             pass
 
+        def merge_from(self, *_a: Any, **_kw: Any) -> None:
+            # Issue #269 — wave-completion loop now calls merge_from on the
+            # primary for each cycle snapshot; stub is a no-op.
+            pass
+
     class _StubOrchestrator:
         _counter = 0
 
@@ -293,3 +303,79 @@ def test_total_cycles_is_batch_size_times_batch_count(empty_lab_state: None) -> 
         RunStrategyLabRequest(batch_count=0)
     with pytest.raises(Exception):
         RunStrategyLabRequest(batch_count=lab_main._MAX_BATCH_COUNT + 1)
+
+
+def test_parallel_wave_merges_trial_counts_into_primary_tracker(
+    empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #269 — after a parallel wave completes, the primary tracker's
+    trial_count must equal the sum of per-cycle refinement rounds, not just
+    the primary's snapshot-time value (which would stay at 0)."""
+
+    # Each cycle simulates this many refinement rounds on its own snapshot.
+    trials_per_cycle = 7
+
+    instances: List["_CapturingOrchestrator"] = []
+
+    class _CapturingOrchestrator:
+        """Passes ``convergence_tracker`` through unchanged so the real
+        ``ConvergenceTracker.merge_from`` path is exercised end-to-end.
+        The first instance receives the primary tracker; subsequent
+        instances receive snapshots built at wave submission time."""
+
+        _counter = 0
+
+        def __init__(self, convergence_tracker: Any = None) -> None:
+            self.convergence_tracker = convergence_tracker
+            instances.append(self)
+
+        def run_cycle(
+            self,
+            prior_records: List[StrategyLabRecord],
+            config: BacktestConfig,
+            signal_brief: Any = None,
+            on_phase: Any = None,
+            exclude_asset_classes: Any = None,
+        ) -> StrategyLabRecord:
+            # Simulate refinement-loop trial increments on the cycle snapshot.
+            if self.convergence_tracker is not None:
+                self.convergence_tracker.increment_trials(trials_per_cycle)
+            type(self)._counter += 1
+            return _make_record(type(self)._counter, config)
+
+    monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _CapturingOrchestrator)
+    # NB: intentionally do NOT monkeypatch ConvergenceTracker — we want the
+    # real class so merge_from is exercised end-to-end.
+    monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
+    monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
+
+    request = RunStrategyLabRequest(
+        batch_size=3,
+        batch_count=1,
+        max_parallel=3,  # truly parallel wave
+        paper_trading_enabled=False,
+    )
+    run_id = "run-test-parallel-merge"
+    _seed_run_state(run_id, request)
+
+    _strategy_lab_worker(run_id, request)
+
+    state = lab_main._active_runs[run_id]
+    assert state["status"] == "completed", state
+
+    # The first constructed orchestrator holds the primary tracker
+    # (constructed with a fresh ConvergenceTracker at worker entry).
+    assert len(instances) == 1 + 3  # primary + one per cycle
+    primary_tracker = instances[0].convergence_tracker
+    assert primary_tracker is not None
+
+    # Before the fix: primary_tracker.trial_count == 0 (snapshots incremented
+    # their own copies and were discarded). After the fix: 3 cycles × 7 =
+    # 21 trials merged back into the primary.
+    assert primary_tracker.trial_count == 3 * trials_per_cycle
+
+    # Sanity: each cycle's snapshot tracker also still shows its own count
+    # (merge_from does not mutate the snapshot).
+    for cycle_orch in instances[1:]:
+        # Snapshot started at baseline 0, was incremented trials_per_cycle.
+        assert cycle_orch.convergence_tracker.trial_count == trials_per_cycle
