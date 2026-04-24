@@ -43,6 +43,7 @@ require docker
 require jq
 require curl
 require ss
+require timeout
 
 hdr "Warm a sandbox if none exist"
 if ! docker ps --format '{{.Names}}' | grep -q '^khala-sbx-'; then
@@ -126,17 +127,44 @@ fi
 hdr "Fork-bomb containment (pids-limit)"
 load_before=$(awk '{print $1}' /proc/loadavg)
 note "host loadavg before: ${load_before}"
-# Run the fork bomb under timeout — exec returns 124 if killed by timeout
-# (which is the success signal here: the container was containing it).
+# The shell forks until the kernel's pids-limit refuses more processes. We
+# read PASS as: `timeout` killed a still-running bomb (rc=124), which means
+# the container kept the shell busy within its pids cap. We must treat
+# docker-CLI failures (rc 125/126/127) as inconclusive rather than pass, or
+# a broken probe looks green.
 timeout 8 docker exec "$CONTAINER" sh -c ':() { :|:& }; :' >/dev/null 2>&1
 rc=$?
 sleep 2
 load_after=$(awk '{print $1}' /proc/loadavg)
 note "host loadavg after:  ${load_after}"
-if [[ "$rc" -eq 124 || "$rc" -ne 0 ]]; then
-  ok "fork-bomb contained by pids-limit (exec rc=${rc})"
+
+fork_bomb_verdict=""
+case "$rc" in
+  124)
+    fork_bomb_verdict="pass: exec timed out under pids-limit (rc=124)"
+    ;;
+  125|126|127)
+    # 125 = docker daemon error, 126 = container cannot exec, 127 = command not found.
+    fork_bomb_verdict="fail: docker exec failed (rc=${rc}) — probe inconclusive"
+    ;;
+  0)
+    fork_bomb_verdict="fail: fork-bomb exec returned 0 — container did not refuse"
+    ;;
+  *)
+    # Non-timeout non-zero: the shell was killed (SIGKILL 137, etc.), also
+    # acceptable — but only if the container itself survived the probe.
+    fork_bomb_verdict="pass: exec shell terminated (rc=${rc})"
+    ;;
+esac
+
+if [[ "$fork_bomb_verdict" == pass:* ]]; then
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" == "true" ]]; then
+    ok "${fork_bomb_verdict#pass: }; container still running"
+  else
+    fail "fork-bomb probe killed the container (rc=${rc}) — not contained"
+  fi
 else
-  fail "fork-bomb exec returned 0 — container did not refuse"
+  fail "${fork_bomb_verdict#fail: }"
 fi
 
 hdr "requires-live-integration block — backend returns 409"
