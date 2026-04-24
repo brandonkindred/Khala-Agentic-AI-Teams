@@ -1,4 +1,6 @@
-"""AI Sales Team — full B2B sales pod powered by AWS Strands agents."""
+"""AI Sales Team — full B2B sales pod. Every agent calls the shared
+``llm_service`` layer via ``complete_validated`` for typed, self-correcting
+structured output with per-role ``sales.<role>`` telemetry tagging."""
 
 from .models import (
     CareerRole,
