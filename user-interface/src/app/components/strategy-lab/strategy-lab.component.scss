@@ -92,6 +92,31 @@
   }
 }
 
+// ── Non-fatal warning banner (completed_with_errors, batch warnings) ────────
+
+.warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  background: var(--kh-warning-subtle, #fff7e0);
+  color: var(--kh-warning, #8a6d00);
+  border-radius: var(--kh-radius-md);
+  margin-bottom: 1.25rem;
+  font-size: 0.9rem;
+
+  mat-icon {
+    flex-shrink: 0;
+    font-size: 1.2rem;
+    width: 1.2rem;
+    height: 1.2rem;
+  }
+
+  button {
+    margin-left: auto;
+  }
+}
+
 // ── Summary chips ─────────────────────────────────────────────────────────────
 
 .summary-row {
@@ -692,6 +717,17 @@
   background: var(--kh-warning-subtle);
   color: var(--kh-warning);
   font-weight: 500;
+}
+
+.errored-badge {
+  font-size: var(--kh-text-xs);
+  padding: 2px 8px;
+  border-radius: var(--kh-radius-full);
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
+  font-weight: 500;
+  cursor: help;
+  white-space: pre-line;
 }
 
 .status-badge {

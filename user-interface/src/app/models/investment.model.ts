@@ -575,13 +575,24 @@ export interface StrategyLabCycleProgress {
   is_winning?: boolean;
 }
 
+export interface StrategyLabErroredDetail {
+  cycle_index: number;
+  batch_index?: number;
+  error: string;
+  exception_type?: string;
+  reason?: string;
+}
+
 export interface StrategyLabRunStatus {
   run_id: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'completed_with_errors' | 'failed' | 'cancelled';
   started_at: string;
   total_cycles: number;
   completed_cycles: number;
   skipped_cycles: number;
+  /** Non-fatal per-cycle failures — run kept going but user should see the count. */
+  errored_cycles?: number;
+  errored_details?: StrategyLabErroredDetail[];
   current_cycle?: StrategyLabCycleProgress;
   completed_record_ids: string[];
   error?: string;
@@ -625,8 +636,10 @@ export interface StrategyLabStreamEvent {
     | 'progress'
     | 'cycle_complete'
     | 'cycle_skipped'
+    | 'cycle_errored'
     | 'batch_start'
     | 'batch_complete'
+    | 'batch_warning'
     | 'complete'
     | 'error'
     | 'done';

@@ -100,6 +100,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   loading = false;
   clearingAll = false;
   error: string | null = null;
+  /** Non-fatal warning banner shown when a run finishes with errored/skipped cycles. */
+  completionWarning: string | null = null;
   /** Lab record id currently being deleted (disables actions on that card). */
   deletingLabRecordId: string | null = null;
 
@@ -252,6 +254,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         status: event['status'] ?? this.runStatus.status,
         completed_cycles: event['completed_cycles'] ?? this.runStatus.completed_cycles,
         skipped_cycles: event['skipped_cycles'] ?? this.runStatus.skipped_cycles,
+        errored_cycles: event['errored_cycles'] ?? this.runStatus.errored_cycles,
+        errored_details: event['errored_details'] ?? this.runStatus.errored_details,
         current_cycle: event['current_cycle'] ?? this.runStatus.current_cycle,
         completed_record_ids: event['completed_record_ids'] ?? this.runStatus.completed_record_ids,
         error: event['error'] ?? this.runStatus.error,
@@ -322,7 +326,37 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       this.runStatus.current_cycle = undefined;
     }
 
+    if (event.type === 'cycle_errored' && this.runStatus) {
+      this.runStatus.errored_cycles = (this.runStatus.errored_cycles ?? 0) + 1;
+      const detail = {
+        cycle_index: (event['cycle_index'] as number) ?? 0,
+        batch_index: event['batch_index'] as number | undefined,
+        error: (event['error'] as string) || '',
+        exception_type: event['reason'] as string | undefined,
+      };
+      const existing = this.runStatus.errored_details ?? [];
+      this.runStatus.errored_details = [...existing, detail].slice(-50);
+      this.runStatus.current_cycle = undefined;
+    }
+
+    if (event.type === 'batch_warning') {
+      // Non-fatal pre-batch issue (e.g. signal-brief failure). Surface as a
+      // gentle warning; the run is still progressing.
+      this.completionWarning =
+        (event['reason'] as string) === 'signal_brief_failed'
+          ? 'Signal brief unavailable for a batch; strategies continued without it.'
+          : (event['reason'] as string) || 'A non-fatal warning occurred during a batch.';
+    }
+
     if (event.type === 'complete') {
+      const erroredCount = (event['errored_count'] as number) ?? this.runStatus?.errored_cycles ?? 0;
+      const skippedCount = (event['skipped_count'] as number) ?? this.runStatus?.skipped_cycles ?? 0;
+      if (erroredCount > 0 || (event['status'] as string) === 'completed_with_errors') {
+        const parts: string[] = [];
+        if (erroredCount > 0) parts.push(`${erroredCount} cycle(s) errored`);
+        if (skippedCount > 0) parts.push(`${skippedCount} cycle(s) skipped`);
+        this.completionWarning = `Run finished with ${parts.join(' and ')}. See details below.`;
+      }
       this.onRunComplete();
     }
 
@@ -394,6 +428,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
     this.running = true;
     this.error = null;
+    this.completionWarning = null;
     this.api.runStrategyLab({ batch_size: batchSize, batch_count: batchCount }).subscribe({
       next: (res) => {
         this.activeRunId = res.run_id;
@@ -404,6 +439,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
           total_cycles: res.total_cycles,
           completed_cycles: 0,
           skipped_cycles: 0,
+          errored_cycles: 0,
+          errored_details: [],
           completed_record_ids: [],
           batch_size: batchSize,
           batch_count: batchCount,
@@ -547,6 +584,16 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   progressPercent(): number {
     if (!this.runStatus || this.runStatus.total_cycles === 0) return 0;
     return Math.round((this.runStatus.completed_cycles / this.runStatus.total_cycles) * 100);
+  }
+
+  /** Short multi-line tooltip summarizing recent errored cycles for hover. */
+  erroredTooltip(): string {
+    const details = this.runStatus?.errored_details ?? [];
+    if (!details.length) return '';
+    return details
+      .slice(-10)
+      .map((d) => `#${d.cycle_index}${d.batch_index ? ` (batch ${d.batch_index})` : ''}: ${d.error}`)
+      .join('\n');
   }
 
   // ---------------------------------------------------------------------------

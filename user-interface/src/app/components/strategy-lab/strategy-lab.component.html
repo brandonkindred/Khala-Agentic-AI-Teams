@@ -86,6 +86,17 @@
     </div>
   }
 
+  <!-- Non-fatal completion warning -->
+  @if (completionWarning) {
+    <div class="warning-banner">
+      <mat-icon>warning_amber</mat-icon>
+      <span>{{ completionWarning }}</span>
+      <button mat-icon-button (click)="completionWarning = null" aria-label="Dismiss warning">
+        <mat-icon>close</mat-icon>
+      </button>
+    </div>
+  }
+
   <!-- In-progress tracking -->
   @if (running && runStatus) {
     <div class="in-progress-section">
@@ -100,6 +111,11 @@
         </span>
         @if (runStatus.skipped_cycles) {
           <span class="skipped-badge">{{ runStatus.skipped_cycles }} skipped</span>
+        }
+        @if (runStatus.errored_cycles) {
+          <span class="errored-badge" [matTooltip]="erroredTooltip()">
+            {{ runStatus.errored_cycles }} errored
+          </span>
         }
         <span class="status-badge status-running">Running</span>
       </div>

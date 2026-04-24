@@ -379,3 +379,138 @@ def test_parallel_wave_merges_trial_counts_into_primary_tracker(
     for cycle_orch in instances[1:]:
         # Snapshot started at baseline 0, was incremented trials_per_cycle.
         assert cycle_orch.convergence_tracker.trial_count == trials_per_cycle
+
+
+# ---------------------------------------------------------------------------
+# Resilience: per-cycle exceptions no longer halt the whole run.
+# ---------------------------------------------------------------------------
+
+
+class _NoopTracker:
+    """Minimal tracker stub shared by the resilience tests."""
+
+    def snapshot(self) -> "_NoopTracker":
+        return _NoopTracker()
+
+    def record(self, *_a: Any, **_kw: Any) -> None:
+        pass
+
+    def merge_from(self, *_a: Any, **_kw: Any) -> None:
+        pass
+
+
+def test_unexpected_cycle_exception_does_not_halt_run(
+    empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single cycle raising an unexpected error must be surfaced as an errored
+    cycle and the remaining batches must still run to completion."""
+
+    call_counter = {"n": 0}
+
+    class _OneBadCycleOrchestrator:
+        _counter = 0
+
+        def __init__(self, convergence_tracker: Any = None) -> None:
+            self.convergence_tracker = _NoopTracker()
+
+        def run_cycle(
+            self,
+            prior_records: List[StrategyLabRecord],
+            config: BacktestConfig,
+            signal_brief: Any = None,
+            on_phase: Any = None,
+            exclude_asset_classes: Any = None,
+        ) -> StrategyLabRecord:
+            call_counter["n"] += 1
+            # Fail cycle #2 with a totally unexpected exception.
+            if call_counter["n"] == 2:
+                raise RuntimeError("boom — downstream provider exploded")
+            type(self)._counter += 1
+            return _make_record(type(self)._counter, config)
+
+    monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _OneBadCycleOrchestrator)
+    monkeypatch.setattr(lab_main, "ConvergenceTracker", _NoopTracker)
+    monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
+    monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
+
+    request = RunStrategyLabRequest(
+        batch_size=2,
+        batch_count=3,
+        max_parallel=1,
+        paper_trading_enabled=False,
+    )
+    run_id = "run-test-errored"
+    _seed_run_state(run_id, request)
+
+    _strategy_lab_worker(run_id, request)
+
+    state = lab_main._active_runs[run_id]
+    # Pre-fix regression: status would be "failed" and the loop would have
+    # broken after batch 1 (~1 completed cycle). Post-fix: run continues.
+    assert state["status"] == "completed_with_errors", state
+    assert state["completed_cycles"] == 5  # 6 total - 1 errored
+    assert state["errored_cycles"] == 1
+    assert state["completed_batches"] == 3
+    assert len(state["errored_details"]) == 1
+    detail = state["errored_details"][0]
+    assert detail["cycle_index"] == 2
+    assert detail["batch_index"] == 1
+    assert detail["exception_type"] == "RuntimeError"
+    assert "boom" in detail["error"]
+
+
+def test_merge_from_failure_does_not_halt_run(
+    empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If primary_tracker.merge_from raises (e.g. negative trial delta), the run
+    must still complete — only that cycle's merge is dropped."""
+
+    class _MergeFailingTracker(_NoopTracker):
+        calls = {"merge": 0}
+
+        def merge_from(self, *_a: Any, **_kw: Any) -> None:
+            _MergeFailingTracker.calls["merge"] += 1
+            # Second merge blows up; the run must still keep going.
+            if _MergeFailingTracker.calls["merge"] == 2:
+                raise ValueError("synthetic negative delta")
+
+    class _Orch:
+        _counter = 0
+
+        def __init__(self, convergence_tracker: Any = None) -> None:
+            self.convergence_tracker = _MergeFailingTracker()
+
+        def run_cycle(
+            self,
+            prior_records: List[StrategyLabRecord],
+            config: BacktestConfig,
+            signal_brief: Any = None,
+            on_phase: Any = None,
+            exclude_asset_classes: Any = None,
+        ) -> StrategyLabRecord:
+            type(self)._counter += 1
+            return _make_record(type(self)._counter, config)
+
+    monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _Orch)
+    monkeypatch.setattr(lab_main, "ConvergenceTracker", _MergeFailingTracker)
+    monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
+    monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
+
+    request = RunStrategyLabRequest(
+        batch_size=3,
+        batch_count=1,
+        max_parallel=1,
+        paper_trading_enabled=False,
+    )
+    run_id = "run-test-merge-fail"
+    _seed_run_state(run_id, request)
+
+    _strategy_lab_worker(run_id, request)
+
+    state = lab_main._active_runs[run_id]
+    # All 3 cycles produced records; one merge failed but that's non-fatal.
+    assert state["status"] == "completed_with_errors", state
+    assert state["completed_cycles"] == 3
+    assert state["errored_cycles"] == 1
+    assert state["completed_batches"] == 1
+    assert state["errored_details"][0].get("reason") == "tracker_merge_failed"
