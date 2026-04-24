@@ -30,7 +30,9 @@ class _StubClient(LLMClient):
         self.call_prompts: list[str] = []
         self.call_system_prompts: list[str | None] = []
 
-    def complete_json(self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs):
+    def complete_json(
+        self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+    ):
         self.call_prompts.append(prompt)
         self.call_system_prompts.append(system_prompt)
         return self._handler(prompt, call_index=len(self.call_prompts) - 1)
@@ -74,9 +76,7 @@ def test_complete_validated_succeeds_after_parse_error(caplog):
     assert "# Markdown spec — not JSON" in retry_prompt
     assert "selected_option_id" in retry_prompt  # schema embedded
     # One INFO log confirming self-correction.
-    success_logs = [
-        r for r in caplog.records if "json_self_correction succeeded" in r.getMessage()
-    ]
+    success_logs = [r for r in caplog.records if "json_self_correction succeeded" in r.getMessage()]
     assert len(success_logs) == 1
     assert "FounderAnswer" in success_logs[0].getMessage()
 
@@ -238,3 +238,60 @@ def test_context_is_forwarded_to_model_validate():
     client2 = _StubClient(handler)
     with pytest.raises(LLMSchemaValidationError):
         complete_validated(client2, "prompt", schema=ContextAwareModel, correction_attempts=0)
+
+
+def test_context_is_isolated_across_retry_attempts():
+    """Each retry attempt must see a pristine copy of the original context.
+
+    Regression: ``complete_validated`` used to pass the same mutable dict into
+    every ``schema.model_validate(data, context=...)`` call, so a validator
+    that mutated the context on a failed attempt (e.g. the sales outreach
+    flow setting ``context["citations_stripped"] = True``) would leak that
+    flag into the next retry and silently corrupt a clean payload.
+    """
+    from pydantic import ValidationInfo, field_validator, model_validator
+
+    class MutatingRetryModel(BaseModel):
+        value: str
+
+        @field_validator("value", mode="after")
+        @classmethod
+        def _record_marker(cls, v: str, info: ValidationInfo) -> str:
+            # Every call sets a flag on the context — simulating the sales
+            # outreach ``citations_stripped`` side-channel. If retries share
+            # state, attempt 2 sees ``was_marked=True`` and ``failed_first=True``
+            # set by attempt 1.
+            if info.context is not None:
+                info.context["was_marked"] = True
+            return v
+
+        @model_validator(mode="after")
+        def _fail_once_if_previously_marked(self, info: ValidationInfo):
+            if info.context is not None and info.context.get("failed_first"):
+                raise ValueError("context from a previous attempt leaked into this retry")
+            if info.context is not None:
+                info.context["failed_first"] = True
+            if self.value == "fail":
+                raise ValueError("initial attempt fails to trigger a retry")
+            return self
+
+    payloads = [{"value": "fail"}, {"value": "clean"}]
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        return payloads[call_index]
+
+    client = _StubClient(handler)
+    caller_context: dict[str, Any] = {"was_marked": False, "failed_first": False}
+
+    # With context isolation, the retry sees ``failed_first=False`` and
+    # ``_fail_once_if_previously_marked`` does not raise.
+    result = complete_validated(
+        client,
+        "prompt",
+        schema=MutatingRetryModel,
+        context=caller_context,
+        correction_attempts=1,
+    )
+    assert result.value == "clean"
+    # And the caller's context dict is never mutated.
+    assert caller_context == {"was_marked": False, "failed_first": False}

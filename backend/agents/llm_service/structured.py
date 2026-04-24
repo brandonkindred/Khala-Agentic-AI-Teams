@@ -24,6 +24,7 @@ Persona" ``LLMJsonParseError``).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -150,7 +151,13 @@ def complete_validated(
             continue
 
         try:
-            validated = schema.model_validate(data, context=context)
+            # Deep-copy the context on every attempt so mutations performed by
+            # validators during a failed attempt (e.g. the sales outreach flow
+            # setting ``context["citations_stripped"] = True``) don't leak
+            # into the next retry and silently corrupt a clean payload.
+            # The caller's original ``context`` dict is never mutated either.
+            attempt_context = copy.deepcopy(context) if context is not None else None
+            validated = schema.model_validate(data, context=attempt_context)
         except ValidationError as exc:
             last_validation_error = exc
             last_parse_error = None
