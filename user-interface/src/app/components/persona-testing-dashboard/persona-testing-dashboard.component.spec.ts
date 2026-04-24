@@ -4,6 +4,7 @@ import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
 import { PersonaTestingDashboardComponent } from './persona-testing-dashboard.component';
+import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { JobActionsService } from '../../services/job-actions.service';
 import type { PersonaTestRun } from '../../models';
 
@@ -15,6 +16,11 @@ describe('PersonaTestingDashboardComponent', () => {
     resume: ReturnType<typeof vi.fn>;
     restart: ReturnType<typeof vi.fn>;
     delete: ReturnType<typeof vi.fn>;
+  };
+  let apiStub: {
+    getPersonas: ReturnType<typeof vi.fn>;
+    getRuns: ReturnType<typeof vi.fn>;
+    startTest: ReturnType<typeof vi.fn>;
   };
 
   const sampleRun = (overrides: Partial<PersonaTestRun> = {}): PersonaTestRun => ({
@@ -32,12 +38,21 @@ describe('PersonaTestingDashboardComponent', () => {
       restart: vi.fn().mockReturnValue(of({})),
       delete: vi.fn().mockReturnValue(of({})),
     };
+    // Stubs prevent ngOnInit's timer-based /runs poll from firing real HTTP
+    // in jsdom, which otherwise leaks as an unhandled HttpErrorResponse and
+    // fails the Angular UI CI job.
+    apiStub = {
+      getPersonas: vi.fn().mockReturnValue(of({ personas: [] })),
+      getRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+      startTest: vi.fn().mockReturnValue(of({ run_id: '', status: '', message: '' })),
+    };
 
     await TestBed.configureTestingModule({
       imports: [PersonaTestingDashboardComponent],
       providers: [
         provideHttpClient(),
         provideRouter([]),
+        { provide: PersonaTestingApiService, useValue: apiStub },
         { provide: JobActionsService, useValue: jobActionsSpy },
       ],
     }).compileComponents();
