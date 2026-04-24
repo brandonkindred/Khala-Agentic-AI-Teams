@@ -16,15 +16,6 @@ import type { JobSource, PersonaInfo, PersonaTestRun } from '../../models';
 const TEAM_SOURCE: JobSource = 'user_agent_founder';
 const POLL_RUNS_MS = 15_000;
 const TERMINAL_STATUSES = ['completed', 'failed'];
-const RUNNING_STATUSES = new Set<string>([
-  'pending',
-  'running',
-  'generating_spec',
-  'submitting_analysis',
-  'polling_analysis',
-  'submitting_build',
-  'polling_build',
-]);
 const RESUMABLE_STATUSES = new Set<string>(['failed', 'interrupted', 'agent_crash']);
 
 @Component({
@@ -101,7 +92,10 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
   }
 
   canStop(run: PersonaTestRun): boolean {
-    return RUNNING_STATUSES.has(run.status);
+    // Any non-terminal status is cancellable — this mirrors the backend's
+    // ``_cancellable_statuses()`` gate and avoids drift when the orchestrator
+    // adds new intermediate phases (e.g. ``answering_analysis_questions``).
+    return !TERMINAL_STATUSES.includes(run.status);
   }
 
   canResume(run: PersonaTestRun): boolean {

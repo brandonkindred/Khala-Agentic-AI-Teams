@@ -97,4 +97,12 @@ describe('PersonaTestingDashboardComponent', () => {
     expect(component.canRestart(completed)).toBe(true);
     expect(component.canRestart(running)).toBe(false);
   });
+
+  it('allows stopping during orchestrator Q&A phases', () => {
+    // Codex P2: orchestrator emits these non-terminal statuses during question
+    // loops and the backend's ``_cancellable_statuses()`` accepts them.
+    expect(component.canStop(sampleRun({ status: 'answering_analysis_questions' }))).toBe(true);
+    expect(component.canStop(sampleRun({ status: 'answering_build_questions' }))).toBe(true);
+    expect(component.canStop(sampleRun({ status: 'generating_spec' }))).toBe(true);
+  });
 });

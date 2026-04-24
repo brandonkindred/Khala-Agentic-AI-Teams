@@ -531,6 +531,7 @@ def resume_job(job_id: str) -> StartRunResponse:
             status=job_store.JOB_STATUS_FAILED,
             error=f"Resume dispatch failed: {exc}"[:500],
         )
+        store.update_run(job_id, status="failed", error=f"Resume dispatch failed: {exc}"[:1000])
         raise HTTPException(status_code=500, detail=f"Failed to resume workflow: {exc}") from exc
 
     return StartRunResponse(
@@ -571,6 +572,7 @@ def restart_job(job_id: str) -> StartRunResponse:
             status=job_store.JOB_STATUS_FAILED,
             error=f"Restart dispatch failed: {exc}"[:500],
         )
+        store.update_run(job_id, status="failed", error=f"Restart dispatch failed: {exc}"[:1000])
         raise HTTPException(status_code=500, detail=f"Failed to restart workflow: {exc}") from exc
 
     return StartRunResponse(

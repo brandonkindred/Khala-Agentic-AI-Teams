@@ -209,6 +209,30 @@ def test_resume_redispatches_failed_job(fake_job_store, fake_store, fake_dispatc
     assert fake_job_store.jobs["run-bad"]["error"] is None
 
 
+def test_resume_mirrors_dispatch_failure_into_founder_store(
+    fake_job_store, fake_store, monkeypatch
+):
+    """Codex P1: if redispatch raises, both the central job and the founder
+    store row must be marked failed — otherwise the Testing Personas dashboard
+    leaves the run at ``pending`` in its Running section."""
+    from user_agent_founder.api import main as api_main
+
+    fake_job_store.create_job("run-bad", status="failed", error="boom")
+    monkeypatch.setattr(
+        api_main, "_dispatch_founder_run", lambda _run_id: (_ for _ in ()).throw(RuntimeError("no worker"))
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        api_main.resume_job("run-bad")
+
+    assert excinfo.value.status_code == 500
+    assert fake_job_store.jobs["run-bad"]["status"] == "failed"
+    assert "no worker" in fake_job_store.jobs["run-bad"]["error"]
+    fake_store.update_run.assert_any_call(
+        "run-bad", status="failed", error="Resume dispatch failed: no worker"
+    )
+
+
 # ---------------------------------------------------------------------------
 # /job/{id}/restart
 # ---------------------------------------------------------------------------
@@ -236,6 +260,29 @@ def test_restart_resets_and_redispatches_completed_job(fake_job_store, fake_stor
     assert fake_dispatch == ["run-done"]
     assert "run-done" in fake_job_store.reset_calls
     assert fake_job_store.jobs["run-done"]["status"] == "running"
+
+
+def test_restart_mirrors_dispatch_failure_into_founder_store(
+    fake_job_store, fake_store, monkeypatch
+):
+    """Codex P1: same invariant as test_resume_mirrors_dispatch_failure_into_founder_store
+    but for /job/{id}/restart."""
+    from user_agent_founder.api import main as api_main
+
+    fake_job_store.create_job("run-done", status="completed", error=None)
+    monkeypatch.setattr(
+        api_main, "_dispatch_founder_run", lambda _run_id: (_ for _ in ()).throw(RuntimeError("no worker"))
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        api_main.restart_job("run-done")
+
+    assert excinfo.value.status_code == 500
+    assert fake_job_store.jobs["run-done"]["status"] == "failed"
+    assert "no worker" in fake_job_store.jobs["run-done"]["error"]
+    fake_store.update_run.assert_any_call(
+        "run-done", status="failed", error="Restart dispatch failed: no worker"
+    )
 
 
 # ---------------------------------------------------------------------------
