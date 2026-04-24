@@ -50,7 +50,6 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'software-engineering', label: 'Software Engineering', icon: 'terminal', route: '/software-engineering', group: 'development', exact: true },
       { id: 'se-planning', label: 'Planning', icon: 'description', route: '/software-engineering/planning-v3', group: 'development', nested: true },
       { id: 'se-coding-team', label: 'Coding Team', icon: 'code', route: '/software-engineering/coding-team', group: 'development', nested: true },
-      { id: 'persona-testing', label: 'Persona Testing', icon: 'science', route: '/persona-testing', group: 'development', nested: true },
     ],
   },
   {
@@ -95,6 +94,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'ai-systems', label: 'AI Systems', icon: 'psychology', route: '/ai-systems', group: 'agentic-ai' },
       { id: 'agent-console', label: 'Agent Console', icon: 'hub', route: '/agent-console', group: 'agentic-ai' },
       { id: 'agentic-teams', label: 'Agentic Teams', icon: 'groups', route: '/agentic-teams', group: 'agentic-ai' },
+      { id: 'persona-testing', label: 'Testing Personas', icon: 'science', route: '/persona-testing', group: 'agentic-ai' },
       { id: 'deepthought', label: 'Deepthought', icon: 'psychology', route: '/deepthought', group: 'agentic-ai' },
     ],
   },

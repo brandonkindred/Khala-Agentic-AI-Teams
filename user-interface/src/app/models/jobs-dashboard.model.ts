@@ -216,7 +216,7 @@ export const SOURCE_DISPLAY: Record<
   agent_provisioning: { label: 'Agent Provisioning', icon: 'settings', route: '/agent-provisioning' },
   social_marketing: { label: 'Social Marketing', icon: 'campaign', route: '/social-marketing' },
   investment: { label: 'Investment', icon: 'trending_up', route: '/investment/strategy-lab' },
-  user_agent_founder: { label: 'Persona Testing', icon: 'person_search', route: '/persona-testing' },
+  user_agent_founder: { label: 'Testing Personas', icon: 'person_search', route: '/persona-testing' },
   soc2_compliance: { label: 'SOC2 Compliance', icon: 'verified_user', route: '/soc2-compliance' },
   personal_assistant: { label: 'Personal Assistant', icon: 'assistant', route: '/personal-assistant' },
   planning_v3: { label: 'Planning V3', icon: 'description', route: '/software-engineering/planning-v3' },
