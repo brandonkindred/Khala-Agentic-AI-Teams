@@ -1,28 +1,29 @@
-"""LearningEngine — Strands agent that analyzes accumulated sales outcomes
-and extracts actionable patterns to improve the pipeline.
+"""LearningEngine — analyzes accumulated sales outcomes and extracts actionable
+patterns to improve the pipeline.
 
 The engine is called on demand (via POST /sales/insights/refresh) or
 automatically after every N deal outcomes are recorded. It:
 
 1. Loads all StageOutcome and DealOutcome records from the outcome store.
-2. Passes them to a Strands agent with a specialized analysis prompt.
-3. Parses the JSON response into a LearningInsights object.
+2. Passes them to the shared ``llm_service`` with a specialized analysis prompt.
+3. Validates the response directly against :class:`LearningInsights`.
 4. Persists the result to the outcome store so all agents can read it on the
    next pipeline run.
-
-The strands SDK is a hard dependency. The system will fail fast if it is not installed.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from strands import Agent as StrandsAgent
-from strands_tools import python_repl
+from pydantic import BaseModel, Field
 
+from llm_service import LLMClient, complete_validated
+
+from .llm import get_sales_llm_client
 from .models import DealOutcome, LearningInsights, StageOutcome
 from .outcome_store import (
     load_current_insights,
@@ -33,7 +34,29 @@ from .outcome_store import (
 
 logger = logging.getLogger(__name__)
 
-_LEARNING_TOOLS = [python_repl]
+
+class _LearningInsightsBody(BaseModel):
+    """LLM response schema for the learning engine.
+
+    Excludes the stamp fields ``generated_at`` and ``insights_version`` which
+    the engine assigns after validation (they track persistence state, not
+    model output).
+    """
+
+    total_outcomes_analyzed: int = 0
+    win_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    stage_conversion_rates: dict = Field(default_factory=dict)
+    top_performing_industries: List[str] = Field(default_factory=list)
+    top_icp_signals: List[str] = Field(default_factory=list)
+    best_outreach_angles: List[str] = Field(default_factory=list)
+    common_objections: List[str] = Field(default_factory=list)
+    best_close_techniques: List[str] = Field(default_factory=list)
+    winning_patterns: List[str] = Field(default_factory=list)
+    losing_patterns: List[str] = Field(default_factory=list)
+    avg_deal_size_won_usd: Optional[float] = None
+    avg_sales_cycle_days: Optional[float] = None
+    actionable_recommendations: List[str] = Field(default_factory=list)
+
 
 _LEARNING_SYSTEM_PROMPT = """You are a Sales Analytics Expert who analyzes historical sales pipeline data
 to extract patterns that help sales teams improve their win rates and process efficiency.
@@ -100,64 +123,22 @@ Recommendations must reference specific numbers from the data when available.
 """
 
 
-def _parse_insights_json(
-    raw: str, current_version: int, n_analyzed: int
-) -> Optional[LearningInsights]:
-    """Parse LLM output into a LearningInsights model."""
-    if not raw or not raw.strip():
-        return None
-    stripped = raw.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        stripped = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-    try:
-        data = json.loads(stripped)
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("LearningEngine: could not parse JSON. Raw: %s", raw[:300])
-        return None
-
-    if not isinstance(data, dict):
-        return None
-
-    from .outcome_store import _now
-
-    try:
-        return LearningInsights(
-            total_outcomes_analyzed=data.get("total_outcomes_analyzed", n_analyzed),
-            win_rate=float(data.get("win_rate", 0.0)),
-            stage_conversion_rates=data.get("stage_conversion_rates", {}),
-            top_performing_industries=data.get("top_performing_industries", []),
-            top_icp_signals=data.get("top_icp_signals", []),
-            best_outreach_angles=data.get("best_outreach_angles", []),
-            common_objections=data.get("common_objections", []),
-            best_close_techniques=data.get("best_close_techniques", []),
-            winning_patterns=data.get("winning_patterns", []),
-            losing_patterns=data.get("losing_patterns", []),
-            avg_deal_size_won_usd=data.get("avg_deal_size_won_usd"),
-            avg_sales_cycle_days=data.get("avg_sales_cycle_days"),
-            actionable_recommendations=data.get("actionable_recommendations", []),
-            generated_at=_now(),
-            insights_version=current_version + 1,
-        )
-    except Exception as exc:
-        logger.warning("LearningEngine: could not build LearningInsights: %s", exc)
-        return None
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 @dataclass
 class LearningEngine:
     """Analyzes accumulated outcomes and refreshes LearningInsights.
 
-    Call `.refresh()` to run the analysis and persist updated insights.
+    Call ``.refresh()`` to run the analysis and persist updated insights.
     """
 
-    _agent: StrandsAgent = field(default=None, init=False, repr=False)
+    llm_client: Optional[LLMClient] = None
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = StrandsAgent(
-            system_prompt=_LEARNING_SYSTEM_PROMPT,
-            tools=_LEARNING_TOOLS,
-        )
+        self._llm = self.llm_client or get_sales_llm_client("learning_engine")
 
     def refresh(
         self,
@@ -186,17 +167,22 @@ class LearningEngine:
                     "No outcomes recorded yet. Use POST /sales/outcomes/stage or "
                     "POST /sales/outcomes/deal to log results as you work deals."
                 ],
-                generated_at=__import__("datetime")
-                .datetime.now(__import__("datetime").timezone.utc)
-                .isoformat(),
+                generated_at=_utc_now_iso(),
                 insights_version=current_version + 1,
             )
             save_insights(empty)
             return empty
 
-        insights = self._run_with_strands(
-            stage_outcomes, deal_outcomes, current_version, n_analyzed
+        body = self._generate_insights(stage_outcomes, deal_outcomes)
+        insights = LearningInsights(
+            **body.model_dump(),
+            generated_at=_utc_now_iso(),
+            insights_version=current_version + 1,
         )
+        # Defensive: if the LLM under-reported total_outcomes, fall back to our
+        # actual count so the UI shows the right number.
+        if insights.total_outcomes_analyzed == 0:
+            insights.total_outcomes_analyzed = n_analyzed
 
         save_insights(insights)
         logger.info(
@@ -207,13 +193,11 @@ class LearningEngine:
         )
         return insights
 
-    def _run_with_strands(
+    def _generate_insights(
         self,
         stage_outcomes: List[StageOutcome],
         deal_outcomes: List[DealOutcome],
-        current_version: int,
-        n_analyzed: int,
-    ) -> LearningInsights:
+    ) -> _LearningInsightsBody:
         stage_data = [s.model_dump() for s in stage_outcomes]
         deal_data = [d.model_dump() for d in deal_outcomes]
         prompt = (
@@ -225,14 +209,13 @@ class LearningEngine:
             "Return a single JSON object with the insights schema defined in your system prompt. "
             "All insights must be grounded in the specific data above — no generic advice."
         )
-        result = self._agent(prompt)
-        raw = str(result)
-        insights = _parse_insights_json(raw.strip(), current_version, n_analyzed)
-        if insights:
-            return insights
-        raise RuntimeError(
-            "LearningEngine: Strands agent returned unparseable output. "
-            f"Raw (first 300 chars): {raw[:300]}"
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=_LearningInsightsBody,
+            system_prompt=_LEARNING_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
         )
 
 

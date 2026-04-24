@@ -1,6 +1,6 @@
-"""AWS Strands AI agent implementations for the Sales Team pod.
+"""AI agent implementations for the Sales Team pod.
 
-Each agent wraps a strands.Agent with a methodology-rich system prompt grounded in:
+Each agent wraps a methodology-rich system prompt grounded in:
 - Gong Labs Blog (pipeline velocity, talk/listen ratios, deal risk signals)
 - Jeb Blount (Fanatical Prospecting, Sales EQ, objection handling)
 - HubSpot Sales Blog (lead scoring, nurture sequences, inbound methodology)
@@ -10,27 +10,36 @@ Each agent wraps a strands.Agent with a methodology-rich system prompt grounded 
 - Salesfolk (hyper-personalized cold email copy)
 - Zig Ziglar (classic closing techniques: assumptive, summary, urgency, etc.)
 
-The strands SDK is a hard dependency. The system will fail fast if it is not installed.
+Every agent calls the shared ``llm_service`` layer through
+``complete_validated`` so responses are Pydantic-typed with self-correction on
+JSON / schema failures, and every call is tagged with its own
+``sales.<role>`` agent key for model overrides and telemetry.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from strands import Agent as StrandsAgent
-from strands_tools import current_time, http_request, python_repl
+from llm_service import LLMClient, complete_validated
 
-from .models import ProspectDossier
+from .llm import get_sales_llm_client
+from .models import (
+    PERSONALIZATION_CONFIDENCE_THRESHOLD,
+    ClosingStrategyBody,
+    DecisionMakerList,
+    DiscoveryPlanBody,
+    NurtureSequenceBody,
+    OutreachVariantList,
+    PipelineCoachingReport,
+    ProspectDossier,
+    ProspectList,
+    QualificationScoreBody,
+    SalesProposalBody,
+)
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_TOOLS = [http_request, python_repl, current_time]
-
-# Dossiers below this confidence drop to the company_soft_opener angle.
-_PERSONALIZATION_CONFIDENCE_THRESHOLD = 0.6
 
 # How many items we carry into the prompt from each dossier list. Keeps the
 # rendered block bounded regardless of how rich the dossier is.
@@ -40,24 +49,6 @@ _DOSSIER_LIST_TOP_K = 5
 # ---------------------------------------------------------------------------
 # Base helper
 # ---------------------------------------------------------------------------
-
-
-def _build_strands_agent(system_prompt: str, tools: list | None = None) -> StrandsAgent:
-    """Construct a strands.Agent."""
-    return StrandsAgent(
-        system_prompt=system_prompt,
-        tools=tools if tools is not None else _DEFAULT_TOOLS,
-    )
-
-
-def _call_agent(agent: StrandsAgent, prompt: str) -> str:
-    """Call a strands.Agent and return its text output."""
-    result = agent(prompt)
-    if hasattr(result, "message"):
-        content = result.message
-    else:
-        content = str(result)
-    return content.strip()
 
 
 def _with_insights(base_prompt: str, insights_context: Optional[str]) -> str:
@@ -92,9 +83,12 @@ You research using publicly available signals:
 - G2 / Capterra reviews of their current vendor for switching intent.
 
 ## Output Format
-Return a JSON array of prospect objects. Each object must include:
+Return a single JSON object with one key, ``prospects``, whose value is an array
+of prospect objects. Each prospect object must include:
 company_name, website, contact_name, contact_title, contact_email (if findable), linkedin_url,
 company_size_estimate, industry, icp_match_score (0.0–1.0), research_notes, trigger_events (array).
+
+Example shape: {"prospects": [ {...}, {...} ]}
 
 Be specific. Do not hallucinate emails — mark as null if not found.
 """
@@ -427,11 +421,12 @@ class ProspectorAgent:
     Grounded in Jeb Blount's Fanatical Prospecting and Sales Hacker ICP frameworks.
     """
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Prospector (SDR)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_PROSPECTOR_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._llm = self.llm_client or get_sales_llm_client("prospector")
 
     def prospect(
         self,
@@ -441,7 +436,7 @@ class ProspectorAgent:
         max_prospects: int,
         company_context: str,
         insights_context: Optional[str] = None,
-    ) -> str:
+    ) -> ProspectList:
         prompt = _with_insights(
             f"You are prospecting for: {product_name}\n"
             f"Value proposition: {value_proposition}\n"
@@ -450,11 +445,18 @@ class ProspectorAgent:
             f"Research and return up to {max_prospects} prospects that match this ICP. "
             "Use learning context above (if any) to prioritise industries and trigger-event "
             "types that have historically produced wins. "
-            "Use web search to find real companies, recent trigger events, and likely contacts. "
-            "Return a JSON array of prospect objects.",
+            'Return a JSON object shaped as {"prospects": [ ... ]} as described in the '
+            "system prompt output format.",
             insights_context,
         )
-        return _call_agent(self._agent, prompt)
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=ProspectList,
+            system_prompt=_PROSPECTOR_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
+        )
 
     def prospect_companies(
         self,
@@ -464,16 +466,16 @@ class ProspectorAgent:
         max_companies: int,
         company_context: str,
         insights_context: Optional[str] = None,
-    ) -> str:
-        """Return a ranked JSON array of *companies* (not individual contacts).
+    ) -> ProspectList:
+        """Return a ranked list of *companies* (not individual contacts).
 
         Used by the deep-research pipeline as the first stage: we first build
         the account list, then map decision-makers into each account, then
         build dossiers per decision-maker.
 
-        Each returned object should include:
-        company_name, website, industry, company_size_estimate, icp_match_score,
-        research_notes, trigger_events. contact_* fields should be left null.
+        Each returned Prospect carries company-level data only: company_name,
+        website, industry, company_size_estimate, icp_match_score,
+        research_notes, trigger_events. contact_* fields are null.
         """
         prompt = _with_insights(
             f"You are building an ACCOUNT list for: {product_name}\n"
@@ -488,10 +490,17 @@ class ProspectorAgent:
             "contact_title, contact_email, linkedin_url as null in this step. "
             "Prefer companies with recent public trigger events (funding, leadership change, "
             "hiring spree, product launch, vendor switch). "
-            "Return a JSON array of company objects — no commentary.",
+            'Return a JSON object shaped as {"prospects": [ ... ]} — no commentary.',
             insights_context,
         )
-        return _call_agent(self._agent, prompt)
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=ProspectList,
+            system_prompt=_PROSPECTOR_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +531,8 @@ most likely to champion or block the purchase inside that account.
 - Favor quality over quantity: one well-evidenced decision-maker is better than three guesses.
 
 ## Output Format
-Return a JSON array of objects. Each object must include:
+Return a single JSON object with one key, ``contacts``, whose value is an
+array of objects. Each object must include:
 - contact_name (string, full name)
 - contact_title (string, exact current title)
 - linkedin_url (string or null)
@@ -530,7 +540,9 @@ Return a JSON array of objects. Each object must include:
 - decision_maker_rationale (1–2 sentence explanation grounded in a specific public signal)
 - confidence (0.0–1.0 — lower if you had to triangulate from weak signals)
 
-Return only the JSON array, no prose.
+Example shape: {"contacts": [ {...}, {...} ]}
+
+Return only the JSON object, no prose.
 """
 
 
@@ -541,11 +553,12 @@ class DecisionMakerMapperAgent:
     Used by the deep-research pipeline after the company shortlist is built.
     """
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Account Researcher (Decision-Maker Mapper)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_DECISION_MAKER_MAPPER_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._llm = self.llm_client or get_sales_llm_client("decision_maker_mapper")
 
     def map_contacts(
         self,
@@ -555,7 +568,7 @@ class DecisionMakerMapperAgent:
         value_proposition: str,
         max_contacts: int = 2,
         insights_context: Optional[str] = None,
-    ) -> str:
+    ) -> DecisionMakerList:
         prompt = _with_insights(
             f"Product: {product_name}\n"
             f"Value proposition: {value_proposition}\n\n"
@@ -564,11 +577,18 @@ class DecisionMakerMapperAgent:
             f"Identify up to {max_contacts} real decision-makers at this company who are likely "
             "to own the purchasing decision for this product. Use public signals only — titles, "
             "LinkedIn, press releases, vendor case studies, job postings, conference talks. "
-            "Return a JSON array. If no decision-maker can be confidently identified, "
-            "return an empty array [].",
+            'Return a JSON object shaped as {"contacts": [ ... ]}. If no decision-maker can be '
+            'confidently identified, return {"contacts": []}.',
             insights_context,
         )
-        return _call_agent(self._agent, prompt)
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=DecisionMakerList,
+            system_prompt=_DECISION_MAKER_MAPPER_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -624,13 +644,14 @@ Return only the JSON object, no prose, no markdown fences.
 
 @dataclass
 class DossierBuilderAgent:
-    """Given one named prospect, builds a full :class:`ProspectDossier` via web research."""
+    """Given one named prospect, builds a full :class:`ProspectDossier`."""
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Sales Research Analyst (Dossier Builder)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_DOSSIER_BUILDER_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._llm = self.llm_client or get_sales_llm_client("dossier_builder")
 
     def build(
         self,
@@ -638,19 +659,25 @@ class DossierBuilderAgent:
         product_name: str,
         value_proposition: str,
         insights_context: Optional[str] = None,
-    ) -> str:
+    ) -> ProspectDossier:
         prompt = _with_insights(
             f"Build a full dossier for this prospect to prepare for a sales conversation about "
             f"{product_name}.\n\n"
             f"Product: {product_name}\n"
             f"Value proposition: {value_proposition}\n\n"
             f"Prospect (from earlier prospecting stage — includes prospect_id):\n{prospect_json}\n\n"
-            "Use http_request to fetch real public pages (LinkedIn, personal site, GitHub, "
-            "Substack/Medium, podcasts, talks, press). Cite every URL you consulted in `sources`. "
-            "Never fabricate. Return a single JSON object matching the ProspectDossier schema.",
+            "Cite every public URL you consulted in `sources`. Never fabricate. "
+            "Return a single JSON object matching the ProspectDossier schema.",
             insights_context,
         )
-        return _call_agent(self._agent, prompt)
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=ProspectDossier,
+            system_prompt=_DOSSIER_BUILDER_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
+        )
 
 
 def _truncate(items: list, k: int = _DOSSIER_LIST_TOP_K) -> list:
@@ -742,11 +769,12 @@ class OutreachAgent:
     generated copy must trace back to a cited dossier field.
     """
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Outreach Specialist (SDR/BDR)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_OUTREACH_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._llm = self.llm_client or get_sales_llm_client("outreach")
 
     def generate_sequence(
         self,
@@ -758,11 +786,20 @@ class OutreachAgent:
         company_context: str,
         insights_context: Optional[str] = None,
         variant_count: int = 3,
-    ) -> str:
+    ) -> OutreachVariantList:
+        """Generate the raw variant list for a prospect.
+
+        Citation verification and grade enforcement happen inside the Pydantic
+        validators on :class:`EmailTouch` and :class:`OutreachVariant`, driven
+        by ``context={"dossier_source_urls": ...}``. The confidence-gate rule
+        (``dossier.confidence < PERSONALIZATION_CONFIDENCE_THRESHOLD`` →
+        company_soft_opener only) is enforced by the orchestrator when it
+        wraps the result into an ``OutreachSequence``.
+        """
         dossier_block = _render_dossier_for_prompt(dossier)
         prompt = _with_insights(
             f"Confidence threshold for person-level personalization: "
-            f"{_PERSONALIZATION_CONFIDENCE_THRESHOLD}. If the dossier's confidence is below "
+            f"{PERSONALIZATION_CONFIDENCE_THRESHOLD}. If the dossier's confidence is below "
             f"this threshold, every variant MUST use the company_soft_opener angle.\n\n"
             f"{dossier_block}\n\n"
             f"---\n\n"
@@ -779,7 +816,19 @@ class OutreachAgent:
             "Return a single JSON object matching the schema in the system prompt.",
             insights_context,
         )
-        return _call_agent(self._agent, prompt)
+        context: dict[str, Any] = {
+            "dossier_source_urls": set(dossier.sources or []),
+            "citations_stripped": False,
+        }
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=OutreachVariantList,
+            system_prompt=_OUTREACH_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
+            context=context,
+        )
 
 
 @dataclass
@@ -789,11 +838,12 @@ class LeadQualifierAgent:
     Grounded in Anthony Iannarino and HubSpot lead scoring methodology.
     """
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Lead Qualifier (BDR)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_QUALIFIER_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._llm = self.llm_client or get_sales_llm_client("qualifier")
 
     def qualify(
         self,
@@ -802,7 +852,7 @@ class LeadQualifierAgent:
         value_proposition: str,
         call_notes: str,
         insights_context: Optional[str] = None,
-    ) -> str:
+    ) -> QualificationScoreBody:
         prompt = _with_insights(
             f"Qualify this prospect for {product_name}:\n{prospect_json}\n\n"
             f"Value proposition: {value_proposition}\n"
@@ -815,7 +865,14 @@ class LeadQualifierAgent:
             "recommended_action, disqualification_reason, qualification_notes.",
             insights_context,
         )
-        return _call_agent(self._agent, prompt)
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=QualificationScoreBody,
+            system_prompt=_QUALIFIER_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
+        )
 
 
 @dataclass
@@ -825,11 +882,12 @@ class NurtureAgent:
     Grounded in HubSpot inbound methodology and Gong Labs optimal cadence research.
     """
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Nurture Specialist (AM)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_NURTURE_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._llm = self.llm_client or get_sales_llm_client("nurture")
 
     def build_sequence(
         self,
@@ -838,7 +896,7 @@ class NurtureAgent:
         value_proposition: str,
         duration_days: int,
         insights_context: Optional[str] = None,
-    ) -> str:
+    ) -> NurtureSequenceBody:
         prompt = _with_insights(
             f"Build a {duration_days}-day nurture sequence for:\n{prospect_json}\n\n"
             f"Product: {product_name}\n"
@@ -847,11 +905,19 @@ class NurtureAgent:
             "Gong Labs cadence research, and SNAP re-engagement principles. "
             "Use the learning context above (if any) to select content types that historically "
             "re-engaged stalled prospects and to set re-engagement triggers that match real patterns. "
-            "Return a JSON object with duration_days, touchpoints (array), "
-            "re_engagement_triggers (array), content_recommendations (array).",
+            "Return a JSON object with duration_days, touchpoints (array of "
+            "{day, channel, content_type, message, goal}), re_engagement_triggers (array), "
+            "content_recommendations (array).",
             insights_context,
         )
-        return _call_agent(self._agent, prompt)
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=NurtureSequenceBody,
+            system_prompt=_NURTURE_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
+        )
 
 
 @dataclass
@@ -861,11 +927,12 @@ class DiscoveryAgent:
     Grounded in SPIN Selling (Jill Konrath), the Challenger Sale, and Gong Labs discovery research.
     """
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Discovery & Demo Specialist (AE)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_DISCOVERY_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._llm = self.llm_client or get_sales_llm_client("discovery")
 
     def prepare(
         self,
@@ -874,7 +941,7 @@ class DiscoveryAgent:
         product_name: str,
         value_proposition: str,
         insights_context: Optional[str] = None,
-    ) -> str:
+    ) -> DiscoveryPlanBody:
         prompt = _with_insights(
             f"Prepare a complete discovery call guide for:\nProspect: {prospect_json}\n"
             f"Qualification context: {qualification_json}\n\n"
@@ -889,52 +956,14 @@ class DiscoveryAgent:
             "challenger_insight, demo_agenda, expected_objections, success_criteria_for_call.",
             insights_context,
         )
-        json.dumps(
-            {
-                "spin_questions": {
-                    "situation": [
-                        "Walk me through how your team currently handles [process].",
-                        "How many people are involved in [process], and what tools do they use?",
-                    ],
-                    "problem": [
-                        "What's the biggest frustration your team has with [current approach]?",
-                        "Where do deals most commonly fall through in your current process?",
-                    ],
-                    "implication": [
-                        "What happens to your [key metric] when [pain] occurs?",
-                        "If this isn't resolved by Q3, what's the downstream impact on your team's targets?",
-                    ],
-                    "need_payoff": [
-                        "If you could eliminate [pain] entirely, what would that free your team to focus on?",
-                        "What would a 20% improvement in [metric] mean for your business this year?",
-                    ],
-                },
-                "challenger_insight": (
-                    "Most [titles] we talk to assume [common belief]. "
-                    "What our data across 200+ customers shows is that [counterintuitive truth] — "
-                    "which means the real leverage point is [reframe]."
-                ),
-                "demo_agenda": [
-                    "Set agenda & confirm success criteria (2 min)",
-                    "Challenger insight: reframe the problem (2 min)",
-                    "Validate key pains from discovery (5 min)",
-                    "Show [Feature A] — ties to confirmed pain #1 (5 min)",
-                    "Show [Feature B] — ties to confirmed pain #2 (5 min)",
-                    "Objection checkpoint — invite concerns (5 min)",
-                    "Propose next steps (3 min)",
-                ],
-                "expected_objections": [
-                    "We already have [competitor] — why switch?",
-                    "This isn't in the budget right now.",
-                    "I need to loop in [other stakeholder] before we can move forward.",
-                ],
-                "success_criteria_for_call": (
-                    "Confirmed 2 quantified pain points, identified the Economic Buyer, "
-                    "and booked a follow-up with the full buying committee within 5 business days."
-                ),
-            }
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=DiscoveryPlanBody,
+            system_prompt=_DISCOVERY_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
         )
-        return _call_agent(self._agent, prompt)
 
 
 @dataclass
@@ -944,11 +973,12 @@ class ProposalAgent:
     Grounded in Anthony Iannarino's Level-4 Value Creation proposal methodology.
     """
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Proposal Writer (AE)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_PROPOSAL_SYSTEM_PROMPT, [*_DEFAULT_TOOLS])
+        self._llm = self.llm_client or get_sales_llm_client("proposal")
 
     def write(
         self,
@@ -960,7 +990,7 @@ class ProposalAgent:
         case_studies: str,
         company_context: str,
         insights_context: Optional[str] = None,
-    ) -> str:
+    ) -> SalesProposalBody:
         prompt = _with_insights(
             f"Write a complete sales proposal for:\nProspect: {prospect_json}\n\n"
             f"Product: {product_name}\n"
@@ -979,62 +1009,14 @@ class ProposalAgent:
             "custom_sections (array of {heading, content}).",
             insights_context,
         )
-        benefit = annual_cost_usd * 2.8
-        json.dumps(
-            {
-                "executive_summary": (
-                    f"This proposal outlines how {product_name} will help {{company_name}} achieve "
-                    "[strategic outcome] by [specific date], delivering measurable ROI within [N] months."
-                ),
-                "situation_analysis": (
-                    "Based on our discovery conversations, {{company_name}} is facing [confirmed pain #1] "
-                    "and [confirmed pain #2], costing an estimated $[X] per year in [metric]."
-                ),
-                "proposed_solution": (
-                    f"You will have a fully operational {product_name} environment within [N] weeks, "
-                    "enabling [outcome #1] and [outcome #2] without [key friction]."
-                ),
-                "roi_model": {
-                    "annual_cost_usd": annual_cost_usd,
-                    "estimated_annual_benefit_usd": round(benefit, 2),
-                    "payback_months": round(
-                        12 / ((benefit - annual_cost_usd) / annual_cost_usd), 1
-                    ),
-                    "roi_percentage": round(
-                        ((benefit - annual_cost_usd) / annual_cost_usd) * 100, 1
-                    ),
-                    "assumptions": [
-                        "10% productivity gain across [N] team members",
-                        "20% reduction in [metric] based on comparable customer data",
-                        "Conservative 80% adoption rate in first 90 days",
-                    ],
-                },
-                "investment_table": (
-                    f"Annual subscription: ${annual_cost_usd:,.0f}\n"
-                    "Implementation & onboarding: Included\n"
-                    "Dedicated customer success: Included\n"
-                    f"Total Year 1: ${annual_cost_usd:,.0f}"
-                ),
-                "implementation_timeline": (
-                    "Week 1–2: Technical setup and data migration\n"
-                    "Week 3: Admin training and workflow configuration\n"
-                    "Week 4: Team onboarding and go-live\n"
-                    "Day 90: Business review and optimization session"
-                ),
-                "risk_mitigation": (
-                    "1. Change management: Dedicated CSM for 90-day onboarding.\n"
-                    "2. Data security: SOC2 Type II certified; your data never leaves [region].\n"
-                    "3. ROI risk: 30-day money-back guarantee if [specific outcome] not achieved."
-                ),
-                "next_steps": [
-                    "Review this proposal with your team by [date]",
-                    "Schedule a 30-min Q&A call with our technical team",
-                    "Sign and return by [date] to secure [implementation slot]",
-                ],
-                "custom_sections": [],
-            }
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=SalesProposalBody,
+            system_prompt=_PROPOSAL_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
         )
-        return _call_agent(self._agent, prompt)
 
 
 @dataclass
@@ -1044,11 +1026,12 @@ class CloserAgent:
     Grounded in Zig Ziglar's closing techniques and Jeb Blount's Sales EQ.
     """
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Closer (AE)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_CLOSER_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._llm = self.llm_client or get_sales_llm_client("closer")
 
     def develop_strategy(
         self,
@@ -1057,7 +1040,7 @@ class CloserAgent:
         product_name: str,
         value_proposition: str,
         insights_context: Optional[str] = None,
-    ) -> str:
+    ) -> ClosingStrategyBody:
         prompt = _with_insights(
             f"Develop a closing strategy for:\nProspect: {prospect_json}\n"
             f"Proposal context: {proposal_json}\n\n"
@@ -1074,56 +1057,14 @@ class CloserAgent:
             "urgency_framing, walk_away_criteria, emotional_intelligence_notes.",
             insights_context,
         )
-        json.dumps(
-            {
-                "recommended_close_technique": "summary",
-                "close_script": (
-                    "So we've agreed that [pain #1] is costing you [metric], "
-                    "and [pain #2] is blocking [outcome]. "
-                    f"{product_name} solves both, and you'll see ROI within [N] months. "
-                    "Shall we get the paperwork started so you can hit [Q goal]?"
-                ),
-                "objection_handlers": [
-                    {
-                        "objection": "The price is too high.",
-                        "response": (
-                            "I understand — and I want to make sure this makes sense for you financially. "
-                            "The ROI model shows a [N]-month payback. "
-                            "Is the concern the absolute cost, or the timing of the spend?"
-                        ),
-                        "feel_felt_found": (
-                            "I understand how you feel — many of our customers felt the same way. "
-                            "What they found was that after 90 days the ROI more than justified the investment."
-                        ),
-                    },
-                    {
-                        "objection": "We need to think about it.",
-                        "response": (
-                            "Of course — what specifically would you like to think through? "
-                            "I want to make sure you have everything you need to make a confident decision."
-                        ),
-                        "feel_felt_found": None,
-                    },
-                ],
-                "urgency_framing": (
-                    "Implementation slots are currently booking [N] weeks out. "
-                    "To hit your [Q] deadline, we'd need to sign by [date]. "
-                    "I can hold your slot until [date + 3 days] — no pressure, but I wanted you to know."
-                ),
-                "walk_away_criteria": (
-                    "If budget is genuinely unavailable for 6+ months OR the prospect repeatedly "
-                    "avoids scheduling next steps after 3 follow-up attempts, "
-                    "politely disengage and flag for nurture re-entry in 90 days."
-                ),
-                "emotional_intelligence_notes": (
-                    "This buyer appears analytical — lead with data before emotion. "
-                    "Validate their thoroughness: 'It makes sense that you want to be thorough — "
-                    "this is a significant decision.' Mirror their deliberate pace; "
-                    "rushing this buyer will lose the deal."
-                ),
-            }
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=ClosingStrategyBody,
+            system_prompt=_CLOSER_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
         )
-        return _call_agent(self._agent, prompt)
 
 
 @dataclass
@@ -1133,11 +1074,12 @@ class SalesCoachAgent:
     Grounded in Gong Labs research, pipeline velocity metrics, and Iannarino's coaching framework.
     """
 
+    llm_client: Optional[LLMClient] = None
     role: str = "Sales Coach (Manager)"
-    _agent: Any = field(default=None, init=False, repr=False)
+    _llm: LLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(_COACH_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._llm = self.llm_client or get_sales_llm_client("coach")
 
     def review(
         self,
@@ -1145,7 +1087,7 @@ class SalesCoachAgent:
         product_name: str,
         pipeline_context: str,
         insights_context: Optional[str] = None,
-    ) -> str:
+    ) -> PipelineCoachingReport:
         prompt = _with_insights(
             f"Review this sales pipeline for {product_name}:\n{prospects_json}\n\n"
             f"Additional pipeline context: {pipeline_context or 'None provided'}\n\n"
@@ -1158,47 +1100,11 @@ class SalesCoachAgent:
             "top_priority_deals (array), recommended_next_actions (array), coaching_summary.",
             insights_context,
         )
-        json.dumps(
-            {
-                "prospects_reviewed": 1,
-                "deal_risk_signals": [
-                    {
-                        "signal": "Single-threaded — only one contact engaged",
-                        "severity": "high",
-                        "recommended_action": (
-                            "Request an intro to the Economic Buyer within the next call. "
-                            "Use: 'Who else on your team would need to be involved in a decision like this?'"
-                        ),
-                    },
-                    {
-                        "signal": "No confirmed next step on calendar",
-                        "severity": "medium",
-                        "recommended_action": (
-                            "Do not end any call without a specific next-step booked. "
-                            "Use calendar link in outreach footer."
-                        ),
-                    },
-                ],
-                "talk_listen_ratio_advice": (
-                    "On discovery calls, aim for 43% talk / 57% listen. "
-                    "Ask SPIN questions in clusters of 2, then pause and let silence work for you."
-                ),
-                "velocity_insights": (
-                    "Average stage duration in this pipeline appears longer than benchmark (14 days in qualification). "
-                    "Recommend qualifying or disqualifying within 7 days by applying hard BANT questions in call #2."
-                ),
-                "forecast_category": "pipeline",
-                "top_priority_deals": ["Acme Corp"],
-                "recommended_next_actions": [
-                    "Multi-thread Acme Corp — request intro to VP Finance by EOW",
-                    "Send Acme Corp ROI model from proposal before next call",
-                    "Set a 5-day follow-up reminder for any prospect with no activity",
-                ],
-                "coaching_summary": (
-                    "Pipeline is early-stage and needs multi-threading. "
-                    "Primary risk is single-threaded deals with no Economic Buyer identified. "
-                    "Focus this week on advancing qualification conversations and securing EB meetings."
-                ),
-            }
+        return complete_validated(
+            self._llm,
+            prompt,
+            schema=PipelineCoachingReport,
+            system_prompt=_COACH_SYSTEM_PROMPT,
+            temperature=0.0,
+            correction_attempts=2,
         )
-        return _call_agent(self._agent, prompt)

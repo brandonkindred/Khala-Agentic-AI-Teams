@@ -80,6 +80,7 @@ def complete_validated(
     system_prompt: str | None = None,
     temperature: float = 0.0,
     correction_attempts: int = 1,
+    context: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> T:
     """Call ``client.complete_json`` and validate the result against ``schema``.
@@ -97,6 +98,11 @@ def complete_validated(
         temperature: Sampling temperature (default 0.0 for structured output).
         correction_attempts: Max corrective follow-up calls (default 1).
             ``0`` disables the retry and matches today's single-shot behavior.
+        context: Optional dict forwarded to ``schema.model_validate`` as
+            the ``context`` kwarg. Validators can read cross-model state
+            from it (e.g. an allowed URL set) and mutate it to surface
+            side-channel signals to other validators in the same model
+            tree.
         **kwargs: Forwarded to ``client.complete_json``.
 
     Returns:
@@ -144,7 +150,7 @@ def complete_validated(
             continue
 
         try:
-            validated = schema.model_validate(data)
+            validated = schema.model_validate(data, context=context)
         except ValidationError as exc:
             last_validation_error = exc
             last_parse_error = None

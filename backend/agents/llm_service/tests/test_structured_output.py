@@ -203,3 +203,38 @@ def test_correction_attempts_zero_opts_out():
 
     assert excinfo.value.correction_attempts_used == 0
     assert len(client.call_prompts) == 1
+
+
+def test_context_is_forwarded_to_model_validate():
+    """context= is forwarded to Pydantic validators — proves the sales_team
+    citation-verification pattern works end-to-end.
+    """
+    from pydantic import ValidationInfo, field_validator
+
+    class ContextAwareModel(BaseModel):
+        token: str
+
+        @field_validator("token", mode="after")
+        @classmethod
+        def _allow_listed(cls, value: str, info: ValidationInfo) -> str:
+            allowed = (info.context or {}).get("allowed", set())
+            if value not in allowed:
+                raise ValueError(f"token {value!r} not in allowed set {allowed}")
+            return value
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        return {"token": "green"}
+
+    client = _StubClient(handler)
+    result = complete_validated(
+        client,
+        "prompt",
+        schema=ContextAwareModel,
+        context={"allowed": {"green", "amber"}},
+    )
+    assert result.token == "green"
+
+    # Without the context, the validator rejects the same payload.
+    client2 = _StubClient(handler)
+    with pytest.raises(LLMSchemaValidationError):
+        complete_validated(client2, "prompt", schema=ContextAwareModel, correction_attempts=0)

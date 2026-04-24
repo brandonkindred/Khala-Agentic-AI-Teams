@@ -10,7 +10,6 @@ from typing import Callable, List, Optional
 from uuid import uuid4
 
 from .agents import (
-    _PERSONALIZATION_CONFIDENCE_THRESHOLD,
     CloserAgent,
     DecisionMakerMapperAgent,
     DiscoveryAgent,
@@ -24,21 +23,19 @@ from .agents import (
 )
 from .learning_engine import LearningEngine, format_insights_for_prompt
 from .models import (
-    BANTScore,
     ClosingStrategy,
+    DecisionMakerList,
     DeepResearchRequest,
     DeepResearchResult,
     DiscoveryPlan,
     EmailTouch,
-    EvidenceCitation,
     IdealCustomerProfile,
     LearningInsights,
-    MEDDICScore,
     NurtureSequence,
-    ObjectionHandler,
     OutcomeResult,
     OutreachSequence,
     OutreachVariant,
+    OutreachVariantList,
     PipelineCoachingReport,
     PipelineStage,
     ProposalRequest,
@@ -46,11 +43,9 @@ from .models import (
     ProspectDossier,
     ProspectListEntry,
     QualificationScore,
-    ROIModel,
     SalesPipelineRequest,
     SalesPipelineResult,
     SalesProposal,
-    SPINQuestions,
     StageOutcome,
 )
 from .outcome_store import load_current_insights, record_stage_outcome
@@ -70,106 +65,55 @@ _STAGE_ORDER = [
 ]
 
 
-def _parse_json(raw: str, fallback: object) -> object:
-    """Best-effort JSON parse; returns fallback on failure."""
-    if not raw or not raw.strip():
-        return fallback
-    # Strip markdown code fences if the LLM wrapped the output
-    stripped = raw.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        stripped = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-    try:
-        return json.loads(stripped)
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("Could not parse agent JSON output; using fallback. Raw: %s", raw[:200])
-        return fallback
+# ---------------------------------------------------------------------------
+# Orchestrator-only helpers
+#
+# The per-agent JSON parsing that used to live here is gone — agents now
+# return typed Pydantic objects via ``llm_service.generate_structured``, and
+# cross-model rules (citation verification, grade downgrade, confidence gate)
+# are enforced inside model validators in ``models.py``. What's left here is
+# *policy* that doesn't belong on the data itself:
+#
+#   - seeding decision-maker prospects with company-level context
+#   - ranking + capping deep-research results
+#   - emitting a fallback variant when a low-confidence dossier ends up with
+#     zero surviving variants after model validation
+# ---------------------------------------------------------------------------
 
 
-def _prospects_from_json(raw: str) -> List[Prospect]:
-    data = _parse_json(raw, [])
-    if not isinstance(data, list):
-        data = [data] if isinstance(data, dict) else []
-    results = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        try:
-            results.append(Prospect(**item))
-        except Exception as exc:
-            logger.warning("Could not parse prospect: %s — %s", item, exc)
-    return results
+def _decision_makers_to_entries(
+    dm_list: DecisionMakerList, company: Prospect
+) -> List[tuple[Prospect, float]]:
+    """Inflate each DecisionMakerEntry into a full Prospect rooted in ``company``.
 
-
-def _decision_makers_from_json(raw: str, company: Prospect) -> List[tuple[Prospect, float]]:
-    """Parse a decision-maker mapper JSON array into ``(prospect, confidence)`` tuples.
-
-    Each returned Prospect inherits company-level data (company_name, website,
-    industry, icp_match_score, etc.) from ``company`` and overlays the contact
-    fields (contact_name, contact_title, linkedin_url). Confidence is a 0–1
-    score from the mapper agent used later to break ties during ranking.
+    Each returned tuple is ``(prospect, confidence)`` — the same shape the
+    old ``_decision_makers_from_json`` produced — so the rest of the
+    deep-research pipeline (ranking, capping) is unchanged.
     """
-    data = _parse_json(raw, [])
-    if not isinstance(data, list):
-        data = [data] if isinstance(data, dict) else []
     results: List[tuple[Prospect, float]] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("contact_name")
+    for item in dm_list.contacts:
+        name = (item.contact_name or "").strip()
         if not name:
             continue
-        rationale = item.get("decision_maker_rationale") or ""
-        confidence_raw = item.get("confidence")
-        extra_notes = rationale
-        if confidence_raw is not None:
-            extra_notes = f"{rationale} (confidence: {confidence_raw})".strip()
-        notes = company.research_notes
-        combined_notes = (notes + "\n" + extra_notes).strip() if extra_notes else notes
-        try:
-            prospect = Prospect(
-                company_name=company.company_name,
-                website=company.website,
-                contact_name=name,
-                contact_title=item.get("contact_title"),
-                contact_email=None,  # never fabricate emails
-                linkedin_url=item.get("linkedin_url"),
-                company_size_estimate=company.company_size_estimate,
-                industry=company.industry,
-                icp_match_score=company.icp_match_score,
-                research_notes=combined_notes,
-                trigger_events=list(company.trigger_events or []),
-            )
-            confidence = float(confidence_raw) if confidence_raw is not None else 0.5
-            results.append((prospect, confidence))
-        except Exception as exc:
-            logger.warning("Could not parse decision-maker contact: %s — %s", item, exc)
-    return results
-
-
-def _dossier_from_json(raw: str, prospect: Prospect) -> Optional[ProspectDossier]:
-    """Parse a dossier-builder JSON object into a ProspectDossier."""
-    data = _parse_json(raw, {})
-    if not isinstance(data, dict):
-        return None
-    # Ensure we always tie the dossier back to the prospect we asked about.
-    data.setdefault("prospect_id", prospect.id)
-    data.setdefault("full_name", prospect.contact_name or "")
-    data.setdefault("current_title", prospect.contact_title or "")
-    data.setdefault("current_company", prospect.company_name)
-    # Inherit linkedin if the agent didn't return one.
-    if not data.get("linkedin_url"):
-        data["linkedin_url"] = prospect.linkedin_url
-    try:
-        return ProspectDossier.model_validate(data)
-    except Exception as exc:
-        logger.warning(
-            "Could not parse dossier for prospect %s (%s): %s",
-            prospect.id,
-            prospect.contact_name,
-            exc,
+        rationale = item.decision_maker_rationale or ""
+        extra_notes = f"{rationale} (confidence: {item.confidence})".strip()
+        base_notes = company.research_notes
+        combined = (base_notes + "\n" + extra_notes).strip() if extra_notes else base_notes
+        prospect = Prospect(
+            company_name=company.company_name,
+            website=company.website,
+            contact_name=name,
+            contact_title=item.contact_title or None,
+            contact_email=None,  # never fabricate emails
+            linkedin_url=item.linkedin_url,
+            company_size_estimate=company.company_size_estimate,
+            industry=company.industry,
+            icp_match_score=company.icp_match_score,
+            research_notes=combined,
+            trigger_events=list(company.trigger_events or []),
         )
-        return None
+        results.append((prospect, item.confidence))
+    return results
 
 
 def _rank_score(entry: tuple[Prospect, float]) -> float:
@@ -185,9 +129,8 @@ def _enforce_cap_and_rank(
 ) -> List[Prospect]:
     """Enforce the per-company cap, rank globally, and trim to ``target_count``.
 
-    ``entries`` is a list of ``(prospect, confidence)`` pairs produced by
-    :func:`_decision_makers_from_json`. Returns a plain ``List[Prospect]``
-    ordered by rank score descending.
+    ``entries`` is a list of ``(prospect, confidence)`` pairs. Returns a
+    plain ``List[Prospect]`` ordered by rank score descending.
 
     Rules:
     1. Drop duplicates by (company_name, linkedin_url or contact_name).
@@ -196,7 +139,6 @@ def _enforce_cap_and_rank(
     3. Sort the surviving list globally by rank score desc and trim to
        ``target_count``.
     """
-    # Step 1: dedupe within the input
     seen: set[tuple[str, str]] = set()
     deduped: List[tuple[Prospect, float]] = []
     for p, conf in entries:
@@ -209,7 +151,6 @@ def _enforce_cap_and_rank(
         seen.add(key)
         deduped.append((p, conf))
 
-    # Step 2: per-company cap (keep top ``max_per_company`` per company by rank score)
     by_company: dict[str, List[tuple[Prospect, float]]] = {}
     for entry in deduped:
         p = entry[0]
@@ -220,76 +161,17 @@ def _enforce_cap_and_rank(
         company_list.sort(key=_rank_score, reverse=True)
         capped.extend(company_list[:max_per_company])
 
-    # Step 3: global rank + trim
     capped.sort(key=_rank_score, reverse=True)
     return [entry[0] for entry in capped[:target_count]]
 
 
-def _qual_from_json(raw: str, prospect: Prospect) -> Optional[QualificationScore]:
-    data = _parse_json(raw, {})
-    if not isinstance(data, dict):
-        return None
-    try:
-        bant_data = data.get("bant", {})
-        meddic_data = data.get("meddic", {})
-        return QualificationScore(
-            prospect=prospect,
-            bant=BANTScore(**bant_data),
-            meddic=MEDDICScore(**meddic_data),
-            overall_score=float(data.get("overall_score", 0.5)),
-            value_creation_level=int(data.get("value_creation_level", 2)),
-            recommended_action=data.get("recommended_action", "Nurture"),
-            disqualification_reason=data.get("disqualification_reason"),
-            qualification_notes=data.get("qualification_notes", ""),
-        )
-    except Exception as exc:
-        logger.warning("Could not build QualificationScore: %s", exc)
-        return None
-
-
-_ALLOWED_ANGLES = {
-    "trigger_event",
-    "thought_leadership",
-    "mutual_connection",
-    "peer_proof",
-    "company_soft_opener",
-}
-
-
-def _verify_citations(
-    touch_data: dict, dossier: ProspectDossier, prospect_id: str, dossier_id: str
-) -> tuple[List[EvidenceCitation], bool]:
-    """Strip citations whose source_url isn't listed in dossier.sources.
-
-    Returns the verified list and a flag indicating whether any citation was
-    stripped (used to downgrade the variant's personalization_grade).
-    """
-    allowed_urls = set(dossier.sources or [])
-    verified: List[EvidenceCitation] = []
-    stripped = False
-    for cit in touch_data.get("evidence_citations", []) or []:
-        if not isinstance(cit, dict):
-            continue
-        url = cit.get("source_url")
-        if url and url not in allowed_urls:
-            logger.warning(
-                "sales.outreach.citation_unverified prospect_id=%s dossier_id=%s url=%s",
-                prospect_id,
-                dossier_id,
-                url,
-            )
-            stripped = True
-            continue
-        try:
-            verified.append(EvidenceCitation(**cit))
-        except Exception as exc:
-            logger.warning("Could not parse EvidenceCitation: %s — %s", cit, exc)
-    return verified, stripped
-
-
 def _build_fallback_variant(prospect: Prospect) -> OutreachVariant:
-    """Minimal company_soft_opener variant used when the model fails to produce one
-    for a low-confidence dossier."""
+    """Minimal company_soft_opener variant.
+
+    Emitted by :func:`_wrap_outreach_sequence` when the model-validated
+    variant list for a low-confidence prospect ends up empty — the
+    confidence-gate validator dropped everything above the soft-opener tier.
+    """
     opener = (
         f"Saw the work coming out of {prospect.company_name} — wanted to ask whether you're "
         "the right person to talk to about improvements in this area. Happy to share what "
@@ -310,114 +192,28 @@ def _build_fallback_variant(prospect: Prospect) -> OutreachVariant:
     )
 
 
-def _outreach_from_json(
-    raw: str, prospect: Prospect, dossier: ProspectDossier
-) -> Optional[OutreachSequence]:
-    data = _parse_json(raw, {})
-    if not isinstance(data, dict):
-        return None
+def _wrap_outreach_sequence(
+    variants: OutreachVariantList,
+    prospect: Prospect,
+    dossier: ProspectDossier,
+) -> OutreachSequence:
+    """Wrap a validated :class:`OutreachVariantList` into a full OutreachSequence.
 
-    low_confidence = dossier.confidence < _PERSONALIZATION_CONFIDENCE_THRESHOLD
-    variants: List[OutreachVariant] = []
-
-    for v in data.get("variants", []) or []:
-        if not isinstance(v, dict):
-            continue
-        angle = v.get("angle")
-        if angle not in _ALLOWED_ANGLES:
-            logger.warning(
-                "sales.outreach.unknown_angle prospect_id=%s angle=%s", prospect.id, angle
-            )
-            continue
-
-        email_seq: List[EmailTouch] = []
-        any_stripped = False
-        for e in v.get("email_sequence", []) or []:
-            if not isinstance(e, dict):
-                continue
-            verified, stripped = _verify_citations(e, dossier, prospect.id, dossier.dossier_id)
-            any_stripped = any_stripped or stripped
-            try:
-                email_seq.append(
-                    EmailTouch(
-                        day=e.get("day", 0),
-                        subject_line=e.get("subject_line", ""),
-                        body=e.get("body", ""),
-                        personalization_tokens=e.get("personalization_tokens", []) or [],
-                        call_to_action=e.get("call_to_action", ""),
-                        evidence_citations=verified,
-                    )
-                )
-            except Exception as exc:
-                logger.warning("Could not build EmailTouch: %s — %s", e, exc)
-
-        grade = v.get("personalization_grade", "medium")
-        if grade not in ("high", "medium", "low", "fallback"):
-            grade = "medium"
-
-        # Enforcement 1: if a non-fallback angle's Day-1 email has zero
-        # verified citations, force fallback — model skipped the contract.
-        if angle != "company_soft_opener" and email_seq:
-            day1 = next((t for t in email_seq if t.day <= 1), email_seq[0])
-            if not day1.evidence_citations:
-                logger.warning(
-                    "sales.outreach.missing_citations prospect_id=%s dossier_id=%s angle=%s",
-                    prospect.id,
-                    dossier.dossier_id,
-                    angle,
-                )
-                grade = "fallback"
-
-        # Enforcement 2: if any citation was stripped, downgrade to "low".
-        if any_stripped and grade in ("high", "medium"):
-            grade = "low"
-
-        try:
-            variants.append(
-                OutreachVariant(
-                    angle=angle,
-                    email_sequence=email_seq,
-                    call_script=v.get("call_script", ""),
-                    linkedin_message=v.get("linkedin_message", ""),
-                    rationale=v.get("rationale", ""),
-                    personalization_grade=grade,
-                )
-            )
-        except Exception as exc:
-            logger.warning("Could not build OutreachVariant: %s", exc)
-
-    # Enforcement 3: confidence gate. If the dossier is below threshold, the
-    # only allowed angle is company_soft_opener — drop everything else.
-    if low_confidence:
-        overridden = [v for v in variants if v.angle != "company_soft_opener"]
-        for v in overridden:
-            logger.warning(
-                "sales.outreach.confidence_override prospect_id=%s dossier_id=%s "
-                "confidence=%.2f original_angle=%s",
-                prospect.id,
-                dossier.dossier_id,
-                dossier.confidence,
-                v.angle,
-            )
-        variants = [v for v in variants if v.angle == "company_soft_opener"]
-        if not variants:
-            variants = [_build_fallback_variant(prospect)]
-
-    if not variants:
+    The model's citation verification and grade downgrade rules already ran
+    inside the Pydantic validators on EmailTouch and OutreachVariant. The
+    OutreachSequence ``model_validator`` then dropped non-soft-opener variants
+    when ``dossier_confidence < PERSONALIZATION_CONFIDENCE_THRESHOLD``. What's
+    left for the orchestrator: if that leaves zero variants, emit a fallback.
+    """
+    seq = OutreachSequence(
+        prospect=prospect,
+        dossier_id=dossier.dossier_id,
+        dossier_confidence=dossier.confidence,
+        variants=variants.variants,
+    )
+    if not seq.variants:
         logger.warning("sales.outreach.no_variants prospect_id=%s — emitting fallback", prospect.id)
-        variants = [_build_fallback_variant(prospect)]
-
-    try:
-        seq = OutreachSequence(
-            prospect=prospect,
-            dossier_id=dossier.dossier_id,
-            dossier_confidence=dossier.confidence,
-            variants=variants,
-        )
-    except Exception as exc:
-        logger.warning("Could not build OutreachSequence: %s", exc)
-        return None
-
+        seq.variants = [_build_fallback_variant(prospect)]
     logger.info(
         "sales.outreach.generated prospect_id=%s dossier_id=%s variants_count=%d "
         "angles=%s grades=%s confidence=%.2f",
@@ -429,171 +225,6 @@ def _outreach_from_json(
         dossier.confidence,
     )
     return seq
-
-
-def _nurture_from_json(
-    raw: str, prospect: Prospect, duration_days: int
-) -> Optional[NurtureSequence]:
-    from .models import NurtureTouchpoint, OutreachChannel
-
-    data = _parse_json(raw, {})
-    if not isinstance(data, dict):
-        return None
-    try:
-        touchpoints = []
-        for t in data.get("touchpoints", []):
-            tp = NurtureTouchpoint(
-                day=t.get("day", 0),
-                channel=OutreachChannel(t.get("channel", "email")),
-                content_type=t.get("content_type", "email"),
-                message=t.get("message", ""),
-                goal=t.get("goal", ""),
-            )
-            touchpoints.append(tp)
-        return NurtureSequence(
-            prospect=prospect,
-            duration_days=data.get("duration_days", duration_days),
-            touchpoints=touchpoints,
-            re_engagement_triggers=data.get("re_engagement_triggers", []),
-            content_recommendations=data.get("content_recommendations", []),
-        )
-    except Exception as exc:
-        logger.warning("Could not build NurtureSequence: %s", exc)
-        return None
-
-
-def _discovery_from_json(raw: str, prospect: Prospect) -> Optional[DiscoveryPlan]:
-    data = _parse_json(raw, {})
-    if not isinstance(data, dict):
-        return None
-    try:
-        sq = data.get("spin_questions", {})
-        return DiscoveryPlan(
-            prospect=prospect,
-            spin_questions=SPINQuestions(
-                situation=sq.get("situation", []),
-                problem=sq.get("problem", []),
-                implication=sq.get("implication", []),
-                need_payoff=sq.get("need_payoff", []),
-            ),
-            challenger_insight=data.get("challenger_insight", ""),
-            demo_agenda=data.get("demo_agenda", []),
-            expected_objections=data.get("expected_objections", []),
-            success_criteria_for_call=data.get("success_criteria_for_call", ""),
-        )
-    except Exception as exc:
-        logger.warning("Could not build DiscoveryPlan: %s", exc)
-        return None
-
-
-def _proposal_from_json(
-    raw: str, prospect: Prospect, annual_cost: float
-) -> Optional[SalesProposal]:
-    data = _parse_json(raw, {})
-    if not isinstance(data, dict):
-        return None
-    try:
-        roi_data = data.get("roi_model", {})
-        roi = ROIModel(
-            annual_cost_usd=float(roi_data.get("annual_cost_usd", annual_cost)),
-            estimated_annual_benefit_usd=float(
-                roi_data.get("estimated_annual_benefit_usd", annual_cost * 2.5)
-            ),
-            payback_months=float(roi_data.get("payback_months", 8.0)),
-            roi_percentage=float(roi_data.get("roi_percentage", 150.0)),
-            assumptions=roi_data.get("assumptions", []),
-        )
-        from .models import ProposalSection
-
-        custom_sections = [
-            ProposalSection(**s) for s in data.get("custom_sections", []) if isinstance(s, dict)
-        ]
-        return SalesProposal(
-            prospect=prospect,
-            executive_summary=data.get("executive_summary", ""),
-            situation_analysis=data.get("situation_analysis", ""),
-            proposed_solution=data.get("proposed_solution", ""),
-            roi_model=roi,
-            investment_table=data.get("investment_table", ""),
-            implementation_timeline=data.get("implementation_timeline", ""),
-            risk_mitigation=data.get("risk_mitigation", ""),
-            next_steps=data.get("next_steps", []),
-            custom_sections=custom_sections,
-        )
-    except Exception as exc:
-        logger.warning("Could not build SalesProposal: %s", exc)
-        return None
-
-
-def _closing_from_json(raw: str, prospect: Prospect) -> Optional[ClosingStrategy]:
-    from .models import CloseType
-
-    data = _parse_json(raw, {})
-    if not isinstance(data, dict):
-        return None
-    try:
-        handlers = [
-            ObjectionHandler(
-                objection=h.get("objection", ""),
-                response=h.get("response", ""),
-                feel_felt_found=h.get("feel_felt_found"),
-            )
-            for h in data.get("objection_handlers", [])
-            if isinstance(h, dict)
-        ]
-        technique_raw = data.get("recommended_close_technique", "summary")
-        try:
-            technique = CloseType(technique_raw)
-        except ValueError:
-            technique = CloseType.SUMMARY
-        return ClosingStrategy(
-            prospect=prospect,
-            recommended_close_technique=technique,
-            close_script=data.get("close_script", ""),
-            objection_handlers=handlers,
-            urgency_framing=data.get("urgency_framing", ""),
-            walk_away_criteria=data.get("walk_away_criteria", ""),
-            emotional_intelligence_notes=data.get("emotional_intelligence_notes", ""),
-        )
-    except Exception as exc:
-        logger.warning("Could not build ClosingStrategy: %s", exc)
-        return None
-
-
-def _coaching_from_json(raw: str, n_prospects: int) -> Optional[PipelineCoachingReport]:
-    from .models import DealRiskSignal, ForecastCategory
-
-    data = _parse_json(raw, {})
-    if not isinstance(data, dict):
-        return None
-    try:
-        signals = [
-            DealRiskSignal(
-                signal=s.get("signal", ""),
-                severity=s.get("severity", "medium"),
-                recommended_action=s.get("recommended_action", ""),
-            )
-            for s in data.get("deal_risk_signals", [])
-            if isinstance(s, dict)
-        ]
-        fc_raw = data.get("forecast_category", "pipeline")
-        try:
-            fc = ForecastCategory(fc_raw)
-        except ValueError:
-            fc = ForecastCategory.PIPELINE
-        return PipelineCoachingReport(
-            prospects_reviewed=data.get("prospects_reviewed", n_prospects),
-            deal_risk_signals=signals,
-            talk_listen_ratio_advice=data.get("talk_listen_ratio_advice", ""),
-            velocity_insights=data.get("velocity_insights", ""),
-            forecast_category=fc,
-            top_priority_deals=data.get("top_priority_deals", []),
-            recommended_next_actions=data.get("recommended_next_actions", []),
-            coaching_summary=data.get("coaching_summary", ""),
-        )
-    except Exception as exc:
-        logger.warning("Could not build PipelineCoachingReport: %s", exc)
-        return None
 
 
 class SalesPodOrchestrator:
@@ -691,10 +322,10 @@ class SalesPodOrchestrator:
             if request.existing_prospects:
                 prospects = request.existing_prospects
             else:
-                raw = self.prospector.prospect(
+                prospects_result = self.prospector.prospect(
                     icp_json, product, vp, request.max_prospects, ctx, insights_ctx
                 )
-                prospects = _prospects_from_json(raw)
+                prospects = list(prospects_result.prospects)
             result.prospects = prospects
             update("prospecting", 15)
         else:
@@ -723,18 +354,22 @@ class SalesPodOrchestrator:
                         p.company_name,
                     )
                     continue
-                raw = self.outreach.generate_sequence(
-                    p.model_dump_json(indent=2),
-                    dossier,
-                    product,
-                    vp,
-                    cases,
-                    ctx,
-                    insights_ctx,
-                )
-                seq = _outreach_from_json(raw, p, dossier)
-                if seq:
-                    sequences.append(seq)
+                try:
+                    variants = self.outreach.generate_sequence(
+                        p.model_dump_json(indent=2),
+                        dossier,
+                        product,
+                        vp,
+                        cases,
+                        ctx,
+                        insights_ctx,
+                    )
+                except Exception:
+                    logger.exception(
+                        "sales.outreach.failed prospect_id=%s company=%s", p.id, p.company_name
+                    )
+                    continue
+                sequences.append(_wrap_outreach_sequence(variants, p, dossier))
             result.outreach_sequences = sequences
             update("outreach", 35)
 
@@ -746,12 +381,14 @@ class SalesPodOrchestrator:
             update("qualification", 40)
             logger.info("Sales pod [%s]: qualification stage", job_id)
             for p in prospects:
-                raw = self.qualifier.qualify(
-                    p.model_dump_json(indent=2), product, vp, "", insights_ctx
-                )
-                score = _qual_from_json(raw, p)
-                if score:
-                    qualified.append(score)
+                try:
+                    body = self.qualifier.qualify(
+                        p.model_dump_json(indent=2), product, vp, "", insights_ctx
+                    )
+                except Exception:
+                    logger.exception("sales.qualify.failed prospect_id=%s", p.id)
+                    continue
+                qualified.append(QualificationScore(prospect=p, **body.model_dump()))
             result.qualified_leads = qualified
             update("qualification", 50)
 
@@ -781,12 +418,14 @@ class SalesPodOrchestrator:
             logger.info("Sales pod [%s]: nurturing %d prospects", job_id, len(nurture_prospects))
             nurture_seqs: List[NurtureSequence] = []
             for p in nurture_prospects:
-                raw = self.nurture.build_sequence(
-                    p.model_dump_json(indent=2), product, vp, 90, insights_ctx
-                )
-                seq = _nurture_from_json(raw, p, 90)
-                if seq:
-                    nurture_seqs.append(seq)
+                try:
+                    body = self.nurture.build_sequence(
+                        p.model_dump_json(indent=2), product, vp, 90, insights_ctx
+                    )
+                except Exception:
+                    logger.exception("sales.nurture.failed prospect_id=%s", p.id)
+                    continue
+                nurture_seqs.append(NurtureSequence(prospect=p, **body.model_dump()))
             result.nurture_sequences = nurture_seqs
             update("nurturing", 62)
 
@@ -805,12 +444,14 @@ class SalesPodOrchestrator:
                     if q.prospect.company_name == p.company_name:
                         qual_json = q.model_dump_json(indent=2)
                         break
-                raw = self.discovery.prepare(
-                    p.model_dump_json(indent=2), qual_json, product, vp, insights_ctx
-                )
-                plan = _discovery_from_json(raw, p)
-                if plan:
-                    plans.append(plan)
+                try:
+                    body = self.discovery.prepare(
+                        p.model_dump_json(indent=2), qual_json, product, vp, insights_ctx
+                    )
+                except Exception:
+                    logger.exception("sales.discovery.failed prospect_id=%s", p.id)
+                    continue
+                plans.append(DiscoveryPlan(prospect=p, **body.model_dump()))
             result.discovery_plans = plans
             update("discovery", 75)
 
@@ -825,19 +466,21 @@ class SalesPodOrchestrator:
             proposals: List[SalesProposal] = []
             annual_cost = 25000.0  # Default; real requests should supply per-prospect pricing
             for p in qualified_prospects:
-                raw = self.proposal.write(
-                    p.model_dump_json(indent=2),
-                    product,
-                    vp,
-                    annual_cost,
-                    "",
-                    cases,
-                    ctx,
-                    insights_ctx,
-                )
-                prop = _proposal_from_json(raw, p, annual_cost)
-                if prop:
-                    proposals.append(prop)
+                try:
+                    body = self.proposal.write(
+                        p.model_dump_json(indent=2),
+                        product,
+                        vp,
+                        annual_cost,
+                        "",
+                        cases,
+                        ctx,
+                        insights_ctx,
+                    )
+                except Exception:
+                    logger.exception("sales.proposal.failed prospect_id=%s", p.id)
+                    continue
+                proposals.append(SalesProposal(prospect=p, **body.model_dump()))
             result.proposals = proposals
             update("proposal", 87)
 
@@ -854,12 +497,14 @@ class SalesPodOrchestrator:
                     if prop.prospect.company_name == p.company_name:
                         prop_json = prop.model_dump_json(indent=2)
                         break
-                raw = self.closer.develop_strategy(
-                    p.model_dump_json(indent=2), prop_json, product, vp, insights_ctx
-                )
-                strat = _closing_from_json(raw, p)
-                if strat:
-                    strategies.append(strat)
+                try:
+                    body = self.closer.develop_strategy(
+                        p.model_dump_json(indent=2), prop_json, product, vp, insights_ctx
+                    )
+                except Exception:
+                    logger.exception("sales.close.failed prospect_id=%s", p.id)
+                    continue
+                strategies.append(ClosingStrategy(prospect=p, **body.model_dump()))
             result.closing_strategies = strategies
             update("negotiation", 95)
 
@@ -869,9 +514,11 @@ class SalesPodOrchestrator:
         update("coaching", 97)
         logger.info("Sales pod [%s]: generating coaching report", job_id)
         prospects_json = json.dumps([p.model_dump() for p in prospects], indent=2)
-        raw = self.coach.review(prospects_json, product, "", insights_ctx)
-        coaching = _coaching_from_json(raw, len(prospects))
-        result.coaching_report = coaching
+        try:
+            result.coaching_report = self.coach.review(prospects_json, product, "", insights_ctx)
+        except Exception:
+            logger.exception("sales.coaching.failed")
+            result.coaching_report = None
 
         # Auto-record prospecting outcomes so the ICP accuracy learns over time
         self._record_prospecting_outcomes(result.prospects, job_id)
@@ -935,15 +582,19 @@ class SalesPodOrchestrator:
         company_context: str,
     ) -> List[Prospect]:
         ctx = self._load_insights_ctx()
-        raw = self.prospector.prospect(
-            icp.model_dump_json(indent=2),
-            product_name,
-            value_proposition,
-            max_prospects,
-            company_context,
-            ctx,
-        )
-        return _prospects_from_json(raw)
+        try:
+            result = self.prospector.prospect(
+                icp.model_dump_json(indent=2),
+                product_name,
+                value_proposition,
+                max_prospects,
+                company_context,
+                ctx,
+            )
+        except Exception:
+            logger.exception("sales.prospect_only.failed")
+            return []
+        return list(result.prospects)
 
     def outreach_only(
         self,
@@ -962,7 +613,7 @@ class SalesPodOrchestrator:
         """
         ctx = self._load_insights_ctx()
         cases = "\n".join(case_study_snippets)
-        sequences = []
+        sequences: List[OutreachSequence] = []
         for p in prospects:
             dossier = dossier_map.get(p.id)
             if dossier is None:
@@ -972,28 +623,42 @@ class SalesPodOrchestrator:
                     p.company_name,
                 )
                 continue
-            raw = self.outreach.generate_sequence(
-                p.model_dump_json(indent=2),
-                dossier,
-                product_name,
-                value_proposition,
-                cases,
-                company_context,
-                ctx,
-            )
-            seq = _outreach_from_json(raw, p, dossier)
-            if seq:
-                sequences.append(seq)
+            try:
+                variants = self.outreach.generate_sequence(
+                    p.model_dump_json(indent=2),
+                    dossier,
+                    product_name,
+                    value_proposition,
+                    cases,
+                    company_context,
+                    ctx,
+                )
+            except Exception:
+                logger.exception(
+                    "sales.outreach_only.failed prospect_id=%s company=%s",
+                    p.id,
+                    p.company_name,
+                )
+                continue
+            sequences.append(_wrap_outreach_sequence(variants, p, dossier))
         return sequences
 
     def qualify_only(
         self, prospect: Prospect, product_name: str, value_proposition: str, call_notes: str
     ) -> Optional[QualificationScore]:
         ctx = self._load_insights_ctx()
-        raw = self.qualifier.qualify(
-            prospect.model_dump_json(indent=2), product_name, value_proposition, call_notes, ctx
-        )
-        return _qual_from_json(raw, prospect)
+        try:
+            body = self.qualifier.qualify(
+                prospect.model_dump_json(indent=2),
+                product_name,
+                value_proposition,
+                call_notes,
+                ctx,
+            )
+        except Exception:
+            logger.exception("sales.qualify_only.failed prospect_id=%s", prospect.id)
+            return None
+        return QualificationScore(prospect=prospect, **body.model_dump())
 
     def nurture_only(
         self,
@@ -1003,38 +668,51 @@ class SalesPodOrchestrator:
         duration_days: int,
     ) -> List[NurtureSequence]:
         ctx = self._load_insights_ctx()
-        sequences = []
+        sequences: List[NurtureSequence] = []
         for p in prospects:
-            raw = self.nurture.build_sequence(
-                p.model_dump_json(indent=2), product_name, value_proposition, duration_days, ctx
-            )
-            seq = _nurture_from_json(raw, p, duration_days)
-            if seq:
-                sequences.append(seq)
+            try:
+                body = self.nurture.build_sequence(
+                    p.model_dump_json(indent=2),
+                    product_name,
+                    value_proposition,
+                    duration_days,
+                    ctx,
+                )
+            except Exception:
+                logger.exception("sales.nurture_only.failed prospect_id=%s", p.id)
+                continue
+            sequences.append(NurtureSequence(prospect=p, **body.model_dump()))
         return sequences
 
     def propose_only(self, req: ProposalRequest) -> Optional[SalesProposal]:
         ctx = self._load_insights_ctx()
         cases = "\n".join(req.case_study_snippets)
-        raw = self.proposal.write(
-            req.prospect.model_dump_json(indent=2),
-            req.product_name,
-            req.value_proposition,
-            req.annual_cost_usd,
-            req.discovery_notes,
-            cases,
-            req.company_context,
-            ctx,
-        )
-        return _proposal_from_json(raw, req.prospect, req.annual_cost_usd)
+        try:
+            body = self.proposal.write(
+                req.prospect.model_dump_json(indent=2),
+                req.product_name,
+                req.value_proposition,
+                req.annual_cost_usd,
+                req.discovery_notes,
+                cases,
+                req.company_context,
+                ctx,
+            )
+        except Exception:
+            logger.exception("sales.propose_only.failed prospect_id=%s", req.prospect.id)
+            return None
+        return SalesProposal(prospect=req.prospect, **body.model_dump())
 
     def coach_only(
         self, prospects: List[Prospect], product_name: str, pipeline_context: str
     ) -> Optional[PipelineCoachingReport]:
         ctx = self._load_insights_ctx()
         prospects_json = json.dumps([p.model_dump() for p in prospects], indent=2)
-        raw = self.coach.review(prospects_json, product_name, pipeline_context, ctx)
-        return _coaching_from_json(raw, len(prospects))
+        try:
+            return self.coach.review(prospects_json, product_name, pipeline_context, ctx)
+        except Exception:
+            logger.exception("sales.coach_only.failed")
+            return None
 
     # ------------------------------------------------------------------
     # Deep-research prospecting: top-N list + per-prospect dossiers
@@ -1076,15 +754,19 @@ class SalesPodOrchestrator:
         run_notes: List[str] = []
 
         # Stage 1 — company shortlist
-        companies_raw = self.prospector.prospect_companies(
-            icp_json,
-            request.product_name,
-            request.value_proposition,
-            companies_requested,
-            request.company_context,
-            ctx,
-        )
-        companies = _prospects_from_json(companies_raw)
+        try:
+            companies_result = self.prospector.prospect_companies(
+                icp_json,
+                request.product_name,
+                request.value_proposition,
+                companies_requested,
+                request.company_context,
+                ctx,
+            )
+            companies = list(companies_result.prospects)
+        except Exception:
+            logger.exception("sales.deep_research.company_stage_failed")
+            companies = []
         if not companies:
             run_notes.append("No companies returned by the prospector agent.")
             return DeepResearchResult(
@@ -1102,7 +784,7 @@ class SalesPodOrchestrator:
 
         def _map_one(company: Prospect) -> List[tuple[Prospect, float]]:
             try:
-                raw = self.decision_maker_mapper.map_contacts(
+                dm_list = self.decision_maker_mapper.map_contacts(
                     company.model_dump_json(indent=2),
                     icp_json,
                     request.product_name,
@@ -1110,7 +792,7 @@ class SalesPodOrchestrator:
                     request.max_per_company,
                     ctx,
                 )
-                return _decision_makers_from_json(raw, company)
+                return _decision_makers_to_entries(dm_list, company)
             except Exception:
                 logger.exception(
                     "decision-maker mapping failed for company %s", company.company_name
@@ -1152,13 +834,25 @@ class SalesPodOrchestrator:
         # Stage 4 — build dossiers (bounded concurrency; network-heavy)
         def _build_one(p: Prospect) -> tuple[Prospect, Optional[ProspectDossier]]:
             try:
-                raw = self.dossier_builder.build(
+                dossier = self.dossier_builder.build(
                     p.model_dump_json(indent=2),
                     request.product_name,
                     request.value_proposition,
                     ctx,
                 )
-                return p, _dossier_from_json(raw, p)
+                # Ensure the dossier is tied to the prospect we asked about —
+                # the model is instructed to set prospect_id but we enforce it
+                # here so later persistence + lookups always work.
+                dossier.prospect_id = p.id
+                if not dossier.full_name and p.contact_name:
+                    dossier.full_name = p.contact_name
+                if not dossier.current_title and p.contact_title:
+                    dossier.current_title = p.contact_title
+                if not dossier.current_company:
+                    dossier.current_company = p.company_name
+                if not dossier.linkedin_url and p.linkedin_url:
+                    dossier.linkedin_url = p.linkedin_url
+                return p, dossier
             except Exception:
                 logger.exception("dossier building failed for prospect %s", p.id)
                 return p, None

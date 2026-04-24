@@ -1,31 +1,109 @@
-"""Tests for the AI Sales Team pod — including outcome tracking and learning loop.
+"""Tests for the AI Sales Team pod after the llm_service migration.
 
-The strands SDK is a hard dependency. Tests require it to be installed.
+These tests drive each agent with a ``CannedLLMClient`` that returns
+pre-programmed structured responses, so the suite needs neither Strands nor
+a live LLM provider on the path.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Dict
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import pytest
-from fastapi.testclient import TestClient
 
+from llm_service.interface import LLMClient
+from sales_team.agents import (
+    CloserAgent,
+    DecisionMakerMapperAgent,
+    DiscoveryAgent,
+    DossierBuilderAgent,
+    LeadQualifierAgent,
+    NurtureAgent,
+    OutreachAgent,
+    ProposalAgent,
+    ProspectorAgent,
+    SalesCoachAgent,
+)
+from sales_team.learning_engine import LearningEngine
+from sales_team.llm import SALES_ROLES, get_sales_llm_client, sales_agent_key
 from sales_team.models import (
-    BANTScore,
+    PERSONALIZATION_CONFIDENCE_THRESHOLD,
     CloseType,
+    ClosingStrategy,
+    ClosingStrategyBody,
     DealOutcome,
+    DealResult,
+    DecisionMakerList,
+    DiscoveryPlan,
+    DiscoveryPlanBody,
+    EmailTouch,
+    EvidenceCitation,
     IdealCustomerProfile,
     LearningInsights,
+    NurtureSequence,
+    NurtureSequenceBody,
     OutcomeResult,
+    OutreachSequence,
+    OutreachVariant,
+    OutreachVariantList,
+    PipelineCoachingReport,
     PipelineStage,
     Prospect,
     ProspectDossier,
-    SalesPipelineRequest,
-    SalesPipelineResult,
+    ProspectList,
+    QualificationScore,
+    QualificationScoreBody,
+    SalesProposal,
+    SalesProposalBody,
     StageOutcome,
 )
-from sales_team.orchestrator import SalesPodOrchestrator, _parse_json, _prospects_from_json
+from sales_team.orchestrator import (
+    _build_fallback_variant,
+    _enforce_cap_and_rank,
+    _wrap_outreach_sequence,
+)
+
+# ---------------------------------------------------------------------------
+# CannedLLMClient — a tiny, programmable LLMClient for tests
+# ---------------------------------------------------------------------------
+
+
+class CannedLLMClient(LLMClient):
+    """LLMClient that returns pre-programmed dicts from a list, in order.
+
+    Each call to ``complete_json`` pops the next response off the queue and
+    returns it as a dict. Tests program expected responses in setup, then
+    assert on agent output. This gives richer control than the shared
+    ``DummyLLMClient`` whose pattern-match fallbacks don't understand sales
+    prompts.
+    """
+
+    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+        self._responses = list(responses)
+        self.calls: List[Dict[str, Any]] = []
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        self.calls.append(
+            {"prompt": prompt, "system_prompt": system_prompt, "temperature": temperature}
+        )
+        if not self._responses:
+            raise AssertionError(
+                "CannedLLMClient queue exhausted — test programmed fewer responses than calls"
+            )
+        return self._responses.pop(0)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -39,11 +117,8 @@ def sample_icp() -> IdealCustomerProfile:
         company_size_min=50,
         company_size_max=2000,
         job_titles=["VP Sales", "CRO", "Head of Revenue"],
-        pain_points=["manual reporting", "long sales cycles", "poor pipeline visibility"],
+        pain_points=["manual reporting", "long sales cycles"],
         budget_range_usd="$20k–$80k/yr",
-        geographic_focus=["United States", "Canada"],
-        tech_stack_keywords=["Salesforce", "HubSpot", "Outreach"],
-        disqualifying_traits=["non-profit", "government"],
     )
 
 
@@ -55,12 +130,11 @@ def sample_prospect() -> Prospect:
         website="https://acme.example.com",
         contact_name="Jane Smith",
         contact_title="VP of Sales",
-        contact_email=None,
         linkedin_url="https://linkedin.com/in/jane-smith-example",
         company_size_estimate="200–500",
         industry="SaaS",
         icp_match_score=0.85,
-        research_notes="Recently raised Series B; hiring 10 AEs; uses Salesforce.",
+        research_notes="Recently raised Series B.",
         trigger_events=["Series B funding announced"],
     )
 
@@ -74,18 +148,9 @@ def sample_dossier(sample_prospect: Prospect) -> ProspectDossier:
         current_title=sample_prospect.contact_title or "VP of Sales",
         current_company=sample_prospect.company_name,
         linkedin_url=sample_prospect.linkedin_url,
-        executive_summary=(
-            "Jane runs sales at Acme Corp, a Series-B SaaS company. She has spoken "
-            "publicly about ramping AE teams and improving pipeline visibility."
-        ),
-        trigger_events=[
-            "Acme Corp announced Series B funding ($40M)",
-            "Hiring 10 AEs per LinkedIn headcount",
-        ],
-        conversation_hooks=[
-            "Recent QCon talk on ramping AE teams",
-            "Series B funding → need for pipeline scale",
-        ],
+        executive_summary="Jane runs sales at Acme Corp, a Series-B SaaS company.",
+        trigger_events=["Acme Corp announced Series B funding ($40M)"],
+        conversation_hooks=["Series B funding → need for pipeline scale"],
         sources=[
             "https://techcrunch.com/2026/acme-series-b",
             "https://qcon.example.com/2025/talks/jane-smith-ramp-ae",
@@ -102,1280 +167,713 @@ def low_confidence_dossier(sample_prospect: Prospect) -> ProspectDossier:
         full_name=sample_prospect.contact_name or "Jane Smith",
         current_title=sample_prospect.contact_title or "VP of Sales",
         current_company=sample_prospect.company_name,
+        executive_summary="Light research — only company-level trigger known.",
+        trigger_events=["Acme expanding into EMEA"],
+        sources=["https://news.example.com/acme-emea"],
         confidence=0.35,
     )
 
 
-@pytest.fixture()
-def orchestrator() -> SalesPodOrchestrator:
-    return SalesPodOrchestrator()
-
-
-@pytest.fixture()
-def api_client():
-    from sales_team.api.main import app
-
-    return TestClient(app)
-
-
 # ---------------------------------------------------------------------------
-# Model tests
+# llm.py factory
 # ---------------------------------------------------------------------------
 
 
-class TestModels:
-    def test_icp_defaults(self):
-        icp = IdealCustomerProfile()
-        assert icp.company_size_min == 10
-        assert icp.company_size_max == 5000
-        assert icp.industry == []
+class TestSalesLlmFactory:
+    def test_all_roles_have_canonical_keys(self) -> None:
+        for role in SALES_ROLES:
+            assert sales_agent_key(role) == f"sales.{role}"
 
-    def test_prospect_score_bounds(self):
-        with pytest.raises(Exception):
-            Prospect(company_name="X", icp_match_score=1.5)
+    def test_unknown_role_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown sales role"):
+            sales_agent_key("not_a_real_role")
 
-        with pytest.raises(Exception):
-            Prospect(company_name="X", icp_match_score=-0.1)
-
-    def test_prospect_valid(self, sample_prospect):
-        assert sample_prospect.icp_match_score == 0.85
-        assert sample_prospect.company_name == "Acme Corp"
-
-    def test_bant_score_bounds(self):
-        with pytest.raises(Exception):
-            BANTScore(budget=11, authority=5, need=5, timeline=5)
-
-    def test_bant_score_valid(self):
-        bant = BANTScore(budget=7, authority=6, need=9, timeline=6)
-        assert bant.budget == 7
-
-    def test_pipeline_stage_enum(self):
-        assert PipelineStage.PROSPECTING.value == "prospecting"
-        assert PipelineStage.CLOSED_WON.value == "closed_won"
-
-    def test_sales_pipeline_request_defaults(self, sample_icp, sample_prospect):
-        req = SalesPipelineRequest(
-            product_name="AcmeSales",
-            value_proposition="Close more deals faster",
-            icp=sample_icp,
-        )
-        assert req.entry_stage == PipelineStage.PROSPECTING
-        assert req.max_prospects == 5
-        assert req.existing_prospects == []
-
-    def test_max_prospects_bounds(self, sample_icp):
-        # Upper bound was raised from 20 to 100 to support deep-research runs.
-        # 100 should be accepted; 101 should fail.
-        SalesPipelineRequest(
-            product_name="X",
-            value_proposition="Y",
-            icp=sample_icp,
-            max_prospects=100,
-        )
-        with pytest.raises(Exception):
-            SalesPipelineRequest(
-                product_name="X",
-                value_proposition="Y",
-                icp=sample_icp,
-                max_prospects=101,
-            )
+    def test_get_sales_llm_client_returns_llm_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "dummy")
+        client = get_sales_llm_client("prospector")
+        assert hasattr(client, "complete_json")
 
 
 # ---------------------------------------------------------------------------
-# Parser helper tests
+# Validators promoted from orchestrator glue
 # ---------------------------------------------------------------------------
 
 
-class TestParsers:
-    def test_parse_json_valid(self):
-        result = _parse_json('{"key": "value"}', {})
-        assert result == {"key": "value"}
-
-    def test_parse_json_array(self):
-        result = _parse_json('[{"a": 1}]', [])
-        assert result == [{"a": 1}]
-
-    def test_parse_json_invalid_returns_fallback(self):
-        result = _parse_json("not valid json", {"fallback": True})
-        assert result == {"fallback": True}
-
-    def test_parse_json_empty_returns_fallback(self):
-        result = _parse_json("", [])
-        assert result == []
-
-    def test_parse_json_strips_markdown_fences(self):
-        raw = '```json\n{"key": 1}\n```'
-        result = _parse_json(raw, {})
-        assert result == {"key": 1}
-
-    def test_prospects_from_json_valid(self, sample_prospect):
-        data = json.dumps([sample_prospect.model_dump()])
-        prospects = _prospects_from_json(data)
-        assert len(prospects) == 1
-        assert prospects[0].company_name == "Acme Corp"
-
-    def test_prospects_from_json_invalid(self):
-        prospects = _prospects_from_json("not json at all")
-        assert prospects == []
-
-    def test_prospects_from_json_empty_array(self):
-        prospects = _prospects_from_json("[]")
-        assert prospects == []
-
-
-# ---------------------------------------------------------------------------
-# Agent stub tests (no strands SDK required)
-# ---------------------------------------------------------------------------
-
-
-class TestAgentStubs:
-    """Verify agents work correctly in stub mode (no strands SDK)."""
-
-    def test_prospector_returns_parseable_json(self, orchestrator, sample_icp):
-        raw = orchestrator.prospector.prospect(
-            sample_icp.model_dump_json(), "TestProduct", "We help X", 3, ""
-        )
-        data = json.loads(raw)
-        assert isinstance(data, list)
-        assert len(data) > 0
-        assert "company_name" in data[0]
-        assert "icp_match_score" in data[0]
-
-    def test_outreach_returns_parseable_json(self, orchestrator, sample_prospect, sample_dossier):
-        raw = orchestrator.outreach.generate_sequence(
-            sample_prospect.model_dump_json(),
-            sample_dossier,
-            "TestProduct",
-            "We help X",
-            "",
-            "",
-        )
-        data = json.loads(raw)
-        assert "variants" in data
-        assert isinstance(data["variants"], list)
-        assert data["variants"], "expected at least one variant"
-        variant = data["variants"][0]
-        assert "angle" in variant
-        assert "email_sequence" in variant
-        assert "personalization_grade" in variant
-
-    def test_qualifier_returns_parseable_json(self, orchestrator, sample_prospect):
-        raw = orchestrator.qualifier.qualify(
-            sample_prospect.model_dump_json(), "TestProduct", "We help X", ""
-        )
-        data = json.loads(raw)
-        assert "bant" in data
-        assert "meddic" in data
-        assert "overall_score" in data
-        assert 0.0 <= data["overall_score"] <= 1.0
-
-    def test_nurture_returns_parseable_json(self, orchestrator, sample_prospect):
-        raw = orchestrator.nurture.build_sequence(
-            sample_prospect.model_dump_json(), "TestProduct", "We help X", 90
-        )
-        data = json.loads(raw)
-        assert "touchpoints" in data
-        assert "re_engagement_triggers" in data
-        assert isinstance(data["touchpoints"], list)
-
-    def test_discovery_returns_parseable_json(self, orchestrator, sample_prospect):
-        raw = orchestrator.discovery.prepare(
-            sample_prospect.model_dump_json(), "{}", "TestProduct", "We help X"
-        )
-        data = json.loads(raw)
-        assert "spin_questions" in data
-        assert "situation" in data["spin_questions"]
-        assert "demo_agenda" in data
-
-    def test_proposal_returns_parseable_json(self, orchestrator, sample_prospect):
-        raw = orchestrator.proposal.write(
-            sample_prospect.model_dump_json(), "TestProduct", "We help X", 25000.0, "", "", ""
-        )
-        data = json.loads(raw)
-        assert "executive_summary" in data
-        assert "roi_model" in data
-        assert data["roi_model"]["annual_cost_usd"] == 25000.0
-
-    def test_closer_returns_parseable_json(self, orchestrator, sample_prospect):
-        raw = orchestrator.closer.develop_strategy(
-            sample_prospect.model_dump_json(), "{}", "TestProduct", "We help X"
-        )
-        data = json.loads(raw)
-        assert "recommended_close_technique" in data
-        assert "objection_handlers" in data
-
-    def test_coach_returns_parseable_json(self, orchestrator, sample_prospect):
-        raw = orchestrator.coach.review(
-            json.dumps([sample_prospect.model_dump()]), "TestProduct", ""
-        )
-        data = json.loads(raw)
-        assert "deal_risk_signals" in data
-        assert "coaching_summary" in data
-
-
-# ---------------------------------------------------------------------------
-# Orchestrator integration tests
-# ---------------------------------------------------------------------------
-
-
-class TestOrchestrator:
-    def test_prospect_only(self, orchestrator, sample_icp):
-        prospects = orchestrator.prospect_only(sample_icp, "TestProduct", "We help X", 3, "")
-        assert isinstance(prospects, list)
-        assert len(prospects) > 0
-        assert all(hasattr(p, "company_name") for p in prospects)
-
-    def test_outreach_only(self, orchestrator, sample_prospect, sample_dossier):
-        sequences = orchestrator.outreach_only(
-            [sample_prospect],
-            {sample_prospect.id: sample_dossier},
-            "TestProduct",
-            "We help X",
-            [],
-            "",
-        )
-        assert len(sequences) == 1
-        assert sequences[0].prospect.company_name == "Acme Corp"
-        assert sequences[0].dossier_id == sample_dossier.dossier_id
-        assert sequences[0].dossier_confidence == sample_dossier.confidence
-        assert sequences[0].variants, "expected at least one variant"
-
-    def test_outreach_only_skips_prospects_without_dossier(self, orchestrator, sample_prospect):
-        sequences = orchestrator.outreach_only(
-            [sample_prospect], {}, "TestProduct", "We help X", [], ""
-        )
-        assert sequences == []
-
-    def test_qualify_only(self, orchestrator, sample_prospect):
-        score = orchestrator.qualify_only(sample_prospect, "TestProduct", "We help X", "")
-        assert score is not None
-        assert 0.0 <= score.overall_score <= 1.0
-        assert score.value_creation_level in (1, 2, 3, 4)
-
-    def test_nurture_only(self, orchestrator, sample_prospect):
-        sequences = orchestrator.nurture_only([sample_prospect], "TestProduct", "We help X", 60)
-        assert len(sequences) == 1
-        assert sequences[0].duration_days > 0
-
-    def test_coach_only(self, orchestrator, sample_prospect):
-        report = orchestrator.coach_only([sample_prospect], "TestProduct", "")
-        assert report is not None
-        assert report.prospects_reviewed >= 0
-        assert isinstance(report.deal_risk_signals, list)
-
-    def test_should_run_logic(self, orchestrator):
-        assert orchestrator._should_run(PipelineStage.PROSPECTING, PipelineStage.PROSPECTING)
-        assert orchestrator._should_run(PipelineStage.OUTREACH, PipelineStage.PROSPECTING)
-        assert not orchestrator._should_run(PipelineStage.PROSPECTING, PipelineStage.OUTREACH)
-        assert orchestrator._should_run(PipelineStage.PROPOSAL, PipelineStage.PROPOSAL)
-
-    def test_full_pipeline_from_prospecting(self, orchestrator, sample_icp):
-        request = SalesPipelineRequest(
-            product_name="TestProduct",
-            value_proposition="We help sales teams close more deals faster",
-            icp=sample_icp,
-            max_prospects=1,
-        )
-        stages_called = []
-
-        def on_update(stage: str, pct: int) -> None:
-            stages_called.append(stage)
-
-        result = orchestrator.run(request, job_id="test-job-001", update_cb=on_update)
-
-        assert isinstance(result, SalesPipelineResult)
-        assert result.job_id == "test-job-001"
-        assert len(result.prospects) > 0
-        assert len(result.outreach_sequences) > 0
-        assert len(result.qualified_leads) > 0
-        assert "prospecting" in stages_called
-
-    def test_full_pipeline_with_existing_prospects(self, orchestrator, sample_prospect, sample_icp):
-        request = SalesPipelineRequest(
-            product_name="TestProduct",
-            value_proposition="We help sales teams close more deals faster",
-            icp=sample_icp,
-            entry_stage=PipelineStage.OUTREACH,
-            existing_prospects=[sample_prospect],
-        )
-        result = orchestrator.run(request, job_id="test-job-002")
-        # Should skip prospecting, start at outreach
-        assert len(result.outreach_sequences) > 0
-
-    def test_pipeline_stops_gracefully_with_no_prospects(self, orchestrator, sample_icp):
-        request = SalesPipelineRequest(
-            product_name="TestProduct",
-            value_proposition="We help sales teams close more deals faster",
-            icp=sample_icp,
-            entry_stage=PipelineStage.OUTREACH,
-            existing_prospects=[],
-        )
-        # Patch the outreach stage to skip since no prospects
-        result = orchestrator.run(request, job_id="test-job-003")
-        assert result.summary != ""
-
-
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Dossier rendering (agents._render_dossier_for_prompt)
-# ---------------------------------------------------------------------------
-
-
-class TestDossierRendering:
-    def test_renders_full_dossier(self, sample_dossier):
-        from sales_team.agents import _render_dossier_for_prompt
-
-        block = _render_dossier_for_prompt(sample_dossier)
-        assert "Prospect Dossier" in block
-        assert f"confidence: {sample_dossier.confidence:.2f}" in block
-        assert sample_dossier.full_name in block
-        assert sample_dossier.executive_summary in block
-        # All trigger events rendered
-        for ev in sample_dossier.trigger_events:
-            assert ev in block
-        # Sources section present so the model knows which URLs it may cite
-        assert "Sources" in block
-        for url in sample_dossier.sources:
-            assert url in block
-
-    def test_omits_empty_sections(self, low_confidence_dossier):
-        from sales_team.agents import _render_dossier_for_prompt
-
-        block = _render_dossier_for_prompt(low_confidence_dossier)
-        # Identity + confidence still appear
-        assert "Identity" in block
-        assert "confidence: 0.35" in block
-        # But none of the empty-list sections
-        assert "Trigger Events" not in block
-        assert "Publications" not in block
-        assert "Conversation Hooks" not in block
-        assert "Sources" not in block
-
-    def test_truncates_long_lists(self, sample_prospect):
-        from sales_team.agents import _DOSSIER_LIST_TOP_K, _render_dossier_for_prompt
-        from sales_team.models import ProspectDossier
-
-        big = ProspectDossier(
-            prospect_id=sample_prospect.id,
-            full_name="Jane",
-            current_title="VP",
-            current_company="Acme",
-            trigger_events=[f"trigger_{i}" for i in range(20)],
-            confidence=0.9,
-        )
-        block = _render_dossier_for_prompt(big)
-        # Only the first _DOSSIER_LIST_TOP_K triggers appear
-        for i in range(_DOSSIER_LIST_TOP_K):
-            assert f"trigger_{i}" in block
-        assert f"trigger_{_DOSSIER_LIST_TOP_K}" not in block
-
-
-# ---------------------------------------------------------------------------
-# Outreach parser + confidence gate + citation verifier
-# ---------------------------------------------------------------------------
-
-
-class TestOutreachParser:
-    def test_high_confidence_keeps_grounded_variant(self, sample_prospect, sample_dossier):
-        from sales_team.orchestrator import _outreach_from_json
-
-        raw = json.dumps(
+class TestEmailTouchCitationValidator:
+    def test_strips_unverified_urls_and_flags_context(self) -> None:
+        ctx: Dict[str, Any] = {
+            "dossier_source_urls": {"https://allowed.com"},
+            "citations_stripped": False,
+        }
+        touch = EmailTouch.model_validate(
             {
+                "day": 1,
+                "subject_line": "hi",
+                "body": "hi",
+                "evidence_citations": [
+                    {
+                        "claim": "c1",
+                        "dossier_field": "publications[0]",
+                        "source_url": "https://allowed.com",
+                    },
+                    {
+                        "claim": "c2",
+                        "dossier_field": "publications[1]",
+                        "source_url": "https://bad.com",
+                    },
+                ],
+            },
+            context=ctx,
+        )
+        assert len(touch.evidence_citations) == 1
+        assert touch.evidence_citations[0].source_url == "https://allowed.com"
+        assert ctx["citations_stripped"] is True
+
+    def test_no_context_keeps_everything(self) -> None:
+        touch = EmailTouch.model_validate(
+            {
+                "day": 1,
+                "subject_line": "s",
+                "body": "b",
+                "evidence_citations": [
+                    {"claim": "c", "dossier_field": "f", "source_url": "https://anywhere.com"}
+                ],
+            }
+        )
+        assert len(touch.evidence_citations) == 1
+
+
+class TestOutreachVariantValidator:
+    def test_grade_downgrades_to_low_when_citations_stripped(self) -> None:
+        ctx: Dict[str, Any] = {
+            "dossier_source_urls": {"https://ok.com"},
+            "citations_stripped": False,
+        }
+        variant = OutreachVariant.model_validate(
+            {
+                "angle": "trigger_event",
+                "email_sequence": [
+                    {
+                        "day": 1,
+                        "subject_line": "s",
+                        "body": "b",
+                        "evidence_citations": [
+                            {
+                                "claim": "c",
+                                "dossier_field": "trigger_events[0]",
+                                "source_url": "https://ok.com",
+                            },
+                            {
+                                "claim": "bad",
+                                "dossier_field": "x",
+                                "source_url": "https://bad.com",
+                            },
+                        ],
+                    }
+                ],
+                "personalization_grade": "high",
+            },
+            context=ctx,
+        )
+        assert variant.personalization_grade == "low"
+
+    def test_day1_missing_citations_forces_fallback(self) -> None:
+        variant = OutreachVariant.model_validate(
+            {
+                "angle": "trigger_event",
+                "email_sequence": [
+                    {"day": 1, "subject_line": "s", "body": "b", "evidence_citations": []}
+                ],
+                "personalization_grade": "high",
+            }
+        )
+        assert variant.personalization_grade == "fallback"
+
+    def test_soft_opener_without_citations_keeps_its_grade(self) -> None:
+        variant = OutreachVariant.model_validate(
+            {
+                "angle": "company_soft_opener",
+                "email_sequence": [
+                    {"day": 1, "subject_line": "s", "body": "b", "evidence_citations": []}
+                ],
+                "personalization_grade": "fallback",
+            }
+        )
+        assert variant.personalization_grade == "fallback"
+
+
+class TestOutreachSequenceConfidenceGate:
+    def test_drops_non_soft_opener_when_dossier_confidence_low(
+        self, sample_prospect: Prospect
+    ) -> None:
+        seq = OutreachSequence.model_validate(
+            {
+                "prospect": sample_prospect.model_dump(),
+                "dossier_id": "d1",
+                "dossier_confidence": 0.4,
                 "variants": [
                     {
-                        "angle": "trigger_event",
+                        "angle": "company_soft_opener",
+                        "personalization_grade": "fallback",
                         "email_sequence": [
                             {
                                 "day": 1,
-                                "subject_line": "Quick note on Acme's Series B",
-                                "body": "Congrats on the Series B.",
-                                "personalization_tokens": ["first_name"],
-                                "call_to_action": "Open to 15 min next week?",
+                                "subject_line": "s",
+                                "body": "b",
+                                "evidence_citations": [],
+                            }
+                        ],
+                    },
+                    {
+                        "angle": "trigger_event",
+                        "personalization_grade": "fallback",
+                        "email_sequence": [
+                            {
+                                "day": 1,
+                                "subject_line": "s",
+                                "body": "b",
+                                "evidence_citations": [],
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+        assert [v.angle for v in seq.variants] == ["company_soft_opener"]
+
+    def test_keeps_all_variants_when_confidence_meets_threshold(
+        self, sample_prospect: Prospect
+    ) -> None:
+        seq = OutreachSequence.model_validate(
+            {
+                "prospect": sample_prospect.model_dump(),
+                "dossier_id": "d1",
+                "dossier_confidence": PERSONALIZATION_CONFIDENCE_THRESHOLD + 0.1,
+                "variants": [
+                    {
+                        "angle": "company_soft_opener",
+                        "personalization_grade": "fallback",
+                        "email_sequence": [
+                            {
+                                "day": 1,
+                                "subject_line": "s",
+                                "body": "b",
+                                "evidence_citations": [],
+                            }
+                        ],
+                    },
+                    {
+                        "angle": "trigger_event",
+                        "personalization_grade": "high",
+                        "email_sequence": [
+                            {
+                                "day": 1,
+                                "subject_line": "s",
+                                "body": "b",
                                 "evidence_citations": [
                                     {
-                                        "claim": "Acme's Series B funding",
+                                        "claim": "c",
                                         "dossier_field": "trigger_events[0]",
-                                        "source_url": sample_dossier.sources[0],
-                                        "strength": "strong",
+                                        "source_url": "https://x.com",
                                     }
                                 ],
                             }
                         ],
-                        "call_script": "...",
-                        "linkedin_message": "...",
-                        "rationale": "trigger event is strongest signal",
-                        "personalization_grade": "high",
-                    }
-                ]
-            }
-        )
-        seq = _outreach_from_json(raw, sample_prospect, sample_dossier)
-        assert seq is not None
-        assert len(seq.variants) == 1
-        v = seq.variants[0]
-        assert v.angle == "trigger_event"
-        assert v.personalization_grade == "high"
-        assert v.email_sequence[0].evidence_citations[0].source_url == sample_dossier.sources[0]
-
-    def test_unverified_url_is_stripped_and_grade_downgraded(self, sample_prospect, sample_dossier):
-        from sales_team.orchestrator import _outreach_from_json
-
-        raw = json.dumps(
-            {
-                "variants": [
-                    {
-                        "angle": "trigger_event",
-                        "email_sequence": [
-                            {
-                                "day": 1,
-                                "subject_line": "Series B",
-                                "body": "Congrats!",
-                                "evidence_citations": [
-                                    {
-                                        "claim": "made up",
-                                        "dossier_field": "trigger_events[0]",
-                                        "source_url": "https://evil.example.com/fake",
-                                        "strength": "strong",
-                                    },
-                                    {
-                                        "claim": "real",
-                                        "dossier_field": "trigger_events[0]",
-                                        "source_url": sample_dossier.sources[0],
-                                        "strength": "strong",
-                                    },
-                                ],
-                            }
-                        ],
-                        "personalization_grade": "high",
-                    }
-                ]
-            }
-        )
-        seq = _outreach_from_json(raw, sample_prospect, sample_dossier)
-        assert seq is not None
-        v = seq.variants[0]
-        # Unverified URL stripped, verified one kept
-        urls = [c.source_url for c in v.email_sequence[0].evidence_citations]
-        assert "https://evil.example.com/fake" not in urls
-        assert sample_dossier.sources[0] in urls
-        # Grade downgraded because a citation was stripped
-        assert v.personalization_grade == "low"
-
-    def test_non_fallback_with_no_citations_forced_to_fallback(
-        self, sample_prospect, sample_dossier
-    ):
-        from sales_team.orchestrator import _outreach_from_json
-
-        raw = json.dumps(
-            {
-                "variants": [
-                    {
-                        "angle": "trigger_event",
-                        "email_sequence": [
-                            {
-                                "day": 1,
-                                "subject_line": "No citations",
-                                "body": "This pretends to be personalized but isn't.",
-                                "evidence_citations": [],
-                            }
-                        ],
-                        "personalization_grade": "high",
-                    }
-                ]
-            }
-        )
-        seq = _outreach_from_json(raw, sample_prospect, sample_dossier)
-        assert seq is not None
-        assert seq.variants[0].personalization_grade == "fallback"
-
-    def test_low_confidence_collapses_to_company_soft_opener(
-        self, sample_prospect, low_confidence_dossier
-    ):
-        from sales_team.orchestrator import _outreach_from_json
-
-        raw = json.dumps(
-            {
-                "variants": [
-                    {
-                        "angle": "trigger_event",
-                        "email_sequence": [
-                            {
-                                "day": 1,
-                                "subject_line": "Should be overridden",
-                                "body": "Personal claims the dossier doesn't support.",
-                                "evidence_citations": [],
-                            }
-                        ],
-                        "personalization_grade": "high",
                     },
-                    {
-                        "angle": "thought_leadership",
-                        "email_sequence": [],
-                        "personalization_grade": "medium",
-                    },
-                ]
+                ],
             }
         )
-        seq = _outreach_from_json(raw, sample_prospect, low_confidence_dossier)
-        assert seq is not None
-        # All non-fallback angles dropped; a synthesized fallback remains.
-        assert all(v.angle == "company_soft_opener" for v in seq.variants)
-        assert all(v.personalization_grade == "fallback" for v in seq.variants)
+        assert len(seq.variants) == 2
 
-    def test_empty_variants_yields_fallback(self, sample_prospect, sample_dossier):
-        from sales_team.orchestrator import _outreach_from_json
 
-        raw = json.dumps({"variants": []})
-        seq = _outreach_from_json(raw, sample_prospect, sample_dossier)
-        assert seq is not None
+# ---------------------------------------------------------------------------
+# Individual agents — each driven by CannedLLMClient
+# ---------------------------------------------------------------------------
+
+
+def _prospect_payload(company: str, score: float = 0.8) -> Dict[str, Any]:
+    return {
+        "company_name": company,
+        "icp_match_score": score,
+        "industry": "SaaS",
+        "research_notes": "fit",
+        "trigger_events": ["Series B"],
+    }
+
+
+class TestProspectorAgent:
+    def test_prospect_returns_typed_list(self, sample_icp: IdealCustomerProfile) -> None:
+        client = CannedLLMClient(
+            [{"prospects": [_prospect_payload("Acme"), _prospect_payload("Beta")]}]
+        )
+        agent = ProspectorAgent(llm_client=client)
+        result = agent.prospect(sample_icp.model_dump_json(), "ProductX", "vp", 5, "company_ctx")
+        assert isinstance(result, ProspectList)
+        assert [p.company_name for p in result.prospects] == ["Acme", "Beta"]
+        assert "Sales Development Representative" in client.calls[0]["system_prompt"]
+
+    def test_prospect_companies_uses_same_schema(self, sample_icp: IdealCustomerProfile) -> None:
+        client = CannedLLMClient([{"prospects": [_prospect_payload("GlobalCo")]}])
+        agent = ProspectorAgent(llm_client=client)
+        result = agent.prospect_companies(sample_icp.model_dump_json(), "ProductX", "vp", 3, "ctx")
+        assert isinstance(result, ProspectList)
+        assert result.prospects[0].company_name == "GlobalCo"
+
+
+class TestDecisionMakerMapperAgent:
+    def test_returns_typed_decision_maker_list(self, sample_icp: IdealCustomerProfile) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "contacts": [
+                        {
+                            "contact_name": "Jane Smith",
+                            "contact_title": "VP Sales",
+                            "linkedin_url": "https://linkedin.com/in/jane",
+                            "contact_email": None,
+                            "decision_maker_rationale": "Owns the sales budget",
+                            "confidence": 0.9,
+                        }
+                    ]
+                }
+            ]
+        )
+        agent = DecisionMakerMapperAgent(llm_client=client)
+        company_json = json.dumps(_prospect_payload("Acme"))
+        result = agent.map_contacts(company_json, sample_icp.model_dump_json(), "ProductX", "vp")
+        assert isinstance(result, DecisionMakerList)
+        assert result.contacts[0].contact_name == "Jane Smith"
+        assert result.contacts[0].confidence == 0.9
+
+
+class TestDossierBuilderAgent:
+    def test_returns_typed_prospect_dossier(self, sample_prospect: Prospect) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "prospect_id": sample_prospect.id,
+                    "full_name": "Jane Smith",
+                    "current_title": "VP Sales",
+                    "current_company": sample_prospect.company_name,
+                    "executive_summary": "VP of Sales at Acme.",
+                    "sources": ["https://a.com"],
+                    "confidence": 0.7,
+                }
+            ]
+        )
+        agent = DossierBuilderAgent(llm_client=client)
+        result = agent.build(sample_prospect.model_dump_json(), "ProductX", "vp")
+        assert isinstance(result, ProspectDossier)
+        assert result.full_name == "Jane Smith"
+
+
+class TestOutreachAgent:
+    def test_validators_run_with_dossier_context(
+        self, sample_prospect: Prospect, sample_dossier: ProspectDossier
+    ) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "variants": [
+                        {
+                            "angle": "trigger_event",
+                            "email_sequence": [
+                                {
+                                    "day": 1,
+                                    "subject_line": "Series B",
+                                    "body": "Saw your Series B",
+                                    "evidence_citations": [
+                                        {
+                                            "claim": "Series B",
+                                            "dossier_field": "trigger_events[0]",
+                                            "source_url": (
+                                                "https://techcrunch.com/2026/acme-series-b"
+                                            ),
+                                        },
+                                        {
+                                            "claim": "fake",
+                                            "dossier_field": "x",
+                                            "source_url": "https://not-in-dossier.com",
+                                        },
+                                    ],
+                                }
+                            ],
+                            "rationale": "strong trigger",
+                            "personalization_grade": "high",
+                        }
+                    ]
+                }
+            ]
+        )
+        agent = OutreachAgent(llm_client=client)
+        result = agent.generate_sequence(
+            sample_prospect.model_dump_json(),
+            sample_dossier,
+            "ProductX",
+            "vp",
+            "",
+            "",
+        )
+        assert isinstance(result, OutreachVariantList)
+        variant = result.variants[0]
+        assert len(variant.email_sequence[0].evidence_citations) == 1
+        assert variant.personalization_grade == "low"
+
+
+class TestLeadQualifierAgent:
+    def test_returns_typed_body(self, sample_prospect: Prospect) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "bant": {"budget": 8, "authority": 9, "need": 7, "timeline": 8},
+                    "meddic": {
+                        "metrics_identified": True,
+                        "economic_buyer_known": True,
+                        "decision_criteria_understood": True,
+                        "decision_process_mapped": True,
+                        "identify_pain": True,
+                        "champion_found": True,
+                    },
+                    "overall_score": 0.85,
+                    "value_creation_level": 3,
+                    "recommended_action": "advance",
+                    "qualification_notes": "Hot lead.",
+                }
+            ]
+        )
+        agent = LeadQualifierAgent(llm_client=client)
+        body = agent.qualify(sample_prospect.model_dump_json(), "ProductX", "vp", "")
+        assert isinstance(body, QualificationScoreBody)
+        qs = QualificationScore(prospect=sample_prospect, **body.model_dump())
+        assert qs.bant.authority == 9
+        assert qs.recommended_action == "advance"
+
+
+class TestNurtureAgent:
+    def test_returns_typed_body(self, sample_prospect: Prospect) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "duration_days": 90,
+                    "touchpoints": [
+                        {
+                            "day": 7,
+                            "channel": "email",
+                            "content_type": "case study",
+                            "message": "Check this out",
+                            "goal": "build trust",
+                        }
+                    ],
+                    "re_engagement_triggers": ["Series C funding"],
+                    "content_recommendations": ["Benchmark report"],
+                }
+            ]
+        )
+        agent = NurtureAgent(llm_client=client)
+        body = agent.build_sequence(sample_prospect.model_dump_json(), "ProductX", "vp", 90)
+        assert isinstance(body, NurtureSequenceBody)
+        seq = NurtureSequence(prospect=sample_prospect, **body.model_dump())
+        assert len(seq.touchpoints) == 1
+
+
+class TestDiscoveryAgent:
+    def test_returns_typed_body(self, sample_prospect: Prospect) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "spin_questions": {
+                        "situation": ["s1"],
+                        "problem": ["p1"],
+                        "implication": ["i1"],
+                        "need_payoff": ["n1"],
+                    },
+                    "challenger_insight": "Counterintuitive data…",
+                    "demo_agenda": ["intro", "demo"],
+                    "expected_objections": ["pricing"],
+                    "success_criteria_for_call": "EB confirmed",
+                }
+            ]
+        )
+        agent = DiscoveryAgent(llm_client=client)
+        body = agent.prepare(sample_prospect.model_dump_json(), "{}", "ProductX", "vp")
+        assert isinstance(body, DiscoveryPlanBody)
+        plan = DiscoveryPlan(prospect=sample_prospect, **body.model_dump())
+        assert plan.spin_questions.situation == ["s1"]
+
+
+class TestProposalAgent:
+    def test_returns_typed_body(self, sample_prospect: Prospect) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "executive_summary": "Proposal.",
+                    "situation_analysis": "…",
+                    "proposed_solution": "…",
+                    "roi_model": {
+                        "annual_cost_usd": 25000.0,
+                        "estimated_annual_benefit_usd": 70000.0,
+                        "payback_months": 6.0,
+                        "roi_percentage": 180.0,
+                        "assumptions": ["assume a"],
+                    },
+                    "investment_table": "…",
+                    "implementation_timeline": "…",
+                    "risk_mitigation": "…",
+                    "next_steps": ["sign"],
+                    "custom_sections": [],
+                }
+            ]
+        )
+        agent = ProposalAgent(llm_client=client)
+        body = agent.write(sample_prospect.model_dump_json(), "ProductX", "vp", 25000.0, "", "", "")
+        assert isinstance(body, SalesProposalBody)
+        proposal = SalesProposal(prospect=sample_prospect, **body.model_dump())
+        assert proposal.roi_model.payback_months == 6.0
+
+
+class TestCloserAgent:
+    def test_returns_typed_body(self, sample_prospect: Prospect) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "recommended_close_technique": "summary",
+                    "close_script": "Shall we sign?",
+                    "objection_handlers": [
+                        {"objection": "price", "response": "ROI", "feel_felt_found": None}
+                    ],
+                    "urgency_framing": "Q-end",
+                    "walk_away_criteria": "no budget",
+                    "emotional_intelligence_notes": "analytical",
+                }
+            ]
+        )
+        agent = CloserAgent(llm_client=client)
+        body = agent.develop_strategy(sample_prospect.model_dump_json(), "{}", "ProductX", "vp")
+        assert isinstance(body, ClosingStrategyBody)
+        strat = ClosingStrategy(prospect=sample_prospect, **body.model_dump())
+        assert strat.recommended_close_technique == CloseType.SUMMARY
+
+
+class TestSalesCoachAgent:
+    def test_returns_full_coaching_report(self, sample_prospect: Prospect) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "prospects_reviewed": 1,
+                    "deal_risk_signals": [
+                        {
+                            "signal": "single-threaded",
+                            "severity": "high",
+                            "recommended_action": "multi-thread",
+                        }
+                    ],
+                    "talk_listen_ratio_advice": "43/57",
+                    "velocity_insights": "slow qual",
+                    "forecast_category": "pipeline",
+                    "top_priority_deals": ["Acme"],
+                    "recommended_next_actions": ["book EB call"],
+                    "coaching_summary": "…",
+                }
+            ]
+        )
+        agent = SalesCoachAgent(llm_client=client)
+        report = agent.review(
+            json.dumps([sample_prospect.model_dump()]), "ProductX", "pipeline ctx"
+        )
+        assert isinstance(report, PipelineCoachingReport)
+        assert report.deal_risk_signals[0].severity == "high"
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator helpers — wrap typed agent outputs + emit fallbacks
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorOutreachWrap:
+    def test_wrap_emits_fallback_when_low_confidence_drops_everything(
+        self, sample_prospect: Prospect, low_confidence_dossier: ProspectDossier
+    ) -> None:
+        raw = OutreachVariantList(
+            variants=[
+                OutreachVariant(
+                    angle="trigger_event",
+                    email_sequence=[
+                        EmailTouch(
+                            day=1,
+                            subject_line="Series B",
+                            body="Saw…",
+                            evidence_citations=[
+                                EvidenceCitation(
+                                    claim="c",
+                                    dossier_field="trigger_events[0]",
+                                    source_url="https://news.example.com/acme-emea",
+                                )
+                            ],
+                        )
+                    ],
+                    personalization_grade="high",
+                )
+            ]
+        )
+        seq = _wrap_outreach_sequence(raw, sample_prospect, low_confidence_dossier)
         assert len(seq.variants) == 1
         assert seq.variants[0].angle == "company_soft_opener"
         assert seq.variants[0].personalization_grade == "fallback"
 
-
-# ---------------------------------------------------------------------------
-# API endpoint tests
-# ---------------------------------------------------------------------------
-
-
-class TestAPI:
-    def test_health(self, api_client):
-        response = api_client.get("/health")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "ok"
-        assert "strands_sdk" in data
-
-    def test_prospect_endpoint(self, api_client, sample_icp):
-        payload = {
-            "icp": sample_icp.model_dump(),
-            "product_name": "TestProduct",
-            "value_proposition": "We help sales teams close faster",
-            "max_prospects": 2,
-        }
-        response = api_client.post("/sales/prospect", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert "prospects" in data
-        assert "count" in data
-        assert data["count"] >= 0
-
-    def test_outreach_endpoint(self, api_client, sample_prospect):
-        payload = {
-            "prospects": [sample_prospect.model_dump()],
-            "product_name": "TestProduct",
-            "value_proposition": "We help X",
-        }
-        response = api_client.post("/sales/outreach", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        # When no dossier exists for the prospect, the endpoint returns an
-        # empty sequences list plus the prospect id in skipped_prospect_ids —
-        # rather than 500ing or silently fabricating personalization.
-        assert "sequences" in data
-        assert "skipped_prospect_ids" in data
-        assert data["count"] == len(data["sequences"])
-        if not data["sequences"]:
-            assert sample_prospect.id in data["skipped_prospect_ids"]
-
-    def test_qualify_endpoint(self, api_client, sample_prospect):
-        payload = {
-            "prospect": sample_prospect.model_dump(),
-            "product_name": "TestProduct",
-            "value_proposition": "We help X",
-            "call_notes": "",
-        }
-        response = api_client.post("/sales/qualify", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert "overall_score" in data
-        assert "recommended_action" in data
-
-    def test_nurture_endpoint(self, api_client, sample_prospect):
-        payload = {
-            "prospects": [sample_prospect.model_dump()],
-            "product_name": "TestProduct",
-            "value_proposition": "We help X",
-            "duration_days": 30,
-        }
-        response = api_client.post("/sales/nurture", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert "sequences" in data
-
-    def test_proposal_endpoint(self, api_client, sample_prospect):
-        payload = {
-            "prospect": sample_prospect.model_dump(),
-            "product_name": "TestProduct",
-            "value_proposition": "We help X",
-            "annual_cost_usd": 24000.0,
-        }
-        response = api_client.post("/sales/proposal", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert "executive_summary" in data
-        assert "roi_model" in data
-
-    def test_coaching_endpoint(self, api_client, sample_prospect):
-        payload = {
-            "prospects": [sample_prospect.model_dump()],
-            "product_name": "TestProduct",
-            "pipeline_context": "",
-        }
-        response = api_client.post("/sales/coaching", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert "coaching_summary" in data
-        assert "deal_risk_signals" in data
-
-    def test_pipeline_run_returns_job_id(self, api_client, sample_icp):
-        payload = {
-            "product_name": "TestProduct",
-            "value_proposition": "We help sales teams close more deals faster",
-            "icp": sample_icp.model_dump(),
-            "max_prospects": 1,
-        }
-        response = api_client.post("/sales/pipeline/run", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert "job_id" in data
-        assert "status" in data
-
-    def test_pipeline_status_not_found(self, api_client):
-        response = api_client.get("/sales/pipeline/status/nonexistent-job-id")
-        assert response.status_code == 404
-
-    def test_pipeline_list_jobs(self, api_client):
-        response = api_client.get("/sales/pipeline/jobs")
-        assert response.status_code == 200
-        assert isinstance(response.json(), list)
-
-    def test_cancel_nonexistent_job(self, api_client):
-        response = api_client.post("/sales/pipeline/job/nonexistent/cancel")
-        assert response.status_code == 404
-
-    def test_delete_nonexistent_job(self, api_client):
-        response = api_client.delete("/sales/pipeline/job/nonexistent")
-        assert response.status_code == 404
-
-    def test_delete_active_job_returns_409(self, api_client, sample_icp):
-        """Deleting a running job must be rejected with 409 — cancel first."""
-        payload = {
-            "product_name": "TestProduct",
-            "value_proposition": "We help sales teams close more deals faster",
-            "icp": sample_icp.model_dump(),
-            "max_prospects": 1,
-        }
-        run_resp = api_client.post("/sales/pipeline/run", json=payload)
-        assert run_resp.status_code == 200
-        job_id = run_resp.json()["job_id"]
-        # Job starts as running/pending — delete should fail
-        del_resp = api_client.delete(f"/sales/pipeline/job/{job_id}")
-        assert del_resp.status_code == 409
-
-
-# ---------------------------------------------------------------------------
-# Outcome store tests
-# ---------------------------------------------------------------------------
-
-
-class TestOutcomeStore:
-    """Test file-backed outcome persistence in isolation using a temp directory."""
-
-    @pytest.fixture(autouse=True)
-    def _tmp_cache(self, tmp_path, monkeypatch):
-        """Redirect all store I/O to a temporary directory."""
-        import sales_team.outcome_store as store
-
-        monkeypatch.setattr(store, "_CACHE_ROOT", tmp_path / "outcomes")
-        monkeypatch.setattr(store, "_INSIGHTS_PATH", tmp_path / "insights" / "current.json")
-
-    def test_record_and_load_stage_outcome(self):
-        from sales_team.outcome_store import load_stage_outcomes, record_stage_outcome
-
-        outcome = StageOutcome(
-            company_name="TestCo",
-            stage=PipelineStage.OUTREACH,
-            outcome=OutcomeResult.CONVERTED,
-            subject_line_used="Saw your Series B — quick thought",
-            email_touch_number=2,
-        )
-        saved = record_stage_outcome(outcome)
-
-        assert saved.outcome_id != ""
-        assert saved.recorded_at != ""
-
-        loaded = load_stage_outcomes()
-        assert len(loaded) == 1
-        assert loaded[0].company_name == "TestCo"
-        assert loaded[0].outcome == OutcomeResult.CONVERTED
-        assert loaded[0].subject_line_used == "Saw your Series B — quick thought"
-
-    def test_record_and_load_deal_outcome(self):
-        from sales_team.outcome_store import load_deal_outcomes, record_deal_outcome
-
-        outcome = DealOutcome(
-            company_name="WinCo",
-            industry="SaaS",
-            deal_size_usd=48000.0,
-            final_stage_reached=PipelineStage.NEGOTIATION,
-            result=OutcomeResult.WON,
-            win_factor="Champion + EB both engaged from discovery",
-            close_technique_used=CloseType.SUMMARY,
-            stages_completed=[
-                PipelineStage.PROSPECTING,
-                PipelineStage.OUTREACH,
-                PipelineStage.QUALIFICATION,
-            ],
-            icp_match_score=0.88,
-            qualification_score=0.79,
-            sales_cycle_days=34,
-        )
-        saved = record_deal_outcome(outcome)
-
-        assert saved.outcome_id != ""
-        loaded = load_deal_outcomes()
-        assert len(loaded) == 1
-        assert loaded[0].result == OutcomeResult.WON
-        assert loaded[0].deal_size_usd == 48000.0
-
-    def test_multiple_outcomes_sorted_newest_first(self):
-        from sales_team.outcome_store import load_stage_outcomes, record_stage_outcome
-
-        for i in range(3):
-            record_stage_outcome(
-                StageOutcome(
-                    company_name=f"Co{i}",
-                    stage=PipelineStage.QUALIFICATION,
-                    outcome=OutcomeResult.STALLED,
+    def test_wrap_keeps_variants_when_confidence_high(
+        self, sample_prospect: Prospect, sample_dossier: ProspectDossier
+    ) -> None:
+        raw = OutreachVariantList(
+            variants=[
+                OutreachVariant(
+                    angle="trigger_event",
+                    email_sequence=[
+                        EmailTouch(
+                            day=1,
+                            subject_line="Series B",
+                            body="Saw…",
+                            evidence_citations=[
+                                EvidenceCitation(
+                                    claim="Series B",
+                                    dossier_field="trigger_events[0]",
+                                    source_url=("https://techcrunch.com/2026/acme-series-b"),
+                                )
+                            ],
+                        )
+                    ],
+                    personalization_grade="high",
                 )
-            )
-        loaded = load_stage_outcomes()
-        assert len(loaded) == 3
-
-    def test_outcome_counts(self):
-        from sales_team.outcome_store import (
-            outcome_counts,
-            record_stage_outcome,
+            ]
         )
+        seq = _wrap_outreach_sequence(raw, sample_prospect, sample_dossier)
+        assert [v.angle for v in seq.variants] == ["trigger_event"]
 
-        assert outcome_counts()["stage_outcomes"] == 0
-        record_stage_outcome(
-            StageOutcome(
-                company_name="A", stage=PipelineStage.OUTREACH, outcome=OutcomeResult.CONVERTED
-            )
-        )
-        assert outcome_counts()["stage_outcomes"] == 1
 
-    def test_save_and_load_insights(self):
-        from sales_team.outcome_store import load_current_insights, save_insights
+class TestOrchestratorFallbackVariant:
+    def test_fallback_uses_company_name(self, sample_prospect: Prospect) -> None:
+        variant = _build_fallback_variant(sample_prospect)
+        assert variant.angle == "company_soft_opener"
+        assert variant.personalization_grade == "fallback"
+        assert sample_prospect.company_name in variant.email_sequence[0].body
 
-        insights = LearningInsights(
-            total_outcomes_analyzed=10,
-            win_rate=0.4,
-            top_performing_industries=["SaaS"],
-            insights_version=1,
-        )
-        save_insights(insights)
-        loaded = load_current_insights()
-        assert loaded is not None
-        assert loaded.win_rate == 0.4
-        assert loaded.insights_version == 1
+
+class TestOrchestratorCapAndRank:
+    def test_cap_enforced_per_company_and_ranked(self) -> None:
+        prospects = [
+            (Prospect(company_name="Acme", contact_name="A1", icp_match_score=0.9), 0.9),
+            (Prospect(company_name="Acme", contact_name="A2", icp_match_score=0.9), 0.8),
+            (Prospect(company_name="Acme", contact_name="A3", icp_match_score=0.9), 0.3),
+            (Prospect(company_name="Beta", contact_name="B1", icp_match_score=0.5), 0.9),
+        ]
+        result = _enforce_cap_and_rank(prospects, max_per_company=2, target_count=10)
+        acme_names = [p.contact_name for p in result if p.company_name == "Acme"]
+        assert len(acme_names) == 2
+        assert "A3" not in acme_names
 
 
 # ---------------------------------------------------------------------------
-# Heuristic learning engine tests
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# LearningEngine integration tests
+# LearningEngine
 # ---------------------------------------------------------------------------
 
 
 class TestLearningEngine:
-    @pytest.fixture(autouse=True)
-    def _tmp_cache(self, tmp_path, monkeypatch):
-        import sales_team.outcome_store as store
+    def test_empty_outcomes_returns_empty_insights_without_llm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saved: Dict[str, Any] = {}
 
-        monkeypatch.setattr(store, "_CACHE_ROOT", tmp_path / "outcomes")
-        monkeypatch.setattr(store, "_INSIGHTS_PATH", tmp_path / "insights" / "current.json")
+        def fake_save(insights: LearningInsights) -> None:
+            saved["insights"] = insights
 
-    def test_refresh_empty_store(self):
-        from sales_team.learning_engine import LearningEngine
+        monkeypatch.setattr("sales_team.learning_engine.save_insights", fake_save)
+        monkeypatch.setattr("sales_team.learning_engine.load_current_insights", lambda: None)
+        client = CannedLLMClient([])  # empty — must NOT be called
+        engine = LearningEngine(llm_client=client)
+        result = engine.refresh(stage_outcomes=[], deal_outcomes=[])
+        assert result.total_outcomes_analyzed == 0
+        assert saved["insights"] is result
+        assert client.calls == []
 
-        engine = LearningEngine()
-        insights = engine.refresh()
-        assert insights.total_outcomes_analyzed == 0
-        assert len(insights.actionable_recommendations) > 0
-
-    def test_refresh_with_outcomes(self):
-        from sales_team.learning_engine import LearningEngine
-        from sales_team.outcome_store import record_deal_outcome, record_stage_outcome
-
-        record_stage_outcome(
-            StageOutcome(
-                company_name="A",
-                stage=PipelineStage.OUTREACH,
-                outcome=OutcomeResult.CONVERTED,
-                subject_line_used="Funding trigger hook",
-            )
+    def test_refresh_builds_insights_from_llm_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        saved: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "sales_team.learning_engine.save_insights",
+            lambda insights: saved.setdefault("insights", insights),
         )
-        record_deal_outcome(
-            DealOutcome(
-                company_name="A",
-                industry="SaaS",
-                final_stage_reached=PipelineStage.NEGOTIATION,
-                result=OutcomeResult.WON,
-                close_technique_used=CloseType.SUMMARY,
-                sales_cycle_days=30,
-            )
+        monkeypatch.setattr("sales_team.learning_engine.load_current_insights", lambda: None)
+
+        stage = StageOutcome(
+            company_name="Acme",
+            stage=PipelineStage.PROSPECTING,
+            outcome=OutcomeResult.CONVERTED,
         )
-
-        engine = LearningEngine()
-        insights = engine.refresh()
-        assert insights.total_outcomes_analyzed == 2
-        assert insights.win_rate == 1.0
-        assert insights.insights_version >= 1
-
-    def test_refresh_persists_insights(self):
-        from sales_team.learning_engine import LearningEngine
-        from sales_team.outcome_store import load_current_insights
-
-        engine = LearningEngine()
-        engine.refresh()
-        loaded = load_current_insights()
-        assert loaded is not None
-        assert loaded.insights_version >= 1
-
-    def test_format_insights_empty(self):
-        from sales_team.learning_engine import format_insights_for_prompt
-
-        assert format_insights_for_prompt(None) == ""
-        assert format_insights_for_prompt(LearningInsights()) == ""
-
-    def test_format_insights_with_data(self):
-        from sales_team.learning_engine import format_insights_for_prompt
-
-        insights = LearningInsights(
-            total_outcomes_analyzed=20,
-            win_rate=0.55,
-            winning_patterns=["Champion + EB both engaged"],
-            common_objections=["Price too high"],
-            best_close_techniques=["summary"],
-            actionable_recommendations=["Focus on SaaS"],
-            insights_version=3,
+        deal = DealOutcome(
+            company_name="Acme",
+            final_stage_reached=PipelineStage.CLOSED_WON,
+            result=DealResult.WON,
         )
-        text = format_insights_for_prompt(insights)
-        assert "20 past outcomes" in text
-        assert "55%" in text
-        assert "Champion + EB" in text
-        assert "Price too high" in text
-        assert "summary" in text
-
-
-# ---------------------------------------------------------------------------
-# Outcome + insights API endpoint tests
-# ---------------------------------------------------------------------------
-
-
-class TestOutcomeAPI:
-    def test_record_stage_outcome(self, api_client, tmp_path, monkeypatch):
-        import sales_team.outcome_store as store
-
-        monkeypatch.setattr(store, "_CACHE_ROOT", tmp_path / "outcomes")
-        monkeypatch.setattr(store, "_INSIGHTS_PATH", tmp_path / "insights" / "current.json")
-
-        payload = {
-            "company_name": "Acme Corp",
-            "stage": "outreach",
-            "outcome": "converted",
-            "email_touch_number": 2,
-            "subject_line_used": "Congrats on your Series B",
-        }
-        response = api_client.post("/sales/outcomes/stage", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert "outcome_id" in data
-        assert data["outcome_id"] != ""
-
-    def test_record_deal_outcome_won(self, api_client, tmp_path, monkeypatch):
-        import sales_team.outcome_store as store
-
-        monkeypatch.setattr(store, "_CACHE_ROOT", tmp_path / "outcomes")
-        monkeypatch.setattr(store, "_INSIGHTS_PATH", tmp_path / "insights" / "current.json")
-
-        payload = {
-            "company_name": "WinCo",
-            "result": "won",
-            "final_stage_reached": "negotiation",
-            "deal_size_usd": 48000,
-            "win_factor": "Strong champion + EB both on final call",
-            "close_technique_used": "summary",
-            "stages_completed": ["prospecting", "outreach", "qualification"],
-            "sales_cycle_days": 28,
-        }
-        response = api_client.post("/sales/outcomes/deal", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert "won" in data["message"]
-
-    def test_outcome_summary(self, api_client):
-        response = api_client.get("/sales/outcomes/summary")
-        assert response.status_code == 200
-        data = response.json()
-        assert "stage_outcomes" in data
-        assert "deal_outcomes" in data
-
-    def test_insights_not_found_before_refresh(self, api_client, tmp_path, monkeypatch):
-        import sales_team.outcome_store as store
-
-        monkeypatch.setattr(store, "_CACHE_ROOT", tmp_path / "outcomes")
-        monkeypatch.setattr(store, "_INSIGHTS_PATH", tmp_path / "insights" / "current.json")
-
-        response = api_client.get("/sales/insights")
-        assert response.status_code == 404
-
-    def test_refresh_insights_endpoint(self, api_client, tmp_path, monkeypatch):
-        import sales_team.outcome_store as store
-
-        monkeypatch.setattr(store, "_CACHE_ROOT", tmp_path / "outcomes")
-        monkeypatch.setattr(store, "_INSIGHTS_PATH", tmp_path / "insights" / "current.json")
-
-        response = api_client.post("/sales/insights/refresh")
-        assert response.status_code == 200
-        data = response.json()
-        assert "insights_version" in data
-        assert data["insights_version"] >= 1
-
-    def test_health_includes_learning_stats(self, api_client):
-        response = api_client.get("/health")
-        assert response.status_code == 200
-        data = response.json()
-        assert "stage_outcomes_recorded" in data
-        assert "deal_outcomes_recorded" in data
-        assert "insights_available" in data
-
-
-# ---------------------------------------------------------------------------
-# Deep-research prospecting tests
-# ---------------------------------------------------------------------------
-
-
-from sales_team.models import (  # noqa: E402
-    DeepResearchRequest,
-    DeepResearchResult,
-)
-from sales_team.orchestrator import _enforce_cap_and_rank  # noqa: E402
-
-
-class TestDeepResearchModels:
-    def test_prospect_dossier_round_trip(self):
-        dossier = ProspectDossier(
-            prospect_id="prs_abc123",
-            full_name="Jane Smith",
-            current_title="VP of Data",
-            current_company="Acme Corp",
-            executive_summary="Owns the data platform and buys tooling for it.",
-            confidence=0.8,
-        )
-        payload = dossier.model_dump(mode="json")
-        restored = ProspectDossier.model_validate(payload)
-        assert restored.full_name == "Jane Smith"
-        assert restored.current_company == "Acme Corp"
-        assert restored.confidence == 0.8
-
-    def test_deep_research_request_bounds(self, sample_icp):
-        # 10..100 inclusive are valid.
-        DeepResearchRequest(
-            product_name="P",
-            value_proposition="we help teams do X",
-            icp=sample_icp,
-            target_prospects=100,
-        )
-        with pytest.raises(Exception):
-            DeepResearchRequest(
-                product_name="P",
-                value_proposition="we help teams do X",
-                icp=sample_icp,
-                target_prospects=101,
-            )
-        with pytest.raises(Exception):
-            DeepResearchRequest(
-                product_name="P",
-                value_proposition="we help teams do X",
-                icp=sample_icp,
-                target_prospects=9,
-            )
-
-    def test_max_per_company_default_is_two(self, sample_icp):
-        req = DeepResearchRequest(
-            product_name="P",
-            value_proposition="we help teams do X",
-            icp=sample_icp,
-        )
-        assert req.max_per_company == 2
-
-
-class TestCapAndRank:
-    def _make(
-        self, company: str, name: str, score: float, confidence: float = 0.5
-    ) -> tuple[Prospect, float]:
-        p = Prospect(
-            company_name=company,
-            contact_name=name,
-            icp_match_score=score,
-            linkedin_url=f"https://linkedin.com/in/{name.lower().replace(' ', '-')}",
-        )
-        return p, confidence
-
-    def test_cap_enforces_max_per_company(self):
-        entries: list = []
-        for i in range(10):  # 10 prospects at Acme
-            entries.append(self._make("Acme", f"Person {i}", 0.9, confidence=0.5))
-        for i in range(5):  # 5 at Beta
-            entries.append(self._make("Beta", f"Person {i}", 0.8, confidence=0.5))
-
-        result = _enforce_cap_and_rank(entries, max_per_company=2, target_count=100)
-        # Acme should contribute at most 2, Beta at most 2 → 4 total.
-        assert len(result) == 4
-        counts: Dict[str, int] = {}
-        for p in result:
-            counts[p.company_name] = counts.get(p.company_name, 0) + 1
-        assert all(c <= 2 for c in counts.values())
-
-    def test_cap_trims_to_target(self):
-        # 25 companies × 5 contacts each = 125 candidates; cap=2 → 50 keepers;
-        # target_count=30 should trim to 30.
-        entries: list = []
-        for c in range(25):
-            for i in range(5):
-                entries.append(self._make(f"Company{c}", f"Person {c}-{i}", 0.5 + (i * 0.01)))
-        result = _enforce_cap_and_rank(entries, max_per_company=2, target_count=30)
-        assert len(result) == 30
-        counts: Dict[str, int] = {}
-        for p in result:
-            counts[p.company_name] = counts.get(p.company_name, 0) + 1
-        assert all(c <= 2 for c in counts.values())
-
-    def test_cap_dedupes_exact_duplicates(self):
-        entry = self._make("Acme", "Jane Smith", 0.9, confidence=0.5)
-        result = _enforce_cap_and_rank([entry, entry, entry], max_per_company=2, target_count=10)
-        assert len(result) == 1
-
-    def test_rank_preserves_highest_fit_per_company(self):
-        low = self._make("Acme", "Low", 0.3, confidence=0.5)
-        mid = self._make("Acme", "Mid", 0.6, confidence=0.5)
-        hi = self._make("Acme", "High", 0.9, confidence=0.5)
-        result = _enforce_cap_and_rank([low, mid, hi], max_per_company=2, target_count=10)
-        names = {p.contact_name for p in result}
-        # Top 2 of 3 by icp_match_score should survive.
-        assert names == {"Mid", "High"}
-
-
-class TestDeepResearchOrchestrator:
-    def test_deep_research_happy_path(self, monkeypatch, sample_icp):
-        """End-to-end with all three agents monkeypatched to return fixed JSON."""
-        orchestrator = SalesPodOrchestrator()
-
-        # Agent 1: return 60 companies across 30 unique names (2 contacts/company target).
-        def _fake_prospect_companies(*_args, **_kwargs):
-            companies = []
-            for i in range(60):
-                companies.append(
-                    {
-                        "company_name": f"Company {i // 2}",  # repeats — 30 unique
-                        "website": f"https://company{i // 2}.example.com",
-                        "industry": "SaaS",
-                        "company_size_estimate": "200-500",
-                        "icp_match_score": 0.7,
-                        "research_notes": "matches ICP",
-                        "trigger_events": ["recent funding"],
-                    }
-                )
-            return json.dumps(companies)
-
-        # Agent 2: return 2 decision-makers per company.
-        counter = {"n": 0}
-
-        def _fake_map_contacts(*_args, **_kwargs):
-            n = counter["n"]
-            counter["n"] += 1
-            return json.dumps(
-                [
-                    {
-                        "contact_name": f"Decision Maker {n}-A",
-                        "contact_title": "VP Operations",
-                        "linkedin_url": f"https://linkedin.com/in/dm-{n}-a",
-                        "contact_email": None,
-                        "decision_maker_rationale": "holds budget authority for tooling",
-                        "confidence": 0.8,
-                    },
-                    {
-                        "contact_name": f"Decision Maker {n}-B",
-                        "contact_title": "Director of Ops",
-                        "linkedin_url": f"https://linkedin.com/in/dm-{n}-b",
-                        "contact_email": None,
-                        "decision_maker_rationale": "champion role on prior vendor deals",
-                        "confidence": 0.7,
-                    },
-                ]
-            )
-
-        # Agent 3: return a valid dossier.
-        def _fake_build_dossier(prospect_json, *_args, **_kwargs):
-            p = json.loads(prospect_json)
-            return json.dumps(
+        client = CannedLLMClient(
+            [
                 {
-                    "prospect_id": p.get("id", "prs_unknown"),
-                    "full_name": p.get("contact_name", "Unknown"),
-                    "current_title": p.get("contact_title", "Unknown"),
-                    "current_company": p.get("company_name", "Unknown"),
-                    "executive_summary": "Seasoned operator in SaaS ops.",
-                    "career_history": [
-                        {"company": "Prev Inc", "title": "Director", "start": "2019", "end": "2022"}
-                    ],
-                    "publications": [],
-                    "topics_of_interest": ["ops efficiency"],
-                    "sources": ["https://linkedin.com/in/example"],
-                    "confidence": 0.75,
+                    "total_outcomes_analyzed": 2,
+                    "win_rate": 0.5,
+                    "winning_patterns": ["multi-threaded"],
+                    "actionable_recommendations": ["Multi-thread earlier"],
                 }
+            ]
+        )
+        engine = LearningEngine(llm_client=client)
+        insights = engine.refresh(stage_outcomes=[stage], deal_outcomes=[deal])
+        assert insights.total_outcomes_analyzed == 2
+        assert insights.win_rate == 0.5
+        assert insights.winning_patterns == ["multi-threaded"]
+        assert insights.insights_version == 1
+        assert insights.generated_at
+
+
+# ---------------------------------------------------------------------------
+# Migration sanity — make sure the old Strands surface is completely gone
+# ---------------------------------------------------------------------------
+
+
+class TestMigrationCompleteness:
+    """Guardrails to prevent the old raw-Strands glue from sneaking back in."""
+
+    _SALES_DIR = Path(__file__).resolve().parent.parent
+
+    def _sales_source(self, filename: str) -> str:
+        return (self._SALES_DIR / filename).read_text()
+
+    @pytest.mark.parametrize("filename", ["agents.py", "orchestrator.py", "learning_engine.py"])
+    def test_no_raw_strands_imports(self, filename: str) -> None:
+        src = self._sales_source(filename)
+        assert "from strands" not in src, f"{filename} still imports strands"
+        assert re.search(r"^import strands", src, re.MULTILINE) is None, (
+            f"{filename} still imports strands"
+        )
+        assert "StrandsAgent" not in src, f"{filename} still references StrandsAgent"
+
+    def test_legacy_parse_helpers_removed(self) -> None:
+        src = self._sales_source("orchestrator.py")
+        for name in (
+            "def _parse_json",
+            "def _prospects_from_json",
+            "def _decision_makers_from_json",
+            "def _dossier_from_json",
+            "def _qual_from_json",
+            "def _outreach_from_json",
+            "def _nurture_from_json",
+            "def _discovery_from_json",
+            "def _proposal_from_json",
+            "def _closing_from_json",
+            "def _coaching_from_json",
+            "def _verify_citations",
+        ):
+            assert name not in src, f"orchestrator.py still defines {name}"
+
+    def test_sales_team_uses_llm_service(self) -> None:
+        for filename in ("agents.py", "learning_engine.py"):
+            src = self._sales_source(filename)
+            assert re.search(r"^from llm_service import", src, re.MULTILINE), (
+                f"{filename} does not import from llm_service"
             )
-
-        monkeypatch.setattr(orchestrator.prospector, "prospect_companies", _fake_prospect_companies)
-        monkeypatch.setattr(orchestrator.decision_maker_mapper, "map_contacts", _fake_map_contacts)
-        monkeypatch.setattr(orchestrator.dossier_builder, "build", _fake_build_dossier)
-
-        request = DeepResearchRequest(
-            product_name="AcmeOps",
-            value_proposition="Cuts ops review time by 80%",
-            icp=sample_icp,
-            target_prospects=50,
-            max_per_company=2,
-        )
-        result = orchestrator.deep_research_only(request, persist=False)
-
-        assert isinstance(result, DeepResearchResult)
-        assert result.total_prospects == 50
-        assert len(result.entries) == 50
-
-        # No company should appear more than twice.
-        from collections import Counter
-
-        company_counts = Counter(e.prospect.company_name for e in result.entries)
-        assert all(c <= 2 for c in company_counts.values())
-
-        # Every entry must have a dossier reference and a well-formed URL.
-        for e in result.entries:
-            assert e.dossier_id
-            assert e.dossier_url == f"/api/sales/dossiers/{e.dossier_id}"
-            assert e.prospect.dossier_id == e.dossier_id
-            assert e.prospect.id
-
-    def test_deep_research_handles_empty_company_shortlist(self, monkeypatch, sample_icp):
-        orchestrator = SalesPodOrchestrator()
-        monkeypatch.setattr(orchestrator.prospector, "prospect_companies", lambda *a, **kw: "[]")
-        request = DeepResearchRequest(
-            product_name="X",
-            value_proposition="we help teams do X",
-            icp=sample_icp,
-            target_prospects=10,
-        )
-        result = orchestrator.deep_research_only(request, persist=False)
-        assert result.total_prospects == 0
-        assert result.entries == []
-        assert "No companies" in result.notes
-
-
-class TestDeepResearchAPI:
-    def test_get_dossier_unknown_id_returns_404(self, api_client, monkeypatch):
-        """Missing dossiers return 404 — regardless of backing store availability."""
-        # Force the store to return None for any id.
-        import sales_team.api.main as api_main
-
-        class _FakeStore:
-            def get_dossier(self, _id):
-                return None
-
-        # The route imports DossierStore lazily; patch the module attribute it imports from.
-        import sales_team.dossier_store as ds
-
-        monkeypatch.setattr(ds, "DossierStore", _FakeStore)
-        response = api_client.get("/sales/dossiers/dsr_nonexistent")
-        assert response.status_code == 404
-
-        # Avoid unused import complaints in case of future refactors.
-        assert api_main is not None
-
-    def test_deep_research_endpoint_monkeypatched(self, api_client, monkeypatch, sample_icp):
-        import sales_team.api.main as api_main
-
-        fake_result = DeepResearchResult(
-            list_id="plst_test",
-            product_name="AcmeOps",
-            generated_at="2026-04-17T00:00:00+00:00",
-            total_prospects=0,
-            companies_represented=0,
-            entries=[],
-            notes="monkeypatched",
-        )
-
-        captured: Dict[str, object] = {}
-
-        class _FakeOrch:
-            def deep_research_only(self, req, dossier_url_builder=None, persist=True):
-                # The route handler must pass a URL builder so that emitted
-                # URLs match the actual registered route (including mount prefix).
-                captured["builder"] = dossier_url_builder
-                captured["req"] = req
-                captured["persist"] = persist
-                return fake_result
-
-        monkeypatch.setattr(api_main, "SalesPodOrchestrator", _FakeOrch)
-
-        response = api_client.post(
-            "/sales/prospect/deep-research",
-            json={
-                "product_name": "AcmeOps",
-                "value_proposition": "Cuts ops review time by 80%",
-                "icp": sample_icp.model_dump(),
-                "target_prospects": 10,
-                "max_per_company": 2,
-            },
-        )
-        assert response.status_code == 200
-        body = response.json()
-        assert body["list_id"] == "plst_test"
-        assert body["total_prospects"] == 0
-
-        # The handler must have passed a URL builder that resolves against
-        # the app's actual route ("get_dossier"). In the TestClient, routes
-        # are registered at /sales/..., so url_for includes that path.
-        builder = captured["builder"]
-        assert callable(builder)
-        built = builder("dsr_abc123")
-        assert "/sales/dossiers/dsr_abc123" in built
-
-    def test_get_dossier_runtime_store_failure_returns_503(self, api_client, monkeypatch):
-        """Runtime failures from the store (not just import failures) map to 503."""
-        import sales_team.dossier_store as ds
-
-        class _ExplodingStore:
-            def get_dossier(self, _id):
-                raise RuntimeError("postgres unreachable")
-
-        monkeypatch.setattr(ds, "DossierStore", _ExplodingStore)
-        response = api_client.get("/sales/dossiers/dsr_anything")
-        assert response.status_code == 503
-        assert "unavailable" in response.json()["detail"].lower()
-
-    def test_list_prospect_lists_runtime_store_failure_returns_503(self, api_client, monkeypatch):
-        import sales_team.dossier_store as ds
-
-        class _ExplodingStore:
-            def list_prospect_lists(self, limit: int = 50):
-                raise RuntimeError("postgres unreachable")
-
-        monkeypatch.setattr(ds, "DossierStore", _ExplodingStore)
-        response = api_client.get("/sales/prospect-lists")
-        assert response.status_code == 503

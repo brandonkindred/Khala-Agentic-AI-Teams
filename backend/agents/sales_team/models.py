@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
+
+# Dossiers below this confidence drop to the company_soft_opener angle.
+# Previously lived in ``agents.py``; moved here so the validator that enforces
+# the confidence gate doesn't pull in agent imports.
+PERSONALIZATION_CONFIDENCE_THRESHOLD = 0.6
 
 # ---------------------------------------------------------------------------
 # Type aliases used by the outreach payload
@@ -290,6 +298,44 @@ class EmailTouch(BaseModel):
         description="Dossier-rooted evidence for every personalization claim in this touch",
     )
 
+    @field_validator("evidence_citations", mode="after")
+    @classmethod
+    def _strip_unverified_citations(
+        cls, value: List[EvidenceCitation], info: ValidationInfo
+    ) -> List[EvidenceCitation]:
+        """Drop citations whose source_url is not in the dossier's verified URL set.
+
+        The allowed URL set is passed via ``ValidationInfo.context`` under
+        ``dossier_source_urls`` (a set of strings). If no context is given,
+        the list is returned unchanged — this keeps EmailTouch usable outside
+        the outreach flow (e.g. for deserialising persisted data).
+
+        When a citation is stripped, the flag
+        ``context["citations_stripped"] = True`` is set so the
+        :class:`OutreachVariant` model_validator can downgrade the
+        ``personalization_grade`` to ``"low"``.
+        """
+        if info.context is None:
+            return value
+        allowed = info.context.get("dossier_source_urls")
+        if allowed is None:
+            return value
+        verified: List[EvidenceCitation] = []
+        stripped_any = False
+        for cit in value:
+            if cit.source_url and cit.source_url not in allowed:
+                logger.warning(
+                    "sales.outreach.citation_unverified url=%s",
+                    cit.source_url,
+                )
+                stripped_any = True
+                continue
+            verified.append(cit)
+        if stripped_any:
+            # Mutate the shared context so the enclosing OutreachVariant can react.
+            info.context["citations_stripped"] = True
+        return verified
+
 
 class OutreachVariant(BaseModel):
     """One angle-specific version of a prospect's outreach sequence.
@@ -318,6 +364,34 @@ class OutreachVariant(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _enforce_personalization_contract(self, info: ValidationInfo) -> "OutreachVariant":
+        """Grade-enforcement rules lifted from the old ``_outreach_from_json`` glue.
+
+        1. If the EmailTouch validator stripped any citation (signalled via
+           ``context["citations_stripped"]``), downgrade ``high``/``medium`` to
+           ``low``.
+        2. If the variant is not the ``company_soft_opener`` angle and its
+           Day-1 email has zero evidence citations, force the grade to
+           ``"fallback"`` — the model failed the Personalization Contract.
+        """
+        if info.context and info.context.get("citations_stripped"):
+            if self.personalization_grade in ("high", "medium"):
+                self.personalization_grade = "low"
+            # Clear the flag so it doesn't leak to the next variant being
+            # validated in the same OutreachVariantList.
+            info.context["citations_stripped"] = False
+
+        if self.angle != "company_soft_opener" and self.email_sequence:
+            day1 = next(
+                (t for t in self.email_sequence if t.day <= 1),
+                self.email_sequence[0],
+            )
+            if not day1.evidence_citations:
+                logger.warning("sales.outreach.missing_citations angle=%s", self.angle)
+                self.personalization_grade = "fallback"
+        return self
+
 
 class OutreachSequence(BaseModel):
     """All generated variants for a single prospect's outreach."""
@@ -331,6 +405,129 @@ class OutreachSequence(BaseModel):
         default_factory=list,
         description="One entry per angle; every entry uses a different angle",
     )
+
+    @model_validator(mode="after")
+    def _enforce_confidence_gate(self) -> "OutreachSequence":
+        """Drop non-``company_soft_opener`` variants when dossier confidence is low.
+
+        Mirrors the Enforcement-3 rule that used to live in
+        ``orchestrator._outreach_from_json``. Policy: when the dossier isn't
+        trustworthy enough to back person-level personalization, the sequence
+        may only carry company-level soft-opener variants. Does **not**
+        synthesise a fallback variant — that remains the orchestrator's job
+        (a validator shouldn't fabricate data).
+        """
+        if self.dossier_confidence < PERSONALIZATION_CONFIDENCE_THRESHOLD:
+            non_soft = [v for v in self.variants if v.angle != "company_soft_opener"]
+            if non_soft:
+                logger.warning(
+                    "sales.outreach.confidence_override dossier_id=%s confidence=%.2f dropped_angles=%s",
+                    self.dossier_id,
+                    self.dossier_confidence,
+                    [v.angle for v in non_soft],
+                )
+            self.variants = [v for v in self.variants if v.angle == "company_soft_opener"]
+        return self
+
+
+# ---------------------------------------------------------------------------
+# LLM response wrapper schemas
+#
+# ``generate_structured`` requires a Pydantic BaseModel at the top level. Many
+# sales agent prompts naturally want to return a list (prospects, decision
+# makers, variants). These wrappers give those responses a single-object root
+# that the shared llm_service helper can validate.
+# ---------------------------------------------------------------------------
+
+
+class ProspectList(BaseModel):
+    """LLM wrapper for ProspectorAgent output (prospects or companies)."""
+
+    prospects: List[Prospect] = Field(default_factory=list)
+
+
+class DecisionMakerEntry(BaseModel):
+    """Shape returned by DecisionMakerMapperAgent for each identified contact."""
+
+    contact_name: str
+    contact_title: str = ""
+    linkedin_url: Optional[str] = None
+    contact_email: Optional[str] = None  # always null in practice; never fabricated
+    decision_maker_rationale: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class DecisionMakerList(BaseModel):
+    """LLM wrapper for DecisionMakerMapperAgent output."""
+
+    contacts: List[DecisionMakerEntry] = Field(default_factory=list)
+
+
+class OutreachVariantList(BaseModel):
+    """LLM wrapper for OutreachAgent output — raw variants before wrapping in OutreachSequence.
+
+    The orchestrator constructs the final :class:`OutreachSequence` after this
+    response validates, attaching ``prospect``, ``dossier_id``, and
+    ``dossier_confidence`` which the LLM should not fabricate.
+    """
+
+    variants: List[OutreachVariant] = Field(default_factory=list)
+
+
+class QualificationScoreBody(BaseModel):
+    """LLM wrapper for LeadQualifierAgent — the per-prospect body without the prospect field."""
+
+    bant: BANTScore
+    meddic: MEDDICScore
+    overall_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    value_creation_level: int = Field(default=2, ge=1, le=4)
+    recommended_action: str = "nurture"
+    disqualification_reason: Optional[str] = None
+    qualification_notes: str = ""
+
+
+class NurtureSequenceBody(BaseModel):
+    """LLM wrapper for NurtureAgent — body without the prospect field."""
+
+    duration_days: int = 90
+    touchpoints: List["NurtureTouchpoint"] = Field(default_factory=list)
+    re_engagement_triggers: List[str] = Field(default_factory=list)
+    content_recommendations: List[str] = Field(default_factory=list)
+
+
+class DiscoveryPlanBody(BaseModel):
+    """LLM wrapper for DiscoveryAgent — body without the prospect field."""
+
+    spin_questions: "SPINQuestions"
+    challenger_insight: str = ""
+    demo_agenda: List[str] = Field(default_factory=list)
+    expected_objections: List[str] = Field(default_factory=list)
+    success_criteria_for_call: str = ""
+
+
+class SalesProposalBody(BaseModel):
+    """LLM wrapper for ProposalAgent — body without the prospect field."""
+
+    executive_summary: str = ""
+    situation_analysis: str = ""
+    proposed_solution: str = ""
+    roi_model: "ROIModel"
+    investment_table: str = ""
+    implementation_timeline: str = ""
+    risk_mitigation: str = ""
+    next_steps: List[str] = Field(default_factory=list)
+    custom_sections: List["ProposalSection"] = Field(default_factory=list)
+
+
+class ClosingStrategyBody(BaseModel):
+    """LLM wrapper for CloserAgent — body without the prospect field."""
+
+    recommended_close_technique: "CloseType"
+    close_script: str = ""
+    objection_handlers: List["ObjectionHandler"] = Field(default_factory=list)
+    urgency_framing: str = ""
+    walk_away_criteria: str = ""
+    emotional_intelligence_notes: str = ""
 
 
 # ---------------------------------------------------------------------------
