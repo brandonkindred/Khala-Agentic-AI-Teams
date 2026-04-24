@@ -11,8 +11,9 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { JobActionsService } from '../../services/job-actions.service';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
-import type { PersonaInfo, PersonaTestRun } from '../../models';
+import type { JobSource, PersonaInfo, PersonaTestRun } from '../../models';
 
+const TEAM_SOURCE: JobSource = 'user_agent_founder';
 const POLL_RUNS_MS = 15_000;
 const TERMINAL_STATUSES = ['completed', 'failed'];
 const RUNNING_STATUSES = new Set<string>([
@@ -129,12 +130,12 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
 
     const call$ =
       action === 'stop'
-        ? this.jobActions.stop('user_agent_founder', run.run_id)
+        ? this.jobActions.stop(TEAM_SOURCE, run.run_id)
         : action === 'resume'
-        ? this.jobActions.resume('user_agent_founder', run.run_id)
+        ? this.jobActions.resume(TEAM_SOURCE, run.run_id)
         : action === 'restart'
-        ? this.jobActions.restart('user_agent_founder', run.run_id)
-        : this.jobActions.delete('user_agent_founder', run.run_id);
+        ? this.jobActions.restart(TEAM_SOURCE, run.run_id)
+        : this.jobActions.delete(TEAM_SOURCE, run.run_id);
 
     call$.subscribe({
       next: () => {

@@ -159,7 +159,7 @@ def start_founder_workflow() -> StartRunResponse:
 
     job_store.create_job(
         run_id,
-        status="running",
+        status=job_store.JOB_STATUS_RUNNING,
         label="Testing Personas workflow",
         current_phase="starting",
     )
@@ -168,13 +168,15 @@ def start_founder_workflow() -> StartRunResponse:
         mode = _dispatch_founder_run(run_id)
     except Exception as exc:
         logger.exception("Failed to dispatch founder workflow for %s", run_id)
-        job_store.update_job(run_id, status="failed", error=f"Dispatch failed: {exc}"[:500])
+        job_store.update_job(
+            run_id, status=job_store.JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}"[:500]
+        )
         store.update_run(run_id, status="failed", error=f"Dispatch failed: {exc}"[:1000])
         raise HTTPException(status_code=500, detail=f"Failed to start workflow: {exc}") from exc
 
     return StartRunResponse(
         job_id=run_id,
-        status="running",
+        status=job_store.JOB_STATUS_RUNNING,
         message=f"Founder workflow started ({mode}). Poll GET /status/{run_id} for progress.",
     )
 
@@ -446,7 +448,10 @@ class FounderJobListResponse(BaseModel):
     jobs: list[FounderJobSummary]
 
 
-_CANCELLABLE_STATUSES = frozenset({"pending", "running"})
+def _cancellable_statuses() -> frozenset[str]:
+    from user_agent_founder.shared import job_store
+
+    return frozenset({job_store.JOB_STATUS_PENDING, job_store.JOB_STATUS_RUNNING})
 
 
 @app.get("/jobs", response_model=FounderJobListResponse)
@@ -454,7 +459,9 @@ def list_jobs(running_only: bool = False) -> FounderJobListResponse:
     """List founder workflow jobs from the centralized job service."""
     from user_agent_founder.shared import job_store
 
-    statuses = ["running", "pending"] if running_only else None
+    statuses = (
+        [job_store.JOB_STATUS_RUNNING, job_store.JOB_STATUS_PENDING] if running_only else None
+    )
     raw = job_store.list_jobs(statuses=statuses)
     jobs = []
     for j in raw:
@@ -479,16 +486,16 @@ def cancel_job(job_id: str) -> dict[str, str]:
 
     try:
         job_store.validate_job_for_action(
-            job_store.get_job(job_id), job_id, _CANCELLABLE_STATUSES, "cancelled"
+            job_store.get_job(job_id), job_id, _cancellable_statuses(), "cancelled"
         )
     except ValueError as exc:
         code = 404 if "not found" in str(exc) else 400
         raise HTTPException(status_code=code, detail=str(exc)) from exc
 
-    job_store.update_job(job_id, status="cancelled", error="Cancelled by user")
+    job_store.update_job(job_id, status=job_store.JOB_STATUS_CANCELLED, error="Cancelled by user")
     store = get_founder_store()
     store.update_run(job_id, status="failed", error="Cancelled by user")
-    return {"status": "cancelled", "job_id": job_id}
+    return {"status": job_store.JOB_STATUS_CANCELLED, "job_id": job_id}
 
 
 @app.post("/job/{job_id}/resume", response_model=StartRunResponse)
@@ -509,7 +516,9 @@ def resume_job(job_id: str) -> StartRunResponse:
         code = 404 if "not found" in str(exc) else 400
         raise HTTPException(status_code=code, detail=str(exc)) from exc
 
-    job_store.update_job(job_id, status="running", error=None, current_phase="resuming")
+    job_store.update_job(
+        job_id, status=job_store.JOB_STATUS_RUNNING, error=None, current_phase="resuming"
+    )
     store = get_founder_store()
     store.update_run(job_id, status="pending", error=None)
 
@@ -517,12 +526,16 @@ def resume_job(job_id: str) -> StartRunResponse:
         mode = _dispatch_founder_run(job_id)
     except Exception as exc:
         logger.exception("Failed to resume founder workflow for %s", job_id)
-        job_store.update_job(job_id, status="failed", error=f"Resume dispatch failed: {exc}"[:500])
+        job_store.update_job(
+            job_id,
+            status=job_store.JOB_STATUS_FAILED,
+            error=f"Resume dispatch failed: {exc}"[:500],
+        )
         raise HTTPException(status_code=500, detail=f"Failed to resume workflow: {exc}") from exc
 
     return StartRunResponse(
         job_id=job_id,
-        status="running",
+        status=job_store.JOB_STATUS_RUNNING,
         message=f"Founder workflow resumed ({mode}).",
     )
 
@@ -545,7 +558,7 @@ def restart_job(job_id: str) -> StartRunResponse:
         raise HTTPException(status_code=code, detail=str(exc)) from exc
 
     job_store.reset_job(job_id)
-    job_store.update_job(job_id, status="running", current_phase="starting")
+    job_store.update_job(job_id, status=job_store.JOB_STATUS_RUNNING, current_phase="starting")
     store = get_founder_store()
     store.update_run(job_id, status="pending", error=None)
 
@@ -553,12 +566,16 @@ def restart_job(job_id: str) -> StartRunResponse:
         mode = _dispatch_founder_run(job_id)
     except Exception as exc:
         logger.exception("Failed to restart founder workflow for %s", job_id)
-        job_store.update_job(job_id, status="failed", error=f"Restart dispatch failed: {exc}"[:500])
+        job_store.update_job(
+            job_id,
+            status=job_store.JOB_STATUS_FAILED,
+            error=f"Restart dispatch failed: {exc}"[:500],
+        )
         raise HTTPException(status_code=500, detail=f"Failed to restart workflow: {exc}") from exc
 
     return StartRunResponse(
         job_id=job_id,
-        status="running",
+        status=job_store.JOB_STATUS_RUNNING,
         message=f"Founder workflow restarted ({mode}).",
     )
 

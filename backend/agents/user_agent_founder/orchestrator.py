@@ -385,11 +385,6 @@ def run_workflow(run_id: str, store: FounderRunStore, agent: FounderAgent) -> No
     """
     logger.info("Starting founder workflow: run_id=%s", run_id)
 
-    # The API layer (POST /start, /job/{id}/resume, /job/{id}/restart) registers
-    # the job with the centralized job service before dispatching, so the
-    # orchestrator only needs to update status here.
-    _sync_job_status(run_id, "running", phase="starting")
-
     try:
         # Phase 1: Generate the product spec
         store.update_run(run_id, status="generating_spec")
