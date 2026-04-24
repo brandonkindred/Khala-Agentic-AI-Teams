@@ -216,6 +216,15 @@ def _now() -> str:
 # Strategy Lab run tracking models
 # ---------------------------------------------------------------------------
 
+# All terminal statuses a strategy lab run can land in. Kept local to this
+# module because "completed_with_errors" is a lab-specific concept and the
+# shared job_service_client constants don't know about it. Used by the SSE
+# stream short-circuit, status reconciliation, and restart gating so a
+# freshly-introduced terminal state can't silently diverge.
+STRATEGY_LAB_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"completed", "completed_with_errors", "failed", "cancelled", "interrupted"}
+)
+
 
 class StrategyLabRunStartResponse(BaseModel):
     """Returned immediately when a strategy lab batch is started."""
@@ -244,6 +253,10 @@ class StrategyLabRunStatusResponse(BaseModel):
     total_cycles: int
     completed_cycles: int = 0
     skipped_cycles: int = 0
+    # Non-fatal per-cycle failures: run keeps going, but these are surfaced
+    # to the UI so users can see that something went wrong during generation.
+    errored_cycles: int = 0
+    errored_details: List[Dict[str, Any]] = Field(default_factory=list)
     current_cycle: Optional[StrategyLabCycleProgress] = None
     completed_record_ids: List[str] = Field(default_factory=list)
     error: Optional[str] = None
@@ -278,6 +291,8 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         total_cycles=state["total_cycles"],
         completed_cycles=state.get("completed_cycles", 0),
         skipped_cycles=state.get("skipped_cycles", 0),
+        errored_cycles=state.get("errored_cycles", 0),
+        errored_details=state.get("errored_details", []),
         current_cycle=StrategyLabCycleProgress(**cc) if cc else None,
         completed_record_ids=state.get("completed_record_ids", []),
         error=state.get("error"),
@@ -1533,11 +1548,19 @@ def _strategy_lab_worker(
             # persisted counter with only the new-since-resume count, making
             # /strategy-lab/jobs and UI progress move backward.
             skipped: int = int(_run_state_snapshot.get("skipped_cycles") or 0)
+            # Carry forward errored count on resume (same reasoning as skipped).
+            errored: int = int(_run_state_snapshot.get("errored_cycles") or 0)
+            errored_details: List[Dict[str, Any]] = list(
+                _run_state_snapshot.get("errored_details") or []
+            )
         completed_indices: set[int] = set(range(start_cycle_offset))
         completed_batches = start_batch_idx
         primary_tracker = orchestrator.convergence_tracker
         run_failed = False
         run_cancelled = False
+        # Bound memory for errored_details — enough for operators to diagnose
+        # without letting a pathological run balloon the state dict.
+        _ERRORED_DETAILS_MAX = 50
 
         for batch_idx in range(start_batch_idx, batch_count):
             if run_failed or run_cancelled:
@@ -1559,7 +1582,24 @@ def _strategy_lab_worker(
 
             # Refresh the signal-intelligence brief at the start of every batch so the
             # next batch's strategies are informed by every prior batch's results.
-            precomputed_brief, signal_brief_storage = _compute_signal_brief()
+            # Belt-and-suspenders: _compute_signal_brief already catches expected
+            # failures, but an unexpected raise here must not kill the whole run.
+            try:
+                precomputed_brief, signal_brief_storage = _compute_signal_brief()
+            except Exception as exc:
+                logger.exception(
+                    "Signal brief computation raised unexpectedly at batch %d", batch_num
+                )
+                precomputed_brief = None
+                signal_brief_storage = {
+                    "skipped": True,
+                    "skipped_reason": "brief_failed",
+                    "error": str(exc)[:500],
+                }
+                _publish(
+                    "batch_warning",
+                    {"batch_index": batch_num, "reason": "signal_brief_failed"},
+                )
 
             # Wave-based parallel execution within this batch.
             # Cycle indices are global (1-based across the whole run): for batch B
@@ -1676,16 +1716,33 @@ def _strategy_lab_worker(
                                 _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
                                 run_failed = True
                         except Exception as exc:
-                            logger.exception("Strategy lab cycle %d/%d failed", cn, total_cycles)
+                            logger.exception("Strategy lab cycle %d/%d errored", cn, total_cycles)
+                            errored += 1
+                            if len(errored_details) < _ERRORED_DETAILS_MAX:
+                                errored_details.append(
+                                    {
+                                        "cycle_index": cn,
+                                        "batch_index": batch_num,
+                                        "error": str(exc)[:500],
+                                        "exception_type": type(exc).__name__,
+                                    }
+                                )
                             _update_run(
                                 {
-                                    "status": "failed",
-                                    "error": f"Cycle {cn} failed: {exc}",
+                                    "errored_cycles": errored,
+                                    "errored_details": errored_details,
                                     "current_cycle": None,
                                 }
                             )
-                            _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
-                            run_failed = True
+                            _publish(
+                                "cycle_errored",
+                                {
+                                    "cycle_index": cn,
+                                    "batch_index": batch_num,
+                                    "reason": type(exc).__name__,
+                                    "error": str(exc)[:500],
+                                },
+                            )
 
                 # Merge wave results into the primary convergence tracker in
                 # deterministic cycle-index order so that stall/diversity
@@ -1703,7 +1760,40 @@ def _strategy_lab_worker(
                     # touches ``_trial_count``.
                     cycle_orch = wave_orchestrators.get(_idx)
                     if cycle_orch is not None:
-                        primary_tracker.merge_from(cycle_orch.convergence_tracker)
+                        try:
+                            primary_tracker.merge_from(cycle_orch.convergence_tracker)
+                        except Exception as exc:
+                            logger.exception(
+                                "Strategy lab tracker merge failed for cycle %d/%d",
+                                _idx + 1,
+                                total_cycles,
+                            )
+                            errored += 1
+                            if len(errored_details) < _ERRORED_DETAILS_MAX:
+                                errored_details.append(
+                                    {
+                                        "cycle_index": _idx + 1,
+                                        "batch_index": batch_num,
+                                        "error": str(exc)[:500],
+                                        "exception_type": type(exc).__name__,
+                                        "reason": "tracker_merge_failed",
+                                    }
+                                )
+                            _update_run(
+                                {
+                                    "errored_cycles": errored,
+                                    "errored_details": errored_details,
+                                }
+                            )
+                            _publish(
+                                "cycle_errored",
+                                {
+                                    "cycle_index": _idx + 1,
+                                    "batch_index": batch_num,
+                                    "reason": "tracker_merge_failed",
+                                    "error": str(exc)[:500],
+                                },
+                            )
 
                 # Check for external cancellation between waves
                 if not run_failed and _is_run_cancelled():
@@ -1740,14 +1830,26 @@ def _strategy_lab_worker(
         )
         if skipped:
             msg += f" ({skipped} skipped due to unavailable market data)"
+        if errored:
+            msg += f" ({errored} cycle(s) errored)"
 
-        _update_run({"status": "completed", "current_cycle": None, "current_batch": None})
+        terminal_status = "completed_with_errors" if errored else "completed"
+        _update_run(
+            {
+                "status": terminal_status,
+                "current_cycle": None,
+                "current_batch": None,
+            }
+        )
         _publish(
             "complete",
             {
                 "message": msg,
+                "status": terminal_status,
                 "completed_count": len(completed_ids),
                 "skipped_count": skipped,
+                "errored_count": errored,
+                "errored_details": errored_details,
                 "completed_batches": completed_batches,
                 "total_batches": batch_count,
             },
@@ -1758,13 +1860,20 @@ def _strategy_lab_worker(
         _update_run({"status": "failed", "error": str(exc)[:500], "current_cycle": None})
         _publish("error", {"detail": str(exc)[:500]})
     finally:
-        # Schedule cleanup of _active_runs entry after 5 minutes
+        # Schedule cleanup of _active_runs entry. Catastrophic worker-level
+        # failures ("failed") get a longer window so UI polls that arrive
+        # after SSE disconnect still see the terminal status and error text.
+        with _lock:
+            final_state = _active_runs.get(run_id)
+        final_status = (final_state or {}).get("status")
+        cleanup_delay = 900.0 if final_status == "failed" else 300.0
+
         def _cleanup() -> None:
             with _lock:
                 _active_runs.pop(run_id, None)
             cleanup_job(run_id)
 
-        timer = threading.Timer(300.0, _cleanup)
+        timer = threading.Timer(cleanup_delay, _cleanup)
         timer.daemon = True
         timer.start()
 
@@ -1804,6 +1913,8 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
         "total_cycles": total_cycles,
         "completed_cycles": 0,
         "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "errored_details": [],
         "current_cycle": None,
         "completed_record_ids": [],
         "error": None,
@@ -1990,6 +2101,8 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         "completed_cycles": completed_cycles,
         "contiguous_cycles": contiguous_cycles,
         "skipped_cycles": state.get("skipped_cycles", 0),
+        "errored_cycles": state.get("errored_cycles", 0),
+        "errored_details": state.get("errored_details", []),
         "current_cycle": None,
         "completed_record_ids": state.get("completed_record_ids", []),
         "error": None,
@@ -2031,8 +2144,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         state = _active_runs.get(run_id)
     if not state:
         state = _load_run_from_job_service(run_id)
+    # "completed_with_errors" is a terminal outcome of the same workflow as
+    # "completed" and must be restartable. Extend the shared set locally
+    # rather than leaking a lab-specific status into job_service_client.
+    _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
     try:
-        validate_job_for_action(state, run_id, RESTARTABLE_STATUSES, "restarted")
+        validate_job_for_action(state, run_id, _lab_restartable, "restarted")
     except ValueError as exc:
         code = 404 if "not found" in str(exc) else 400
         raise HTTPException(status_code=code, detail=str(exc)) from exc
@@ -2058,6 +2175,8 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         "total_cycles": total_cycles,
         "completed_cycles": 0,
         "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "errored_details": [],
         "current_cycle": None,
         "completed_record_ids": [],
         "error": None,
@@ -2118,7 +2237,7 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
     updated to match — this handles external cancellation via the generic
     job proxy or the Jobs Dashboard.
     """
-    _TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+    _TERMINAL = STRATEGY_LAB_TERMINAL_STATUSES
 
     try:
         client = _get_lab_run_job_client()
@@ -2173,7 +2292,7 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
 )
 def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
     """Snapshot of a single run's progress. Use for polling when SSE is unavailable."""
-    _TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+    _TERMINAL = STRATEGY_LAB_TERMINAL_STATUSES
 
     with _lock:
         state = _active_runs.get(run_id)
@@ -2231,7 +2350,7 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         return f"data: {json_module.dumps(data, default=str)}\n\n"
 
     # If the run is already terminal, send snapshot + done immediately.
-    if state.get("status") in ("completed", "failed"):
+    if state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
 
         async def _terminal_gen():
             yield _sse_line(

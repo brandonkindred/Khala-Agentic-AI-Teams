@@ -7,11 +7,14 @@ Modeled on the blogging team's FeedbackTracker
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections import Counter
 from typing import List, Optional, Set
 
 from ...models import StrategySpec
 from .models import QualityGateResult
+
+logger = logging.getLogger(__name__)
 
 
 class ConvergenceTracker:
@@ -183,6 +186,12 @@ class ConvergenceTracker:
         baseline = other._trial_count_at_snapshot
         delta = other._trial_count - baseline
         if delta < 0:
+            logger.warning(
+                "ConvergenceTracker.merge_from: snapshot trial_count (%d) is below "
+                "its baseline (%d); refusing to apply negative delta",
+                other._trial_count,
+                baseline,
+            )
             raise ValueError(
                 f"snapshot trial_count ({other._trial_count}) is below its "
                 f"baseline ({baseline}); merge_from expects monotonic increments"
