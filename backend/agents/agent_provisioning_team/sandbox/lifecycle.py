@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -29,12 +30,14 @@ import httpx
 from . import provisioner as provisioner_mod
 from . import state as state_mod
 from .state import (
+    COLD_START_LOG_PREFIX,
     SandboxHandle,
     SandboxState,
     SandboxStatus,
     boot_timeout_seconds,
     idle_teardown_seconds,
     now,
+    sandbox_image,
     state_file_path,
 )
 
@@ -108,6 +111,7 @@ class Lifecycle:
             st = state_mod.new_state(agent_id=agent_id, team=team, container_name=container_name)
             self._state[agent_id] = st
 
+            cold_start = time.perf_counter()
             try:
                 container_id = await provisioner_mod.run_container(
                     agent_id=agent_id, container_name=container_name, team=team
@@ -119,7 +123,16 @@ class Lifecycle:
                 st.status = SandboxStatus.WARM
                 st.last_used_at = now()
                 self._persist()
-                return SandboxHandle.from_state(st)
+                boot_ms = int((time.perf_counter() - cold_start) * 1000)
+                logger.info(
+                    "%s agent_id=%s team=%s image=%s boot_ms=%d",
+                    COLD_START_LOG_PREFIX,
+                    agent_id,
+                    team,
+                    sandbox_image(),
+                    boot_ms,
+                )
+                return SandboxHandle.from_state(st, boot_ms=boot_ms)
             except Exception as exc:
                 logger.exception("Sandbox provisioning failed for %s", agent_id)
                 st.status = SandboxStatus.ERROR

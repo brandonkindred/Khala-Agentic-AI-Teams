@@ -22,6 +22,11 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
+# Shared with the invoke proxy so a single change updates both producer and
+# consumer of the cold-start log marker.
+COLD_START_LOG_PREFIX = "sandbox.cold_start"
+
+
 class SandboxStatus(str, Enum):
     """Lifecycle states for a per-agent sandbox."""
 
@@ -63,9 +68,14 @@ class SandboxHandle(BaseModel):
     last_used_at: datetime | None = None
     idle_seconds: int | None = None
     error: str | None = None
+    boot_ms: int | None = Field(
+        default=None,
+        description="Cold-start latency in milliseconds — the wall-clock time from the start of "
+        "`acquire()` to a successful `/health` probe. None on warm-path returns.",
+    )
 
     @classmethod
-    def from_state(cls, st: SandboxState) -> SandboxHandle:
+    def from_state(cls, st: SandboxState, *, boot_ms: int | None = None) -> SandboxHandle:
         url = (
             f"http://127.0.0.1:{st.host_port}"
             if st.status == SandboxStatus.WARM and st.host_port is not None
@@ -84,6 +94,7 @@ class SandboxHandle(BaseModel):
             last_used_at=st.last_used_at,
             idle_seconds=idle,
             error=st.error,
+            boot_ms=boot_ms,
         )
 
 
@@ -104,6 +115,15 @@ def new_state(agent_id: str, team: str, container_name: str) -> SandboxState:
     )
 
 
+def resolve_cache_path(*parts: str) -> Path:
+    """Resolve ``${AGENT_CACHE:-/tmp/agents}/<parts>`` for any sandbox/test artifact.
+
+    Centralised so the half-dozen ad-hoc ``Path(os.environ.get("AGENT_CACHE", ...))``
+    spellings stay in sync.
+    """
+    return Path(os.environ.get("AGENT_CACHE", "/tmp/agents")).joinpath(*parts)
+
+
 def state_file_path() -> Path:
     """Where to persist sandbox state across restarts.
 
@@ -113,8 +133,7 @@ def state_file_path() -> Path:
     override = os.environ.get("AGENT_PROVISIONING_SANDBOX_STATE_FILE")
     if override:
         return Path(override)
-    cache = os.environ.get("AGENT_CACHE", "/tmp/agents")
-    return Path(cache) / "agent_provisioning" / "sandboxes" / "state.json"
+    return resolve_cache_path("agent_provisioning", "sandboxes", "state.json")
 
 
 def idle_teardown_seconds() -> int:

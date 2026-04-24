@@ -41,6 +41,7 @@ from agent_provisioning_team.sandbox import (
     acquire,
     note_activity,
 )
+from agent_provisioning_team.sandbox.state import COLD_START_LOG_PREFIX
 from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
 from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
 from shared_agent_invoke.limits import (
@@ -232,6 +233,7 @@ async def invoke_agent(
         upstream_status=upstream.status_code,
         envelope=content,
         sandbox_url=handle.url,
+        boot_ms=handle.boot_ms,
     )
 
     return JSONResponse(status_code=upstream.status_code, content=content)
@@ -296,6 +298,7 @@ def _persist_run(
     upstream_status: int,
     envelope: Any,
     sandbox_url: str | None,
+    boot_ms: int | None = None,
 ) -> None:
     """Write one row to agent_console_runs. Swallows all errors by design."""
     try:
@@ -312,6 +315,10 @@ def _persist_run(
         trace_id = str(inner.get("trace_id") or "")
         logs_tail_raw = inner.get("logs_tail") or []
         logs_tail = [str(line) for line in logs_tail_raw if line is not None]
+        # Surface cold-start latency in logs_tail so the runs table stays
+        # schema-stable; a dedicated column can come later (#302).
+        if boot_ms is not None:
+            logs_tail = [f"{COLD_START_LOG_PREFIX} boot_ms={boot_ms}", *logs_tail]
         error_text = inner.get("error") if status == "error" else None
         if status == "error" and not error_text and upstream_status >= 400:
             error_text = f"HTTP {upstream_status}"

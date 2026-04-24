@@ -81,6 +81,88 @@ python3 -m pytest agents/agent_provisioning_team/tests/test_sandbox_lifecycle.py
 Tests patch `provisioner.run_container`, `inspect_host_port`, `is_running`,
 and `stop_container` so the suite runs offline.
 
+## Capacity
+
+Phase 6 (issue #268) characterised the per-agent sandbox under the production
+hardening profile. The harness lives in
+`backend/agents/agent_provisioning_team/tests/`:
+
+- `test_e2e_smoke.py` (gated on `KHALA_E2E=1`) — drives the four-agent smoke
+  matrix, cross-team and intra-team concurrency, the reaper, and the
+  `requires-live-integration` block. Writes one perf sample per invoke to
+  `$AGENT_CACHE/agent_provisioning/phase6_perf.jsonl`.
+- `scripts/phase6_hardening.sh` — `docker inspect` / `ss` / `docker exec`
+  probes that confirm the hardening flags are still in effect on a live
+  sandbox.
+- `scripts/phase6_perf_summary.py` — reads the perf log and prints p50/p95.
+
+### Resource caps (per sandbox)
+
+| Cap | Value | Source |
+|---|---|---|
+| CPU | 1.0 core | `--cpus=1.0` (provisioner.py) |
+| Memory | 1 GiB | `--memory=1g` |
+| PIDs | 512 | `--pids-limit=512` |
+| Open files | 4096 | `--ulimit nofile=4096` |
+| Subprocesses | 1024 | `--ulimit nproc=1024` |
+| Health-probe timeout | 90 s | `AGENT_PROVISIONING_SANDBOX_BOOT_TIMEOUT_S` |
+| Idle reap threshold | 5 min | `AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES` |
+| Reaper tick | 60 s | `Lifecycle.run_idle_reaper` |
+
+### Port binding
+
+Sandboxes bind only to `127.0.0.1`; Docker picks a free ephemeral host port at
+provision time. Theoretical upper bound is the loopback ephemeral range
+(≈ 28 000 ports on Linux), well above any plausible per-host concurrency cap.
+
+### Cold-start observability
+
+`Lifecycle.acquire()` records `boot_ms` on the returned `SandboxHandle` for
+every cold provision and emits a structured log line:
+
+```
+sandbox.cold_start agent_id=<id> team=<team> image=<image> boot_ms=<n>
+```
+
+Warm-path returns leave `boot_ms` as `None`. The invoke proxy forwards the
+sample into `agent_console_runs.logs_tail` as a `sandbox.cold_start boot_ms=<n>`
+line, so cold-vs-warm latency is queryable from the runs table without a
+schema migration.
+
+### Measured envelope
+
+Latency samples come from running the harness end-to-end against the full
+docker-compose stack (`docker compose -f docker/docker-compose.yml up`). The
+header below is committed as `TBD` until a human runs the harness on real
+hardware and pastes the resulting numbers.
+
+| Phase | n | p50 (ms) | p95 (ms) |
+|---|---|---|---|
+| cold-start | TBD | TBD | TBD |
+| warm-invoke | TBD | TBD | TBD |
+
+Maximum concurrent sandboxes the dev host tolerated before OOM / CPU
+contention: **TBD** (host spec: TBD).
+
+To populate: run `KHALA_E2E=1 pytest backend/agents/agent_provisioning_team/tests/test_e2e_smoke.py`,
+then `python backend/agents/agent_provisioning_team/tests/scripts/phase6_perf_summary.py`,
+then paste the markdown snippet it prints over the row above.
+
+### Known exhaustion modes
+
+- **Host memory** (primary): each sandbox reserves up to 1 GiB; with 16 GiB of
+  host RAM and overhead for the unified API + Postgres + Ollama, expect
+  ~10–12 concurrent sandboxes before swapping.
+- **Docker daemon throughput**: bursting `acquire()` for many cold agents
+  serialises through the Docker socket. The lifecycle's per-agent
+  `asyncio.Lock` prevents duplicate provisions for the same id but does not
+  rate-limit across agents.
+- **Loopback ephemeral ports**: theoretical only — the kernel will run out of
+  RAM long before the port range is depleted.
+
+Live counters for resident sandboxes and reaper activity are tracked
+separately as a follow-up (`/metrics` endpoint, issue #302).
+
 ## Design notes
 
 - **One container per agent.** Each specialist gets its own sandbox — process
