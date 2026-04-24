@@ -675,10 +675,15 @@ class PantryItemCreate(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_identity(self) -> "PantryItemCreate":
-        has_cid = bool(self.canonical_id and self.canonical_id.strip())
-        has_raw = bool(self.raw_name and self.raw_name.strip())
-        if has_cid == has_raw:
+        # Normalize blank / whitespace-only strings to ``None`` so the route
+        # can branch on ``is None`` alone (and so blank canonical ids never
+        # reach the store).
+        cid = (self.canonical_id or "").strip() or None
+        raw = (self.raw_name or "").strip() or None
+        if (cid is None) == (raw is None):
             raise ValueError("exactly one of canonical_id or raw_name is required")
+        self.canonical_id = cid
+        self.raw_name = raw
         return self
 
 

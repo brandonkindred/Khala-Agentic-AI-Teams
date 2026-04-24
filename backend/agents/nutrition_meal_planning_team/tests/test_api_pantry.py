@@ -214,6 +214,32 @@ def test_post_invalid_quantity_returns_400(client, client_id, pantry_on):
     assert r.status_code == 400
 
 
+def test_post_whitespace_canonical_id_falls_through_to_raw_name(client, client_id, pantry_on):
+    # Whitespace-only ``canonical_id`` must not bypass ``raw_name`` resolution;
+    # the validator normalizes blank strings to ``None``.
+    r = client.post(
+        f"/pantry/{client_id}/items",
+        json={
+            "canonical_id": "   ",
+            "raw_name": "olive oil",
+            "display_qty": 100,
+            "display_unit": "g",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["canonical_id"] == "olive_oil"
+
+
+def test_post_unknown_client_returns_404(client, pantry_on):
+    # No profile seeded ⇒ FK would fail. Route pre-checks and 404s cleanly.
+    r = client.post(
+        "/pantry/ghost-client/items",
+        json={"canonical_id": "olive_oil", "display_qty": 100, "display_unit": "g"},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["reason"] == "client_profile_not_found"
+
+
 # --- PUT ----------------------------------------------------------------
 
 

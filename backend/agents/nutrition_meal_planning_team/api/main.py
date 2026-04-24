@@ -506,6 +506,16 @@ def post_pantry_item_route(client_id: str, body: PantryItemCreate):
     from ..ingredient_kb.errors import UnknownUnitError
     from ..ingredient_kb.parser import parse_ingredient
     from ..ingredient_kb.units import convert_to_grams, get_unit
+    from ..shared.client_profile_store import get_profile
+
+    # ``nutrition_pantry.client_id`` FKs into ``nutrition_profiles``; check
+    # here so unknown clients surface as a clean 404 rather than a 500 from
+    # a Postgres IntegrityError downstream.
+    if get_profile(client_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"reason": "client_profile_not_found", "client_id": client_id},
+        )
 
     canonical_id = body.canonical_id
     if canonical_id is None:
