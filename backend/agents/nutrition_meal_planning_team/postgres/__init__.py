@@ -107,6 +107,35 @@ SCHEMA = TeamSchema(
         "restriction_resolver_kb_version TEXT",
         """CREATE INDEX IF NOT EXISTS idx_nutrition_profiles_resolver_kb_version
             ON nutrition_profiles(restriction_resolver_kb_version)""",
+        # --- SPEC-015 additions (pantry tracking + bulk-import drafts) ---
+        # One row per (client_id, canonical_id). Re-adding an existing
+        # canonical id on insert increments ``quantity_grams`` rather than
+        # producing a duplicate (enforced at the store layer via ON
+        # CONFLICT). Cascade delete on profile removal.
+        """CREATE TABLE IF NOT EXISTS nutrition_pantry (
+            client_id       TEXT NOT NULL REFERENCES nutrition_profiles(client_id) ON DELETE CASCADE,
+            canonical_id    TEXT NOT NULL,
+            quantity_grams  DOUBLE PRECISION NOT NULL,
+            display_qty     DOUBLE PRECISION,
+            display_unit    TEXT,
+            expires_on      DATE,
+            notes           TEXT,
+            added_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (client_id, canonical_id)
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_nutrition_pantry_client_expires
+            ON nutrition_pantry (client_id, expires_on) WHERE expires_on IS NOT NULL""",
+        # Short-lived drafts produced by the SPEC-015 bulk-import parser
+        # (two-step parse → confirm flow). Populated by W6; migrated now
+        # so we only touch the schema once for this spec.
+        """CREATE TABLE IF NOT EXISTS nutrition_pantry_import_drafts (
+            draft_id     TEXT PRIMARY KEY,
+            client_id    TEXT NOT NULL,
+            payload_json JSONB NOT NULL,
+            expires_at   TIMESTAMPTZ NOT NULL,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+        )""",
     ],
     table_names=[
         "nutrition_profiles",
@@ -115,5 +144,7 @@ SCHEMA = TeamSchema(
         "nutrition_recommendations",
         "nutrition_biometric_log",
         "nutrition_clinical_overrides_log",
+        "nutrition_pantry",
+        "nutrition_pantry_import_drafts",
     ],
 )

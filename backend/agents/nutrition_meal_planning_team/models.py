@@ -283,6 +283,10 @@ class ClientProfile(BaseModel):
     # Populated by the resolver at intake time when the feature flag is on;
     # otherwise left as the empty default.
     restriction_resolution: RestrictionResolution = Field(default_factory=RestrictionResolution)
+    # SPEC-015: opt-in pantry auto-debit on cook events. Off by default.
+    # The actual debit hook is implemented by SPEC-018 cook mode; this
+    # spec only ships the profile flag.
+    pantry_auto_debit: bool = False
     # Monotonic write counter; bumped by the store on every save.
     profile_version: int = 1
     # Data-model version. Migrations that reshape ClientProfile bump
