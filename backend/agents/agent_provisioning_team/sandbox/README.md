@@ -160,8 +160,21 @@ then paste the markdown snippet it prints over the row above.
 - **Loopback ephemeral ports**: theoretical only — the kernel will run out of
   RAM long before the port range is depleted.
 
-Live counters for resident sandboxes and reaper activity are tracked
-separately as a follow-up (`/metrics` endpoint, issue #302).
+### Live counters
+
+`GET /api/agents/sandboxes/metrics` (issue #302) returns a JSON snapshot of
+the current pool:
+
+- `resident` — count of tracked sandboxes.
+- `by_team` / `by_status` — breakdowns (status is the lowercase
+  `SandboxStatus` value: `cold` / `warming` / `warm` / `error`).
+- `ages_seconds` — `min` / `p50` / `p95` / `max` of `now() - created_at`.
+- `reaper` — `last_tick_at`, configured `interval_s` / `threshold_s`,
+  monotonic `torn_down_total`, and `torn_down_last_tick` from the most
+  recent iteration. Counters are in-process and reset on restart; per-run
+  history lives in `agent_console_runs`.
+- `boot_ms` — `p50` / `p95` / `samples` over the last 500 cold-start
+  observations (see `_BOOT_MS_WINDOW` in `lifecycle.py`).
 
 ## Design notes
 

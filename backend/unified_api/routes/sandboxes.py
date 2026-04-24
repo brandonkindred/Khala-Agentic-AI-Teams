@@ -6,6 +6,7 @@ rather than by team. The new agent-keyed lifecycle owner lives in
 ``agent_provisioning_team.sandbox``.
 
 - GET    /api/agents/sandboxes                   — list all tracked sandboxes
+- GET    /api/agents/sandboxes/metrics           — pool-wide live counters (#302)
 - GET    /api/agents/sandboxes/{agent_id}        — status + URL + idle seconds
 - POST   /api/agents/sandboxes/{agent_id}/warm   — eager acquire (idempotent)
 - DELETE /api/agents/sandboxes/{agent_id}        — teardown
@@ -19,9 +20,11 @@ from fastapi import APIRouter, HTTPException
 
 from agent_provisioning_team.sandbox import (
     SandboxHandle,
+    SandboxMetrics,
     UnknownAgentError,
     acquire,
     list_active,
+    metrics,
     status,
     teardown,
 )
@@ -35,6 +38,12 @@ router = APIRouter(prefix="/api/agents/sandboxes", tags=["agent-console"])
 @router.get("/", response_model=list[SandboxHandle])
 async def list_sandboxes() -> list[SandboxHandle]:
     return await list_active()
+
+
+# Registered BEFORE /{agent_id} so FastAPI doesn't capture "metrics" as an id.
+@router.get("/metrics", response_model=SandboxMetrics)
+async def sandbox_metrics() -> SandboxMetrics:
+    return await metrics()
 
 
 @router.post("/{agent_id}/warm", response_model=SandboxHandle)

@@ -541,6 +541,157 @@ def test_state_file_path_uses_agent_cache(monkeypatch: pytest.MonkeyPatch, tmp_p
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# /metrics snapshot — issue #302
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_metrics_empty_state(tmp_path: Path) -> None:
+    """A fresh Lifecycle has no residents, no reaper ticks, no samples."""
+    lc = _lifecycle(tmp_path)
+    snap = await lc.metrics()
+    assert snap.resident == 0
+    assert snap.by_team == {}
+    assert snap.by_status == {}
+    assert snap.ages_seconds.min == 0 == snap.ages_seconds.max
+    assert snap.ages_seconds.p50 == 0 == snap.ages_seconds.p95
+    assert snap.boot_ms.samples == 0
+    assert snap.boot_ms.p50 == 0 == snap.boot_ms.p95
+    assert snap.reaper.last_tick_at is None
+    assert snap.reaper.interval_s is None
+    assert snap.reaper.torn_down_total == 0
+    assert snap.reaper.torn_down_last_tick == 0
+    # Threshold comes from the env-backed helper so it's always populated.
+    assert snap.reaper.threshold_s > 0
+
+
+def test_percentile_uses_nearest_rank() -> None:
+    """Regression for PR #304 Codex feedback: the helper must use ceil, not
+    round, so p95 on 11 samples lands on index 10 (the textbook nearest-rank
+    rank) rather than underestimating at index 9."""
+    from agent_provisioning_team.sandbox.lifecycle import _percentile
+
+    samples = list(range(1, 12))  # 1..11, pre-sorted
+    # p95 of 11 samples: ceil(0.95 * 11) = 11 → index 10 → value 11.
+    assert _percentile(samples, 95) == 11
+    # p50 of 11 samples: ceil(0.5 * 11) = 6 → index 5 → value 6.
+    assert _percentile(samples, 50) == 6
+    # Empty input → 0 (safe default for the all-empty /metrics snapshot).
+    assert _percentile([], 95) == 0
+    # Single sample → that sample, regardless of percentile.
+    assert _percentile([42], 50) == 42
+    assert _percentile([42], 95) == 42
+
+
+@pytest.mark.asyncio
+async def test_metrics_after_acquire_records_boot_sample(tmp_path: Path) -> None:
+    """acquire() pushes a boot_ms sample and lights up the by_team/by_status
+    counters — confirming the Phase 6 cold-start hook feeds /metrics."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker():
+        await lc.acquire("blogging.planner")
+    snap = await lc.metrics()
+    assert snap.resident == 1
+    assert snap.by_team == {"blogging": 1}
+    assert snap.by_status == {"warm": 1}
+    assert snap.boot_ms.samples == 1
+    # Percentiles collapse to the single sample on n=1.
+    assert snap.boot_ms.p50 == snap.boot_ms.p95
+    assert snap.ages_seconds.min >= 0
+    assert snap.ages_seconds.max >= snap.ages_seconds.min
+
+
+@pytest.mark.asyncio
+async def test_metrics_reaper_counters_advance_per_tick(tmp_path: Path) -> None:
+    """Every reap_once() call must stamp last_tick_at and update the torn-down
+    counters — even when it finds nothing to reap — so operators can tell the
+    reaper is alive."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker():
+        await lc.acquire("blogging.planner")
+
+    # First tick: fresh sandbox, nothing reaped, but last_tick_at stamps.
+    await lc.reap_once(threshold=3600)
+    snap = await lc.metrics()
+    assert snap.reaper.last_tick_at is not None
+    assert snap.reaper.torn_down_total == 0
+    assert snap.reaper.torn_down_last_tick == 0
+
+    # Back-date and reap — mirrors the pattern used in
+    # test_reap_once_tears_down_idle.
+    lc._state["blogging.planner"].last_used_at = lc._state[
+        "blogging.planner"
+    ].last_used_at - timedelta(minutes=30)
+    with _patched_registry(), _patched_docker():
+        reaped = await lc.reap_once(threshold=60)
+    assert reaped == ["blogging.planner"]
+    snap = await lc.metrics()
+    assert snap.resident == 0
+    assert snap.reaper.torn_down_total == 1
+    assert snap.reaper.torn_down_last_tick == 1
+
+
+@pytest.mark.asyncio
+async def test_metrics_boot_ms_window_is_bounded(tmp_path: Path) -> None:
+    """The boot_ms buffer must stay bounded so long-running APIs don't leak —
+    guards against someone swapping the deque for an unbounded list."""
+    lc = _lifecycle(tmp_path)
+    for i in range(600):
+        lc._boot_ms_samples.append(i)
+    snap = await lc.metrics()
+    # Deque with maxlen=500 drops the oldest 100 samples.
+    assert snap.boot_ms.samples == 500
+    assert snap.boot_ms.p50 > 0
+    assert snap.boot_ms.p95 >= snap.boot_ms.p50
+
+
+@pytest.mark.asyncio
+async def test_metrics_by_status_groups_across_agents(tmp_path: Path) -> None:
+    """Two acquires on different teams land in distinct by_team buckets;
+    by_status uses the lowercase enum value."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(team="blogging"), _patched_docker():
+        await lc.acquire("blogging.planner")
+    with (
+        _patched_registry(team="branding"),
+        _patched_docker(container_id="brand1", host_port=55124),
+    ):
+        await lc.acquire("branding.logo")
+    snap = await lc.metrics()
+    assert snap.resident == 2
+    assert snap.by_team == {"blogging": 1, "branding": 1}
+    assert snap.by_status == {"warm": 2}
+    assert snap.boot_ms.samples == 2
+
+
+@pytest.mark.asyncio
+async def test_run_idle_reaper_records_interval(tmp_path: Path) -> None:
+    """run_idle_reaper must publish its configured interval so /metrics can
+    surface it — operators need both the threshold and the tick cadence."""
+    lc = _lifecycle(tmp_path)
+
+    async def _cancel(self_: Lifecycle, *, threshold: int) -> list[str]:
+        raise asyncio.CancelledError
+
+    with (
+        # Mock the in-loop sleep so the reaper doesn't stall 42s before reaping.
+        # Patching asyncio.sleep globally would also mock any `await sleep(0)`
+        # in the test itself — hence we drive cancellation from reap_once below.
+        patch(
+            "agent_provisioning_team.sandbox.lifecycle.asyncio.sleep",
+            new=AsyncMock(),
+        ),
+        patch.object(Lifecycle, "reap_once", new=_cancel),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await lc.run_idle_reaper(interval_s=42)
+
+    assert lc._reaper_interval_s == 42
+    snap = await lc.metrics()
+    assert snap.reaper.interval_s == 42
+
+
 @pytest.mark.asyncio
 async def test_module_helpers_delegate_to_singleton(tmp_path: Path, monkeypatch) -> None:
     """`sandbox.acquire/teardown/…` must operate on the same Lifecycle instance

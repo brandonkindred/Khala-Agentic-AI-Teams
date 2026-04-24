@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
+from collections import Counter, deque
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -31,7 +34,11 @@ from . import provisioner as provisioner_mod
 from . import state as state_mod
 from .state import (
     COLD_START_LOG_PREFIX,
+    AgeStats,
+    BootMsStats,
+    ReaperStats,
     SandboxHandle,
+    SandboxMetrics,
     SandboxState,
     SandboxStatus,
     boot_timeout_seconds,
@@ -40,6 +47,10 @@ from .state import (
     sandbox_image,
     state_file_path,
 )
+
+# Cap on how many recent boot_ms observations we keep in memory. 500 samples
+# at 4 bytes each is negligible; large enough for stable p95 under churn.
+_BOOT_MS_WINDOW = 500
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +83,12 @@ class Lifecycle:
         self._state_file = state_file or state_file_path()
         self._state: dict[str, SandboxState] = state_mod.load(self._state_file)
         self._locks: dict[str, asyncio.Lock] = {}
+        # Observability counters (issue #302). In-process only — reset on restart.
+        self._boot_ms_samples: deque[int] = deque(maxlen=_BOOT_MS_WINDOW)
+        self._torn_down_total: int = 0
+        self._torn_down_last_tick: int = 0
+        self._reaper_last_tick_at: datetime | None = None
+        self._reaper_interval_s: int | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -132,6 +149,7 @@ class Lifecycle:
                     sandbox_image(),
                     boot_ms,
                 )
+                self._boot_ms_samples.append(boot_ms)
                 return SandboxHandle.from_state(st, boot_ms=boot_ms)
             except Exception as exc:
                 logger.exception("Sandbox provisioning failed for %s", agent_id)
@@ -200,6 +218,36 @@ class Lifecycle:
         st.last_used_at = now()
         self._persist()
 
+    async def metrics(self) -> SandboxMetrics:
+        """Return a live snapshot of the sandbox pool (issue #302).
+
+        All counters are in-process and reset when the unified API restarts;
+        historical per-invocation data lives in ``agent_console_runs``.
+        """
+        snapshot = list(self._state.values())
+        current = now()
+
+        by_team: Counter[str] = Counter(st.team for st in snapshot)
+        by_status: Counter[str] = Counter(st.status.value for st in snapshot)
+
+        ages = [int((current - st.created_at).total_seconds()) for st in snapshot]
+        boot_samples = list(self._boot_ms_samples)
+
+        return SandboxMetrics(
+            resident=len(snapshot),
+            by_team=dict(by_team),
+            by_status=dict(by_status),
+            ages_seconds=_age_stats(ages),
+            reaper=ReaperStats(
+                last_tick_at=self._reaper_last_tick_at,
+                interval_s=self._reaper_interval_s,
+                threshold_s=idle_teardown_seconds(),
+                torn_down_total=self._torn_down_total,
+                torn_down_last_tick=self._torn_down_last_tick,
+            ),
+            boot_ms=_boot_ms_stats(boot_samples),
+        )
+
     # ------------------------------------------------------------------
     # Idle reaper
     # ------------------------------------------------------------------
@@ -211,6 +259,7 @@ class Lifecycle:
         ``AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES``). Loop is cancellable.
         """
         threshold = idle_teardown_seconds()
+        self._reaper_interval_s = interval_s
         logger.info(
             "Agent sandbox idle reaper started (threshold %ds, check every %ds)",
             threshold,
@@ -246,6 +295,11 @@ class Lifecycle:
                 logger.exception("Teardown failed for %s; will retry next tick", agent_id)
                 continue
             torn_down.append(agent_id)
+        # Stamp the tick even when nothing was torn down — operators need to
+        # see the reaper is alive, not just that it found work.
+        self._reaper_last_tick_at = current
+        self._torn_down_last_tick = len(torn_down)
+        self._torn_down_total += len(torn_down)
         return torn_down
 
     # ------------------------------------------------------------------
@@ -313,3 +367,48 @@ async def note_activity(agent_id: str) -> None:
 
 async def run_idle_reaper(*, interval_s: int = 60) -> None:
     await get_lifecycle().run_idle_reaper(interval_s=interval_s)
+
+
+async def metrics() -> SandboxMetrics:
+    return await get_lifecycle().metrics()
+
+
+# ----------------------------------------------------------------------
+# Percentile helpers (shared between ages_seconds and boot_ms aggregations)
+# ----------------------------------------------------------------------
+
+
+def _percentile(sorted_values: list[int], pct: float) -> int:
+    """Nearest-rank percentile on a pre-sorted list. Empty → 0.
+
+    Uses ``ceil(pct/100 * n)`` (the textbook nearest-rank definition) so high
+    percentiles don't underestimate for odd sample counts — e.g. n=11, p95
+    must land on index 10, not 9.
+    """
+    if not sorted_values:
+        return 0
+    idx = max(0, min(len(sorted_values) - 1, math.ceil(pct / 100 * len(sorted_values)) - 1))
+    return sorted_values[idx]
+
+
+def _age_stats(ages: list[int]) -> AgeStats:
+    if not ages:
+        return AgeStats()
+    ordered = sorted(ages)
+    return AgeStats(
+        min=ordered[0],
+        p50=_percentile(ordered, 50),
+        p95=_percentile(ordered, 95),
+        max=ordered[-1],
+    )
+
+
+def _boot_ms_stats(samples: list[int]) -> BootMsStats:
+    if not samples:
+        return BootMsStats()
+    ordered = sorted(samples)
+    return BootMsStats(
+        p50=_percentile(ordered, 50),
+        p95=_percentile(ordered, 95),
+        samples=len(samples),
+    )

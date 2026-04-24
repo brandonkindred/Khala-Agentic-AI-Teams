@@ -98,6 +98,48 @@ class SandboxHandle(BaseModel):
         )
 
 
+class AgeStats(BaseModel):
+    """Age percentiles across every resident sandbox, in seconds."""
+
+    min: int = 0
+    p50: int = 0
+    p95: int = 0
+    max: int = 0
+
+
+class BootMsStats(BaseModel):
+    """Cold-start latency percentiles over the recent sample window."""
+
+    p50: int = 0
+    p95: int = 0
+    samples: int = 0
+
+
+class ReaperStats(BaseModel):
+    """Idle-reaper observability — in-process, reset at Lifecycle construction."""
+
+    last_tick_at: datetime | None = None
+    interval_s: int | None = None
+    threshold_s: int
+    torn_down_total: int = 0
+    torn_down_last_tick: int = 0
+
+
+class SandboxMetrics(BaseModel):
+    """Live snapshot of the per-agent sandbox pool (issue #302).
+
+    Returned from ``GET /api/agents/sandboxes/metrics``. No persistence —
+    counters reset when the unified API restarts.
+    """
+
+    resident: int
+    by_team: dict[str, int]
+    by_status: dict[str, int]
+    ages_seconds: AgeStats
+    reaper: ReaperStats
+    boot_ms: BootMsStats
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
