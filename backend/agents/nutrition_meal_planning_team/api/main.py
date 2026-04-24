@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from shared_observability import init_otel, instrument_fastapi_app
@@ -27,11 +28,20 @@ from ..models import (
     MealHistoryResponse,
     MealPlanRequest,
     NutritionPlanRequest,
+    PantryItemCreate,
+    PantryItemOut,
+    PantryItemPatch,
     ProfileUpdateRequest,
     ResolveAmbiguousRequest,
     RestrictionResolution,
 )
 from ..orchestrator.agent import NutritionMealPlanningOrchestrator
+from ..pantry import (
+    InvalidQuantity,
+    PantryItem,
+    PantryItemNotFound,
+    get_pantry_store,
+)
 from ..shared.job_store import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -435,3 +445,168 @@ def get_history_meals_route(client_id: Optional[str] = None):
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id required")
     return orchestrator.get_meal_history(client_id)
+
+
+# --- SPEC-015 §4.4: pantry routes (NUTRITION_PANTRY) ---------------------
+
+_PANTRY_FLAG = "NUTRITION_PANTRY"
+
+
+def is_pantry_enabled() -> bool:
+    """Feature-flag truth source. Read on every call so tests can toggle."""
+    return os.environ.get(_PANTRY_FLAG, "0") == "1"
+
+
+def require_pantry_flag() -> None:
+    """Gate routes behind ``NUTRITION_PANTRY``. Returns 404 when flag is off
+    so the surface looks absent rather than forbidden."""
+    if not is_pantry_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _item_to_out(item: PantryItem) -> PantryItemOut:
+    return PantryItemOut(
+        client_id=item.client_id,
+        canonical_id=item.canonical_id,
+        quantity_grams=item.quantity_grams,
+        display_qty=item.display_qty,
+        display_unit=item.display_unit,
+        expires_on=item.expires_on,
+        notes=item.notes,
+        added_at=item.added_at,
+        updated_at=item.updated_at,
+    )
+
+
+@app.get(
+    "/pantry/{client_id}",
+    response_model=List[PantryItemOut],
+    dependencies=[Depends(require_pantry_flag)],
+)
+def get_pantry_route(
+    client_id: str,
+    sort: str = Query("expiring", pattern="^(expiring|name|added_desc)$"),
+):
+    """List pantry items for a client. Sort modes: expiring (default), name, added_desc."""
+    store = get_pantry_store()
+    items = store.list_items(client_id, sort=sort)  # type: ignore[arg-type]
+    return [_item_to_out(i) for i in items]
+
+
+@app.post(
+    "/pantry/{client_id}/items",
+    response_model=PantryItemOut,
+    dependencies=[Depends(require_pantry_flag)],
+)
+def post_pantry_item_route(client_id: str, body: PantryItemCreate):
+    """Add or increment a pantry item. Server derives ``quantity_grams`` from
+    ``display_qty`` + ``display_unit``. When ``raw_name`` is given, the
+    ingredient parser resolves it to a canonical id."""
+    # Lazy-import to avoid loading the KB yaml / alias index at module import.
+    from ..ingredient_kb.errors import UnknownUnitError
+    from ..ingredient_kb.parser import parse_ingredient
+    from ..ingredient_kb.units import convert_to_grams, get_unit
+    from ..shared.client_profile_store import get_profile
+
+    # ``nutrition_pantry.client_id`` FKs into ``nutrition_profiles``; check
+    # here so unknown clients surface as a clean 404 rather than a 500 from
+    # a Postgres IntegrityError downstream.
+    if get_profile(client_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"reason": "client_profile_not_found", "client_id": client_id},
+        )
+
+    canonical_id = body.canonical_id
+    if canonical_id is None:
+        parsed = parse_ingredient(body.raw_name or "")
+        if parsed.canonical_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "reason": "unresolved_ingredient",
+                    "raw_name": body.raw_name,
+                    "reasons": list(parsed.reasons),
+                },
+            )
+        canonical_id = parsed.canonical_id
+
+    try:
+        unit = get_unit(body.display_unit)
+    except UnknownUnitError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"reason": "unknown_unit", "display_unit": body.display_unit, "error": str(e)},
+        ) from e
+
+    grams = convert_to_grams(qty=body.display_qty, unit=unit, canonical_id=canonical_id)
+    if grams is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason": "unconvertible_quantity",
+                "canonical_id": canonical_id,
+                "display_unit": body.display_unit,
+            },
+        )
+
+    store = get_pantry_store()
+    try:
+        item = store.add_or_increment_item(
+            client_id,
+            canonical_id,
+            quantity_grams=grams,
+            display_qty=body.display_qty,
+            display_unit=body.display_unit,
+            expires_on=body.expires_on,
+            notes=body.notes,
+        )
+    except InvalidQuantity as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return _item_to_out(item)
+
+
+@app.put(
+    "/pantry/{client_id}/items/{canonical_id}",
+    response_model=PantryItemOut,
+    dependencies=[Depends(require_pantry_flag)],
+)
+def put_pantry_item_route(client_id: str, canonical_id: str, body: PantryItemPatch):
+    """Patch an existing pantry item. Omitted fields are untouched; explicit
+    ``null`` clears a nullable column."""
+    fields = body.model_dump(exclude_unset=True)
+    store = get_pantry_store()
+    try:
+        item = store.update_item(client_id, canonical_id, **fields)
+    except PantryItemNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except InvalidQuantity as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return _item_to_out(item)
+
+
+@app.delete(
+    "/pantry/{client_id}/items/{canonical_id}",
+    dependencies=[Depends(require_pantry_flag)],
+)
+def delete_pantry_item_route(client_id: str, canonical_id: str):
+    """Remove a pantry item. 404 when the row doesn't exist."""
+    store = get_pantry_store()
+    if not store.delete_item(client_id, canonical_id):
+        raise HTTPException(status_code=404, detail="pantry item not found")
+    return {"deleted": True, "client_id": client_id, "canonical_id": canonical_id}
+
+
+@app.get(
+    "/pantry/{client_id}/expiring",
+    response_model=List[PantryItemOut],
+    dependencies=[Depends(require_pantry_flag)],
+)
+def get_pantry_expiring_route(client_id: str, days: int = 3):
+    """Items expiring within ``days`` of today (already-expired items included)."""
+    store = get_pantry_store()
+    try:
+        items = store.list_expiring(client_id, days=days)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return [_item_to_out(i) for i in items]
