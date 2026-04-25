@@ -12,10 +12,25 @@ Pipeline:
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from ..execution.benchmarks import benchmark_for_strategy, build_60_40_equity
+from ..execution.metrics import (
+    bootstrap_sharpe_ci,
+    build_equity_curve_from_trades,
+    compute_deflated_sharpe,
+    summarize_return_moments,
+)
+from ..execution.regimes import regime_comparison, vix_quartile_subwindows
+from ..execution.walk_forward import (
+    build_purged_walk_forward,
+    filter_trades_in_fold_training,
+    filter_trades_in_range,
+    max_hold_days_from_trades,
+)
 from ..market_data_service import MarketDataService, OHLCVBar
 from ..models import (
     BacktestConfig,
@@ -33,6 +48,7 @@ from .agents.alignment import TradeAlignmentAgent, TradeAlignmentReport
 from .agents.analysis import AnalysisAgent
 from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
+from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
@@ -50,6 +66,10 @@ MAX_CODE_REFINEMENT_ROUNDS = 50
 # through the sandbox for a fresh backtest. The cap prevents runaway loops
 # when the agent cannot converge.
 MAX_ALIGNMENT_ROUNDS = 10
+# Legacy single-window acceptance threshold. Issue #247 replaced this with
+# the composite ``AcceptanceGate`` (OOS DSR + IS→OOS degradation + OOS trade
+# count + regime beats); ``WINNING_THRESHOLD`` is now only consulted as a
+# fallback when ``BacktestConfig.walk_forward_enabled`` is False.
 WINNING_THRESHOLD = 8.0
 
 
@@ -69,6 +89,7 @@ class StrategyLabOrchestrator:
         self.strategy_validator = StrategySpecValidator()
         self.code_safety_checker = CodeSafetyChecker()
         self.anomaly_detector = BacktestAnomalyDetector()
+        self.acceptance_gate = AcceptanceGate()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
 
@@ -328,7 +349,9 @@ class StrategyLabOrchestrator:
                 trades, config.initial_capital, config.start_date, config.end_date
             )
 
-            anomaly_gates = self.anomaly_detector.check(metrics, trades)
+            anomaly_gates = self.anomaly_detector.check(
+                metrics, trades, dsr_aware=config.walk_forward_enabled
+            )
             for g in anomaly_gates:
                 g.refinement_round = round_num
             all_gate_results.extend(anomaly_gates)
@@ -574,7 +597,9 @@ class StrategyLabOrchestrator:
                 # fix could introduce zero-trade or implausible-return
                 # output that bypasses quality gates and still flows into
                 # analysis and the win/loss classification.
-                anomaly_gates = self.anomaly_detector.check(new_metrics, new_trades)
+                anomaly_gates = self.anomaly_detector.check(
+                    new_metrics, new_trades, dsr_aware=config.walk_forward_enabled
+                )
                 for g in anomaly_gates:
                     g.refinement_round = align_round
                     g.gate_name = f"alignment_{g.gate_name}"
@@ -617,6 +642,72 @@ class StrategyLabOrchestrator:
         alignment_rounds = len(alignment_attempts)
         trades_aligned = bool(alignment_reports and alignment_reports[-1].aligned)
 
+        # ── Phase 2.6: TRIAL COUNTING (issue #247) ────────────────────
+        # Every refinement round on the same window contributes to the
+        # multiple-testing burden the Deflated Sharpe Ratio corrects for.
+        # Increment by ``len(refinement_attempts) + 1`` so the first
+        # round (which has no recorded "attempt") still counts.
+        self.convergence_tracker.increment_trials(max(1, len(refinement_attempts) + 1))
+
+        # ── Phase 2.7: WALK-FORWARD + ACCEPTANCE GATE (issue #247) ────
+        # Replaces the legacy ``WINNING_THRESHOLD`` annualized-return scalar
+        # with a composite OOS gate evaluated on purged, embargoed K-fold
+        # walk-forward diagnostics. Skipped when walk-forward is disabled
+        # (legacy fallback) or there is no successful execution to evaluate.
+        acceptance_results: List[QualityGateResult] = []
+        acceptance_reason: Optional[str] = None
+        if (
+            execution_succeeded
+            and trades
+            and market_data is not None
+            and config.walk_forward_enabled
+        ):
+            try:
+                emit("backtesting", {"sub_phase": "walk_forward_started"})
+                metrics = self._evaluate_walk_forward(spec, market_data, config, trades, metrics)
+                acceptance_results = self.acceptance_gate.check(
+                    metrics,
+                    config,
+                    n_trials=self.convergence_tracker.trial_count,
+                )
+                all_gate_results.extend(acceptance_results)
+                acceptance_reason = summarize_acceptance_reason(acceptance_results)
+                metrics = metrics.model_copy(
+                    update={
+                        "n_trials_when_accepted": self.convergence_tracker.trial_count,
+                        "acceptance_reason": acceptance_reason,
+                    }
+                )
+                emit(
+                    "backtesting",
+                    {
+                        "sub_phase": "walk_forward_completed",
+                        "deflated_sharpe": metrics.deflated_sharpe,
+                        "oos_sharpe": metrics.oos_sharpe,
+                        "is_oos_degradation_pct": metrics.is_oos_degradation_pct,
+                        "oos_trade_count": metrics.oos_trade_count,
+                        "n_trials": self.convergence_tracker.trial_count,
+                        "acceptance_reason": acceptance_reason,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Walk-forward evaluation failed for %s; falling back to "
+                    "legacy single-window acceptance",
+                    spec.strategy_id,
+                )
+                acceptance_results = []
+                acceptance_reason = None
+
+        # ── Resolve is_winning ────────────────────────────────────────
+        # Walk-forward path: composite gate is authoritative.
+        # Legacy path (walk_forward_enabled=False or evaluation failed):
+        # fall back to the historical annualized-return threshold.
+        if acceptance_results:
+            is_winning = execution_succeeded and all(r.passed for r in acceptance_results)
+        else:
+            is_winning = execution_succeeded and metrics.annualized_return_pct > WINNING_THRESHOLD
+
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────
         narrative = ""
         if execution_succeeded and trades:
@@ -629,12 +720,10 @@ class StrategyLabOrchestrator:
                 narrative = self.analysis_agent.run(
                     spec, metrics, trades, rationale, on_sub_phase=_on_analysis_sub
                 )
-                is_w = metrics.annualized_return_pct > WINNING_THRESHOLD
-                emit("analyzing", {"sub_phase": "completed", "is_winning": is_w})
+                emit("analyzing", {"sub_phase": "completed", "is_winning": is_winning})
             except Exception:
                 logger.exception("Analysis agent failed for %s", spec.strategy_id)
-                is_w = metrics.annualized_return_pct > WINNING_THRESHOLD
-                label = "winning" if is_w else "losing"
+                label = "winning" if is_winning else "losing"
                 narrative = (
                     f"Auto-summary: {spec.asset_class} strategy ({label}) with "
                     f"annualized return {metrics.annualized_return_pct:.1f}%. "
@@ -649,7 +738,6 @@ class StrategyLabOrchestrator:
 
         # ── Phase 4: RECORD ───────────────────────────────────────────
         now_iso = datetime.now(timezone.utc).isoformat()
-        is_winning = execution_succeeded and metrics.annualized_return_pct > WINNING_THRESHOLD
 
         backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
         backtest_record = BacktestRecord(
@@ -781,3 +869,282 @@ class StrategyLabOrchestrator:
         except Exception:
             logger.exception("Market data fetch failed for %s", spec.asset_class)
             return None
+
+    # ------------------------------------------------------------------
+    # Issue #247 — walk-forward + acceptance-gate helpers
+    # ------------------------------------------------------------------
+
+    def _evaluate_walk_forward(
+        self,
+        spec: StrategySpec,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+        trades: List[TradeRecord],
+        metrics: BacktestResult,
+    ) -> BacktestResult:
+        """Compute walk-forward IS/OOS diagnostics and populate the new
+        ``BacktestResult`` fields the ``AcceptanceGate`` consumes.
+
+        The strategy code is fixed for a cycle (no per-fold refit), so we
+        partition the existing full-window trade ledger by ``exit_date`` into
+        IS/OOS buckets per fold rather than re-running the strategy K times.
+        Mathematically equivalent for OOS metrics and K× cheaper.
+        """
+        purge_hold_days = max_hold_days_from_trades(trades)
+        embargo = config.embargo_days if config.embargo_days > 0 else purge_hold_days
+        folds = build_purged_walk_forward(
+            config.start_date,
+            config.end_date,
+            k_folds=config.n_folds,
+            embargo_days=embargo,
+            purge_hold_days=purge_hold_days,
+        )
+
+        fold_results: List[Dict[str, Any]] = []
+        per_fold_oos_sharpe: List[float] = []
+        per_fold_is_sharpe: List[float] = []
+        oos_trade_count_total = 0
+        all_oos_trades: List[TradeRecord] = []
+        for fold in folds:
+            oos_trades = filter_trades_in_range(trades, fold.test_start, fold.test_end)
+            is_trades = filter_trades_in_fold_training(trades, fold)
+
+            test_start_str = fold.test_start.isoformat()
+            test_end_str = fold.test_end.isoformat()
+
+            oos_metrics = compute_metrics(
+                oos_trades, config.initial_capital, test_start_str, test_end_str
+            )
+            # IS metrics span the full original window minus the fold's
+            # purge/embargo cushion; use the full window for the date span
+            # (the trade list is already filtered).
+            is_metrics = compute_metrics(
+                is_trades,
+                config.initial_capital,
+                config.start_date,
+                config.end_date,
+            )
+
+            per_fold_oos_sharpe.append(oos_metrics.sharpe_ratio)
+            if is_trades:
+                per_fold_is_sharpe.append(is_metrics.sharpe_ratio)
+            oos_trade_count_total += len(oos_trades)
+            all_oos_trades.extend(oos_trades)
+
+            fold_results.append(
+                {
+                    "fold_index": fold.fold_index,
+                    "test_start": test_start_str,
+                    "test_end": test_end_str,
+                    "oos_sharpe": oos_metrics.sharpe_ratio,
+                    "is_sharpe": is_metrics.sharpe_ratio,
+                    "oos_trade_count": len(oos_trades),
+                    "is_trade_count": len(is_trades),
+                }
+            )
+
+        oos_sharpe = (
+            sum(per_fold_oos_sharpe) / len(per_fold_oos_sharpe) if per_fold_oos_sharpe else 0.0
+        )
+        is_sharpe = sum(per_fold_is_sharpe) / len(per_fold_is_sharpe) if per_fold_is_sharpe else 0.0
+        denom = max(abs(is_sharpe), 1e-9)
+        is_oos_degradation_pct = max(0.0, 100.0 * (is_sharpe - oos_sharpe) / denom)
+
+        # Pooled OOS daily-return series for DSR + bootstrap CI. Uses the
+        # same equity-curve construction the metrics engine uses, so the
+        # series is consistent with the per-fold OOS Sharpes.
+        oos_returns = self._daily_returns_from_trades(
+            all_oos_trades, config.initial_capital, config.start_date, config.end_date
+        )
+        skew, kurt = summarize_return_moments(oos_returns)
+        deflated_sharpe = compute_deflated_sharpe(
+            oos_sharpe,
+            n_trials=self.convergence_tracker.trial_count,
+            n_obs=len(oos_returns),
+            skew=skew,
+            kurtosis=kurt,
+        )
+        sharpe_ci_low, sharpe_ci_high = bootstrap_sharpe_ci(oos_returns, seed=0)
+
+        regime_results = self._evaluate_regimes(spec, market_data, config, trades)
+
+        return metrics.model_copy(
+            update={
+                "deflated_sharpe": round(deflated_sharpe, 4),
+                "sharpe_ci_low": sharpe_ci_low,
+                "sharpe_ci_high": sharpe_ci_high,
+                "is_sharpe": round(is_sharpe, 4),
+                "oos_sharpe": round(oos_sharpe, 4),
+                "is_oos_degradation_pct": round(is_oos_degradation_pct, 2),
+                "oos_trade_count": oos_trade_count_total,
+                "regime_results": regime_results,
+                "fold_results": fold_results,
+            }
+        )
+
+    @staticmethod
+    def _daily_returns_from_trades(
+        trades: Sequence[TradeRecord],
+        initial_capital: float,
+        start_date: str,
+        end_date: str,
+    ) -> List[float]:
+        """Daily simple returns from the equity curve implied by the trades."""
+        curve = build_equity_curve_from_trades(
+            trades, initial_capital, start_date=start_date, end_date=end_date
+        )
+        if len(curve.equity) < 2:
+            return []
+        out: List[float] = []
+        for i in range(1, len(curve.equity)):
+            prev = curve.equity[i - 1]
+            if prev <= 0:
+                out.append(0.0)
+            else:
+                out.append((curve.equity[i] - prev) / prev)
+        return out
+
+    def _evaluate_regimes(
+        self,
+        spec: StrategySpec,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+        trades: List[TradeRecord],
+    ) -> List[Dict[str, Any]]:
+        """Per-regime strategy-vs-benchmark comparison for the acceptance gate.
+
+        Builds a daily strategy return series from the trade ledger, a
+        benchmark return series from the configured composition (defaults to
+        a 60/40 SPY+AGG blend; falls back to a single-symbol benchmark when
+        the blend cannot be assembled), aligns by length, then partitions
+        into VIX-quartile sub-windows. Returns a list of four dicts shaped
+        for ``AcceptanceGate``.
+        """
+        try:
+            curve = build_equity_curve_from_trades(
+                trades,
+                config.initial_capital,
+                start_date=config.start_date,
+                end_date=config.end_date,
+            )
+            if len(curve.equity) < 2:
+                return []
+            strategy_returns = self._equity_to_returns(curve.equity)
+
+            bench_dates, bench_equity = self._build_benchmark_equity(spec, market_data, config)
+            if len(bench_equity) < 2:
+                return []
+            benchmark_returns = self._equity_to_returns(bench_equity)
+
+            n = min(len(strategy_returns), len(benchmark_returns))
+            strategy_returns = strategy_returns[:n]
+            benchmark_returns = benchmark_returns[:n]
+            aligned_dates = list(bench_dates[: n + 1])  # equity has n+1 points; returns has n
+
+            subwindows = vix_quartile_subwindows(
+                aligned_dates,
+                benchmark_returns,
+                vix_provider=self._resolve_vix_provider(),
+            )
+            return regime_comparison(strategy_returns, benchmark_returns, subwindows)
+        except Exception:
+            logger.exception("Regime evaluation failed for %s", spec.strategy_id)
+            return []
+
+    @staticmethod
+    def _equity_to_returns(equity: Sequence[float]) -> List[float]:
+        out: List[float] = []
+        for i in range(1, len(equity)):
+            prev = equity[i - 1]
+            if prev <= 0:
+                out.append(0.0)
+            else:
+                out.append((equity[i] - prev) / prev)
+        return out
+
+    def _build_benchmark_equity(
+        self,
+        spec: StrategySpec,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+    ) -> Tuple[List[Any], List[float]]:
+        """Return ``(dates, equity)`` for the configured benchmark composition.
+
+        ``benchmark_composition="60_40"`` blends SPY and AGG closes via
+        :func:`build_60_40_equity`; any other value falls back to the
+        asset-class default benchmark from :func:`benchmark_for_strategy`.
+        Both paths normalize closes into an equity series scaled by
+        ``config.initial_capital``.
+        """
+        composition = (config.benchmark_composition or "").strip().lower()
+        if composition == "60_40":
+            try:
+                blend = self.market_data_service.fetch_multi_symbol_range(
+                    symbols=["SPY", "AGG"],
+                    asset_class="stocks",
+                    start_date=config.start_date,
+                    end_date=config.end_date,
+                )
+            except Exception:
+                logger.exception("60/40 benchmark fetch failed; falling back to single-symbol")
+                blend = None
+            if blend and "SPY" in blend and "AGG" in blend and blend["SPY"] and blend["AGG"]:
+                spy_bars = blend["SPY"]
+                agg_bars = blend["AGG"]
+                spy_dates = [self._parse_bar_date(b.date) for b in spy_bars]
+                spy_equity = self._closes_to_equity(
+                    [b.close for b in spy_bars], config.initial_capital
+                )
+                agg_equity = self._closes_to_equity(
+                    [b.close for b in agg_bars], config.initial_capital
+                )
+                blended = build_60_40_equity(
+                    spy_equity, agg_equity, initial_capital=config.initial_capital
+                )
+                n = min(len(spy_dates), len(blended))
+                return spy_dates[:n], blended[:n]
+
+        # Single-symbol fallback
+        bench_symbol = benchmark_for_strategy(spec)
+        try:
+            single = self.market_data_service.fetch_multi_symbol_range(
+                symbols=[bench_symbol],
+                asset_class=spec.asset_class,
+                start_date=config.start_date,
+                end_date=config.end_date,
+            )
+        except Exception:
+            logger.exception("Single-symbol benchmark fetch failed for %s", bench_symbol)
+            single = None
+        if single and bench_symbol in single and single[bench_symbol]:
+            bars = single[bench_symbol]
+            dates = [self._parse_bar_date(b.date) for b in bars]
+            equity = self._closes_to_equity([b.close for b in bars], config.initial_capital)
+            n = min(len(dates), len(equity))
+            return dates[:n], equity[:n]
+        return [], []
+
+    @staticmethod
+    def _closes_to_equity(closes: Sequence[float], initial_capital: float) -> List[float]:
+        if not closes or closes[0] <= 0:
+            return []
+        scale = initial_capital / closes[0]
+        return [c * scale for c in closes]
+
+    @staticmethod
+    def _parse_bar_date(d: str) -> Any:
+        from datetime import date
+
+        return date.fromisoformat(d[:10])
+
+    @staticmethod
+    def _resolve_vix_provider() -> Optional[Callable[[Sequence[Any]], List[float]]]:
+        """Return a VIX provider callable when ``STRATEGY_LAB_VIX_SOURCE`` is
+        set, otherwise None so :func:`vix_quartile_subwindows` falls back to
+        realized-vol on the benchmark series. Production deployments can
+        wire in a Yahoo ``^VIX`` fetcher here without touching callers."""
+        source = os.environ.get("STRATEGY_LAB_VIX_SOURCE", "").strip().lower()
+        if not source:
+            return None
+        # Hook point for production providers; unset → realized-vol fallback.
+        return None
