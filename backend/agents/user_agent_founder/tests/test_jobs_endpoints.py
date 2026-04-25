@@ -219,7 +219,9 @@ def test_resume_mirrors_dispatch_failure_into_founder_store(
 
     fake_job_store.create_job("run-bad", status="failed", error="boom")
     monkeypatch.setattr(
-        api_main, "_dispatch_founder_run", lambda _run_id: (_ for _ in ()).throw(RuntimeError("no worker"))
+        api_main,
+        "_dispatch_founder_run",
+        lambda _run_id: (_ for _ in ()).throw(RuntimeError("no worker")),
     )
 
     with pytest.raises(HTTPException) as excinfo:
@@ -262,6 +264,26 @@ def test_restart_resets_and_redispatches_completed_job(fake_job_store, fake_stor
     assert fake_job_store.jobs["run-done"]["status"] == "running"
 
 
+def test_restart_clears_founder_store_checkpoint_columns(fake_job_store, fake_store, fake_dispatch):
+    """Restart must NULL every column the resume short-circuit reads, otherwise
+    a restarted run skips spec/analysis or polls a stale SE job id (#347)."""
+    from user_agent_founder.api.main import restart_job
+
+    fake_job_store.create_job("run-done", status="completed", error=None)
+
+    restart_job("run-done")
+
+    fake_store.update_run.assert_any_call(
+        "run-done",
+        status="pending",
+        error=None,
+        spec_content=None,
+        analysis_job_id=None,
+        repo_path=None,
+        se_job_id=None,
+    )
+
+
 def test_restart_mirrors_dispatch_failure_into_founder_store(
     fake_job_store, fake_store, monkeypatch
 ):
@@ -271,7 +293,9 @@ def test_restart_mirrors_dispatch_failure_into_founder_store(
 
     fake_job_store.create_job("run-done", status="completed", error=None)
     monkeypatch.setattr(
-        api_main, "_dispatch_founder_run", lambda _run_id: (_ for _ in ()).throw(RuntimeError("no worker"))
+        api_main,
+        "_dispatch_founder_run",
+        lambda _run_id: (_ for _ in ()).throw(RuntimeError("no worker")),
     )
 
     with pytest.raises(HTTPException) as excinfo:

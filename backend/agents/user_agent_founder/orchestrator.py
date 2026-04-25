@@ -137,7 +137,10 @@ def _answer_pending_questions(
             role="assistant",
             content=f"Q: {q.get('question_text', '')}\nA: {answer_text}\nRationale: {rationale}",
             message_type="answer_given",
-            metadata={"question_id": q["id"], "selected_option_id": result.get("selected_option_id")},
+            metadata={
+                "question_id": q["id"],
+                "selected_option_id": result.get("selected_option_id"),
+            },
         )
         answer_payload: dict[str, Any] = {
             "question_id": q["id"],
@@ -186,31 +189,51 @@ def _run_product_analysis(
     store: FounderRunStore,
     run_id: str,
     spec_content: str,
+    *,
+    existing_job_id: str | None = None,
 ) -> str | None:
-    """Submit spec for product analysis and poll until complete. Returns repo_path or None."""
-    store.update_run(run_id, status="submitting_analysis")
-    _sync_job_status(run_id, "running", phase="submitting_analysis")
+    """Submit spec for product analysis and poll until complete. Returns repo_path or None.
 
-    resp = client.post(
-        _se_url("/product-analysis/start-from-spec"),
-        json={"project_name": f"user-agent-founder-{run_id}", "spec_content": spec_content},
-        timeout=HTTP_TIMEOUT,
-    )
-    if resp.status_code >= 400:
-        store.update_run(
-            run_id,
-            status="failed",
-            error=f"Failed to start analysis: {resp.status_code} {resp.text[:500]}",
+    If ``existing_job_id`` is supplied (resume path), the submit step is
+    skipped and polling resumes against that analysis job.
+    """
+    if existing_job_id is None:
+        store.update_run(run_id, status="submitting_analysis")
+        _sync_job_status(run_id, "running", phase="submitting_analysis")
+
+        resp = client.post(
+            _se_url("/product-analysis/start-from-spec"),
+            json={"project_name": f"user-agent-founder-{run_id}", "spec_content": spec_content},
+            timeout=HTTP_TIMEOUT,
         )
-        _sync_job_status(run_id, "failed", error="Failed to start analysis")
-        return None
+        if resp.status_code >= 400:
+            store.update_run(
+                run_id,
+                status="failed",
+                error=f"Failed to start analysis: {resp.status_code} {resp.text[:500]}",
+            )
+            _sync_job_status(run_id, "failed", error="Failed to start analysis")
+            return None
 
-    data = resp.json()
-    analysis_job_id = data.get("job_id")
-    store.update_run(run_id, analysis_job_id=analysis_job_id, status="polling_analysis")
-    _sync_job_status(run_id, "running", phase="polling_analysis")
-    logger.info("Product analysis started: job_id=%s", analysis_job_id)
-    store.add_chat_message(run_id, "system", f"Product analysis started (job: {analysis_job_id})", "status_update")
+        data = resp.json()
+        analysis_job_id = data.get("job_id")
+        store.update_run(run_id, analysis_job_id=analysis_job_id, status="polling_analysis")
+        _sync_job_status(run_id, "running", phase="polling_analysis")
+        logger.info("Product analysis started: job_id=%s", analysis_job_id)
+        store.add_chat_message(
+            run_id, "system", f"Product analysis started (job: {analysis_job_id})", "status_update"
+        )
+    else:
+        analysis_job_id = existing_job_id
+        store.update_run(run_id, status="polling_analysis", error=None)
+        _sync_job_status(run_id, "running", phase="polling_analysis")
+        logger.info("Resuming product analysis poll: job_id=%s", analysis_job_id)
+        store.add_chat_message(
+            run_id,
+            "system",
+            f"Resuming product analysis poll (job: {analysis_job_id})",
+            "status_update",
+        )
 
     failed_question_sets: dict[frozenset[str], int] = {}  # qset -> attempt count
 
@@ -245,15 +268,26 @@ def _run_product_analysis(
 
             store.update_run(run_id, status="answering_analysis_questions")
             store.add_chat_message(
-                run_id, "system", f"SE team has {len(pending)} question(s) during analysis.",
-                "question_received", metadata={"question_ids": list(qset)},
+                run_id,
+                "system",
+                f"SE team has {len(pending)} question(s) during analysis.",
+                "question_received",
+                metadata={"question_ids": list(qset)},
             )
             success = _answer_pending_questions(
-                client, agent, store, run_id, analysis_job_id, pending, "/product-analysis",
+                client,
+                agent,
+                store,
+                run_id,
+                analysis_job_id,
+                pending,
+                "/product-analysis",
             )
             if not success:
                 failed_question_sets[qset] = prior_failures + 1
-                logger.warning("Answer attempt %d failed for analysis questions", prior_failures + 1)
+                logger.warning(
+                    "Answer attempt %d failed for analysis questions", prior_failures + 1
+                )
             continue
 
         if status == "completed":
@@ -261,7 +295,10 @@ def _run_product_analysis(
             store.update_run(run_id, repo_path=repo_path)
             logger.info("Product analysis completed: repo_path=%s", repo_path)
             store.add_chat_message(
-                run_id, "system", "Analysis complete. Starting SE team build.", "status_update",
+                run_id,
+                "system",
+                "Analysis complete. Starting SE team build.",
+                "status_update",
             )
             return repo_path
 
@@ -284,31 +321,51 @@ def _run_se_team(
     store: FounderRunStore,
     run_id: str,
     repo_path: str,
+    *,
+    existing_job_id: str | None = None,
 ) -> bool:
-    """Start the SE team build and poll until complete. Returns True on success."""
-    store.update_run(run_id, status="submitting_build")
-    _sync_job_status(run_id, "running", phase="submitting_build")
+    """Start the SE team build and poll until complete. Returns True on success.
 
-    resp = client.post(
-        _se_url("/run-team"),
-        json={"repo_path": repo_path},
-        timeout=HTTP_TIMEOUT,
-    )
-    if resp.status_code >= 400:
-        store.update_run(
-            run_id,
-            status="failed",
-            error=f"Failed to start SE team: {resp.status_code} {resp.text[:500]}",
+    If ``existing_job_id`` is supplied (resume path), the submit step is
+    skipped and polling resumes against that SE job.
+    """
+    if existing_job_id is None:
+        store.update_run(run_id, status="submitting_build")
+        _sync_job_status(run_id, "running", phase="submitting_build")
+
+        resp = client.post(
+            _se_url("/run-team"),
+            json={"repo_path": repo_path},
+            timeout=HTTP_TIMEOUT,
         )
-        _sync_job_status(run_id, "failed", error="Failed to start SE team")
-        return False
+        if resp.status_code >= 400:
+            store.update_run(
+                run_id,
+                status="failed",
+                error=f"Failed to start SE team: {resp.status_code} {resp.text[:500]}",
+            )
+            _sync_job_status(run_id, "failed", error="Failed to start SE team")
+            return False
 
-    data = resp.json()
-    se_job_id = data.get("job_id")
-    store.update_run(run_id, se_job_id=se_job_id, status="polling_build")
-    _sync_job_status(run_id, "running", phase="polling_build")
-    logger.info("SE team build started: job_id=%s", se_job_id)
-    store.add_chat_message(run_id, "system", f"SE team build started (job: {se_job_id})", "status_update")
+        data = resp.json()
+        se_job_id = data.get("job_id")
+        store.update_run(run_id, se_job_id=se_job_id, status="polling_build")
+        _sync_job_status(run_id, "running", phase="polling_build")
+        logger.info("SE team build started: job_id=%s", se_job_id)
+        store.add_chat_message(
+            run_id, "system", f"SE team build started (job: {se_job_id})", "status_update"
+        )
+    else:
+        se_job_id = existing_job_id
+        store.update_run(run_id, status="polling_build", error=None)
+        _sync_job_status(run_id, "running", phase="polling_build")
+        logger.info("Resuming SE team build poll: job_id=%s", se_job_id)
+        store.add_chat_message(
+            run_id,
+            "system",
+            f"Resuming SE team build poll (job: {se_job_id})",
+            "status_update",
+        )
 
     failed_question_sets: dict[frozenset[str], int] = {}
 
@@ -343,11 +400,20 @@ def _run_se_team(
 
             store.update_run(run_id, status="answering_build_questions")
             store.add_chat_message(
-                run_id, "system", f"SE team has {len(pending)} question(s) during build.",
-                "question_received", metadata={"question_ids": list(qset)},
+                run_id,
+                "system",
+                f"SE team has {len(pending)} question(s) during build.",
+                "question_received",
+                metadata={"question_ids": list(qset)},
             )
             success = _answer_pending_questions(
-                client, agent, store, run_id, se_job_id, pending, "/run-team",
+                client,
+                agent,
+                store,
+                run_id,
+                se_job_id,
+                pending,
+                "/run-team",
             )
             if not success:
                 failed_question_sets[qset] = prior_failures + 1
@@ -356,7 +422,9 @@ def _run_se_team(
 
         if status == "completed":
             logger.info("SE team build completed for run %s", run_id)
-            store.add_chat_message(run_id, "system", "Build completed successfully.", "status_update")
+            store.add_chat_message(
+                run_id, "system", "Build completed successfully.", "status_update"
+            )
             return True
 
         if status == "failed":
@@ -369,7 +437,9 @@ def _run_se_team(
         if status == "cancelled":
             store.update_run(run_id, status="failed", error="SE team build was cancelled")
             _sync_job_status(run_id, "failed", error="SE team build cancelled")
-            store.add_chat_message(run_id, "system", "SE team build was cancelled.", "status_update")
+            store.add_chat_message(
+                run_id, "system", "SE team build was cancelled.", "status_update"
+            )
             return False
 
     store.update_run(run_id, status="failed", error="SE team build timed out")
@@ -381,32 +451,88 @@ def _run_se_team(
 def run_workflow(run_id: str, store: FounderRunStore, agent: FounderAgent) -> None:
     """Execute the full founder workflow: spec -> analysis -> build.
 
+    Re-entrant for the resume path: phases whose checkpoint columns are
+    already populated on the run row are short-circuited so a `/resume`
+    call does not re-pay the cost of completed phases (LLM spec gen,
+    multi-hour analysis poll, etc.).
+
     This function is designed to run in a background thread.
     """
     logger.info("Starting founder workflow: run_id=%s", run_id)
 
     try:
-        # Phase 1: Generate the product spec
-        store.update_run(run_id, status="generating_spec")
-        _sync_job_status(run_id, "running", phase="generating_spec")
-        store.add_chat_message(run_id, "system", "Generating product specification...", "status_update")
-        spec_content = _generate_spec_with_heartbeat(agent, run_id)
-        store.update_run(run_id, spec_content=spec_content)
-        logger.info("Spec generated for run %s (%d chars)", run_id, len(spec_content))
-        store.add_chat_message(
-            run_id, "assistant",
-            f"Product spec generated ({len(spec_content)} chars). Submitting to SE team for analysis.",
-            "status_update",
-        )
+        # Read the run row inside the try so a transient store outage during
+        # the resume-short-circuit lookup gets caught by the failure handler
+        # below rather than escaping the worker thread silently.
+        run = store.get_run(run_id)
+
+        # Phase 1: Generate the product spec (skip if already done)
+        if run is not None and run.spec_content:
+            spec_content = run.spec_content
+            logger.info(
+                "Resuming run %s past Phase 1 (spec already generated, %d chars)",
+                run_id,
+                len(spec_content),
+            )
+            store.add_chat_message(
+                run_id,
+                "system",
+                "Resuming with existing spec.",
+                "status_update",
+            )
+        else:
+            store.update_run(run_id, status="generating_spec")
+            _sync_job_status(run_id, "running", phase="generating_spec")
+            store.add_chat_message(
+                run_id, "system", "Generating product specification...", "status_update"
+            )
+            spec_content = _generate_spec_with_heartbeat(agent, run_id)
+            store.update_run(run_id, spec_content=spec_content)
+            logger.info("Spec generated for run %s (%d chars)", run_id, len(spec_content))
+            store.add_chat_message(
+                run_id,
+                "assistant",
+                f"Product spec generated ({len(spec_content)} chars). Submitting to SE team for analysis.",
+                "status_update",
+            )
 
         with httpx.Client() as client:
-            # Phase 2: Product analysis
-            repo_path = _run_product_analysis(client, agent, store, run_id, spec_content)
-            if repo_path is None:
-                return  # status already set to failed
+            # Phase 2: Product analysis (skip entirely if repo_path stored;
+            # skip submit only if analysis_job_id stored without repo_path)
+            if run is not None and run.repo_path:
+                repo_path: str | None = run.repo_path
+                logger.info(
+                    "Resuming run %s past Phase 2 (analysis already complete, repo_path=%s)",
+                    run_id,
+                    repo_path,
+                )
+                store.add_chat_message(
+                    run_id,
+                    "system",
+                    "Resuming with existing analysis output.",
+                    "status_update",
+                )
+            else:
+                repo_path = _run_product_analysis(
+                    client,
+                    agent,
+                    store,
+                    run_id,
+                    spec_content,
+                    existing_job_id=run.analysis_job_id if run is not None else None,
+                )
+                if repo_path is None:
+                    return  # status already set to failed
 
-            # Phase 3: SE team build
-            success = _run_se_team(client, agent, store, run_id, repo_path)
+            # Phase 3: SE team build (skip submit if se_job_id stored)
+            success = _run_se_team(
+                client,
+                agent,
+                store,
+                run_id,
+                repo_path,
+                existing_job_id=run.se_job_id if run is not None else None,
+            )
             if success:
                 store.update_run(run_id, status="completed")
                 _sync_job_status(run_id, "completed", phase="completed")
@@ -416,4 +542,6 @@ def run_workflow(run_id: str, store: FounderRunStore, agent: FounderAgent) -> No
         logger.exception("Founder workflow crashed: run_id=%s", run_id)
         store.update_run(run_id, status="failed", error=str(exc)[:1000])
         _sync_job_status(run_id, "failed", error=str(exc)[:500])
-        store.add_chat_message(run_id, "system", f"Workflow failed: {str(exc)[:500]}", "status_update")
+        store.add_chat_message(
+            run_id, "system", f"Workflow failed: {str(exc)[:500]}", "status_update"
+        )
