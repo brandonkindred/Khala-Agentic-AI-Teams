@@ -28,8 +28,8 @@ self.outreach.generate_sequence(
 ```
 
 The `OutreachAgent.generate_sequence` signature at
-[`agents.py:597`](../agents.py) has no `dossier` parameter. The
-`_OUTREACH_SYSTEM_PROMPT` at [`agents.py:93`](../agents.py) tells the model to
+[`agents.py`](../agents.py) has no `dossier` parameter. The
+`OUTREACH_SYSTEM_PROMPT` at [`prompts/outreach.py`](../prompts/outreach.py) tells the model to
 "lead with *their* world" while giving it nothing of their world. The model
 either invents personalization (bad) or falls back to generic value-prop prose
 (also bad).
@@ -138,7 +138,7 @@ class OutreachSequence(BaseModel):
 There are no top-level `email_sequence` / `call_script` / `linkedin_message` /
 `sequence_rationale` fields. Consumers read `sequence.variants[i]` directly.
 
-### 3.3 Prompt rewrite — `_OUTREACH_SYSTEM_PROMPT`
+### 3.3 Prompt rewrite — `prompts/outreach.py::SYSTEM_PROMPT`
 
 Three additions on top of the existing Salesfolk / SNAP / Jeb Blount framework.
 
