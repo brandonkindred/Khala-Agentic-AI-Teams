@@ -21,6 +21,7 @@ from .agents import (
     ProspectorAgent,
     SalesCoachAgent,
 )
+from .critics import OutreachCriticAgent, ProposalCriticAgent, format_critic_feedback
 from .learning_engine import LearningEngine, format_insights_for_prompt
 from .models import (
     ClosingStrategy,
@@ -250,12 +251,129 @@ class SalesPodOrchestrator:
         self.decision_maker_mapper = DecisionMakerMapperAgent()
         self.dossier_builder = DossierBuilderAgent()
         self.learning_engine = LearningEngine()
+        self.outreach_critic = OutreachCriticAgent()
+        self.proposal_critic = ProposalCriticAgent()
 
     def _should_run(self, stage: PipelineStage, entry: PipelineStage) -> bool:
         try:
             return _STAGE_ORDER.index(stage) >= _STAGE_ORDER.index(entry)
         except ValueError:
             return False
+
+    # ------------------------------------------------------------------
+    # Critic-gated emit helpers (one-shot refinement budget per prospect)
+    # ------------------------------------------------------------------
+
+    def _generate_outreach_with_critic(
+        self,
+        prospect: Prospect,
+        dossier: ProspectDossier,
+        product_name: str,
+        value_proposition: str,
+        case_studies: str,
+        company_context: str,
+        insights_context: Optional[str],
+        icp: Optional[IdealCustomerProfile],
+    ) -> OutreachSequence:
+        """Emit -> wrap -> critic -> on revise, re-emit once with violations."""
+        variants = self.outreach.generate_sequence(
+            prospect.model_dump_json(indent=2),
+            dossier,
+            product_name,
+            value_proposition,
+            case_studies,
+            company_context,
+            insights_context,
+        )
+        sequence = _wrap_outreach_sequence(variants, prospect, dossier)
+
+        if icp is None:
+            # No ICP available (e.g. outreach_only without a request envelope) —
+            # the rubric needs ICP for rule 6, so skip the critic in that case.
+            return sequence
+
+        report = self.outreach_critic.review(sequence, dossier, icp)
+        if report.approved:
+            return sequence
+
+        feedback = format_critic_feedback(report.violations, report.notes)
+        logger.info(
+            "sales.outreach.critic_revise prospect_id=%s violations=%d",
+            prospect.id,
+            report.must_fix_count(),
+        )
+        refined_ctx = (company_context or "") + "\n\nReviewer feedback to address:\n" + feedback
+        try:
+            variants = self.outreach.generate_sequence(
+                prospect.model_dump_json(indent=2),
+                dossier,
+                product_name,
+                value_proposition,
+                case_studies,
+                refined_ctx,
+                insights_context,
+            )
+        except Exception:
+            logger.exception(
+                "sales.outreach.refine_failed prospect_id=%s — keeping original", prospect.id
+            )
+            return sequence
+        return _wrap_outreach_sequence(variants, prospect, dossier)
+
+    def _generate_proposal_with_critic(
+        self,
+        prospect: Prospect,
+        product_name: str,
+        value_proposition: str,
+        annual_cost: float,
+        discovery_notes: str,
+        case_studies: str,
+        company_context: str,
+        insights_context: Optional[str],
+        dossier: Optional[ProspectDossier],
+        qualification: Optional[QualificationScore],
+    ) -> SalesProposal:
+        """Emit -> wrap -> critic -> on revise, re-emit once with violations."""
+        body = self.proposal.write(
+            prospect.model_dump_json(indent=2),
+            product_name,
+            value_proposition,
+            annual_cost,
+            discovery_notes,
+            case_studies,
+            company_context,
+            insights_context,
+        )
+        proposal = SalesProposal(prospect=prospect, **body.model_dump())
+
+        report = self.proposal_critic.review(proposal, dossier, qualification)
+        if report.approved:
+            return proposal
+
+        feedback = format_critic_feedback(report.violations, report.notes)
+        logger.info(
+            "sales.proposal.critic_revise prospect_id=%s violations=%d",
+            prospect.id,
+            report.must_fix_count(),
+        )
+        refined_notes = (discovery_notes or "") + "\n\nReviewer feedback to address:\n" + feedback
+        try:
+            body = self.proposal.write(
+                prospect.model_dump_json(indent=2),
+                product_name,
+                value_proposition,
+                annual_cost,
+                refined_notes,
+                case_studies,
+                company_context,
+                insights_context,
+            )
+        except Exception:
+            logger.exception(
+                "sales.proposal.refine_failed prospect_id=%s — keeping original", prospect.id
+            )
+            return proposal
+        return SalesProposal(prospect=prospect, **body.model_dump())
 
     def load_dossiers_for_prospects(self, prospects: List[Prospect]) -> dict[str, ProspectDossier]:
         """Batch-load dossiers for the prospects we're about to run outreach on.
@@ -312,6 +430,9 @@ class SalesPodOrchestrator:
             )
 
         result = SalesPipelineResult(job_id=job_id, entry_stage=entry, product_name=product)
+        # Dossiers are loaded once per run and reused by both the outreach
+        # critic (rule outreach.citation.fabricated) and the proposal critic.
+        dossier_map: dict[str, ProspectDossier] = {}
 
         # ------------------------------------------------------------------
         # Stage 1: Prospecting
@@ -355,21 +476,15 @@ class SalesPodOrchestrator:
                     )
                     continue
                 try:
-                    variants = self.outreach.generate_sequence(
-                        p.model_dump_json(indent=2),
-                        dossier,
-                        product,
-                        vp,
-                        cases,
-                        ctx,
-                        insights_ctx,
+                    sequence = self._generate_outreach_with_critic(
+                        p, dossier, product, vp, cases, ctx, insights_ctx, request.icp
                     )
                 except Exception:
                     logger.exception(
                         "sales.outreach.failed prospect_id=%s company=%s", p.id, p.company_name
                     )
                     continue
-                sequences.append(_wrap_outreach_sequence(variants, p, dossier))
+                sequences.append(sequence)
             result.outreach_sequences = sequences
             update("outreach", 35)
 
@@ -465,10 +580,15 @@ class SalesPodOrchestrator:
             )
             proposals: List[SalesProposal] = []
             annual_cost = 25000.0  # Default; real requests should supply per-prospect pricing
+            qual_by_company = {q.prospect.company_name: q for q in qualified}
+            # If outreach stage didn't run, dossier_map is empty — load now so
+            # the proposal critic has dossier context for the founded-claims check.
+            if not dossier_map:
+                dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
             for p in qualified_prospects:
                 try:
-                    body = self.proposal.write(
-                        p.model_dump_json(indent=2),
+                    proposal_obj = self._generate_proposal_with_critic(
+                        p,
                         product,
                         vp,
                         annual_cost,
@@ -476,11 +596,13 @@ class SalesPodOrchestrator:
                         cases,
                         ctx,
                         insights_ctx,
+                        dossier_map.get(p.id),
+                        qual_by_company.get(p.company_name),
                     )
                 except Exception:
                     logger.exception("sales.proposal.failed prospect_id=%s", p.id)
                     continue
-                proposals.append(SalesProposal(prospect=p, **body.model_dump()))
+                proposals.append(proposal_obj)
             result.proposals = proposals
             update("proposal", 87)
 
@@ -624,14 +746,10 @@ class SalesPodOrchestrator:
                 )
                 continue
             try:
-                variants = self.outreach.generate_sequence(
-                    p.model_dump_json(indent=2),
-                    dossier,
-                    product_name,
-                    value_proposition,
-                    cases,
-                    company_context,
-                    ctx,
+                # outreach_only callers don't supply ICP — pass None and the
+                # critic-gated helper falls back to the unreviewed wrap path.
+                sequence = self._generate_outreach_with_critic(
+                    p, dossier, product_name, value_proposition, cases, company_context, ctx, None
                 )
             except Exception:
                 logger.exception(
@@ -640,7 +758,7 @@ class SalesPodOrchestrator:
                     p.company_name,
                 )
                 continue
-            sequences.append(_wrap_outreach_sequence(variants, p, dossier))
+            sequences.append(sequence)
         return sequences
 
     def qualify_only(
@@ -687,9 +805,13 @@ class SalesPodOrchestrator:
     def propose_only(self, req: ProposalRequest) -> Optional[SalesProposal]:
         ctx = self._load_insights_ctx()
         cases = "\n".join(req.case_study_snippets)
+        # Best-effort dossier lookup so the proposal critic can score the
+        # founded-claims rule. Missing dossier degrades to None — the critic
+        # treats that as "(no dossier supplied)" and skips the related rule.
+        dossier_map = self.load_dossiers_for_prospects([req.prospect])
         try:
-            body = self.proposal.write(
-                req.prospect.model_dump_json(indent=2),
+            return self._generate_proposal_with_critic(
+                req.prospect,
                 req.product_name,
                 req.value_proposition,
                 req.annual_cost_usd,
@@ -697,11 +819,12 @@ class SalesPodOrchestrator:
                 cases,
                 req.company_context,
                 ctx,
+                dossier_map.get(req.prospect.id),
+                None,  # propose_only does not carry a qualification score
             )
         except Exception:
             logger.exception("sales.propose_only.failed prospect_id=%s", req.prospect.id)
             return None
-        return SalesProposal(prospect=req.prospect, **body.model_dump())
 
     def coach_only(
         self, prospects: List[Prospect], product_name: str, pipeline_context: str

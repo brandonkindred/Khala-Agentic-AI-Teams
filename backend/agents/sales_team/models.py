@@ -1060,3 +1060,106 @@ class SalesPipelineResult(BaseModel):
     closing_strategies: List[ClosingStrategy] = Field(default_factory=list)
     coaching_report: Optional[PipelineCoachingReport] = None
     summary: str = Field(default="", description="Plain-English summary of the full pipeline run")
+
+
+# ---------------------------------------------------------------------------
+# Critic models
+#
+# LLM-as-judge critics review outreach sequences and proposals before they
+# reach a customer. Both reports share ``CriticViolation`` so the orchestrator
+# can format feedback through one helper.
+# ---------------------------------------------------------------------------
+
+
+CriticStatus = Literal["PASS", "FAIL"]
+CriticSeverity = Literal["must_fix", "should_fix", "consider"]
+
+
+class CriticViolation(BaseModel):
+    """A single rubric or policy violation found by an outreach/proposal critic."""
+
+    rule_id: str = Field(
+        ...,
+        description=(
+            "Rubric identifier, e.g. 'outreach.day1.subject_length', "
+            "'proposal.roi.arithmetic', 'proposal.claims.founded'."
+        ),
+    )
+    severity: CriticSeverity = Field(
+        default="must_fix",
+        description="must_fix blocks critic approval; should_fix and consider are advisory.",
+    )
+    section: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path within the artifact, e.g. 'variants[0].day1' or 'roi_model', "
+            "or 'overall' for artifact-wide issues."
+        ),
+    )
+    evidence_quote: Optional[str] = Field(
+        default=None,
+        description="Exact quote from the offending field (keep under ~120 chars).",
+    )
+    description: str = Field(..., description="What is wrong and why it matters.")
+    suggested_fix: str = Field(
+        ...,
+        description="Concrete, actionable instruction the agent can apply on retry.",
+    )
+
+
+class OutreachCriticReport(BaseModel):
+    """Structured critique of an :class:`OutreachSequence` against the outreach rubric."""
+
+    status: CriticStatus = Field(
+        ...,
+        description="PASS when no must_fix violations exist; FAIL otherwise.",
+    )
+    approved: bool = Field(
+        ...,
+        description=(
+            "True when the critic considers the sequence shippable. "
+            "Should equal (status == 'PASS')."
+        ),
+    )
+    violations: List[CriticViolation] = Field(default_factory=list)
+    personalization_grade_override: Optional[PersonalizationGrade] = Field(
+        default=None,
+        description=(
+            "Optional grade the critic suggests for the lead variant when the "
+            "Pydantic validator over-graded it (e.g. cited URL is real but "
+            "irrelevant). Advisory; orchestrator may apply on retry."
+        ),
+    )
+    notes: Optional[str] = Field(
+        default=None,
+        description="Optional short critic notes, e.g. parse-failure hints or context.",
+    )
+    rubric_version: str = Field(default="v1")
+
+    def must_fix_count(self) -> int:
+        return sum(1 for v in self.violations if v.severity == "must_fix")
+
+
+class ProposalCriticReport(BaseModel):
+    """Structured critique of a :class:`SalesProposal` against the proposal rubric."""
+
+    status: CriticStatus = Field(
+        ...,
+        description="PASS when no must_fix violations exist; FAIL otherwise.",
+    )
+    approved: bool = Field(
+        ...,
+        description=(
+            "True when the critic considers the proposal shippable. "
+            "Should equal (status == 'PASS')."
+        ),
+    )
+    violations: List[CriticViolation] = Field(default_factory=list)
+    notes: Optional[str] = Field(
+        default=None,
+        description="Optional short critic notes, e.g. parse-failure hints or context.",
+    )
+    rubric_version: str = Field(default="v1")
+
+    def must_fix_count(self) -> int:
+        return sum(1 for v in self.violations if v.severity == "must_fix")
