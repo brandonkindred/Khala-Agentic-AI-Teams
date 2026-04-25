@@ -47,11 +47,45 @@ def test_impact_increases_with_order_size():
     assert large.round_trip_cost_bps > small.round_trip_cost_bps
 
 
-def test_impact_zero_without_adv():
+def test_impact_zero_without_adv_or_bar_volume():
     cm = SpreadPlusImpactCostModel()
     e = cm.estimate(symbol="X", asset_class="stocks", order_notional=10_000)
     # Should just be half_spread + venue_fee, no impact term
     assert e.entry_cost_bps == pytest.approx(1.0 + 0.5)  # stocks defaults
+
+
+def test_impact_falls_back_to_bar_volume_when_adv_missing():
+    """Issue #248: when ADV is unavailable, use bar dollar volume so
+    strategies on thin names don't silently get free zero-impact fills."""
+    cm = SpreadPlusImpactCostModel()
+    # No avg_daily_volume_usd. Bar dollar volume = $100k. Order = $50k → 50% participation.
+    e = cm.estimate(
+        symbol="X",
+        asset_class="stocks",
+        order_notional=50_000,
+        bar_dollar_volume_usd=100_000,
+    )
+    # Impact term should be non-zero and substantial.
+    assert e.entry_cost_bps > 1.5  # well above just half_spread + venue_fee
+    # Equivalent ADV-supplied call should give the same number.
+    e_adv = cm.estimate(
+        symbol="X", asset_class="stocks", order_notional=50_000, avg_daily_volume_usd=100_000
+    )
+    assert e.entry_cost_bps == pytest.approx(e_adv.entry_cost_bps)
+
+
+def test_adv_takes_precedence_over_bar_volume():
+    """When both are supplied, ADV wins (it's the more reliable signal)."""
+    cm = SpreadPlusImpactCostModel()
+    e = cm.estimate(
+        symbol="X",
+        asset_class="stocks",
+        order_notional=50_000,
+        avg_daily_volume_usd=10_000_000,  # generous ADV → small impact
+        bar_dollar_volume_usd=100_000,  # tight bar volume → would be huge impact
+    )
+    # Impact term should be small (consistent with the generous ADV).
+    assert e.entry_cost_bps < 5.0
 
 
 def test_crypto_higher_than_stocks():

@@ -5,18 +5,11 @@ the service advances to bar *t+1* and uses that bar's full OHLC to decide
 which orders fill and at what price. The strategy **does not** have access
 to bar *t+1* until after its ``on_fill`` events have been delivered.
 
-Microstructure rules (kept deliberately simple; each is noted):
-
-- ``market`` orders fill at the next bar's open, adjusted by slippage.
-- ``limit`` long orders fill if ``bar.low <= limit_price``; fill price is
-  ``min(open, limit_price)`` adjusted by slippage (if the bar opens below
-  the limit, we assume the fill happens at the open, not the limit).
-- ``limit`` short orders fill if ``bar.high >= limit_price``; fill price is
-  ``max(open, limit_price)`` adjusted by slippage.
-- ``stop`` long orders trigger when ``bar.high >= stop_price``; fill price
-  is ``max(open, stop_price)`` adjusted by slippage.
-- ``stop`` short orders trigger when ``bar.low <= stop_price``; fill price
-  is ``min(open, stop_price)`` adjusted by slippage.
+The trigger geometry and the (price, qty, slippage) triple per order live
+behind a pluggable ``ExecutionModel`` (issue #248). Two implementations
+ship: ``OptimisticExecutionModel`` (legacy, used by golden parity tests)
+and ``RealisticExecutionModel`` (default; limit fills at limit price,
+participation-capped partial fills, adverse-selection haircut).
 
 Transaction costs and realized P&L on close match the legacy
 ``TradeSimulationEngine._close_position`` math so parity tests hold.
@@ -31,7 +24,8 @@ from typing import List, Optional
 from ...execution.bar_safety import BarSafetyAssertion
 from ...execution.risk_filter import RiskFilter
 from ...models import TradeRecord
-from ..strategy.contract import Bar, Fill, OrderSide, OrderType
+from ..strategy.contract import Bar, Fill, OrderSide
+from .execution_model import ExecutionModel, FillTerms, OptimisticExecutionModel
 from .order_book import OrderBook, PendingOrder
 from .portfolio import Portfolio, Position
 
@@ -64,6 +58,7 @@ class FillSimulator:
         risk_filter: RiskFilter,
         config: FillSimulatorConfig,
         bar_safety: Optional[BarSafetyAssertion] = None,
+        execution_model: Optional[ExecutionModel] = None,
     ) -> None:
         self.portfolio = portfolio
         self.order_book = order_book
@@ -74,21 +69,21 @@ class FillSimulator:
         # fails loudly.  Tests that construct pathological traces can pass
         # ``BarSafetyAssertion(enabled=False)`` to suppress it.
         self.bar_safety = bar_safety or BarSafetyAssertion()
+        # Default to the optimistic (legacy) model with the warning
+        # suppressed — preserves byte-equal behavior for callers that
+        # haven't migrated to the realistic default exposed via
+        # ``BacktestConfig.execution_model`` (issue #248).
+        self.execution_model = execution_model or OptimisticExecutionModel(warn=False)
         self._trade_num = 0
 
     # ------------------------------------------------------------------
     # Public entrypoint: process one fill tick for one symbol/bar.
     # ------------------------------------------------------------------
 
-    def process_bar(self, bar: Bar) -> FillOutcome:
+    def process_bar(self, bar: Bar, next_bar: Optional[Bar] = None) -> FillOutcome:
         entry_fills: List[Fill] = []
         exit_fills: List[Fill] = []
         closed: List[TradeRecord] = []
-
-        slip_mult_long_entry = 1.0 + self.config.slippage_bps / 10_000.0
-        slip_mult_long_exit = 1.0 - self.config.slippage_bps / 10_000.0
-        slip_mult_short_entry = 1.0 - self.config.slippage_bps / 10_000.0
-        slip_mult_short_exit = 1.0 + self.config.slippage_bps / 10_000.0
 
         # Work on a snapshot of pending orders for this symbol so cancels /
         # removes inside the loop don't mutate iteration.
@@ -97,9 +92,12 @@ class FillSimulator:
         for po in pending:
             req = po.request
             # Determine whether this bar triggered the order and at what
-            # reference price.
-            ref_price = self._touched(req, bar)
-            if ref_price is None:
+            # terms (price, partial-fill fraction, adverse-selection
+            # haircut). The execution model encapsulates the (model-
+            # dependent) parts; risk gates and money math are simulator-
+            # owned below.
+            terms = self.execution_model.compute_fill_terms(req, bar, next_bar)
+            if terms is None:
                 continue
 
             # Parent-side look-ahead guard: any triggered order must belong
@@ -124,9 +122,7 @@ class FillSimulator:
             )
 
             if is_entry:
-                pos = self._fill_entry(
-                    po, bar, ref_price, slip_mult_long_entry, slip_mult_short_entry
-                )
+                pos = self._fill_entry(po, bar, terms)
                 if pos is None:
                     continue
                 self.portfolio.open(pos)
@@ -136,7 +132,9 @@ class FillSimulator:
             elif has_position:
                 # Exit path: order closes out the open position. We only
                 # support full-qty exits in PR 1 (matches legacy behavior at
-                # trade_simulator.py:560-565).
+                # trade_simulator.py:560-565). Partial-fill caps from the
+                # execution model apply only to entries — exits always
+                # close the position fully.
                 pos = self.portfolio.positions[bar.symbol]
                 if req.side == pos.side:
                     # Ignoring same-side add-ons in PR 1 — log and leave.
@@ -147,9 +145,7 @@ class FillSimulator:
                     )
                     self.order_book.remove(po.order_id)
                     continue
-                trade = self._fill_exit(
-                    po, bar, ref_price, slip_mult_long_exit, slip_mult_short_exit
-                )
+                trade = self._fill_exit(po, bar, terms)
                 if trade is None:
                     continue
                 closed.append(trade)
@@ -174,27 +170,25 @@ class FillSimulator:
         )
 
     # ------------------------------------------------------------------
-    # Trigger logic
+    # Slippage helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _touched(req, bar: Bar) -> Optional[float]:
-        """Return a reference price if the order would trigger on this bar, else None."""
-        if req.order_type == OrderType.MARKET:
-            return bar.open
-        if req.order_type == OrderType.LIMIT:
-            if req.side == OrderSide.LONG and bar.low <= req.limit_price:
-                return min(bar.open, req.limit_price)
-            if req.side == OrderSide.SHORT and bar.high >= req.limit_price:
-                return max(bar.open, req.limit_price)
-            return None
-        if req.order_type == OrderType.STOP:
-            if req.side == OrderSide.LONG and bar.high >= req.stop_price:
-                return max(bar.open, req.stop_price)
-            if req.side == OrderSide.SHORT and bar.low <= req.stop_price:
-                return min(bar.open, req.stop_price)
-            return None
-        return None
+    def _slippage_multipliers(self, extra_slip_bps: float) -> tuple[float, float, float, float]:
+        """Return (long_entry, long_exit, short_entry, short_exit) multipliers.
+
+        ``extra_slip_bps`` widens the band on both legs symmetrically so
+        the realistic model's adverse-selection haircut shows up as a
+        worse fill price regardless of whether the fill is an entry or
+        exit on either side.
+        """
+        slip_bps = self.config.slippage_bps + max(0.0, extra_slip_bps)
+        s = slip_bps / 10_000.0
+        return (
+            1.0 + s,  # long entry: pay more
+            1.0 - s,  # long exit: receive less
+            1.0 - s,  # short entry: receive less
+            1.0 + s,  # short exit: pay more
+        )
 
     # ------------------------------------------------------------------
     # Entry / exit money math (mirrors legacy engine)
@@ -204,12 +198,17 @@ class FillSimulator:
         self,
         po: PendingOrder,
         bar: Bar,
-        ref_price: float,
-        slip_long: float,
-        slip_short: float,
+        terms: FillTerms,
     ) -> Optional[Position]:
         req = po.request
-        qty = req.qty
+        ref_price = terms.reference_price
+        # Apply the execution model's partial-fill cap (1.0 = full).
+        # Fractions below 1.0 mean the bar's dollar volume couldn't absorb
+        # the full request; the remainder is dropped, not re-quoted.
+        qty = req.qty * max(0.0, min(1.0, terms.qty_fraction))
+        if qty <= 0:
+            self.order_book.remove(po.order_id)
+            return None
         # Vol-target sizing is not re-run here — strategies own sizing via
         # ``ctx.submit_order(qty=...)``. The risk filter still caps via
         # ``can_enter``, which mirrors the legacy engine's behavior.
@@ -230,11 +229,12 @@ class FillSimulator:
             self.order_book.remove(po.order_id)
             return None
 
+        slip_long_entry, _, slip_short_entry, _ = self._slippage_multipliers(terms.extra_slip_bps)
         dp = 4 if ref_price < 10 else 2
         if req.side == OrderSide.LONG:
-            fill_price = round(ref_price * slip_long, dp)
+            fill_price = round(ref_price * slip_long_entry, dp)
         else:
-            fill_price = round(ref_price * slip_short, dp)
+            fill_price = round(ref_price * slip_short_entry, dp)
 
         return Position(
             symbol=req.symbol,
@@ -252,17 +252,17 @@ class FillSimulator:
         self,
         po: PendingOrder,
         bar: Bar,
-        ref_price: float,
-        slip_long: float,
-        slip_short: float,
+        terms: FillTerms,
     ) -> Optional[TradeRecord]:
         pos = self.portfolio.positions[bar.symbol]
+        ref_price = terms.reference_price
         dp = 4 if ref_price < 10 else 2
+        _, slip_long_exit, _, slip_short_exit = self._slippage_multipliers(terms.extra_slip_bps)
         # Apply slippage against the position's original direction.
         if pos.side == OrderSide.LONG:
-            exit_price = round(ref_price * slip_long, dp)
+            exit_price = round(ref_price * slip_long_exit, dp)
         else:
-            exit_price = round(ref_price * slip_short, dp)
+            exit_price = round(ref_price * slip_short_exit, dp)
 
         # Realized P&L — matches trade_simulator._close_position math.
         cost_mult = self.config.transaction_cost_bps / 10_000.0

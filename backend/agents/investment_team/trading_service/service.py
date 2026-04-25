@@ -20,6 +20,7 @@ from ..execution.bar_safety import LookAheadError
 from ..execution.risk_filter import RiskFilter, RiskLimits
 from ..models import BacktestConfig, TradeRecord
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
+from .engine.execution_model import build_execution_model
 from .engine.fill_simulator import FillSimulator, FillSimulatorConfig
 from .engine.order_book import OrderBook
 from .engine.portfolio import Portfolio
@@ -85,6 +86,10 @@ class TradingService:
         """
         portfolio = Portfolio(initial_capital=self.config.initial_capital)
         order_book = OrderBook()
+        execution_model = build_execution_model(
+            self.config.execution_model,
+            participation_cap=self.config.fill_participation_cap,
+        )
         fill_sim = FillSimulator(
             portfolio=portfolio,
             order_book=order_book,
@@ -93,6 +98,7 @@ class TradingService:
                 slippage_bps=self.config.slippage_bps,
                 transaction_cost_bps=self.config.transaction_cost_bps,
             ),
+            execution_model=execution_model,
         )
 
         result = TradingServiceResult()
@@ -114,17 +120,41 @@ class TradingService:
             # We need one-bar lookahead in the fill simulator, so we buffer
             # the next bar. The strategy sees bar N; the fill simulator uses
             # bar N+1 to decide fills for orders submitted after bar N.
+            #
+            # Issue #248: the realistic execution model also wants a
+            # one-bar **forward** view (bar N+2) to compute the
+            # adverse-selection haircut on limit fills. We get that by
+            # peeking one event ahead via ``_peeked``.
             prev_bar = None  # the bar the strategy most recently saw
             pending_for_prev: List[OrderRequest] = []
+            event_iter = iter(stream)
+            peeked: Optional[StreamEvent] = None
 
             try:
-                for event in stream:
-                    if isinstance(event, EndOfStreamEvent):
+                while True:
+                    if peeked is not None:
+                        event = peeked
+                        peeked = None
+                    else:
+                        event = next(event_iter, None)
+                    if event is None or isinstance(event, EndOfStreamEvent):
                         break
                     if not isinstance(event, BarEvent):
                         continue
                     cur_bar = event.bar
                     is_warmup = event.is_warmup
+
+                    # Peek the next bar event for the fill simulator's
+                    # lookahead (used by realistic execution model).
+                    next_bar = None
+                    while True:
+                        peeked = next(event_iter, None)
+                        if peeked is None or isinstance(peeked, EndOfStreamEvent):
+                            break
+                        if isinstance(peeked, BarEvent):
+                            next_bar = peeked.bar
+                            break
+                        # Skip non-bar events but keep looking.
 
                     if not is_warmup:
                         # 1) Expire day orders on date change.
@@ -146,7 +176,7 @@ class TradingService:
                                 )
                             pending_for_prev = []
 
-                        outcome = fill_sim.process_bar(cur_bar)
+                        outcome = fill_sim.process_bar(cur_bar, next_bar=next_bar)
                         for fill in outcome.entry_fills + outcome.exit_fills:
                             harness.send_fill(
                                 fill=fill.model_dump(mode="json"),

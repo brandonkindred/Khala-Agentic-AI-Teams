@@ -42,12 +42,17 @@ def _make_spec(name: str, code: str) -> StrategySpec:
 
 
 def _make_config() -> BacktestConfig:
+    # Pin the legacy fill geometry so snapshot drift can't be introduced by
+    # future tweaks to ``RealisticExecutionModel``. The reference strategies
+    # used here trade only MARKET orders so optimistic vs. realistic produce
+    # byte-identical fills today, but pinning makes the contract explicit.
     return BacktestConfig(
         start_date="2024-01-01",
         end_date="2024-12-31",
         initial_capital=100_000.0,
         transaction_cost_bps=0.0,
         slippage_bps=0.0,
+        execution_model="optimistic",
     )
 
 
