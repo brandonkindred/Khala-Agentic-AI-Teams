@@ -19,12 +19,20 @@ class BacktestAnomalyDetector:
         trades: List[TradeRecord],
         *,
         mode: str = "backtest",
+        dsr_aware: bool = False,
     ) -> List[QualityGateResult]:
         """Run anomaly checks.
 
         ``mode="backtest"`` (default) runs the full gate set; ``mode="paper"``
         relaxes gates that assume a multi-year backtest window so short
         paper-trading sessions don't false-trigger on "too few trades".
+
+        ``dsr_aware`` (default False) is set by the Strategy Lab orchestrator
+        when walk-forward + ``AcceptanceGate`` is wired in: the OOS Deflated
+        Sharpe Ratio is then the authoritative overfitting check, so the
+        ``Sharpe > 5.0`` single-window flag is downgraded from critical to
+        warning — it still surfaces in the gate result list but no longer
+        forces a refinement-loop rewrite when the OOS DSR clears the gate.
         """
         results: List[QualityGateResult] = []
 
@@ -98,26 +106,32 @@ class BacktestAnomalyDetector:
             )
 
         # 5b. Sharpe ratio thresholds.
-        # Issue #247: the walk-forward + AcceptanceGate + DSR gate is the
-        # eventual authoritative overfitting check, but until it is wired
-        # into StrategyLabOrchestrator (step 8), the orchestrator only
-        # refines/rejects on ``severity == "critical"`` gate failures. Keep
-        # Sharpe > 5.0 at critical severity so clearly-overfit strategies
-        # still trigger refinement on the single-window path; the Sharpe > 3
-        # band remains a warning. Once AcceptanceGate is invoked from the
-        # orchestrator this gate can be revisited.
+        # Issue #247: when the orchestrator runs walk-forward and invokes
+        # ``AcceptanceGate`` on the OOS Deflated Sharpe, that gate is the
+        # authoritative overfitting check — so we downgrade the single-window
+        # ``Sharpe > 5.0`` flag from critical to warning under ``dsr_aware``
+        # to avoid double-rejecting (and to avoid forcing a refinement rewrite
+        # on a strategy whose IS Sharpe is high but OOS DSR clears the gate).
+        # Without ``dsr_aware`` the orchestrator only sees the single window,
+        # so a Sharpe > 5.0 stays critical to trigger refinement.
         if metrics.sharpe_ratio > 5.0:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
                     passed=False,
-                    severity="critical",
+                    severity="warning" if dsr_aware else "critical",
                     details=(
                         f"Sharpe ratio {metrics.sharpe_ratio:.2f} exceeds 5.0 — "
                         "almost certainly indicates look-ahead bias or a "
-                        "calculation artifact. When walk-forward is available, "
-                        "AcceptanceGate's OOS Deflated Sharpe is the more "
-                        "precise overfitting check."
+                        "calculation artifact. "
+                        + (
+                            "AcceptanceGate's OOS Deflated Sharpe is the "
+                            "authoritative overfitting check on this run."
+                            if dsr_aware
+                            else "When walk-forward is available, "
+                            "AcceptanceGate's OOS Deflated Sharpe is the more "
+                            "precise overfitting check."
+                        )
                     ),
                 )
             )
