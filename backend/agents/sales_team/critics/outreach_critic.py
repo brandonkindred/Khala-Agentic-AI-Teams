@@ -50,9 +50,12 @@ RUBRIC (use these rule_id slugs verbatim):
     one source URL that appears in the supplied dossier `sources` allowlist. \
     Cited URLs that aren't in the allowlist FAIL.
 
- 2. outreach.email.contact_address — `prospect.contact_email`, if present, \
-    must appear verbatim somewhere in the dossier sources list. Pattern \
-    fabrications like `firstname.lastname@company.com` FAIL.
+ 2. outreach.email.contact_address — `prospect.contact_email` should be \
+    `null` unless it appears verbatim in the dossier's `personal_site`, \
+    `executive_summary`, `notes`, or `other_social` fields. Pattern \
+    fabrications like `firstname.lastname@company.com` with no dossier \
+    backing FAIL. The dossier `sources` field is a list of URLs and never \
+    contains an email address — do not check there.
 
  3. outreach.day1.cta — the first email in every variant's email_sequence \
     must contain a clear call-to-action: a specific question, a meeting ask, \

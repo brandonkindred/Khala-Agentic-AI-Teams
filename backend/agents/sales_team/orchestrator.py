@@ -580,7 +580,10 @@ class SalesPodOrchestrator:
             )
             proposals: List[SalesProposal] = []
             annual_cost = 25000.0  # Default; real requests should supply per-prospect pricing
-            qual_by_company = {q.prospect.company_name: q for q in qualified}
+            # Key by prospect.id, not company_name — multiple decision-makers
+            # at the same company (max_per_company > 1) would otherwise share
+            # one entry and trip false `proposal.discovery.referenced` flags.
+            qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect.id}
             # If outreach stage didn't run, dossier_map is empty — load now so
             # the proposal critic has dossier context for the founded-claims check.
             if not dossier_map:
@@ -597,7 +600,7 @@ class SalesPodOrchestrator:
                         ctx,
                         insights_ctx,
                         dossier_map.get(p.id),
-                        qual_by_company.get(p.company_name),
+                        qual_by_prospect_id.get(p.id),
                     )
                 except Exception:
                     logger.exception("sales.proposal.failed prospect_id=%s", p.id)
