@@ -354,6 +354,14 @@
   aliases: ["anchovy", "anchovies"]
   citations: { allergen: "FDA Big-9: fish." }
 
+- id: mussels
+  display_name: "Mussels"
+  allergen_tags: [mollusc]
+  dietary_tags: [animal]
+  aisle_tag: seafood
+  aliases: ["mussels", "blue mussels", "mussel meat"]
+  citations: { allergen: "EU-14: molluscs." }
+
 # ==========================================================================
 # PROTEINS — plant
 # ==========================================================================
@@ -394,6 +402,14 @@
   dietary_tags: [legume]
   aisle_tag: pantry
   aliases: ["black beans", "cooked black beans", "canned black beans"]
+
+- id: lupin_flour
+  display_name: "Lupin flour"
+  allergen_tags: [lupin]
+  dietary_tags: [legume]
+  aisle_tag: pantry
+  aliases: ["lupin flour", "lupine flour", "lupin bean flour"]
+  citations: { allergen: "EU-14: lupin." }
 
 # ==========================================================================
 # CONDIMENTS / SAUCES — allergen-heavy; curate carefully
@@ -448,6 +464,15 @@
   dietary_tags: []
   aisle_tag: condiments
   aliases: ["apple cider vinegar", "acv"]
+
+- id: wine_red
+  display_name: "Red wine"
+  allergen_tags: [sulfites]
+  dietary_tags: [alcohol]
+  interaction_tags: [tyramine_high]
+  aisle_tag: pantry
+  aliases: ["red wine", "wine", "cooking wine", "dry red wine"]
+  citations: { allergen: "EU-14: sulfites/sulphur dioxide. Aged/fermented → tyramine (MAOI caution)." }
 
 - id: mustard
   display_name: "Mustard (prepared)"

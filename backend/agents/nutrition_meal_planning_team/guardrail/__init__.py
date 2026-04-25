@@ -1,7 +1,4 @@
-"""SPEC-007 guardrail pipeline — Phase 0 scaffolding.
-
-W1 ships only the public surface area. ``check_recommendation`` is a
-stub that raises ``NotImplementedError`` until W2 lands ``checker.py``.
+"""SPEC-007 guardrail pipeline.
 
 Behaviour is gated by the ``NUTRITION_GUARDRAIL`` env var (off by
 default), mirroring the SPEC-006 ``NUTRITION_RESTRICTION_RESOLVER``
@@ -12,6 +9,7 @@ from __future__ import annotations
 
 import os
 
+from .checker import check_recommendation
 from .errors import GuardrailError, GuardrailNotImplementedError
 from .version import GUARDRAIL_VERSION
 from .violations import GuardrailResult, Severity, Violation, ViolationReason
@@ -24,14 +22,10 @@ def is_guardrail_enabled() -> bool:
     return os.environ.get(_FLAG, "0") == "1"
 
 
-def check_recommendation(profile, rec):
-    """SPEC-007 entrypoint. Stub until W2 implements ``checker.py``."""
-    raise GuardrailNotImplementedError("check_recommendation is implemented in SPEC-007 W2")
-
-
 __all__ = [
     "GUARDRAIL_VERSION",
     "GuardrailError",
+    "GuardrailNotImplementedError",
     "GuardrailResult",
     "Severity",
     "Violation",

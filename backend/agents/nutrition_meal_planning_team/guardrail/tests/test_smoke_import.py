@@ -28,11 +28,18 @@ def test_guardrail_version() -> None:
     assert GUARDRAIL_VERSION == "1.0.0"
 
 
-def test_check_recommendation_is_stub() -> None:
-    from agents.nutrition_meal_planning_team.guardrail import check_recommendation
+def test_check_recommendation_is_wired_to_checker() -> None:
+    """W2 replaces the W1 stub. Behaviour is covered in detail by the
+    other test files in this directory; here we just confirm the
+    public name resolves to the real implementation."""
+    from agents.nutrition_meal_planning_team.guardrail import (
+        check_recommendation,
+    )
+    from agents.nutrition_meal_planning_team.guardrail.checker import (
+        check_recommendation as impl,
+    )
 
-    with pytest.raises(NotImplementedError):
-        check_recommendation(None, None)
+    assert check_recommendation is impl
 
 
 def test_violation_is_frozen() -> None:
