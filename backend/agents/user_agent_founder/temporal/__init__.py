@@ -24,6 +24,8 @@ def run_pipeline_activity(run_id: str) -> dict[str, Any]:
 
     store = get_founder_store()
     agent = FounderAgent()
+    # run_workflow resolves the adapter from the run row's target_team_key
+    # when none is supplied — keeps this boundary thin.
     run_workflow(run_id, store, agent)
     return {"run_id": run_id}
 

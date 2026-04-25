@@ -43,7 +43,7 @@ class _FakeCursor:
 
         # INSERT into runs
         if sql_l.startswith("insert into user_agent_founder_runs"):
-            run_id, status, created_at, updated_at = params
+            run_id, status, target_team_key, created_at, updated_at = params
             self._db["runs"][run_id] = {
                 "run_id": run_id,
                 "status": status,
@@ -51,6 +51,7 @@ class _FakeCursor:
                 "analysis_job_id": None,
                 "spec_content": None,
                 "repo_path": None,
+                "target_team_key": target_team_key,
                 "created_at": created_at,
                 "updated_at": updated_at,
                 "error": None,
@@ -171,8 +172,27 @@ def test_create_run_returns_uuid_and_inserts_pending_row(store, fake_pg):
     assert row["status"] == "pending"
     assert row["se_job_id"] is None
     assert row["spec_content"] is None
+    assert row["target_team_key"] == "software_engineering"
     assert isinstance(row["created_at"], datetime)
     assert row["created_at"].tzinfo is timezone.utc
+
+
+def test_create_run_persists_explicit_target_team_key(store, fake_pg):
+    run_id = store.create_run(target_team_key="some_other_team")
+    assert fake_pg["runs"][run_id]["target_team_key"] == "some_other_team"
+
+
+def test_get_run_exposes_target_team_key(store):
+    run_id = store.create_run(target_team_key="software_engineering")
+    run = store.get_run(run_id)
+    assert run is not None
+    assert run.target_team_key == "software_engineering"
+
+
+def test_update_run_can_change_target_team_key(store, fake_pg):
+    run_id = store.create_run()
+    assert store.update_run(run_id, target_team_key="new_team") is True
+    assert fake_pg["runs"][run_id]["target_team_key"] == "new_team"
 
 
 def test_get_run_returns_stored_run_dataclass(store):

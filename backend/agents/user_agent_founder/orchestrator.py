@@ -1,7 +1,10 @@
 """Background workflow orchestrator for the founder agent.
 
-Runs the full lifecycle: spec generation -> product analysis -> SE team execution,
+Runs the full lifecycle: spec generation -> product analysis -> team build,
 answering all questions autonomously through the founder persona.
+
+Team-specific HTTP coupling lives in ``user_agent_founder.targets``;
+the orchestrator only knows the ``TargetTeamAdapter`` Protocol shape.
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -18,13 +21,11 @@ from job_service_client import JobServiceClient
 from llm_service import LLMJsonParseError, LLMSchemaValidationError
 from user_agent_founder.agent import FounderAgent
 from user_agent_founder.store import FounderRunStore
+from user_agent_founder.targets import StartFailed, TargetTeamAdapter, get_adapter
 
 logger = logging.getLogger(__name__)
 
 _job_client = JobServiceClient(team="user_agent_founder")
-
-UNIFIED_API_BASE = os.environ.get("UNIFIED_API_BASE_URL", "http://localhost:8080")
-SE_PREFIX = "/api/software-engineering"
 
 ANALYSIS_POLL_INTERVAL = int(os.environ.get("FOUNDER_ANALYSIS_POLL_SECONDS", "15"))
 EXECUTION_POLL_INTERVAL = int(os.environ.get("FOUNDER_EXECUTION_POLL_SECONDS", "30"))
@@ -32,13 +33,6 @@ MAX_POLL_ATTEMPTS = int(os.environ.get("FOUNDER_MAX_POLL_ATTEMPTS", "480"))  # ~
 MAX_ANSWER_RETRIES = int(os.environ.get("FOUNDER_MAX_ANSWER_RETRIES", "2"))
 ANSWER_POST_RETRIES = 3
 ANSWER_POST_BACKOFF_BASE = 2  # seconds
-
-# httpx timeout: generous because SE team operations can be slow
-HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
-
-
-def _se_url(path: str) -> str:
-    return f"{UNIFIED_API_BASE}{SE_PREFIX}{path}"
 
 
 def _sync_job_status(run_id: str, status: str, *, phase: str = "", error: str = "") -> None:
@@ -88,17 +82,18 @@ def _generate_spec_with_heartbeat(agent: FounderAgent, run_id: str) -> str:
 
 
 def _answer_pending_questions(
-    client: httpx.Client,
     agent: FounderAgent,
     store: FounderRunStore,
     run_id: str,
     job_id: str,
     questions: list[dict[str, Any]],
-    endpoint_prefix: str,
+    submit_fn: Callable[[list[dict[str, Any]]], None],
 ) -> bool:
     """Use the founder agent to answer all pending questions and submit them.
 
-    Returns True if answers were successfully submitted, False on failure.
+    ``submit_fn`` posts the answers (e.g. ``adapter.submit_analysis_answers``
+    bound to ``client`` and ``job_id``). Returns True if answers were
+    successfully submitted, False on failure.
     """
     answerable = [q for q in questions if q.get("id")]
     if not answerable:
@@ -155,32 +150,175 @@ def _answer_pending_questions(
 
     # Submit with retry + backoff for transient failures
     for attempt in range(ANSWER_POST_RETRIES):
-        resp = client.post(
-            _se_url(f"{endpoint_prefix}/{job_id}/answers"),
-            json={"answers": answers},
-            timeout=HTTP_TIMEOUT,
-        )
-        if resp.status_code < 400:
+        try:
+            submit_fn(answers)
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "Answer submission attempt %d/%d failed for job %s: %s %s",
+                attempt + 1,
+                ANSWER_POST_RETRIES,
+                job_id,
+                exc.response.status_code,
+                exc.response.text[:500],
+            )
+        except Exception:
+            logger.exception(
+                "Answer submission attempt %d/%d crashed for job %s",
+                attempt + 1,
+                ANSWER_POST_RETRIES,
+                job_id,
+            )
+        else:
             logger.info("Successfully submitted %d answers for job %s", len(answers), job_id)
             return True
-        logger.warning(
-            "Answer submission attempt %d/%d failed for job %s: %s %s",
-            attempt + 1,
-            ANSWER_POST_RETRIES,
-            job_id,
-            resp.status_code,
-            resp.text[:500],
-        )
         if attempt < ANSWER_POST_RETRIES - 1:
             time.sleep(ANSWER_POST_BACKOFF_BASE ** (attempt + 1))
 
     store.add_chat_message(
         run_id=run_id,
         role="system",
-        content=f"Failed to submit answers to SE team after {ANSWER_POST_RETRIES} attempts.",
+        content=f"Failed to submit answers to target team after {ANSWER_POST_RETRIES} attempts.",
         message_type="status_update",
     )
     return False
+
+
+def _run_phase(
+    *,
+    client: httpx.Client,
+    agent: FounderAgent,
+    store: FounderRunStore,
+    run_id: str,
+    phase: str,
+    poll_interval: int,
+    start_fn: Callable[[], str],
+    poll_fn: Callable[[str], dict[str, Any]],
+    submit_answers_fn: Callable[[str, list[dict[str, Any]]], None],
+    on_started: Callable[[str], None],
+    existing_job_id: str | None,
+    questions_status: str,
+    failure_label: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Run one start + poll + answer phase against a target-team adapter.
+
+    Returns ``(ok, final_status_data)``. ``ok=False`` means the phase
+    failed/cancelled/timed out and the run row has already been marked
+    ``failed``; the caller should abort. ``final_status_data`` is the
+    last status payload returned by ``poll_fn`` on success.
+
+    All four terminal states (completed / failed / cancelled / timeout)
+    are handled in this single helper, eliminating the historic
+    asymmetry where the analysis phase ignored ``cancelled`` and burned
+    ~4 hours of polling before timing out.
+    """
+    submit_phase_status = f"submitting_{phase}"
+    polling_phase_status = f"polling_{phase}"
+
+    if existing_job_id is None:
+        store.update_run(run_id, status=submit_phase_status)
+        _sync_job_status(run_id, "running", phase=submit_phase_status)
+        try:
+            job_id = start_fn()
+        except StartFailed as exc:
+            err = f"Failed to start {phase}: {exc}"
+            store.update_run(run_id, status="failed", error=err)
+            _sync_job_status(run_id, "failed", error=f"Failed to start {phase}")
+            return False, None
+        on_started(job_id)
+        store.update_run(run_id, status=polling_phase_status)
+        _sync_job_status(run_id, "running", phase=polling_phase_status)
+        logger.info("%s started: job_id=%s", failure_label, job_id)
+        store.add_chat_message(
+            run_id, "system", f"{failure_label} started (job: {job_id})", "status_update"
+        )
+    else:
+        job_id = existing_job_id
+        store.update_run(run_id, status=polling_phase_status, error=None)
+        _sync_job_status(run_id, "running", phase=polling_phase_status)
+        logger.info("Resuming %s poll: job_id=%s", failure_label, job_id)
+        store.add_chat_message(
+            run_id,
+            "system",
+            f"Resuming {failure_label} poll (job: {job_id})",
+            "status_update",
+        )
+
+    failed_question_sets: dict[frozenset[str], int] = {}
+
+    for _ in range(MAX_POLL_ATTEMPTS):
+        time.sleep(poll_interval)
+        _heartbeat(run_id)
+
+        status_data = poll_fn(job_id)
+        if status_data.get("_poll_error"):
+            logger.warning("%s poll error: %s", failure_label, status_data.get("_poll_error"))
+            continue
+        status = status_data.get("status", "")
+
+        # Answer pending questions
+        if status_data.get("waiting_for_answers") and status_data.get("pending_questions"):
+            pending = status_data["pending_questions"]
+            qset = frozenset(q.get("id", "") for q in pending)
+            prior_failures = failed_question_sets.get(qset, 0)
+
+            if prior_failures > MAX_ANSWER_RETRIES:
+                err = (
+                    f"Answer submission failed {prior_failures} times "
+                    f"for {phase} questions. Aborting."
+                )
+                logger.error(err)
+                store.update_run(run_id, status="failed", error=err)
+                _sync_job_status(run_id, "failed", error=err)
+                store.add_chat_message(run_id, "system", err, "status_update")
+                return False, None
+
+            store.update_run(run_id, status=questions_status)
+            store.add_chat_message(
+                run_id,
+                "system",
+                f"Target team has {len(pending)} question(s) during {phase}.",
+                "question_received",
+                metadata={"question_ids": list(qset)},
+            )
+            success = _answer_pending_questions(
+                agent,
+                store,
+                run_id,
+                job_id,
+                pending,
+                lambda answers, _jid=job_id: submit_answers_fn(_jid, answers),
+            )
+            if not success:
+                failed_question_sets[qset] = prior_failures + 1
+                logger.warning(
+                    "Answer attempt %d failed for %s questions",
+                    prior_failures + 1,
+                    phase,
+                )
+            continue
+
+        if status == "completed":
+            return True, status_data
+
+        if status == "failed":
+            err = f"{failure_label} failed: {status_data.get('error', 'unknown')}"
+            store.update_run(run_id, status="failed", error=err)
+            _sync_job_status(run_id, "failed", error=f"{failure_label} failed")
+            store.add_chat_message(run_id, "system", err, "status_update")
+            return False, None
+
+        if status == "cancelled":
+            err = f"{failure_label} was cancelled"
+            store.update_run(run_id, status="failed", error=err)
+            _sync_job_status(run_id, "failed", error=f"{failure_label} cancelled")
+            store.add_chat_message(run_id, "system", f"{err}.", "status_update")
+            return False, None
+
+    err = f"{failure_label} timed out"
+    store.update_run(run_id, status="failed", error=err)
+    _sync_job_status(run_id, "failed", error=err)
+    store.add_chat_message(run_id, "system", f"{err}.", "status_update")
+    return False, None
 
 
 def _run_product_analysis(
@@ -189,274 +327,100 @@ def _run_product_analysis(
     store: FounderRunStore,
     run_id: str,
     spec_content: str,
+    adapter: TargetTeamAdapter,
+    project_name: str,
     *,
     existing_job_id: str | None = None,
 ) -> str | None:
-    """Submit spec for product analysis and poll until complete. Returns repo_path or None.
+    """Submit spec for product analysis and poll until complete. Returns repo_path or None."""
 
-    If ``existing_job_id`` is supplied (resume path), the submit step is
-    skipped and polling resumes against that analysis job.
-    """
-    if existing_job_id is None:
-        store.update_run(run_id, status="submitting_analysis")
-        _sync_job_status(run_id, "running", phase="submitting_analysis")
+    def _on_started(job_id: str) -> None:
+        store.update_run(run_id, analysis_job_id=job_id)
 
-        resp = client.post(
-            _se_url("/product-analysis/start-from-spec"),
-            json={"project_name": f"user-agent-founder-{run_id}", "spec_content": spec_content},
-            timeout=HTTP_TIMEOUT,
-        )
-        if resp.status_code >= 400:
-            store.update_run(
-                run_id,
-                status="failed",
-                error=f"Failed to start analysis: {resp.status_code} {resp.text[:500]}",
-            )
-            _sync_job_status(run_id, "failed", error="Failed to start analysis")
-            return None
+    ok, status_data = _run_phase(
+        client=client,
+        agent=agent,
+        store=store,
+        run_id=run_id,
+        phase="analysis",
+        poll_interval=ANALYSIS_POLL_INTERVAL,
+        start_fn=lambda: adapter.start_from_spec(client, project_name, spec_content),
+        poll_fn=lambda jid: adapter.poll_analysis(client, jid),
+        submit_answers_fn=lambda jid, answers: adapter.submit_analysis_answers(
+            client, jid, answers
+        ),
+        on_started=_on_started,
+        existing_job_id=existing_job_id,
+        questions_status="answering_analysis_questions",
+        failure_label="Product analysis",
+    )
+    if not ok or status_data is None:
+        return None
 
-        data = resp.json()
-        analysis_job_id = data.get("job_id")
-        store.update_run(run_id, analysis_job_id=analysis_job_id, status="polling_analysis")
-        _sync_job_status(run_id, "running", phase="polling_analysis")
-        logger.info("Product analysis started: job_id=%s", analysis_job_id)
-        store.add_chat_message(
-            run_id, "system", f"Product analysis started (job: {analysis_job_id})", "status_update"
-        )
-    else:
-        analysis_job_id = existing_job_id
-        store.update_run(run_id, status="polling_analysis", error=None)
-        _sync_job_status(run_id, "running", phase="polling_analysis")
-        logger.info("Resuming product analysis poll: job_id=%s", analysis_job_id)
-        store.add_chat_message(
-            run_id,
-            "system",
-            f"Resuming product analysis poll (job: {analysis_job_id})",
-            "status_update",
-        )
-
-    failed_question_sets: dict[frozenset[str], int] = {}  # qset -> attempt count
-
-    for _ in range(MAX_POLL_ATTEMPTS):
-        time.sleep(ANALYSIS_POLL_INTERVAL)
-        _heartbeat(run_id)
-
-        resp = client.get(
-            _se_url(f"/product-analysis/status/{analysis_job_id}"),
-            timeout=HTTP_TIMEOUT,
-        )
-        if resp.status_code >= 400:
-            logger.warning("Analysis poll error: %s", resp.status_code)
-            continue
-
-        status_data = resp.json()
-        status = status_data.get("status", "")
-
-        # Answer pending questions
-        if status_data.get("waiting_for_answers") and status_data.get("pending_questions"):
-            pending = status_data["pending_questions"]
-            qset = frozenset(q.get("id", "") for q in pending)
-            prior_failures = failed_question_sets.get(qset, 0)
-
-            if prior_failures > MAX_ANSWER_RETRIES:
-                err = f"Answer submission failed {prior_failures} times for analysis questions. Aborting."
-                logger.error(err)
-                store.update_run(run_id, status="failed", error=err)
-                _sync_job_status(run_id, "failed", error=err)
-                store.add_chat_message(run_id, "system", err, "status_update")
-                return None
-
-            store.update_run(run_id, status="answering_analysis_questions")
-            store.add_chat_message(
-                run_id,
-                "system",
-                f"SE team has {len(pending)} question(s) during analysis.",
-                "question_received",
-                metadata={"question_ids": list(qset)},
-            )
-            success = _answer_pending_questions(
-                client,
-                agent,
-                store,
-                run_id,
-                analysis_job_id,
-                pending,
-                "/product-analysis",
-            )
-            if not success:
-                failed_question_sets[qset] = prior_failures + 1
-                logger.warning(
-                    "Answer attempt %d failed for analysis questions", prior_failures + 1
-                )
-            continue
-
-        if status == "completed":
-            repo_path = status_data.get("repo_path")
-            store.update_run(run_id, repo_path=repo_path)
-            logger.info("Product analysis completed: repo_path=%s", repo_path)
-            store.add_chat_message(
-                run_id,
-                "system",
-                "Analysis complete. Starting SE team build.",
-                "status_update",
-            )
-            return repo_path
-
-        if status == "failed":
-            err = f"Product analysis failed: {status_data.get('error', 'unknown')}"
-            store.update_run(run_id, status="failed", error=err)
-            _sync_job_status(run_id, "failed", error="Product analysis failed")
-            store.add_chat_message(run_id, "system", err, "status_update")
-            return None
-
-    store.update_run(run_id, status="failed", error="Product analysis timed out")
-    _sync_job_status(run_id, "failed", error="Product analysis timed out")
-    store.add_chat_message(run_id, "system", "Product analysis timed out.", "status_update")
-    return None
+    repo_path = status_data.get("repo_path")
+    store.update_run(run_id, repo_path=repo_path)
+    logger.info("Product analysis completed: repo_path=%s", repo_path)
+    store.add_chat_message(
+        run_id,
+        "system",
+        "Analysis complete. Starting target-team build.",
+        "status_update",
+    )
+    return repo_path
 
 
-def _run_se_team(
+def _run_target_team(
     client: httpx.Client,
     agent: FounderAgent,
     store: FounderRunStore,
     run_id: str,
     repo_path: str,
+    adapter: TargetTeamAdapter,
     *,
     existing_job_id: str | None = None,
 ) -> bool:
-    """Start the SE team build and poll until complete. Returns True on success.
+    """Start the target-team build and poll until complete. Returns True on success."""
 
-    If ``existing_job_id`` is supplied (resume path), the submit step is
-    skipped and polling resumes against that SE job.
-    """
-    if existing_job_id is None:
-        store.update_run(run_id, status="submitting_build")
-        _sync_job_status(run_id, "running", phase="submitting_build")
+    def _on_started(job_id: str) -> None:
+        store.update_run(run_id, se_job_id=job_id)
 
-        resp = client.post(
-            _se_url("/run-team"),
-            json={"repo_path": repo_path},
-            timeout=HTTP_TIMEOUT,
-        )
-        if resp.status_code >= 400:
-            store.update_run(
-                run_id,
-                status="failed",
-                error=f"Failed to start SE team: {resp.status_code} {resp.text[:500]}",
-            )
-            _sync_job_status(run_id, "failed", error="Failed to start SE team")
-            return False
-
-        data = resp.json()
-        se_job_id = data.get("job_id")
-        store.update_run(run_id, se_job_id=se_job_id, status="polling_build")
-        _sync_job_status(run_id, "running", phase="polling_build")
-        logger.info("SE team build started: job_id=%s", se_job_id)
-        store.add_chat_message(
-            run_id, "system", f"SE team build started (job: {se_job_id})", "status_update"
-        )
-    else:
-        se_job_id = existing_job_id
-        store.update_run(run_id, status="polling_build", error=None)
-        _sync_job_status(run_id, "running", phase="polling_build")
-        logger.info("Resuming SE team build poll: job_id=%s", se_job_id)
-        store.add_chat_message(
-            run_id,
-            "system",
-            f"Resuming SE team build poll (job: {se_job_id})",
-            "status_update",
-        )
-
-    failed_question_sets: dict[frozenset[str], int] = {}
-
-    for _ in range(MAX_POLL_ATTEMPTS):
-        time.sleep(EXECUTION_POLL_INTERVAL)
-        _heartbeat(run_id)
-
-        resp = client.get(
-            _se_url(f"/run-team/{se_job_id}"),
-            timeout=HTTP_TIMEOUT,
-        )
-        if resp.status_code >= 400:
-            logger.warning("Build poll error: %s", resp.status_code)
-            continue
-
-        status_data = resp.json()
-        status = status_data.get("status", "")
-
-        # Answer pending questions
-        if status_data.get("waiting_for_answers") and status_data.get("pending_questions"):
-            pending = status_data["pending_questions"]
-            qset = frozenset(q.get("id", "") for q in pending)
-            prior_failures = failed_question_sets.get(qset, 0)
-
-            if prior_failures > MAX_ANSWER_RETRIES:
-                err = f"Answer submission failed {prior_failures} times for build questions. Aborting."
-                logger.error(err)
-                store.update_run(run_id, status="failed", error=err)
-                _sync_job_status(run_id, "failed", error=err)
-                store.add_chat_message(run_id, "system", err, "status_update")
-                return False
-
-            store.update_run(run_id, status="answering_build_questions")
-            store.add_chat_message(
-                run_id,
-                "system",
-                f"SE team has {len(pending)} question(s) during build.",
-                "question_received",
-                metadata={"question_ids": list(qset)},
-            )
-            success = _answer_pending_questions(
-                client,
-                agent,
-                store,
-                run_id,
-                se_job_id,
-                pending,
-                "/run-team",
-            )
-            if not success:
-                failed_question_sets[qset] = prior_failures + 1
-                logger.warning("Answer attempt %d failed for build questions", prior_failures + 1)
-            continue
-
-        if status == "completed":
-            logger.info("SE team build completed for run %s", run_id)
-            store.add_chat_message(
-                run_id, "system", "Build completed successfully.", "status_update"
-            )
-            return True
-
-        if status == "failed":
-            err = f"SE team build failed: {status_data.get('error', 'unknown')}"
-            store.update_run(run_id, status="failed", error=err)
-            _sync_job_status(run_id, "failed", error="SE team build failed")
-            store.add_chat_message(run_id, "system", err, "status_update")
-            return False
-
-        if status == "cancelled":
-            store.update_run(run_id, status="failed", error="SE team build was cancelled")
-            _sync_job_status(run_id, "failed", error="SE team build cancelled")
-            store.add_chat_message(
-                run_id, "system", "SE team build was cancelled.", "status_update"
-            )
-            return False
-
-    store.update_run(run_id, status="failed", error="SE team build timed out")
-    _sync_job_status(run_id, "failed", error="SE team build timed out")
-    store.add_chat_message(run_id, "system", "SE team build timed out.", "status_update")
-    return False
+    ok, _status_data = _run_phase(
+        client=client,
+        agent=agent,
+        store=store,
+        run_id=run_id,
+        phase="build",
+        poll_interval=EXECUTION_POLL_INTERVAL,
+        start_fn=lambda: adapter.start_build(client, repo_path),
+        poll_fn=lambda jid: adapter.poll_build(client, jid),
+        submit_answers_fn=lambda jid, answers: adapter.submit_build_answers(client, jid, answers),
+        on_started=_on_started,
+        existing_job_id=existing_job_id,
+        questions_status="answering_build_questions",
+        failure_label=f"{adapter.display_name} build",
+    )
+    if ok:
+        logger.info("%s build completed for run %s", adapter.display_name, run_id)
+        store.add_chat_message(run_id, "system", "Build completed successfully.", "status_update")
+    return ok
 
 
-def run_workflow(run_id: str, store: FounderRunStore, agent: FounderAgent) -> None:
+def run_workflow(
+    run_id: str,
+    store: FounderRunStore,
+    agent: FounderAgent,
+    adapter: TargetTeamAdapter | None = None,
+) -> None:
     """Execute the full founder workflow: spec -> analysis -> build.
 
+    ``adapter`` defaults to the team recorded on the run row's
+    ``target_team_key`` column (or the default if the column is empty).
     Re-entrant for the resume path: phases whose checkpoint columns are
     already populated on the run row are short-circuited so a `/resume`
     call does not re-pay the cost of completed phases (LLM spec gen,
     multi-hour analysis poll, etc.).
 
-    This function is designed to run in a background thread.
+    Designed to run in a background thread.
     """
     logger.info("Starting founder workflow: run_id=%s", run_id)
 
@@ -465,6 +429,12 @@ def run_workflow(run_id: str, store: FounderRunStore, agent: FounderAgent) -> No
         # the resume-short-circuit lookup gets caught by the failure handler
         # below rather than escaping the worker thread silently.
         run = store.get_run(run_id)
+
+        if adapter is None:
+            team_key = getattr(run, "target_team_key", None) or "software_engineering"
+            adapter = get_adapter(team_key)
+
+        project_name = f"user-agent-founder-{run_id}"
 
         # Phase 1: Generate the product spec (skip if already done)
         if run is not None and run.spec_content:
@@ -492,7 +462,8 @@ def run_workflow(run_id: str, store: FounderRunStore, agent: FounderAgent) -> No
             store.add_chat_message(
                 run_id,
                 "assistant",
-                f"Product spec generated ({len(spec_content)} chars). Submitting to SE team for analysis.",
+                f"Product spec generated ({len(spec_content)} chars). "
+                f"Submitting to {adapter.display_name} for analysis.",
                 "status_update",
             )
 
@@ -519,18 +490,21 @@ def run_workflow(run_id: str, store: FounderRunStore, agent: FounderAgent) -> No
                     store,
                     run_id,
                     spec_content,
+                    adapter,
+                    project_name,
                     existing_job_id=run.analysis_job_id if run is not None else None,
                 )
                 if repo_path is None:
                     return  # status already set to failed
 
-            # Phase 3: SE team build (skip submit if se_job_id stored)
-            success = _run_se_team(
+            # Phase 3: target-team build (skip submit if se_job_id stored)
+            success = _run_target_team(
                 client,
                 agent,
                 store,
                 run_id,
                 repo_path,
+                adapter,
                 existing_job_id=run.se_job_id if run is not None else None,
             )
             if success:

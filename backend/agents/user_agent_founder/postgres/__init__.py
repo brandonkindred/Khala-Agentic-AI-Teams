@@ -13,16 +13,22 @@ SCHEMA = TeamSchema(
     database=None,
     statements=[
         """CREATE TABLE IF NOT EXISTS user_agent_founder_runs (
-            run_id          TEXT PRIMARY KEY,
-            status          TEXT NOT NULL DEFAULT 'pending',
-            se_job_id       TEXT,
-            analysis_job_id TEXT,
-            spec_content    TEXT,
-            repo_path       TEXT,
-            created_at      TIMESTAMPTZ NOT NULL,
-            updated_at      TIMESTAMPTZ NOT NULL,
-            error           TEXT
+            run_id           TEXT PRIMARY KEY,
+            status           TEXT NOT NULL DEFAULT 'pending',
+            se_job_id        TEXT,
+            analysis_job_id  TEXT,
+            spec_content     TEXT,
+            repo_path        TEXT,
+            target_team_key  TEXT NOT NULL DEFAULT 'software_engineering',
+            created_at       TIMESTAMPTZ NOT NULL,
+            updated_at       TIMESTAMPTZ NOT NULL,
+            error            TEXT
         )""",
+        # Idempotent migration for existing deployments where the table
+        # was created before this column existed.
+        """ALTER TABLE user_agent_founder_runs
+            ADD COLUMN IF NOT EXISTS target_team_key TEXT
+            NOT NULL DEFAULT 'software_engineering'""",
         """CREATE TABLE IF NOT EXISTS user_agent_founder_decisions (
             id             BIGSERIAL PRIMARY KEY,
             run_id         TEXT NOT NULL,

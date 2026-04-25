@@ -41,9 +41,12 @@ _UPDATE_ALLOWED_COLUMNS = frozenset(
         "analysis_job_id",
         "spec_content",
         "repo_path",
+        "target_team_key",
         "error",
     }
 )
+
+DEFAULT_TARGET_TEAM_KEY = "software_engineering"
 
 
 def _row_ts(value: Any) -> str:
@@ -65,6 +68,7 @@ class StoredRun:
     analysis_job_id: str | None
     spec_content: str | None
     repo_path: str | None
+    target_team_key: str
     created_at: str
     updated_at: str
     error: str | None
@@ -100,6 +104,7 @@ def _row_to_run(row: dict[str, Any]) -> StoredRun:
         analysis_job_id=row["analysis_job_id"],
         spec_content=row["spec_content"],
         repo_path=row["repo_path"],
+        target_team_key=row.get("target_team_key") or DEFAULT_TARGET_TEAM_KEY,
         created_at=_row_ts(row["created_at"]),
         updated_at=_row_ts(row["updated_at"]),
         error=row["error"],
@@ -120,14 +125,15 @@ class FounderRunStore:
         pass
 
     @timed_query(store=_STORE, op="create_run")
-    def create_run(self) -> str:
+    def create_run(self, target_team_key: str = DEFAULT_TARGET_TEAM_KEY) -> str:
         run_id = str(uuid4())
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO user_agent_founder_runs "
-                "(run_id, status, created_at, updated_at) VALUES (%s, %s, %s, %s)",
-                (run_id, "pending", now, now),
+                "(run_id, status, target_team_key, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (run_id, "pending", target_team_key, now, now),
             )
         return run_id
 
@@ -136,7 +142,7 @@ class FounderRunStore:
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT run_id, status, se_job_id, analysis_job_id, spec_content, "
-                "repo_path, created_at, updated_at, error "
+                "repo_path, target_team_key, created_at, updated_at, error "
                 "FROM user_agent_founder_runs WHERE run_id = %s",
                 (run_id,),
             )
@@ -223,7 +229,7 @@ class FounderRunStore:
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT run_id, status, se_job_id, analysis_job_id, spec_content, "
-                "repo_path, created_at, updated_at, error "
+                "repo_path, target_team_key, created_at, updated_at, error "
                 "FROM user_agent_founder_runs ORDER BY created_at DESC"
             )
             return [_row_to_run(r) for r in cur.fetchall()]

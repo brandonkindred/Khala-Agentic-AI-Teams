@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from contextlib import asynccontextmanager
 from typing import Any, Optional
@@ -16,7 +15,8 @@ from shared_observability import init_otel, instrument_fastapi_app
 from user_agent_founder.agent import FounderAgent
 from user_agent_founder.orchestrator import run_workflow
 from user_agent_founder.postgres import SCHEMA as USER_AGENT_FOUNDER_POSTGRES_SCHEMA
-from user_agent_founder.store import get_founder_store
+from user_agent_founder.store import DEFAULT_TARGET_TEAM_KEY, get_founder_store
+from user_agent_founder.targets import get_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,13 @@ instrument_fastapi_app(app, team_key="user_agent_founder")
 # ---------------------------------------------------------------------------
 
 
+class StartRunRequest(BaseModel):
+    target_team_key: str = Field(
+        default=DEFAULT_TARGET_TEAM_KEY,
+        description="Which target team this persona run drives. Must be a key in targets.ADAPTERS.",
+    )
+
+
 class StartRunResponse(BaseModel):
     # External-facing key used by the team-assistant launch endpoint and the
     # jobs UI. Internally the team still uses ``run_id`` for its own rows;
@@ -82,6 +89,7 @@ class RunStatusResponse(BaseModel):
     analysis_job_id: Optional[str] = None
     spec_content: Optional[str] = None
     repo_path: Optional[str] = None
+    target_team_key: str = DEFAULT_TARGET_TEAM_KEY
     created_at: str
     updated_at: str
     error: Optional[str] = None
@@ -93,6 +101,7 @@ class RunSummaryResponse(BaseModel):
     status: str
     se_job_id: Optional[str] = None
     analysis_job_id: Optional[str] = None
+    target_team_key: str = DEFAULT_TARGET_TEAM_KEY
     created_at: str
     updated_at: str
     error: Optional[str] = None
@@ -128,9 +137,12 @@ def _dispatch_founder_run(run_id: str) -> str:
 
     store = get_founder_store()
     agent = FounderAgent()
+    run = store.get_run(run_id)
+    team_key = (run.target_team_key if run is not None else None) or DEFAULT_TARGET_TEAM_KEY
+    adapter = get_adapter(team_key)
     thread = threading.Thread(
         target=run_workflow,
-        args=(run_id, store, agent),
+        args=(run_id, store, agent, adapter),
         name=f"founder-workflow-{run_id[:8]}",
         daemon=True,
     )
@@ -140,22 +152,30 @@ def _dispatch_founder_run(run_id: str) -> str:
 
 
 @app.post("/start", response_model=StartRunResponse)
-def start_founder_workflow() -> StartRunResponse:
+def start_founder_workflow(request: StartRunRequest | None = None) -> StartRunResponse:
     """Kick off the autonomous founder workflow.
 
     The agent will:
     1. Generate a task management product spec
-    2. Submit it to the SE team for product analysis
-    3. Answer all SE team questions autonomously
-    4. Trigger the full SE team build pipeline
+    2. Submit it to the target team for product analysis
+    3. Answer all target-team questions autonomously
+    4. Trigger the full target-team build pipeline
 
     The run is registered with the centralized job service **before**
     dispatch so it appears in the Jobs Dashboard immediately.
     """
     from user_agent_founder.shared import job_store
 
+    target_team_key = request.target_team_key if request else DEFAULT_TARGET_TEAM_KEY
+    # Validate up-front so an unknown key returns 400 instead of crashing the
+    # background dispatch thread later.
+    try:
+        get_adapter(target_team_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     store = get_founder_store()
-    run_id = store.create_run()
+    run_id = store.create_run(target_team_key=target_team_key)
 
     job_store.create_job(
         run_id,
@@ -197,6 +217,7 @@ def get_run_status(run_id: str) -> RunStatusResponse:
         analysis_job_id=run.analysis_job_id,
         spec_content=run.spec_content,
         repo_path=run.repo_path,
+        target_team_key=run.target_team_key,
         created_at=run.created_at,
         updated_at=run.updated_at,
         error=run.error,
@@ -226,6 +247,7 @@ def list_runs() -> RunListResponse:
                 status=r.status,
                 se_job_id=r.se_job_id,
                 analysis_job_id=r.analysis_job_id,
+                target_team_key=r.target_team_key,
                 created_at=r.created_at,
                 updated_at=r.updated_at,
                 error=r.error,
@@ -294,11 +316,6 @@ class RunArtifactsResponse(BaseModel):
     spec_content: Optional[str] = None
 
 
-UNIFIED_API_BASE = os.environ.get("UNIFIED_API_BASE_URL", "http://localhost:8080")
-SE_PREFIX = "/api/software-engineering"
-_HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
-
-
 @app.get("/personas", response_model=PersonaListResponse)
 def list_personas() -> PersonaListResponse:
     """Return the list of available project personas for SE team testing."""
@@ -322,8 +339,9 @@ def list_personas() -> PersonaListResponse:
 def get_run_artifacts(run_id: str) -> RunArtifactsResponse:
     """Get artifacts produced during a persona test run.
 
-    Proxies to the SE team job status to retrieve task results,
-    task states, and other pipeline outputs.
+    Proxies to the target-team job status (resolved via the run's
+    ``target_team_key``) to retrieve task results, task states, and
+    other pipeline outputs.
     """
     store = get_founder_store()
     run = store.get_run(run_id)
@@ -333,15 +351,21 @@ def get_run_artifacts(run_id: str) -> RunArtifactsResponse:
     se_job_status: dict[str, Any] | None = None
     if run.se_job_id:
         try:
-            with httpx.Client() as client:
-                resp = client.get(
-                    f"{UNIFIED_API_BASE}{SE_PREFIX}/run-team/{run.se_job_id}",
-                    timeout=_HTTP_TIMEOUT,
-                )
-                if resp.status_code < 400:
-                    se_job_status = resp.json()
-        except httpx.HTTPError:
-            logger.warning("Failed to fetch SE job status for %s", run.se_job_id)
+            adapter = get_adapter(run.target_team_key)
+        except ValueError:
+            logger.warning(
+                "Unknown target_team_key %r on run %s; cannot fetch artifacts",
+                run.target_team_key,
+                run.run_id,
+            )
+        else:
+            try:
+                with httpx.Client() as client:
+                    payload = adapter.poll_build(client, run.se_job_id)
+                if not payload.get("_poll_error"):
+                    se_job_status = payload
+            except httpx.HTTPError:
+                logger.warning("Failed to fetch target-team job status for %s", run.se_job_id)
 
     return RunArtifactsResponse(
         run_id=run.run_id,

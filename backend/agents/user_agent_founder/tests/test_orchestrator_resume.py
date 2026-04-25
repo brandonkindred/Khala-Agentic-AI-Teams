@@ -32,6 +32,7 @@ class _FakeRun:
     analysis_job_id: str | None = None
     spec_content: str | None = None
     repo_path: str | None = None
+    target_team_key: str = "software_engineering"
     created_at: str = "2026-04-25T00:00:00+00:00"
     updated_at: str = "2026-04-25T00:00:00+00:00"
     error: str | None = None

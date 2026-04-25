@@ -153,6 +153,27 @@ def test_start_creates_job_and_dispatches(fake_job_store, fake_store, fake_dispa
         )
     ]
     assert fake_job_store.jobs["run-123"]["status"] == "running"
+    # Default target_team_key is recorded on create_run.
+    fake_store.create_run.assert_called_once_with(target_team_key="software_engineering")
+
+
+def test_start_passes_explicit_target_team_key_through(fake_job_store, fake_store, fake_dispatch):
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    resp = start_founder_workflow(StartRunRequest(target_team_key="software_engineering"))
+
+    assert resp.job_id == "run-123"
+    fake_store.create_run.assert_called_once_with(target_team_key="software_engineering")
+
+
+def test_start_rejects_unknown_target_team_key(fake_job_store, fake_store, fake_dispatch):
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    with pytest.raises(HTTPException) as excinfo:
+        start_founder_workflow(StartRunRequest(target_team_key="not_a_real_team"))
+    assert excinfo.value.status_code == 400
+    # No dispatch when validation rejects the request.
+    assert fake_dispatch == []
 
 
 def test_start_marks_job_failed_when_dispatch_raises(fake_job_store, fake_store, monkeypatch):
