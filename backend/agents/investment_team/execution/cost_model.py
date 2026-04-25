@@ -12,10 +12,13 @@ Three implementations behind a common ``CostModel`` interface:
 
 from __future__ import annotations
 
+import logging
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -35,6 +38,7 @@ class CostModel(ABC):
         asset_class: str,
         order_notional: float,
         avg_daily_volume_usd: Optional[float] = None,
+        bar_dollar_volume_usd: Optional[float] = None,
     ) -> CostEstimate: ...
 
 
@@ -57,6 +61,7 @@ class FlatBpsCostModel(CostModel):
         asset_class: str,
         order_notional: float,
         avg_daily_volume_usd: Optional[float] = None,
+        bar_dollar_volume_usd: Optional[float] = None,
     ) -> CostEstimate:
         per_leg = self.tx_bps + self.slip_bps
         return CostEstimate(
@@ -93,8 +98,13 @@ _DEFAULT_VENUE_FEE: Dict[str, float] = {
 class SpreadPlusImpactCostModel(CostModel):
     """``cost_bps = half_spread + k * (notional / ADV)^impact_exponent + venue_fee``.
 
-    When ``avg_daily_volume_usd`` is not available, falls back to the flat
-    half-spread + venue-fee without the impact term.
+    Issue #248: when ``avg_daily_volume_usd`` is not available, fall back
+    to ``bar_dollar_volume_usd`` (a per-bar volume proxy, e.g.
+    ``bar.close * bar.volume``) instead of silently dropping the impact
+    term to zero. Strategies on thin names where ADV isn't pre-fetched no
+    longer get free zero-impact fills. The fallback path is logged at
+    INFO once per call so audit trails reflect that the cost is a
+    proxy rather than the headline ADV figure.
     """
 
     def __init__(
@@ -117,16 +127,24 @@ class SpreadPlusImpactCostModel(CostModel):
         asset_class: str,
         order_notional: float,
         avg_daily_volume_usd: Optional[float] = None,
+        bar_dollar_volume_usd: Optional[float] = None,
     ) -> CostEstimate:
         ac = asset_class.lower()
         half_spread = self._half_spread.get(ac, 2.0)
         venue_fee = self._venue_fee.get(ac, 2.0)
 
-        if avg_daily_volume_usd and avg_daily_volume_usd > 0 and order_notional > 0:
-            ratio = order_notional / avg_daily_volume_usd
-            impact = self.k * math.pow(ratio, self.exp)
-        else:
-            impact = 0.0
+        impact = 0.0
+        if order_notional > 0:
+            if avg_daily_volume_usd and avg_daily_volume_usd > 0:
+                ratio = order_notional / avg_daily_volume_usd
+                impact = self.k * math.pow(ratio, self.exp)
+            elif bar_dollar_volume_usd and bar_dollar_volume_usd > 0:
+                logger.info(
+                    "ADV missing for %s; falling back to bar dollar-volume proxy",
+                    symbol,
+                )
+                ratio = order_notional / bar_dollar_volume_usd
+                impact = self.k * math.pow(ratio, self.exp)
 
         per_leg = half_spread + impact + venue_fee
         return CostEstimate(
@@ -156,6 +174,7 @@ class MakerTakerCostModel(CostModel):
         asset_class: str,
         order_notional: float,
         avg_daily_volume_usd: Optional[float] = None,
+        bar_dollar_volume_usd: Optional[float] = None,
     ) -> CostEstimate:
         return CostEstimate(
             entry_cost_bps=-self.maker_rebate,

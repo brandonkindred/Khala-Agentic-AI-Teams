@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -361,6 +361,31 @@ class BacktestConfig(BaseModel):
             "Benchmark blend for the regime-conditional gate. ``60_40`` "
             "compounds a 60/40 SPY+AGG equity series; future options can "
             "support per-asset-class blends."
+        ),
+    )
+    # Issue #248 — pluggable execution model. ``realistic`` is the new
+    # default; ``optimistic`` preserves the legacy fill geometry and is
+    # used by the golden simulator-invariants suite (which sets
+    # ``KHALA_ALLOW_OPTIMISTIC_FILLS=1`` to silence the warning).
+    execution_model: Literal["optimistic", "realistic"] = Field(
+        default="realistic",
+        description=(
+            "Fill geometry. ``realistic`` (default) fixes the limit-gap-"
+            "through 'free alpha' bug, applies a participation cap, and "
+            "layers an adverse-selection haircut on limit fills using "
+            "one-bar lookahead. ``optimistic`` preserves the legacy "
+            "geometry verbatim for parity tests."
+        ),
+    )
+    fill_participation_cap: float = Field(
+        default=0.10,
+        gt=0,
+        le=1,
+        description=(
+            "Maximum fraction of a bar's dollar volume an order may "
+            "consume in one fill under the realistic execution model. "
+            "Orders sized above the cap are partially filled to the cap; "
+            "the remainder is dropped. Ignored by the optimistic model."
         ),
     )
 

@@ -91,12 +91,17 @@ def _bar_sequences(draw) -> List[OHLCVBar]:
 
 
 def _config() -> BacktestConfig:
+    # Pin to the optimistic (legacy) fill geometry — the structural
+    # invariants tested here (fill-on-t+1, gross-PnL math, lookahead
+    # red-team) hold under either model, but pinning makes the engine's
+    # parity-tested code path the test target.
     return BacktestConfig(
         start_date="2024-01-01",
         end_date="2024-12-31",
         initial_capital=100_000.0,
         transaction_cost_bps=0.0,
         slippage_bps=0.0,
+        execution_model="optimistic",
     )
 
 
