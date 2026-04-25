@@ -235,22 +235,53 @@ def test_adverse_selection_zero_when_next_bar_favourable_for_buyer():
 
 def test_adverse_selection_positive_for_long_limit_followed_by_drop():
     """Long limit fills, next bar drops — adverse selection. Haircut > 0
-    and scales with participation rate."""
-    # Bar dollar volume = 100 * 100 = 10_000. Order = $5k notional, 50% participation.
+    and scales with the *effective* participation (capped at
+    ``participation_cap``)."""
+    # Bar dollar volume = 100 * 100 = 10_000. Order = $5k notional → raw
+    # participation = 0.5, but ``cap=0.10`` → effective_participation = 0.10
+    # (the order is partially filled to the cap, so only 10% of bar
+    # liquidity actually trades).
     bar = _bar(o=100.0, h=101.0, l=99.0, c=100.0, volume=100.0)
     next_bar = _bar(o=98.0, h=99.0, l=97.0, c=98.0, timestamp="2024-01-03")  # 2% drop
     req = _req(side=OrderSide.LONG, order_type=OrderType.LIMIT, limit_price=100.0, qty=50)
 
     terms = RealisticExecutionModel().compute_fill_terms(req, bar, next_bar=next_bar)
     assert terms is not None
-    # qty_fraction = max_notional / order_notional = 1000 / 5000 = 0.2
+    # qty_fraction = cap / raw_participation = 0.10 / 0.5 = 0.2
     assert terms.qty_fraction == pytest.approx(0.2)
-    # adverse_move = 2% = 200bps; haircut = 200bps * 0.2 = 40bps
-    assert terms.extra_slip_bps == pytest.approx(40.0)
+    # adverse_move = 2% = 200 bps; haircut = 200 bps × 0.10 = 20 bps
+    # (not 200 × 0.2 = 40 bps — the previous version conflated qty_fraction
+    # with participation rate; see PR #355 review feedback).
+    assert terms.extra_slip_bps == pytest.approx(20.0)
+
+
+def test_adverse_selection_scales_with_in_cap_participation():
+    """A *tiny* in-cap order must get a *small* haircut (regression for
+    the PR #355 review comment: previously every in-cap order had
+    ``qty_fraction == 1.0`` and was haircut at the full adverse-move
+    rate, materially over-penalising small fills)."""
+    # Bar dollar volume = 100 * 1_000_000 = $100M. Order = $1k notional →
+    # raw participation = 1e-5, well below the 10% cap. Effective
+    # participation == raw participation (no partial fill).
+    bar = _bar(o=100.0, h=101.0, l=99.0, c=100.0, volume=1_000_000.0)
+    next_bar = _bar(o=98.0, h=99.0, l=97.0, c=98.0, timestamp="2024-01-03")  # 2% drop
+    req = _req(side=OrderSide.LONG, order_type=OrderType.LIMIT, limit_price=100.0, qty=10)
+
+    terms = RealisticExecutionModel().compute_fill_terms(req, bar, next_bar=next_bar)
+    assert terms is not None
+    assert terms.qty_fraction == 1.0  # well within cap
+    # adverse_move = 200 bps; haircut = 200 × 1e-5 = 0.002 bps. The bug
+    # would have produced 200 × 1.0 = 200 bps (clamped to 50).
+    assert terms.extra_slip_bps == pytest.approx(0.002, abs=1e-6)
 
 
 def test_adverse_selection_capped_at_max_bps():
-    """Pathological thin name + violent next-bar move shouldn't blow up."""
+    """Pathological thin name + violent next-bar move shouldn't blow up.
+
+    Effective participation is clamped at ``participation_cap`` (10%), and
+    the haircut itself is clamped at ``adverse_selection_max_bps`` —
+    belt-and-braces against degenerate inputs.
+    """
     bar = _bar(o=100.0, h=101.0, l=99.0, c=100.0, volume=100.0)
     next_bar = _bar(o=50.0, h=55.0, l=45.0, c=50.0, timestamp="2024-01-03")  # 50% crash
     req = _req(side=OrderSide.LONG, order_type=OrderType.LIMIT, limit_price=100.0, qty=50)

@@ -194,13 +194,30 @@ class RealisticExecutionModel:
         if ref is None:
             return None
 
-        qty_fraction = self._participation_fraction(req, bar, ref)
+        # ``raw_participation`` is the order's notional as a fraction of bar
+        # dollar volume (capped only by the bar's available liquidity, not
+        # by ``self._cap``). The partial-fill cap and the adverse-selection
+        # haircut both derive from it but in different ways.
+        raw_participation = self._raw_participation(req, bar, ref)
+        qty_fraction = self._qty_fraction_from_participation(raw_participation)
         if qty_fraction <= 0:
             return None
+        # ``effective_participation`` is the fraction of bar liquidity the
+        # *filled* portion of the order consumes — capped at ``self._cap``
+        # because over-cap orders only fill the cap fraction. This is what
+        # drives the adverse-selection haircut, so a tiny in-cap order is
+        # not penalised at the same rate as one filled right at the cap.
+        effective_participation = min(raw_participation, self._cap)
 
         extra_slip_bps = 0.0
-        if req.order_type == OrderType.LIMIT and next_bar is not None:
-            extra_slip_bps = self._adverse_selection_bps(req, bar, next_bar, qty_fraction)
+        if (
+            req.order_type == OrderType.LIMIT
+            and next_bar is not None
+            and effective_participation > 0
+        ):
+            extra_slip_bps = self._adverse_selection_bps(
+                req, bar, next_bar, effective_participation
+            )
 
         return FillTerms(
             reference_price=ref,
@@ -243,29 +260,40 @@ class RealisticExecutionModel:
         return None
 
     # ------------------------------------------------------------------
-    # Participation cap
+    # Participation
     # ------------------------------------------------------------------
 
-    def _participation_fraction(
+    def _raw_participation(
         self,
         req: OrderRequest,
         bar: Bar,
         reference_price: float,
     ) -> float:
-        """Cap fill quantity at ``participation_cap × bar_dollar_volume``."""
+        """Order notional as a fraction of bar dollar volume.
+
+        Returns 0.0 when the bar has no volume signal — daily-bar feeds
+        occasionally drop volume, and refusing to fill in that case would
+        be more disruptive than the legacy "ignore impact" path. Callers
+        treat 0.0 participation as "no haircut, no partial fill".
+        """
         bar_dollar_volume = self._bar_dollar_volume(bar)
         if bar_dollar_volume <= 0:
-            # No volume signal — fall back to full fill rather than reject.
-            # Daily-bar feeds occasionally drop volume; refusing to fill
-            # would be more disruptive than the legacy "ignore impact" path.
-            return 1.0
+            return 0.0
         order_notional = req.qty * reference_price
         if order_notional <= 0:
+            return 0.0
+        return order_notional / bar_dollar_volume
+
+    def _qty_fraction_from_participation(self, raw_participation: float) -> float:
+        """Cap fill quantity at ``participation_cap × bar_dollar_volume``."""
+        if raw_participation <= 0:
+            # No volume signal — fall back to full fill (matches the
+            # legacy zero-impact path so daily-bar feeds with missing
+            # volume keep working).
             return 1.0
-        max_notional = self._cap * bar_dollar_volume
-        if order_notional <= max_notional:
+        if raw_participation <= self._cap:
             return 1.0
-        return max_notional / order_notional
+        return self._cap / raw_participation
 
     @staticmethod
     def _bar_dollar_volume(bar: Bar) -> float:
@@ -285,6 +313,15 @@ class RealisticExecutionModel:
         participation_rate: float,
     ) -> float:
         """Conditional toxicity haircut on limit fills.
+
+        ``participation_rate`` is the *effective* fraction of bar
+        liquidity the filled portion of the order consumes (raw
+        participation clamped at ``self._cap`` because over-cap orders
+        only fill the cap fraction). A tiny in-cap order has small
+        participation and a small haircut; an order at the cap pays the
+        cap-rate haircut. The earlier ``qty_fraction``-based version
+        gave any in-cap order the full haircut, which over-penalised
+        small fills.
 
         For a long limit, an unfavourable next-bar move is a *fall*
         (``next_bar.close < bar.close``) — you bought at the limit just

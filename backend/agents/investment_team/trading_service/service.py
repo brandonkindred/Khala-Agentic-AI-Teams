@@ -145,14 +145,23 @@ class TradingService:
                     is_warmup = event.is_warmup
 
                     # Peek the next bar event for the fill simulator's
-                    # lookahead (used by realistic execution model).
+                    # lookahead (used by realistic execution model). In
+                    # multi-symbol streams the very next ``BarEvent`` may
+                    # belong to a different symbol — ``HistoricalReplayStream``
+                    # interleaves bars chronologically — so we only set
+                    # ``next_bar`` when the peeked bar is the same symbol.
+                    # Otherwise the realistic model would compute symbol A's
+                    # adverse-selection haircut against symbol B's price
+                    # move, corrupting fills. The peeked event is preserved
+                    # for the next loop iteration regardless.
                     next_bar = None
                     while True:
                         peeked = next(event_iter, None)
                         if peeked is None or isinstance(peeked, EndOfStreamEvent):
                             break
                         if isinstance(peeked, BarEvent):
-                            next_bar = peeked.bar
+                            if peeked.bar.symbol == cur_bar.symbol:
+                                next_bar = peeked.bar
                             break
                         # Skip non-bar events but keep looking.
 
