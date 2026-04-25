@@ -656,6 +656,7 @@ class StrategyLabOrchestrator:
         # (legacy fallback) or there is no successful execution to evaluate.
         acceptance_results: List[QualityGateResult] = []
         acceptance_reason: Optional[str] = None
+        walk_forward_failed = False
         if (
             execution_succeeded
             and trades
@@ -698,13 +699,36 @@ class StrategyLabOrchestrator:
                 )
                 acceptance_results = []
                 acceptance_reason = None
+                walk_forward_failed = True
 
         # ── Resolve is_winning ────────────────────────────────────────
         # Walk-forward path: composite gate is authoritative.
-        # Legacy path (walk_forward_enabled=False or evaluation failed):
-        # fall back to the historical annualized-return threshold.
+        # Walk-forward fallback: anomaly checks during refinement ran with
+        # ``dsr_aware=True``, which downgraded the ``Sharpe > 5.0`` flag
+        # from critical to warning on the assumption that the OOS DSR
+        # would adjudicate. With AcceptanceGate unavailable, re-run the
+        # anomaly checks with ``dsr_aware=False`` and reject if any
+        # critical fires — otherwise an obvious overfit could still be
+        # marked winning on annualized return alone.
+        # Legacy path (``walk_forward_enabled=False``): unchanged
+        # ``WINNING_THRESHOLD`` comparison; the refinement loop already
+        # ran with ``dsr_aware=False`` so no re-check is needed.
         if acceptance_results:
             is_winning = execution_succeeded and all(r.passed for r in acceptance_results)
+        elif walk_forward_failed and execution_succeeded:
+            fallback_anomalies = self.anomaly_detector.check(metrics, trades, dsr_aware=False)
+            fallback_criticals = [
+                g for g in fallback_anomalies if not g.passed and g.severity == "critical"
+            ]
+            is_winning = (
+                metrics.annualized_return_pct > WINNING_THRESHOLD and not fallback_criticals
+            )
+            if fallback_criticals:
+                # Surface the upgraded severities so the persisted
+                # gate-result history reflects the true rejection reason.
+                for g in fallback_anomalies:
+                    g.gate_name = f"fallback_{g.gate_name}"
+                all_gate_results.extend(fallback_anomalies)
         else:
             is_winning = execution_succeeded and metrics.annualized_return_pct > WINNING_THRESHOLD
 
@@ -915,19 +939,36 @@ class StrategyLabOrchestrator:
             oos_metrics = compute_metrics(
                 oos_trades, config.initial_capital, test_start_str, test_end_str
             )
-            # IS metrics span the full original window minus the fold's
-            # purge/embargo cushion; use the full window for the date span
-            # (the trade list is already filtered).
-            is_metrics = compute_metrics(
-                is_trades,
-                config.initial_capital,
-                config.start_date,
-                config.end_date,
-            )
+            # IS Sharpe is computed per training segment (a fold may have up
+            # to two disjoint segments — pre-test and post-test) and then
+            # trade-count-weighted. Spanning the full backtest window would
+            # include the test+purge+embargo gap as flat zero-return days
+            # and dilute the Sharpe, materially understating IS→OOS
+            # degradation.
+            is_segment_sharpes: List[Tuple[float, int]] = []
+            for tr in fold.train_ranges:
+                seg_trades = filter_trades_in_range(is_trades, tr.start, tr.end)
+                if not seg_trades:
+                    continue
+                seg_metrics = compute_metrics(
+                    seg_trades,
+                    config.initial_capital,
+                    tr.start.isoformat(),
+                    tr.end.isoformat(),
+                )
+                is_segment_sharpes.append((seg_metrics.sharpe_ratio, len(seg_trades)))
+
+            if is_segment_sharpes:
+                total_w = sum(w for _, w in is_segment_sharpes)
+                fold_is_sharpe = (
+                    sum(s * w for s, w in is_segment_sharpes) / total_w if total_w else 0.0
+                )
+            else:
+                fold_is_sharpe = 0.0
 
             per_fold_oos_sharpe.append(oos_metrics.sharpe_ratio)
             if is_trades:
-                per_fold_is_sharpe.append(is_metrics.sharpe_ratio)
+                per_fold_is_sharpe.append(fold_is_sharpe)
             oos_trade_count_total += len(oos_trades)
             all_oos_trades.extend(oos_trades)
 
@@ -937,7 +978,7 @@ class StrategyLabOrchestrator:
                     "test_start": test_start_str,
                     "test_end": test_end_str,
                     "oos_sharpe": oos_metrics.sharpe_ratio,
-                    "is_sharpe": is_metrics.sharpe_ratio,
+                    "is_sharpe": fold_is_sharpe,
                     "oos_trade_count": len(oos_trades),
                     "is_trade_count": len(is_trades),
                 }

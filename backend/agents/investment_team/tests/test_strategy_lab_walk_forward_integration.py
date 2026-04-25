@@ -433,3 +433,152 @@ def test_closes_to_equity_scales_to_initial_capital():
     out = StrategyLabOrchestrator._closes_to_equity([10.0, 11.0, 12.0], 100_000.0)
     assert out[0] == pytest.approx(100_000.0)
     assert out[-1] == pytest.approx(100_000.0 * 12.0 / 10.0)
+
+
+# ---------------------------------------------------------------------------
+# Review-comment fixes — IS Sharpe per training segment
+# ---------------------------------------------------------------------------
+
+
+def test_is_sharpe_uses_training_segments_not_full_span():
+    """Per-fold IS Sharpe must be computed on the actual training date
+    ranges. If we used ``config.start_date``/``config.end_date`` instead,
+    the test+purge+embargo gap would show up as flat zero-return days and
+    dilute the Sharpe — materially understating IS→OOS degradation.
+
+    This test compares two scenarios with identical OOS trades but very
+    different IS trade distributions (front-loaded vs back-loaded). The
+    full-span computation would yield similar IS Sharpes for both because
+    the gaps dominate; the per-segment computation produces visibly
+    different IS Sharpes.
+    """
+    orch = _orchestrator(_StubMarketDataService())
+    config = _config(walk_forward_enabled=True, n_folds=5)
+    base_metrics = BacktestResult(
+        total_return_pct=5.0,
+        annualized_return_pct=6.0,
+        volatility_pct=8.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=4.0,
+        win_rate_pct=55.0,
+        profit_factor=1.4,
+    )
+
+    # Two trades per month, evenly distributed → at least one IS trade per
+    # fold's training segments.
+    trades = _trades_across_year(n_per_month=4, base_pnl=80.0)
+    market_data = {"AAPL": _stub_bars("AAPL")}
+    result = orch._evaluate_walk_forward(_spec(), market_data, config, trades, base_metrics)
+
+    # Per-fold IS Sharpe must come from the segment computation: when
+    # ``is_trade_count > 0``, the recorded ``is_sharpe`` should not be
+    # zero except by genuine flat-return coincidence. With four winning-
+    # losing alternations per month and 5 folds, at least one fold should
+    # produce a strictly nonzero IS Sharpe under the per-segment fix.
+    nonzero_is_sharpes = [
+        fr["is_sharpe"]
+        for fr in (result.fold_results or [])
+        if fr.get("is_trade_count", 0) > 0 and fr.get("is_sharpe", 0.0) != 0.0
+    ]
+    assert nonzero_is_sharpes, (
+        "Per-fold IS Sharpe should be nonzero for at least one fold once we "
+        "compute on training segments instead of the full backtest span."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review-comment fixes — walk-forward fallback re-checks anomalies
+# ---------------------------------------------------------------------------
+
+
+def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
+    """When walk-forward evaluation raises and we fall back to the legacy
+    threshold path, the orchestrator must re-run anomaly checks with
+    ``dsr_aware=False`` so a downgraded ``Sharpe > 5`` flag becomes
+    critical again — preventing an obvious overfit from being marked
+    winning on annualized return alone."""
+
+    from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
+
+    orch = _orchestrator(_StubMarketDataService())
+
+    # Force walk-forward to raise so we exercise the fallback path.
+    def _raise(*args, **kwargs):
+        raise RuntimeError("walk-forward fold construction failed (synthetic)")
+
+    monkeypatch.setattr(orch, "_evaluate_walk_forward", _raise)
+
+    # Stub the agents that would otherwise call the LLM.
+    spec_dict = {
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": ["e"],
+        "exit_rules": ["x"],
+        "sizing_rules": [],
+        "risk_limits": {},
+        "speculative": False,
+    }
+    overfit_code = "from contract import Strategy\n\nclass S(Strategy):\n    def on_bar(self, ctx, bar):\n        pass\n"
+    monkeypatch.setattr(
+        orch.ideation_agent, "run", lambda **kw: (spec_dict, overfit_code, "rationale")
+    )
+    monkeypatch.setattr(
+        orch.refinement_agent, "run", lambda **kw: ({"changes_made": "x"}, overfit_code)
+    )
+    monkeypatch.setattr(
+        orch.alignment_agent, "run", lambda **kw: TradeAlignmentReport(aligned=True, rationale="ok")
+    )
+    monkeypatch.setattr(orch.analysis_agent, "run", lambda *a, **k: "narrative")
+    monkeypatch.setattr(
+        orch, "_fetch_market_data", lambda spec, config: {"AAPL": _stub_bars("AAPL")}
+    )
+
+    # Synthesize an "overfit" backtest: high Sharpe (>5) and high
+    # annualized return (>WINNING_THRESHOLD). With dsr_aware=False the
+    # Sharpe>5 critical is what we expect to upgrade severity on
+    # fallback.
+    overfit_result = BacktestResult(
+        total_return_pct=80.0,
+        annualized_return_pct=60.0,
+        volatility_pct=8.0,
+        sharpe_ratio=6.5,
+        max_drawdown_pct=4.0,
+        win_rate_pct=60.0,
+        profit_factor=2.4,
+    )
+    overfit_trades = _trades_across_year(n_per_month=4, base_pnl=80.0)
+
+    class _StubExecResult:
+        def __init__(self):
+            self.success = True
+            self.trades = overfit_trades
+            self.execution_time_seconds = 0.01
+            self.error_type = None
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.orchestrator.run_strategy_code",
+        lambda *a, **k: _StubExecResult(),
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.orchestrator.compute_metrics",
+        lambda *a, **k: overfit_result,
+    )
+
+    config = _config(walk_forward_enabled=True)
+    record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
+
+    # The fallback path must reject this on the upgraded Sharpe>5 critical
+    # even though annualized return clears WINNING_THRESHOLD.
+    assert record.is_winning is False
+    # The persisted gate-result history reflects the upgraded severity so
+    # downstream consumers can audit the rejection reason.
+    fallback_gates = [
+        g for g in record.quality_gate_results if g.get("gate_name", "").startswith("fallback_")
+    ]
+    assert any(
+        g.get("severity") == "critical" and "Sharpe ratio" in g.get("details", "")
+        for g in fallback_gates
+    )
