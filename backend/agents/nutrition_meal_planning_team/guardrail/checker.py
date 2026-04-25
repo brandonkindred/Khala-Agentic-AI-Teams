@@ -48,12 +48,16 @@ def check_recommendation(
 
     for p in parsed:
         canonical: Optional[CanonicalFood] = catalog.get(p.canonical_id) if p.canonical_id else None
+        is_low_confidence = p.confidence < UNRESOLVED_CONFIDENCE_THRESHOLD
 
-        if canonical is None:
+        # Spec §4.4 step 5 plus the ParsedIngredient contract: any
+        # confidence < 0.85 is unresolved/ambiguous, even when the
+        # parser returned a canonical_id from a fuzzy match.
+        if canonical is None or is_low_confidence:
             severity = (
-                Severity.hard_reject
-                if p.confidence < UNRESOLVED_CONFIDENCE_THRESHOLD
-                else Severity.flag
+                Severity.flag
+                if canonical is None and not is_low_confidence
+                else Severity.hard_reject
             )
             target = hard if severity is Severity.hard_reject else flags
             target.append(_unresolved(p, severity))

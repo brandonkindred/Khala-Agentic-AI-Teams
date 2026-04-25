@@ -6,6 +6,7 @@ pescatarian + fish → pass.
 
 from __future__ import annotations
 
+import pytest
 from agents.nutrition_meal_planning_team.guardrail import (
     Severity,
     ViolationReason,
@@ -34,7 +35,7 @@ def test_pescatarian_rejects_chicken() -> None:
     tags chicken with ``dietary_tags=[animal]`` (no fish), so a
     pescatarian profile (forbid `animal`) hard-rejects chicken."""
     profile = profile_with(dietary_forbid=[DietaryTag.animal])
-    rec = recipe("chicken")
+    rec = recipe("chicken thigh")
 
     result = check_recommendation(profile, rec)
 
@@ -71,9 +72,30 @@ def test_honey_forbidden_for_vegan() -> None:
     assert "animal" in tags
 
 
+@pytest.mark.skip(
+    reason=(
+        "SPEC-006 follow-up: pescatarian shorthand resolves to "
+        "forbid_dietary=[animal] but active_dietary_forbid() does not "
+        "subtract the fish exemption — see issue #351."
+    )
+)
+def test_pescatarian_resolution_passes_fish() -> None:
+    """Regression pin for the SPEC-006 exemption mechanism.
+
+    Once #351 lands the resolver-level fish exemption, this test must
+    pass with a pescatarian-shorthand-resolved profile (not the
+    sidestepped empty-forbid version below)."""
+    profile = profile_with(dietary_forbid=[DietaryTag.animal])
+    rec = recipe("salmon")
+
+    result = check_recommendation(profile, rec)
+
+    assert result.passed is True
+
+
 def test_no_dietary_forbid_passes_anything() -> None:
     profile = profile_with(dietary_forbid=[])
-    rec = recipe("milk", "egg", "chicken", "salmon")
+    rec = recipe("milk", "egg", "chicken thigh", "salmon")
 
     result = check_recommendation(profile, rec)
 

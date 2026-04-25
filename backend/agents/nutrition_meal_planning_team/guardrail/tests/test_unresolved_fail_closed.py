@@ -119,6 +119,25 @@ def test_just_below_threshold_is_hard_reject(monkeypatch: pytest.MonkeyPatch) ->
     assert result.violations[0].severity is Severity.hard_reject
 
 
+def test_low_confidence_canonical_match_hard_rejects() -> None:
+    """Real-parser case for the broadened fail-closed contract.
+
+    ``parse_ingredient("olive")`` returns a canonical_id (``olive_oil``)
+    with confidence 0.5 — the parser fuzzy-matched. Per the
+    ``ParsedIngredient`` docstring, ``confidence < 0.85`` is unresolved
+    regardless of canonical_id. The checker must hard-reject."""
+    profile = profile_with()
+    rec = recipe("olive")
+
+    result = check_recommendation(profile, rec)
+
+    assert result.passed is False
+    assert len(result.violations) == 1
+    v = result.violations[0]
+    assert v.reason is ViolationReason.unresolved_ingredient
+    assert v.severity is Severity.hard_reject
+
+
 def test_unresolved_does_not_short_circuit_other_ingredients() -> None:
     """An unresolved ingredient yields its own violation but the loop
     still checks remaining ingredients (so we don't miss a real
