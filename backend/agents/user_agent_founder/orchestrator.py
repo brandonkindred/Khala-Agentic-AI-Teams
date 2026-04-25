@@ -460,9 +460,12 @@ def run_workflow(run_id: str, store: FounderRunStore, agent: FounderAgent) -> No
     """
     logger.info("Starting founder workflow: run_id=%s", run_id)
 
-    run = store.get_run(run_id)
-
     try:
+        # Read the run row inside the try so a transient store outage during
+        # the resume-short-circuit lookup gets caught by the failure handler
+        # below rather than escaping the worker thread silently.
+        run = store.get_run(run_id)
+
         # Phase 1: Generate the product spec (skip if already done)
         if run is not None and run.spec_content:
             spec_content = run.spec_content

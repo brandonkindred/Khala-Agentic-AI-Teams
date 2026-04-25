@@ -561,7 +561,18 @@ def restart_job(job_id: str) -> StartRunResponse:
     job_store.reset_job(job_id)
     job_store.update_job(job_id, status=job_store.JOB_STATUS_RUNNING, current_phase="starting")
     store = get_founder_store()
-    store.update_run(job_id, status="pending", error=None)
+    # Clear every checkpoint column so the orchestrator's resume short-circuit
+    # (which keys off non-NULL spec_content / analysis_job_id / repo_path /
+    # se_job_id) cannot turn a restart into a stale replay.
+    store.update_run(
+        job_id,
+        status="pending",
+        error=None,
+        spec_content=None,
+        analysis_job_id=None,
+        repo_path=None,
+        se_job_id=None,
+    )
 
     try:
         mode = _dispatch_founder_run(job_id)

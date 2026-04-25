@@ -363,5 +363,31 @@ def test_resume_with_existing_analysis_job_succeeds_to_completion(
     assert run.status == "completed"
 
 
+def test_get_run_failure_is_caught_and_reported_as_failed(stub_orchestrator_io):
+    """A transient store outage at the entry-time lookup must not escape the
+    worker thread silently; the failure handler must mirror status to the
+    founder store + job service so the UI doesn't see the run stuck."""
+    orchestrator = stub_orchestrator_io
+    store = MagicMock()
+    store.get_run.side_effect = RuntimeError("postgres outage")
+    agent = MagicMock()
+
+    # Must not raise — exceptions in the worker thread are handled internally.
+    orchestrator.run_workflow("run-boom", store, agent)
+
+    # Failure path was hit: status flipped to "failed" + a chat message added.
+    failed_calls = [
+        c
+        for c in store.update_run.call_args_list
+        if c.kwargs.get("status") == "failed" and "postgres outage" in (c.kwargs.get("error") or "")
+    ]
+    assert failed_calls, (
+        f"Expected update_run(..., status='failed', error=...) on get_run failure; "
+        f"got {store.update_run.call_args_list}"
+    )
+    failure_msgs = [c for c in store.add_chat_message.call_args_list if "postgres outage" in str(c)]
+    assert failure_msgs, "Expected a system chat message reporting the failure"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
