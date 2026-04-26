@@ -233,6 +233,14 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("agent_console postgres schema registration failed")
 
+    try:
+        from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(PRODUCT_DELIVERY_SCHEMA)
+    except Exception:
+        logger.exception("product_delivery postgres schema registration failed")
+
     # 1. Mount team assistant conversational sub-apps (before proxy routes).
     try:
         from team_assistant.api import create_assistant_app
@@ -367,6 +375,7 @@ from unified_api.routes.analytics import router as analytics_router
 from unified_api.routes.integrations import router as integrations_router
 from unified_api.routes.llm_tools import router as llm_tools_router
 from unified_api.routes.llm_usage import router as llm_usage_router
+from unified_api.routes.product_delivery import router as product_delivery_router
 from unified_api.routes.sandboxes import router as sandboxes_router
 
 app.include_router(integrations_router)
@@ -377,6 +386,7 @@ app.include_router(agents_router)
 app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
+app.include_router(product_delivery_router)
 
 
 # ---------------------------------------------------------------------------
