@@ -45,8 +45,10 @@ def temp_job_manager(monkeypatch: pytest.MonkeyPatch, fake_job_client):
 
 
 def test_update_job(tmp_path: Path, temp_job_manager) -> None:
+    # _update_job on a missing job is a no-op (mirrors the central job
+    # service's bare UPDATE-by-id semantics — no auto-create, no error).
     api_main._update_job("missing", status="running")
-    assert temp_job_manager.get_job("missing") is not None
+    assert temp_job_manager.get_job("missing") is None
 
     req = api_main.RunMarketingTeamRequest(
         client_id="c1",

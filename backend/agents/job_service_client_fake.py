@@ -21,6 +21,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 import pytest
 
 _ACTIVE_STATUSES = frozenset({"pending", "running"})
@@ -84,16 +85,13 @@ class FakeJobServiceClient:
         return jobs
 
     def update_job(self, job_id: str, *, heartbeat: bool = True, **fields: Any) -> None:
-        job = self._jobs.setdefault(
-            job_id,
-            {
-                "job_id": job_id,
-                "team": self.team,
-                "status": "pending",
-                "created_at": _now_iso(),
-                "events": [],
-            },
-        )
+        # Mirror production: ``PATCH /jobs/{team}/{job_id}`` runs a bare
+        # SQL UPDATE.  If no row matches, it silently does nothing — it
+        # does NOT auto-create the job.  Tests that need a job present
+        # must call ``create_job`` first.
+        job = self._jobs.get(job_id)
+        if job is None:
+            return
         job.update(fields)
         self._stamp(job, heartbeat=heartbeat)
 
@@ -125,9 +123,16 @@ class FakeJobServiceClient:
         self._stamp(job)
 
     def heartbeat(self, job_id: str) -> None:
+        # Mirror production: ``POST /jobs/{team}/{job_id}/heartbeat`` returns
+        # 404 when the job is missing, which ``JobServiceClient.heartbeat``
+        # surfaces as ``httpx.HTTPStatusError``.  Raise the same exception
+        # type so unit tests catching it behave like integration tests do.
         job = self._jobs.get(job_id)
-        if job is not None:
-            self._stamp(job)
+        if job is None:
+            request = httpx.Request("POST", f"/jobs/{self.team}/{job_id}/heartbeat")
+            response = httpx.Response(404, request=request, json={"detail": "Job not found"})
+            raise httpx.HTTPStatusError("Job not found", request=request, response=response)
+        self._stamp(job)
 
     # -- bulk lifecycle -----------------------------------------------------
 

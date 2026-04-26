@@ -1,7 +1,7 @@
 """Unit tests for the JobServiceClient + FakeJobServiceClient contracts.
 
 Pure unit tests — they do not need a real job service.  They exist to
-lock in the two behaviours called out by review on PR #360:
+lock in the behaviours called out by review on PR #360:
 
 * The real client resolves ``JOB_SERVICE_URL`` lazily so a placeholder set
   before module-level construction does not get pinned.
@@ -9,12 +9,17 @@ lock in the two behaviours called out by review on PR #360:
   waiting states (``waiting_for_answers``, ``waiting_for_title_selection``,
   ``waiting_for_story_input``, ``waiting_for_draft_feedback``), not only
   the caller-supplied ``waiting_field``.
+* The fake's ``update_job`` is a no-op on a missing job (no auto-create),
+  matching the bare UPDATE in ``backend/job_service/db.py:197``.
+* The fake's ``heartbeat`` raises ``httpx.HTTPStatusError`` (404) on a
+  missing job, matching ``backend/job_service/main.py:184``.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 from job_service_client import JobServiceClient
@@ -93,3 +98,42 @@ def test_fake_stale_sweep_excludes_all_waiting_fields(
         job = stale_jobs_setup.get_job(job_id)
         assert job is not None
         assert job["status"] == "running", f"{job_id} should still be running"
+
+
+# ---------------------------------------------------------------------------
+# Fake missing-job behaviour — mirrors production endpoints
+# ---------------------------------------------------------------------------
+
+
+def test_fake_update_job_is_noop_on_missing(fake_job_client: FakeJobServiceClient) -> None:
+    """``update_job`` on a missing id must not auto-create a row.
+
+    Production runs a bare ``UPDATE … WHERE team=$1 AND job_id=$2`` — no row
+    matched ⇒ silent no-op (see ``backend/job_service/db.py:197``).
+    """
+    fake_job_client.update_job("missing", status="running", repo_path="/x")
+    assert fake_job_client.get_job("missing") is None
+
+
+def test_fake_heartbeat_raises_on_missing(fake_job_client: FakeJobServiceClient) -> None:
+    """``heartbeat`` on a missing id must raise ``httpx.HTTPStatusError`` (404).
+
+    Production raises 404 (``backend/job_service/main.py:184``); the real
+    ``JobServiceClient.heartbeat`` surfaces that as ``HTTPStatusError`` via
+    ``raise_for_status``.  The fake does the same so unit tests can pin the
+    same exception type.
+    """
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        fake_job_client.heartbeat("missing")
+    assert exc_info.value.response.status_code == 404
+
+
+def test_fake_heartbeat_succeeds_for_existing_job(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    fake_job_client.create_job("present", status="running")
+    before = fake_job_client.get_job("present")["last_heartbeat_at"]
+    # Heartbeat must advance ``last_heartbeat_at`` and not raise.
+    fake_job_client.heartbeat("present")
+    after = fake_job_client.get_job("present")["last_heartbeat_at"]
+    assert after >= before
