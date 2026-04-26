@@ -1,15 +1,23 @@
 """Root pytest configuration for the backend test suite.
 
-In addition to fast-fail LLM defaults, this conftest spins up the central job
-service (``backend/job_service/main.py``) in-process for the duration of the
-test session.  Every team's ``JobServiceClient(...)`` then talks to the
-in-process server, with no file-backed fallback.
+Test layering
+-------------
 
-When ``POSTGRES_HOST`` is unset we fall back to setting a placeholder URL so
-that *importing* team modules (which build module-level ``JobServiceClient``
-instances) does not crash at collection time.  Any test that actually issues
-a request will then fail loudly with a connection error — matching the
-project policy that all migrated teams require Postgres for local dev/tests.
+* **Unit tests** (default) must not depend on Postgres or a running job
+  service.  Use the :class:`FakeJobServiceClient` helper exposed via the
+  ``fake_job_client`` fixture (defined in
+  ``backend/agents/job_service_client_fake.py``) and ``monkeypatch`` it
+  into the team module under test.
+
+* **Integration tests** are marked ``@pytest.mark.integration``.  They are
+  **skipped by default** and only run when pytest is invoked with
+  ``-m integration`` (CI does this in the dedicated ``test-integration``
+  job, with Postgres + the in-process job service spun up automatically).
+
+The placeholder ``JOB_SERVICE_URL`` set below is just enough for team
+modules that build a module-level ``JobServiceClient(team=…)`` to succeed
+at import time.  Any actual HTTP call to it will fail loudly — exactly
+what we want for unit tests that forgot to monkeypatch.
 """
 
 from __future__ import annotations
@@ -26,21 +34,57 @@ from pathlib import Path
 import pytest
 
 # ---------------------------------------------------------------------------
-# Fast-fail LLM defaults
+# Globally-applied env defaults — must run before any team module imports.
 # ---------------------------------------------------------------------------
 
 os.environ.setdefault("LLM_MAX_RETRIES", "0")
+# Placeholder URL: makes JobServiceClient(team=…) construction succeed at
+# import time.  Real HTTP calls will fail with a connection error.
+os.environ.setdefault("JOB_SERVICE_URL", "http://127.0.0.1:1")
 
-
-# ---------------------------------------------------------------------------
-# Job service in-process spin-up
-# ---------------------------------------------------------------------------
 
 logger = logging.getLogger(__name__)
 
 _BACKEND_ROOT = Path(__file__).resolve().parent
 _JOB_SERVICE_DIR = _BACKEND_ROOT / "job_service"
 _AGENTS_DIR = _BACKEND_ROOT / "agents"
+
+# Ensure the agents/ directory is on sys.path so the fixture import below
+# works even before pytest applies its own pythonpath additions.
+if str(_AGENTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_AGENTS_DIR))
+
+# Re-export the shared in-memory fake + fixture.  Teams that override
+# pytest's rootdir (e.g. SE) opt in by adding the same import to their own
+# tests/conftest.py.
+from job_service_client_fake import FakeJobServiceClient, fake_job_client  # noqa: E402, F401
+
+# ---------------------------------------------------------------------------
+# Marker registration + default-skip for integration tests.
+# ---------------------------------------------------------------------------
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "integration: requires real Postgres + the central job service. Skipped unless invoked with `-m integration`.",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip integration-marked tests unless `-m integration` was passed."""
+    selected = config.getoption("-m", default="") or ""
+    if "integration" in selected:
+        return
+    skip = pytest.mark.skip(reason="integration test; run with `pytest -m integration`")
+    for item in items:
+        if "integration" in item.keywords:
+            item.add_marker(skip)
+
+
+# ---------------------------------------------------------------------------
+# Integration: spin up the real job service in-process, isolate per test.
+# ---------------------------------------------------------------------------
 
 
 def _free_port() -> int:
@@ -53,21 +97,7 @@ def _postgres_configured() -> bool:
     return bool(os.environ.get("POSTGRES_HOST"))
 
 
-def _start_job_service() -> str | None:
-    """Start the job service on a free port and return its base URL.
-
-    Returns ``None`` (and emits a warning) if Postgres is not configured —
-    in that case we leave a placeholder ``JOB_SERVICE_URL`` set so that
-    module imports succeed.
-    """
-    if not _postgres_configured():
-        logger.warning(
-            "POSTGRES_HOST not set — skipping in-process job service spin-up. Tests that exercise job state will fail."
-        )
-        return None
-
-    # The job service module imports use ``from db import …`` etc. so its
-    # directory must be on sys.path before we import its app.
+def _start_in_process_job_service() -> str:
     if str(_JOB_SERVICE_DIR) not in sys.path:
         sys.path.insert(0, str(_JOB_SERVICE_DIR))
     if str(_AGENTS_DIR) not in sys.path:
@@ -83,7 +113,6 @@ def _start_job_service() -> str | None:
     thread = threading.Thread(target=server.run, name="job-service-test", daemon=True)
     thread.start()
 
-    # Wait for the server to be ready (max 5s)
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         if server.started:
@@ -92,38 +121,39 @@ def _start_job_service() -> str | None:
     else:
         raise RuntimeError("In-process job service failed to start within 5s")
 
-    base_url = f"http://127.0.0.1:{port}"
-
     @atexit.register
     def _shutdown() -> None:
         server.should_exit = True
         thread.join(timeout=2.0)
 
-    return base_url
+    return f"http://127.0.0.1:{port}"
 
 
-# Set JOB_SERVICE_URL *before* any team module imports.  If the user already
-# exported one (e.g. pointing at a docker-compose job-service), respect it.
-if not os.environ.get("JOB_SERVICE_URL"):
-    _resolved = _start_job_service()
-    os.environ["JOB_SERVICE_URL"] = _resolved or "http://127.0.0.1:1"
+@pytest.fixture(scope="session")
+def integration_job_service() -> str:
+    """Session-scoped: boot the real job service in-process and return its URL.
 
-
-# ---------------------------------------------------------------------------
-# Per-test isolation
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _truncate_jobs_table() -> None:
-    """Wipe the shared ``jobs`` table before each test for isolation."""
+    Honours an externally-set ``JOB_SERVICE_URL`` (e.g. CI pointing at a
+    sidecar container).  Skips the suite when Postgres is not configured.
+    """
     if not _postgres_configured():
-        return
-    try:
-        sys.path.insert(0, str(_JOB_SERVICE_DIR))
-        from db import get_conn  # type: ignore[import-not-found]
+        pytest.skip("integration tests require POSTGRES_HOST to be set")
 
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE jobs")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("could not truncate jobs table between tests: %s", exc)
+    existing = os.environ.get("JOB_SERVICE_URL", "")
+    # Replace placeholder with a real one.
+    if existing and existing != "http://127.0.0.1:1":
+        return existing
+    url = _start_in_process_job_service()
+    os.environ["JOB_SERVICE_URL"] = url
+    return url
+
+
+@pytest.fixture
+def truncate_jobs_table(integration_job_service: str) -> None:
+    """Per-test reset of the shared `jobs` table.  Pull this in when an
+    integration test needs a clean slate."""
+    sys.path.insert(0, str(_JOB_SERVICE_DIR))
+    from db import get_conn  # type: ignore[import-not-found]
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE jobs")

@@ -7,9 +7,14 @@ Covers:
   the PR 2 active states (OPENING / WARMING_UP / LIVE), not just the
   legacy RUNNING state, so SIGKILL orphans cannot block the new
   per-strategy concurrency guard.
+
+Calls real ``investment_team.shared.job_store``.  Marked integration
+pending follow-up to use the in-memory fake.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from investment_team.api.main import (
     RunPaperTradingRequest,
@@ -22,6 +27,8 @@ from investment_team.models import (
     PaperTradingStatus,
     StrategySpec,
 )
+
+pytestmark = [pytest.mark.integration]
 
 # ---------------------------------------------------------------------------
 # Fee-override resolution

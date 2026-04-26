@@ -1,9 +1,15 @@
-"""Unit tests for the orchestrator."""
+"""Unit tests for the orchestrator.
+
+Some tests in this file call the real SE job_store (which now requires
+either a live job service or the in-memory fake).  Marked integration
+pending follow-up to swap those to ``fake_job_client``.
+"""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import orchestrator
+import pytest
 
 from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE, LLMJsonParseError, LLMRateLimitError
 from software_engineering_team.shared.command_runner import CommandResult
@@ -15,6 +21,8 @@ from software_engineering_team.shared.models import (
     TaskType,
     TaskUpdate,
 )
+
+pytestmark = [pytest.mark.integration]
 
 
 def test_run_build_verification_appends_fix_line_when_pytest_fails_with_test_error_handlers(

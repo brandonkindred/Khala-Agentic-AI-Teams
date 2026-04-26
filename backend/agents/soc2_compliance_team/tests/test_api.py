@@ -1,10 +1,17 @@
-"""Tests for SOC2 audit API."""
+"""Tests for SOC2 audit API.
+
+Hits the team API which calls the real job service.  Marked integration
+pending follow-up to mock the team's ``_job_manager``.
+"""
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from soc2_compliance_team.api.main import app
+
+pytestmark = [pytest.mark.integration]
 
 client = TestClient(app)
 

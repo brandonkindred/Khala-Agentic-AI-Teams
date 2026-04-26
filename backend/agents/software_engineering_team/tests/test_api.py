@@ -1,4 +1,9 @@
-"""Tests for the run-team API endpoint."""
+"""Tests for the run-team API endpoint.
+
+MIXED file: most tests are mock-driven and could run as unit tests, but
+a handful exercise the real job store and would fail without the live
+job service.  Marked integration until we split it.
+"""
 
 import importlib.util
 import os
@@ -12,6 +17,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+
+pytestmark = [pytest.mark.integration]
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:

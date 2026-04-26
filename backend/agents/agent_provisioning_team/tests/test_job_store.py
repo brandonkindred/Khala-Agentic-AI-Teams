@@ -1,8 +1,15 @@
-"""Tests for agent_provisioning_team job store."""
+"""Tests for agent_provisioning_team job store.
+
+Exercises the team's job_store helpers directly; relied on the file
+fallback that is now removed.  Marked integration until follow-up
+conversion to the in-memory fake.
+"""
 
 import pytest
 
-from agent_provisioning_team.shared.job_store import (
+pytestmark = [pytest.mark.integration]
+
+from agent_provisioning_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,

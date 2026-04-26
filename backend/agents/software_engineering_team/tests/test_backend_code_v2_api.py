@@ -2,6 +2,9 @@
 API tests for the backend-code-v2 endpoints:
   POST /backend-code-v2/run
   GET /backend-code-v2/status/{job_id}
+
+Hits the team API which calls the real job store; marked integration
+pending a follow-up that mocks job_store at the API boundary.
 """
 
 from __future__ import annotations
@@ -14,6 +17,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+
+pytestmark = [pytest.mark.integration]
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
