@@ -1,4 +1,8 @@
-"""API tests for Medium stats endpoints (agent mocked — no browser)."""
+"""API tests for Medium stats endpoints (agent mocked — no browser).
+
+MIXED file: one test polls a real async job loop; the other two could run
+on the in-memory fake.  Marked integration until we split it.
+"""
 
 import importlib.util
 import sys
@@ -7,6 +11,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+
+pytestmark = [pytest.mark.integration]
 
 _blogging_root = Path(__file__).resolve().parent.parent
 if str(_blogging_root) not in sys.path:

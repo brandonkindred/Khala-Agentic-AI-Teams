@@ -1,6 +1,7 @@
 import time
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from social_media_marketing_team.adapters.branding import (
@@ -9,6 +10,10 @@ from social_media_marketing_team.adapters.branding import (
 )
 from social_media_marketing_team.api.main import app
 from social_media_marketing_team.models import Platform
+
+# Hits the team API which calls the real job service.  See
+# ``test_api_internal.py`` for the converted unit-style equivalent.
+pytestmark = [pytest.mark.integration]
 
 _MOCK_BRAND_CTX = BrandContext(
     brand_name="Acme",

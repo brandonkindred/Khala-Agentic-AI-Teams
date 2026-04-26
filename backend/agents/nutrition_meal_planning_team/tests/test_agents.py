@@ -1,4 +1,9 @@
-"""Unit/integration tests for intake, nutritionist, meal planning, and chat agents (mocked LLM or full)."""
+"""Unit/integration tests for intake, nutritionist, meal planning, and chat agents (mocked LLM or full).
+
+Several tests import paths that transitively touch the real job service.
+Marked integration pending follow-up to either fully mock the LLM stack
+or split the file.
+"""
 
 import pytest
 
@@ -22,6 +27,8 @@ from nutrition_meal_planning_team.models import (
     NutritionPlan,
     PreferencesInfo,
 )
+
+pytestmark = [pytest.mark.integration]
 
 
 class TestMealPlanningAgentHelpers:

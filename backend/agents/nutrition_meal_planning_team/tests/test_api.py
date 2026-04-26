@@ -1,4 +1,8 @@
-"""API tests for Nutrition & Meal Planning team (profile, plan, meals, feedback, history)."""
+"""API tests for Nutrition & Meal Planning team (profile, plan, meals, feedback, history).
+
+Hits the team API which calls the real job service.  Marked integration
+pending follow-up.
+"""
 
 import time
 from pathlib import Path
@@ -7,6 +11,8 @@ from typing import Any, Dict
 import pytest
 
 from shared_postgres import is_postgres_enabled
+
+pytestmark = [pytest.mark.integration]
 
 # Ensure agents dir is on path
 _agents_dir = Path(__file__).resolve().parent.parent.parent

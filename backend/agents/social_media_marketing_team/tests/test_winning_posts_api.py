@@ -2,6 +2,10 @@
 
 Swaps the bank module's ``get_conn`` for an in-process fake so the
 routes exercise their full happy-path without Postgres.
+
+Marked integration: the auto-ingest hook calls into ``_job_manager``
+which currently routes to the real job service.  Follow-up to mock that
+boundary.
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ from fastapi.testclient import TestClient
 from social_media_marketing_team.adapters.branding import BrandContext
 from social_media_marketing_team.api.main import app
 from social_media_marketing_team.tests.test_winning_posts_bank import _FakeConn
+
+pytestmark = [pytest.mark.integration]
 
 _BRAND_ADAPTER = "social_media_marketing_team.api.main"
 

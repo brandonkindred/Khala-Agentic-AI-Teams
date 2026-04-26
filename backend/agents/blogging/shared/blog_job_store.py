@@ -1,9 +1,8 @@
 """
 Job store for blogging pipeline: persists job status and progress via the job service.
 
-Uses ``JobServiceClient`` to communicate with the job service container over
-HTTP when ``JOB_SERVICE_URL`` is set, falling back to a local
-``CentralJobManager`` for non-Docker development.
+Uses ``JobServiceClient`` to communicate with the central job service over HTTP.
+``JOB_SERVICE_URL`` must be set; see ``backend/agents/job_service_client.py``.
 
 Note: Jobs created before migration from the legacy store (under .agent_cache/blog_jobs/)
 are not automatically migrated. New jobs use the central store only. Historical jobs
@@ -73,7 +72,7 @@ DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache")).re
 
 
 def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
-    return JobServiceClient(team="blogging_team", cache_dir=str(cache_dir))
+    return JobServiceClient(team="blogging_team")
 
 
 def medium_stats_run_dir(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> Path:

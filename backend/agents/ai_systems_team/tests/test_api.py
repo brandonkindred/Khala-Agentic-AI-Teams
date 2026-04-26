@@ -1,10 +1,17 @@
-"""Tests for ai_systems_team API endpoints."""
+"""Tests for ai_systems_team API endpoints.
+
+Hits the team API which calls the real job service.  Marked integration
+pending follow-up to mock the team's ``_client`` factory.
+"""
 
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ai_systems_team.api.main import app
+
+pytestmark = [pytest.mark.integration]
 
 client = TestClient(app)
 

@@ -1,4 +1,8 @@
-"""Tests for Deepthought FastAPI endpoints."""
+"""Tests for Deepthought FastAPI endpoints.
+
+Hits the team API which calls the real job service.  Marked integration
+pending follow-up to mock the team's ``_client`` factory.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +11,12 @@ import time
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from deepthought.api.main import app
+
+pytestmark = [pytest.mark.integration]
 
 
 def _poll_deepthought(client: TestClient, job_id: str, deadline_s: float = 5.0) -> Dict[str, Any]:

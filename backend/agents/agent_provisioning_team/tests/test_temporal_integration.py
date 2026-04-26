@@ -11,10 +11,15 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agent_provisioning_team.api import main as api_main
 from agent_provisioning_team.api.main import app
+
+# Exercises real activity contracts that touch the job store.  Run via the
+# `test-integration` CI job.
+pytestmark = [pytest.mark.integration]
 
 client = TestClient(app)
 

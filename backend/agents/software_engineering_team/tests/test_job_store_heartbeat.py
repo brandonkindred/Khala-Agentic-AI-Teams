@@ -1,8 +1,25 @@
-"""Tests for job store heartbeat and stale job handling."""
+"""Unit tests for SE job-store heartbeat and stale-job logic.
+
+These tests run against the in-memory ``FakeJobServiceClient`` (see
+``backend/conftest.py``) — they do not require Postgres or the real job
+service.
+"""
 
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _patched_job_store(monkeypatch, fake_job_client):
+    """Route the SE job_store's ``_client`` through the in-memory fake."""
+    from software_engineering_team.shared import job_store as js
+
+    monkeypatch.setattr(js, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
 
 
 def test_heartbeat_updates_last_heartbeat_at(tmp_path: Path) -> None:
@@ -56,27 +73,19 @@ def test_heartbeat_stops_when_job_terminal(tmp_path: Path) -> None:
     assert data.get("status") == JOB_STATUS_COMPLETED
 
 
-def test_mark_stale_jobs_failed_marks_old_heartbeat(tmp_path: Path) -> None:
+def test_mark_stale_jobs_failed_marks_old_heartbeat(tmp_path: Path, fake_job_client) -> None:
     """Job with last_heartbeat_at older than threshold (and not waiting_for_answers) is marked failed."""
-    from datetime import datetime, timedelta, timezone
-
     from software_engineering_team.shared.job_store import (
         create_job,
         get_job,
         mark_stale_jobs_failed,
-        update_job,
     )
 
     cache_dir = tmp_path
     job_id = str(uuid.uuid4())
     create_job(job_id, "/repo", cache_dir=cache_dir)
     stale_ts = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
-    update_job(job_id, cache_dir=cache_dir)
-    # Force old heartbeat by writing via manager (job_store has no heartbeat=False); use direct manager
-    from shared_job_management import CentralJobManager
-
-    manager = CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
-    manager.update_job(job_id, last_heartbeat_at=stale_ts, heartbeat=False)
+    fake_job_client.update_job(job_id, heartbeat=False, last_heartbeat_at=stale_ts)
 
     failed = mark_stale_jobs_failed(stale_after_seconds=60.0, reason="stale", cache_dir=cache_dir)
     assert job_id in failed
@@ -107,11 +116,8 @@ def test_mark_stale_jobs_failed_does_not_mark_recent_heartbeat(tmp_path: Path) -
     assert data.get("status") == "pending"
 
 
-def test_waiting_for_answers_excluded_from_stale(tmp_path: Path) -> None:
+def test_waiting_for_answers_excluded_from_stale(tmp_path: Path, fake_job_client) -> None:
     """Job with waiting_for_answers=True is not marked stale even when last_heartbeat_at is old."""
-    from datetime import datetime, timedelta, timezone
-
-    from shared_job_management import CentralJobManager
     from software_engineering_team.shared.job_store import (
         create_job,
         get_job,
@@ -121,10 +127,9 @@ def test_waiting_for_answers_excluded_from_stale(tmp_path: Path) -> None:
     cache_dir = tmp_path
     job_id = str(uuid.uuid4())
     create_job(job_id, "/repo", cache_dir=cache_dir)
-    manager = CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
     stale_ts = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
-    manager.update_job(
-        job_id, last_heartbeat_at=stale_ts, heartbeat=False, waiting_for_answers=True
+    fake_job_client.update_job(
+        job_id, heartbeat=False, last_heartbeat_at=stale_ts, waiting_for_answers=True
     )
 
     failed = mark_stale_jobs_failed(stale_after_seconds=60.0, reason="stale", cache_dir=cache_dir)

@@ -77,6 +77,8 @@ backend/continuation_logs/*
 backend/agents/software_engineering_team/continuation_logs/*
 backend/.a11y_artifacts/
 backend/.tmp/
+.a11y_artifacts/
+.tmp/
 .claude/settings.local.json
 .claude/*
 # Author profile (PII): never commit real profile, only the example.

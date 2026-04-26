@@ -18,7 +18,7 @@ PORT ?= 8080
 HOST ?= 0.0.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help install install-dev lint lint-fix test coverage coverage-html build run deploy clean
+.PHONY: help install install-dev lint lint-fix test coverage coverage-html build run deploy clean _check_job_service_url
 
 help:
 	@echo "Backend targets:"
@@ -60,10 +60,19 @@ coverage-html:
 
 build: install-dev lint test
 
-run:
+_check_job_service_url:
+	@if [ -z "$$JOB_SERVICE_URL" ]; then \
+		echo "ERROR: JOB_SERVICE_URL is not set."; \
+		echo "Start the job service then export the URL:"; \
+		echo "  docker compose -f ../docker/docker-compose.yml up -d postgres job-service"; \
+		echo "  export JOB_SERVICE_URL=http://localhost:8085"; \
+		exit 1; \
+	fi
+
+run: _check_job_service_url
 	$(VENV_PYTHON) run_unified_api.py --host $(HOST) --port $(PORT) --reload
 
-deploy:
+deploy: _check_job_service_url
 	$(VENV_PYTHON) run_unified_api.py --host $(HOST) --port $(PORT) --workers 4 --log-level warning
 
 clean:

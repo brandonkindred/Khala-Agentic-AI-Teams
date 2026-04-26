@@ -41,7 +41,6 @@ backend/agents/
 ├── team_assistant/                    # Team assistant utilities
 ├── team_contract/                     # Team contract definitions
 ├── user_agent_founder/                # Autonomous startup founder agent
-├── shared_job_management.py           # Shared job state helpers
 ├── job_service_client.py              # HTTP client for centralized job service
 ├── Dockerfile
 ├── docker-compose.yml

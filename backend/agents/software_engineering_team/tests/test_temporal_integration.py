@@ -12,6 +12,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+# Touches the central job service via SE job_store; opt out of unit-default
+# pytest runs.  Follow-up: split this file's pure-mock tests off and convert
+# the storage-touching ones to use ``fake_job_client``.
+pytestmark = [pytest.mark.integration]
+
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))

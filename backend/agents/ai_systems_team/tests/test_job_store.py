@@ -1,4 +1,9 @@
-"""Tests for ai_systems_team job store."""
+"""Tests for ai_systems_team job store.
+
+Exercises the team's job_store helpers directly; relied on the file
+fallback that is now removed.  Marked integration until follow-up
+conversion to the in-memory fake.
+"""
 
 import pytest
 
@@ -18,6 +23,8 @@ from ai_systems_team.shared.job_store import (
     mark_job_failed,
     mark_job_running,
 )
+
+pytestmark = [pytest.mark.integration]
 
 
 @pytest.fixture()

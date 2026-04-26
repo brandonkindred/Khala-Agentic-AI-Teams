@@ -34,14 +34,13 @@ _client_instance: Optional[JobServiceClient] = None
 def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
     global _client_instance
     if _client_instance is None:
-        _client_instance = JobServiceClient(
-            team="road_trip_planning_team",
-            cache_dir=str(cache_dir),
-        )
+        _client_instance = JobServiceClient(team="road_trip_planning_team")
     return _client_instance
 
 
 def create_job(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR, **fields: Any) -> None:
+    # Don't let a caller-supplied ``status=...`` collide with the kwarg below.
+    fields.pop("status", None)
     _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
 
 

@@ -221,9 +221,9 @@ curl http://localhost:8080/api/accessibility-audit/audit/{audit_id}/findings
 
 ### Job Tracking
 
-Audit and retest jobs are tracked through the shared centralized job management layer
-(`shared_job_management.CentralJobManager`) under the `accessibility_audit_team` namespace.
-This provides persistent, file-backed job state and consistent lifecycle handling across team APIs.
+Audit and retest jobs are tracked through the shared central job service via
+`job_service_client.JobServiceClient` under the `accessibility_audit_team` namespace.
+This provides persistent, Postgres-backed job state and consistent lifecycle handling across team APIs.
 
 ## Finding Quality Bar
 

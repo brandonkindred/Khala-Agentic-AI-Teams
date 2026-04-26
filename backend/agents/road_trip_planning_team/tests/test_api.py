@@ -1,4 +1,8 @@
-"""API tests for the Road Trip Planning team — async-only job flow."""
+"""API tests for the Road Trip Planning team — async-only job flow.
+
+Hits the team API which calls the real job service.  Marked integration
+pending follow-up.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict
 
 import pytest
+
+pytestmark = [pytest.mark.integration]
 
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in __import__("sys").path:
@@ -66,9 +72,7 @@ def test_health(client: TestClient):
     assert r.json().get("team") == "road_trip_planning"
 
 
-def test_plan_async_submit_returns_job_id(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-):
+def test_plan_async_submit_returns_job_id(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     canned = TripItinerary(title="Test Trip", overview="ok", total_days=3)
     monkeypatch.setattr(api_main, "_run_pipeline", lambda body: canned)
 
@@ -99,9 +103,7 @@ def test_plan_requires_travelers(client: TestClient):
     assert "traveler" in r.json().get("detail", "").lower()
 
 
-def test_plan_failure_captured_in_job(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-):
+def test_plan_failure_captured_in_job(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     def boom(_body):
         raise RuntimeError("pipeline exploded")
 

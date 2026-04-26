@@ -1,4 +1,9 @@
-"""Tests for blogging API artifact endpoints."""
+"""Tests for blogging API artifact endpoints.
+
+Calls the real ``create_blog_job`` / ``update_blog_job`` helpers, which
+hit the central job service.  Marked integration pending a follow-up
+that replaces the storage calls with the in-memory fake.
+"""
 
 import importlib.util
 import sys
@@ -7,6 +12,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+
+pytestmark = [pytest.mark.integration]
 
 _blogging_root = Path(__file__).resolve().parent.parent
 if str(_blogging_root) not in sys.path:

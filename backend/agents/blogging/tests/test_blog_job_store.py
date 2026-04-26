@@ -1,7 +1,19 @@
-"""Tests for blog job store (CentralJobManager-backed). Use cache_dir=tmp_path so jobs go to tmp_path/blogging_team/jobs/."""
+"""Unit tests for the blog job store. Backed by an in-memory FakeJobServiceClient
+(see backend/conftest.py) — no Postgres or live job service required.
+"""
 
 import uuid
 from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _patched_blog_client(monkeypatch, fake_job_client):
+    from shared import blog_job_store as bjs
+
+    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
 
 
 def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:

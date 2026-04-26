@@ -1,13 +1,20 @@
-"""Tests for agent_provisioning_team API endpoints."""
+"""Tests for agent_provisioning_team API endpoints.
+
+MIXED file: most tests mock the job store; a few exercise real timing /
+concurrency.  Marked integration pending a split.
+"""
 
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
-from agent_provisioning_team.api import main as api_main
-from agent_provisioning_team.api.main import app
+pytestmark = [pytest.mark.integration]
+
+from agent_provisioning_team.api import main as api_main  # noqa: E402
+from agent_provisioning_team.api.main import app  # noqa: E402
 
 client = TestClient(app)
 

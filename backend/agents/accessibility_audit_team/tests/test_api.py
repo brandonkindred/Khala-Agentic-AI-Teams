@@ -1,9 +1,17 @@
-"""Tests for accessibility_audit_team API endpoints."""
+"""Tests for accessibility_audit_team API endpoints.
 
+Hits endpoints whose handlers route through the team's ``_job_manager``
+(real JobServiceClient).  Marked integration pending follow-up to
+mock the job service at the API boundary.
+"""
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from accessibility_audit_team.api.main import router
+
+pytestmark = [pytest.mark.integration]
 
 # Create a test app that mounts the router
 _test_app = FastAPI()

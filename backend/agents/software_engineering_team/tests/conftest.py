@@ -2,9 +2,43 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
-from llm_service import DummyLLMClient
+import pytest
+
+# Mirror the env defaults from ``backend/conftest.py`` (not auto-discovered
+# here because this team overrides pytest's rootdir).  The placeholder
+# JOB_SERVICE_URL lets module-level ``JobServiceClient(team=…)`` construction
+# succeed; real HTTP calls will fail loudly.
+os.environ.setdefault("LLM_MAX_RETRIES", "0")
+os.environ.setdefault("JOB_SERVICE_URL", "http://127.0.0.1:1")
+
+# Re-export the in-memory FakeJobServiceClient + ``fake_job_client`` fixture so
+# unit tests in this team can use them.  The SE team's ``pyproject.toml``
+# overrides pytest's rootdir, which means ``backend/conftest.py`` is not
+# auto-discovered here, so we pull the fixture in explicitly (and re-register
+# the ``integration`` marker / default-skip behaviour for the same reason).
+from job_service_client_fake import fake_job_client  # noqa: F401, E402
+from llm_service import DummyLLMClient  # noqa: E402
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "integration: requires real Postgres + the central job service. "
+        "Skipped unless invoked with `-m integration`.",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    selected = config.getoption("-m", default="") or ""
+    if "integration" in selected:
+        return
+    skip = pytest.mark.skip(reason="integration test; run with `pytest -m integration`")
+    for item in items:
+        if "integration" in item.keywords:
+            item.add_marker(skip)
 
 
 class _TrackingMock:
@@ -57,10 +91,14 @@ class _TrackingMock:
         assert self.call_count > 0, "Expected to have been called"
 
     def assert_not_called(self):
-        assert self.call_count == 0, f"Expected not to have been called, but was called {self.call_count} time(s)"
+        assert self.call_count == 0, (
+            f"Expected not to have been called, but was called {self.call_count} time(s)"
+        )
 
     def assert_called_once(self):
-        assert self.call_count == 1, f"Expected to be called once, but was called {self.call_count} time(s)"
+        assert self.call_count == 1, (
+            f"Expected to be called once, but was called {self.call_count} time(s)"
+        )
 
 
 _SENTINEL = object()

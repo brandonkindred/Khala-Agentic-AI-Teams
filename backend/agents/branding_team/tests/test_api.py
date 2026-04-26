@@ -2,10 +2,15 @@ import time
 from typing import Any, Dict
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from branding_team.api.main import app
 from branding_team.models import BrandingMission
+
+# Hits the team API which calls the real job service.  Marked integration
+# pending follow-up.
+pytestmark = [pytest.mark.integration]
 
 client = TestClient(app)
 

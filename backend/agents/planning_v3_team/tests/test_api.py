@@ -1,9 +1,15 @@
-"""API tests for Planning V3: run returns job_id, status/result shapes."""
+"""API tests for Planning V3: run returns job_id, status/result shapes.
+
+Hits the team API which calls the real job service.  Marked integration
+pending follow-up.
+"""
 
 import sys
 from pathlib import Path
 
 import pytest
+
+pytestmark = [pytest.mark.integration]
 
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:

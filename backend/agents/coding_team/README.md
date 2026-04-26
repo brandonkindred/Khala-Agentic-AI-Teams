@@ -108,7 +108,7 @@ flowchart LR
 - `senior_software_engineer_agent/` – Senior SWE agent (parameterized by StackSpec): request task, implement, tests, linter, commit, In Review, hand off.
 - `orchestrator.py` – Coordinates Tech Lead and Senior SWEs; init (plan → Task Graph, create SWEs), loop (assign → implement → review → merge).
 - `api/main.py` – FastAPI: POST /run, GET /status/{job_id}, GET /jobs.
-- Job store uses the same pattern as software_engineering_team (e.g. CentralJobManager with team="coding_team").
+- Job store uses the same pattern as software_engineering_team: `JobServiceClient(team="coding_team")` from `job_service_client`.
 
 ## Process flows
 

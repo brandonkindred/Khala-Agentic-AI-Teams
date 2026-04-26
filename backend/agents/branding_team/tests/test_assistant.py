@@ -1,6 +1,13 @@
-"""Tests for BrandingAssistantAgent (mock LLM)."""
+"""Tests for BrandingAssistantAgent (mock LLM).
+
+Imports from ``branding_team.assistant`` chain transitively touch the
+real job service.  Marked integration pending follow-up to break that
+import-time coupling.
+"""
 
 from unittest.mock import MagicMock
+
+import pytest
 
 from branding_team.assistant.agent import (
     BrandingAssistantAgent,
@@ -8,6 +15,8 @@ from branding_team.assistant.agent import (
     _parse_mission_and_suggestions,
 )
 from branding_team.models import BrandingMission
+
+pytestmark = [pytest.mark.integration]
 
 
 def test_parse_mission_and_suggestions_returns_reply_and_updates() -> None:

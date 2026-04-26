@@ -37,10 +37,7 @@ _client_instance: Optional[JobServiceClient] = None
 def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
     global _client_instance
     if _client_instance is None:
-        _client_instance = JobServiceClient(
-            team="nutrition_meal_planning_team",
-            cache_dir=str(cache_dir),
-        )
+        _client_instance = JobServiceClient(team="nutrition_meal_planning_team")
     return _client_instance
 
 
