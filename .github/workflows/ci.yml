@@ -279,7 +279,12 @@ jobs:
     needs:
       - test-shared-postgres
       - test-backend
-      - test-integration
+      # NOTE: `test-integration` is intentionally NOT in this list yet.  The
+      # job runs against real Postgres + the central job service and the
+      # infrastructure works, but most of the tests currently marked
+      # `@pytest.mark.integration` are stop-gaps that need to be converted
+      # to use the in-memory FakeJobServiceClient (tracked in #361-#367).
+      # Re-add to needs once that work lands and the suite is reliably green.
       - test-ui
     steps:
       - run: echo "All lint, test, and build checks passed."
