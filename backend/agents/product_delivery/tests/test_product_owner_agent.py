@@ -174,3 +174,85 @@ def test_groom_handles_llm_exception_gracefully() -> None:
     agent = ProductOwnerAgent(store=store, llm_client=_BoomLLM())  # type: ignore[arg-type]
     result = agent.groom(product_id="x", method="wsjf")
     assert result.ranked == []
+
+
+def test_groom_wsjf_treats_null_job_size_as_estimate_points_fallback() -> None:
+    # The model occasionally emits explicit `null` for job_size when it
+    # can't size a story. Without normalization, float(None) trips the
+    # exception handler and silently drops the story from the ranking.
+    stories = [_story("s1", points=4.0)]
+    llm = _StubLLM(
+        payload={
+            "items": [
+                {
+                    "id": "s1",
+                    "inputs": {
+                        "user_business_value": 6,
+                        "time_criticality": 4,
+                        "risk_reduction_or_opportunity_enablement": 2,
+                        "job_size": None,
+                    },
+                    "rationale": "",
+                }
+            ]
+        }
+    )
+    store = _FakeStore(stories)
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="x", method="wsjf", persist=False)
+    # cost_of_delay = 12; job_size falls back to estimate_points (4) → 3.0
+    assert len(result.ranked) == 1
+    assert result.ranked[0].score == 3.0
+
+
+def test_groom_rice_treats_null_effort_as_estimate_points_fallback() -> None:
+    stories = [_story("s1", points=8.0)]
+    llm = _StubLLM(
+        payload={
+            "items": [
+                {
+                    "id": "s1",
+                    "inputs": {
+                        "reach": 1000,
+                        "impact": 1,
+                        "confidence": 1,
+                        "effort": None,
+                    },
+                    "rationale": "",
+                }
+            ]
+        }
+    )
+    store = _FakeStore(stories)
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="x", method="rice", persist=False)
+    # effort falls back to estimate_points / 4 = 2.0 → score 500
+    assert len(result.ranked) == 1
+    assert result.ranked[0].score == 500.0
+
+
+def test_groom_wsjf_treats_null_value_components_as_zero() -> None:
+    # All non-denominator inputs default to 0 when the model emits null.
+    stories = [_story("s1", points=2.0)]
+    llm = _StubLLM(
+        payload={
+            "items": [
+                {
+                    "id": "s1",
+                    "inputs": {
+                        "user_business_value": None,
+                        "time_criticality": None,
+                        "risk_reduction_or_opportunity_enablement": None,
+                        "job_size": 4,
+                    },
+                    "rationale": "",
+                }
+            ]
+        }
+    )
+    store = _FakeStore(stories)
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="x", method="wsjf", persist=False)
+    # cost_of_delay = 0 → score 0
+    assert len(result.ranked) == 1
+    assert result.ranked[0].score == 0.0

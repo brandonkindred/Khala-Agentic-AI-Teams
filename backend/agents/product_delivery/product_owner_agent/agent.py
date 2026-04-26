@@ -36,6 +36,20 @@ from product_delivery.store import ProductDeliveryStore
 logger = logging.getLogger(__name__)
 
 
+def _to_float(value: Any, fallback: float) -> float:
+    """Coerce an LLM-supplied value to ``float`` with a typed fallback.
+
+    Models routinely emit explicit ``null`` for fields they're unsure
+    about (especially the denominator-shaped ones like ``job_size`` and
+    ``effort``). ``float(None)`` raises ``TypeError`` and the outer
+    handler skips the whole story — so we'd silently drop items from
+    the ranking. Treat ``None`` (and missing) the same as the fallback.
+    """
+    if value is None:
+        return float(fallback)
+    return float(value)
+
+
 class _LLMLike(Protocol):
     def complete_json(
         self,
@@ -146,16 +160,14 @@ class ProductOwnerAgent:
                 if method == "wsjf":
                     wsjf_value = wsjf_score(
                         WSJFInputs(
-                            user_business_value=float(inputs.get("user_business_value", 0)),
-                            time_criticality=float(inputs.get("time_criticality", 0)),
-                            risk_reduction_or_opportunity_enablement=float(
-                                inputs.get("risk_reduction_or_opportunity_enablement", 0)
+                            user_business_value=_to_float(inputs.get("user_business_value"), 0.0),
+                            time_criticality=_to_float(inputs.get("time_criticality"), 0.0),
+                            risk_reduction_or_opportunity_enablement=_to_float(
+                                inputs.get("risk_reduction_or_opportunity_enablement"), 0.0
                             ),
-                            job_size=float(
-                                inputs.get(
-                                    "job_size",
-                                    story.estimate_points or 1.0,
-                                )
+                            job_size=_to_float(
+                                inputs.get("job_size"),
+                                story.estimate_points or 1.0,
                             ),
                         )
                     )
@@ -163,14 +175,12 @@ class ProductOwnerAgent:
                 else:
                     rice_value = rice_score(
                         RICEInputs(
-                            reach=float(inputs.get("reach", 0)),
-                            impact=float(inputs.get("impact", 0)),
-                            confidence=float(inputs.get("confidence", 0)),
-                            effort=float(
-                                inputs.get(
-                                    "effort",
-                                    (story.estimate_points or 4.0) / 4.0,
-                                )
+                            reach=_to_float(inputs.get("reach"), 0.0),
+                            impact=_to_float(inputs.get("impact"), 0.0),
+                            confidence=_to_float(inputs.get("confidence"), 0.0),
+                            effort=_to_float(
+                                inputs.get("effort"),
+                                (story.estimate_points or 4.0) / 4.0,
                             ),
                         )
                     )

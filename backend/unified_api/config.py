@@ -223,6 +223,23 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         cell="core_dev",
         timeout_seconds=120.0,
     ),
+    # In-process module (not a proxy team): the unified API mounts the
+    # product_delivery router directly. Listed here with enabled=False so
+    # `_register_proxy_routes` skips proxy registration but the security
+    # gateway middleware still picks up the prefix in
+    # `_get_team_prefixes()` and scans request bodies.
+    "product_delivery": TeamConfig(
+        name="Product Delivery",
+        prefix="/api/product-delivery",
+        description=(
+            "Persistent product backlog (products → initiatives → epics → stories → tasks), "
+            "WSJF/RICE grooming, and feedback intake. In-process module mounted on the unified API."
+        ),
+        enabled=False,
+        tags=["product-delivery", "backlog", "grooming"],
+        cell="core_dev",
+        timeout_seconds=60.0,
+    ),
 }
 
 
