@@ -72,11 +72,12 @@ def test_mark_stale_jobs_failed_marks_old_heartbeat(tmp_path: Path) -> None:
     create_job(job_id, "/repo", cache_dir=cache_dir)
     stale_ts = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
     update_job(job_id, cache_dir=cache_dir)
-    # Force old heartbeat by writing via manager (job_store has no heartbeat=False); use direct manager
-    from shared_job_management import CentralJobManager
+    # Force old heartbeat by writing through the job service (heartbeat=False keeps
+    # last_heartbeat_at at the value we pass instead of stamping "now").
+    from job_service_client import JobServiceClient
 
-    manager = CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
-    manager.update_job(job_id, last_heartbeat_at=stale_ts, heartbeat=False)
+    client = JobServiceClient(team="software_engineering_team")
+    client.update_job(job_id, heartbeat=False, last_heartbeat_at=stale_ts)
 
     failed = mark_stale_jobs_failed(stale_after_seconds=60.0, reason="stale", cache_dir=cache_dir)
     assert job_id in failed
@@ -111,7 +112,7 @@ def test_waiting_for_answers_excluded_from_stale(tmp_path: Path) -> None:
     """Job with waiting_for_answers=True is not marked stale even when last_heartbeat_at is old."""
     from datetime import datetime, timedelta, timezone
 
-    from shared_job_management import CentralJobManager
+    from job_service_client import JobServiceClient
     from software_engineering_team.shared.job_store import (
         create_job,
         get_job,
@@ -121,11 +122,9 @@ def test_waiting_for_answers_excluded_from_stale(tmp_path: Path) -> None:
     cache_dir = tmp_path
     job_id = str(uuid.uuid4())
     create_job(job_id, "/repo", cache_dir=cache_dir)
-    manager = CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
+    client = JobServiceClient(team="software_engineering_team")
     stale_ts = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
-    manager.update_job(
-        job_id, last_heartbeat_at=stale_ts, heartbeat=False, waiting_for_answers=True
-    )
+    client.update_job(job_id, heartbeat=False, last_heartbeat_at=stale_ts, waiting_for_answers=True)
 
     failed = mark_stale_jobs_failed(stale_after_seconds=60.0, reason="stale", cache_dir=cache_dir)
     assert job_id not in failed

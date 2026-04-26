@@ -1,4 +1,4 @@
-"""Tests for blog job store (CentralJobManager-backed). Use cache_dir=tmp_path so jobs go to tmp_path/blogging_team/jobs/."""
+"""Tests for blog job store. Backed by the central job service (see backend/conftest.py)."""
 
 import uuid
 from pathlib import Path

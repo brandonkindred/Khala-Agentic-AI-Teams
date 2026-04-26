@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Ensure backend/agents is on path for coding_team and shared_job_management
+# Ensure backend/agents is on path for coding_team and job_service_client
 _agents_root = Path(__file__).resolve().parent.parent.parent
 if str(_agents_root) not in sys.path:
     sys.path.insert(0, str(_agents_root))

@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 
-from shared_job_management import CentralJobManager
+from job_service_client import JobServiceClient
 from social_media_marketing_team.adapters.branding import BrandContext, BrandNotFoundError
 from social_media_marketing_team.api import main as api_main
 
@@ -40,15 +40,13 @@ def _seed_job(job_id: str, request: api_main.RunMarketingTeamRequest) -> None:
 
 
 @pytest.fixture
-def temp_job_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    manager = CentralJobManager(
-        team="social_media_marketing_team_test", cache_dir=tmp_path / "cache"
-    )
+def temp_job_manager(monkeypatch: pytest.MonkeyPatch):
+    manager = JobServiceClient(team="social_media_marketing_team_test")
     monkeypatch.setattr(api_main, "_job_manager", manager)
     return manager
 
 
-def test_update_job(tmp_path: Path, temp_job_manager: CentralJobManager) -> None:
+def test_update_job(tmp_path: Path, temp_job_manager: JobServiceClient) -> None:
     api_main._update_job("missing", status="running")
     assert temp_job_manager.get_job("missing") is not None
 
@@ -65,7 +63,7 @@ def test_update_job(tmp_path: Path, temp_job_manager: CentralJobManager) -> None
     assert job["last_heartbeat_at"] >= old_ts
 
 
-def test_run_team_job_success(tmp_path: Path, temp_job_manager: CentralJobManager) -> None:
+def test_run_team_job_success(tmp_path: Path, temp_job_manager: JobServiceClient) -> None:
     req = api_main.RunMarketingTeamRequest(
         client_id="c1",
         brand_id="b1",
@@ -88,7 +86,7 @@ def test_run_and_status_functions_with_inline_thread(
     _mock_brand,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    temp_job_manager: CentralJobManager,
+    temp_job_manager: JobServiceClient,
 ) -> None:
     class InlineThread:
         def __init__(self, target, args, daemon):
@@ -135,7 +133,7 @@ def test_run_and_status_functions_with_inline_thread(
     side_effect=BrandNotFoundError("c_miss", "b_miss"),
 )
 def test_run_marketing_team_brand_not_found(
-    _mock_fetch, temp_job_manager: CentralJobManager
+    _mock_fetch, temp_job_manager: JobServiceClient
 ) -> None:
     with pytest.raises(HTTPException) as exc_info:
         api_main.run_marketing_team(
@@ -149,7 +147,7 @@ def test_run_marketing_team_brand_not_found(
     assert exc_info.value.detail["error"] == "brand_not_found"
 
 
-def test_revise_marketing_team_missing_job_and_health(temp_job_manager: CentralJobManager) -> None:
+def test_revise_marketing_team_missing_job_and_health(temp_job_manager: JobServiceClient) -> None:
     with pytest.raises(HTTPException):
         api_main.revise_marketing_team(
             "missing",
@@ -159,7 +157,7 @@ def test_revise_marketing_team_missing_job_and_health(temp_job_manager: CentralJ
     assert api_main.health() == {"status": "ok"}
 
 
-def test_legacy_job_without_brand_ids_returns_410(temp_job_manager: CentralJobManager) -> None:
+def test_legacy_job_without_brand_ids_returns_410(temp_job_manager: JobServiceClient) -> None:
     """A job created before the brand requirement has no client_id/brand_id anywhere."""
     api_main._job_manager.create_job(
         "legacy-1",
@@ -183,7 +181,7 @@ def test_legacy_job_without_brand_ids_returns_410(temp_job_manager: CentralJobMa
     assert "predates the brand requirement" in exc_info.value.detail
 
 
-def test_job_backfills_brand_ids_from_request_payload(temp_job_manager: CentralJobManager) -> None:
+def test_job_backfills_brand_ids_from_request_payload(temp_job_manager: JobServiceClient) -> None:
     """A job that has client_id/brand_id in request_payload but not at top level."""
     api_main._job_manager.create_job(
         "backfill-1",

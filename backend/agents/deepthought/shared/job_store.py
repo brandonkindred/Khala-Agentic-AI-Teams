@@ -42,10 +42,7 @@ _client_instance: Optional[JobServiceClient] = None
 def _client() -> JobServiceClient:
     global _client_instance
     if _client_instance is None:
-        _client_instance = JobServiceClient(
-            team="deepthought",
-            cache_dir=str(DEFAULT_CACHE_DIR),
-        )
+        _client_instance = JobServiceClient(team="deepthought")
     return _client_instance
 
 

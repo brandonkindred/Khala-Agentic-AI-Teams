@@ -1,9 +1,8 @@
 """
 Job store for async API: persists job status and progress via the centralized job service.
 
-Uses ``JobServiceClient`` to communicate with the job service container over
-HTTP when ``JOB_SERVICE_URL`` is set, falling back to a local
-``CentralJobManager`` for non-Docker development.
+Uses ``JobServiceClient`` to communicate with the central job service over HTTP.
+``JOB_SERVICE_URL`` must be set; see ``backend/agents/job_service_client.py``.
 
 Stale jobs: JOB_STALE_AFTER_SECONDS (env JOB_STALE_AFTER_SECONDS, default 1800) is the
 age in seconds after which a pending/running job with no recent heartbeat is marked failed.
@@ -61,7 +60,7 @@ def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
             "Software engineering job store using JobServiceClient (team=software_engineering_team)"
         )
         _jobs_path_logged = True
-    return JobServiceClient(team="software_engineering_team", cache_dir=str(cache_dir))
+    return JobServiceClient(team="software_engineering_team")
 
 
 def create_job(

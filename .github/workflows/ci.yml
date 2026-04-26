@@ -108,8 +108,29 @@ jobs:
     defaults:
       run:
         working-directory: backend/agents
+    services:
+      # Postgres backs the in-process job service spun up by backend/conftest.py.
+      # Every test that creates/queries jobs goes through it (no file fallback).
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
     env:
       LLM_PROVIDER: dummy
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
     strategy:
       fail-fast: false
       matrix:
@@ -158,6 +179,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          # backend/conftest.py spins up backend/job_service/ in-process; install
+          # its deps so the import succeeds.
+          pip install -r ../job_service/requirements.txt
           if [ -n "${{ matrix.extra_requirements }}" ]; then
             pip install -r "${{ matrix.extra_requirements }}"
           fi

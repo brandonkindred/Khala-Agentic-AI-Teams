@@ -88,9 +88,10 @@ unified_api credentials) now require Postgres for local dev and tests —
 no SQLite fallback.
 
 ```bash
-# Start Postgres from the full stack compose file (or the tiny subset)
+# Start Postgres + the central job service (every team's JobServiceClient
+# requires JOB_SERVICE_URL — there is no longer a file-backed fallback).
 cp docker/.env.example docker/.env              # once, if not done
-docker compose -f docker/docker-compose.yml up -d postgres
+docker compose -f docker/docker-compose.yml up -d postgres job-service
 
 # Export the vars every shared_postgres caller reads
 export POSTGRES_HOST=localhost
@@ -99,7 +100,12 @@ export POSTGRES_USER=postgres
 export POSTGRES_PASSWORD=postgres
 export POSTGRES_DB=postgres
 
-# Now `pytest`, `uvicorn <team>.api.main:app`, etc. all work
+# Required by every team for job tracking
+export JOB_SERVICE_URL=http://localhost:8085
+
+# Now `make run`, `uvicorn <team>.api.main:app`, etc. all work.
+# `pytest` does not need JOB_SERVICE_URL exported — backend/conftest.py
+# spins up the job service in-process for the test session.
 ```
 
 Pool sizing is controlled by `POSTGRES_POOL_MIN_SIZE` (default 2) and

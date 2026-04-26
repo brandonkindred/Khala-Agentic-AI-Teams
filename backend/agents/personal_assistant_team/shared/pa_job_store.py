@@ -23,7 +23,7 @@ DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache")).re
 
 
 def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
-    return JobServiceClient(team="personal_assistant_team", cache_dir=str(cache_dir))
+    return JobServiceClient(team="personal_assistant_team")
 
 
 def create_job(
