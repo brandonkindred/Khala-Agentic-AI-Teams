@@ -49,6 +49,7 @@ from product_delivery.models import (
     TaskCreate,
 )
 from product_delivery.product_owner_agent import ProductOwnerAgent
+from product_delivery.product_owner_agent.agent import LLMScoringUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,9 @@ _EXC_STATUS: dict[type[Exception], int] = {
     CrossProductFeedbackLink: 400,
     UnknownProductDeliveryEntity: 404,
     ProductDeliveryStorageUnavailable: 503,
+    # LLM transport/model/parse failures during /groom — clients retry
+    # the same way they do for a Postgres outage.
+    LLMScoringUnavailable: 503,
 }
 
 

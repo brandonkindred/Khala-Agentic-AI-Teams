@@ -175,7 +175,17 @@ def test_groom_returns_empty_when_backlog_empty() -> None:
     assert llm.calls == []
 
 
-def test_groom_handles_llm_exception_gracefully() -> None:
+def test_groom_raises_llm_unavailable_on_end_to_end_llm_failure() -> None:
+    # End-to-end LLM failure (transport / model / parse) must surface as
+    # `LLMScoringUnavailable` so the route can return 503 and callers
+    # retry. Returning 200 with every story zero-scored would silently
+    # de-prioritise the backlog during a transient outage. (Per-story
+    # missing/malformed payloads are handled gracefully via the
+    # fallback path — see `test_groom_includes_stories_omitted_by_llm`.)
+    import pytest as _pytest
+
+    from product_delivery.product_owner_agent.agent import LLMScoringUnavailable
+
     class _BoomLLM:
         def complete_json(self, *a: Any, **kw: Any) -> dict[str, Any]:
             raise RuntimeError("model unreachable")
@@ -183,13 +193,8 @@ def test_groom_handles_llm_exception_gracefully() -> None:
     stories = [_story("s1")]
     store = _fake_store(stories=stories)
     agent = ProductOwnerAgent(store=store, llm_client=_BoomLLM())  # type: ignore[arg-type]
-    result = agent.groom(product_id="prod-x", method="wsjf")
-    # LLM exception → empty payload → missing-stories pass surfaces
-    # every backlog story with score=0 + a manual-review rationale so
-    # downstream planning doesn't silently lose work.
-    assert [r.id for r in result.ranked] == ["s1"]
-    assert result.ranked[0].score == 0.0
-    assert "manual review" in result.ranked[0].rationale
+    with _pytest.raises(LLMScoringUnavailable):
+        agent.groom(product_id="prod-x", method="wsjf")
 
 
 def test_groom_wsjf_treats_null_job_size_as_estimate_points_fallback() -> None:

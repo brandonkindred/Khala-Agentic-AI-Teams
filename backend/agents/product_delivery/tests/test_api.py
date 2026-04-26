@@ -580,6 +580,46 @@ def test_story_create_rejects_non_finite_estimate_points(client: TestClient, bad
     assert r.status_code == 422
 
 
+def test_groom_returns_503_when_llm_call_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # End-to-end LLM call failure (model unreachable, JSON parse blew up)
+    # must propagate as 503 — same shape as a Postgres outage — so
+    # callers retry instead of accepting a 200 with all-zero scores.
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+    eid = client.post(
+        "/api/product-delivery/epics",
+        json={"initiative_id": iid, "title": "E"},
+    ).json()["id"]
+    client.post(
+        "/api/product-delivery/stories",
+        json={"epic_id": eid, "title": "S", "estimate_points": 5},
+    )
+
+    import sys
+    import types
+
+    stub_module = types.ModuleType("llm_service")
+
+    class _BoomClient:
+        def complete_json(self, *a: Any, **kw: Any) -> dict[str, Any]:
+            raise RuntimeError("model unreachable")
+
+    stub_module.get_client = lambda *a, **kw: _BoomClient()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "llm_service", stub_module)
+
+    resp = client.post(
+        "/api/product-delivery/groom",
+        json={"product_id": pid, "method": "wsjf"},
+    )
+    assert resp.status_code == 503
+    assert "LLM scoring call failed" in resp.json()["detail"]
+
+
 def test_groom_returns_503_when_llm_client_bootstrap_fails(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

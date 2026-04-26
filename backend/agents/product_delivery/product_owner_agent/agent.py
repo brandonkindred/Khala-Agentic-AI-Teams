@@ -40,6 +40,14 @@ _MISSING_RATIONALE = "LLM did not score this story; needs manual review."
 _MALFORMED_RATIONALE = "LLM emitted malformed scoring inputs; needs manual review."
 
 
+class LLMScoringUnavailable(RuntimeError):
+    """The LLM call inside grooming failed end-to-end (transport, parse,
+    or model error). The route maps this to 503 so callers can retry —
+    a 200 with all-fallback zero-scores would silently de-prioritise
+    the entire backlog during a transient outage.
+    """
+
+
 def _to_float(value: Any, fallback: float) -> float:
     """Coerce an LLM-supplied value to a finite ``float`` with a typed fallback.
 
@@ -164,11 +172,24 @@ class ProductOwnerAgent:
             self._store.bulk_update_story_scores(persist_rows)
 
         ranked.sort(key=lambda r: r.score, reverse=True)
+        # Report the actual scored count (= persist_rows length) — not
+        # `len(ranked)`, which also includes synthetic fallback rows for
+        # missing/malformed LLM outputs. Otherwise downstream automation
+        # that parses the rationale overcounts scoring success.
+        scored = len(persist_rows)
+        total = len(stories)
+        if scored == total:
+            rationale = f"Scored {scored} stories using {method.upper()}."
+        else:
+            rationale = (
+                f"Scored {scored}/{total} stories using {method.upper()}; "
+                f"{total - scored} surfaced with score=0 for manual review."
+            )
         return GroomResult(
             product_id=product_id,
             method=method,
             ranked=ranked,
-            rationale=f"Scored {len(ranked)} stories using {method.upper()}.",
+            rationale=rationale,
         )
 
     # ------------------------------------------------------------------
@@ -196,9 +217,14 @@ class ProductOwnerAgent:
                 temperature=0.0,
                 system_prompt=SYSTEM_PROMPT,
             )
-        except Exception:
-            logger.exception("ProductOwnerAgent: LLM call failed; returning unscored backlog")
-            return {"items": []}
+        except Exception as exc:
+            # End-to-end LLM failure (network, model, JSON parse). Convert
+            # to a typed domain error so the route can return 503 and
+            # callers retry, instead of returning 200 with every story
+            # zero-scored. Per-story missing/malformed payloads are still
+            # handled gracefully downstream in `_compute_ranked`.
+            logger.exception("ProductOwnerAgent: LLM call failed; surfacing as 503")
+            raise LLMScoringUnavailable(f"LLM scoring call failed: {exc}") from exc
 
     def _compute_ranked(
         self,

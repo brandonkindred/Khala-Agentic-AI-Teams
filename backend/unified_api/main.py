@@ -217,6 +217,12 @@ async def lifespan(app: FastAPI):
     global _registered_teams
     logger.info("Starting Unified API Server...")
 
+    # Reset stale failure markers from a previous lifespan run (e.g.
+    # uvicorn `--reload`, in-process test fixtures that boot the app
+    # multiple times). Without this, a transient Postgres outage on the
+    # first boot would mark the team unhealthy forever.
+    _in_process_schema_failures.clear()
+
     # 0. Register Postgres schemas for modules that run in-process here
     #    (unified_api itself + the team_assistant conversation store that we
     #    mount as sub-apps). No-op when POSTGRES_HOST is unset.
@@ -246,14 +252,30 @@ async def lifespan(app: FastAPI):
 
     try:
         from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
-        from shared_postgres import register_team_schemas
+        from shared_postgres import ensure_team_schema, is_postgres_enabled
 
-        register_team_schemas(PRODUCT_DELIVERY_SCHEMA)
+        # Use `ensure_team_schema` directly (rather than the
+        # `register_team_schemas` boolean wrapper) so we can detect
+        # partial DDL: if a single CREATE/ALTER statement fails it's
+        # logged-and-skipped and `applied < total` — the team's still
+        # mounted but its persistence is broken.
+        if is_postgres_enabled():
+            applied = ensure_team_schema(PRODUCT_DELIVERY_SCHEMA)
+            total = len(PRODUCT_DELIVERY_SCHEMA.statements)
+            if applied < total:
+                logger.warning(
+                    "product_delivery: %d/%d DDL statements applied; marking unhealthy",
+                    applied,
+                    total,
+                )
+                _in_process_schema_failures.add("product_delivery")
+        else:
+            # Postgres disabled → every persistence call will 503.
+            # Mark unhealthy so /health doesn't disagree with the route.
+            logger.warning("product_delivery: Postgres disabled; persistence endpoints will return 503")
+            _in_process_schema_failures.add("product_delivery")
     except Exception:
         logger.exception("product_delivery postgres schema registration failed")
-        # Surface the failure through `/health` — the team is still
-        # mounted (so /docs and discovery work) but every persistence
-        # call will 503, so health must reflect that.
         _in_process_schema_failures.add("product_delivery")
 
     # 1. Mount team assistant conversational sub-apps (before proxy routes).
@@ -406,8 +428,12 @@ app.include_router(agents_router)
 app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
-app.include_router(product_delivery_router)
-register_pd_exception_handlers(app)
+# Honor the in-process team's `enabled` flag: an operator that disables
+# the team via TEAM_CONFIGS expects /api/product-delivery/* to stop
+# answering, not just disappear from /teams.
+if TEAM_CONFIGS["product_delivery"].enabled:
+    app.include_router(product_delivery_router)
+    register_pd_exception_handlers(app)
 
 
 # ---------------------------------------------------------------------------
