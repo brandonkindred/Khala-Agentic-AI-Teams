@@ -530,6 +530,16 @@ class ProductDeliveryStore:
         fid = _new_id()
         try:
             with self._conn() as conn, conn.cursor() as cur:
+                # Validate the product first so a bad product_id always
+                # surfaces as 404 (unknown), even when a valid story id
+                # is also supplied. Otherwise the cross-product check
+                # below would misclassify "unknown product" as 400.
+                cur.execute(
+                    "SELECT 1 FROM product_delivery_products WHERE id = %s",
+                    (product_id,),
+                )
+                if cur.fetchone() is None:
+                    raise UnknownProductDeliveryEntity(f"product {product_id!r} does not exist")
                 # When linked_story_id is set, verify the story is under the
                 # same product as the feedback item (story → epic → initiative
                 # → product). Done inside the same transaction so a concurrent

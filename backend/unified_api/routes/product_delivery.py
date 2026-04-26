@@ -190,6 +190,14 @@ def patch_status(kind: _StatusKind, entity_id: str, body: StatusUpdate) -> dict[
 
 @router.patch("/{kind}/{entity_id}/scores")
 def patch_scores(kind: _ScoredKind, entity_id: str, body: ScoreUpdate) -> dict[str, Any]:
+    # Distinguish "bad request" from "not found" so clients can branch
+    # correctly on retry / create flows. An empty body is a 400 even if
+    # the entity exists; an unknown id is a 404.
+    if body.wsjf_score is None and body.rice_score is None:
+        raise HTTPException(
+            status_code=400,
+            detail="at least one of wsjf_score / rice_score must be supplied",
+        )
     try:
         ok = get_store().update_scores(
             kind=kind,
@@ -200,10 +208,7 @@ def patch_scores(kind: _ScoredKind, entity_id: str, body: ScoreUpdate) -> dict[s
     except ProductDeliveryStorageUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not ok:
-        raise HTTPException(
-            status_code=404,
-            detail=f"unknown {kind} or no score fields supplied: {entity_id}",
-        )
+        raise HTTPException(status_code=404, detail=f"unknown {kind}: {entity_id}")
     return {"ok": True, "kind": kind, "id": entity_id}
 
 

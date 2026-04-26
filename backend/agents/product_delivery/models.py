@@ -118,7 +118,11 @@ class StoryCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     user_story: str = ""
     status: str = "proposed"
-    estimate_points: float | None = None
+    # Strictly positive: zero / negative effort silently inflates WSJF
+    # (job_size <= 0 clamps to 1) and RICE (effort <= 0 clamps to 1),
+    # which would let bad input bubble misleading priorities into the
+    # ranking. Reject at the API boundary instead.
+    estimate_points: float | None = Field(default=None, gt=0)
 
 
 class TaskCreate(BaseModel):

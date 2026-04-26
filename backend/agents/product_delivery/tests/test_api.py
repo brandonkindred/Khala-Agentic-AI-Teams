@@ -479,6 +479,95 @@ def test_status_patch_404_for_unknown_id(client: TestClient) -> None:
     assert r.status_code == 404
 
 
+def test_score_patch_empty_body_returns_400(client: TestClient) -> None:
+    # Empty (or all-null) score payload is a client error, not a 404 —
+    # otherwise clients can't tell "you sent nothing" from "the entity
+    # doesn't exist" and may incorrectly trigger a create/retry flow.
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+
+    r = client.patch(f"/api/product-delivery/initiative/{iid}/scores", json={})
+    assert r.status_code == 400
+    assert "wsjf_score" in r.json()["detail"]
+
+    r = client.patch(
+        f"/api/product-delivery/initiative/{iid}/scores",
+        json={"wsjf_score": None, "rice_score": None},
+    )
+    assert r.status_code == 400
+
+
+def test_score_patch_404_for_unknown_id_with_real_payload(client: TestClient) -> None:
+    # Sanity check: a well-formed payload against an unknown id is still 404.
+    r = client.patch(
+        "/api/product-delivery/initiative/missing/scores",
+        json={"wsjf_score": 1.0},
+    )
+    assert r.status_code == 404
+
+
+def test_story_create_rejects_non_positive_estimate_points(client: TestClient) -> None:
+    # Negative / zero estimates would feed into WSJF/RICE denominators
+    # which clamp to 1, silently inflating priority. Reject at the API.
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+    eid = client.post(
+        "/api/product-delivery/epics",
+        json={"initiative_id": iid, "title": "E"},
+    ).json()["id"]
+
+    for bad in (0, -3.5):
+        r = client.post(
+            "/api/product-delivery/stories",
+            json={"epic_id": eid, "title": "S", "estimate_points": bad},
+        )
+        assert r.status_code == 422, f"estimate_points={bad} should be rejected"
+
+    # None is still allowed (means "unestimated").
+    r = client.post(
+        "/api/product-delivery/stories",
+        json={"epic_id": eid, "title": "S", "estimate_points": None},
+    )
+    assert r.status_code == 200
+
+
+def test_feedback_unknown_product_with_valid_story_returns_404(client: TestClient) -> None:
+    # When both product_id and linked_story_id are supplied and the
+    # product doesn't exist, the route must return 404 (unknown product),
+    # not 400 (cross-product link). Otherwise clients misclassify the
+    # error and may trigger the wrong recovery flow.
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+    eid = client.post(
+        "/api/product-delivery/epics",
+        json={"initiative_id": iid, "title": "E"},
+    ).json()["id"]
+    sid = client.post(
+        "/api/product-delivery/stories",
+        json={"epic_id": eid, "title": "S"},
+    ).json()["id"]
+
+    r = client.post(
+        "/api/product-delivery/feedback",
+        json={
+            "product_id": "ghost-product",
+            "source": "qa",
+            "linked_story_id": sid,
+        },
+    )
+    assert r.status_code == 404
+    assert "ghost-product" in r.json()["detail"]
+
+
 def test_feedback_create_and_list_filters_by_status(client: TestClient) -> None:
     pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
     client.post(
