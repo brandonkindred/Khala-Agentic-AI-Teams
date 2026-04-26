@@ -39,6 +39,8 @@ def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
 
 
 def create_job(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR, **fields: Any) -> None:
+    # Don't let a caller-supplied ``status=...`` collide with the kwarg below.
+    fields.pop("status", None)
     _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
 
 
