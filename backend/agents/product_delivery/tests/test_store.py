@@ -28,7 +28,6 @@ pytestmark = pytest.mark.skipif(
 def _provision_schema() -> None:
     register_team_schemas(SCHEMA)
     truncate_team_tables(SCHEMA)
-    get_store.cache_clear()
 
 
 def _store() -> ProductDeliveryStore:

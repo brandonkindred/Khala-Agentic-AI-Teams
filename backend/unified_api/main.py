@@ -381,7 +381,12 @@ from unified_api.routes.analytics import router as analytics_router
 from unified_api.routes.integrations import router as integrations_router
 from unified_api.routes.llm_tools import router as llm_tools_router
 from unified_api.routes.llm_usage import router as llm_usage_router
-from unified_api.routes.product_delivery import router as product_delivery_router
+from unified_api.routes.product_delivery import (
+    register_pd_exception_handlers,
+)
+from unified_api.routes.product_delivery import (
+    router as product_delivery_router,
+)
 from unified_api.routes.sandboxes import router as sandboxes_router
 
 app.include_router(integrations_router)
@@ -393,6 +398,7 @@ app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
 app.include_router(product_delivery_router)
+register_pd_exception_handlers(app)
 
 
 # ---------------------------------------------------------------------------

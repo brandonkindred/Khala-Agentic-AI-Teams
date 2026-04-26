@@ -5,26 +5,40 @@ Mirrors :mod:`agent_console.store` in shape:
 * stateless class — pool lives in ``shared_postgres``;
 * one public method per operation, decorated with ``@timed_query``;
 * methods translate Postgres errors into typed domain exceptions;
-* :func:`get_store` returns a process-wide singleton via ``lru_cache``.
+* :func:`get_store` returns the process-wide singleton.
 
 The store does not manage transactions across operations; each method is
 its own transaction (``shared_postgres.get_conn`` commits on clean exit,
 rolls back on error). Multi-row writes that need atomicity (e.g. the
 grooming endpoint persisting scores for many stories) call the store
 inside an explicit transaction at the route layer.
+
+Internal layout:
+
+* ``_ROW_SPECS`` is the single source of truth for "what kind of row is
+  this": the table name, the parent FK label used in error messages,
+  and the Pydantic model used to project a row dict back to a typed
+  return value. Both the create-shim methods and the status / score
+  update methods key off it.
+
+* ``_*_COLS`` constants hold each table's projection column list once,
+  so a typo can't drop a column from one query while leaving another
+  query's projection intact.
 """
 
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import lru_cache
-from typing import Any, Iterable
+from typing import Any, Iterable, TypeVar
 from uuid import uuid4
 
 from psycopg import errors as psycopg_errors
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
+from pydantic import BaseModel
 
 from shared_postgres import get_conn, is_postgres_enabled
 from shared_postgres.metrics import timed_query
@@ -47,6 +61,11 @@ logger = logging.getLogger(__name__)
 _STORE = "product_delivery"
 
 
+# ---------------------------------------------------------------------------
+# Domain exceptions
+# ---------------------------------------------------------------------------
+
+
 class ProductDeliveryStorageUnavailable(RuntimeError):
     """Postgres isn't configured, unreachable, or the pool is shut down."""
 
@@ -65,8 +84,99 @@ class CrossProductFeedbackLink(ValueError):
     """
 
 
+# ---------------------------------------------------------------------------
+# Row specs + per-table column constants — single source of truth.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _RowSpec:
+    table: str
+    model: type[BaseModel]
+    parent_fk: str  # human label for FK-violation errors
+
+
+_ROW_SPECS: dict[str, _RowSpec] = {
+    "initiative": _RowSpec("product_delivery_initiatives", Initiative, "product"),
+    "epic": _RowSpec("product_delivery_epics", Epic, "initiative"),
+    "story": _RowSpec("product_delivery_stories", Story, "epic"),
+    "task": _RowSpec("product_delivery_tasks", Task, "story"),
+    "ac": _RowSpec("product_delivery_acceptance_criteria", AcceptanceCriterion, "story"),
+}
+
+_STATUS_KINDS = frozenset({"initiative", "epic", "story", "task"})
+_SCORED_KINDS = frozenset({"initiative", "epic", "story"})
+
+_AUDIT_COLS = "author, created_at, updated_at"
+_PRODUCT_COLS = f"id, name, description, vision, {_AUDIT_COLS}"
+_SCORED_HEAD = "title, summary, status, wsjf_score, rice_score"
+_INITIATIVE_COLS = f"id, product_id, {_SCORED_HEAD}, {_AUDIT_COLS}"
+_EPIC_COLS = f"id, initiative_id, {_SCORED_HEAD}, {_AUDIT_COLS}"
+_STORY_COLS = (
+    f"id, epic_id, title, user_story, status, wsjf_score, rice_score, "
+    f"estimate_points, {_AUDIT_COLS}"
+)
+_TASK_COLS = f"id, story_id, title, description, status, owner, {_AUDIT_COLS}"
+_AC_COLS = f"id, story_id, text, satisfied, {_AUDIT_COLS}"
+_FEEDBACK_COLS = (
+    f"id, product_id, source, raw_payload, severity, status, linked_story_id, {_AUDIT_COLS}"
+)
+
+
+_T = TypeVar("_T", bound=BaseModel)
+
+
+def _bucket_by(rows: list[dict[str, Any]], key: str, model: type[_T]) -> dict[str, list[_T]]:
+    """Group raw row dicts by `parent_id` and validate them through ``model``.
+
+    Used by ``get_backlog_tree`` to assemble the nested tree from the
+    flat per-level fetches without a per-parent SQL query.
+    """
+    buckets: defaultdict[str, list[_T]] = defaultdict(list)
+    for row in rows:
+        buckets[row[key]].append(model.model_validate(row))
+    return buckets
+
+
+# ---------------------------------------------------------------------------
+# Store
+# ---------------------------------------------------------------------------
+
+
 class ProductDeliveryStore:
     """Stateless DAL. Construct once per process; pool is shared."""
+
+    # ------------------------------------------------------------------
+    # Generic insert — used by all create_* shims below.
+    # ------------------------------------------------------------------
+
+    def _insert(self, kind: str, **fields: Any) -> Any:
+        """INSERT a row and return the validated Pydantic model.
+
+        Auto-fills ``id`` (if not supplied), ``created_at``, ``updated_at``.
+        Translates a foreign-key violation into ``UnknownProductDeliveryEntity``
+        with the parent label from :data:`_ROW_SPECS`.
+        """
+        spec = _ROW_SPECS[kind]
+        now = _now()
+        fields.setdefault("id", _new_id())
+        fields.setdefault("author", fields.get("author"))  # required by callers
+        fields["created_at"] = now
+        fields["updated_at"] = now
+        cols = ", ".join(fields)
+        placeholders = ", ".join(["%s"] * len(fields))
+        # Adapt JSONB-typed columns. Currently only `raw_payload` on
+        # feedback_items needs it; future kinds add their key to this set.
+        adapted = {k: (Json(v) if k == "raw_payload" else v) for k, v in fields.items()}
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {spec.table} ({cols}) VALUES ({placeholders})",
+                    list(adapted.values()),
+                )
+        except psycopg_errors.ForeignKeyViolation as exc:
+            raise UnknownProductDeliveryEntity(f"{spec.parent_fk} does not exist") from exc
+        return spec.model.model_validate(fields)
 
     # ------------------------------------------------------------------
     # Products
@@ -78,8 +188,7 @@ class ProductDeliveryStore:
         pid = _new_id()
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO product_delivery_products
-                      (id, name, description, vision, author, created_at, updated_at)
+                f"""INSERT INTO product_delivery_products ({_PRODUCT_COLS})
                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                 (pid, name, description, vision, author, now, now),
             )
@@ -97,9 +206,7 @@ class ProductDeliveryStore:
     def list_products(self) -> list[Product]:
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT id, name, description, vision, author, created_at, updated_at
-                   FROM product_delivery_products
-                   ORDER BY created_at DESC"""
+                f"SELECT {_PRODUCT_COLS} FROM product_delivery_products ORDER BY created_at DESC"
             )
             return [Product.model_validate(row) for row in cur.fetchall()]
 
@@ -107,85 +214,42 @@ class ProductDeliveryStore:
     def get_product(self, product_id: str) -> Product | None:
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT id, name, description, vision, author, created_at, updated_at
-                   FROM product_delivery_products WHERE id = %s""",
+                f"SELECT {_PRODUCT_COLS} FROM product_delivery_products WHERE id = %s",
                 (product_id,),
             )
             row = cur.fetchone()
             return Product.model_validate(row) if row else None
 
     # ------------------------------------------------------------------
-    # Initiatives / Epics / Stories — uniform CRUD via _create_scored.
+    # Initiatives / Epics / Stories / Tasks / Acceptance criteria —
+    # thin shims over `_insert`. Public signatures are unchanged so the
+    # route layer and tests stay identical.
     # ------------------------------------------------------------------
 
     @timed_query(store=_STORE, op="create_initiative")
     def create_initiative(
-        self,
-        *,
-        product_id: str,
-        title: str,
-        summary: str,
-        status: str,
-        author: str,
+        self, *, product_id: str, title: str, summary: str, status: str, author: str
     ) -> Initiative:
-        now = _now()
-        iid = _new_id()
-        try:
-            with self._conn() as conn, conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO product_delivery_initiatives
-                          (id, product_id, title, summary, status, author,
-                           created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (iid, product_id, title, summary, status, author, now, now),
-                )
-        except psycopg_errors.ForeignKeyViolation as exc:
-            raise UnknownProductDeliveryEntity(f"product {product_id!r} does not exist") from exc
-        return Initiative(
-            id=iid,
+        return self._insert(
+            "initiative",
             product_id=product_id,
             title=title,
             summary=summary,
             status=status,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
 
     @timed_query(store=_STORE, op="create_epic")
     def create_epic(
-        self,
-        *,
-        initiative_id: str,
-        title: str,
-        summary: str,
-        status: str,
-        author: str,
+        self, *, initiative_id: str, title: str, summary: str, status: str, author: str
     ) -> Epic:
-        now = _now()
-        eid = _new_id()
-        try:
-            with self._conn() as conn, conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO product_delivery_epics
-                          (id, initiative_id, title, summary, status, author,
-                           created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (eid, initiative_id, title, summary, status, author, now, now),
-                )
-        except psycopg_errors.ForeignKeyViolation as exc:
-            raise UnknownProductDeliveryEntity(
-                f"initiative {initiative_id!r} does not exist"
-            ) from exc
-        return Epic(
-            id=eid,
+        return self._insert(
+            "epic",
             initiative_id=initiative_id,
             title=title,
             summary=summary,
             status=status,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
 
     @timed_query(store=_STORE, op="create_story")
@@ -199,39 +263,14 @@ class ProductDeliveryStore:
         estimate_points: float | None,
         author: str,
     ) -> Story:
-        now = _now()
-        sid = _new_id()
-        try:
-            with self._conn() as conn, conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO product_delivery_stories
-                          (id, epic_id, title, user_story, status,
-                           estimate_points, author, created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        sid,
-                        epic_id,
-                        title,
-                        user_story,
-                        status,
-                        estimate_points,
-                        author,
-                        now,
-                        now,
-                    ),
-                )
-        except psycopg_errors.ForeignKeyViolation as exc:
-            raise UnknownProductDeliveryEntity(f"epic {epic_id!r} does not exist") from exc
-        return Story(
-            id=sid,
+        return self._insert(
+            "story",
             epic_id=epic_id,
             title=title,
             user_story=user_story,
             status=status,
             estimate_points=estimate_points,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
 
     @timed_query(store=_STORE, op="create_task")
@@ -245,82 +284,37 @@ class ProductDeliveryStore:
         owner: str | None,
         author: str,
     ) -> Task:
-        now = _now()
-        tid = _new_id()
-        try:
-            with self._conn() as conn, conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO product_delivery_tasks
-                          (id, story_id, title, description, status, owner,
-                           author, created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (tid, story_id, title, description, status, owner, author, now, now),
-                )
-        except psycopg_errors.ForeignKeyViolation as exc:
-            raise UnknownProductDeliveryEntity(f"story {story_id!r} does not exist") from exc
-        return Task(
-            id=tid,
+        return self._insert(
+            "task",
             story_id=story_id,
             title=title,
             description=description,
             status=status,
             owner=owner,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
 
     @timed_query(store=_STORE, op="create_acceptance_criterion")
     def create_acceptance_criterion(
-        self,
-        *,
-        story_id: str,
-        text: str,
-        satisfied: bool,
-        author: str,
+        self, *, story_id: str, text: str, satisfied: bool, author: str
     ) -> AcceptanceCriterion:
-        now = _now()
-        aid = _new_id()
-        try:
-            with self._conn() as conn, conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO product_delivery_acceptance_criteria
-                          (id, story_id, text, satisfied, author,
-                           created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    (aid, story_id, text, satisfied, author, now, now),
-                )
-        except psycopg_errors.ForeignKeyViolation as exc:
-            raise UnknownProductDeliveryEntity(f"story {story_id!r} does not exist") from exc
-        return AcceptanceCriterion(
-            id=aid,
+        return self._insert(
+            "ac",
             story_id=story_id,
             text=text,
             satisfied=satisfied,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
 
     # ------------------------------------------------------------------
-    # Status / score updates — generic helpers keep route code small.
+    # Status / score updates.
     # ------------------------------------------------------------------
-
-    _SCORED_TABLES = {
-        "initiative": "product_delivery_initiatives",
-        "epic": "product_delivery_epics",
-        "story": "product_delivery_stories",
-    }
-    _STATUS_TABLES = {
-        **_SCORED_TABLES,
-        "task": "product_delivery_tasks",
-    }
 
     @timed_query(store=_STORE, op="update_status")
     def update_status(self, *, kind: str, entity_id: str, status: str) -> bool:
-        table = self._STATUS_TABLES.get(kind)
-        if table is None:
+        if kind not in _STATUS_KINDS:
             raise ValueError(f"unknown kind for status update: {kind!r}")
+        table = _ROW_SPECS[kind].table
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"UPDATE {table} SET status = %s, updated_at = %s WHERE id = %s",
@@ -337,9 +331,9 @@ class ProductDeliveryStore:
         wsjf_score: float | None,
         rice_score: float | None,
     ) -> bool:
-        table = self._SCORED_TABLES.get(kind)
-        if table is None:
+        if kind not in _SCORED_KINDS:
             raise ValueError(f"unknown kind for score update: {kind!r}")
+        table = _ROW_SPECS[kind].table
         sets: list[str] = []
         params: list[Any] = []
         if wsjf_score is not None:
@@ -366,26 +360,25 @@ class ProductDeliveryStore:
     ) -> int:
         """Persist a batch of (story_id, wsjf, rice) updates in one transaction.
 
-        Returns the number of rows actually updated. Used by the grooming
-        route so a re-groom is atomic from the client's perspective.
+        Uses ``executemany`` so the whole batch ships in a single
+        client/server round trip. Returns the number of rows actually
+        updated (psycopg's ``rowcount`` after ``executemany`` is the
+        sum of per-statement row counts).
         """
         rows_list = list(rows)
         if not rows_list:
             return 0
         now = _now()
         with self._conn() as conn, conn.cursor() as cur:
-            updated = 0
-            for sid, wsjf, rice in rows_list:
-                cur.execute(
-                    """UPDATE product_delivery_stories
-                       SET wsjf_score = COALESCE(%s, wsjf_score),
-                           rice_score = COALESCE(%s, rice_score),
-                           updated_at = %s
-                       WHERE id = %s""",
-                    (wsjf, rice, now, sid),
-                )
-                updated += cur.rowcount
-            return updated
+            cur.executemany(
+                """UPDATE product_delivery_stories
+                   SET wsjf_score = COALESCE(%s, wsjf_score),
+                       rice_score = COALESCE(%s, rice_score),
+                       updated_at = %s
+                   WHERE id = %s""",
+                [(w, r, now, sid) for sid, w, r in rows_list],
+            )
+            return cur.rowcount
 
     # ------------------------------------------------------------------
     # Backlog read — single-product nested tree.
@@ -406,8 +399,7 @@ class ProductDeliveryStore:
             return None
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT id, product_id, title, summary, status, wsjf_score, rice_score,
-                          author, created_at, updated_at
+                f"""SELECT {_INITIATIVE_COLS}
                    FROM product_delivery_initiatives WHERE product_id = %s
                    ORDER BY created_at""",
                 (product_id,),
@@ -418,8 +410,7 @@ class ProductDeliveryStore:
             initiative_ids = [i["id"] for i in initiatives_raw]
 
             cur.execute(
-                """SELECT id, initiative_id, title, summary, status, wsjf_score, rice_score,
-                          author, created_at, updated_at
+                f"""SELECT {_EPIC_COLS}
                    FROM product_delivery_epics
                    WHERE initiative_id = ANY(%s)
                    ORDER BY created_at""",
@@ -433,8 +424,7 @@ class ProductDeliveryStore:
             acs_raw: list[dict[str, Any]] = []
             if epic_ids:
                 cur.execute(
-                    """SELECT id, epic_id, title, user_story, status, wsjf_score, rice_score,
-                              estimate_points, author, created_at, updated_at
+                    f"""SELECT {_STORY_COLS}
                        FROM product_delivery_stories
                        WHERE epic_id = ANY(%s)
                        ORDER BY created_at""",
@@ -444,8 +434,7 @@ class ProductDeliveryStore:
                 story_ids = [s["id"] for s in stories_raw]
                 if story_ids:
                     cur.execute(
-                        """SELECT id, story_id, title, description, status, owner,
-                                  author, created_at, updated_at
+                        f"""SELECT {_TASK_COLS}
                            FROM product_delivery_tasks
                            WHERE story_id = ANY(%s)
                            ORDER BY created_at""",
@@ -453,8 +442,7 @@ class ProductDeliveryStore:
                     )
                     tasks_raw = cur.fetchall()
                     cur.execute(
-                        """SELECT id, story_id, text, satisfied, author,
-                                  created_at, updated_at
+                        f"""SELECT {_AC_COLS}
                            FROM product_delivery_acceptance_criteria
                            WHERE story_id = ANY(%s)
                            ORDER BY created_at""",
@@ -464,15 +452,11 @@ class ProductDeliveryStore:
 
         # Bucket children by parent id, preserving fetch order (which is
         # already created_at thanks to the ORDER BY above).
-        tasks_by_story: dict[str, list[Task]] = {}
-        for t in tasks_raw:
-            tasks_by_story.setdefault(t["story_id"], []).append(Task.model_validate(t))
-        acs_by_story: dict[str, list[AcceptanceCriterion]] = {}
-        for a in acs_raw:
-            acs_by_story.setdefault(a["story_id"], []).append(AcceptanceCriterion.model_validate(a))
-        stories_by_epic: dict[str, list[StoryNode]] = {}
+        tasks_by_story = _bucket_by(tasks_raw, "story_id", Task)
+        acs_by_story = _bucket_by(acs_raw, "story_id", AcceptanceCriterion)
+        stories_by_epic: defaultdict[str, list[StoryNode]] = defaultdict(list)
         for srow in stories_raw:
-            stories_by_epic.setdefault(srow["epic_id"], []).append(
+            stories_by_epic[srow["epic_id"]].append(
                 StoryNode.model_validate(
                     {
                         **srow,
@@ -481,9 +465,9 @@ class ProductDeliveryStore:
                     }
                 )
             )
-        epics_by_initiative: dict[str, list[EpicNode]] = {}
+        epics_by_initiative: defaultdict[str, list[EpicNode]] = defaultdict(list)
         for erow in epics_raw:
-            epics_by_initiative.setdefault(erow["initiative_id"], []).append(
+            epics_by_initiative[erow["initiative_id"]].append(
                 EpicNode.model_validate({**erow, "stories": stories_by_epic.get(erow["id"], [])})
             )
         initiatives = [
@@ -499,9 +483,7 @@ class ProductDeliveryStore:
         """Flat list of every story under a product. Used by the grooming agent."""
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT s.id, s.epic_id, s.title, s.user_story, s.status,
-                          s.wsjf_score, s.rice_score, s.estimate_points,
-                          s.author, s.created_at, s.updated_at
+                f"""SELECT {_STORY_COLS.replace("id, ", "s.id, ")}
                    FROM product_delivery_stories s
                    JOIN product_delivery_epics e ON e.id = s.epic_id
                    JOIN product_delivery_initiatives i ON i.id = e.initiative_id
@@ -526,63 +508,52 @@ class ProductDeliveryStore:
         linked_story_id: str | None,
         author: str,
     ) -> FeedbackItem:
+        # Validate product + cross-product linkage first, then insert. We
+        # don't go through `_insert` because feedback_items needs the
+        # validation-then-insert sequence inside one transaction (so a
+        # concurrent delete of the linking chain can't slip past us).
         now = _now()
         fid = _new_id()
-        try:
-            with self._conn() as conn, conn.cursor() as cur:
-                # Validate the product first so a bad product_id always
-                # surfaces as 404 (unknown), even when a valid story id
-                # is also supplied. Otherwise the cross-product check
-                # below would misclassify "unknown product" as 400.
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM product_delivery_products WHERE id = %s",
+                (product_id,),
+            )
+            if cur.fetchone() is None:
+                raise UnknownProductDeliveryEntity(f"product {product_id!r} does not exist")
+            if linked_story_id is not None:
                 cur.execute(
-                    "SELECT 1 FROM product_delivery_products WHERE id = %s",
-                    (product_id,),
+                    """SELECT i.product_id
+                       FROM product_delivery_stories s
+                       JOIN product_delivery_epics e ON e.id = s.epic_id
+                       JOIN product_delivery_initiatives i ON i.id = e.initiative_id
+                       WHERE s.id = %s""",
+                    (linked_story_id,),
                 )
-                if cur.fetchone() is None:
-                    raise UnknownProductDeliveryEntity(f"product {product_id!r} does not exist")
-                # When linked_story_id is set, verify the story is under the
-                # same product as the feedback item (story → epic → initiative
-                # → product). Done inside the same transaction so a concurrent
-                # delete of the linking chain can't slip a stale row past us.
-                if linked_story_id is not None:
-                    cur.execute(
-                        """SELECT i.product_id
-                           FROM product_delivery_stories s
-                           JOIN product_delivery_epics e ON e.id = s.epic_id
-                           JOIN product_delivery_initiatives i ON i.id = e.initiative_id
-                           WHERE s.id = %s""",
-                        (linked_story_id,),
+                row = cur.fetchone()
+                if row is None:
+                    raise UnknownProductDeliveryEntity(f"story {linked_story_id!r} does not exist")
+                if row[0] != product_id:
+                    raise CrossProductFeedbackLink(
+                        f"story {linked_story_id!r} belongs to product "
+                        f"{row[0]!r}, not {product_id!r}"
                     )
-                    row = cur.fetchone()
-                    if row is None:
-                        raise UnknownProductDeliveryEntity(
-                            f"story {linked_story_id!r} does not exist"
-                        )
-                    if row[0] != product_id:
-                        raise CrossProductFeedbackLink(
-                            f"story {linked_story_id!r} belongs to product "
-                            f"{row[0]!r}, not {product_id!r}"
-                        )
-                cur.execute(
-                    """INSERT INTO product_delivery_feedback_items
-                          (id, product_id, source, raw_payload, severity, status,
-                           linked_story_id, author, created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        fid,
-                        product_id,
-                        source,
-                        Json(raw_payload),
-                        severity,
-                        "open",
-                        linked_story_id,
-                        author,
-                        now,
-                        now,
-                    ),
-                )
-        except psycopg_errors.ForeignKeyViolation as exc:
-            raise UnknownProductDeliveryEntity(f"product {product_id!r} does not exist") from exc
+            cur.execute(
+                f"""INSERT INTO product_delivery_feedback_items ({_FEEDBACK_COLS})
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    fid,
+                    product_id,
+                    source,
+                    Json(raw_payload),
+                    severity,
+                    "open",
+                    linked_story_id,
+                    author,
+                    now,
+                    now,
+                ),
+            )
         return FeedbackItem(
             id=fid,
             product_id=product_id,
@@ -603,25 +574,14 @@ class ProductDeliveryStore:
         *,
         status: str | None = None,
     ) -> list[FeedbackItem]:
+        sql = f"SELECT {_FEEDBACK_COLS} FROM product_delivery_feedback_items WHERE product_id = %s"
+        params: list[Any] = [product_id]
+        if status is not None:
+            sql += " AND status = %s"
+            params.append(status)
+        sql += " ORDER BY created_at DESC"
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            if status is None:
-                cur.execute(
-                    """SELECT id, product_id, source, raw_payload, severity, status,
-                              linked_story_id, author, created_at, updated_at
-                       FROM product_delivery_feedback_items
-                       WHERE product_id = %s
-                       ORDER BY created_at DESC""",
-                    (product_id,),
-                )
-            else:
-                cur.execute(
-                    """SELECT id, product_id, source, raw_payload, severity, status,
-                              linked_story_id, author, created_at, updated_at
-                       FROM product_delivery_feedback_items
-                       WHERE product_id = %s AND status = %s
-                       ORDER BY created_at DESC""",
-                    (product_id, status),
-                )
+            cur.execute(sql, params)
             return [FeedbackItem.model_validate(row) for row in cur.fetchall()]
 
     # ------------------------------------------------------------------
@@ -647,6 +607,12 @@ def _new_id() -> str:
     return uuid4().hex
 
 
-@lru_cache(maxsize=1)
+# Process-wide singleton. The store has no constructor side effects and
+# the connection pool lives in ``shared_postgres``, so a module-level
+# instance is sufficient — no `lru_cache` dance, no `cache_clear()`
+# calls in tests.
+_STORE_INSTANCE = ProductDeliveryStore()
+
+
 def get_store() -> ProductDeliveryStore:
-    return ProductDeliveryStore()
+    return _STORE_INSTANCE

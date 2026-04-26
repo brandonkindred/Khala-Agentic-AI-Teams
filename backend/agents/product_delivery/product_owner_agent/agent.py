@@ -36,23 +36,20 @@ from product_delivery.store import ProductDeliveryStore
 
 logger = logging.getLogger(__name__)
 
+_MISSING_RATIONALE = "LLM did not score this story; needs manual review."
+
 
 def _to_float(value: Any, fallback: float) -> float:
     """Coerce an LLM-supplied value to a finite ``float`` with a typed fallback.
 
-    Models routinely emit explicit ``null`` for fields they're unsure
-    about (especially the denominator-shaped ones like ``job_size`` and
-    ``effort``). ``float(None)`` raises ``TypeError`` and the outer
-    handler skips the whole story — so we'd silently drop items from
-    the ranking. Treat ``None`` (and missing) the same as the fallback.
+    Handles three lossy LLM behaviours:
 
-    Models also occasionally emit ``"NaN"`` or ``"Infinity"`` for fields
-    they refuse to commit to. ``float()`` accepts both, but non-finite
-    scores break Starlette's JSON encoder downstream and corrupt
-    persisted ranking data — so we treat them the same as ``None`` and
-    fall back, not raise. The outer ``try`` only catches malformed
-    values that genuinely can't be coerced; a finite fallback is the
-    safer default for a lossy LLM input.
+    * explicit ``null`` → returns the fallback (``float(None)`` would
+      otherwise raise ``TypeError`` and skip the whole story);
+    * non-finite ``"NaN"`` / ``"Infinity"`` → returns the fallback
+      (those would later break Starlette's JSON encoder if persisted);
+    * malformed strings → propagates ``ValueError``/``TypeError`` for
+      the caller's exception handler to log + skip.
     """
     if value is None:
         return float(fallback)
@@ -60,6 +57,65 @@ def _to_float(value: Any, fallback: float) -> float:
     if not math.isfinite(coerced):
         return float(fallback)
     return coerced
+
+
+def _score_for(
+    method: GroomMethod, inputs: dict[str, Any], story: Story
+) -> tuple[float, float | None, float | None]:
+    """Compute (score, wsjf_value, rice_value) for one story.
+
+    Centralises the WSJF/RICE branching so the loop in ``_compute_ranked``
+    doesn't have to. The two unused per-method values stay ``None`` so
+    ``RankedBacklogItem`` and ``persist_rows`` keep their typed shape.
+    """
+    if method == "wsjf":
+        wsjf = wsjf_score(
+            WSJFInputs(
+                user_business_value=_to_float(inputs.get("user_business_value"), 0.0),
+                time_criticality=_to_float(inputs.get("time_criticality"), 0.0),
+                risk_reduction_or_opportunity_enablement=_to_float(
+                    inputs.get("risk_reduction_or_opportunity_enablement"), 0.0
+                ),
+                job_size=_to_float(inputs.get("job_size"), story.estimate_points or 1.0),
+            )
+        )
+        return wsjf, wsjf, None
+    rice = rice_score(
+        RICEInputs(
+            reach=_to_float(inputs.get("reach"), 0.0),
+            impact=_to_float(inputs.get("impact"), 0.0),
+            confidence=_to_float(inputs.get("confidence"), 0.0),
+            effort=_to_float(inputs.get("effort"), (story.estimate_points or 4.0) / 4.0),
+        )
+    )
+    return rice, None, rice
+
+
+def _index_payload(payload: Any) -> dict[str, dict[str, Any]]:
+    """Build ``{story_id: raw_item}`` from the LLM response.
+
+    Filters out non-dict items + items without a string id, and warns on
+    duplicate ids (first occurrence wins so persisted scores stay
+    deterministic instead of depending on which copy lands last).
+    """
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return {}
+    indexed: dict[str, dict[str, Any]] = {}
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        sid = raw.get("id")
+        if not isinstance(sid, str):
+            continue
+        if sid in indexed:
+            logger.warning(
+                "ProductOwnerAgent: duplicate story id %s in LLM payload; ignoring repeat",
+                sid,
+            )
+            continue
+        indexed[sid] = raw
+    return indexed
 
 
 class _LLMLike(Protocol):
@@ -149,65 +205,42 @@ class ProductOwnerAgent:
         stories: list[Story],
         payload: dict[str, Any],
     ) -> tuple[list[RankedBacklogItem], list[tuple[str, float | None, float | None]]]:
-        by_id = {s.id: s for s in stories}
+        """Build the ranked list + the persist payload.
+
+        Iterates ``stories`` (each id seen once, no dedup needed) and
+        looks up the LLM's scoring inputs by id. Stories the LLM
+        omitted get a synthetic ``score=0`` row with a manual-review
+        rationale so downstream planning never silently loses work;
+        synthetic rows are *not* persisted (the existing scores on the
+        row stay intact).
+        """
+        payload_by_id = _index_payload(payload)
         ranked: list[RankedBacklogItem] = []
         persist_rows: list[tuple[str, float | None, float | None]] = []
-        seen_ids: set[str] = set()
-        items = payload.get("items") if isinstance(payload, dict) else None
-        if not isinstance(items, list):
-            items = []
 
-        for raw in items:
-            if not isinstance(raw, dict):
-                continue
-            sid = raw.get("id")
-            story = by_id.get(sid) if isinstance(sid, str) else None
-            if story is None:
-                continue
-            # Models occasionally repeat the same id (truncation + retry,
-            # confused JSON). Take the first occurrence and warn on the
-            # rest so persisted scores stay deterministic instead of
-            # depending on whichever copy lands last.
-            if story.id in seen_ids:
+        for story in stories:
+            raw = payload_by_id.get(story.id)
+            if raw is None:
                 logger.warning(
-                    "ProductOwnerAgent: duplicate story id %s in LLM payload; ignoring repeat",
+                    "ProductOwnerAgent: story %s missing from LLM output; including with score=0",
                     story.id,
                 )
+                ranked.append(
+                    RankedBacklogItem(
+                        kind="story",
+                        id=story.id,
+                        title=story.title,
+                        score=0.0,
+                        wsjf_score=0.0 if method == "wsjf" else None,
+                        rice_score=0.0 if method == "rice" else None,
+                        rationale=_MISSING_RATIONALE,
+                    )
+                )
                 continue
-            inputs = raw.get("inputs") if isinstance(raw.get("inputs"), dict) else {}
-            rationale = str(raw.get("rationale") or "")
 
-            wsjf_value: float | None = None
-            rice_value: float | None = None
+            inputs = raw.get("inputs") if isinstance(raw.get("inputs"), dict) else {}
             try:
-                if method == "wsjf":
-                    wsjf_value = wsjf_score(
-                        WSJFInputs(
-                            user_business_value=_to_float(inputs.get("user_business_value"), 0.0),
-                            time_criticality=_to_float(inputs.get("time_criticality"), 0.0),
-                            risk_reduction_or_opportunity_enablement=_to_float(
-                                inputs.get("risk_reduction_or_opportunity_enablement"), 0.0
-                            ),
-                            job_size=_to_float(
-                                inputs.get("job_size"),
-                                story.estimate_points or 1.0,
-                            ),
-                        )
-                    )
-                    score = wsjf_value
-                else:
-                    rice_value = rice_score(
-                        RICEInputs(
-                            reach=_to_float(inputs.get("reach"), 0.0),
-                            impact=_to_float(inputs.get("impact"), 0.0),
-                            confidence=_to_float(inputs.get("confidence"), 0.0),
-                            effort=_to_float(
-                                inputs.get("effort"),
-                                (story.estimate_points or 4.0) / 4.0,
-                            ),
-                        )
-                    )
-                    score = rice_value
+                score, wsjf_value, rice_value = _score_for(method, inputs, story)
             except (TypeError, ValueError):
                 logger.warning(
                     "ProductOwnerAgent: malformed inputs for story %s; skipping",
@@ -215,7 +248,6 @@ class ProductOwnerAgent:
                 )
                 continue
 
-            seen_ids.add(story.id)
             ranked.append(
                 RankedBacklogItem(
                     kind="story",
@@ -224,33 +256,9 @@ class ProductOwnerAgent:
                     score=score,
                     wsjf_score=wsjf_value,
                     rice_score=rice_value,
-                    rationale=rationale,
+                    rationale=str(raw.get("rationale") or ""),
                 )
             )
             persist_rows.append((story.id, wsjf_value, rice_value))
 
-        # Cover any stories the LLM omitted (truncation, skipped uncertain
-        # items). Surface them in the response with score=0 + a rationale
-        # so downstream planning sees them and can re-groom or hand-score
-        # them — silently dropping is the failure mode flagged by review.
-        for story in stories:
-            if story.id in seen_ids:
-                continue
-            logger.warning(
-                "ProductOwnerAgent: story %s missing from LLM output; including with score=0",
-                story.id,
-            )
-            ranked.append(
-                RankedBacklogItem(
-                    kind="story",
-                    id=story.id,
-                    title=story.title,
-                    score=0.0,
-                    wsjf_score=0.0 if method == "wsjf" else None,
-                    rice_score=0.0 if method == "rice" else None,
-                    rationale="LLM did not score this story; needs manual review.",
-                )
-            )
-            # Don't persist a 0 — leave the row's existing scores intact.
-            seen_ids.add(story.id)
         return ranked, persist_rows

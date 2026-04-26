@@ -8,8 +8,9 @@ Postgres.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from fastapi import FastAPI
@@ -28,45 +29,101 @@ from product_delivery.models import (
     StoryNode,
     Task,
 )
+from product_delivery.store import (
+    CrossProductFeedbackLink,
+    UnknownProductDeliveryEntity,
+)
 
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
-class _FakeStore:
-    """In-memory implementation of the subset of ProductDeliveryStore the API uses."""
+# ---------------------------------------------------------------------------
+# Fake store — kind-driven CRUD over per-bucket dicts.
+# ---------------------------------------------------------------------------
 
-    def __init__(self) -> None:
-        self.products: dict[str, Product] = {}
-        self.initiatives: dict[str, Initiative] = {}
-        self.epics: dict[str, Epic] = {}
-        self.stories: dict[str, Story] = {}
-        self.tasks: dict[str, Task] = {}
-        self.acs: dict[str, AcceptanceCriterion] = {}
-        self.feedback: dict[str, FeedbackItem] = {}
-        self._next = 0
+
+@dataclass(frozen=True)
+class _Kind:
+    """Metadata table mirroring the real store's ``_ROW_SPECS``.
+
+    ``model`` is the Pydantic class returned from create. ``bucket`` is
+    the attribute name of the in-memory dict that holds rows of this
+    kind. ``parent_kind`` (when set) names the kind whose dict is
+    consulted for FK validation; ``parent_field`` is the field name on
+    the row that holds the parent's id.
+    """
+
+    model: type
+    bucket: str
+    parent_kind: str | None = None
+    parent_field: str | None = None
+    fk_label: str | None = None
+
+
+_KINDS: dict[str, _Kind] = {
+    "product": _Kind(Product, "products"),
+    "initiative": _Kind(Initiative, "initiatives", "product", "product_id", "product"),
+    "epic": _Kind(Epic, "epics", "initiative", "initiative_id", "initiative"),
+    "story": _Kind(Story, "stories", "epic", "epic_id", "epic"),
+    "task": _Kind(Task, "tasks", "story", "story_id", "story"),
+    "ac": _Kind(AcceptanceCriterion, "acs", "story", "story_id", "story"),
+    "feedback": _Kind(FeedbackItem, "feedback"),
+}
+
+
+@dataclass
+class _FakeStore:
+    """In-memory subset of ``ProductDeliveryStore`` used by the API tests.
+
+    Kind-driven: every CRUD method is a thin shim over ``_insert`` /
+    ``_update`` that consults :data:`_KINDS` for the bucket attribute,
+    parent FK, and Pydantic model. Mirrors the real store's
+    ``_ROW_SPECS`` pattern so the two stay in lockstep.
+    """
+
+    products: dict[str, Product] = field(default_factory=dict)
+    initiatives: dict[str, Initiative] = field(default_factory=dict)
+    epics: dict[str, Epic] = field(default_factory=dict)
+    stories: dict[str, Story] = field(default_factory=dict)
+    tasks: dict[str, Task] = field(default_factory=dict)
+    acs: dict[str, AcceptanceCriterion] = field(default_factory=dict)
+    feedback: dict[str, FeedbackItem] = field(default_factory=dict)
+    _next: ClassVar[int] = 0
 
     def _id(self) -> str:
-        self._next += 1
-        return f"id{self._next}"
+        type(self)._next += 1
+        return f"id{type(self)._next}"
 
-    # products ----------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Generic create — used by every public create_* shim.
+    # ------------------------------------------------------------------
+
+    def _insert(self, kind: str, **fields: Any) -> Any:
+        meta = _KINDS[kind]
+        if meta.parent_kind:
+            parent_bucket = getattr(self, _KINDS[meta.parent_kind].bucket)
+            if fields[meta.parent_field] not in parent_bucket:  # type: ignore[index]
+                raise UnknownProductDeliveryEntity(
+                    f"{meta.fk_label} {fields[meta.parent_field]!r} does not exist"  # type: ignore[index]
+                )
+        now = _now()
+        fields["id"] = self._id()
+        fields["created_at"] = now
+        fields["updated_at"] = now
+        row = meta.model(**fields)
+        getattr(self, meta.bucket)[row.id] = row
+        return row
+
+    # ------------------------------------------------------------------
+    # Public store API — thin shims, signatures match ProductDeliveryStore.
+    # ------------------------------------------------------------------
 
     def create_product(self, *, name: str, description: str, vision: str, author: str) -> Product:
-        pid = self._id()
-        now = _now()
-        product = Product(
-            id=pid,
-            name=name,
-            description=description,
-            vision=vision,
-            author=author,
-            created_at=now,
-            updated_at=now,
+        return self._insert(
+            "product", name=name, description=description, vision=vision, author=author
         )
-        self.products[pid] = product
-        return product
 
     def list_products(self) -> list[Product]:
         return list(self.products.values())
@@ -74,63 +131,29 @@ class _FakeStore:
     def get_product(self, product_id: str) -> Product | None:
         return self.products.get(product_id)
 
-    # initiatives / epics / stories / tasks / ac ------------------------
-
     def create_initiative(
-        self,
-        *,
-        product_id: str,
-        title: str,
-        summary: str,
-        status: str,
-        author: str,
+        self, *, product_id: str, title: str, summary: str, status: str, author: str
     ) -> Initiative:
-        from product_delivery.store import UnknownProductDeliveryEntity
-
-        if product_id not in self.products:
-            raise UnknownProductDeliveryEntity(f"product {product_id!r} does not exist")
-        iid = self._id()
-        now = _now()
-        i = Initiative(
-            id=iid,
+        return self._insert(
+            "initiative",
             product_id=product_id,
             title=title,
             summary=summary,
             status=status,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
-        self.initiatives[iid] = i
-        return i
 
     def create_epic(
-        self,
-        *,
-        initiative_id: str,
-        title: str,
-        summary: str,
-        status: str,
-        author: str,
+        self, *, initiative_id: str, title: str, summary: str, status: str, author: str
     ) -> Epic:
-        from product_delivery.store import UnknownProductDeliveryEntity
-
-        if initiative_id not in self.initiatives:
-            raise UnknownProductDeliveryEntity(f"initiative {initiative_id!r} does not exist")
-        eid = self._id()
-        now = _now()
-        e = Epic(
-            id=eid,
+        return self._insert(
+            "epic",
             initiative_id=initiative_id,
             title=title,
             summary=summary,
             status=status,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
-        self.epics[eid] = e
-        return e
 
     def create_story(
         self,
@@ -142,25 +165,15 @@ class _FakeStore:
         estimate_points: float | None,
         author: str,
     ) -> Story:
-        from product_delivery.store import UnknownProductDeliveryEntity
-
-        if epic_id not in self.epics:
-            raise UnknownProductDeliveryEntity(f"epic {epic_id!r} does not exist")
-        sid = self._id()
-        now = _now()
-        s = Story(
-            id=sid,
+        return self._insert(
+            "story",
             epic_id=epic_id,
             title=title,
             user_story=user_story,
             status=status,
             estimate_points=estimate_points,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
-        self.stories[sid] = s
-        return s
 
     def create_task(
         self,
@@ -172,50 +185,24 @@ class _FakeStore:
         owner: str | None,
         author: str,
     ) -> Task:
-        from product_delivery.store import UnknownProductDeliveryEntity
-
-        if story_id not in self.stories:
-            raise UnknownProductDeliveryEntity(f"story {story_id!r} does not exist")
-        tid = self._id()
-        now = _now()
-        t = Task(
-            id=tid,
+        return self._insert(
+            "task",
             story_id=story_id,
             title=title,
             description=description,
             status=status,
             owner=owner,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
-        self.tasks[tid] = t
-        return t
 
     def create_acceptance_criterion(
         self, *, story_id: str, text: str, satisfied: bool, author: str
     ) -> AcceptanceCriterion:
-        from product_delivery.store import UnknownProductDeliveryEntity
-
-        if story_id not in self.stories:
-            raise UnknownProductDeliveryEntity(f"story {story_id!r} does not exist")
-        aid = self._id()
-        now = _now()
-        ac = AcceptanceCriterion(
-            id=aid,
-            story_id=story_id,
-            text=text,
-            satisfied=satisfied,
-            author=author,
-            created_at=now,
-            updated_at=now,
-        )
-        self.acs[aid] = ac
-        return ac
+        return self._insert("ac", story_id=story_id, text=text, satisfied=satisfied, author=author)
 
     # status / score updates -------------------------------------------
 
-    _kinds = {
+    _UPDATE_KINDS: ClassVar[dict[str, str]] = {
         "initiative": "initiatives",
         "epic": "epics",
         "story": "stories",
@@ -223,14 +210,13 @@ class _FakeStore:
     }
 
     def update_status(self, *, kind: str, entity_id: str, status: str) -> bool:
-        attr = self._kinds.get(kind)
-        if attr is None:
+        bucket_name = self._UPDATE_KINDS.get(kind)
+        if bucket_name is None:
             raise ValueError(kind)
-        bag = getattr(self, attr)
+        bag = getattr(self, bucket_name)
         if entity_id not in bag:
             return False
-        existing = bag[entity_id]
-        bag[entity_id] = existing.model_copy(update={"status": status, "updated_at": _now()})
+        bag[entity_id] = bag[entity_id].model_copy(update={"status": status, "updated_at": _now()})
         return True
 
     def update_scores(
@@ -243,10 +229,10 @@ class _FakeStore:
     ) -> bool:
         if wsjf_score is None and rice_score is None:
             return False
-        attr = self._kinds.get(kind)
-        if attr is None:
+        bucket_name = self._UPDATE_KINDS.get(kind)
+        if bucket_name is None:
             raise ValueError(kind)
-        bag = getattr(self, attr)
+        bag = getattr(self, bucket_name)
         if entity_id not in bag:
             return False
         update: dict[str, Any] = {"updated_at": _now()}
@@ -256,6 +242,20 @@ class _FakeStore:
             update["rice_score"] = rice_score
         bag[entity_id] = bag[entity_id].model_copy(update=update)
         return True
+
+    def bulk_update_story_scores(self, rows: list[tuple[str, float | None, float | None]]) -> int:
+        n = 0
+        for sid, w, r in rows:
+            if sid not in self.stories:
+                continue
+            update: dict[str, Any] = {"updated_at": _now()}
+            if w is not None:
+                update["wsjf_score"] = w
+            if r is not None:
+                update["rice_score"] = r
+            self.stories[sid] = self.stories[sid].model_copy(update=update)
+            n += 1
+        return n
 
     # backlog tree -----------------------------------------------------
 
@@ -299,20 +299,6 @@ class _FakeStore:
         }
         return [s for s in self.stories.values() if s.epic_id in epic_ids]
 
-    def bulk_update_story_scores(self, rows: list[tuple[str, float | None, float | None]]) -> int:
-        n = 0
-        for sid, w, r in rows:
-            if sid not in self.stories:
-                continue
-            update: dict[str, Any] = {"updated_at": _now()}
-            if w is not None:
-                update["wsjf_score"] = w
-            if r is not None:
-                update["rice_score"] = r
-            self.stories[sid] = self.stories[sid].model_copy(update=update)
-            n += 1
-        return n
-
     # feedback ---------------------------------------------------------
 
     def create_feedback_item(
@@ -325,11 +311,6 @@ class _FakeStore:
         linked_story_id: str | None,
         author: str,
     ) -> FeedbackItem:
-        from product_delivery.store import (
-            CrossProductFeedbackLink,
-            UnknownProductDeliveryEntity,
-        )
-
         if product_id not in self.products:
             raise UnknownProductDeliveryEntity(f"product {product_id!r} does not exist")
         if linked_story_id is not None:
@@ -342,10 +323,8 @@ class _FakeStore:
                     f"story {linked_story_id!r} belongs to product "
                     f"{owning_product!r}, not {product_id!r}"
                 )
-        fid = self._id()
-        now = _now()
-        f = FeedbackItem(
-            id=fid,
+        return self._insert(
+            "feedback",
             product_id=product_id,
             source=source,
             raw_payload=raw_payload,
@@ -353,11 +332,7 @@ class _FakeStore:
             status="open",
             linked_story_id=linked_story_id,
             author=author,
-            created_at=now,
-            updated_at=now,
         )
-        self.feedback[fid] = f
-        return f
 
     def list_feedback(self, product_id: str, *, status: str | None = None) -> list[FeedbackItem]:
         out = [f for f in self.feedback.values() if f.product_id == product_id]
@@ -366,8 +341,16 @@ class _FakeStore:
         return out
 
 
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client_and_store(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, _FakeStore]:
+    """Yield (TestClient, fake_store) so tests can assert on either side
+    without the runtime ``client.fake_store = …`` monkey-attr hack.
+    """
     from unified_api.routes import product_delivery as router_module
 
     fake = _FakeStore()
@@ -376,9 +359,13 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     app = FastAPI()
     app.include_router(router_module.router)
-    test_client = TestClient(app)
-    test_client.fake_store = fake  # type: ignore[attr-defined]
-    return test_client
+    router_module.register_pd_exception_handlers(app)
+    return TestClient(app), fake
+
+
+@pytest.fixture
+def client(client_and_store: tuple[TestClient, _FakeStore]) -> TestClient:
+    return client_and_store[0]
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +432,10 @@ def test_initiative_create_404_when_product_missing(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
-def test_status_and_score_patches_apply(client: TestClient) -> None:
+def test_status_and_score_patches_apply(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, fake = client_and_store
     pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
     iid = client.post(
         "/api/product-delivery/initiatives",
@@ -465,7 +455,6 @@ def test_status_and_score_patches_apply(client: TestClient) -> None:
     )
     assert r.status_code == 200
 
-    fake = client.fake_store  # type: ignore[attr-defined]
     assert fake.initiatives[iid].status == "in_sprint"
     assert fake.initiatives[iid].wsjf_score == 12.5
     assert fake.initiatives[iid].rice_score == 80.0
@@ -479,7 +468,8 @@ def test_status_patch_404_for_unknown_id(client: TestClient) -> None:
     assert r.status_code == 404
 
 
-def test_score_patch_rejects_non_finite_values(client: TestClient) -> None:
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity"])
+def test_score_patch_rejects_non_finite_values(client: TestClient, bad: str) -> None:
     # NaN / ±Infinity must be rejected at validation: persisting them
     # would later break Starlette's JSON encoder when /backlog or /groom
     # serialize the row, manifesting as a 500 long after the bad write.
@@ -488,27 +478,23 @@ def test_score_patch_rejects_non_finite_values(client: TestClient) -> None:
         "/api/product-delivery/initiatives",
         json={"product_id": pid, "title": "I"},
     ).json()["id"]
-
-    for bad in ("NaN", "Infinity", "-Infinity"):
-        # Send the value as a string so Pydantic's float coercion is exercised.
-        # FastAPI / requests serializes Python floats correctly, but JSON
-        # itself doesn't allow NaN — strings reach Pydantic intact.
-        r = client.post(
-            f"/api/product-delivery/initiative/{iid}/scores",
-            content=f'{{"wsjf_score": "{bad}"}}',
-            headers={"content-type": "application/json"},
-        )
-        # POST → 405 (we declared PATCH); use PATCH with the same content.
-        r = client.request(
-            "PATCH",
-            f"/api/product-delivery/initiative/{iid}/scores",
-            content=f'{{"wsjf_score": "{bad}"}}',
-            headers={"content-type": "application/json"},
-        )
-        assert r.status_code == 422, f"value={bad!r} should be rejected"
+    # JSON itself doesn't allow NaN / Infinity tokens, so send them as
+    # strings to exercise Pydantic's float coercion.
+    r = client.request(
+        "PATCH",
+        f"/api/product-delivery/initiative/{iid}/scores",
+        content=f'{{"wsjf_score": "{bad}"}}',
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 422
 
 
-def test_score_patch_empty_body_returns_400(client: TestClient) -> None:
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"wsjf_score": None, "rice_score": None}],
+    ids=["empty", "explicit-nulls"],
+)
+def test_score_patch_empty_body_returns_400(client: TestClient, body: dict[str, Any]) -> None:
     # Empty (or all-null) score payload is a client error, not a 404 —
     # otherwise clients can't tell "you sent nothing" from "the entity
     # doesn't exist" and may incorrectly trigger a create/retry flow.
@@ -518,15 +504,9 @@ def test_score_patch_empty_body_returns_400(client: TestClient) -> None:
         json={"product_id": pid, "title": "I"},
     ).json()["id"]
 
-    r = client.patch(f"/api/product-delivery/initiative/{iid}/scores", json={})
+    r = client.patch(f"/api/product-delivery/initiative/{iid}/scores", json=body)
     assert r.status_code == 400
     assert "wsjf_score" in r.json()["detail"]
-
-    r = client.patch(
-        f"/api/product-delivery/initiative/{iid}/scores",
-        json={"wsjf_score": None, "rice_score": None},
-    )
-    assert r.status_code == 400
 
 
 def test_score_patch_404_for_unknown_id_with_real_payload(client: TestClient) -> None:
@@ -538,7 +518,8 @@ def test_score_patch_404_for_unknown_id_with_real_payload(client: TestClient) ->
     assert r.status_code == 404
 
 
-def test_story_create_rejects_non_positive_estimate_points(client: TestClient) -> None:
+@pytest.mark.parametrize("bad", [0, -3.5])
+def test_story_create_rejects_non_positive_estimate_points(client: TestClient, bad: float) -> None:
     # Negative / zero estimates would feed into WSJF/RICE denominators
     # which clamp to 1, silently inflating priority. Reject at the API.
     pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
@@ -551,14 +532,25 @@ def test_story_create_rejects_non_positive_estimate_points(client: TestClient) -
         json={"initiative_id": iid, "title": "E"},
     ).json()["id"]
 
-    for bad in (0, -3.5):
-        r = client.post(
-            "/api/product-delivery/stories",
-            json={"epic_id": eid, "title": "S", "estimate_points": bad},
-        )
-        assert r.status_code == 422, f"estimate_points={bad} should be rejected"
+    r = client.post(
+        "/api/product-delivery/stories",
+        json={"epic_id": eid, "title": "S", "estimate_points": bad},
+    )
+    assert r.status_code == 422
 
-    # None is still allowed (means "unestimated").
+
+def test_story_create_accepts_none_estimate_points(client: TestClient) -> None:
+    """``None`` is the legitimate "unestimated" value — must still be accepted."""
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+    eid = client.post(
+        "/api/product-delivery/epics",
+        json={"initiative_id": iid, "title": "E"},
+    ).json()["id"]
+
     r = client.post(
         "/api/product-delivery/stories",
         json={"epic_id": eid, "title": "S", "estimate_points": None},
@@ -752,13 +744,15 @@ def test_groom_unknown_product_returns_404(client: TestClient) -> None:
 
 
 def test_groom_uses_stubbed_llm_and_returns_ranked_result(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client_and_store: tuple[TestClient, _FakeStore],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Stub the llm_service module before the route's lazy import runs, so the
     # test doesn't pull in strands / ollama just to swap out get_client.
     import sys
     import types
 
+    client, fake = client_and_store
     stub_module = types.ModuleType("llm_service")
     pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
     iid = client.post(
@@ -817,4 +811,4 @@ def test_groom_uses_stubbed_llm_and_returns_ranked_result(
     assert body["product_id"] == pid
     assert [r["id"] for r in body["ranked"]] == [sid_b, sid_a]
     # persistence ran on the fake
-    assert client.fake_store.stories[sid_b].wsjf_score == body["ranked"][0]["score"]  # type: ignore[attr-defined]
+    assert fake.stories[sid_b].wsjf_score == body["ranked"][0]["score"]
