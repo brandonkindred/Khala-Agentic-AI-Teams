@@ -213,13 +213,15 @@ jobs:
           # The job service is started as a sidecar process below; it needs
           # psycopg2-binary from its own reqs file.
           pip install -r ../job_service/requirements.txt
-      # Boot the real job-service as a sidecar process so the `JOB_SERVICE_URL`
-      # env is set *before* pytest collects (team modules build module-level
-      # `JobServiceClient(...)` instances at import time and pin the URL).
-      # PYTHONPATH=../agents is required because job_service/postgres.py imports
-      # `shared_postgres`, which lives under backend/agents/.
-      - name: Start job-service sidecar
-        working-directory: backend/job_service
+      # Boot the job-service sidecar AND run pytest in a single step so the
+      # background process is guaranteed to be alive when pytest collects.
+      # Splitting startup and execution across two GHA steps is brittle —
+      # each step is a fresh shell and a backgrounded process can be killed
+      # when the parent shell exits.  Scope: only the smoke suite for now;
+      # wider per-team integration tests are tracked in #361-#367.
+      # PYTHONPATH=../agents is required because job_service/postgres.py
+      # imports `shared_postgres`, which lives under backend/agents/.
+      - name: Start job-service + run integration tests
         env:
           PYTHONPATH: ../agents
           POSTGRES_HOST: localhost
@@ -227,28 +229,37 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
+          JOB_SERVICE_URL: http://127.0.0.1:8085
         run: |
-          uvicorn main:app --host 127.0.0.1 --port 8085 \
-            > /tmp/job-service.log 2>&1 &
-          echo $! > /tmp/job-service.pid
+          set -euo pipefail
+          # Boot the job service.
+          (cd ../job_service && \
+            uvicorn main:app --host 127.0.0.1 --port 8085 > /tmp/job-service.log 2>&1) &
+          JOB_SERVICE_PID=$!
+          # If pytest fails or this step is cancelled, take the sidecar down
+          # cleanly so its log surfaces in CI output.
+          trap '
+            echo "--- job-service log ---";
+            tail -100 /tmp/job-service.log || true;
+            kill "$JOB_SERVICE_PID" 2>/dev/null || true;
+          ' EXIT
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8085/health >/dev/null; then
-              echo "job-service is up"
-              exit 0
+              echo "job-service is up after ${i}s"
+              break
+            fi
+            if ! kill -0 "$JOB_SERVICE_PID" 2>/dev/null; then
+              echo "job-service exited prematurely; tail of log:"
+              tail -100 /tmp/job-service.log
+              exit 1
             fi
             sleep 1
           done
-          echo "job-service failed to start; tail of log:"
-          tail -50 /tmp/job-service.log
-          exit 1
-      # Scope: only the smoke suite for now.  The wider per-team integration
-      # tests are stop-gaps tracked in #361-#367 — they need to be converted
-      # to the in-memory fake or rewritten as proper integration tests before
-      # they can run reliably against the live services.
-      - name: Run integration tests
-        env:
-          JOB_SERVICE_URL: http://127.0.0.1:8085
-        run: |
+          if ! curl -sf http://127.0.0.1:8085/health >/dev/null; then
+            echo "job-service did not become healthy in 30s; tail of log:"
+            tail -100 /tmp/job-service.log
+            exit 1
+          fi
           pytest -v --tb=short -m integration \
             ../unified_api/tests/test_integration_smoke.py
 
