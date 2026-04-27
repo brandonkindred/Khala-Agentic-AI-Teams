@@ -231,13 +231,20 @@ class TaskCreate(BaseModel):
 
 class AcceptanceCriterionCreate(BaseModel):
     story_id: str
-    text: str = Field(..., min_length=1)
+    # Wrapped in `_reject_blank_str` so whitespace-only text (`'   '`,
+    # `'\t'`) doesn't slip past `min_length=1` and persist a
+    # semantically empty acceptance criterion that breaks the
+    # satisfied/total ratio operators read from the backlog tree.
+    text: Annotated[str, Field(min_length=1), AfterValidator(_reject_blank_str)]
     satisfied: bool = False
 
 
 class FeedbackItemCreate(BaseModel):
     product_id: str
-    source: str = Field(..., min_length=1, max_length=120)
+    # `source` is used for triage and reporting (e.g. "support",
+    # "sales-call", "bug-tracker"). A blank value would break source
+    # filtering and degrade the provenance trail, so reject up front.
+    source: Annotated[str, Field(min_length=1, max_length=120), AfterValidator(_reject_blank_str)]
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     severity: str = "normal"
     linked_story_id: str | None = None

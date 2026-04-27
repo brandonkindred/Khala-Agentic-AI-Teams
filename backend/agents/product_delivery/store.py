@@ -772,8 +772,8 @@ class ProductDeliveryStore:
 
 class _SafeConn:
     """Context manager wrapper around ``shared_postgres.get_conn`` that
-    surfaces connection-acquisition failures as
-    :class:`ProductDeliveryStorageUnavailable`.
+    surfaces both connection-acquisition *and* query-time infra
+    failures as :class:`ProductDeliveryStorageUnavailable`.
 
     ``get_conn()`` returns a context manager, but the real connection
     isn't acquired until ``__enter__`` runs (the pool's ``connection()``
@@ -784,12 +784,36 @@ class _SafeConn:
     driver errors, bypassing the route-level 503 mapping and producing
     unhandled 500s.
 
-    This wrapper re-raises any exception from either ``__enter__`` or
-    the underlying CM creation as ``ProductDeliveryStorageUnavailable``
-    so the route's exception handler maps it cleanly to 503 every time.
-    Exit semantics are unchanged — the pool's CM still commits on clean
-    exit, rolls back on exception, and returns the connection to the pool.
+    Codex also flagged that ``cur.execute(...)`` errors raised *inside*
+    the body — most importantly ``UndefinedTable`` when schema
+    registration applied only partially, plus ``OperationalError``
+    when the connection drops mid-query — bypass the same 503 mapping.
+    ``__exit__`` translates those infra errors to
+    ``ProductDeliveryStorageUnavailable`` too, while leaving the store's
+    own typed domain exceptions (``UnknownProductDeliveryEntity``,
+    ``CrossProductFeedbackLink``, ``ForeignKeyViolation``) and
+    ``ValueError`` from the validator helpers untouched.
+
+    Exit semantics are otherwise unchanged — the pool's CM still
+    commits on clean exit, rolls back on exception, and returns the
+    connection to the pool.
     """
+
+    # psycopg query-time exceptions that mean "infra is broken"
+    # (transport down, schema not deployed, pool poisoned). Each maps
+    # naturally to 503 — clients should retry. Specific subclasses are
+    # listed before broader bases so the isinstance check below picks
+    # the most precise mapping in the log line.
+    _INFRA_EXC_TYPES = (
+        psycopg_errors.UndefinedTable,
+        psycopg_errors.UndefinedColumn,
+        psycopg_errors.UndefinedObject,
+        psycopg_errors.AdminShutdown,
+        psycopg_errors.CrashShutdown,
+        psycopg_errors.ConnectionException,
+        psycopg_errors.ConnectionFailure,
+        psycopg_errors.SqlclientUnableToEstablishSqlconnection,
+    )
 
     def __init__(self) -> None:
         self._cm: Any | None = None
@@ -807,7 +831,34 @@ class _SafeConn:
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
         if self._cm is None:
             return False
-        return self._cm.__exit__(exc_type, exc, tb)
+        # Always let the pool's CM tear down (commit/rollback, return
+        # connection) — we're going to *replace* the exception, not
+        # suppress it.
+        try:
+            self._cm.__exit__(exc_type, exc, tb)
+        except Exception:  # pragma: no cover — pool teardown failures
+            # Don't lose the original error if pool teardown also
+            # raises; just log and continue to the translation step.
+            logger.warning("ProductDeliveryStore: pool teardown raised", exc_info=True)
+        # Translate infra-class exceptions to ProductDeliveryStorageUnavailable
+        # so the route handler returns 503. Domain exceptions raised
+        # by the store itself (``UnknownProductDeliveryEntity``,
+        # ``CrossProductFeedbackLink``) and ``ValueError`` from the
+        # validator helpers, plus ``ForeignKeyViolation`` (translated
+        # by callers to ``UnknownProductDeliveryEntity``), all flow
+        # through unchanged.
+        if exc is not None and isinstance(exc, self._INFRA_EXC_TYPES):
+            logger.warning(
+                "ProductDeliveryStore: infra error %s raised inside connection; "
+                "mapping to ProductDeliveryStorageUnavailable",
+                type(exc).__name__,
+            )
+            raise ProductDeliveryStorageUnavailable(str(exc)) from exc
+        # Returning False (or None) lets the original exception, if
+        # any, propagate; returning True would suppress it. Never
+        # suppress — every store method needs the caller to see real
+        # failures.
+        return False
 
 
 def _now() -> datetime:

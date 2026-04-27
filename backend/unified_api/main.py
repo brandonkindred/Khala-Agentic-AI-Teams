@@ -145,7 +145,15 @@ async def _check_team_health(team_key: str, service_url: str) -> str:
 
 
 async def _health_check_loop() -> None:
-    """Periodically probe all registered teams' health endpoints."""
+    """Periodically probe all registered teams' health endpoints.
+
+    Also retries schema registration for in-process teams whose startup
+    DDL failed — Codex flagged that doing this from `/health` makes the
+    handler mutate state on every probe (no throttling, no isolation).
+    Running it here gives both: a natural cooldown via the loop interval
+    and a dedicated executor (`_PROBE_EXECUTOR`) instead of the default
+    threadpool.
+    """
     while True:
         await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
         for team_key in list(_registered_teams.keys()):
@@ -156,6 +164,28 @@ async def _health_check_loop() -> None:
             if url:
                 status = await _check_team_health(team_key, url)
                 _team_liveness[team_key] = status
+        # Background schema retries for in-process teams that failed at
+        # startup. The interval (default 30s) is the cooldown — no
+        # tighter retry loop, no per-/health-call execution. Runs in
+        # the dedicated `_PROBE_EXECUTOR` so DDL doesn't compete with
+        # other `to_thread` work in the default executor.
+        if _in_process_schema_failures:
+            db_live = await _probe_postgres_live()
+            if db_live:
+                loop = asyncio.get_running_loop()
+                for team_key in list(_in_process_schema_failures):
+                    try:
+                        await loop.run_in_executor(
+                            _PROBE_EXECUTOR,
+                            _retry_in_process_schema_registration,
+                            team_key,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Background schema retry failed for %s",
+                            team_key,
+                            exc_info=True,
+                        )
 
 
 def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
@@ -356,6 +386,13 @@ async def lifespan(app: FastAPI):
         close_pool()
     except Exception:
         logger.warning("shared_postgres close_pool failed", exc_info=True)
+
+    # Shut down the dedicated health-probe executor so worker threads
+    # don't outlive the app — important under reload / test processes
+    # that recreate app state. ``cancel_futures=True`` drops queued
+    # work; in-flight DB pings finish naturally because they were
+    # already capped by the inner connection timeout.
+    _PROBE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
     logger.info("Shutting down Unified API Server...")
 
@@ -604,7 +641,15 @@ def _retry_in_process_schema_registration(team_key: str) -> bool:
 
 @app.get("/health", response_model=UnifiedHealthResponse, tags=["health"])
 async def health() -> UnifiedHealthResponse:
-    """Unified health check — reports proxy registration and upstream liveness per team."""
+    """Unified health check — reports proxy registration and upstream liveness per team.
+
+    Read-only: Codex flagged that triggering DDL retries from a public
+    GET endpoint is operationally surprising and lets every health
+    probe (load balancer, monitoring) repeatedly attempt
+    `CREATE TABLE/INDEX`. Schema retries now run on a throttled
+    background task (`_health_check_loop`) so this handler only reads
+    state — no DDL, no `_retry_in_process_schema_registration`.
+    """
     teams = []
     all_healthy = True
     # Lazily probe the live DB only if at least one in-process team
@@ -615,46 +660,39 @@ async def health() -> UnifiedHealthResponse:
     for key, config in TEAM_CONFIGS.items():
         registered = _registered_teams.get(key, False)
         liveness = _team_liveness.get(key, "unknown")
+        # Tracks whether `unavailable` here is *intentional* (the
+        # in-process Postgres-disabled case) or *misconfigured* (proxy
+        # team without a service URL). Only the misconfigured case
+        # should flip overall health to `degraded` — Codex flagged
+        # that the previous "any unavailable degrades" rule masked
+        # real proxy misconfigurations and the new "no unavailable
+        # degrades" rule overcorrected.
+        intentionally_unavailable = False
         if config.in_process:
             # No upstream container, but the in-process router still
             # depends on Postgres for product_delivery / agent_console.
             # Four states matter:
             #   * disabled → routes are unmounted; report "unavailable"
-            #     so operators don't see a green light beside a route
-            #     that 404s.
-            #   * schema registration failed at startup → persistence
-            #     calls will 503; report "unhealthy".
-            #   * runtime DB probe fails → endpoints are actively
-            #     returning 503; report "unhealthy" (this catches
-            #     post-startup outages — pool death, host reboot, etc.
-            #     — that the startup-time failure set wouldn't).
-            #   * otherwise the route is live and Postgres is reachable
-            #     → "healthy".
-            if not config.enabled:
+            #     (intentional — operator opt-out via TEAM_CONFIGS).
+            #   * Postgres not configured → "unavailable" (intentional —
+            #     the env explicitly opted out by not setting
+            #     `POSTGRES_HOST`).
+            #   * schema registration failed at startup AND the
+            #     background retry hasn't healed it yet → "unhealthy"
+            #     (broken).
+            #   * runtime DB probe fails → "unhealthy" (active outage).
+            #   * otherwise → "healthy".
+            if not config.enabled or not _is_postgres_enabled_cached():
+                # Either operator opt-out (config-disabled team) or
+                # env opt-out (no `POSTGRES_HOST`). Both are
+                # intentional and should not flip overall health.
                 status = "unavailable"
-            elif not _is_postgres_enabled_cached():
-                # Postgres intentionally not configured for this env.
-                # The team is mounted but every persistence call will
-                # 503; report `unavailable` so the unified API doesn't
-                # report degraded for an opt-out feature.
-                status = "unavailable"
+                intentionally_unavailable = True
             elif key in _in_process_schema_failures:
-                # Startup-time failure recorded. Don't immediately
-                # short-circuit to "unhealthy" — Postgres may have
-                # come back since startup. Probe live, and if it
-                # succeeds, retry the schema registration (idempotent)
-                # so the team can self-heal between startup and the
-                # next process restart. Only stay "unhealthy" if the
-                # probe + retry both fail.
-                if db_live is None:
-                    db_live = await _probe_postgres_live()
-                if db_live and await asyncio.to_thread(_retry_in_process_schema_registration, key):
-                    # DDL is synchronous; offloaded to a worker so the
-                    # event loop isn't blocked while pg processes
-                    # CREATE TABLE / CREATE INDEX during recovery.
-                    status = "healthy"
-                else:
-                    status = "unhealthy"
+                # Background loop may have already cleared this; if
+                # we're still in the set, persistence is still broken.
+                # Read-only: don't trigger a retry from this handler.
+                status = "unhealthy"
             else:
                 if db_live is None:
                     db_live = await _probe_postgres_live()
@@ -666,14 +704,11 @@ async def health() -> UnifiedHealthResponse:
         elif registered:
             status = "unhealthy"
         else:
+            # Proxy team that isn't registered — typically because its
+            # service URL is missing. That's a deployment misconfig,
+            # not an opt-out, so it should degrade overall health.
             status = "unavailable"
-        # Only `unhealthy` flips the overall status to `degraded`.
-        # `unavailable` means a team is intentionally not deployed in
-        # this environment (in-process team without `POSTGRES_HOST`
-        # set, or proxy team without a service URL); flagging the
-        # whole API degraded for an opt-out feature would trip
-        # readiness probes for deployments that don't use it yet.
-        if config.enabled and status == "unhealthy":
+        if config.enabled and (status == "unhealthy" or (status == "unavailable" and not intentionally_unavailable)):
             all_healthy = False
         teams.append(TeamHealth(name=config.name, prefix=config.prefix, status=status, enabled=config.enabled))
     return UnifiedHealthResponse(

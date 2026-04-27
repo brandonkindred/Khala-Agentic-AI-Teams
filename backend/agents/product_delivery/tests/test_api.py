@@ -653,6 +653,47 @@ def test_status_patch_rejects_whitespace_only_status(client: TestClient) -> None
     assert r.status_code == 422
 
 
+@pytest.mark.parametrize("blank", [" ", "   ", "\t", "\n"])
+def test_acceptance_criterion_create_rejects_whitespace_only_text(
+    client: TestClient, blank: str
+) -> None:
+    """Whitespace-only acceptance-criterion text degrades the satisfied/total ratio.
+
+    Codex flagged that ``min_length=1`` lets ``'   '`` through, which
+    persists a meaningless criterion. Now rejected at the API boundary
+    via the shared ``_reject_blank_str`` validator.
+    """
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+    eid = client.post(
+        "/api/product-delivery/epics",
+        json={"initiative_id": iid, "title": "E"},
+    ).json()["id"]
+    sid = client.post(
+        "/api/product-delivery/stories",
+        json={"epic_id": eid, "title": "S"},
+    ).json()["id"]
+    r = client.post(
+        "/api/product-delivery/acceptance-criteria",
+        json={"story_id": sid, "text": blank},
+    )
+    assert r.status_code == 422
+
+
+@pytest.mark.parametrize("blank", [" ", "   ", "\t", "\n"])
+def test_feedback_create_rejects_whitespace_only_source(client: TestClient, blank: str) -> None:
+    """Blank ``source`` would corrupt feedback provenance / triage filters."""
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    r = client.post(
+        "/api/product-delivery/feedback",
+        json={"product_id": pid, "source": blank, "raw_payload": {"k": "v"}},
+    )
+    assert r.status_code == 422
+
+
 def test_story_create_accepts_none_estimate_points(client: TestClient) -> None:
     """``None`` is the legitimate "unestimated" value — must still be accepted."""
     pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
