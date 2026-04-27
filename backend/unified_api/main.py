@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import sys
+from concurrent import futures
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -124,8 +125,21 @@ _registered_teams: dict[str, bool] = {}
 # Track upstream liveness per team (updated by background health checker).
 _team_liveness: dict[str, str] = {}  # team_key -> "healthy" | "unhealthy" | "unknown"
 
+# In-process teams whose Postgres schema registration failed at startup.
+# Health reports these as "unhealthy" so operators see the broken
+# persistence instead of a green light beside endpoints that 503.
+_in_process_schema_failures: set[str] = set()
+
 # Background health check interval in seconds.
 _HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "30"))
+
+# Per-team schema retry budget inside `_health_check_loop`. Codex
+# flagged that an unbounded `await loop.run_in_executor(...)` could let
+# one stalled DDL attempt block every other team's liveness update —
+# exactly during the outages where timely health refresh matters most.
+# The timeout cancels the *await*; the worker thread is independently
+# bounded by the pool-connection timeout, so it always cleans up.
+_SCHEMA_RETRY_TIMEOUT_S = float(os.getenv("SCHEMA_RETRY_TIMEOUT_S", "10"))
 
 
 async def _check_team_health(team_key: str, service_url: str) -> str:
@@ -139,7 +153,15 @@ async def _check_team_health(team_key: str, service_url: str) -> str:
 
 
 async def _health_check_loop() -> None:
-    """Periodically probe all registered teams' health endpoints."""
+    """Periodically probe all registered teams' health endpoints.
+
+    Also retries schema registration for in-process teams whose startup
+    DDL failed — Codex flagged that doing this from `/health` makes the
+    handler mutate state on every probe (no throttling, no isolation).
+    Running it here gives both: a natural cooldown via the loop interval
+    and a dedicated executor (`_PROBE_EXECUTOR`) instead of the default
+    threadpool.
+    """
     while True:
         await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
         for team_key in list(_registered_teams.keys()):
@@ -150,6 +172,47 @@ async def _health_check_loop() -> None:
             if url:
                 status = await _check_team_health(team_key, url)
                 _team_liveness[team_key] = status
+        # Background schema retries for in-process teams that failed at
+        # startup. The interval (default 30s) is the cooldown — no
+        # tighter retry loop, no per-/health-call execution. Runs in
+        # the dedicated `_PROBE_EXECUTOR` so DDL doesn't compete with
+        # other `to_thread` work in the default executor.
+        if _in_process_schema_failures:
+            db_live = await _probe_postgres_live()
+            if db_live:
+                loop = asyncio.get_running_loop()
+                for team_key in list(_in_process_schema_failures):
+                    # Bound each retry with `wait_for`. Codex flagged that
+                    # awaiting the executor directly meant a single stalled
+                    # DDL attempt (lock contention, slow connection
+                    # acquisition during the same outage that caused the
+                    # initial failure) could stall the loop and stale every
+                    # other team's liveness update — exactly the moment
+                    # operators need timely health refresh. The timeout
+                    # cancels the await; the worker thread itself is bounded
+                    # by the inner pool-connection timeout so it cleans up.
+                    try:
+                        await asyncio.wait_for(
+                            loop.run_in_executor(
+                                _get_probe_executor(),
+                                _retry_in_process_schema_registration,
+                                team_key,
+                            ),
+                            timeout=_SCHEMA_RETRY_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Background schema retry for %s exceeded %.1fs; "
+                            "leaving team in failure set for next loop pass",
+                            team_key,
+                            _SCHEMA_RETRY_TIMEOUT_S,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Background schema retry failed for %s",
+                            team_key,
+                            exc_info=True,
+                        )
 
 
 def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
@@ -160,6 +223,12 @@ def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
     enabled = get_enabled_teams()
 
     for team_key, config in enabled.items():
+        # In-process teams are served by `app.include_router(...)`; no
+        # upstream container, so no proxy. They still count as
+        # "registered" for discovery purposes since the route is live.
+        if config.in_process:
+            results[team_key] = True
+            continue
         env_var = TEAM_SERVICE_URL_ENVS.get(team_key)
         url = (os.environ.get(env_var, "").strip() if env_var else "") if env_var else ""
         if not url:
@@ -206,6 +275,12 @@ async def lifespan(app: FastAPI):
     global _registered_teams
     logger.info("Starting Unified API Server...")
 
+    # Reset stale failure markers from a previous lifespan run (e.g.
+    # uvicorn `--reload`, in-process test fixtures that boot the app
+    # multiple times). Without this, a transient Postgres outage on the
+    # first boot would mark the team unhealthy forever.
+    _in_process_schema_failures.clear()
+
     # 0. Register Postgres schemas for modules that run in-process here
     #    (unified_api itself + the team_assistant conversation store that we
     #    mount as sub-apps). No-op when POSTGRES_HOST is unset.
@@ -232,6 +307,43 @@ async def lifespan(app: FastAPI):
         register_team_schemas(AGENT_CONSOLE_SCHEMA)
     except Exception:
         logger.exception("agent_console postgres schema registration failed")
+
+    # Gate the entire product_delivery startup block on the team's
+    # `enabled` flag. Disabling the team must also disable its startup
+    # side effects (schema DDL, failure logs, health markers) — not
+    # just the routes.
+    if TEAM_CONFIGS["product_delivery"].enabled:
+        try:
+            from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
+            from shared_postgres import ensure_team_schema, is_postgres_enabled
+
+            # Use `ensure_team_schema` directly (rather than the
+            # `register_team_schemas` boolean wrapper) so we can detect
+            # partial DDL: if a single CREATE/ALTER statement fails it's
+            # logged-and-skipped and `applied < total` — the team's still
+            # mounted but its persistence is broken.
+            if is_postgres_enabled():
+                applied = ensure_team_schema(PRODUCT_DELIVERY_SCHEMA)
+                total = len(PRODUCT_DELIVERY_SCHEMA.statements)
+                if applied < total:
+                    logger.warning(
+                        "product_delivery: %d/%d DDL statements applied; marking unhealthy",
+                        applied,
+                        total,
+                    )
+                    _in_process_schema_failures.add("product_delivery")
+            else:
+                # Postgres disabled → every persistence call will 503.
+                # Don't add to `_in_process_schema_failures` (which
+                # tracks broken state, not opt-out): the health handler
+                # sees `is_postgres_enabled()` is False and reports
+                # `unavailable` instead of `unhealthy`, so the unified
+                # API doesn't flag overall health degraded for an
+                # intentionally-undeployed feature.
+                logger.warning("product_delivery: Postgres disabled; persistence endpoints will return 503")
+        except Exception:
+            logger.exception("product_delivery postgres schema registration failed")
+            _in_process_schema_failures.add("product_delivery")
 
     # 1. Mount team assistant conversational sub-apps (before proxy routes).
     try:
@@ -301,6 +413,15 @@ async def lifespan(app: FastAPI):
         close_pool()
     except Exception:
         logger.warning("shared_postgres close_pool failed", exc_info=True)
+
+    # Shut down the dedicated health-probe executor so worker threads
+    # don't outlive the app. The shutdown helper also clears the
+    # module-level slot so the next lifespan startup (under reload /
+    # test harnesses that recreate app state in-process) sees a fresh
+    # executor on first probe via `_get_probe_executor()`. Codex
+    # flagged that the previous "shutdown but never recreate" pattern
+    # silently broke probe + schema retry on subsequent app starts.
+    _shutdown_probe_executor()
 
     logger.info("Shutting down Unified API Server...")
 
@@ -377,6 +498,20 @@ app.include_router(agents_router)
 app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
+# Honor the in-process team's `enabled` flag: an operator that disables
+# the team via TEAM_CONFIGS expects /api/product-delivery/* to stop
+# answering, not just disappear from /teams. Gate the *import* too —
+# Codex flagged that an unconditional import can take down unified_api
+# at startup with an import-time failure (missing transitive dep,
+# broken module, etc.) even when the team is disabled. With the gate,
+# disabling product_delivery in config skips the module graph
+# entirely.
+if TEAM_CONFIGS["product_delivery"].enabled:
+    from unified_api.routes.product_delivery import register_pd_exception_handlers
+    from unified_api.routes.product_delivery import router as product_delivery_router
+
+    app.include_router(product_delivery_router)
+    register_pd_exception_handlers(app)
 
 
 # ---------------------------------------------------------------------------
@@ -406,23 +541,321 @@ async def root() -> ApiInfoResponse:
     )
 
 
+# Dedicated, bounded executor for the `/health` Postgres probe.
+# Codex flagged that `asyncio.to_thread` cannot interrupt the underlying
+# psycopg call on `wait_for` timeout: under a Postgres outage every
+# probe leaves a worker blocked in `pool.connection()` until the pool's
+# own timeout elapses, which can quickly exhaust the default executor
+# (and starve every other `to_thread`-using path in the app — file
+# I/O, integrations, etc.).
+#
+# Two-pronged fix:
+#   1. Run the probe in its own small executor so a flooded /health
+#      can't drag down unrelated work.
+#   2. Cap the connection-acquisition wait via psycopg's own timeout
+#      knob (`pool.connection(timeout=…)`) so the worker itself can't
+#      block longer than the budget — the thread always exits cleanly.
+_PROBE_DB_TIMEOUT_S = 1.5
+# The probe executor is created lazily via `_get_probe_executor()` so
+# that lifespan teardown (which calls `.shutdown()`) doesn't strand a
+# subsequent app start with a dead executor — Codex flagged that
+# tests / reload harnesses that recreate app state in-process were
+# left with no way to schedule probe or retry work after the first
+# shutdown. ``_get_probe_executor`` recreates it on demand.
+_PROBE_EXECUTOR: futures.ThreadPoolExecutor | None = None
+
+
+def _get_probe_executor() -> futures.ThreadPoolExecutor:
+    """Lazily create or recreate the dedicated probe executor.
+
+    Codex flagged that the previous module-level executor was shut
+    down on lifespan exit but never recreated. In-process restarts
+    (test harnesses, ``uvicorn --reload``) would then schedule probe
+    work onto a closed executor and silently fail. With this lazy
+    accessor every probe / retry call enters with a live executor —
+    or creates a fresh one if the previous lifespan tore it down.
+    """
+    global _PROBE_EXECUTOR
+    if _PROBE_EXECUTOR is None or getattr(_PROBE_EXECUTOR, "_shutdown", False):
+        _PROBE_EXECUTOR = futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pd-health-probe")
+    return _PROBE_EXECUTOR
+
+
+def _shutdown_probe_executor() -> None:
+    """Shut down the probe executor and clear the slot for re-creation."""
+    global _PROBE_EXECUTOR
+    if _PROBE_EXECUTOR is not None:
+        _PROBE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+        _PROBE_EXECUTOR = None
+
+
+async def _probe_postgres_live() -> bool:
+    """Run ``SELECT 1`` against the shared pool with a short timeout.
+
+    Used by the in-process team health branch so a runtime Postgres
+    outage (pool exhausted, host unreachable, FK chain broken) flips
+    those teams to ``unhealthy`` immediately instead of leaving the
+    startup-time success result frozen until the next process restart.
+    Anything that doesn't return ``True`` quickly is treated as a
+    fail — better to flap to ``unhealthy`` briefly than miss a real
+    outage. Runs in a dedicated 2-worker executor with an inner
+    psycopg-level timeout so a stalled DB can't accumulate orphaned
+    workers in the default threadpool.
+    """
+
+    def _ping() -> bool:
+        from shared_postgres import client as _pg_client
+        from shared_postgres import is_postgres_enabled
+
+        if not is_postgres_enabled():
+            return False
+        try:
+            # Bound the connection acquisition itself so the worker
+            # thread can't block longer than `_PROBE_DB_TIMEOUT_S`. We
+            # reach through `client._get_or_create_pool` (rather than
+            # `get_conn()`) because the public helper doesn't expose a
+            # timeout knob today and the probe must be hard-bounded.
+            pool = _pg_client._get_or_create_pool()
+            with pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                row = cur.fetchone()
+                return row is not None and row[0] == 1
+        except Exception:
+            return False
+
+    loop = asyncio.get_running_loop()
+    try:
+        # Outer wait_for gives the await an upper bound even if the
+        # inner psycopg timeout fires later than expected. Worker
+        # cleanup is guaranteed by the inner timeout; this is just
+        # belt-and-suspenders for the await side.
+        return await asyncio.wait_for(
+            loop.run_in_executor(_get_probe_executor(), _ping),
+            timeout=_PROBE_DB_TIMEOUT_S + 0.5,
+        )
+    except asyncio.TimeoutError:
+        return False
+    except Exception:
+        return False
+
+
+def _is_postgres_enabled_cached() -> bool:
+    """``shared_postgres.is_postgres_enabled()`` without the import dance.
+
+    Just reads the env var directly so the health handler doesn't pay
+    an import on every call. Postgres-disabled environments use this
+    to drop in-process teams to ``unavailable`` rather than ``unhealthy``.
+    """
+    return bool(os.environ.get("POSTGRES_HOST", "").strip())
+
+
+def _expected_tables_for(team_key: str) -> list[str]:
+    """Return the list of tables an in-process team is expected to own.
+
+    Sourced from each team's ``TeamSchema.table_names`` so this stays
+    in lockstep with the schema-registry truth, no separate list.
+    """
+    if team_key == "product_delivery":
+        from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
+
+        return list(PRODUCT_DELIVERY_SCHEMA.table_names)
+    # Other in-process teams (agent_console, team_assistant, …) don't
+    # currently surface table-presence checks in /health. Add cases
+    # here as they adopt the pattern.
+    return []
+
+
+async def _verify_in_process_schema_present(team_key: str) -> bool:
+    """Check that the team's expected tables still exist in Postgres.
+
+    Codex flagged that ``SELECT 1`` alone proves connectivity but
+    *not* that the team's schema is intact — a manual ``DROP TABLE``,
+    a botched migration, or a database swap could leave product-delivery
+    endpoints returning storage errors while ``/health`` stayed green.
+    We re-confirm the table set every time this branch fires; if any
+    expected table is missing, the team flips to ``unhealthy`` and is
+    added back to ``_in_process_schema_failures`` so the background
+    loop's retry path attempts re-registration.
+
+    Runs the synchronous psycopg query inside the dedicated probe
+    executor (same pool as ``_probe_postgres_live`` and the schema
+    retry) so it can't starve the default ``to_thread`` executor.
+    """
+    expected = _expected_tables_for(team_key)
+    if not expected:
+        # No declared tables → nothing to verify. Treat as healthy
+        # (e.g. a future in-process team that doesn't own any tables).
+        return True
+
+    def _check() -> bool:
+        from shared_postgres import client as _pg_client
+        from shared_postgres import is_postgres_enabled
+
+        if not is_postgres_enabled():
+            return False
+        try:
+            pool = _pg_client._get_or_create_pool()
+            with pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn, conn.cursor() as cur:
+                # `to_regclass` returns NULL for missing tables — fast,
+                # one round-trip, and it doesn't lock anything.
+                placeholders = ", ".join(["to_regclass(%s) IS NOT NULL"] * len(expected))
+                cur.execute(f"SELECT {placeholders}", expected)
+                row = cur.fetchone()
+                return row is not None and all(row)
+        except Exception:
+            return False
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_get_probe_executor(), _check),
+            timeout=_PROBE_DB_TIMEOUT_S + 0.5,
+        )
+    except asyncio.TimeoutError:
+        return False
+    except Exception:
+        return False
+
+
+def _retry_in_process_schema_registration(team_key: str) -> bool:
+    """Re-run schema registration for a team after a transient outage.
+
+    Called from `/health` when the live DB probe succeeds for a team
+    that was added to `_in_process_schema_failures` at startup —
+    typically because Postgres wasn't reachable when the lifespan
+    fired but is reachable now. Uses `ensure_team_schema` (rather than
+    the boolean `register_team_schemas` wrapper) so we can detect
+    *partial* DDL — that helper logs-and-skips per-statement errors
+    and would otherwise return success after applying only some
+    statements, flipping `/health` to `healthy` while required tables
+    or indexes are still missing. We only clear the failure flag when
+    `applied == total`.
+
+    Synchronous (DDL is sync); the caller wraps this in
+    ``asyncio.to_thread`` so it doesn't block the event loop.
+    """
+    try:
+        if team_key == "product_delivery":
+            from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
+            from shared_postgres import ensure_team_schema
+
+            applied = ensure_team_schema(PRODUCT_DELIVERY_SCHEMA)
+            total = len(PRODUCT_DELIVERY_SCHEMA.statements)
+            if applied < total:
+                logger.warning(
+                    "product_delivery retry: %d/%d DDL statements applied; "
+                    "still unhealthy (some required tables or indexes are missing)",
+                    applied,
+                    total,
+                )
+                return False
+            _in_process_schema_failures.discard(team_key)
+            logger.info(
+                "product_delivery: schema re-registration succeeded (%d/%d); clearing health flag",
+                applied,
+                total,
+            )
+            return True
+        # Other in-process teams (agent_console, team_assistant, etc.)
+        # don't currently track their schema-failure flag through this
+        # set, so there's nothing to retry. Add cases here as they
+        # adopt the pattern.
+        return False
+    except Exception:
+        logger.warning("Schema re-registration retry failed for %s", team_key, exc_info=True)
+        return False
+
+
 @app.get("/health", response_model=UnifiedHealthResponse, tags=["health"])
 async def health() -> UnifiedHealthResponse:
-    """Unified health check — reports proxy registration and upstream liveness per team."""
+    """Unified health check — reports proxy registration and upstream liveness per team.
+
+    Read-only: Codex flagged that triggering DDL retries from a public
+    GET endpoint is operationally surprising and lets every health
+    probe (load balancer, monitoring) repeatedly attempt
+    `CREATE TABLE/INDEX`. Schema retries now run on a throttled
+    background task (`_health_check_loop`) so this handler only reads
+    state — no DDL, no `_retry_in_process_schema_registration`.
+    """
     teams = []
     all_healthy = True
+    # Lazily probe the live DB only if at least one in-process team
+    # would otherwise report `healthy` — avoids paying the round trip
+    # when every in-process team is already disabled or has a startup
+    # schema failure recorded.
+    db_live: bool | None = None
     for key, config in TEAM_CONFIGS.items():
         registered = _registered_teams.get(key, False)
         liveness = _team_liveness.get(key, "unknown")
-        if registered and liveness == "healthy":
+        # Tracks whether `unavailable` here is *intentional* (the
+        # in-process Postgres-disabled case) or *misconfigured* (proxy
+        # team without a service URL). Only the misconfigured case
+        # should flip overall health to `degraded` — Codex flagged
+        # that the previous "any unavailable degrades" rule masked
+        # real proxy misconfigurations and the new "no unavailable
+        # degrades" rule overcorrected.
+        intentionally_unavailable = False
+        if config.in_process:
+            # No upstream container, but the in-process router still
+            # depends on Postgres for product_delivery / agent_console.
+            # Four states matter:
+            #   * disabled → routes are unmounted; report "unavailable"
+            #     (intentional — operator opt-out via TEAM_CONFIGS).
+            #   * Postgres not configured → "unavailable" (intentional —
+            #     the env explicitly opted out by not setting
+            #     `POSTGRES_HOST`).
+            #   * schema registration failed at startup AND the
+            #     background retry hasn't healed it yet → "unhealthy"
+            #     (broken).
+            #   * runtime DB probe fails → "unhealthy" (active outage).
+            #   * otherwise → "healthy".
+            if not config.enabled or not _is_postgres_enabled_cached():
+                # Either operator opt-out (config-disabled team) or
+                # env opt-out (no `POSTGRES_HOST`). Both are
+                # intentional and should not flip overall health.
+                status = "unavailable"
+                intentionally_unavailable = True
+            elif key in _in_process_schema_failures:
+                # Background loop may have already cleared this; if
+                # we're still in the set, persistence is still broken.
+                # Read-only: don't trigger a retry from this handler.
+                status = "unhealthy"
+            else:
+                if db_live is None:
+                    db_live = await _probe_postgres_live()
+                if not db_live:
+                    status = "unhealthy"
+                else:
+                    # `SELECT 1` proves connectivity — but Codex
+                    # flagged that it doesn't prove the team's tables
+                    # are still present (a manual `DROP TABLE`,
+                    # botched migration, or DB swap can leave
+                    # endpoints 503-ing while /health stayed green).
+                    # Verify the team's expected tables exist; if any
+                    # are missing, mark the team unhealthy and queue
+                    # a background-loop retry to re-register.
+                    if await _verify_in_process_schema_present(key):
+                        status = "healthy"
+                    else:
+                        logger.warning(
+                            "%s: Postgres reachable but expected tables missing; "
+                            "marking unhealthy and queueing schema retry",
+                            key,
+                        )
+                        _in_process_schema_failures.add(key)
+                        status = "unhealthy"
+        elif registered and liveness == "healthy":
             status = "healthy"
         elif registered and liveness == "unknown":
             status = "healthy"  # Not yet checked — assume healthy
         elif registered:
             status = "unhealthy"
         else:
+            # Proxy team that isn't registered — typically because its
+            # service URL is missing. That's a deployment misconfig,
+            # not an opt-out, so it should degrade overall health.
             status = "unavailable"
-        if config.enabled and status in ("unavailable", "unhealthy"):
+        if config.enabled and (status == "unhealthy" or (status == "unavailable" and not intentionally_unavailable)):
             all_healthy = False
         teams.append(TeamHealth(name=config.name, prefix=config.prefix, status=status, enabled=config.enabled))
     return UnifiedHealthResponse(
@@ -438,13 +871,17 @@ async def list_teams() -> dict[str, Any]:
     teams = {}
     for key, config in TEAM_CONFIGS.items():
         registered = _registered_teams.get(key, False)
+        # In-process teams piggy-back on the unified API's `/docs` —
+        # they don't expose a `/api/<team>/docs` endpoint themselves,
+        # so don't advertise one (it would 404).
+        per_team_docs = registered and not config.in_process
         teams[key] = {
             "name": config.name,
             "prefix": config.prefix,
             "description": config.description,
             "registered": registered,
             "enabled": config.enabled,
-            "docs_url": f"{config.prefix}/docs" if registered else None,
+            "docs_url": f"{config.prefix}/docs" if per_team_docs else None,
         }
     return {"teams": teams}
 

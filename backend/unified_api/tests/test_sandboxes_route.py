@@ -117,5 +117,3 @@ def test_status_reconciles_vanished_container(client: TestClient, monkeypatch) -
     resp = client.get("/api/agents/sandboxes/blogging.planner")
     assert resp.status_code == 200
     assert resp.json()["status"] == SandboxStatus.COLD
-
-
