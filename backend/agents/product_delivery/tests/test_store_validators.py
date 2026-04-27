@@ -276,9 +276,15 @@ def test_validate_status_strips_leading_trailing_whitespace() -> None:
     assert _validate_status("\topen\n") == "open"
 
 
-def test_validate_title_rejects_non_string_inputs() -> None:
+@pytest.mark.parametrize("bad", [None, 123, 4.5, [], {}, True, False])
+def test_validate_title_rejects_non_string_inputs(bad: object) -> None:
+    """Non-route callers handing in non-strings must surface a domain
+    `ValueError`, not a raw `TypeError` from `len()` — same contract
+    as `_validate_status`. Internal callers (the ProductOwnerAgent,
+    future workflow code, etc.) can't bypass the explicit validation
+    path with non-strings."""
     with pytest.raises(ValueError, match="title must be a string"):
-        _validate_title(None)  # type: ignore[arg-type]
+        _validate_title(bad)  # type: ignore[arg-type]
 
 
 def test_validate_title_strips_whitespace() -> None:
