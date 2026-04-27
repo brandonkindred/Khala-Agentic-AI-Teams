@@ -35,6 +35,9 @@ TEAM_POSTGRES_MODULES: dict[str, str] = {
     "blogging": "blogging.postgres",
     "nutrition_meal_planning": "nutrition_meal_planning_team.postgres",
     "product_delivery": "product_delivery.postgres",
+    # Issue #376 — investment team's first Postgres table: snapshot index
+    # for the durable, content-hashed market-data cache.
+    "investment_market_data": "investment_team.market_data_cache.postgres",
 }
 
 

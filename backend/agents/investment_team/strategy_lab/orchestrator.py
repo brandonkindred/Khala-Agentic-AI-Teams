@@ -878,16 +878,24 @@ class StrategyLabOrchestrator:
         spec: StrategySpec,
         config: BacktestConfig,
     ) -> Optional[Dict[str, List[OHLCVBar]]]:
-        """Fetch OHLCV data for the strategy's asset class."""
+        """Fetch OHLCV data for the strategy's asset class.
+
+        Issue #376 — when the strategy spec carries an
+        ``audit.data_snapshot_id``, treat it as the ``as_of`` cutoff so
+        a re-run of the saved spec replays the exact same snapshot.
+        Specs without it use ``None`` (latest).
+        """
         try:
             symbols = self.market_data_service.get_symbols_for_strategy(spec)
             if not symbols:
                 return None
+            as_of = (getattr(spec, "audit", None) and spec.audit.data_snapshot_id) or None
             data = self.market_data_service.fetch_multi_symbol_range(
                 symbols=symbols[:5],
                 asset_class=spec.asset_class,
                 start_date=config.start_date,
                 end_date=config.end_date,
+                as_of=as_of,
             )
             return data if data else None
         except Exception:
@@ -1118,6 +1126,10 @@ class StrategyLabOrchestrator:
         ``config.initial_capital``.
         """
         composition = (config.benchmark_composition or "").strip().lower()
+        # Issue #376 — pin benchmark fetches to the same ``as_of`` as the
+        # strategy fetch so a saved spec re-runs against a consistent
+        # historical snapshot of both strategy bars and benchmark bars.
+        as_of = (getattr(spec, "audit", None) and spec.audit.data_snapshot_id) or None
         if composition == "60_40":
             try:
                 blend = self.market_data_service.fetch_multi_symbol_range(
@@ -1125,6 +1137,7 @@ class StrategyLabOrchestrator:
                     asset_class="stocks",
                     start_date=config.start_date,
                     end_date=config.end_date,
+                    as_of=as_of,
                 )
             except Exception:
                 logger.exception("60/40 benchmark fetch failed; falling back to single-symbol")
@@ -1153,6 +1166,7 @@ class StrategyLabOrchestrator:
                 asset_class=spec.asset_class,
                 start_date=config.start_date,
                 end_date=config.end_date,
+                as_of=as_of,
             )
         except Exception:
             logger.exception("Single-symbol benchmark fetch failed for %s", bench_symbol)

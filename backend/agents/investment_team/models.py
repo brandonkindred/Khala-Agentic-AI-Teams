@@ -455,6 +455,14 @@ class BacktestResult(BaseModel):
     # (``DataQualityReport``) lives there and is ``model_dump()``-ed at
     # the boundary. None on legacy rows.
     data_quality_report: Optional[Dict[str, Any]] = None
+    # Issue #376 — content-addressed dataset fingerprint (SHA256) covering
+    # every bar fed to the run.  Two runs with the same ``BacktestConfig``
+    # against the cached snapshot at the same ``as_of`` produce an
+    # identical fingerprint, enabling byte-exact reproducibility checks.
+    # None on legacy rows and on runs where the data path could not be
+    # captured (e.g. fully external pre-fetched dicts that bypass the
+    # cache).
+    dataset_fingerprint: Optional[str] = None
 
 
 class TradeRecord(BaseModel):
@@ -727,6 +735,14 @@ class PaperTradingSession(BaseModel):
     data_quality_report: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Preflight data-quality report captured at warm-up; null for legacy rows.",
+    )
+    # Issue #376 — fingerprint of the warm-up window, taken at cut-over.
+    # Live bars are not cached, so this hashes the historical warm-up
+    # only.  Null for legacy rows and for sessions that ended before
+    # cut-over.
+    dataset_fingerprint: Optional[str] = Field(
+        default=None,
+        description="SHA256 fingerprint of the warm-up snapshot; null for legacy rows.",
     )
 
 

@@ -11,9 +11,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 from pydantic import BaseModel
@@ -34,6 +33,9 @@ from .symbols import (
     STOCK_SYMBOLS,
     YAHOO_CRYPTO_TICKERS,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .market_data_cache import MarketDataCache
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +93,12 @@ class MarketDataService:
     Alpha Vantage is only included when ``ALPHA_VANTAGE_API_KEY`` is set.
     """
 
-    def __init__(self, http_timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        http_timeout: float = 30.0,
+        *,
+        cache: Optional["MarketDataCache"] = None,
+    ) -> None:
         self._timeout = http_timeout
         # Phase 5 (partial): records which provider supplied bars for each
         # symbol on the most recent fetch.  Read by
@@ -105,6 +112,18 @@ class MarketDataService:
         # (backtest / paper trade) re-run validation with the strictness
         # appropriate to their context.  None until the first fetch.
         self.last_quality_report: Optional["object"] = None
+        # Issue #376 — durable, content-hashed cache. Lazily resolved so
+        # tests can construct a MarketDataService without paying the
+        # cache_root() side effects until they need them.
+        self._injected_cache: Optional["MarketDataCache"] = cache
+
+    @property
+    def cache(self) -> "MarketDataCache":
+        if self._injected_cache is not None:
+            return self._injected_cache
+        from .market_data_cache import get_default_cache
+
+        return get_default_cache()
 
     # ------------------------------------------------------------------
     # Public API
@@ -116,32 +135,65 @@ class MarketDataService:
         start_dt = end_dt - timedelta(days=days)
         return self.fetch_ohlcv_range(symbol, asset_class, start_dt.isoformat(), end_dt.isoformat())
 
-    def fetch_ohlcv_range(
+    def _fetch_with_providers(
         self, symbol: str, asset_class: str, start_date: str, end_date: str
-    ) -> List[OHLCVBar]:
-        """Fetch OHLCV data for an explicit date range with automatic fallback."""
-        ac = normalize_asset_class(asset_class)
-        for slug, fetch_fn in self._get_named_provider_chain(ac):
+    ) -> Tuple[List[OHLCVBar], str]:
+        """Run the provider chain and return the winning provider's bars + slug.
+
+        Used both as the cache miss handler and (indirectly) as the legacy
+        fetch path.  Returns ``([], "")`` when every provider is exhausted.
+        """
+        for slug, fetch_fn in self._get_named_provider_chain(asset_class):
             try:
-                bars = fetch_fn(symbol, ac, start_date, end_date)
+                bars = fetch_fn(symbol, asset_class, start_date, end_date)
                 if bars:
-                    # Phase 5 (partial): record the winning provider so the
-                    # intraday-safety guard can inspect it post-fetch.
-                    self.provider_used[symbol] = slug
-                    return bars
+                    return bars, slug
             except Exception as exc:
-                logger.warning("Provider failed for %s (%s): %s", symbol, ac, exc)
-        logger.warning("All providers exhausted for %s (%s)", symbol, ac)
-        return []
+                logger.warning("Provider failed for %s (%s): %s", symbol, asset_class, exc)
+        logger.warning("All providers exhausted for %s (%s)", symbol, asset_class)
+        return [], ""
+
+    def fetch_ohlcv_range(
+        self,
+        symbol: str,
+        asset_class: str,
+        start_date: str,
+        end_date: str,
+        *,
+        as_of: Optional[str] = None,
+        frequency: str = "1d",
+    ) -> List[OHLCVBar]:
+        """Fetch OHLCV data for an explicit date range with automatic fallback.
+
+        Issue #376 — every fetch routes through the durable, content-hashed
+        ``MarketDataCache``; identical ``(symbol, range, as_of)`` reads
+        replay byte-equal bars on subsequent calls.  ``as_of=None`` means
+        "latest"; pass an ISO date / datetime to pin to a historical
+        snapshot.
+        """
+        ac = normalize_asset_class(asset_class)
+        bars, meta = self.cache.get_or_fetch(
+            symbol=symbol,
+            asset_class=ac,
+            frequency=frequency,
+            start=start_date,
+            end=end_date,
+            fetch_fn=self._fetch_with_providers,
+            as_of=as_of,
+        )
+        if meta is not None:
+            # Phase 5 (partial): record the winning provider so the
+            # intraday-safety guard can inspect it post-fetch.  Both the
+            # cache-hit and miss paths populate this so downstream
+            # consumers see consistent metadata.
+            self.provider_used[symbol] = meta.provider
+        return bars
 
     # ------------------------------------------------------------------
     # Liquidity (Phase 4): average daily dollar volume over the trailing
     # 20 bars.  Consumed by ``SpreadPlusImpactCostModel`` to size the
     # market-impact term per symbol.
     # ------------------------------------------------------------------
-
-    _adv_cache: Dict[tuple, tuple[float, float]] = {}
-    _ADV_CACHE_TTL_SEC: float = 3600.0
 
     def avg_dollar_volume_20d(
         self,
@@ -153,30 +205,29 @@ class MarketDataService:
     ) -> Optional[float]:
         """Return the trailing-N-bar mean of ``close * volume`` in USD.
 
-        ``as_of`` defaults to today.  Results are memoized on ``(symbol,
-        asset_class, as_of, lookback)`` for ``_ADV_CACHE_TTL_SEC`` seconds
-        so the orchestrator can query ADV per-symbol cheaply during a
-        run.  Returns ``None`` when the provider chain is exhausted — the
+        Issue #376 — backed by the cache's derived-ADV layer keyed on
+        ``(per-symbol-snapshot fingerprint, lookback)``.  Within a
+        snapshot the result is eternally valid (no TTL), and across
+        processes byte-equal Parquet content yields the same key.
+        Returns ``None`` when the provider chain is exhausted — the
         cost model's impact term collapses to the flat half-spread in
         that case.
         """
         as_of_str = as_of or date.today().isoformat()
-        key = (symbol, asset_class, as_of_str, int(lookback))
-        now = time.monotonic()
-        cached = type(self)._adv_cache.get(key)
-        if cached is not None:
-            cached_value, cached_ts = cached
-            if now - cached_ts < self._ADV_CACHE_TTL_SEC:
-                return cached_value if cached_value >= 0 else None
-
         # Pull lookback * ~1.6 calendar days so weekends / holidays leave
         # enough trading bars after filtering.  Extra bars are truncated.
         end_dt = date.fromisoformat(as_of_str[:10])
         start_dt = end_dt - timedelta(days=max(lookback * 2, 30))
-        bars = self.fetch_ohlcv_range(symbol, asset_class, start_dt.isoformat(), end_dt.isoformat())
-        adv = compute_adv_from_bars(bars, lookback=lookback)
-        type(self)._adv_cache[key] = (adv if adv is not None else -1.0, now)
-        return adv
+        bars = self.fetch_ohlcv_range(
+            symbol,
+            asset_class,
+            start_dt.isoformat(),
+            end_dt.isoformat(),
+            as_of=as_of,
+        )
+        if not bars:
+            return None
+        return self.cache.adv_for_bars(bars=bars, lookback=lookback)
 
     def get_symbols_for_strategy(self, strategy: StrategySpec) -> List[str]:
         """Return relevant symbols based on the strategy's asset class."""
@@ -209,30 +260,37 @@ class MarketDataService:
         end_date: str,
         *,
         intraday_mode: bool = False,
+        as_of: Optional[str] = None,
+        frequency: str = "1d",
     ) -> Dict[str, List[OHLCVBar]]:
         """Fetch OHLCV data for multiple symbols over an explicit date range.
 
-        Uses a thread pool to fetch symbols in parallel.  When
-        ``intraday_mode=True`` runs the Phase 5 intraday-safety guard after
-        all symbols resolve — raises ``IntradayDataError`` if any symbol's
-        bars came from a provider that's unsafe at intraday granularity
-        (CoinGecko today).
+        Issue #376 — routes through the durable cache.  Worker count is
+        controlled by ``MARKET_DATA_FETCH_WORKERS`` (default
+        ``min(len(symbols), 16)``); the previous hard-coded cap of 5 is
+        gone.  Cache-hit symbols don't dispatch to a provider at all.
+
+        When ``intraday_mode=True`` runs the Phase 5 intraday-safety
+        guard after all symbols resolve — raises ``IntradayDataError`` if
+        any symbol's bars came from a provider that's unsafe at intraday
+        granularity (CoinGecko today).
         """
+        ac = normalize_asset_class(asset_class)
+        cache_results = self.cache.get_or_fetch_multi(
+            symbols=symbols,
+            asset_class=ac,
+            frequency=frequency,
+            start=start_date,
+            end=end_date,
+            fetch_fn=self._fetch_with_providers,
+            as_of=as_of,
+        )
         result: Dict[str, List[OHLCVBar]] = {}
-        workers = min(len(symbols), 5)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(self.fetch_ohlcv_range, sym, asset_class, start_date, end_date): sym
-                for sym in symbols
-            }
-            for future in as_completed(futures):
-                sym = futures[future]
-                try:
-                    bars = future.result()
-                    if bars:
-                        result[sym] = bars
-                except Exception as exc:
-                    logger.warning("Failed to fetch %s: %s", sym, exc)
+        for sym, (bars, meta) in cache_results.items():
+            if not bars or meta is None:
+                continue
+            result[sym] = bars
+            self.provider_used[sym] = meta.provider
 
         if intraday_mode:
             from .execution.intraday_guard import check_intraday_data_source

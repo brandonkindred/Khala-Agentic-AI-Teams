@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -127,10 +128,36 @@ _MAX_BATCH_COUNT = _env_positive_int("STRATEGY_LAB_MAX_BATCH_COUNT", 100)
 
 init_otel(service_name="investment-team", team_key="investment")
 
+
+@asynccontextmanager
+async def _investment_lifespan(app: FastAPI):
+    """Issue #376 — register the market-data cache snapshot index DDL.
+
+    No-op when ``POSTGRES_HOST`` is unset (the cache then uses an
+    in-process index, which is enough for unit tests but loses
+    cross-process reproducibility).
+    """
+    try:
+        from investment_team.market_data_cache.postgres import SCHEMA as MD_CACHE_SCHEMA
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(MD_CACHE_SCHEMA)
+    except Exception:
+        logger.exception("investment_market_data postgres schema registration failed")
+    yield
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("investment shared_postgres close_pool failed", exc_info=True)
+
+
 app = FastAPI(
     title="Investment Team API",
     description="Investment profile management, portfolio proposals, strategy validation, and promotion gates.",
     version="1.0.0",
+    lifespan=_investment_lifespan,
 )
 instrument_fastapi_app(app, team_key="investment")
 
@@ -2952,6 +2979,10 @@ def _run_live_paper_trading_background(
             session.error = (run_result.error or "")[:500] or None
             session.symbols_traded = symbols
             session.data_source = f"live:{run_result.provider_id}"
+            # Issue #376 — surface the warm-up snapshot fingerprint on the
+            # persisted session so reproducibility checks can refer back
+            # to the exact bars that drove warm-up.
+            session.dataset_fingerprint = run_result.dataset_fingerprint
             session.completed_at = datetime.now(tz=timezone.utc).isoformat()
             if run_result.error or run_result.terminated_reason in {
                 "lookahead_violation",

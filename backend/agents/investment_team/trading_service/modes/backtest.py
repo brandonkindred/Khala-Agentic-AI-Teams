@@ -24,11 +24,12 @@ from typing import Dict, List, Optional
 
 from ...execution.cost_stress import CostStressReport, CostStressRow
 from ...execution.data_quality import validate_market_data
+from ...market_data_cache import compute_dataset_fingerprint
+from ...market_data_cache.streaming import CachingProviderHistoricalStream
 from ...market_data_service import OHLCVBar
 from ...models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
 from ...trade_simulator import compute_metrics
 from ..data_stream.historical_replay import HistoricalReplayStream
-from ..data_stream.provider_stream import ProviderHistoricalStream
 from ..providers import ProviderRegistry, default_registry
 from ..service import TradingService, TradingServiceResult
 
@@ -52,6 +53,7 @@ def run_backtest(
     timeframe: str = "1d",
     provider_id: Optional[str] = None,
     registry: Optional[ProviderRegistry] = None,
+    as_of: Optional[str] = None,
 ) -> BacktestRunResult:
     """Run a backtest for ``strategy``.
 
@@ -99,6 +101,18 @@ def run_backtest(
             mode="strict",
         )
 
+    # Issue #376 — dataset fingerprint.  Legacy path: hash the
+    # pre-fetched dict directly so callers that bypass the cache still
+    # get a reproducibility check.  Provider-driven path: a single
+    # ``CachingProviderHistoricalStream`` instance is created per run
+    # and its ``dataset_fingerprint`` is read after iteration; cost-
+    # stress replays reuse the cache hit so they don't refetch.
+    legacy_fingerprint: Optional[str] = None
+    if has_legacy and market_data:
+        legacy_fingerprint = compute_dataset_fingerprint(market_data)
+
+    streaming_holder: Dict[str, Optional[CachingProviderHistoricalStream]] = {"current": None}
+
     def _build_stream() -> object:
         if has_legacy:
             return HistoricalReplayStream(market_data, timeframe=timeframe)
@@ -108,14 +122,17 @@ def run_backtest(
             direction="historical",
             explicit=provider_id,
         )
-        return ProviderHistoricalStream(
+        stream = CachingProviderHistoricalStream(
             provider=provider,
             symbols=symbols,
             asset_class=asset_class,
             start=config.start_date,
             end=config.end_date,
             timeframe=timeframe,
+            as_of=as_of,
         )
+        streaming_holder["current"] = stream
+        return stream
 
     def _run_once(
         run_config: BacktestConfig,
@@ -194,6 +211,18 @@ def run_backtest(
     # layer and audit log can record exactly what passed (or warned).
     if quality_report is not None:
         update["data_quality_report"] = quality_report.model_dump()
+
+    # Issue #376 — surface the dataset fingerprint for byte-equality
+    # checks on rerun.  Streaming path takes precedence over the legacy
+    # hash so both routes converge on the same content-addressed key.
+    streaming_fp = (
+        streaming_holder["current"].dataset_fingerprint
+        if streaming_holder["current"] is not None
+        else None
+    )
+    fingerprint = streaming_fp or legacy_fingerprint
+    if fingerprint:
+        update["dataset_fingerprint"] = fingerprint
 
     if update:
         metrics = metrics.model_copy(update=update)

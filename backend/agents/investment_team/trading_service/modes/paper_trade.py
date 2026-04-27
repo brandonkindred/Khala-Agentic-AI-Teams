@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, Iterator, List, Optional
 
 from ...execution.data_quality import LiveGapMonitor, validate_market_data
+from ...market_data_cache import compute_dataset_fingerprint, get_default_cache
 from ...market_data_service import OHLCVBar
 from ...models import BacktestConfig, StrategySpec, TradeRecord
 from ..data_stream.live_stream import (
@@ -82,6 +83,11 @@ class PaperTradeRunResult:
     # cut-over (``validate_market_data(mode='warn')``).  None when no
     # warm-up bars were observed before the stream ended.
     data_quality_report: Optional[dict] = None
+    # Issue #376 — content-addressed fingerprint of the warm-up snapshot,
+    # captured at cut-over.  Live bars are not cached, so this hashes
+    # only the historical warm-up window.  None when the stream ended
+    # before cut-over.
+    dataset_fingerprint: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +189,9 @@ def run_paper_trade(
     terminated_reason = {"reason": "unknown"}
     # Issue #375 — captures the preflight report at warm-up cut-over
     # (mode='warn').  Stays None if the stream ends before cut-over.
-    quality_state: dict = {"report": None}
+    # Issue #376 — ``fingerprint`` is filled at the same cut-over from
+    # the buffered warm-up bars.
+    quality_state: dict = {"report": None, "fingerprint": None}
 
     def _should_stop() -> bool:
         if controller.is_stopped():
@@ -225,6 +233,7 @@ def run_paper_trade(
             paper_config=paper_config,
             warnings=warnings,
             quality_state=quality_state,
+            provider_id=provider_id,
         )
         service_result = service.run(
             stream_source, on_trade=lambda _trade: fill_counter.increment()
@@ -242,6 +251,7 @@ def run_paper_trade(
                 error=str(exc),
                 warnings=warnings,
                 data_quality_report=quality_state["report"],
+                dataset_fingerprint=quality_state["fingerprint"],
             )
         logger.info(
             "primary provider %s region-blocked; failing over to %s",
@@ -258,6 +268,7 @@ def run_paper_trade(
             paper_config=paper_config,
             warnings=warnings,
             quality_state=quality_state,
+            provider_id=provider_id,
         )
         service_result = service.run(
             stream_source, on_trade=lambda _trade: fill_counter.increment()
@@ -289,6 +300,7 @@ def run_paper_trade(
         warnings=warnings,
         error=service_result.error,
         data_quality_report=quality_state["report"],
+        dataset_fingerprint=quality_state["fingerprint"],
     )
 
 
@@ -325,6 +337,7 @@ def _translate(
     paper_config: PaperTradeConfig,
     warnings: List[str],
     quality_state: dict,
+    provider_id: str = "",
 ) -> Iterator[StreamEvent]:
     """Convert :class:`LiveStreamEvent` to :class:`StreamEvent` the engine understands.
 
@@ -332,6 +345,11 @@ def _translate(
     cut-over (``mode='warn'``) and a per-symbol live-gap monitor on
     streaming bars; advisories accumulate on ``warnings`` and the warm-up
     report ends up on ``quality_state['report']``.
+
+    Issue #376 — at the same cut-over, hashes the buffered warm-up bars
+    into a content-addressed fingerprint and persists each per-symbol
+    warm-up window as a cache snapshot.  The fingerprint lands on
+    ``quality_state['fingerprint']``; live bars are not cached.
     """
     # Warm-up bar buffer keyed by symbol; flushed at cutover.
     warmup_buffer: Dict[str, List[OHLCVBar]] = {}
@@ -358,6 +376,28 @@ def _translate(
                 quality_state["report"] = report.model_dump()
                 if report.severity != "ok":
                     warnings.append(f"data_quality:warmup:{report.severity}")
+                # Issue #376 — fingerprint the warm-up window and persist
+                # a per-symbol cache snapshot, then surface the
+                # fingerprint to the caller.  Cache writes are best-
+                # effort; failures are logged but do not abort the
+                # session.
+                quality_state["fingerprint"] = compute_dataset_fingerprint(warmup_buffer)
+                try:
+                    cache = get_default_cache()
+                    for sym, sym_bars in warmup_buffer.items():
+                        if not sym_bars:
+                            continue
+                        cache.record_bars_snapshot(
+                            symbol=sym,
+                            asset_class=paper_config.asset_class,
+                            frequency=paper_config.strategy_timeframe,
+                            provider=provider_id or "live",
+                            bars=sym_bars,
+                            start=sym_bars[0].date,
+                            end=sym_bars[-1].date,
+                        )
+                except Exception:
+                    logger.exception("warm-up snapshot persistence failed")
             # No StreamEvent to emit — the service doesn't care about the
             # cut-over, only whether a bar is marked warm-up or not.
         elif isinstance(event, LiveBarEvent):

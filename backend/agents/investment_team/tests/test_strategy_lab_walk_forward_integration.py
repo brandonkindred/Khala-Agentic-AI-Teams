@@ -160,6 +160,8 @@ class _StubMarketDataService:
         asset_class: str,
         start_date: str,
         end_date: str,
+        as_of: Optional[str] = None,
+        frequency: str = "1d",
     ) -> Dict[str, List[OHLCVBar]]:
         self.calls.append(
             {
@@ -167,6 +169,8 @@ class _StubMarketDataService:
                 "asset_class": asset_class,
                 "start_date": start_date,
                 "end_date": end_date,
+                "as_of": as_of,
+                "frequency": frequency,
             }
         )
         out: Dict[str, List[OHLCVBar]] = {}

@@ -1024,17 +1024,24 @@ def test_market_data_service_fetch_ohlcv_range_routes_by_asset_class() -> None:
         mock_yahoo.assert_called_once_with("EURUSD=X", "forex", "2023-01-01", "2023-12-31")
 
 
-def test_market_data_service_fetch_multi_symbol_range() -> None:
+def test_market_data_service_fetch_multi_symbol_range(tmp_path) -> None:
+    """Issue #376 — multi-symbol fetches route through ``MarketDataCache``.
+
+    With a tmp-rooted cache and ``_fetch_with_providers`` mocked to a
+    fixed bar, both symbols populate the result and write a snapshot.
+    """
     from unittest.mock import patch
 
+    from agents.investment_team.market_data_cache import MarketDataCache
     from agents.investment_team.market_data_service import MarketDataService, OHLCVBar
 
-    service = MarketDataService()
+    cache = MarketDataCache(cache_root=tmp_path)
+    service = MarketDataService(cache=cache)
     sample_bar = OHLCVBar(
         date="2023-06-01", open=150.0, high=155.0, low=148.0, close=153.0, volume=1000000
     )
 
-    with patch.object(service, "fetch_ohlcv_range", return_value=[sample_bar]):
+    with patch.object(service, "_fetch_with_providers", return_value=([sample_bar], "yahoo")):
         result = service.fetch_multi_symbol_range(
             ["AAPL", "MSFT"], "stocks", "2023-01-01", "2023-12-31"
         )
