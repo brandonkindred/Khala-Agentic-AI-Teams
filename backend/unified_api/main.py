@@ -250,33 +250,38 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("agent_console postgres schema registration failed")
 
-    try:
-        from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
-        from shared_postgres import ensure_team_schema, is_postgres_enabled
+    # Gate the entire product_delivery startup block on the team's
+    # `enabled` flag. Disabling the team must also disable its startup
+    # side effects (schema DDL, failure logs, health markers) — not
+    # just the routes.
+    if TEAM_CONFIGS["product_delivery"].enabled:
+        try:
+            from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
+            from shared_postgres import ensure_team_schema, is_postgres_enabled
 
-        # Use `ensure_team_schema` directly (rather than the
-        # `register_team_schemas` boolean wrapper) so we can detect
-        # partial DDL: if a single CREATE/ALTER statement fails it's
-        # logged-and-skipped and `applied < total` — the team's still
-        # mounted but its persistence is broken.
-        if is_postgres_enabled():
-            applied = ensure_team_schema(PRODUCT_DELIVERY_SCHEMA)
-            total = len(PRODUCT_DELIVERY_SCHEMA.statements)
-            if applied < total:
-                logger.warning(
-                    "product_delivery: %d/%d DDL statements applied; marking unhealthy",
-                    applied,
-                    total,
-                )
+            # Use `ensure_team_schema` directly (rather than the
+            # `register_team_schemas` boolean wrapper) so we can detect
+            # partial DDL: if a single CREATE/ALTER statement fails it's
+            # logged-and-skipped and `applied < total` — the team's still
+            # mounted but its persistence is broken.
+            if is_postgres_enabled():
+                applied = ensure_team_schema(PRODUCT_DELIVERY_SCHEMA)
+                total = len(PRODUCT_DELIVERY_SCHEMA.statements)
+                if applied < total:
+                    logger.warning(
+                        "product_delivery: %d/%d DDL statements applied; marking unhealthy",
+                        applied,
+                        total,
+                    )
+                    _in_process_schema_failures.add("product_delivery")
+            else:
+                # Postgres disabled → every persistence call will 503.
+                # Mark unhealthy so /health doesn't disagree with the route.
+                logger.warning("product_delivery: Postgres disabled; persistence endpoints will return 503")
                 _in_process_schema_failures.add("product_delivery")
-        else:
-            # Postgres disabled → every persistence call will 503.
-            # Mark unhealthy so /health doesn't disagree with the route.
-            logger.warning("product_delivery: Postgres disabled; persistence endpoints will return 503")
+        except Exception:
+            logger.exception("product_delivery postgres schema registration failed")
             _in_process_schema_failures.add("product_delivery")
-    except Exception:
-        logger.exception("product_delivery postgres schema registration failed")
-        _in_process_schema_failures.add("product_delivery")
 
     # 1. Mount team assistant conversational sub-apps (before proxy routes).
     try:
@@ -474,10 +479,20 @@ async def health() -> UnifiedHealthResponse:
         if config.in_process:
             # No upstream container, but the in-process router still
             # depends on Postgres for product_delivery / agent_console.
-            # If schema registration failed at startup, persistence calls
-            # will 503 — surface that here instead of always reporting
-            # "healthy".
-            status = "unhealthy" if key in _in_process_schema_failures else "healthy"
+            # Three states matter:
+            #   * disabled → routes are unmounted; report "unavailable"
+            #     so operators don't see a green light beside a route
+            #     that 404s.
+            #   * schema registration failed → persistence calls will
+            #     503; report "unhealthy".
+            #   * otherwise the route is live and the unified API
+            #     process itself is up → "healthy".
+            if not config.enabled:
+                status = "unavailable"
+            elif key in _in_process_schema_failures:
+                status = "unhealthy"
+            else:
+                status = "healthy"
         elif registered and liveness == "healthy":
             status = "healthy"
         elif registered and liveness == "unknown":

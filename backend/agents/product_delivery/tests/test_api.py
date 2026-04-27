@@ -539,6 +539,28 @@ def test_story_create_rejects_non_positive_estimate_points(client: TestClient, b
     assert r.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("status", ""),  # empty
+        ("status", "x" * 41),  # over the 40-char cap
+    ],
+    ids=["empty", "over-cap"],
+)
+def test_initiative_create_rejects_out_of_bounds_status(
+    client: TestClient, field: str, value: str
+) -> None:
+    # Codex flagged that Create payloads accepted unbounded `status`
+    # while StatusUpdate enforced 1..40. Now both go through the same
+    # `StatusStr` annotated alias, so create + patch agree.
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    r = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I", field: value},
+    )
+    assert r.status_code == 422
+
+
 def test_story_create_accepts_none_estimate_points(client: TestClient) -> None:
     """``None`` is the legitimate "unestimated" value — must still be accepted."""
     pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
@@ -658,7 +680,7 @@ def test_groom_returns_503_when_llm_client_bootstrap_fails(
         json={"product_id": pid, "method": "wsjf"},
     )
     assert resp.status_code == 503
-    assert "LLM client unavailable" in resp.json()["detail"]
+    assert "LLM scoring call failed" in resp.json()["detail"]
     assert "OLLAMA_API_KEY missing" in resp.json()["detail"]
 
 
@@ -885,7 +907,7 @@ def test_groom_returns_503_when_llm_service_import_fails(
         json={"product_id": pid, "method": "wsjf"},
     )
     assert resp.status_code == 503
-    assert "LLM client unavailable" in resp.json()["detail"]
+    assert "LLM scoring call failed" in resp.json()["detail"]
 
 
 def test_groom_uses_stubbed_llm_and_returns_ranked_result(

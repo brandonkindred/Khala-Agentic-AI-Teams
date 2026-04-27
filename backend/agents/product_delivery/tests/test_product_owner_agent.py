@@ -376,6 +376,36 @@ def test_groom_surfaces_malformed_inputs_with_score_zero() -> None:
     assert store.persisted == []
 
 
+def test_groom_rationale_uses_actual_persisted_count() -> None:
+    # If `bulk_update_story_scores` reports fewer rows updated than we
+    # tried to score (e.g. concurrent delete), the rationale must
+    # reflect that — it's the signal downstream automation parses to
+    # measure grooming success.
+    stories = [_story("s1"), _story("s2")]
+    inputs = {
+        "user_business_value": 1,
+        "time_criticality": 1,
+        "risk_reduction_or_opportunity_enablement": 1,
+        "job_size": 3,
+    }
+    llm = _StubLLM(
+        payload={
+            "items": [
+                {"id": "s1", "inputs": inputs, "rationale": "ok"},
+                {"id": "s2", "inputs": inputs, "rationale": "ok"},
+            ]
+        }
+    )
+    store = _fake_store(stories=stories)
+    # Stub bulk_update_story_scores to claim only one row landed (the
+    # other was deleted between ranking and persistence).
+    store.bulk_update_story_scores = lambda rows: 1  # type: ignore[assignment]
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="prod-x", method="wsjf", persist=True)
+    assert "Scored 1/2" in result.rationale
+    assert "manual review" in result.rationale.lower()
+
+
 def test_groom_only_sees_stories_under_requested_product() -> None:
     # Two products with disjoint stories. The agent must only score the
     # stories under the requested product — a regression to the old

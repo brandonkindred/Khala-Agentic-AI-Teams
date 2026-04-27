@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from product_delivery.models import (
     GroomMethod,
@@ -139,15 +139,37 @@ class _LLMLike(Protocol):
 
 
 class ProductOwnerAgent:
-    """Stateless: depends on a store + an LLM client only."""
+    """Stateless: depends on a store + an LLM client (or factory).
+
+    Accepting a *factory* (not a pre-built client) lets the agent
+    short-circuit on an empty backlog without ever touching the LLM
+    stack — important because the route can't safely "pre-check"
+    emptiness without racing concurrent writes. We bootstrap the
+    client lazily on the first call to ``_call_llm``.
+
+    For ergonomic tests, callers may pass a pre-built ``llm_client``
+    instead; it gets wrapped in a constant factory so the lazy path
+    behaves the same way. Exactly one of the two arguments must be set.
+    """
 
     def __init__(
         self,
         store: ProductDeliveryStore,
-        llm_client: _LLMLike,
+        llm_client: _LLMLike | None = None,
+        *,
+        llm_factory: Callable[[], _LLMLike] | None = None,
     ) -> None:
+        if (llm_client is None) == (llm_factory is None):
+            raise TypeError("ProductOwnerAgent: pass exactly one of llm_client or llm_factory")
         self._store = store
-        self._llm = llm_client
+        if llm_factory is not None:
+            self._llm_factory = llm_factory
+            self._llm: _LLMLike | None = None
+        else:
+            # Pre-built client — store it directly so `_call_llm` skips
+            # the bootstrap branch.
+            self._llm_factory = lambda: llm_client  # type: ignore[return-value,assignment]
+            self._llm = llm_client
 
     def groom(
         self,
@@ -156,6 +178,10 @@ class ProductOwnerAgent:
         method: GroomMethod = "wsjf",
         persist: bool = True,
     ) -> GroomResult:
+        # Single read of the backlog — no second `list_stories_for_product`
+        # call elsewhere. The route doesn't pre-check emptiness either,
+        # so there's no race window between an empty-check and the actual
+        # iteration.
         stories = self._store.list_stories_for_product(product_id)
         if not stories:
             return GroomResult(
@@ -168,22 +194,25 @@ class ProductOwnerAgent:
         scoring_payload = self._call_llm(method, stories)
         ranked, persist_rows = self._compute_ranked(method, stories, scoring_payload)
 
+        # Report the actual *persisted* count (not just `len(persist_rows)`):
+        # if rows were deleted between ranking and persistence, fewer
+        # scores landed than we attempted, and downstream automation
+        # parsing the rationale should see that.
+        persisted = 0
         if persist and persist_rows:
-            self._store.bulk_update_story_scores(persist_rows)
+            persisted = self._store.bulk_update_story_scores(persist_rows)
+        elif not persist:
+            # Caller explicitly opted out — report attempted scoring.
+            persisted = len(persist_rows)
 
         ranked.sort(key=lambda r: r.score, reverse=True)
-        # Report the actual scored count (= persist_rows length) — not
-        # `len(ranked)`, which also includes synthetic fallback rows for
-        # missing/malformed LLM outputs. Otherwise downstream automation
-        # that parses the rationale overcounts scoring success.
-        scored = len(persist_rows)
         total = len(stories)
-        if scored == total:
-            rationale = f"Scored {scored} stories using {method.upper()}."
+        if persisted == total:
+            rationale = f"Scored {persisted} stories using {method.upper()}."
         else:
             rationale = (
-                f"Scored {scored}/{total} stories using {method.upper()}; "
-                f"{total - scored} surfaced with score=0 for manual review."
+                f"Scored {persisted}/{total} stories using {method.upper()}; "
+                f"{total - persisted} surfaced with score=0 for manual review."
             )
         return GroomResult(
             product_id=product_id,
@@ -212,6 +241,12 @@ class ProductOwnerAgent:
         )
         prompt = build_user_prompt(method, stories_payload)
         try:
+            if self._llm is None:
+                # Lazy bootstrap: factory failures (missing credentials,
+                # broken provider plugin, etc.) get the same 503 mapping
+                # as LLM-call failures. Empty-backlog grooming never
+                # reaches here, so it's safe to defer.
+                self._llm = self._llm_factory()
             return self._llm.complete_json(
                 prompt,
                 temperature=0.0,

@@ -572,8 +572,16 @@ class ProductDeliveryStore:
             # Race: a concurrent caller deleted the product or story
             # between the validation SELECT and our INSERT. Surface as
             # the same 404 the eager validation would have produced.
+            # Don't leak the raw psycopg/SQL detail to the HTTP client —
+            # `from exc` keeps the cause chained for server logs.
+            logger.warning(
+                "create_feedback_item: FK race for product=%s story=%s: %s",
+                product_id,
+                linked_story_id,
+                exc,
+            )
             raise UnknownProductDeliveryEntity(
-                f"product or story for feedback item disappeared mid-write: {exc}"
+                "product or linked story disappeared mid-write"
             ) from exc
         return FeedbackItem(
             id=fid,

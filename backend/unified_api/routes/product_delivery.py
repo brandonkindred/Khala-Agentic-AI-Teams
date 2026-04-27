@@ -209,60 +209,41 @@ def patch_scores(kind: _ScoredKind, entity_id: str, body: ScoreUpdate) -> dict[s
 # ---------------------------------------------------------------------------
 
 
+def _llm_client_factory() -> Any:
+    """Bootstrap the LLM client lazily.
+
+    Both the import and the ``get_client`` call can fail (missing strands
+    plugin, bad credentials, broken provider). Wrapping them in a single
+    callable lets the agent invoke it only when the backlog is non-empty,
+    and lets the agent's existing ``LLMScoringUnavailable`` path handle
+    failures without an extra try/except in the route. Tests stub by
+    monkeypatching ``sys.modules['llm_service']``.
+    """
+    from llm_service import get_client  # noqa: PLC0415 — tests stub via sys.modules
+
+    return get_client("product_owner")
+
+
 @router.post("/groom", response_model=GroomResult)
 def groom(body: GroomRequest) -> GroomResult:
     store = get_store()
     if store.get_product(body.product_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown product: {body.product_id}")
 
-    # Defer LLM client bootstrap until we actually need it: a product
-    # with no stories short-circuits to an empty `GroomResult` without
-    # any LLM call, so we shouldn't fail with 503 here when the LLM
-    # provider is down. The agent itself does the empty-backlog check.
-    if not store.list_stories_for_product(body.product_id):
-        agent = ProductOwnerAgent(store=store, llm_client=_NullLLMClient())
-        return agent.groom(
-            product_id=body.product_id,
-            method=body.method,
-            persist=body.persist,
-        )
-
-    # `get_client` (and the `llm_service` import itself) can raise on
-    # misconfigured provider, missing credentials, or module/dependency
-    # import-time failures. Surface all of those as 503 (same shape as a
-    # Postgres outage) so clients see a consistent "transient
-    # infrastructure" signal instead of a bare 500.
-    try:
-        from llm_service import get_client  # noqa: PLC0415 — lazy: tests stub via override
-
-        llm_client = get_client("product_owner")
-    except Exception as exc:
-        logger.exception("ProductOwnerAgent: LLM client bootstrap failed")
-        raise HTTPException(
-            status_code=503,
-            detail=f"LLM client unavailable: {exc}",
-        ) from exc
-
-    agent = ProductOwnerAgent(store=store, llm_client=llm_client)
+    # The agent owns the empty-backlog short-circuit AND lazy LLM
+    # bootstrap, so:
+    #   * we don't double-scan the backlog (no pre-check + agent re-read);
+    #   * there's no race where a story lands between a pre-check and
+    #     the agent's read;
+    #   * an empty backlog never touches the LLM stack.
+    # Factory failures and call failures both surface as
+    # `LLMScoringUnavailable`, mapped to 503 by the global handler.
+    agent = ProductOwnerAgent(store=store, llm_factory=_llm_client_factory)
     return agent.groom(
         product_id=body.product_id,
         method=body.method,
         persist=body.persist,
     )
-
-
-class _NullLLMClient:
-    """Sentinel client used only when the backlog is empty.
-
-    The agent never calls ``complete_json`` on the empty-backlog path
-    (it short-circuits to ``GroomResult(ranked=[])`` before any LLM
-    interaction), so this sentinel is just a typing-stable placeholder
-    that lets us avoid bootstrapping the real client when the LLM
-    provider is unavailable.
-    """
-
-    def complete_json(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
-        raise RuntimeError("_NullLLMClient.complete_json should never be called — empty backlog short-circuit only")
 
 
 # ---------------------------------------------------------------------------

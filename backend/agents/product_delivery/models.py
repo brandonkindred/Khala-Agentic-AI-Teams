@@ -55,6 +55,13 @@ def _positive_finite_or_none(value: float | None) -> float | None:
 
 PositiveFiniteEstimate = Annotated[float | None, AfterValidator(_positive_finite_or_none)]
 
+
+# Status string bounds shared by every create payload + StatusUpdate so
+# the create and patch contracts can't drift apart (Codex caught a case
+# where Create accepted unbounded strings while StatusUpdate enforced
+# 1..40 chars).
+StatusStr = Annotated[str, Field(min_length=1, max_length=40)]
+
 # ---------------------------------------------------------------------------
 # Backlog entities
 # ---------------------------------------------------------------------------
@@ -78,7 +85,7 @@ class Product(_AuditedRow):
 class _ScoredRow(_AuditedRow):
     title: str
     summary: str = ""
-    status: str = "proposed"
+    status: StatusStr = "proposed"
     wsjf_score: float | None = None
     rice_score: float | None = None
 
@@ -95,7 +102,7 @@ class Story(_AuditedRow):
     epic_id: str
     title: str
     user_story: str = ""
-    status: str = "proposed"
+    status: StatusStr = "proposed"
     wsjf_score: float | None = None
     rice_score: float | None = None
     estimate_points: float | None = None
@@ -105,7 +112,7 @@ class Task(_AuditedRow):
     story_id: str
     title: str
     description: str = ""
-    status: str = "todo"
+    status: StatusStr = "todo"
     owner: str | None = None
 
 
@@ -120,7 +127,7 @@ class FeedbackItem(_AuditedRow):
     source: str
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     severity: str = "normal"
-    status: str = "open"
+    status: StatusStr = "open"
     linked_story_id: str | None = None
 
 
@@ -139,21 +146,21 @@ class InitiativeCreate(BaseModel):
     product_id: str
     title: str = Field(..., min_length=1, max_length=200)
     summary: str = ""
-    status: str = "proposed"
+    status: StatusStr = "proposed"
 
 
 class EpicCreate(BaseModel):
     initiative_id: str
     title: str = Field(..., min_length=1, max_length=200)
     summary: str = ""
-    status: str = "proposed"
+    status: StatusStr = "proposed"
 
 
 class StoryCreate(BaseModel):
     epic_id: str
     title: str = Field(..., min_length=1, max_length=200)
     user_story: str = ""
-    status: str = "proposed"
+    status: StatusStr = "proposed"
     # Strictly positive AND finite: zero / negative effort silently
     # inflates WSJF (job_size <= 0 clamps to 1) and RICE (effort <= 0
     # clamps to 1), and Infinity would pass `gt=0` but propagate as
@@ -165,7 +172,7 @@ class TaskCreate(BaseModel):
     story_id: str
     title: str = Field(..., min_length=1, max_length=200)
     description: str = ""
-    status: str = "todo"
+    status: StatusStr = "todo"
     owner: str | None = None
 
 
@@ -186,7 +193,7 @@ class FeedbackItemCreate(BaseModel):
 class StatusUpdate(BaseModel):
     """PATCH body for status transitions on any backlog entity."""
 
-    status: str = Field(..., min_length=1, max_length=40)
+    status: StatusStr
 
 
 class ScoreUpdate(BaseModel):
