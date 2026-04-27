@@ -429,6 +429,109 @@ def test_unknown_asset_class_falls_back_to_continuous_calendar() -> None:
     assert report.severity == "ok"
 
 
+def test_holiday_window_unsupported_skips_gap_detection() -> None:
+    """Equity series outside [2018, 2030] degrades to 'skip gaps + note'.
+
+    Reviewer P1 (codex): without this guard, true US-equity holidays in
+    e.g. a 2017 backtest would all be flagged as missing bars and the
+    severity would flip to ``fail``.  We surface a structured
+    ``calendar_window_unsupported`` issue instead so callers can opt in
+    to richer calendars later.
+    """
+    # Build a clean 2017 weekday-only series.  Jan 16 2017 was MLK Day —
+    # if our holiday set were applied, it would be flagged as a gap.
+    bars: List[OHLCVBar] = []
+    cur = datetime.fromisoformat("2017-01-03")  # Tue
+    for _ in range(30):
+        while cur.weekday() >= 5:
+            cur += timedelta(days=1)
+        # Skip MLK 2017 (Jan 16) to mimic real US-equity data.
+        if cur.date().isoformat() == "2017-01-16":
+            cur += timedelta(days=1)
+            continue
+        bars.append(
+            OHLCVBar(
+                date=cur.date().isoformat(),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1_000_000.0,
+            )
+        )
+        cur += timedelta(days=1)
+    report = validate_market_data(
+        bars_by_symbol={"AAPL": bars},
+        expected_frequency="1d",
+        asset_class="stocks",
+        mode="strict",
+    )
+    sym_report = report.per_symbol["AAPL"]
+    assert sym_report.gaps == 0
+    assert "calendar_window_unsupported" in sym_report.issues
+    # Severity stays "ok" (or "warn" only via other rules) — must NOT fail
+    # purely because the holiday window doesn't cover 2017.
+    assert report.severity != "fail"
+
+
+def test_holiday_window_supported_in_range() -> None:
+    """Sanity: a 2024 series still applies the holiday filter."""
+    # Run jumps across MLK 2024 (Jan 15) — actual data correctly omits it.
+    bars: List[OHLCVBar] = []
+    cur = datetime.fromisoformat("2024-01-09")  # Tue
+    target_dates: List[str] = []
+    while len(target_dates) < 10:
+        while cur.weekday() >= 5:
+            cur += timedelta(days=1)
+        target_dates.append(cur.date().isoformat())
+        cur += timedelta(days=1)
+    # Drop MLK from the data; without the holiday filter this would count
+    # as a gap, but with the filter it should be expected-as-closed.
+    target_dates = [d for d in target_dates if d != "2024-01-15"]
+    bars = [
+        OHLCVBar(date=d, open=100.0, high=101.0, low=99.0, close=100.0, volume=1.0)
+        for d in target_dates
+    ]
+    report = validate_market_data(
+        bars_by_symbol={"AAPL": bars},
+        expected_frequency="1d",
+        asset_class="stocks",
+        mode="strict",
+    )
+    assert report.severity == "ok"
+    assert report.per_symbol["AAPL"].gaps == 0
+
+
+def test_live_gap_monitor_ignores_out_of_order_bars() -> None:
+    """Reviewer P2 (codex): a stale bar must not poison the next in-order bar.
+
+    Concretely: at 1m frequency, two in-order bars 1 minute apart should
+    NOT trigger a gap warning even if a much-later out-of-order bar
+    arrived in between (which we then expect the monitor to drop without
+    mutating its internal last-seen timestamp).
+    """
+    monitor = LiveGapMonitor(bar_frequency="1m", threshold_multiple=5.0)
+    monitor.observe("BTC", "2024-05-01T12:00:00+00:00")  # prime
+    monitor.observe("BTC", "2024-05-01T12:01:00+00:00")  # in-order, no warning
+    # A late/out-of-order bar arrives.  Pre-fix this would overwrite
+    # ``_last_ts`` with this stale ts, then the next 12:02 bar would be
+    # compared against e.g. 11:30 → 32m delta → false gap warning.
+    assert monitor.observe("BTC", "2024-05-01T11:30:00+00:00") is None
+    # The next real-time bar is just 1 minute after 12:01 — still in order
+    # and within threshold.  Must NOT fire.
+    assert monitor.observe("BTC", "2024-05-01T12:02:00+00:00") is None
+
+
+def test_live_gap_monitor_advances_state_after_real_gap() -> None:
+    """Two consecutive over-threshold gaps each fire once (no chaining)."""
+    monitor = LiveGapMonitor(bar_frequency="1m", threshold_multiple=5.0)
+    monitor.observe("BTC", "2024-05-01T12:00:00+00:00")
+    # 30-minute gap ⇒ warning, state advances to 12:30.
+    assert monitor.observe("BTC", "2024-05-01T12:30:00+00:00") == "data_quality:live_gap:BTC"
+    # 1 minute later ⇒ in-order, no warning.
+    assert monitor.observe("BTC", "2024-05-01T12:31:00+00:00") is None
+
+
 def test_intraday_bars_clean_series() -> None:
     bars = _crypto_minute_bars(n=60)
     report = validate_market_data(

@@ -72,6 +72,14 @@ _FREQUENCY_TOL_PCT = 0.10
 # whichever is larger), so missing one minor holiday in a long backtest
 # does not flip the run to ``fail``.  Extend or replace with
 # ``pandas_market_calendars`` later if precise calendars become a need.
+# Inclusive year window covered by the holiday set below.  Used to gate
+# gap detection on equity-style classes — runs that touch a year outside
+# this window degrade to "skip gaps with a note" rather than risk
+# false-failing on legitimate market holidays we haven't catalogued.
+_US_HOLIDAYS_YEAR_MIN = 2018
+_US_HOLIDAYS_YEAR_MAX = 2030
+
+
 _US_HOLIDAYS_2018_2030: frozenset[str] = frozenset(
     {
         # New Year's Day (observed)
@@ -454,12 +462,15 @@ def _validate_symbol(
     # least 2 bars and a known expected frequency — single-bar paper-trade
     # warm-ups would otherwise spuriously fail.
     if len(bars) >= 2 and expected_frequency in _FREQUENCY_SECONDS:
-        report.gaps = _count_gaps(
+        gap_count, gap_note = _count_gaps(
             bars=bars,
             expected_frequency=expected_frequency,
             asset_class=asset_class,
             tolerance=gap_tolerance_bars,
         )
+        report.gaps = gap_count
+        if gap_note is not None:
+            report.issues.append(gap_note)
 
     # Roll up the rules into a flat ``issues`` list so callers can render a
     # one-line summary without re-implementing the severity logic.
@@ -593,8 +604,17 @@ def _count_gaps(
     expected_frequency: str,
     asset_class: str,
     tolerance: int,
-) -> int:
+) -> tuple[int, Optional[str]]:
     """Count missing bars between bars[0] and bars[-1] vs. an expected calendar.
+
+    Returns ``(missing_count, note)``.  ``note`` is non-None only when the
+    requested range falls outside our hardcoded US-equity holiday window
+    (``_US_HOLIDAYS_YEAR_MIN`` … ``_US_HOLIDAYS_YEAR_MAX``).  In that
+    case the calendar can't reliably distinguish "true holiday" from
+    "missing bar," so we skip gap detection (return 0) and surface a
+    ``calendar_window_unsupported`` issue on the per-symbol report
+    rather than risk a false ``DataIntegrityError`` on otherwise clean
+    historical data (e.g. a 2017 backtest).
 
     For sub-daily frequencies we expect every ``expected_frequency`` step
     to have a bar (no calendar — even crypto markets pause briefly, but
@@ -604,13 +624,25 @@ def _count_gaps(
     24/7 classes use a continuous calendar.
     """
     if expected_frequency not in _FREQUENCY_SECONDS:
-        return 0
+        return (0, None)
     expected_seconds = _FREQUENCY_SECONDS[expected_frequency]
 
     first = _parse_ts(bars[0].date)
     last = _parse_ts(bars[-1].date)
     if first is None or last is None or last <= first:
-        return 0
+        return (0, None)
+
+    # If the asset class observes US-equity-style closures and any part
+    # of the range is outside our holiday-set coverage, skip gap
+    # detection rather than risk false-failing on legitimate holidays
+    # we haven't catalogued.
+    is_daily = expected_frequency == "1d"
+    if (
+        is_daily
+        and asset_class in _BUSINESS_DAY_ASSET_CLASSES
+        and not _holiday_window_covers(first, last)
+    ):
+        return (0, "calendar_window_unsupported")
 
     # Build the expected timestamp set.
     expected_timestamps = _expected_timestamps(
@@ -620,11 +652,16 @@ def _count_gaps(
         asset_class=asset_class,
     )
     if not expected_timestamps:
-        return 0
+        return (0, None)
 
     actual = {_normalize_ts(b.date, expected_seconds) for b in bars}
     missing = sum(1 for ts in expected_timestamps if ts not in actual)
-    return max(missing - tolerance, 0)
+    return (max(missing - tolerance, 0), None)
+
+
+def _holiday_window_covers(first: datetime, last: datetime) -> bool:
+    """True iff every year in [first, last] is in the holiday set's range."""
+    return first.year >= _US_HOLIDAYS_YEAR_MIN and last.year <= _US_HOLIDAYS_YEAR_MAX
 
 
 def _expected_timestamps(
@@ -767,10 +804,13 @@ class LiveGapMonitor:
     string (or ``None``) so the caller can append to
     :class:`PaperTradingSession.warnings`.
 
-    The monitor is safe to feed bars in any order; out-of-order bars (a
-    timestamp earlier than the previously recorded one) are dropped
-    silently — :func:`_translate` already handles that case in
-    :mod:`paper_trade`.
+    The monitor is safe to feed bars in any order: out-of-order or
+    duplicate bars (delta ≤ 0 vs. the recorded last) are dropped without
+    mutating state, so a single late bar can't make the next in-order
+    bar look like an artificial large gap.  ``_translate`` in
+    :mod:`paper_trade` separately enforces ``ts >= cutover_ts`` against
+    a single global cut-over timestamp; this monitor handles per-symbol
+    monotonicity on top of that.
     """
 
     def __init__(
@@ -791,14 +831,23 @@ class LiveGapMonitor:
         if cur is None:
             return None
         prev = self._last_ts.get(symbol)
-        self._last_ts[symbol] = cur
         if prev is None:
+            # First observation for this symbol — record state and return.
+            self._last_ts[symbol] = cur
             return None
         delta = (cur - prev).total_seconds()
-        if delta <= self._threshold * self._frequency_seconds:
-            return None
-        # Out-of-order or duplicate — already filtered upstream, but be safe.
         if delta <= 0:
+            # Out-of-order or duplicate.  Do *not* update state — keeping
+            # the last in-order timestamp ensures the next forward-moving
+            # bar is still compared against a real prev rather than this
+            # stale one (which would otherwise produce a false large-gap
+            # warning).
+            return None
+        # In-order bar: advance state regardless of whether the gap rule
+        # fires (so consecutive over-threshold gaps each produce a single
+        # warning rather than the same one chained against an old prev).
+        self._last_ts[symbol] = cur
+        if delta <= self._threshold * self._frequency_seconds:
             return None
         return f"data_quality:live_gap:{symbol}"
 
