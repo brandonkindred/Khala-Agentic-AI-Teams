@@ -151,7 +151,6 @@ jobs:
               - 'backend/agents/**'
               - 'backend/unified_api/**'
               - 'backend/run_unified_api.py'
-              - 'backend/requirements.txt'
               - 'backend/entrypoint.sh'
               - '.github/workflows/ci.yml'
             docker_blogging_service:
@@ -164,7 +163,6 @@ jobs:
               - 'backend/agents/shared_temporal/**'
               - 'backend/agents/shared_observability/**'
               - 'backend/agents/job_service_client.py'
-              - 'backend/agents/requirements.txt'
               - 'backend/unified_api/__init__.py'
               - 'backend/unified_api/integrations_store.py'
               - 'backend/unified_api/integration_credentials.py'
