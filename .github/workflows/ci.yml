@@ -77,7 +77,6 @@ jobs:
               - 'backend/agents/event_bus/**'
               - 'backend/agents/artifact_registry/**'
               - 'backend/agents/integrations/**'
-              - 'backend/agents/agent_registry/**'
               - 'backend/agents/job_service_client.py'
               - 'backend/agents/job_service_client_fake.py'
               - 'backend/agents/requirements.txt'
@@ -90,24 +89,41 @@ jobs:
             backend_any:
               - 'backend/**'
               - '.github/workflows/ci.yml'
+            # shared_postgres triggers test-shared-postgres which calls
+            # register_all_team_schemas(). That imports each team's
+            # `team.postgres` module, which forces Python to evaluate the
+            # team's package __init__ first — so a non-postgres change in
+            # any of those teams can break schema registration. Trigger
+            # paths therefore include every team listed in
+            # shared_postgres/registry.py:TEAM_POSTGRES_MODULES (root)
+            # plus the postgres/dependency-related files.
             shared_postgres:
               - 'backend/agents/shared_postgres/**'
               - 'backend/agents/**/postgres/**'
+              - 'backend/agents/branding_team/**'
+              - 'backend/agents/startup_advisor/**'
+              - 'backend/agents/user_agent_founder/**'
+              - 'backend/agents/team_assistant/**'
+              - 'backend/agents/agentic_team_provisioning/**'
+              - 'backend/agents/blogging/**'
+              - 'backend/agents/nutrition_meal_planning_team/**'
               - 'backend/agents/requirements.txt'
               - 'backend/unified_api/postgres/**'
+              - 'backend/unified_api/postgres.py'
               - 'backend/job_service/postgres.py'
               - '.github/workflows/ci.yml'
             # SE imports coding_team, planning_v3_team, agent_repair_team
-            # from its orchestrator and Temporal activities, and api.main
-            # from agent_implementations/run_api_server.py.
+            # from its orchestrator and Temporal activities. agents/api is
+            # the blog research API (see agents/api/README.md) — it's
+            # owned by blogging, listed in the blogging filter below.
             software_engineering:
               - 'backend/agents/software_engineering_team/**'
               - 'backend/agents/coding_team/**'
               - 'backend/agents/planning_v3_team/**'
               - 'backend/agents/agent_repair_team/**'
-              - 'backend/agents/api/**'
             blogging:
               - 'backend/agents/blogging/**'
+              - 'backend/agents/api/**'
               - 'backend/blogging_service/**'
             market_research:
               - 'backend/agents/market_research_team/**'
