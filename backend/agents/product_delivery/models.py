@@ -18,14 +18,27 @@ import math
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, BeforeValidator, Field
+
+
+def _reject_bool(value: Any) -> Any:
+    """``BeforeValidator``: reject JSON booleans before float coercion.
+
+    Pydantic's default ``float`` coercion accepts JSON booleans
+    (``true → 1.0``, ``false → 0.0``). For score / estimate fields that
+    silently mutates ranking data with non-numeric semantics, so we
+    refuse booleans up front. ``isinstance(True, int)`` is True, hence
+    the explicit ``bool`` check.
+    """
+    if isinstance(value, bool):
+        raise ValueError("must be a number, not a boolean")
+    return value
 
 
 def _finite_or_none(value: float | None) -> float | None:
-    """Reject NaN / ±Infinity. Pydantic happily coerces ``"NaN"`` / ``"Infinity"``
-    on plain ``float`` fields; non-finite scores break Starlette's JSON
-    encoder downstream and corrupt persisted ranking data, so we refuse
-    them at the boundary.
+    """``AfterValidator``: reject NaN / ±Infinity. Booleans are blocked
+    earlier by ``_reject_bool``. Non-finite scores break Starlette's
+    JSON encoder downstream and corrupt persisted ranking data.
     """
     if value is None:
         return None
@@ -34,15 +47,20 @@ def _finite_or_none(value: float | None) -> float | None:
     return value
 
 
-FiniteScore = Annotated[float | None, AfterValidator(_finite_or_none)]
+FiniteScore = Annotated[
+    float | None,
+    BeforeValidator(_reject_bool),
+    AfterValidator(_finite_or_none),
+]
 
 
 def _positive_finite_or_none(value: float | None) -> float | None:
-    """Like ``_finite_or_none`` but also rejects values ≤ 0.
+    """``AfterValidator``: like ``_finite_or_none`` but also rejects ≤ 0.
 
     Used by ``estimate_points``: zero / negative values silently inflate
     WSJF/RICE priority (denominators clamp to 1), and ``Infinity``
-    passes ``gt=0`` but is non-finite. ``None`` still means "unestimated".
+    passes ``gt=0`` but is non-finite. ``None`` still means
+    "unestimated"; booleans are blocked by ``_reject_bool`` upstream.
     """
     if value is None:
         return None
@@ -53,7 +71,11 @@ def _positive_finite_or_none(value: float | None) -> float | None:
     return value
 
 
-PositiveFiniteEstimate = Annotated[float | None, AfterValidator(_positive_finite_or_none)]
+PositiveFiniteEstimate = Annotated[
+    float | None,
+    BeforeValidator(_reject_bool),
+    AfterValidator(_positive_finite_or_none),
+]
 
 
 # Status string bounds shared by every create payload + StatusUpdate so

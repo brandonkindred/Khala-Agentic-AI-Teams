@@ -406,6 +406,52 @@ def test_groom_rationale_uses_actual_persisted_count() -> None:
     assert "manual review" in result.rationale.lower()
 
 
+def test_groom_treats_empty_inputs_dict_as_malformed_no_persist() -> None:
+    # Codex flagged: an empty `{}` for `inputs` was scored to 0 and
+    # persisted, overwriting any existing real score on the row. Now
+    # the agent treats empty-dict same as None — fallback row visible
+    # but never persisted.
+    stories = [_story("s1")]
+    llm = _StubLLM(payload={"items": [{"id": "s1", "inputs": {}, "rationale": "x"}]})
+    store = _fake_store(stories=stories)
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="prod-x", method="wsjf", persist=True)
+    assert len(result.ranked) == 1
+    assert result.ranked[0].score == 0.0
+    assert "malformed" in result.ranked[0].rationale.lower()
+    assert store.persisted == []
+
+
+def test_groom_handles_overflow_error_in_inputs() -> None:
+    # `_to_float` can raise `OverflowError` for huge JSON integers
+    # (e.g. an LLM emitting `reach: 10**400`). The agent must still
+    # surface the story via the malformed fallback rather than 500.
+    stories = [_story("s1")]
+    llm = _StubLLM(
+        payload={
+            "items": [
+                {
+                    "id": "s1",
+                    "inputs": {
+                        "reach": 10**400,  # int well outside float64
+                        "impact": 1,
+                        "confidence": 1,
+                        "effort": 1,
+                    },
+                    "rationale": "huge",
+                }
+            ]
+        }
+    )
+    store = _fake_store(stories=stories)
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="prod-x", method="rice", persist=True)
+    assert len(result.ranked) == 1
+    assert result.ranked[0].score == 0.0
+    assert "malformed" in result.ranked[0].rationale.lower()
+    assert store.persisted == []
+
+
 def test_groom_only_sees_stories_under_requested_product() -> None:
     # Two products with disjoint stories. The agent must only score the
     # stories under the requested product — a regression to the old

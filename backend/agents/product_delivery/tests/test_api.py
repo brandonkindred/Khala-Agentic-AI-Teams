@@ -291,6 +291,12 @@ class _FakeStore:
         return BacklogTree(product=p, initiatives=i_nodes)
 
     def list_stories_for_product(self, product_id: str) -> list[Story]:
+        # Mirror the real store's transactional contract: an unknown
+        # product raises `UnknownProductDeliveryEntity` (→ 404 via the
+        # global handler) so a concurrent delete can't slip past as
+        # `200 []`.
+        if product_id not in self.products:
+            raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
         epic_ids = {
             e.id
             for e in self.epics.values()
@@ -335,6 +341,11 @@ class _FakeStore:
         )
 
     def list_feedback(self, product_id: str, *, status: str | None = None) -> list[FeedbackItem]:
+        # Mirror the real store: unknown product raises 404 inside the
+        # same transaction as the SELECT, so concurrent deletes don't
+        # turn a 404 into `200 []`.
+        if product_id not in self.products:
+            raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
         out = [f for f in self.feedback.values() if f.product_id == product_id]
         if status is not None:
             out = [f for f in out if f.status == status]
@@ -466,6 +477,41 @@ def test_status_patch_404_for_unknown_id(client: TestClient) -> None:
         json={"status": "done"},
     )
     assert r.status_code == 404
+
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_score_patch_rejects_boolean_values(client: TestClient, bad: bool) -> None:
+    # Pydantic's default `float` coercion accepts JSON booleans
+    # (`true → 1.0`, `false → 0.0`). The validator now rejects them
+    # so PATCH /scores can't silently mutate ranking data.
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+    r = client.patch(
+        f"/api/product-delivery/initiative/{iid}/scores",
+        json={"wsjf_score": bad},
+    )
+    assert r.status_code == 422
+
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_story_create_rejects_boolean_estimate_points(client: TestClient, bad: bool) -> None:
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+    eid = client.post(
+        "/api/product-delivery/epics",
+        json={"initiative_id": iid, "title": "E"},
+    ).json()["id"]
+    r = client.post(
+        "/api/product-delivery/stories",
+        json={"epic_id": eid, "title": "S", "estimate_points": bad},
+    )
+    assert r.status_code == 422
 
 
 @pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity"])
@@ -809,10 +855,11 @@ def test_feedback_accepts_same_product_story_link(client: TestClient) -> None:
 def test_groom_returns_503_when_storage_unavailable(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Simulate a Postgres outage hitting `store.get_product` (the failure
-    # path covered by the P1 review comment). The route must return 503,
-    # not 500, so clients can retry the same way they do for the
-    # CRUD endpoints.
+    # Simulate a Postgres outage hitting the agent's
+    # `store.list_stories_for_product` call (the new TOCTTOU-safe
+    # entry point that combines product-existence + story-listing).
+    # The route must return 503, not 500, so clients can retry the
+    # same way they do for the other persistence endpoints.
     pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
 
     from unified_api.routes import product_delivery as router_module
@@ -822,7 +869,7 @@ def test_groom_returns_503_when_storage_unavailable(
     def _boom(_self, _product_id):  # type: ignore[no-untyped-def]
         raise ProductDeliveryStorageUnavailable("postgres is down")
 
-    monkeypatch.setattr(router_module.get_store().__class__, "get_product", _boom)
+    monkeypatch.setattr(router_module.get_store().__class__, "list_stories_for_product", _boom)
 
     resp = client.post(
         "/api/product-delivery/groom",

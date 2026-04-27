@@ -29,6 +29,7 @@ Internal layout:
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -106,6 +107,40 @@ _ROW_SPECS: dict[str, _RowSpec] = {
 
 _STATUS_KINDS = frozenset({"initiative", "epic", "story", "task"})
 _SCORED_KINDS = frozenset({"initiative", "epic", "story"})
+
+# Status string bound (matches ``models.StatusStr``) — store-level
+# enforcement so non-route callers can't slip overlong statuses past
+# the API validator and break read-side projection later.
+_STATUS_MAX_LEN = 40
+
+
+def _validate_status(value: str) -> str:
+    if not value or len(value) > _STATUS_MAX_LEN:
+        raise ValueError(f"status must be 1..{_STATUS_MAX_LEN} chars; got {len(value)}")
+    return value
+
+
+def _validate_optional_finite_score(value: float | None, *, label: str) -> float | None:
+    """Mirror ``models.FiniteScore`` at the store layer for non-route callers."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a number, not a boolean")
+    if not math.isfinite(value):
+        raise ValueError(f"{label} must be a finite number")
+    return float(value)
+
+
+def _validate_estimate_points(value: float | None) -> float | None:
+    """Mirror ``models.PositiveFiniteEstimate`` at the store layer."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("estimate_points must be a number, not a boolean")
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("estimate_points must be a finite positive number")
+    return float(value)
+
 
 _AUDIT_COLS = "author, created_at, updated_at"
 _PRODUCT_COLS = f"id, name, description, vision, {_AUDIT_COLS}"
@@ -276,8 +311,8 @@ class ProductDeliveryStore:
             epic_id=epic_id,
             title=title,
             user_story=user_story,
-            status=status,
-            estimate_points=estimate_points,
+            status=_validate_status(status),
+            estimate_points=_validate_estimate_points(estimate_points),
             author=author,
         )
 
@@ -322,6 +357,10 @@ class ProductDeliveryStore:
     def update_status(self, *, kind: str, entity_id: str, status: str) -> bool:
         if kind not in _STATUS_KINDS:
             raise ValueError(f"unknown kind for status update: {kind!r}")
+        # Mirror the API-level `StatusStr` bound here so non-route
+        # callers can't slip overlong/empty statuses into the row and
+        # break read-side projection later.
+        status = _validate_status(status)
         table = _ROW_SPECS[kind].table
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -341,6 +380,12 @@ class ProductDeliveryStore:
     ) -> bool:
         if kind not in _SCORED_KINDS:
             raise ValueError(f"unknown kind for score update: {kind!r}")
+        # Store-level guard against NaN/±Infinity/booleans — mirrors
+        # `models.FiniteScore` so non-route callers can't write
+        # non-finite values that later break JSON serialisation or
+        # corrupt persisted ranking data.
+        wsjf_score = _validate_optional_finite_score(wsjf_score, label="wsjf_score")
+        rice_score = _validate_optional_finite_score(rice_score, label="rice_score")
         table = _ROW_SPECS[kind].table
         sets: list[str] = []
         params: list[Any] = []
@@ -362,6 +407,7 @@ class ProductDeliveryStore:
             )
             return cur.rowcount > 0
 
+    @timed_query(store=_STORE, op="bulk_update_story_scores")
     def bulk_update_story_scores(
         self,
         rows: Iterable[tuple[str, float | None, float | None]],
@@ -371,11 +417,21 @@ class ProductDeliveryStore:
         Uses ``executemany`` so the whole batch ships in a single
         client/server round trip. Returns the number of rows actually
         updated (psycopg's ``rowcount`` after ``executemany`` is the
-        sum of per-statement row counts).
+        sum of per-statement row counts). Validates each per-row score
+        the same way ``update_scores`` does.
         """
         rows_list = list(rows)
         if not rows_list:
             return 0
+        validated: list[tuple[str, float | None, float | None]] = []
+        for sid, w, r in rows_list:
+            validated.append(
+                (
+                    sid,
+                    _validate_optional_finite_score(w, label="wsjf_score"),
+                    _validate_optional_finite_score(r, label="rice_score"),
+                )
+            )
         now = _now()
         with self._conn() as conn, conn.cursor() as cur:
             cur.executemany(
@@ -384,7 +440,7 @@ class ProductDeliveryStore:
                        rice_score = COALESCE(%s, rice_score),
                        updated_at = %s
                    WHERE id = %s""",
-                [(w, r, now, sid) for sid, w, r in rows_list],
+                [(w, r, now, sid) for sid, w, r in validated],
             )
             return cur.rowcount
 
@@ -488,8 +544,20 @@ class ProductDeliveryStore:
 
     @timed_query(store=_STORE, op="list_stories_for_product")
     def list_stories_for_product(self, product_id: str) -> list[Story]:
-        """Flat list of every story under a product. Used by the grooming agent."""
+        """Flat list of every story under a product. Used by the grooming agent.
+
+        Raises ``UnknownProductDeliveryEntity`` if the product doesn't
+        exist (the existence check + the story SELECT run in a single
+        connection so concurrent deletes can't make the route return
+        ``200 []`` for a missing product).
+        """
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT 1 FROM product_delivery_products WHERE id = %s",
+                (product_id,),
+            )
+            if cur.fetchone() is None:
+                raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
             cur.execute(
                 f"""SELECT {_STORY_COLS_ALIASED}
                    FROM product_delivery_stories s
@@ -603,6 +671,13 @@ class ProductDeliveryStore:
         *,
         status: str | None = None,
     ) -> list[FeedbackItem]:
+        """List feedback items under a product.
+
+        Raises ``UnknownProductDeliveryEntity`` when the product doesn't
+        exist — the existence check + the feedback SELECT run in a
+        single connection so a concurrent delete can't make the route
+        return ``200 []`` for a missing product.
+        """
         sql = f"SELECT {_FEEDBACK_COLS} FROM product_delivery_feedback_items WHERE product_id = %s"
         params: list[Any] = [product_id]
         if status is not None:
@@ -610,6 +685,12 @@ class ProductDeliveryStore:
             params.append(status)
         sql += " ORDER BY created_at DESC"
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT 1 FROM product_delivery_products WHERE id = %s",
+                (product_id,),
+            )
+            if cur.fetchone() is None:
+                raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
             cur.execute(sql, params)
             return [FeedbackItem.model_validate(row) for row in cur.fetchall()]
 

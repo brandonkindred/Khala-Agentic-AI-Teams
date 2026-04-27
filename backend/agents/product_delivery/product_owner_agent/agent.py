@@ -305,25 +305,26 @@ class ProductOwnerAgent:
                 continue
 
             inputs = raw.get("inputs")
-            if not isinstance(inputs, dict):
-                # `inputs` missing or non-object (e.g. `null`, list, string).
-                # Treating an empty dict here would silently produce a
-                # zero score and persist it, overwriting any existing
-                # real score on the row. Route through the malformed
+            if not isinstance(inputs, dict) or not inputs:
+                # `inputs` missing, non-object (e.g. `null`, list, string),
+                # OR an empty dict. An empty dict would otherwise score
+                # to a synthetic 0.0 and overwrite any real persisted
+                # score on the row. Route through the malformed
                 # fallback so the synthetic zero stays visible-only.
                 logger.warning(
-                    "ProductOwnerAgent: non-dict inputs for story %s; including with score=0",
+                    "ProductOwnerAgent: empty/non-dict inputs for story %s; including with score=0",
                     story.id,
                 )
                 ranked.append(_fallback(story, _MALFORMED_RATIONALE))
                 continue
             try:
                 score, wsjf_value, rice_value = _score_for(method, inputs, story)
-            except (TypeError, ValueError):
-                # Malformed inputs (un-coerceable strings, etc.). Surface
-                # the story with score=0 + a malformed-inputs rationale
-                # rather than dropping it silently — downstream planning
-                # would otherwise lose this work item entirely.
+            except (TypeError, ValueError, OverflowError):
+                # Malformed inputs (un-coerceable strings, integers too
+                # large for the float64 range, etc.). Surface the story
+                # with score=0 + a malformed-inputs rationale rather
+                # than dropping it silently — downstream planning would
+                # otherwise lose this work item entirely.
                 logger.warning(
                     "ProductOwnerAgent: malformed inputs for story %s; including with score=0",
                     story.id,

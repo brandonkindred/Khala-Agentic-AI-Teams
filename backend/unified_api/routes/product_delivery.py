@@ -227,16 +227,13 @@ def _llm_client_factory() -> Any:
 @router.post("/groom", response_model=GroomResult)
 def groom(body: GroomRequest) -> GroomResult:
     store = get_store()
-    if store.get_product(body.product_id) is None:
-        raise HTTPException(status_code=404, detail=f"unknown product: {body.product_id}")
-
-    # The agent owns the empty-backlog short-circuit AND lazy LLM
-    # bootstrap, so:
-    #   * we don't double-scan the backlog (no pre-check + agent re-read);
-    #   * there's no race where a story lands between a pre-check and
-    #     the agent's read;
-    #   * an empty backlog never touches the LLM stack.
-    # Factory failures and call failures both surface as
+    # No standalone existence check here — `agent.groom` calls
+    # `store.list_stories_for_product`, which raises
+    # `UnknownProductDeliveryEntity` (mapped to 404 by the global
+    # handler) inside a single transaction with the product-existence
+    # SELECT. So a concurrent delete can't slip past as `200 []`.
+    #
+    # Factory failures and LLM call failures both surface as
     # `LLMScoringUnavailable`, mapped to 503 by the global handler.
     agent = ProductOwnerAgent(store=store, llm_factory=_llm_client_factory)
     return agent.groom(
@@ -268,9 +265,8 @@ def list_feedback(
     product_id: str,
     status: str | None = None,
 ) -> list[FeedbackItem]:
-    store = get_store()
-    # Match the 404 semantics of /backlog, /groom, and feedback POST:
-    # an unknown product is a hard error, not "no feedback yet".
-    if store.get_product(product_id) is None:
-        raise HTTPException(status_code=404, detail=f"unknown product: {product_id}")
-    return store.list_feedback(product_id, status=status)
+    # `store.list_feedback` checks product existence in the same
+    # transaction as the SELECT and raises `UnknownProductDeliveryEntity`
+    # (→ 404) when the product is missing — no TOCTTOU window where a
+    # concurrent delete could turn a 404 into a `200 []`.
+    return get_store().list_feedback(product_id, status=status)

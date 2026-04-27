@@ -517,13 +517,17 @@ async def list_teams() -> dict[str, Any]:
     teams = {}
     for key, config in TEAM_CONFIGS.items():
         registered = _registered_teams.get(key, False)
+        # In-process teams piggy-back on the unified API's `/docs` —
+        # they don't expose a `/api/<team>/docs` endpoint themselves,
+        # so don't advertise one (it would 404).
+        per_team_docs = registered and not config.in_process
         teams[key] = {
             "name": config.name,
             "prefix": config.prefix,
             "description": config.description,
             "registered": registered,
             "enabled": config.enabled,
-            "docs_url": f"{config.prefix}/docs" if registered else None,
+            "docs_url": f"{config.prefix}/docs" if per_team_docs else None,
         }
     return {"teams": teams}
 
