@@ -84,48 +84,6 @@ jobs:
             backend_any:
               - 'backend/**'
               - '.github/workflows/ci.yml'
-            # Backend paths NOT already covered by a per-team or shared_backend
-            # filter. When this trips the matrix-builder fans out fully so a
-            # mixed PR (e.g. investment_team + an uncategorised backend file
-            # that SE happens to import) doesn't under-test. Negations must
-            # stay in sync with the per-team and shared_backend filter lists
-            # above; touching either side of that pair triggers ci_workflow,
-            # which forces a full run as a safety net.
-            backend_unclassified:
-              - 'backend/**'
-              # Per-team paths (each has its own filter)
-              - '!backend/agents/software_engineering_team/**'
-              - '!backend/agents/coding_team/**'
-              - '!backend/agents/planning_v3_team/**'
-              - '!backend/agents/agent_repair_team/**'
-              - '!backend/agents/api/**'
-              - '!backend/agents/blogging/**'
-              - '!backend/blogging_service/**'
-              - '!backend/agents/market_research_team/**'
-              - '!backend/agents/soc2_compliance_team/**'
-              - '!backend/agents/investment_team/**'
-              - '!backend/agents/social_media_marketing_team/**'
-              - '!backend/agents/agent_provisioning_team/**'
-              - '!backend/agents/agent_registry/**'
-              - '!backend/agents/sales_team/**'
-              # shared_backend paths (already trigger fan-out separately)
-              - '!backend/agents/shared_postgres/**'
-              - '!backend/agents/shared_temporal/**'
-              - '!backend/agents/shared_agent_invoke/**'
-              - '!backend/agents/shared_graph/**'
-              - '!backend/agents/shared_observability/**'
-              - '!backend/agents/llm_service/**'
-              - '!backend/agents/event_bus/**'
-              - '!backend/agents/artifact_registry/**'
-              - '!backend/agents/integrations/**'
-              - '!backend/agents/job_service_client.py'
-              - '!backend/agents/job_service_client_fake.py'
-              - '!backend/agents/requirements.txt'
-              - '!backend/team_service/**'
-              - '!backend/unified_api/**'
-              - '!backend/conftest.py'
-              - '!backend/pyproject.toml'
-              - '!backend/pytest.ini'
             shared_postgres:
               - 'backend/agents/shared_postgres/**'
               - 'backend/agents/**/postgres/**'
@@ -209,6 +167,56 @@ jobs:
               - 'user-interface/**'
               - '.github/workflows/ci.yml'
 
+      # Backend paths NOT covered by any per-team or shared_backend filter.
+      # Run as a SEPARATE filter step with predicate-quantifier: 'every',
+      # because dorny/paths-filter's default 'some' quantifier OR's all
+      # rules — including the leading `backend/**` — which would make the
+      # `!exclude` rules ineffective. With 'every', a file matches only
+      # when it is `backend/**` AND not in any of the negated paths.
+      # When this filter trips, the matrix-builder fans out fully so a
+      # mixed PR (e.g. investment_team + an uncategorised backend file SE
+      # transitively imports) doesn't under-test.
+      - id: filter_unclassified
+        uses: dorny/paths-filter@v3
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            backend_unclassified:
+              - 'backend/**'
+              # Per-team paths (each has its own filter)
+              - '!backend/agents/software_engineering_team/**'
+              - '!backend/agents/coding_team/**'
+              - '!backend/agents/planning_v3_team/**'
+              - '!backend/agents/agent_repair_team/**'
+              - '!backend/agents/api/**'
+              - '!backend/agents/blogging/**'
+              - '!backend/blogging_service/**'
+              - '!backend/agents/market_research_team/**'
+              - '!backend/agents/soc2_compliance_team/**'
+              - '!backend/agents/investment_team/**'
+              - '!backend/agents/social_media_marketing_team/**'
+              - '!backend/agents/agent_provisioning_team/**'
+              - '!backend/agents/agent_registry/**'
+              - '!backend/agents/sales_team/**'
+              # shared_backend paths (already trigger fan-out separately)
+              - '!backend/agents/shared_postgres/**'
+              - '!backend/agents/shared_temporal/**'
+              - '!backend/agents/shared_agent_invoke/**'
+              - '!backend/agents/shared_graph/**'
+              - '!backend/agents/shared_observability/**'
+              - '!backend/agents/llm_service/**'
+              - '!backend/agents/event_bus/**'
+              - '!backend/agents/artifact_registry/**'
+              - '!backend/agents/integrations/**'
+              - '!backend/agents/job_service_client.py'
+              - '!backend/agents/job_service_client_fake.py'
+              - '!backend/agents/requirements.txt'
+              - '!backend/team_service/**'
+              - '!backend/unified_api/**'
+              - '!backend/conftest.py'
+              - '!backend/pyproject.toml'
+              - '!backend/pytest.ini'
+
       # Build the per-team test matrix. A team enters the matrix when its
       # own files changed, when shared_backend changed (its tests transitively
       # depend on those), or when this workflow file changed (safety net).
@@ -217,7 +225,7 @@ jobs:
           F_CI_WORKFLOW: ${{ steps.filter.outputs.ci_workflow }}
           F_SHARED_BACKEND: ${{ steps.filter.outputs.shared_backend }}
           F_BACKEND_ANY: ${{ steps.filter.outputs.backend_any }}
-          F_BACKEND_UNCLASSIFIED: ${{ steps.filter.outputs.backend_unclassified }}
+          F_BACKEND_UNCLASSIFIED: ${{ steps.filter_unclassified.outputs.backend_unclassified }}
           F_SOFTWARE_ENGINEERING: ${{ steps.filter.outputs.software_engineering }}
           F_BLOGGING: ${{ steps.filter.outputs.blogging }}
           F_MARKET_RESEARCH: ${{ steps.filter.outputs.market_research }}
