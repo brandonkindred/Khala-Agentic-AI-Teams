@@ -7,10 +7,16 @@ on:
   push:
     branches: [master, main, development]
 
-# Cancel in-flight CI on the same PR branch when a new commit is pushed.
-# Push events to default branches keep their runs to preserve build artifacts.
+# PR events: group by ref so a new commit cancels the in-flight run for the
+# same PR. Push events to default branches: include the SHA in the group so
+# every commit gets its own slot — workflow-level concurrency only allows one
+# pending run per group, so a shared push group would silently drop
+# intermediate commits during rapid merges and skip their build artifacts.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: >-
+    ${{ github.event_name == 'pull_request'
+        && format('ci-{0}-{1}', github.workflow, github.ref)
+        || format('ci-{0}-{1}-{2}', github.workflow, github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
