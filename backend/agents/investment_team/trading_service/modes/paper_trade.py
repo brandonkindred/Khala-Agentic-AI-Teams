@@ -23,8 +23,10 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional
 
+from ...execution.data_quality import LiveGapMonitor, validate_market_data
+from ...market_data_service import OHLCVBar
 from ...models import BacktestConfig, StrategySpec, TradeRecord
 from ..data_stream.live_stream import (
     CutoverEvent,
@@ -76,6 +78,10 @@ class PaperTradeRunResult:
     terminated_reason: str
     warnings: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    # Issue #375 — preflight data-quality report captured at warm-up
+    # cut-over (``validate_market_data(mode='warn')``).  None when no
+    # warm-up bars were observed before the stream ended.
+    data_quality_report: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +181,9 @@ def run_paper_trade(
     fill_counter = _FillCounter()
     cutover_seen: dict = {"ts": None}
     terminated_reason = {"reason": "unknown"}
+    # Issue #375 — captures the preflight report at warm-up cut-over
+    # (mode='warn').  Stays None if the stream ends before cut-over.
+    quality_state: dict = {"report": None}
 
     def _should_stop() -> bool:
         if controller.is_stopped():
@@ -213,6 +222,9 @@ def run_paper_trade(
             fill_counter=fill_counter,
             cutover_seen=cutover_seen,
             terminated_reason=terminated_reason,
+            paper_config=paper_config,
+            warnings=warnings,
+            quality_state=quality_state,
         )
         service_result = service.run(
             stream_source, on_trade=lambda _trade: fill_counter.increment()
@@ -229,6 +241,7 @@ def run_paper_trade(
                 terminated_reason="region_blocked",
                 error=str(exc),
                 warnings=warnings,
+                data_quality_report=quality_state["report"],
             )
         logger.info(
             "primary provider %s region-blocked; failing over to %s",
@@ -242,6 +255,9 @@ def run_paper_trade(
             fill_counter=fill_counter,
             cutover_seen=cutover_seen,
             terminated_reason=terminated_reason,
+            paper_config=paper_config,
+            warnings=warnings,
+            quality_state=quality_state,
         )
         service_result = service.run(
             stream_source, on_trade=lambda _trade: fill_counter.increment()
@@ -272,6 +288,7 @@ def run_paper_trade(
         terminated_reason=final_reason,
         warnings=warnings,
         error=service_result.error,
+        data_quality_report=quality_state["report"],
     )
 
 
@@ -305,13 +322,42 @@ def _translate(
     fill_counter: _FillCounter,
     cutover_seen: dict,
     terminated_reason: dict,
+    paper_config: PaperTradeConfig,
+    warnings: List[str],
+    quality_state: dict,
 ) -> Iterator[StreamEvent]:
-    """Convert :class:`LiveStreamEvent` to :class:`StreamEvent` the engine understands."""
+    """Convert :class:`LiveStreamEvent` to :class:`StreamEvent` the engine understands.
+
+    Issue #375 — also runs the preflight data-quality gate at warm-up
+    cut-over (``mode='warn'``) and a per-symbol live-gap monitor on
+    streaming bars; advisories accumulate on ``warnings`` and the warm-up
+    report ends up on ``quality_state['report']``.
+    """
+    # Warm-up bar buffer keyed by symbol; flushed at cutover.
+    warmup_buffer: Dict[str, List[OHLCVBar]] = {}
+    gap_monitor = LiveGapMonitor(bar_frequency=paper_config.strategy_timeframe)
+
     for event in live_events:
         if isinstance(event, WarmupBarEvent):
+            warmup_buffer.setdefault(event.bar.symbol, []).append(_bar_to_ohlcv(event.bar))
             yield BarEvent(bar=event.bar, is_warmup=True)
         elif isinstance(event, CutoverEvent):
             cutover_seen["ts"] = event.cutover_ts
+            # Issue #375 — validate the warm-up window now that we have
+            # the full set of historical bars.  ``mode='warn'`` because
+            # paper trading must not crash on transient feed issues —
+            # callers see the report on ``warnings`` and the structured
+            # report attached to the session.
+            if warmup_buffer:
+                report = validate_market_data(
+                    bars_by_symbol=warmup_buffer,
+                    expected_frequency=paper_config.strategy_timeframe,
+                    asset_class=paper_config.asset_class,
+                    mode="warn",
+                )
+                quality_state["report"] = report.model_dump()
+                if report.severity != "ok":
+                    warnings.append(f"data_quality:warmup:{report.severity}")
             # No StreamEvent to emit — the service doesn't care about the
             # cut-over, only whether a bar is marked warm-up or not.
         elif isinstance(event, LiveBarEvent):
@@ -324,6 +370,12 @@ def _translate(
                     cutover_seen["ts"],
                 )
                 continue
+            # Issue #375 — per-symbol live-gap monitor.  Emits a single
+            # warning whenever consecutive bars are >5x the expected
+            # frequency apart.
+            warning = gap_monitor.observe(event.bar.symbol, ts)
+            if warning is not None and warning not in warnings:
+                warnings.append(warning)
             yield BarEvent(bar=event.bar, is_warmup=False)
         elif isinstance(event, LiveStreamEnd):
             # Preserve the reason the _should_stop closure already recorded;
@@ -341,6 +393,23 @@ def _translate(
 
     # Upstream iterator exhausted without a terminal event.
     yield EndOfStreamEvent(reason="upstream_end")
+
+
+def _bar_to_ohlcv(bar) -> OHLCVBar:
+    """Convert a :class:`Bar` (live-stream model) to :class:`OHLCVBar`.
+
+    The two share the same fields modulo the timestamp / date naming;
+    keeping a thin adapter here avoids leaking ``OHLCVBar`` semantics
+    into the live-stream protocol module.
+    """
+    return OHLCVBar(
+        date=bar.timestamp,
+        open=bar.open,
+        high=bar.high,
+        low=bar.low,
+        close=bar.close,
+        volume=bar.volume,
+    )
 
 
 __all__ = [

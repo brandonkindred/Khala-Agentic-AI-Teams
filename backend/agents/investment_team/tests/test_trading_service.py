@@ -188,3 +188,55 @@ def test_run_backtest_without_strategy_code_raises() -> None:
     )
     with pytest.raises(ValueError, match="strategy_code is required"):
         run_backtest(strategy=strategy, config=_config(), market_data={})
+
+
+# ---------------------------------------------------------------------------
+# Issue #375 — preflight data integrity gate
+# ---------------------------------------------------------------------------
+
+
+def test_run_backtest_attaches_data_quality_report() -> None:
+    """Happy path: clean market data → report present, severity == 'ok'."""
+    market_data: Dict[str, List[OHLCVBar]] = {}
+    _uptrend_then_down_bars(market_data)
+
+    strategy = StrategySpec(
+        strategy_id="strat-sma-dq-1",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="momentum via SMA(5)",
+        signal_definition="close vs sma(5)",
+        entry_rules=["close > sma(5)"],
+        exit_rules=["close < sma(5)"],
+        strategy_code=_SMA_STRATEGY_CODE,
+    )
+
+    run = run_backtest(strategy=strategy, config=_config(), market_data=market_data)
+    assert run.result.data_quality_report is not None
+    assert run.result.data_quality_report["severity"] == "ok"
+    assert "AAA" in run.result.data_quality_report["per_symbol"]
+
+
+def test_run_backtest_strict_fails_on_ohlc_violation() -> None:
+    """A bar with high < open trips the gate before TradingService runs."""
+    from investment_team.execution.data_quality import DataIntegrityError
+
+    market_data: Dict[str, List[OHLCVBar]] = {}
+    _uptrend_then_down_bars(market_data)
+    bars = market_data["AAA"]
+    # Corrupt one bar so high < max(open, close).
+    bars[10] = bars[10].model_copy(update={"high": bars[10].open - 5.0})
+
+    strategy = StrategySpec(
+        strategy_id="strat-dq-fail",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="h",
+        signal_definition="s",
+        strategy_code=_SMA_STRATEGY_CODE,
+    )
+
+    with pytest.raises(DataIntegrityError) as excinfo:
+        run_backtest(strategy=strategy, config=_config(), market_data=market_data)
+    assert excinfo.value.report.severity == "fail"
+    assert excinfo.value.report.per_symbol["AAA"].ohlc_violations == 1

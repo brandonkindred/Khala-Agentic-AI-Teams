@@ -449,6 +449,12 @@ class BacktestResult(BaseModel):
     acceptance_reason: Optional[str] = None
     regime_results: Optional[List[Dict[str, Any]]] = None
     fold_results: Optional[List[Dict[str, Any]]] = None
+    # Issue #375 — preflight market-data integrity report. Stored as a dict
+    # to avoid a forward-reference cycle between this module and
+    # ``execution.data_quality``; the typed model
+    # (``DataQualityReport``) lives there and is ``model_dump()``-ed at
+    # the boundary. None on legacy rows.
+    data_quality_report: Optional[Dict[str, Any]] = None
 
 
 class TradeRecord(BaseModel):
@@ -713,6 +719,14 @@ class PaperTradingSession(BaseModel):
     error: Optional[str] = Field(
         default=None,
         description="Truncated error text if the session ended abnormally.",
+    )
+    # Issue #375 — preflight data-quality report captured at warm-up time
+    # (``validate_market_data(mode='warn')``).  Live-bar gap warnings
+    # accumulate on ``warnings`` instead — this field holds only the
+    # warm-up snapshot.  Stored as a dict to mirror BacktestResult.
+    data_quality_report: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Preflight data-quality report captured at warm-up; null for legacy rows.",
     )
 
 

@@ -419,6 +419,80 @@ def test_stocks_asset_class_routes_to_equities_provider() -> None:
     assert result.cutover_ts == "2024-05-01T12:01:00Z"
 
 
+# ---------------------------------------------------------------------------
+# Issue #375 — preflight data quality at warm-up + live-gap monitor
+# ---------------------------------------------------------------------------
+
+
+def test_paper_trade_attaches_warmup_data_quality_report() -> None:
+    """Clean warm-up bars → ``data_quality_report`` populated with severity 'ok'."""
+    warmup = [
+        _hist_bar("2024-05-01T11:57:00Z", 100.0),
+        _hist_bar("2024-05-01T11:58:00Z", 101.0),
+        _hist_bar("2024-05-01T11:59:00Z", 102.0),
+    ]
+    live = [
+        _native_bar("2024-05-01T12:01:00Z", 103.0),
+        _native_bar("2024-05-01T12:02:00Z", 104.0),
+        _native_bar("2024-05-01T12:03:00Z", 105.0),
+    ]
+    provider = _StubProvider(historical_bars=warmup, live_events=live)
+    result = run_paper_trade(
+        strategy=_strategy(_ALTERNATING_STRATEGY),
+        backtest_config=_btc_config(),
+        paper_config=_paper_config(warmup_bars=3, min_fills=999, max_hours=1.0),
+        registry=_registry_with(provider),
+    )
+    assert result.data_quality_report is not None
+    assert result.data_quality_report["severity"] == "ok"
+
+
+def test_paper_trade_warns_on_warmup_gap() -> None:
+    """A long gap inside the warm-up window surfaces on ``warnings``."""
+    # 10 minute-bars then a 30-bar gap then 1 more — at 1m frequency that's
+    # well above the 5-bar threshold for a fail-class gap.
+    warmup: List[BarEvent] = []
+    for i in range(10):
+        warmup.append(_hist_bar(f"2024-05-01T11:{i:02d}:00Z", 100.0 + i))
+    # Skip 30 minutes ⇒ multiple missing 1m bars ⇒ severity == "fail".
+    warmup.append(_hist_bar("2024-05-01T11:40:00Z", 110.0))
+
+    live = [
+        _native_bar("2024-05-01T12:01:00Z", 111.0),
+        _native_bar("2024-05-01T12:02:00Z", 112.0),
+        _native_bar("2024-05-01T12:03:00Z", 113.0),
+    ]
+    provider = _StubProvider(historical_bars=warmup, live_events=live)
+    result = run_paper_trade(
+        strategy=_strategy(_ALTERNATING_STRATEGY),
+        backtest_config=_btc_config(),
+        paper_config=_paper_config(warmup_bars=11, min_fills=999, max_hours=1.0),
+        registry=_registry_with(provider),
+    )
+    assert result.data_quality_report is not None
+    # Warm-up validation runs in warn mode so the run still proceeds, but
+    # the advisory must be on ``warnings`` for ops to act on.
+    assert any(w.startswith("data_quality:warmup:") for w in result.warnings)
+
+
+def test_paper_trade_emits_live_gap_warning() -> None:
+    """A live-bar gap >5x the strategy timeframe surfaces a structured warning."""
+    # No warm-up. Two live bars 30 minutes apart at 1m frequency.
+    live = [
+        _native_bar("2024-05-01T12:00:00Z", 100.0),
+        _native_bar("2024-05-01T12:30:00Z", 101.0),  # 30x
+        _native_bar("2024-05-01T12:31:00Z", 102.0),
+    ]
+    provider = _StubProvider(historical_bars=[], live_events=live)
+    result = run_paper_trade(
+        strategy=_strategy(_ALTERNATING_STRATEGY),
+        backtest_config=_btc_config(),
+        paper_config=_paper_config(warmup_bars=0, min_fills=999, max_hours=1.0),
+        registry=_registry_with(provider),
+    )
+    assert "data_quality:live_gap:BTC" in result.warnings
+
+
 def test_missing_strategy_code_raises() -> None:
     provider = _StubProvider()
     with pytest.raises(ValueError, match="strategy_code is required"):

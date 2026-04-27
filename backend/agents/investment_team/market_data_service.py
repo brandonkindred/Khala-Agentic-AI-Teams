@@ -99,6 +99,12 @@ class MarketDataService:
         # hard-fail intraday runs that fell back to CoinGecko's synthesized
         # OHLCV.  Empty dict on init; populated lazily.
         self.provider_used: Dict[str, str] = {}
+        # Issue #375 — populated by ``fetch_multi_symbol_range`` after
+        # every successful multi-symbol fetch.  The service-level check
+        # is non-blocking (``mode='warn'``); the per-mode entry points
+        # (backtest / paper trade) re-run validation with the strictness
+        # appropriate to their context.  None until the first fetch.
+        self.last_quality_report: Optional["object"] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -236,6 +242,21 @@ class MarketDataService:
                 provider_used={
                     sym: self.provider_used[sym] for sym in result if sym in self.provider_used
                 },
+            )
+
+        # Issue #375 — non-blocking preflight report for callers that
+        # want a structured view of data quality without re-validating.
+        # Backtest and paper-trade modes re-run validation themselves
+        # with the appropriate strictness; we run ``warn`` here so the
+        # service stays a generic data-fetcher.
+        if result:
+            from .execution.data_quality import validate_market_data
+
+            self.last_quality_report = validate_market_data(
+                bars_by_symbol=result,
+                expected_frequency="1d" if not intraday_mode else "unknown",
+                asset_class=normalize_asset_class(asset_class),
+                mode="warn",
             )
         return result
 

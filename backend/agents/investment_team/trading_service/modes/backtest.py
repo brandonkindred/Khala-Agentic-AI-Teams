@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from ...execution.cost_stress import CostStressReport, CostStressRow
+from ...execution.data_quality import validate_market_data
 from ...market_data_service import OHLCVBar
 from ...models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
 from ...trade_simulator import compute_metrics
@@ -79,6 +80,23 @@ def run_backtest(
             "run_backtest requires exactly one data source: either "
             "'market_data' (pre-fetched) or ('symbols', 'asset_class') "
             "(provider-driven)"
+        )
+
+    # Issue #375 — preflight market-data integrity gate.  Strict mode
+    # because a backtest is a research artifact: silent corruption is
+    # disastrous and a hard failure is recoverable (re-run with the
+    # service-level ``warn`` report attached if the caller wants the
+    # detail).  Only the legacy pre-fetched path runs the gate today;
+    # the provider-driven path streams bars lazily and would require a
+    # buffering rewrite to validate up-front (issue #376 introduces a
+    # natural integration point via the point-in-time cache).
+    quality_report: Optional[object] = None
+    if has_legacy:
+        quality_report = validate_market_data(
+            bars_by_symbol=market_data,
+            expected_frequency=timeframe,
+            asset_class=asset_class or strategy.asset_class,
+            mode="strict",
         )
 
     def _build_stream() -> object:
@@ -171,6 +189,11 @@ def run_backtest(
             row_2x = report.at(2.0)
             if row_2x is not None and row_2x.sharpe_ratio < config.min_sharpe_at_2x:
                 update.setdefault("reject_reason", "fails_cost_stress")
+
+    # Issue #375 — surface the preflight report on the result so the API
+    # layer and audit log can record exactly what passed (or warned).
+    if quality_report is not None:
+        update["data_quality_report"] = quality_report.model_dump()
 
     if update:
         metrics = metrics.model_copy(update=update)
