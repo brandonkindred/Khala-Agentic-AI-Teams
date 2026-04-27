@@ -7,12 +7,227 @@ on:
   push:
     branches: [master, main, development]
 
+# Cancel in-flight CI on the same PR branch when a new commit is pushed.
+# Push events to default branches keep their runs to preserve build artifacts.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # ── Change detection ────────────────────────────────────────────────────────
+  # Runs once per CI invocation and emits per-area boolean outputs plus a
+  # dynamic matrix for the per-team test job. Touching this workflow file
+  # triggers every filter so we never ship a broken filter blind.
+
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      lint_python: ${{ steps.filter.outputs.lint_python }}
+      lint_frontend: ${{ steps.filter.outputs.lint_frontend }}
+      ui: ${{ steps.filter.outputs.ui }}
+      shared_postgres: ${{ steps.filter.outputs.shared_postgres }}
+      backend_any: ${{ steps.filter.outputs.backend_any }}
+      docker_backend: ${{ steps.filter.outputs.docker_backend }}
+      docker_blogging_service: ${{ steps.filter.outputs.docker_blogging_service }}
+      docker_team_service: ${{ steps.filter.outputs.docker_team_service }}
+      docker_frontend: ${{ steps.filter.outputs.docker_frontend }}
+      tests_matrix: ${{ steps.matrix.outputs.tests_matrix }}
+      tests_matrix_empty: ${{ steps.matrix.outputs.tests_empty }}
+      team_services_matrix: ${{ steps.matrix.outputs.team_services_matrix }}
+      team_services_matrix_empty: ${{ steps.matrix.outputs.team_services_empty }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            ci_workflow:
+              - '.github/workflows/ci.yml'
+            lint_python:
+              - 'backend/**'
+              - '.github/workflows/ci.yml'
+            lint_frontend:
+              - 'user-interface/**'
+              - '.github/workflows/ci.yml'
+            ui:
+              - 'user-interface/**'
+              - '.github/workflows/ci.yml'
+            # Anything that every team's tests transitively depend on. When
+            # this trips, the matrix-builder fans out to all teams below.
+            shared_backend:
+              - 'backend/agents/shared_postgres/**'
+              - 'backend/agents/shared_temporal/**'
+              - 'backend/agents/shared_agent_invoke/**'
+              - 'backend/agents/shared_graph/**'
+              - 'backend/agents/shared_observability/**'
+              - 'backend/agents/llm_service/**'
+              - 'backend/agents/event_bus/**'
+              - 'backend/agents/artifact_registry/**'
+              - 'backend/agents/integrations/**'
+              - 'backend/agents/requirements.txt'
+              - 'backend/unified_api/**'
+              - 'backend/conftest.py'
+              - 'backend/pyproject.toml'
+              - 'backend/pytest.ini'
+              - '.github/workflows/ci.yml'
+            backend_any:
+              - 'backend/**'
+              - '.github/workflows/ci.yml'
+            shared_postgres:
+              - 'backend/agents/shared_postgres/**'
+              - 'backend/agents/**/postgres/**'
+              - 'backend/unified_api/postgres/**'
+              - 'backend/job_service/postgres.py'
+              - '.github/workflows/ci.yml'
+            software_engineering:
+              - 'backend/agents/software_engineering_team/**'
+            blogging:
+              - 'backend/agents/blogging/**'
+            market_research:
+              - 'backend/agents/market_research_team/**'
+            soc2:
+              - 'backend/agents/soc2_compliance_team/**'
+            investment:
+              - 'backend/agents/investment_team/**'
+            social_marketing:
+              - 'backend/agents/social_media_marketing_team/**'
+            agent_provisioning:
+              - 'backend/agents/agent_provisioning_team/**'
+            sales:
+              - 'backend/agents/sales_team/**'
+            docker_backend:
+              - 'backend/Dockerfile'
+              - 'backend/agents/**'
+              - 'backend/unified_api/**'
+              - 'backend/requirements.txt'
+              - 'backend/entrypoint.sh'
+              - '.github/workflows/ci.yml'
+            docker_blogging_service:
+              - 'backend/blogging_service/**'
+              - 'backend/agents/blogging/**'
+              - 'backend/agents/shared_postgres/**'
+              - 'backend/agents/llm_service/**'
+              - 'backend/agents/integrations/**'
+              - 'backend/agents/requirements.txt'
+              - '.github/workflows/ci.yml'
+            docker_team_service:
+              - 'backend/team_service/**'
+              - 'backend/agents/shared_postgres/**'
+              - 'backend/agents/llm_service/**'
+              - 'backend/agents/requirements.txt'
+              - '.github/workflows/ci.yml'
+            docker_frontend:
+              - 'user-interface/**'
+              - '.github/workflows/ci.yml'
+
+      # Build the per-team test matrix. A team enters the matrix when its
+      # own files changed, when shared_backend changed (its tests transitively
+      # depend on those), or when this workflow file changed (safety net).
+      - id: matrix
+        env:
+          F_CI_WORKFLOW: ${{ steps.filter.outputs.ci_workflow }}
+          F_SHARED_BACKEND: ${{ steps.filter.outputs.shared_backend }}
+          F_SOFTWARE_ENGINEERING: ${{ steps.filter.outputs.software_engineering }}
+          F_BLOGGING: ${{ steps.filter.outputs.blogging }}
+          F_MARKET_RESEARCH: ${{ steps.filter.outputs.market_research }}
+          F_SOC2: ${{ steps.filter.outputs.soc2 }}
+          F_INVESTMENT: ${{ steps.filter.outputs.investment }}
+          F_SOCIAL_MARKETING: ${{ steps.filter.outputs.social_marketing }}
+          F_AGENT_PROVISIONING: ${{ steps.filter.outputs.agent_provisioning }}
+          F_SALES: ${{ steps.filter.outputs.sales }}
+          F_DOCKER_BLOGGING_SERVICE: ${{ steps.filter.outputs.docker_blogging_service }}
+          F_DOCKER_TEAM_SERVICE: ${{ steps.filter.outputs.docker_team_service }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          all_entries = {
+              "software_engineering": {
+                  "name": "Software Engineering Team",
+                  "tests": "software_engineering_team/tests/",
+                  "extra_requirements": "software_engineering_team/requirements.txt",
+                  "editable_install": "software_engineering_team",
+                  "needs_node": True,
+              },
+              "blogging": {
+                  "name": "Blogging",
+                  "tests": "blogging/tests/",
+                  "extra_requirements": "blogging/requirements.txt",
+              },
+              "market_research": {
+                  "name": "Market Research",
+                  "tests": "market_research_team/tests/",
+              },
+              "soc2": {
+                  "name": "SOC2 Compliance",
+                  "tests": "soc2_compliance_team/tests/",
+              },
+              "investment": {
+                  "name": "Investment Strategy Lab",
+                  "tests": "investment_team/tests/",
+                  "extra_requirements": "investment_team/requirements-test.txt",
+              },
+              "social_marketing": {
+                  "name": "Social Marketing",
+                  "tests": "social_media_marketing_team/tests/",
+              },
+              "agent_provisioning": {
+                  "name": "Agent Provisioning",
+                  "tests": "agent_provisioning_team/tests/",
+                  "extra_requirements": "agent_provisioning_team/requirements.txt",
+              },
+              "sales": {
+                  "name": "Sales Team",
+                  "tests": "sales_team/tests/",
+              },
+          }
+
+          truthy = lambda v: str(v).lower() == "true"
+          fan_out = truthy(os.environ.get("F_CI_WORKFLOW", "false")) or truthy(
+              os.environ.get("F_SHARED_BACKEND", "false")
+          )
+          changed = {
+              k: fan_out or truthy(os.environ.get("F_" + k.upper(), "false"))
+              for k in all_entries
+          }
+          entries = [v for k, v in all_entries.items() if changed[k]]
+
+          team_services = {
+              "docker_blogging_service": {
+                  "service": "khala-blogging-service",
+                  "dockerfile": "backend/blogging_service/Dockerfile",
+              },
+              "docker_team_service": {
+                  "service": "khala-team-service",
+                  "dockerfile": "backend/team_service/Dockerfile",
+              },
+          }
+          team_services_entries = [
+              v for k, v in team_services.items()
+              if truthy(os.environ.get("F_CI_WORKFLOW", "false"))
+              or truthy(os.environ.get("F_" + k.upper(), "false"))
+          ]
+
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a") as f:
+              f.write(f"tests_matrix={json.dumps({'include': entries})}\n")
+              f.write(f"tests_empty={'true' if not entries else 'false'}\n")
+              f.write(
+                  f"team_services_matrix={json.dumps({'include': team_services_entries})}\n"
+              )
+              f.write(
+                  f"team_services_empty={'true' if not team_services_entries else 'false'}\n"
+              )
+          PY
+
   # ── Lint ────────────────────────────────────────────────────────────────────
 
   lint-python:
     name: Lint Python (ruff)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.lint_python == 'true'
     defaults:
       run:
         working-directory: backend
@@ -23,12 +238,20 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: backend/pyproject.toml
+      - uses: actions/cache@v4
+        with:
+          path: backend/.ruff_cache
+          key: ruff-${{ runner.os }}-${{ hashFiles('backend/pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ruff-${{ runner.os }}-${{ hashFiles('backend/pyproject.toml') }}-
       - run: pip install ruff
       - run: ruff check agents/ unified_api/ blogging_service/ team_service/
 
   lint-frontend:
     name: Lint Angular (ng lint)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.lint_frontend == 'true'
     defaults:
       run:
         working-directory: user-interface
@@ -46,17 +269,20 @@ jobs:
       - run: npm run lint
 
   # ── Tests ───────────────────────────────────────────────────────────────────
+  # Test jobs run in parallel with lint — lint failures are surfaced via the
+  # `all-checks` gate, not by serializing the critical path.
 
   test-shared-postgres:
     name: Test – shared_postgres (live Postgres)
     runs-on: ubuntu-latest
-    needs: lint-python
+    needs: changes
+    if: needs.changes.outputs.shared_postgres == 'true'
     defaults:
       run:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -65,9 +291,9 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd="pg_isready -U postgres"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=15
     env:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
@@ -82,29 +308,23 @@ jobs:
           cache: pip
           cache-dependency-path: backend/agents/requirements.txt
       - run: pip install -r requirements.txt
-      # Apply every team's schema to the live Postgres to catch
-      # cross-team DDL conflicts before any team test runs.
-      # PYTHONPATH=.. adds backend/ to sys.path so the registry can
-      # import unified_api.postgres and job_service.postgres (both of
-      # which live under backend/ rather than backend/agents/). The
-      # python process's implicit sys.path[0]="" covers the
-      # working-directory (backend/agents/) for the team modules.
+      # PYTHONPATH=.. adds backend/ to sys.path so the registry can import
+      # unified_api.postgres and job_service.postgres (both of which live
+      # under backend/ rather than backend/agents/).
       - name: register_all_team_schemas against live Postgres
         env:
           PYTHONPATH: ..
         run: python -c "from shared_postgres import register_all_team_schemas; r = register_all_team_schemas(); assert all(r.values()), r"
       - run: pytest shared_postgres/tests/ -v --tb=short -n auto
 
-  # All non-Postgres backend test suites run as a single matrix job so the CI
-  # config stays DRY and adding/removing a suite is one matrix entry. Matrix
-  # entries still run in parallel; fail-fast is off so one red suite doesn't
-  # kill the others. The shared_postgres suite stays standalone because it
-  # needs a live Postgres `services:` block that we don't want to spin up for
-  # the other six suites.
+  # All non-Postgres backend test suites run as a single matrix job. Matrix
+  # entries are produced dynamically by the `changes` job — only teams whose
+  # files were touched (directly or via shared deps) appear in the matrix.
   test-backend:
     name: "Test – ${{ matrix.name }}"
     runs-on: ubuntu-latest
-    needs: lint-python
+    needs: changes
+    if: needs.changes.outputs.tests_matrix_empty != 'true'
     defaults:
       run:
         working-directory: backend/agents
@@ -112,30 +332,7 @@ jobs:
       LLM_PROVIDER: dummy
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: Software Engineering Team
-            tests: software_engineering_team/tests/
-            extra_requirements: software_engineering_team/requirements.txt
-            editable_install: software_engineering_team
-            needs_node: true
-          - name: Blogging
-            tests: blogging/tests/
-            extra_requirements: blogging/requirements.txt
-          - name: Market Research
-            tests: market_research_team/tests/
-          - name: SOC2 Compliance
-            tests: soc2_compliance_team/tests/
-          - name: Investment Strategy Lab
-            tests: investment_team/tests/
-            extra_requirements: investment_team/requirements-test.txt
-          - name: Social Marketing
-            tests: social_media_marketing_team/tests/
-          - name: Agent Provisioning
-            tests: agent_provisioning_team/tests/
-            extra_requirements: agent_provisioning_team/requirements.txt
-          - name: Sales Team
-            tests: sales_team/tests/
+      matrix: ${{ fromJSON(needs.changes.outputs.tests_matrix) }}
     steps:
       - uses: actions/checkout@v4
       - if: matrix.needs_node
@@ -146,15 +343,23 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          # Listing every team's requirements in the cache key means the key
-          # is shared across matrix entries (so pip's wheel cache is reused)
-          # and invalidates whenever any team's reqs change.
+          # Listing every team's requirements in the cache key keeps the key
+          # shared across matrix entries so pip's wheel cache is reused, and
+          # invalidates whenever any team's reqs change.
           cache-dependency-path: |
             backend/agents/requirements.txt
             backend/agents/software_engineering_team/requirements.txt
             backend/agents/blogging/requirements.txt
             backend/agents/investment_team/requirements-test.txt
             backend/agents/agent_provisioning_team/requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            backend/.pytest_cache
+            backend/agents/.pytest_cache
+          key: pytest-${{ runner.os }}-${{ matrix.name }}-${{ github.sha }}
+          restore-keys: |
+            pytest-${{ runner.os }}-${{ matrix.name }}-
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
@@ -168,20 +373,20 @@ jobs:
       # marked `@pytest.mark.integration` and runs in `test-integration`.
       - run: pytest ${{ matrix.tests }} -v --tb=short -n auto -m "not integration"
 
-  # Integration suite: real Postgres + real job service.  Runs every team's
-  # tests selected by the `@integration` marker.  Currently a sentinel job
-  # that boots the infra and runs the marker; per-team integration suites
+  # Integration suite: real Postgres + real job service. Currently a sentinel
+  # job that boots the infra and runs the marker; per-team integration suites
   # are filed as follow-up issues.
   test-integration:
     name: Test – integration (Postgres + job service)
     runs-on: ubuntu-latest
-    needs: lint-python
+    needs: changes
+    if: needs.changes.outputs.backend_any == 'true'
     defaults:
       run:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -190,9 +395,9 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd="pg_isready -U postgres"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=15
     env:
       LLM_PROVIDER: dummy
       POSTGRES_HOST: localhost
@@ -215,10 +420,6 @@ jobs:
           pip install -r ../job_service/requirements.txt
       # Boot the job-service sidecar AND run pytest in a single step so the
       # background process is guaranteed to be alive when pytest collects.
-      # Splitting startup and execution across two GHA steps is brittle —
-      # each step is a fresh shell and a backgrounded process can be killed
-      # when the parent shell exits.  Scope: only the smoke suite for now;
-      # wider per-team integration tests are tracked in #361-#367.
       # PYTHONPATH=../agents is required because job_service/postgres.py
       # imports `shared_postgres`, which lives under backend/agents/.
       - name: Start job-service + run integration tests
@@ -232,20 +433,18 @@ jobs:
           JOB_SERVICE_URL: http://127.0.0.1:8085
         run: |
           set -euo pipefail
-          # Boot the job service.
           (cd ../job_service && \
             uvicorn main:app --host 127.0.0.1 --port 8085 > /tmp/job-service.log 2>&1) &
           JOB_SERVICE_PID=$!
-          # If pytest fails or this step is cancelled, take the sidecar down
-          # cleanly so its log surfaces in CI output.
           trap '
             echo "--- job-service log ---";
             tail -100 /tmp/job-service.log || true;
             kill "$JOB_SERVICE_PID" 2>/dev/null || true;
           ' EXIT
+          # 30 × 0.5s = 15s budget; the service is usually ready in 2–3s.
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8085/health >/dev/null; then
-              echo "job-service is up after ${i}s"
+              echo "job-service is up after ~$((i * 5 / 10))s"
               break
             fi
             if ! kill -0 "$JOB_SERVICE_PID" 2>/dev/null; then
@@ -253,10 +452,10 @@ jobs:
               tail -100 /tmp/job-service.log
               exit 1
             fi
-            sleep 1
+            sleep 0.5
           done
           if ! curl -sf http://127.0.0.1:8085/health >/dev/null; then
-            echo "job-service did not become healthy in 30s; tail of log:"
+            echo "job-service did not become healthy in 15s; tail of log:"
             tail -100 /tmp/job-service.log
             exit 1
           fi
@@ -266,7 +465,8 @@ jobs:
   test-ui:
     name: Test – Angular UI
     runs-on: ubuntu-latest
-    needs: lint-frontend
+    needs: changes
+    if: needs.changes.outputs.ui == 'true'
     defaults:
       run:
         working-directory: user-interface
@@ -284,35 +484,59 @@ jobs:
       - run: npm run test:coverage
 
   # ── Gate ────────────────────────────────────────────────────────────────────
-  # Single convergence point: both build jobs must wait for every test suite
-  # (backend and frontend) so neither image can be published while any suite
-  # is red, preventing partial releases where only one image reaches Docker Hub.
+  # Single convergence point used as the required status check in branch
+  # protection. `if: always()` plus per-dependency result evaluation lets
+  # legitimately-skipped jobs pass the gate; only `failure` or `cancelled`
+  # results fail it.
 
   all-checks:
     name: All checks passed
     runs-on: ubuntu-latest
+    if: always()
     needs:
+      - changes
+      - lint-python
+      - lint-frontend
       - test-shared-postgres
       - test-backend
       - test-integration
       - test-ui
     steps:
-      - run: echo "All lint, test, and build checks passed."
+      - name: Verify dependencies
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ["RESULTS"])
+          bad = []
+          for job, info in results.items():
+              status = info.get("result")
+              if status not in ("success", "skipped"):
+                  bad.append(f"{job}={status}")
+          if bad:
+              print("Failed dependencies:", ", ".join(bad))
+              sys.exit(1)
+          print("All checks passed (or were legitimately skipped).")
+          PY
 
   # ── Build & Deploy ──────────────────────────────────────────────────────────
-  # On pull_request: build only (validates the image can be built).
-  # On push to main/development (merged PR): build + push to GHCR.
-  #
-  # No extra secrets or variables required — GITHUB_TOKEN is used automatically.
-  # Images are published to:
-  #   ghcr.io/<owner>/khala
-  #   ghcr.io/<owner>/khala-ui
+  # Builds gate on `all-checks` so untested images can never be published.
+  # Each build only runs when its docker_* path filter trips, so an
+  # investment-only PR doesn't rebuild blogging or team-service images.
+  # On pull_request: builds validate (push: false). On push to default
+  # branches: builds publish to GHCR and update the registry buildcache.
 
   build-backend:
     name: Build Backend Docker image
     runs-on: ubuntu-latest
     needs:
+      - changes
       - all-checks
+    if: |
+      always() &&
+      needs.all-checks.result == 'success' &&
+      needs.changes.outputs.docker_backend == 'true'
     permissions:
       contents: read
       packages: write
@@ -347,29 +571,31 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Explicit scope keeps this image's cache separate from the team
-          # service matrix and frontend images; without scope, default is the
-          # job name which still works but isn't future-proof if the job is
-          # renamed.
-          cache-from: type=gha,scope=build-backend
-          cache-to: type=gha,mode=max,scope=build-backend
+          # Layered cache: GHA for fast same-runner reuse, registry for
+          # survival across the 7-day GHA TTL and across PRs.
+          cache-from: |
+            type=gha,scope=build-backend
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/khala:buildcache
+          cache-to: |
+            type=gha,mode=max,scope=build-backend
+            ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/{0}/khala:buildcache,mode=max', github.repository_owner) || '' }}
 
   build-team-services:
     name: "Build ${{ matrix.service }} Docker image"
     runs-on: ubuntu-latest
     needs:
+      - changes
       - all-checks
+    if: |
+      always() &&
+      needs.all-checks.result == 'success' &&
+      needs.changes.outputs.team_services_matrix_empty != 'true'
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - service: khala-blogging-service
-            dockerfile: backend/blogging_service/Dockerfile
-          - service: khala-team-service
-            dockerfile: backend/team_service/Dockerfile
+      matrix: ${{ fromJSON(needs.changes.outputs.team_services_matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -401,17 +627,23 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Per-service scope keeps the two matrix entries from clobbering
-          # each other's cache (default scope is the job name, which is
-          # shared across all matrix entries).
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-from: |
+            type=gha,scope=${{ matrix.service }}
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}:buildcache
+          cache-to: |
+            type=gha,mode=max,scope=${{ matrix.service }}
+            ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/{0}/{1}:buildcache,mode=max', github.repository_owner, matrix.service) || '' }}
 
   build-frontend:
     name: Build Frontend Docker image
     runs-on: ubuntu-latest
     needs:
+      - changes
       - all-checks
+    if: |
+      always() &&
+      needs.all-checks.result == 'success' &&
+      needs.changes.outputs.docker_frontend == 'true'
     permissions:
       contents: read
       packages: write
@@ -446,5 +678,9 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=build-frontend
-          cache-to: type=gha,mode=max,scope=build-frontend
+          cache-from: |
+            type=gha,scope=build-frontend
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/khala-ui:buildcache
+          cache-to: |
+            type=gha,mode=max,scope=build-frontend
+            ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/{0}/khala-ui:buildcache,mode=max', github.repository_owner) || '' }}
