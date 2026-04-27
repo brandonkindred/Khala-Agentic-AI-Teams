@@ -674,3 +674,148 @@ def test_groom_caps_prompt_size_and_defers_overflow_stories(
 
     # And the rationale calls out the deferral so an operator notices.
     assert "deferred" in result.rationale.lower()
+
+
+@pytest.mark.parametrize(
+    "bad_envelope",
+    [
+        # Codex flagged: a 200 with all stories zero-scored masks
+        # provider/schema regressions as normal output. These shapes
+        # must trip `LLMScoringUnavailable` so the route returns 503
+        # and callers retry.
+        {"items": "not a list"},
+        {"items": None},
+        {"results": [{"id": "s1", "inputs": {}}]},  # wrong key
+        "definitely not a dict",
+        ["lists are not envelopes"],
+        42,
+    ],
+)
+def test_groom_raises_503_on_malformed_llm_envelope(bad_envelope: Any) -> None:
+    from product_delivery.product_owner_agent.agent import LLMScoringUnavailable
+
+    stories = [_story("s1")]
+    llm = _StubLLM(payload=bad_envelope)  # type: ignore[arg-type]
+    store = _fake_store(stories=stories)
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    with pytest.raises(LLMScoringUnavailable):
+        agent.groom(product_id="prod-x", method="wsjf", persist=True)
+    # No persistence on failure — the existing scores stay intact.
+    assert store.persisted == []
+
+
+def test_groom_grooming_window_rotates_by_updated_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cap selection must prefer least-recently-updated stories.
+
+    If grooming always took ``stories[:cap]`` (creation order) every
+    run, newer stories would be permanently starved in sustained large
+    backlogs. The rotation by ``updated_at`` means scored stories'
+    ``updated_at`` jumps to "now" on persist and they cycle to the
+    end of the next run's window.
+    """
+    from datetime import timedelta
+
+    monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_STORIES", "1")
+    base = datetime.now(tz=timezone.utc)
+
+    # Two stories — `recent` was just touched, `stale` hasn't been
+    # updated in a week. The rotation must pick `stale` for grooming
+    # this run, not `recent` (which would be the first by id).
+    recent = _story("recent")
+    stale = _story("stale")
+    object.__setattr__(recent, "updated_at", base)
+    object.__setattr__(stale, "updated_at", base - timedelta(days=7))
+
+    llm = _StubLLM(
+        payload={
+            "items": [
+                {
+                    "id": "stale",
+                    "inputs": {
+                        "user_business_value": 8,
+                        "time_criticality": 4,
+                        "risk_reduction_or_opportunity_enablement": 0,
+                        "job_size": 4,
+                    },
+                }
+            ]
+        }
+    )
+    store = _fake_store(stories=[recent, stale])  # creation-order: recent first
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="prod-x", method="wsjf", persist=True)
+
+    assert len(result.ranked) == 2
+    # Stale was scored, recent was deferred — opposite of creation order.
+    by_id = {item.id: item for item in result.ranked}
+    assert by_id["stale"].score == 3.0
+    assert by_id["recent"].score == 0.0
+    assert "deferred" in by_id["recent"].rationale.lower()
+
+    # And the LLM only saw the stale story.
+    assert len(llm.calls) == 1
+    prompt = llm.calls[0]["prompt"]
+    assert '"id": "stale"' in prompt
+    assert '"id": "recent"' not in prompt
+
+    # Persistence covers only the scored story.
+    assert {r[0] for r in store.persisted} == {"stale"}
+
+
+def test_groom_trims_by_byte_budget_when_user_stories_are_large(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story-count cap alone doesn't protect against verbose ``user_story`` fields.
+
+    A small backlog with multi-KB ``user_story`` text can still overrun
+    model context. Set a small byte budget and verify that stories
+    beyond what fits get deferred (even when count < cap), and the
+    LLM only sees the trimmed slice.
+    """
+    monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_STORIES", "100")  # well above story count
+    monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", "1024")  # tight budget
+
+    # Three stories with ~600-char `user_story` each, so two fit and
+    # one overflows the 1 KiB budget.
+    big_text = "x" * 600
+    stories = []
+    for sid in ("s1", "s2", "s3"):
+        story = _story(sid)
+        object.__setattr__(story, "user_story", big_text)
+        stories.append(story)
+
+    llm = _StubLLM(
+        payload={
+            "items": [
+                {
+                    "id": "s1",
+                    "inputs": {
+                        "user_business_value": 8,
+                        "time_criticality": 4,
+                        "risk_reduction_or_opportunity_enablement": 0,
+                        "job_size": 4,
+                    },
+                },
+            ]
+        }
+    )
+    store = _fake_store(stories=stories)
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="prod-x", method="wsjf", persist=True)
+
+    # All three surface in result so no work disappears.
+    assert len(result.ranked) == 3
+    by_id = {item.id: item for item in result.ranked}
+
+    # First story scored, the other two deferred for byte-budget reasons
+    # (the second wouldn't fit either since 2 * 600 > 1024 budget).
+    assert by_id["s1"].score == 3.0
+    for sid in ("s2", "s3"):
+        assert by_id[sid].score == 0.0
+        assert "deferred" in by_id[sid].rationale.lower()
+
+    # LLM only saw the slice that fit in the byte budget.
+    prompt = llm.calls[0]["prompt"]
+    assert '"id": "s1"' in prompt
+    assert '"id": "s2"' not in prompt
+    assert '"id": "s3"' not in prompt

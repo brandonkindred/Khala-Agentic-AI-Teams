@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import sys
+from concurrent import futures
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -276,9 +277,13 @@ async def lifespan(app: FastAPI):
                     _in_process_schema_failures.add("product_delivery")
             else:
                 # Postgres disabled → every persistence call will 503.
-                # Mark unhealthy so /health doesn't disagree with the route.
+                # Don't add to `_in_process_schema_failures` (which
+                # tracks broken state, not opt-out): the health handler
+                # sees `is_postgres_enabled()` is False and reports
+                # `unavailable` instead of `unhealthy`, so the unified
+                # API doesn't flag overall health degraded for an
+                # intentionally-undeployed feature.
                 logger.warning("product_delivery: Postgres disabled; persistence endpoints will return 503")
-                _in_process_schema_failures.add("product_delivery")
         except Exception:
             logger.exception("product_delivery postgres schema registration failed")
             _in_process_schema_failures.add("product_delivery")
@@ -468,6 +473,24 @@ async def root() -> ApiInfoResponse:
     )
 
 
+# Dedicated, bounded executor for the `/health` Postgres probe.
+# Codex flagged that `asyncio.to_thread` cannot interrupt the underlying
+# psycopg call on `wait_for` timeout: under a Postgres outage every
+# probe leaves a worker blocked in `pool.connection()` until the pool's
+# own timeout elapses, which can quickly exhaust the default executor
+# (and starve every other `to_thread`-using path in the app — file
+# I/O, integrations, etc.).
+#
+# Two-pronged fix:
+#   1. Run the probe in its own small executor so a flooded /health
+#      can't drag down unrelated work.
+#   2. Cap the connection-acquisition wait via psycopg's own timeout
+#      knob (`pool.connection(timeout=…)`) so the worker itself can't
+#      block longer than the budget — the thread always exits cleanly.
+_PROBE_EXECUTOR = futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pd-health-probe")
+_PROBE_DB_TIMEOUT_S = 1.5
+
+
 async def _probe_postgres_live() -> bool:
     """Run ``SELECT 1`` against the shared pool with a short timeout.
 
@@ -475,30 +498,86 @@ async def _probe_postgres_live() -> bool:
     outage (pool exhausted, host unreachable, FK chain broken) flips
     those teams to ``unhealthy`` immediately instead of leaving the
     startup-time success result frozen until the next process restart.
-    Anything that doesn't return a ``True`` quickly is treated as a
-    fail — better to flap to "unhealthy" briefly than miss a real
-    outage. Runs the sync psycopg call inside ``to_thread`` so the
-    event loop isn't blocked on a slow connect.
+    Anything that doesn't return ``True`` quickly is treated as a
+    fail — better to flap to ``unhealthy`` briefly than miss a real
+    outage. Runs in a dedicated 2-worker executor with an inner
+    psycopg-level timeout so a stalled DB can't accumulate orphaned
+    workers in the default threadpool.
     """
 
     def _ping() -> bool:
-        from shared_postgres import get_conn, is_postgres_enabled
+        from shared_postgres import client as _pg_client
+        from shared_postgres import is_postgres_enabled
 
         if not is_postgres_enabled():
             return False
         try:
-            with get_conn() as conn, conn.cursor() as cur:
+            # Bound the connection acquisition itself so the worker
+            # thread can't block longer than `_PROBE_DB_TIMEOUT_S`. We
+            # reach through `client._get_or_create_pool` (rather than
+            # `get_conn()`) because the public helper doesn't expose a
+            # timeout knob today and the probe must be hard-bounded.
+            pool = _pg_client._get_or_create_pool()
+            with pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn, conn.cursor() as cur:
                 cur.execute("SELECT 1")
                 row = cur.fetchone()
                 return row is not None and row[0] == 1
         except Exception:
             return False
 
+    loop = asyncio.get_running_loop()
     try:
-        return await asyncio.wait_for(asyncio.to_thread(_ping), timeout=2.0)
+        # Outer wait_for gives the await an upper bound even if the
+        # inner psycopg timeout fires later than expected. Worker
+        # cleanup is guaranteed by the inner timeout; this is just
+        # belt-and-suspenders for the await side.
+        return await asyncio.wait_for(
+            loop.run_in_executor(_PROBE_EXECUTOR, _ping),
+            timeout=_PROBE_DB_TIMEOUT_S + 0.5,
+        )
     except asyncio.TimeoutError:
         return False
     except Exception:
+        return False
+
+
+def _is_postgres_enabled_cached() -> bool:
+    """``shared_postgres.is_postgres_enabled()`` without the import dance.
+
+    Just reads the env var directly so the health handler doesn't pay
+    an import on every call. Postgres-disabled environments use this
+    to drop in-process teams to ``unavailable`` rather than ``unhealthy``.
+    """
+    return bool(os.environ.get("POSTGRES_HOST", "").strip())
+
+
+def _retry_in_process_schema_registration(team_key: str) -> bool:
+    """Re-run schema registration for a team after a transient outage.
+
+    Called from `/health` when the live DB probe succeeds for a team
+    that was added to `_in_process_schema_failures` at startup —
+    typically because Postgres wasn't reachable when the lifespan
+    fired but is reachable now. `register_team_schemas` is idempotent,
+    so re-running on a recovered DB simply applies any DDL the startup
+    attempt missed and clears the failure flag so subsequent /health
+    calls report `healthy` without a process restart.
+    """
+    try:
+        if team_key == "product_delivery":
+            from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
+            from shared_postgres import register_team_schemas
+
+            register_team_schemas(PRODUCT_DELIVERY_SCHEMA)
+            _in_process_schema_failures.discard(team_key)
+            logger.info("product_delivery: schema re-registration succeeded; clearing health flag")
+            return True
+        # Other in-process teams (agent_console, team_assistant, etc.)
+        # don't currently track their schema-failure flag through this
+        # set, so there's nothing to retry. Add cases here as they
+        # adopt the pattern.
+        return False
+    except Exception:
+        logger.warning("Schema re-registration retry failed for %s", team_key, exc_info=True)
         return False
 
 
@@ -532,8 +611,26 @@ async def health() -> UnifiedHealthResponse:
             #     → "healthy".
             if not config.enabled:
                 status = "unavailable"
+            elif not _is_postgres_enabled_cached():
+                # Postgres intentionally not configured for this env.
+                # The team is mounted but every persistence call will
+                # 503; report `unavailable` so the unified API doesn't
+                # report degraded for an opt-out feature.
+                status = "unavailable"
             elif key in _in_process_schema_failures:
-                status = "unhealthy"
+                # Startup-time failure recorded. Don't immediately
+                # short-circuit to "unhealthy" — Postgres may have
+                # come back since startup. Probe live, and if it
+                # succeeds, retry the schema registration (idempotent)
+                # so the team can self-heal between startup and the
+                # next process restart. Only stay "unhealthy" if the
+                # probe + retry both fail.
+                if db_live is None:
+                    db_live = await _probe_postgres_live()
+                if db_live and _retry_in_process_schema_registration(key):
+                    status = "healthy"
+                else:
+                    status = "unhealthy"
             else:
                 if db_live is None:
                     db_live = await _probe_postgres_live()
@@ -546,7 +643,13 @@ async def health() -> UnifiedHealthResponse:
             status = "unhealthy"
         else:
             status = "unavailable"
-        if config.enabled and status in ("unavailable", "unhealthy"):
+        # Only `unhealthy` flips the overall status to `degraded`.
+        # `unavailable` means a team is intentionally not deployed in
+        # this environment (in-process team without `POSTGRES_HOST`
+        # set, or proxy team without a service URL); flagging the
+        # whole API degraded for an opt-out feature would trip
+        # readiness probes for deployments that don't use it yet.
+        if config.enabled and status == "unhealthy":
             all_healthy = False
         teams.append(TeamHealth(name=config.name, prefix=config.prefix, status=status, enabled=config.enabled))
     return UnifiedHealthResponse(

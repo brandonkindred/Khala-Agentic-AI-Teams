@@ -114,9 +114,35 @@ _SCORED_KINDS = frozenset({"initiative", "epic", "story"})
 _STATUS_MAX_LEN = 40
 
 
+# Title bound — matches every ``*Create.title``/``ProductCreate.name``
+# Pydantic field on the API side. Store-level mirror so non-route
+# callers can't slip empty/oversized identifiers past validation and
+# break read-side projection later.
+_TITLE_MAX_LEN = 200
+
+
 def _validate_status(value: str) -> str:
-    if not value or len(value) > _STATUS_MAX_LEN:
-        raise ValueError(f"status must be 1..{_STATUS_MAX_LEN} chars; got {len(value)}")
+    # `not value.strip()` rejects whitespace-only strings (`'   '`,
+    # `'\t'`) that pass the length check but represent semantically
+    # empty workflow states. Without this they'd persist and propagate
+    # through backlog + feedback projections as if they were valid
+    # statuses.
+    if not value or not value.strip() or len(value) > _STATUS_MAX_LEN:
+        raise ValueError(f"status must be 1..{_STATUS_MAX_LEN} non-blank chars; got {len(value)}")
+    return value
+
+
+def _validate_title(value: str, *, label: str = "title") -> str:
+    """Mirror the API-level ``min_length=1, max_length=200`` bound.
+
+    Used by ``create_product`` / ``create_initiative`` / ``create_epic``
+    / ``create_story`` / ``create_task`` so internal callers (the
+    ProductOwnerAgent, future workflow code, etc.) can't bypass route
+    validation and persist empty / oversized / whitespace-only titles
+    that the HTTP contract rejects.
+    """
+    if not value or not value.strip() or len(value) > _TITLE_MAX_LEN:
+        raise ValueError(f"{label} must be 1..{_TITLE_MAX_LEN} non-blank chars; got {len(value)}")
     return value
 
 
@@ -243,6 +269,10 @@ class ProductDeliveryStore:
 
     @timed_query(store=_STORE, op="create_product")
     def create_product(self, *, name: str, description: str, vision: str, author: str) -> Product:
+        # Mirror `ProductCreate(name=Field(min_length=1, max_length=200))`
+        # so non-route callers can't persist empty / oversized names
+        # that the HTTP contract rejects.
+        name = _validate_title(name, label="name")
         now = _now()
         pid = _new_id()
         with self._conn() as conn, conn.cursor() as cur:
@@ -292,7 +322,7 @@ class ProductDeliveryStore:
         return self._insert(
             "initiative",
             product_id=product_id,
-            title=title,
+            title=_validate_title(title),
             summary=summary,
             status=_validate_status(status),
             author=author,
@@ -305,7 +335,7 @@ class ProductDeliveryStore:
         return self._insert(
             "epic",
             initiative_id=initiative_id,
-            title=title,
+            title=_validate_title(title),
             summary=summary,
             status=_validate_status(status),
             author=author,
@@ -325,7 +355,7 @@ class ProductDeliveryStore:
         return self._insert(
             "story",
             epic_id=epic_id,
-            title=title,
+            title=_validate_title(title),
             user_story=user_story,
             status=_validate_status(status),
             estimate_points=_validate_estimate_points(estimate_points),
@@ -346,7 +376,7 @@ class ProductDeliveryStore:
         return self._insert(
             "task",
             story_id=story_id,
-            title=title,
+            title=_validate_title(title),
             description=description,
             status=_validate_status(status),
             owner=owner,
@@ -737,10 +767,47 @@ class ProductDeliveryStore:
             raise ProductDeliveryStorageUnavailable(
                 "POSTGRES_HOST is not configured; product_delivery storage is unavailable."
             )
+        return _SafeConn()
+
+
+class _SafeConn:
+    """Context manager wrapper around ``shared_postgres.get_conn`` that
+    surfaces connection-acquisition failures as
+    :class:`ProductDeliveryStorageUnavailable`.
+
+    ``get_conn()`` returns a context manager, but the real connection
+    isn't acquired until ``__enter__`` runs (the pool's ``connection()``
+    method blocks waiting for a free slot, then opens the socket if
+    needed). If the pool times out or the driver raises, the original
+    ``_conn`` only caught errors at *creation* of that context manager
+    — the ``__enter__`` exceptions surfaced as raw ``PoolTimeout`` /
+    driver errors, bypassing the route-level 503 mapping and producing
+    unhandled 500s.
+
+    This wrapper re-raises any exception from either ``__enter__`` or
+    the underlying CM creation as ``ProductDeliveryStorageUnavailable``
+    so the route's exception handler maps it cleanly to 503 every time.
+    Exit semantics are unchanged — the pool's CM still commits on clean
+    exit, rolls back on exception, and returns the connection to the pool.
+    """
+
+    def __init__(self) -> None:
+        self._cm: Any | None = None
+
+    def __enter__(self) -> Any:
         try:
-            return get_conn()
+            self._cm = get_conn()
+            return self._cm.__enter__()
+        except ProductDeliveryStorageUnavailable:
+            raise
         except Exception as exc:  # pragma: no cover — infra paths
+            self._cm = None
             raise ProductDeliveryStorageUnavailable(str(exc)) from exc
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
+        if self._cm is None:
+            return False
+        return self._cm.__exit__(exc_type, exc, tb)
 
 
 def _now() -> datetime:

@@ -56,18 +56,47 @@ def _max_stories_per_groom() -> int:
     ``score=0`` + a "deferred" rationale so they don't disappear from
     the planning view.
     """
-    raw = os.environ.get("PRODUCT_DELIVERY_GROOM_MAX_STORIES")
+    return _env_int("PRODUCT_DELIVERY_GROOM_MAX_STORIES", default=200, minimum=1)
+
+
+def _max_prompt_bytes_per_groom() -> int:
+    """Per-call byte budget for the grooming prompt's stories payload.
+
+    Story-count alone isn't sufficient: a small backlog with very long
+    ``user_story`` fields can still overrun the model context (Codex
+    flagged this in PR #369). We trim from the *tail* of the candidate
+    slice once the JSON-serialized payload exceeds this budget; the
+    trimmed stories surface with the same "deferred" rationale as the
+    story-count cap, so deferred work stays visible to the planner.
+
+    Default 65_536 bytes (~16k tokens worst case) — well under the
+    smallest model context budgets we use. Override with
+    ``PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES``.
+    """
+    return _env_int("PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", default=65_536, minimum=1_024)
+
+
+def _env_int(name: str, *, default: int, minimum: int) -> int:
+    """Parse an int env var with a default + lower bound.
+
+    Centralises the "missing → default; non-int → warn + default;
+    below minimum → clamp" pattern shared by the two grooming cap
+    knobs above. Returns >= ``minimum`` always.
+    """
+    raw = os.environ.get(name)
     if not raw:
-        return 200
+        return default
     try:
         value = int(raw)
     except ValueError:
         logger.warning(
-            "PRODUCT_DELIVERY_GROOM_MAX_STORIES=%r is not an int; using default 200",
+            "%s=%r is not an int; using default %d",
+            name,
             raw,
+            default,
         )
-        return 200
-    return max(1, value)
+        return default
+    return max(minimum, value)
 
 
 class LLMScoringUnavailable(RuntimeError):
@@ -139,6 +168,77 @@ def _score_for(
     return rice, None, rice
 
 
+def _story_payload(story: Story) -> dict[str, Any]:
+    """The serialised shape sent to the LLM for one story.
+
+    Centralised so ``_call_llm`` and ``_trim_to_prompt_budget`` agree
+    on what's in the prompt — otherwise the byte budget would underestimate.
+    """
+    return {
+        "id": story.id,
+        "title": story.title,
+        "user_story": story.user_story,
+        "estimate_points": story.estimate_points,
+        "status": story.status,
+    }
+
+
+def _select_grooming_window(stories: list[Story], cap: int) -> tuple[list[Story], list[Story]]:
+    """Pick up to ``cap`` stories to groom, return ``(scored, deferred)``.
+
+    Sorted by ``updated_at`` ascending so the *least-recently-touched*
+    stories are scored first. After grooming persists their new scores,
+    each scored story's ``updated_at`` jumps to "now" and naturally
+    cycles to the *end* of the next run's window. This rotates the cap
+    across the backlog instead of permanently starving newer stories
+    (which the original "oldest by `created_at`" slice would do for
+    sustained large backlogs — Codex flagged this in PR #369).
+
+    Stable sort within ``updated_at`` ties means stories with identical
+    timestamps stay in their original (creation) order, so the cap
+    selection is deterministic across runs as long as the backlog
+    doesn't change.
+    """
+    if len(stories) <= cap:
+        return list(stories), []
+    by_freshness = sorted(stories, key=lambda s: s.updated_at)
+    return by_freshness[:cap], by_freshness[cap:]
+
+
+def _trim_to_prompt_budget(
+    stories: list[Story], byte_budget: int
+) -> tuple[list[Story], list[Story]]:
+    """Trim ``stories`` from the tail until the JSON payload fits in ``byte_budget``.
+
+    Story-count caps don't protect against a small backlog with very
+    long ``user_story`` fields (Codex flagged this in PR #369). We
+    accumulate the JSON payload story-by-story and stop adding once
+    the next story would push us past the budget.
+
+    Returns ``(scored, deferred)`` so deferred stories can surface in
+    the result with the same ``_BACKLOG_TOO_LARGE_RATIONALE`` as the
+    story-count cap. Always keeps at least one story so a single
+    pathological story doesn't drop the entire run to "0 scored".
+    Length budget includes the ``[`` / ``]`` / `, ` JSON list overhead
+    (rough proxy: 2 + (n-1)*2 bytes; conservative for our purposes).
+    """
+    if not stories:
+        return [], []
+    kept: list[Story] = []
+    used = 2  # the enclosing `[]`
+    for story in stories:
+        # Recompute the payload byte cost incrementally — `json.dumps`
+        # of one dict is cheap and avoids re-serialising the whole
+        # accumulator every iteration.
+        item_bytes = len(json.dumps(_story_payload(story)).encode("utf-8"))
+        sep_bytes = 2 if kept else 0  # `, ` between items
+        if kept and used + sep_bytes + item_bytes > byte_budget:
+            break
+        kept.append(story)
+        used += sep_bytes + item_bytes
+    return kept, stories[len(kept) :]
+
+
 def _fallback_item(story: Story, method: GroomMethod, rationale: str) -> RankedBacklogItem:
     """Synthetic ``score=0`` row for a story we couldn't score this run.
 
@@ -162,13 +262,31 @@ def _fallback_item(story: Story, method: GroomMethod, rationale: str) -> RankedB
 def _index_payload(payload: Any) -> dict[str, dict[str, Any]]:
     """Build ``{story_id: raw_item}`` from the LLM response.
 
-    Filters out non-dict items + items without a string id, and warns on
-    duplicate ids (first occurrence wins so persisted scores stay
-    deterministic instead of depending on which copy lands last).
+    Raises :class:`LLMScoringUnavailable` (→ 503 at the route) when the
+    envelope itself is malformed — a non-dict response or a response
+    without a list-typed ``items`` key indicates a provider/schema
+    regression and is *not* equivalent to "the LLM scored zero
+    stories". Returning a 200 with every story zero-scored would mask
+    that regression as normal output and silently de-prioritise the
+    whole backlog, so we surface it as a retryable failure instead.
+
+    Per-item issues (non-dict entries, missing/non-string ids) are
+    still tolerated: those are filtered out and the rest of the items
+    proceed through the missing-fallback path. Duplicate ids keep the
+    first occurrence so persisted scores stay deterministic instead
+    of depending on which copy lands last.
     """
-    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        raise LLMScoringUnavailable(
+            f"LLM returned a non-object envelope ({type(payload).__name__}); "
+            "expected an object with an 'items' list."
+        )
+    items = payload.get("items")
     if not isinstance(items, list):
-        return {}
+        raise LLMScoringUnavailable(
+            "LLM envelope missing or non-list 'items' field; "
+            "treating as a transient provider/schema failure."
+        )
     indexed: dict[str, dict[str, Any]] = {}
     for raw in items:
         if not isinstance(raw, dict):
@@ -254,22 +372,29 @@ class ProductOwnerAgent:
         # backlogs can exceed the model context window. The deferred
         # tail is still surfaced in the result (score=0 + deferred
         # rationale) so callers see them; they just aren't scored this
-        # run. Order matters: we keep the oldest stories (already
-        # ``ORDER BY created_at`` from the store) so the cap is
-        # deterministic and operators can predict which stories will be
-        # scored on the next call after a backlog edit.
+        # run.
+        #
+        # Two-stage cap:
+        #   1. Story count (oldest-`updated_at` first so each run
+        #      rotates the window — see `_select_grooming_window` —
+        #      newer stories aren't permanently starved).
+        #   2. Serialized-payload byte budget (so a small backlog with
+        #      verbose `user_story` fields can't still overrun model
+        #      context). Trims from the tail of the size-sorted slice
+        #      until the JSON fits.
         cap = _max_stories_per_groom()
-        if len(stories) > cap:
+        scored_stories, deferred_stories = _select_grooming_window(stories, cap)
+        scored_stories, byte_deferred = _trim_to_prompt_budget(
+            scored_stories, _max_prompt_bytes_per_groom()
+        )
+        deferred_stories.extend(byte_deferred)
+        if deferred_stories:
             logger.warning(
-                "ProductOwnerAgent: backlog has %d stories; grooming first %d, deferring rest",
+                "ProductOwnerAgent: backlog has %d stories; grooming %d, deferring %d",
                 len(stories),
-                cap,
+                len(scored_stories),
+                len(deferred_stories),
             )
-            scored_stories = stories[:cap]
-            deferred_stories = stories[cap:]
-        else:
-            scored_stories = stories
-            deferred_stories = []
 
         scoring_payload = self._call_llm(method, scored_stories)
         ranked, persist_rows = self._compute_ranked(method, scored_stories, scoring_payload)
@@ -316,17 +441,12 @@ class ProductOwnerAgent:
     # ------------------------------------------------------------------
 
     def _call_llm(self, method: GroomMethod, stories: list[Story]) -> dict[str, Any]:
+        # Use the shared `_story_payload` helper so the byte-budget
+        # estimate in `_trim_to_prompt_budget` matches what's actually
+        # serialised here. Otherwise an indent-2 difference would
+        # silently let the prompt overrun the budget.
         stories_payload = json.dumps(
-            [
-                {
-                    "id": s.id,
-                    "title": s.title,
-                    "user_story": s.user_story,
-                    "estimate_points": s.estimate_points,
-                    "status": s.status,
-                }
-                for s in stories
-            ],
+            [_story_payload(s) for s in stories],
             indent=2,
         )
         prompt = build_user_prompt(method, stories_payload)
