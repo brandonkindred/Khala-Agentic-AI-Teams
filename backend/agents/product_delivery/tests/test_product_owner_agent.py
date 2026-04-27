@@ -768,15 +768,19 @@ def test_groom_trims_by_byte_budget_when_user_stories_are_large(
     """Story-count cap alone doesn't protect against verbose ``user_story`` fields.
 
     A small backlog with multi-KB ``user_story`` text can still overrun
-    model context. Set a small byte budget and verify that stories
+    model context. Set a tight byte budget and verify that stories
     beyond what fits get deferred (even when count < cap), and the
     LLM only sees the trimmed slice.
+
+    Budget includes the SYSTEM_PROMPT + build_user_prompt wrapper
+    (~1020 bytes) per Codex's "include wrapper bytes" fix; the test
+    sizes its budget above that floor.
     """
     monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_STORIES", "100")  # well above story count
-    monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", "1024")  # tight budget
+    # Wrapper is ~1020 bytes; 2048 leaves ~1028 bytes for stories.
+    # One ~600-char user_story (+ ~80 bytes JSON overhead) fits, two don't.
+    monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", "2048")
 
-    # Three stories with ~600-char `user_story` each, so two fit and
-    # one overflows the 1 KiB budget.
     big_text = "x" * 600
     stories = []
     for sid in ("s1", "s2", "s3"):
@@ -866,7 +870,10 @@ def test_groom_keeps_trimming_past_oversize_story(monkeypatch: pytest.MonkeyPatc
     oversize story is deferred individually and later small stories
     are still scored.
     """
-    monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", "1024")
+    # Wrapper alone is ~1020 bytes; 2048 leaves ~1028 bytes for stories.
+    # Two small stories with default-length user_story easily fit; the
+    # 4_000-char huge story doesn't.
+    monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", "2048")
     small_a = _story("small_a")
     huge = _story("huge")
     object.__setattr__(huge, "user_story", "x" * 4_000)
@@ -960,3 +967,96 @@ def test_groom_rationale_distinguishes_count_cap_vs_byte_budget(
     # bucket so operators tune `PRODUCT_DELIVERY_GROOM_MAX_STORIES`,
     # not the byte budget.
     assert "story-count" in result.rationale.lower()
+
+
+def test_groom_byte_deferred_oldest_story_does_not_starve_newer_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex-flagged starvation case: cap=1 + oldest story too large.
+
+    Previously the two-stage selection put the oversize-oldest story
+    in the cap window first, the byte-budget trim then dropped it,
+    and ``scored_stories`` came back empty. ``updated_at`` for that
+    story never advanced, so it stayed at the front of the freshness
+    queue forever and newer (potentially small) stories were
+    permanently deferred even though there was prompt room. The
+    combined `_select_grooming_candidates` only consumes a cap slot
+    when a story is *actually kept*, so byte-deferrals roll forward
+    to the next candidate.
+    """
+    from datetime import timedelta
+
+    monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_STORIES", "1")
+    monkeypatch.setenv("PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", "2048")
+    base = datetime.now(tz=timezone.utc)
+
+    # Oldest story is huge (won't fit byte budget). Newer one is small
+    # (would fit). Under the old two-stage selection, the huge story
+    # consumed the only cap slot and the small story was permanently
+    # count-deferred; the rotation never advanced because the huge
+    # story's `updated_at` stayed pinned at one week ago.
+    huge_old = _story("huge_old")
+    object.__setattr__(huge_old, "user_story", "x" * 4_000)
+    object.__setattr__(huge_old, "updated_at", base - timedelta(days=7))
+    small_new = _story("small_new")
+    object.__setattr__(small_new, "updated_at", base)
+
+    llm = _StubLLM(
+        payload={
+            "items": [
+                {
+                    "id": "small_new",
+                    "inputs": {
+                        "user_business_value": 8,
+                        "time_criticality": 4,
+                        "risk_reduction_or_opportunity_enablement": 0,
+                        "job_size": 4,
+                    },
+                }
+            ]
+        }
+    )
+    store = _fake_store(stories=[huge_old, small_new])
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="prod-x", method="wsjf", persist=True)
+
+    by_id = {item.id: item for item in result.ranked}
+    # The byte-deferred huge story did NOT consume the cap slot — the
+    # newer small story still got scored.
+    assert by_id["small_new"].score == 3.0
+    assert by_id["huge_old"].score == 0.0
+    # The huge story is byte-deferred, not count-deferred — operators
+    # should know which control to tune.
+    assert "prompt-byte budget" in by_id["huge_old"].rationale.lower()
+    # Persistence covers the small story.
+    assert {r[0] for r in store.persisted} == {"small_new"}
+
+
+def test_groom_503_when_byte_budget_smaller_than_prompt_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex-flagged: budget that ignores wrapper bytes was undercounting.
+
+    Set the byte budget to the env-var minimum (1024) — even smaller
+    than the SYSTEM_PROMPT + build_user_prompt wrapper alone. Every
+    story's ``_full_prompt_size`` exceeds the budget, so all stories
+    are byte-deferred and the LLM is never invoked. Without the
+    wrapper-aware fix, the trimmer would have undercounted and the
+    actual model call would have overrun context with no warning.
+    """
+    monkeypatch.setenv(
+        "PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", "1024"
+    )  # below ~1020-byte wrapper
+    stories = [_story("s1"), _story("s2")]
+    llm = _StubLLM(payload={"items": []})
+    store = _fake_store(stories=stories)
+    agent = ProductOwnerAgent(store=store, llm_client=llm)  # type: ignore[arg-type]
+    result = agent.groom(product_id="prod-x", method="wsjf", persist=True)
+
+    # Both stories surface as deferred (LLM never called).
+    assert len(result.ranked) == 2
+    for item in result.ranked:
+        assert item.score == 0.0
+        assert "prompt-byte budget" in item.rationale.lower()
+    assert llm.calls == []
+    assert store.persisted == []

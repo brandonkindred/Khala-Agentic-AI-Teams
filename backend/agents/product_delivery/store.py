@@ -796,12 +796,20 @@ class ProductDeliveryStore:
         snapshot — under the default ``READ COMMITTED`` a concurrent
         delete between the two statements could otherwise return
         ``200 []`` for a missing product.
+
+        ``status`` is normalised through ``_validate_status`` (strip +
+        non-blank + length bound) before the SQL filter so a query like
+        ``GET /feedback?status=open%20`` (trailing space) matches stored
+        rows whose status was likewise normalised on write. Without this,
+        the filter did exact matching against the raw query input and
+        returned an empty list even when matching rows existed —
+        Codex flagged this as a triage-view false-negative.
         """
         sql = f"SELECT {_FEEDBACK_COLS} FROM product_delivery_feedback_items WHERE product_id = %s"
         params: list[Any] = [product_id]
         if status is not None:
             sql += " AND status = %s"
-            params.append(status)
+            params.append(_validate_status(status))
         sql += " ORDER BY created_at DESC"
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             _begin_repeatable_read(cur)

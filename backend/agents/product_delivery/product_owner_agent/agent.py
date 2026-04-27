@@ -172,8 +172,8 @@ def _score_for(
 def _story_payload(story: Story) -> dict[str, Any]:
     """The serialised shape sent to the LLM for one story.
 
-    Centralised so ``_call_llm`` and ``_trim_to_prompt_budget`` agree
-    on what's in the prompt — otherwise the byte budget would underestimate.
+    Centralised so ``_call_llm`` and ``_full_prompt_size`` agree on
+    what's in the prompt — otherwise the byte budget would underestimate.
     """
     return {
         "id": story.id,
@@ -184,80 +184,70 @@ def _story_payload(story: Story) -> dict[str, Any]:
     }
 
 
-def _select_grooming_window(stories: list[Story], cap: int) -> tuple[list[Story], list[Story]]:
-    """Pick up to ``cap`` stories to groom, return ``(scored, deferred)``.
+def _full_prompt_size(method: GroomMethod, stories: list[Story]) -> int:
+    """Byte size of the *full* prompt `_call_llm` will actually send.
 
-    Sorted by ``updated_at`` ascending so the *least-recently-touched*
-    stories are scored first. After grooming persists their new scores,
-    each scored story's ``updated_at`` jumps to "now" and naturally
-    cycles to the *end* of the next run's window. This rotates the cap
-    across the backlog instead of permanently starving newer stories
-    (which the original "oldest by `created_at`" slice would do for
-    sustained large backlogs — Codex flagged this in PR #369).
+    Codex flagged that the previous size estimate measured only the
+    JSON list of stories, ignoring ``SYSTEM_PROMPT`` and the
+    instruction text in ``build_user_prompt``. Near the byte budget
+    that meant a payload could pass the trimmer and still overrun
+    model context inside ``_call_llm``, turning what should be a
+    deferred-story result into a 503 grooming failure.
 
-    Stable sort within ``updated_at`` ties means stories with identical
-    timestamps stay in their original (creation) order, so the cap
-    selection is deterministic across runs as long as the backlog
-    doesn't change.
+    This now sums:
+      * the system prompt bytes (``SYSTEM_PROMPT``),
+      * the full user prompt as ``build_user_prompt(method, …)``
+        renders it — including the instruction wrapper and the
+        ``json.dumps(..., indent=2)`` payload — so the budget reflects
+        what actually crosses the wire to the model.
     """
-    if len(stories) <= cap:
-        return list(stories), []
-    by_freshness = sorted(stories, key=lambda s: s.updated_at)
-    return by_freshness[:cap], by_freshness[cap:]
+    stories_payload = json.dumps([_story_payload(s) for s in stories], indent=2)
+    user_prompt = build_user_prompt(method, stories_payload)
+    return len(SYSTEM_PROMPT.encode("utf-8")) + len(user_prompt.encode("utf-8"))
 
 
-def _trim_to_prompt_budget(
-    stories: list[Story], byte_budget: int
-) -> tuple[list[Story], list[Story]]:
-    """Trim ``stories`` so the JSON payload fits in ``byte_budget``.
+def _select_grooming_candidates(
+    method: GroomMethod, stories: list[Story], *, cap: int, byte_budget: int
+) -> tuple[list[Story], list[Story], list[Story]]:
+    """Pick up to ``cap`` stories that fit in ``byte_budget``.
 
-    Story-count caps don't protect against a small backlog with very
-    long ``user_story`` fields (Codex flagged this in PR #369). We
-    accumulate the indented JSON payload story-by-story; if a story
-    would push us past the budget, we *skip that one* and try the
-    next — a single oversize story shouldn't block scoring of every
-    later (potentially small) story. Codex flagged the previous
-    "break on first overflow" version because in sustained large
-    backlogs a single pathological item could permanently defer the
-    rest of the tail across runs.
+    Returns ``(scored, count_deferred, byte_deferred)``. Codex flagged
+    a starvation case in the previous two-stage selection: when
+    ``cap=1`` and the oldest candidate is always over the byte budget,
+    the trim returned ``scored=[]`` every run, the oldest story's
+    ``updated_at`` never advanced, and newer stories that would fit
+    were permanently deferred for count-cap reasons even though there
+    was prompt room for them. The fix folds the two stages into one
+    pass so byte-deferred stories don't consume cap slots:
 
-    The byte estimate matches what ``_call_llm`` actually serialises
-    (via ``_serialised_list_size`` below — same ``indent=2``, same
-    separators), so the trimmer can't undercount and let an indented
-    prompt overrun the budget.
+      * sort by ``updated_at`` ascending (oldest-touched first);
+      * for each story, if it'd push the prompt past ``byte_budget``,
+        defer it as **byte_deferred** — it does *not* count against
+        ``cap``;
+      * else, if we already have ``cap`` kept, defer the rest as
+        **count_deferred** — still surfaced with the count-cap
+        rationale so an operator knows which control to tune;
+      * else, keep it.
 
-    Returns ``(scored, deferred)`` so deferred stories can surface in
-    the result with the byte-budget rationale. ``scored`` may be
-    empty (every candidate too large); the caller skips the LLM
-    altogether in that case.
+    Stable sort within ``updated_at`` ties keeps selection
+    deterministic across runs.
     """
     if not stories:
-        return [], []
-    kept: list[Story] = []
-    deferred: list[Story] = []
-    for story in stories:
-        # Recompute the indented size with this story added. Slightly
-        # more expensive than incremental delta tracking, but matches
-        # `_call_llm`'s `json.dumps(..., indent=2)` exactly so the
-        # budget can't drift if the indent ever changes.
-        candidate = kept + [story]
-        if _serialised_list_size(candidate) > byte_budget:
-            deferred.append(story)
+        return [], [], []
+    by_freshness = sorted(stories, key=lambda s: s.updated_at)
+    scored: list[Story] = []
+    count_deferred: list[Story] = []
+    byte_deferred: list[Story] = []
+    for story in by_freshness:
+        if len(scored) >= cap:
+            count_deferred.append(story)
             continue
-        kept.append(story)
-    return kept, deferred
-
-
-def _serialised_list_size(stories: list[Story]) -> int:
-    """Byte size of the JSON list `_call_llm` will actually send.
-
-    Mirrors ``json.dumps([...], indent=2)`` exactly — including the
-    enclosing ``[`` / ``]``, the `,\\n  ` separators between items,
-    and the per-key indentation — so ``_trim_to_prompt_budget`` can't
-    undercount the payload by measuring with compact formatting and
-    let the prompt still overrun the budget.
-    """
-    return len(json.dumps([_story_payload(s) for s in stories], indent=2).encode("utf-8"))
+        candidate = scored + [story]
+        if _full_prompt_size(method, candidate) > byte_budget:
+            byte_deferred.append(story)
+            continue
+        scored.append(story)
+    return scored, count_deferred, byte_deferred
 
 
 def _fallback_item(story: Story, method: GroomMethod, rationale: str) -> RankedBacklogItem:
@@ -395,18 +385,21 @@ class ProductOwnerAgent:
         # rationale) so callers see them; they just aren't scored this
         # run.
         #
-        # Two-stage cap:
-        #   1. Story count (oldest-`updated_at` first so each run
-        #      rotates the window — see `_select_grooming_window` —
-        #      newer stories aren't permanently starved).
-        #   2. Serialized-payload byte budget (so a small backlog with
-        #      verbose `user_story` fields can't still overrun model
-        #      context). Trims from the tail of the size-sorted slice
-        #      until the JSON fits.
+        # Combined cap + byte-budget selection:
+        # Codex flagged a starvation case where the two-stage version
+        # (count cap first, then byte trim) could leave `scored_stories`
+        # empty forever under cap=1 + an oldest oversize story —
+        # `updated_at` never advanced, the oversize story stayed at the
+        # front of the freshness queue, and newer stories that would
+        # actually fit were permanently deferred. `_select_grooming_candidates`
+        # iterates the freshness-sorted list once and only consumes a
+        # cap slot when a story is *actually kept*, so a byte-deferral
+        # rolls forward to the next candidate instead of blocking the run.
         cap = _max_stories_per_groom()
         prompt_bytes_cap = _max_prompt_bytes_per_groom()
-        scored_stories, count_deferred = _select_grooming_window(stories, cap)
-        scored_stories, byte_deferred = _trim_to_prompt_budget(scored_stories, prompt_bytes_cap)
+        scored_stories, count_deferred, byte_deferred = _select_grooming_candidates(
+            method, stories, cap=cap, byte_budget=prompt_bytes_cap
+        )
         # Track the deferral cause separately so the rationale points
         # operators at the right control to tune (story-count cap vs.
         # prompt-byte budget) — Codex flagged that conflating the two
@@ -501,7 +494,7 @@ class ProductOwnerAgent:
 
     def _call_llm(self, method: GroomMethod, stories: list[Story]) -> dict[str, Any]:
         # Use the shared `_story_payload` helper so the byte-budget
-        # estimate in `_trim_to_prompt_budget` matches what's actually
+        # estimate in `_full_prompt_size` matches what's actually
         # serialised here. Otherwise an indent-2 difference would
         # silently let the prompt overrun the budget.
         stories_payload = json.dumps(

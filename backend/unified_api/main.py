@@ -133,6 +133,14 @@ _in_process_schema_failures: set[str] = set()
 # Background health check interval in seconds.
 _HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "30"))
 
+# Per-team schema retry budget inside `_health_check_loop`. Codex
+# flagged that an unbounded `await loop.run_in_executor(...)` could let
+# one stalled DDL attempt block every other team's liveness update —
+# exactly during the outages where timely health refresh matters most.
+# The timeout cancels the *await*; the worker thread is independently
+# bounded by the pool-connection timeout, so it always cleans up.
+_SCHEMA_RETRY_TIMEOUT_S = float(os.getenv("SCHEMA_RETRY_TIMEOUT_S", "10"))
+
 
 async def _check_team_health(team_key: str, service_url: str) -> str:
     """Probe a team's /health endpoint. Returns 'healthy' or 'unhealthy'."""
@@ -174,11 +182,30 @@ async def _health_check_loop() -> None:
             if db_live:
                 loop = asyncio.get_running_loop()
                 for team_key in list(_in_process_schema_failures):
+                    # Bound each retry with `wait_for`. Codex flagged that
+                    # awaiting the executor directly meant a single stalled
+                    # DDL attempt (lock contention, slow connection
+                    # acquisition during the same outage that caused the
+                    # initial failure) could stall the loop and stale every
+                    # other team's liveness update — exactly the moment
+                    # operators need timely health refresh. The timeout
+                    # cancels the await; the worker thread itself is bounded
+                    # by the inner pool-connection timeout so it cleans up.
                     try:
-                        await loop.run_in_executor(
-                            _get_probe_executor(),
-                            _retry_in_process_schema_registration,
+                        await asyncio.wait_for(
+                            loop.run_in_executor(
+                                _get_probe_executor(),
+                                _retry_in_process_schema_registration,
+                                team_key,
+                            ),
+                            timeout=_SCHEMA_RETRY_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Background schema retry for %s exceeded %.1fs; "
+                            "leaving team in failure set for next loop pass",
                             team_key,
+                            _SCHEMA_RETRY_TIMEOUT_S,
                         )
                     except Exception:
                         logger.warning(

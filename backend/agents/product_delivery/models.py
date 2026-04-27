@@ -78,22 +78,37 @@ PositiveFiniteEstimate = Annotated[
 ]
 
 
+def _strip_and_bound(*, max_len: int) -> Any:
+    """Build an ``AfterValidator`` that strips, rejects blank, then
+    enforces the max length on the *trimmed* value.
+
+    Codex flagged that putting ``Field(max_length=N)`` *before* the
+    ``AfterValidator`` strips makes Pydantic compare the raw length —
+    so ``"x" * N + " "`` (N+1 chars, but trims to N) gets rejected at
+    the API while the store's stripped value is accepted, drifting
+    the two contracts. Doing both checks inside one validator keeps
+    them aligned.
+    """
+
+    def _validate(value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank or whitespace-only")
+        if len(stripped) > max_len:
+            raise ValueError(f"must be at most {max_len} chars after trimming; got {len(stripped)}")
+        return stripped
+
+    return AfterValidator(_validate)
+
+
 def _reject_blank_str(value: str) -> str:
     """``AfterValidator``: reject whitespace-only strings AND
     normalise leading/trailing whitespace.
 
-    Pydantic's ``min_length=1`` accepts ``"   "`` because it counts the
-    spaces. Without this, a whitespace-only ``status``/``name``/``title``
-    passed Pydantic, hit the store layer's stricter ``_validate_*``
-    helpers, and surfaced as a raw ``ValueError`` → 500 because the
-    domain-exception handler doesn't map ``ValueError``. Reject up
-    front so clients get a 422 with a clear "may not be blank" message.
-
-    Also returns the *stripped* value: Codex flagged that accidental
-    inputs like ``"open "`` would otherwise be persisted as a distinct
-    state and miss exact-match filters such as ``GET /feedback?status=open``.
-    Normalising on the way in (rather than only at filter time) keeps
-    API/store/projection paths consistent.
+    Used by fields that don't have a max-length cap (e.g. acceptance
+    criterion ``text``). Bounded fields use ``_strip_and_bound`` instead
+    so Pydantic can't reject a value at the API that the store would
+    accept after trimming.
     """
     stripped = value.strip()
     if not stripped:
@@ -101,26 +116,30 @@ def _reject_blank_str(value: str) -> str:
     return stripped
 
 
-# Status string bounds shared by every create payload + StatusUpdate so
+# Status string bound shared by every create payload + StatusUpdate so
 # the create and patch contracts can't drift apart (Codex caught a case
 # where Create accepted unbounded strings while StatusUpdate enforced
-# 1..40 chars). The ``AfterValidator`` also rejects whitespace-only
-# values so they trip the API's 422 path instead of the store's
-# unmapped 500 path.
+# 1..40 chars). The ``min_length=1`` on Field rejects empty strings
+# fast (no surprise traceback for the AfterValidator); the actual
+# whitespace + max-length checks run inside ``_strip_and_bound`` AFTER
+# stripping so accidental trailing spaces don't trip the boundary
+# while leaving the equivalent trimmed value valid in the store.
 StatusStr = Annotated[
     str,
-    Field(min_length=1, max_length=40),
-    AfterValidator(_reject_blank_str),
+    Field(min_length=1),
+    _strip_and_bound(max_len=40),
 ]
 
 # Title/name string bound — matches the store's ``_validate_title``
 # helper so blank/whitespace and oversized titles fail validation at
 # the API boundary (422), not at the store (500). Used by every
-# ``*Create.title`` field plus ``ProductCreate.name``.
+# ``*Create.title`` field plus ``ProductCreate.name``. Same length-
+# after-strip ordering as ``StatusStr`` so trailing-whitespace inputs
+# don't drift between the API and the store.
 TitleStr = Annotated[
     str,
-    Field(min_length=1, max_length=200),
-    AfterValidator(_reject_blank_str),
+    Field(min_length=1),
+    _strip_and_bound(max_len=200),
 ]
 
 # ---------------------------------------------------------------------------
@@ -252,7 +271,7 @@ class FeedbackItemCreate(BaseModel):
     # `source` is used for triage and reporting (e.g. "support",
     # "sales-call", "bug-tracker"). A blank value would break source
     # filtering and degrade the provenance trail, so reject up front.
-    source: Annotated[str, Field(min_length=1, max_length=120), AfterValidator(_reject_blank_str)]
+    source: Annotated[str, Field(min_length=1), _strip_and_bound(max_len=120)]
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     severity: str = "normal"
     linked_story_id: str | None = None

@@ -343,12 +343,17 @@ class _FakeStore:
     def list_feedback(self, product_id: str, *, status: str | None = None) -> list[FeedbackItem]:
         # Mirror the real store: unknown product raises 404 inside the
         # same transaction as the SELECT, so concurrent deletes don't
-        # turn a 404 into `200 []`.
+        # turn a 404 into `200 []`. Also normalise the status filter
+        # the same way the real store does so the in-memory fake stays
+        # in lockstep with the API contract.
+        from product_delivery.store import _validate_status
+
         if product_id not in self.products:
             raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
         out = [f for f in self.feedback.values() if f.product_id == product_id]
         if status is not None:
-            out = [f for f in out if f.status == status]
+            normalised = _validate_status(status)
+            out = [f for f in out if f.status == normalised]
         return out
 
 
@@ -653,6 +658,48 @@ def test_status_patch_rejects_whitespace_only_status(client: TestClient) -> None
     assert r.status_code == 422
 
 
+def test_status_with_trailing_whitespace_is_accepted_after_trim(client: TestClient) -> None:
+    """Codex-flagged ordering bug: ``StatusStr`` used to apply ``max_length=40``
+    *before* the AfterValidator stripped whitespace, so a 40-char status
+    plus a trailing space (41 chars total, but trims to 40) was rejected
+    by the API while the store accepted the trimmed value. With the
+    validator applied first, both paths agree.
+    """
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    # 40-char status + trailing space = 41 chars raw, 40 after trim
+    status_with_trailing_space = "a" * 40 + " "
+    r = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I", "status": status_with_trailing_space},
+    )
+    assert r.status_code == 200, r.text
+    # And the persisted value is the trimmed form, not the raw input.
+    assert r.json()["status"] == "a" * 40
+
+
+def test_title_with_trailing_whitespace_is_accepted_after_trim(client: TestClient) -> None:
+    """Same length-after-trim contract for ``TitleStr``."""
+    title_with_trailing_space = "T" * 200 + " "
+    r = client.post(
+        "/api/product-delivery/products",
+        json={"name": title_with_trailing_space},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "T" * 200
+
+
+def test_status_overlong_after_trim_still_rejected(client: TestClient) -> None:
+    """Defence-in-depth: 41 chars after stripping must still be 422
+    (the trim doesn't bypass the cap, just moves the cap behind it).
+    """
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    r = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I", "status": "a" * 41},
+    )
+    assert r.status_code == 422
+
+
 @pytest.mark.parametrize("blank", [" ", "   ", "\t", "\n"])
 def test_acceptance_criterion_create_rejects_whitespace_only_text(
     client: TestClient, blank: str
@@ -884,6 +931,36 @@ def test_feedback_create_and_list_filters_by_status(client: TestClient) -> None:
         params={"product_id": pid, "status": "closed"},
     ).json()
     assert listed_closed == []
+
+
+@pytest.mark.parametrize("filter_value", ["open ", " open", "  open  ", "open\t", "\nopen"])
+def test_feedback_status_filter_normalised_before_query(
+    client: TestClient, filter_value: str
+) -> None:
+    """Codex flagged: feedback statuses are normalised on write but the
+    read filter used the raw query input, so ``status=open%20`` returned
+    an empty list even when ``open`` rows existed. The store now strips
+    the filter through the same ``_validate_status`` helper used on
+    write, so the API/store contract holds.
+    """
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    client.post(
+        "/api/product-delivery/feedback",
+        json={
+            "product_id": pid,
+            "source": "user-survey",
+            "raw_payload": {},
+            "severity": "low",
+        },
+    )
+    listed = client.get(
+        "/api/product-delivery/feedback",
+        params={"product_id": pid, "status": filter_value},
+    )
+    assert listed.status_code == 200, listed.text
+    assert len(listed.json()) == 1, (
+        f"filter_value={filter_value!r} should match the persisted 'open' status"
+    )
 
 
 def test_feedback_rejects_cross_product_story_link(client: TestClient) -> None:
