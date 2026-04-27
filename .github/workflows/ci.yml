@@ -65,6 +65,8 @@ jobs:
               - 'backend/agents/event_bus/**'
               - 'backend/agents/artifact_registry/**'
               - 'backend/agents/integrations/**'
+              - 'backend/agents/job_service_client.py'
+              - 'backend/agents/job_service_client_fake.py'
               - 'backend/agents/requirements.txt'
               - 'backend/unified_api/**'
               - 'backend/conftest.py'
@@ -96,26 +98,45 @@ jobs:
               - 'backend/agents/agent_provisioning_team/**'
             sales:
               - 'backend/agents/sales_team/**'
+            # Each docker_* filter mirrors what its Dockerfile actually
+            # copies into the image, so a change to any baked-in source
+            # triggers a rebuild and main never publishes stale code.
             docker_backend:
               - 'backend/Dockerfile'
               - 'backend/agents/**'
               - 'backend/unified_api/**'
+              - 'backend/run_unified_api.py'
               - 'backend/requirements.txt'
               - 'backend/entrypoint.sh'
               - '.github/workflows/ci.yml'
             docker_blogging_service:
               - 'backend/blogging_service/**'
               - 'backend/agents/blogging/**'
-              - 'backend/agents/shared_postgres/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/integrations/**'
+              - 'backend/agents/shared_postgres/**'
+              - 'backend/agents/shared_temporal/**'
+              - 'backend/agents/shared_observability/**'
+              - 'backend/agents/job_service_client.py'
               - 'backend/agents/requirements.txt'
+              - 'backend/unified_api/__init__.py'
+              - 'backend/unified_api/integrations_store.py'
+              - 'backend/unified_api/integration_credentials.py'
+              - 'backend/unified_api/postgres_encrypted_credentials.py'
+              - 'backend/unified_api/google_browser_login_credentials.py'
+              - 'backend/unified_api/medium_browser_login.py'
               - '.github/workflows/ci.yml'
+            # team_service Dockerfile copies the entire agents/ tree, so
+            # any agent change can require rebuilding this image.
             docker_team_service:
               - 'backend/team_service/**'
-              - 'backend/agents/shared_postgres/**'
-              - 'backend/agents/llm_service/**'
-              - 'backend/agents/requirements.txt'
+              - 'backend/agents/**'
+              - 'backend/unified_api/__init__.py'
+              - 'backend/unified_api/integrations_store.py'
+              - 'backend/unified_api/integration_credentials.py'
+              - 'backend/unified_api/postgres_encrypted_credentials.py'
+              - 'backend/unified_api/google_browser_login_credentials.py'
+              - 'backend/unified_api/medium_browser_login.py'
               - '.github/workflows/ci.yml'
             docker_frontend:
               - 'user-interface/**'
