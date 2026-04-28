@@ -354,3 +354,97 @@ class GroomResult(BaseModel):
     method: GroomMethod
     ranked: list[RankedBacklogItem] = Field(default_factory=list)
     rationale: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Sprints + releases (Phase 2 of #243)
+# ---------------------------------------------------------------------------
+
+
+def _non_negative_finite(value: float) -> float:
+    """``AfterValidator``: reject NaN / ±Infinity / negatives.
+
+    ``capacity_points`` is a float so half-points are expressible
+    (Fibonacci-3 ≈ 3.0, but a half-point spike can land at 0.5), but
+    NaN / ±Infinity break ``select_sprint_scope`` (every comparison
+    against NaN is False, so the greedy fit accepts everything; +Inf
+    accepts everything; −Inf accepts nothing) and corrupt the on-wire
+    JSON. Negatives don't make physical sense and would make the
+    "remaining_capacity" arithmetic in ``SprintPlanResult`` go below
+    zero on the first allocation. Reject all three at the boundary.
+    """
+    if not math.isfinite(value):
+        raise ValueError("capacity_points must be a finite number (NaN / Infinity not allowed)")
+    if value < 0:
+        raise ValueError("capacity_points must be >= 0")
+    return value
+
+
+CapacityPoints = Annotated[
+    float,
+    BeforeValidator(_reject_bool),
+    AfterValidator(_non_negative_finite),
+]
+
+
+class Sprint(_AuditedRow):
+    product_id: str
+    name: str
+    capacity_points: float = 0.0
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    status: StatusStr = "planned"
+
+
+class CreateSprintRequest(BaseModel):
+    product_id: str
+    name: TitleStr
+    capacity_points: CapacityPoints = 0.0
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    status: StatusStr = "planned"
+
+
+class SprintWithStories(BaseModel):
+    """Sprint header + the planned stories, ordered by WSJF then created_at."""
+
+    sprint: Sprint
+    stories: list[Story] = Field(default_factory=list)
+
+
+class Release(_AuditedRow):
+    sprint_id: str
+    version: str
+    notes_path: str | None = None
+    shipped_at: datetime | None = None
+
+
+class CreateReleaseRequest(BaseModel):
+    """Phase 2 ships only the model + table; routes land with #371."""
+
+    sprint_id: str
+    version: Annotated[str, Field(min_length=1), _strip_and_bound(max_len=80)]
+    notes_path: str | None = None
+    shipped_at: datetime | None = None
+
+
+class SprintPlanRequest(BaseModel):
+    """Body for ``POST /sprints/{id}/plan``.
+
+    ``capacity_points`` overrides the sprint row's stored capacity for
+    this run when supplied (useful for ad-hoc what-if planning). When
+    ``None`` the agent reads ``capacity_points`` from the sprint row.
+    """
+
+    capacity_points: CapacityPoints | None = None
+
+
+class SprintPlanResult(BaseModel):
+    """Output of ``SprintPlannerAgent.plan`` and ``select_sprint_scope``."""
+
+    sprint_id: str
+    selected_story_ids: list[str] = Field(default_factory=list)
+    skipped_story_ids: list[str] = Field(default_factory=list)
+    used_capacity: float = 0.0
+    remaining_capacity: float = 0.0
+    rationale: str = ""

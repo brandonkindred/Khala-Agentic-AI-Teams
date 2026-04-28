@@ -29,10 +29,18 @@ def compute_planning_cache_key(
     spec_content: str,
     architecture_overview: str,
     project_overview: Optional[Dict[str, Any]] = None,
+    *,
+    sprint_id: Optional[str] = None,
 ) -> str:
     """
     Compute a stable cache key from planning inputs.
     Same inputs produce same key; used to detect when planning can be skipped.
+
+    ``sprint_id`` (#370) keeps cache keys distinct between iterative
+    sprint runs whose synthesized spec might otherwise collide. Default
+    ``None`` keeps the historic byte representation of the hash input
+    unchanged for non-sprint runs (the ``sprint_id`` segment is only
+    appended when set), so existing cache entries stay valid.
     """
     parts = [
         (spec_content or "").strip(),
@@ -50,6 +58,8 @@ def compute_planning_cache_key(
             sort_keys=True,
         )
         parts.append(po_str)
+    if sprint_id:
+        parts.append(f"sprint_id={sprint_id}")
     blob = "\n---\n".join(parts)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:24]
 

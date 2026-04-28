@@ -54,6 +54,10 @@ from .models import (
     Initiative,
     InitiativeNode,
     Product,
+    Release,
+    Sprint,
+    SprintPlanResult,
+    SprintWithStories,
     Story,
     StoryNode,
     Task,
@@ -232,6 +236,28 @@ _AC_COLS = f"id, story_id, text, satisfied, {_AUDIT_COLS}"
 _FEEDBACK_COLS = (
     f"id, product_id, source, raw_payload, severity, status, linked_story_id, {_AUDIT_COLS}"
 )
+_SPRINT_COLS = f"id, product_id, name, capacity_points, starts_at, ends_at, status, {_AUDIT_COLS}"
+_RELEASE_COLS = f"id, sprint_id, version, notes_path, shipped_at, {_AUDIT_COLS}"
+
+
+def _validate_capacity_points(value: float | None) -> float:
+    """Mirror ``models.CapacityPoints`` at the store layer.
+
+    ``None`` collapses to 0.0 so internal callers (e.g. the route layer
+    passing through a default-less request body) don't have to repeat
+    the dance. ``select_sprint_scope`` already treats 0.0 as "fit
+    nothing", which is the safe default — the alternative (raising on
+    None) would break ergonomic use from the planner agent.
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, bool):
+        raise ValueError("capacity_points must be a number, not a boolean")
+    if not math.isfinite(value):
+        raise ValueError("capacity_points must be a finite number")
+    if value < 0:
+        raise ValueError("capacity_points must be >= 0")
+    return float(value)
 
 
 _T = TypeVar("_T", bound=BaseModel)
@@ -821,6 +847,330 @@ class ProductDeliveryStore:
                 raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
             cur.execute(sql, params)
             return [FeedbackItem.model_validate(row) for row in cur.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Sprints (Phase 2 of #243)
+    # ------------------------------------------------------------------
+
+    @timed_query(store=_STORE, op="create_sprint")
+    def create_sprint(
+        self,
+        *,
+        product_id: str,
+        name: str,
+        capacity_points: float | None,
+        starts_at: datetime | None,
+        ends_at: datetime | None,
+        status: str,
+        author: str,
+    ) -> Sprint:
+        # Mirror the API-side bounds at the store boundary so non-route
+        # callers can't slip past validation. Same pattern as `create_story`.
+        name = _validate_title(name, label="name")
+        status = _validate_status(status)
+        capacity = _validate_capacity_points(capacity_points)
+        now = _now()
+        sid = _new_id()
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    f"""INSERT INTO product_delivery_sprints ({_SPRINT_COLS})
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        sid,
+                        product_id,
+                        name,
+                        capacity,
+                        starts_at,
+                        ends_at,
+                        status,
+                        author,
+                        now,
+                        now,
+                    ),
+                )
+        except psycopg_errors.ForeignKeyViolation as exc:
+            raise UnknownProductDeliveryEntity(f"product {product_id!r} does not exist") from exc
+        return Sprint(
+            id=sid,
+            product_id=product_id,
+            name=name,
+            capacity_points=capacity,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            status=status,
+            author=author,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @timed_query(store=_STORE, op="get_sprint")
+    def get_sprint(self, sprint_id: str) -> Sprint | None:
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"SELECT {_SPRINT_COLS} FROM product_delivery_sprints WHERE id = %s",
+                (sprint_id,),
+            )
+            row = cur.fetchone()
+            return Sprint.model_validate(row) if row else None
+
+    @timed_query(store=_STORE, op="list_sprints_for_product")
+    def list_sprints_for_product(self, product_id: str) -> list[Sprint]:
+        """List sprints under a product, newest first.
+
+        Single transaction with the existence check + the SELECT (same
+        ``REPEATABLE READ`` pattern as ``list_stories_for_product``) so a
+        concurrent product delete can't slip past as ``200 []``.
+        """
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            _begin_repeatable_read(cur)
+            cur.execute(
+                "SELECT 1 FROM product_delivery_products WHERE id = %s",
+                (product_id,),
+            )
+            if cur.fetchone() is None:
+                raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
+            cur.execute(
+                f"""SELECT {_SPRINT_COLS}
+                   FROM product_delivery_sprints
+                   WHERE product_id = %s
+                   ORDER BY created_at DESC""",
+                (product_id,),
+            )
+            return [Sprint.model_validate(row) for row in cur.fetchall()]
+
+    @timed_query(store=_STORE, op="update_sprint_status")
+    def update_sprint_status(self, *, sprint_id: str, status: str) -> bool:
+        status = _validate_status(status)
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE product_delivery_sprints SET status = %s, updated_at = %s WHERE id = %s",
+                (status, _now(), sprint_id),
+            )
+            return cur.rowcount > 0
+
+    @timed_query(store=_STORE, op="add_story_to_sprint")
+    def add_story_to_sprint(self, *, sprint_id: str, story_id: str) -> bool:
+        """Idempotent: re-adding the same story is a silent no-op.
+
+        Returns True when the row was inserted, False when the
+        ``(sprint_id, story_id)`` pair already existed (PK conflict
+        handled via ``ON CONFLICT DO NOTHING``). FK violations on either
+        side surface as ``UnknownProductDeliveryEntity`` via the route's
+        global handler.
+        """
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO product_delivery_sprint_stories
+                          (sprint_id, story_id, planned_at)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (sprint_id, story_id) DO NOTHING""",
+                    (sprint_id, story_id, _now()),
+                )
+                return cur.rowcount > 0
+        except psycopg_errors.ForeignKeyViolation as exc:
+            raise UnknownProductDeliveryEntity(
+                f"sprint {sprint_id!r} or story {story_id!r} does not exist"
+            ) from exc
+
+    @timed_query(store=_STORE, op="list_planned_story_ids")
+    def list_planned_story_ids(self, sprint_id: str) -> list[str]:
+        """Story ids planned into ``sprint_id``, ordered by plan time."""
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT story_id FROM product_delivery_sprint_stories
+                   WHERE sprint_id = %s
+                   ORDER BY planned_at""",
+                (sprint_id,),
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    @timed_query(store=_STORE, op="get_sprint_with_stories")
+    def get_sprint_with_stories(self, sprint_id: str) -> SprintWithStories | None:
+        """Sprint header + planned stories, ordered by WSJF then created_at.
+
+        Two SELECTs in a single ``REPEATABLE READ`` transaction so the
+        sprint header and the story projection observe the same
+        snapshot — otherwise a concurrent unplan + delete between the
+        two could yield a stale sprint with vanished stories.
+        """
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            _begin_repeatable_read(cur)
+            cur.execute(
+                f"SELECT {_SPRINT_COLS} FROM product_delivery_sprints WHERE id = %s",
+                (sprint_id,),
+            )
+            sprint_row = cur.fetchone()
+            if sprint_row is None:
+                return None
+            sprint = Sprint.model_validate(sprint_row)
+            cur.execute(
+                f"""SELECT {_STORY_COLS_ALIASED}
+                   FROM product_delivery_sprint_stories ss
+                   JOIN product_delivery_stories s ON s.id = ss.story_id
+                   WHERE ss.sprint_id = %s
+                   ORDER BY s.wsjf_score DESC NULLS LAST, s.created_at ASC""",
+                (sprint_id,),
+            )
+            stories = [Story.model_validate(row) for row in cur.fetchall()]
+        return SprintWithStories(sprint=sprint, stories=stories)
+
+    @timed_query(store=_STORE, op="select_sprint_scope")
+    def select_sprint_scope(
+        self, *, sprint_id: str, capacity_points: float | None = None
+    ) -> SprintPlanResult:
+        """Capacity-aware story selection, then commit picks into ``sprint_stories``.
+
+        Greedy 0/1 fit:
+
+        * Candidates are stories under the sprint's product that aren't
+          already planned into *any* sprint (including this one — caller
+          uses ``add_story_to_sprint`` separately if it wants to top up
+          an existing plan). SQL ``ORDER BY wsjf_score DESC NULLS LAST,
+          created_at ASC`` makes the WSJF tie-break deterministic and
+          pushes null-WSJF stories to the tail.
+        * Stories with ``estimate_points IS NULL`` count as 0 for fit but
+          stay in the candidate pool so they don't disappear from the
+          plan.
+        * Negative ``capacity_points`` is rejected upstream by
+          ``CapacityPoints`` / ``_validate_capacity_points``; 0.0 is
+          legal (zero-capacity sprint → empty plan, no inserts, no error).
+
+        All writes happen inside a single transaction so a partial
+        failure can't leave the sprint half-planned.
+        """
+        capacity = _validate_capacity_points(capacity_points)
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            _begin_repeatable_read(cur)
+            cur.execute(
+                "SELECT product_id FROM product_delivery_sprints WHERE id = %s",
+                (sprint_id,),
+            )
+            sprint_row = cur.fetchone()
+            if sprint_row is None:
+                raise UnknownProductDeliveryEntity(f"unknown sprint: {sprint_id}")
+            product_id = sprint_row["product_id"]
+            # Candidates: every story under the product not already in any
+            # sprint. The ``NOT EXISTS`` subquery is preferable to ``NOT IN``
+            # so NULL-bearing rows never leak the wrong answer.
+            cur.execute(
+                f"""SELECT {_STORY_COLS_ALIASED}
+                   FROM product_delivery_stories s
+                   JOIN product_delivery_epics e ON e.id = s.epic_id
+                   JOIN product_delivery_initiatives i ON i.id = e.initiative_id
+                   WHERE i.product_id = %s
+                     AND NOT EXISTS (
+                       SELECT 1 FROM product_delivery_sprint_stories ss
+                       WHERE ss.story_id = s.id
+                     )
+                   ORDER BY s.wsjf_score DESC NULLS LAST, s.created_at ASC""",
+                (product_id,),
+            )
+            candidates = [Story.model_validate(row) for row in cur.fetchall()]
+            selected: list[Story] = []
+            skipped: list[Story] = []
+            used = 0.0
+            for story in candidates:
+                # Treat unestimated stories as size-0: they're in the
+                # plan, but don't consume budget. Avoids dropping
+                # newly-created stories that haven't been pointed yet.
+                cost = float(story.estimate_points) if story.estimate_points is not None else 0.0
+                if used + cost <= capacity:
+                    selected.append(story)
+                    used += cost
+                else:
+                    skipped.append(story)
+            now = _now()
+            if selected:
+                cur.executemany(
+                    """INSERT INTO product_delivery_sprint_stories
+                          (sprint_id, story_id, planned_at)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (sprint_id, story_id) DO NOTHING""",
+                    [(sprint_id, s.id, now) for s in selected],
+                )
+        remaining = capacity - used
+        rationale = (
+            f"Selected {len(selected)} stories totaling {used:g} points "
+            f"(capacity {capacity:g}); skipped {len(skipped)} for capacity."
+        )
+        return SprintPlanResult(
+            sprint_id=sprint_id,
+            selected_story_ids=[s.id for s in selected],
+            skipped_story_ids=[s.id for s in skipped],
+            used_capacity=used,
+            remaining_capacity=remaining,
+            rationale=rationale,
+        )
+
+    # ------------------------------------------------------------------
+    # Releases (Phase 2 — table CRUD only; routes ship in #371)
+    # ------------------------------------------------------------------
+
+    @timed_query(store=_STORE, op="create_release")
+    def create_release(
+        self,
+        *,
+        sprint_id: str,
+        version: str,
+        notes_path: str | None,
+        shipped_at: datetime | None,
+        author: str,
+    ) -> Release:
+        version = _validate_text(version, label="version", max_len=80)
+        now = _now()
+        rid = _new_id()
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    f"""INSERT INTO product_delivery_releases ({_RELEASE_COLS})
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        rid,
+                        sprint_id,
+                        version,
+                        notes_path,
+                        shipped_at,
+                        author,
+                        now,
+                        now,
+                    ),
+                )
+        except psycopg_errors.ForeignKeyViolation as exc:
+            raise UnknownProductDeliveryEntity(f"sprint {sprint_id!r} does not exist") from exc
+        return Release(
+            id=rid,
+            sprint_id=sprint_id,
+            version=version,
+            notes_path=notes_path,
+            shipped_at=shipped_at,
+            author=author,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @timed_query(store=_STORE, op="get_release")
+    def get_release(self, release_id: str) -> Release | None:
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"SELECT {_RELEASE_COLS} FROM product_delivery_releases WHERE id = %s",
+                (release_id,),
+            )
+            row = cur.fetchone()
+            return Release.model_validate(row) if row else None
+
+    @timed_query(store=_STORE, op="list_releases_for_sprint")
+    def list_releases_for_sprint(self, sprint_id: str) -> list[Release]:
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"""SELECT {_RELEASE_COLS}
+                   FROM product_delivery_releases
+                   WHERE sprint_id = %s
+                   ORDER BY created_at DESC""",
+                (sprint_id,),
+            )
+            return [Release.model_validate(row) for row in cur.fetchall()]
 
     # ------------------------------------------------------------------
     # Internals

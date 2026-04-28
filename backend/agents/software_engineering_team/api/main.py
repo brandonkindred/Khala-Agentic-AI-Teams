@@ -175,6 +175,15 @@ class RunTeamRequest(BaseModel):
         max_length=4096,
         description="Local filesystem path to the folder where work will be saved. Must contain a spec: at root (initial_spec.md or spec.md) or under plan/ or plan/product_analysis/ (e.g. validated_spec.md, updated_spec_vN.md). Does not need to be a git repository.",
     )
+    sprint_id: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "When set (#370), pull planned scope from the product_delivery "
+            "sprint's stories instead of parsing a spec from the repo. "
+            "Discovery's LLM spec-parse and the PRA agent are skipped."
+        ),
+    )
 
 
 class RunTeamResponse(BaseModel):
@@ -448,6 +457,7 @@ def _run_orchestrator_background(
     spec_content_override: Optional[str] = None,
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
+    sprint_id: Optional[str] = None,
 ) -> None:
     """Run orchestrator in background thread."""
     _active_orchestrator_threads[job_id] = threading.current_thread()
@@ -460,6 +470,7 @@ def _run_orchestrator_background(
             spec_content_override=spec_content_override,
             resolved_questions_override=resolved_questions_override,
             planning_only=planning_only,
+            sprint_id=sprint_id,
         )
     except Exception as e:
         logger.exception("Orchestrator failed")
@@ -503,11 +514,25 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
         if is_temporal_enabled():
+            # Temporal workflow path doesn't yet thread sprint_id through
+            # the workflow signature (#370 lands the thread-mode path
+            # only). Surface a clear error rather than silently dropping
+            # the field — operators using Temporal can opt into the
+            # sprint flow once the workflow is updated in a follow-up.
+            if request.sprint_id is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
+                        "run without Temporal or omit sprint_id."
+                    ),
+                )
             start_run_team_workflow(job_id, str(repo_path))
         else:
             thread = threading.Thread(
                 target=_run_orchestrator_background,
                 args=(job_id, str(repo_path)),
+                kwargs={"sprint_id": request.sprint_id},
             )
             thread.daemon = True
             thread.start()
@@ -1711,7 +1736,6 @@ def _run_backend_code_v2_background(
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
 
-
 @app.post(
     "/backend-code-v2/run",
     response_model=BackendCodeV2RunResponse,
@@ -1796,8 +1820,6 @@ def get_backend_code_v2_status(job_id: str) -> BackendCodeV2StatusResponse:
         summary=data.get("summary"),
         status_text=data.get("status_text"),
     )
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1903,8 +1925,6 @@ def auto_answer_run_team_question(
             status_code=500,
             detail=f"Auto-answer failed: {e}",
         )
-
-
 
 
 def _get_spec_content_for_job(data: Dict[str, Any]) -> str:
@@ -2475,7 +2495,6 @@ def get_logs(
     if not parts:
         return PlainTextResponse(content="(no log files found)\n", status_code=200)
     return PlainTextResponse(content="\n\n".join(parts))
-
 
 
 @app.get("/health")

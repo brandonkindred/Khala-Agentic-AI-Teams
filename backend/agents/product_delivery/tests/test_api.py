@@ -25,6 +25,10 @@ from product_delivery.models import (
     Initiative,
     InitiativeNode,
     Product,
+    Release,
+    Sprint,
+    SprintPlanResult,
+    SprintWithStories,
     Story,
     StoryNode,
     Task,
@@ -70,6 +74,8 @@ _KINDS: dict[str, _Kind] = {
     "task": _Kind(Task, "tasks", "story", "story_id", "story"),
     "ac": _Kind(AcceptanceCriterion, "acs", "story", "story_id", "story"),
     "feedback": _Kind(FeedbackItem, "feedback"),
+    "sprint": _Kind(Sprint, "sprints", "product", "product_id", "product"),
+    "release": _Kind(Release, "releases", "sprint", "sprint_id", "sprint"),
 }
 
 
@@ -90,6 +96,9 @@ class _FakeStore:
     tasks: dict[str, Task] = field(default_factory=dict)
     acs: dict[str, AcceptanceCriterion] = field(default_factory=dict)
     feedback: dict[str, FeedbackItem] = field(default_factory=dict)
+    sprints: dict[str, Sprint] = field(default_factory=dict)
+    releases: dict[str, Release] = field(default_factory=dict)
+    sprint_stories: list[tuple[str, str]] = field(default_factory=list)
     _next: ClassVar[int] = 0
 
     def _id(self) -> str:
@@ -355,6 +364,113 @@ class _FakeStore:
             normalised = _validate_status(status)
             out = [f for f in out if f.status == normalised]
         return out
+
+    # sprints (Phase 2 of #243) ----------------------------------------
+
+    def create_sprint(
+        self,
+        *,
+        product_id: str,
+        name: str,
+        capacity_points: float | None,
+        starts_at: Any,
+        ends_at: Any,
+        status: str,
+        author: str,
+    ) -> Sprint:
+        return self._insert(
+            "sprint",
+            product_id=product_id,
+            name=name,
+            capacity_points=capacity_points or 0.0,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            status=status,
+            author=author,
+        )
+
+    def get_sprint(self, sprint_id: str) -> Sprint | None:
+        return self.sprints.get(sprint_id)
+
+    def add_story_to_sprint(self, *, sprint_id: str, story_id: str) -> bool:
+        if sprint_id not in self.sprints or story_id not in self.stories:
+            raise UnknownProductDeliveryEntity(
+                f"sprint {sprint_id!r} or story {story_id!r} does not exist"
+            )
+        if (sprint_id, story_id) in self.sprint_stories:
+            return False
+        self.sprint_stories.append((sprint_id, story_id))
+        return True
+
+    def list_planned_story_ids(self, sprint_id: str) -> list[str]:
+        return [s for sid, s in self.sprint_stories if sid == sprint_id]
+
+    def get_sprint_with_stories(self, sprint_id: str) -> SprintWithStories | None:
+        sprint = self.sprints.get(sprint_id)
+        if sprint is None:
+            return None
+        ids = [s for sid, s in self.sprint_stories if sid == sprint_id]
+        # Stable ordering: WSJF desc with NULL last, then created_at asc.
+        # `(wsjf is None, -wsjf, created_at)` sorts None to the end via
+        # the boolean-tuple trick; explicit `0.0` fallback for the
+        # secondary key isn't reached when the bool is True.
+        ordered = sorted(
+            (self.stories[i] for i in ids if i in self.stories),
+            key=lambda s: (
+                s.wsjf_score is None,
+                -(s.wsjf_score or 0.0),
+                s.created_at,
+            ),
+        )
+        return SprintWithStories(sprint=sprint, stories=ordered)
+
+    def select_sprint_scope(
+        self, *, sprint_id: str, capacity_points: float | None = None
+    ) -> SprintPlanResult:
+        sprint = self.sprints.get(sprint_id)
+        if sprint is None:
+            raise UnknownProductDeliveryEntity(f"unknown sprint: {sprint_id}")
+        capacity = float(capacity_points if capacity_points is not None else 0.0)
+        # Already-planned story ids across all sprints.
+        already = {sid for _, sid in self.sprint_stories}
+        # Same ordering invariant as the real store.
+        candidates = sorted(
+            (
+                s
+                for s in self.stories.values()
+                if self.epics[s.epic_id].initiative_id
+                in {i.id for i in self.initiatives.values() if i.product_id == sprint.product_id}
+                and s.id not in already
+            ),
+            key=lambda s: (
+                s.wsjf_score is None,
+                -(s.wsjf_score or 0.0),
+                s.created_at,
+            ),
+        )
+        selected: list[Story] = []
+        skipped: list[Story] = []
+        used = 0.0
+        for story in candidates:
+            cost = float(story.estimate_points) if story.estimate_points is not None else 0.0
+            if used + cost <= capacity:
+                selected.append(story)
+                used += cost
+            else:
+                skipped.append(story)
+        for s in selected:
+            self.sprint_stories.append((sprint_id, s.id))
+        return SprintPlanResult(
+            sprint_id=sprint_id,
+            selected_story_ids=[s.id for s in selected],
+            skipped_story_ids=[s.id for s in skipped],
+            used_capacity=used,
+            remaining_capacity=capacity - used,
+            rationale=(
+                f"Selected {len(selected)} stories totaling {used:g} points "
+                f"(capacity {capacity:g}); skipped {len(skipped)} for capacity."
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1190,3 +1306,262 @@ def test_groom_uses_stubbed_llm_and_returns_ranked_result(
     assert [r["id"] for r in body["ranked"]] == [sid_b, sid_a]
     # persistence ran on the fake
     assert fake.stories[sid_b].wsjf_score == body["ranked"][0]["score"]
+
+
+# ---------------------------------------------------------------------------
+# Sprints (Phase 2 of #243)
+# ---------------------------------------------------------------------------
+
+
+def _make_product_with_stories(
+    client: TestClient,
+    fake: _FakeStore,
+    *,
+    stories: list[dict[str, Any]],
+) -> str:
+    """Helper: create product → initiative → epic → N stories and apply
+    optional ``wsjf_score`` patches via the fake's bucket directly.
+
+    Stories don't accept ``wsjf_score`` on create (it lives on
+    ``ScoreUpdate``), so we mutate the fake's row in place — that matches
+    what the real store would do after a separate
+    ``PATCH /story/{id}/scores`` call. Keeping the test setup terse
+    avoids 5 HTTP calls per fixture.
+    """
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+    eid = client.post(
+        "/api/product-delivery/epics",
+        json={"initiative_id": iid, "title": "E"},
+    ).json()["id"]
+    for spec in stories:
+        body: dict[str, Any] = {"epic_id": eid, "title": spec["title"]}
+        if "estimate_points" in spec:
+            body["estimate_points"] = spec["estimate_points"]
+        sid = client.post("/api/product-delivery/stories", json=body).json()["id"]
+        wsjf = spec.get("wsjf")
+        if wsjf is not None:
+            fake.stories[sid] = fake.stories[sid].model_copy(update={"wsjf_score": wsjf})
+        # Tag the test-supplied id alias for assertions.
+        spec["_id"] = sid
+    return pid
+
+
+def test_sprint_create_round_trip(client_and_store: tuple[TestClient, _FakeStore]) -> None:
+    client, fake = client_and_store
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    resp = client.post(
+        "/api/product-delivery/sprints",
+        json={
+            "product_id": pid,
+            "name": "S1",
+            "capacity_points": 13,
+            "status": "planned",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "S1"
+    assert body["capacity_points"] == 13.0
+    assert body["status"] == "planned"
+    assert body["author"] == "tester"
+    assert body["id"] in fake.sprints
+
+
+def test_sprint_create_404_when_product_missing(client: TestClient) -> None:
+    r = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": "missing", "name": "S1", "capacity_points": 5},
+    )
+    assert r.status_code == 404
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
+def test_sprint_create_rejects_non_finite_or_negative_capacity(
+    client: TestClient, bad: float
+) -> None:
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    # JSON itself doesn't allow NaN/Infinity literals — send via raw
+    # content so Pydantic's coercion exercises the validator.
+    if bad != bad or bad in (float("inf"), float("-inf")):
+        token = "NaN" if bad != bad else ("Infinity" if bad > 0 else "-Infinity")
+        r = client.request(
+            "POST",
+            "/api/product-delivery/sprints",
+            content=f'{{"product_id": "{pid}", "name": "S", "capacity_points": "{token}"}}',
+            headers={"content-type": "application/json"},
+        )
+    else:
+        r = client.post(
+            "/api/product-delivery/sprints",
+            json={"product_id": pid, "name": "S", "capacity_points": bad},
+        )
+    assert r.status_code == 422
+
+
+def test_sprint_plan_selects_highest_wsjf_within_capacity(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, fake = client_and_store
+    stories = [
+        {"title": "low", "estimate_points": 5, "wsjf": 1.0},
+        {"title": "mid", "estimate_points": 5, "wsjf": 5.0},
+        {"title": "high", "estimate_points": 5, "wsjf": 9.0},
+    ]
+    pid = _make_product_with_stories(client, fake, stories=stories)
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 10},
+    ).json()["id"]
+    plan = client.post(
+        f"/api/product-delivery/sprints/{sid}/plan",
+        json={},  # use sprint row's stored capacity (10)
+    ).json()
+    # Capacity 10, three 5-point stories — pick the top two by WSJF.
+    selected_titles = {fake.stories[s].title for s in plan["selected_story_ids"]}
+    skipped_titles = {fake.stories[s].title for s in plan["skipped_story_ids"]}
+    assert selected_titles == {"high", "mid"}
+    assert skipped_titles == {"low"}
+    assert plan["used_capacity"] == 10.0
+    assert plan["remaining_capacity"] == 0.0
+
+
+def test_sprint_plan_zero_capacity_picks_nothing(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, fake = client_and_store
+    pid = _make_product_with_stories(
+        client,
+        fake,
+        stories=[{"title": "a", "estimate_points": 1, "wsjf": 5.0}],
+    )
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S0", "capacity_points": 0},
+    ).json()["id"]
+    plan = client.post(
+        f"/api/product-delivery/sprints/{sid}/plan", json={"capacity_points": 0}
+    ).json()
+    assert plan["selected_story_ids"] == []
+    assert len(plan["skipped_story_ids"]) == 1
+
+
+def test_sprint_plan_story_bigger_than_capacity_is_skipped(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, fake = client_and_store
+    pid = _make_product_with_stories(
+        client,
+        fake,
+        stories=[
+            {"title": "huge", "estimate_points": 100, "wsjf": 9.0},
+            {"title": "small", "estimate_points": 1, "wsjf": 1.0},
+        ],
+    )
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 5},
+    ).json()["id"]
+    plan = client.post(
+        f"/api/product-delivery/sprints/{sid}/plan", json={"capacity_points": 5}
+    ).json()
+    selected_titles = {fake.stories[s].title for s in plan["selected_story_ids"]}
+    # `huge` exceeds capacity even though it has highest WSJF; greedy
+    # rolls forward to the next-best fit.
+    assert selected_titles == {"small"}
+
+
+def test_sprint_plan_null_estimate_points_is_size_zero(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, fake = client_and_store
+    pid = _make_product_with_stories(
+        client,
+        fake,
+        stories=[
+            {"title": "unestimated", "wsjf": 9.0},  # estimate_points absent → None
+            {"title": "sized", "estimate_points": 3, "wsjf": 5.0},
+        ],
+    )
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 3},
+    ).json()["id"]
+    plan = client.post(
+        f"/api/product-delivery/sprints/{sid}/plan", json={"capacity_points": 3}
+    ).json()
+    titles = {fake.stories[s].title for s in plan["selected_story_ids"]}
+    # Both fit: the unestimated story counts as 0 points, leaving the
+    # full 3-point budget for the sized one.
+    assert titles == {"unestimated", "sized"}
+    assert plan["used_capacity"] == 3.0
+
+
+def test_sprint_plan_excludes_stories_already_in_other_sprint(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, fake = client_and_store
+    pid = _make_product_with_stories(
+        client,
+        fake,
+        stories=[
+            {"title": "a", "estimate_points": 2, "wsjf": 5.0},
+            {"title": "b", "estimate_points": 2, "wsjf": 4.0},
+        ],
+    )
+    s1 = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 2},
+    ).json()["id"]
+    plan1 = client.post(
+        f"/api/product-delivery/sprints/{s1}/plan", json={"capacity_points": 2}
+    ).json()
+    assert len(plan1["selected_story_ids"]) == 1
+    locked_id = plan1["selected_story_ids"][0]
+
+    s2 = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S2", "capacity_points": 100},
+    ).json()["id"]
+    plan2 = client.post(
+        f"/api/product-delivery/sprints/{s2}/plan", json={"capacity_points": 100}
+    ).json()
+    # The story already planned into S1 must not show up in S2's pool.
+    assert locked_id not in plan2["selected_story_ids"]
+    assert locked_id not in plan2["skipped_story_ids"]
+
+
+def test_get_sprint_returns_planned_stories_ordered_by_wsjf(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, fake = client_and_store
+    pid = _make_product_with_stories(
+        client,
+        fake,
+        stories=[
+            {"title": "a", "estimate_points": 1, "wsjf": 1.0},
+            {"title": "c", "estimate_points": 1, "wsjf": 9.0},
+            {"title": "b", "estimate_points": 1, "wsjf": 5.0},
+        ],
+    )
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 100},
+    ).json()["id"]
+    client.post(f"/api/product-delivery/sprints/{sid}/plan", json={"capacity_points": 100})
+    body = client.get(f"/api/product-delivery/sprints/{sid}").json()
+    # Highest WSJF first.
+    assert [s["title"] for s in body["stories"]] == ["c", "b", "a"]
+
+
+def test_get_sprint_404_when_missing(client: TestClient) -> None:
+    r = client.get("/api/product-delivery/sprints/missing")
+    assert r.status_code == 404
+
+
+def test_sprint_plan_404_when_sprint_missing(client: TestClient) -> None:
+    r = client.post("/api/product-delivery/sprints/missing/plan", json={})
+    assert r.status_code == 404

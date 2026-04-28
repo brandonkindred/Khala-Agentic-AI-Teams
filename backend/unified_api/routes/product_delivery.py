@@ -31,6 +31,10 @@ from product_delivery import (
     Initiative,
     Product,
     ProductDeliveryStorageUnavailable,
+    Sprint,
+    SprintPlanRequest,
+    SprintPlanResult,
+    SprintWithStories,
     Story,
     Task,
     UnknownProductDeliveryEntity,
@@ -39,6 +43,7 @@ from product_delivery import (
 )
 from product_delivery.models import (
     AcceptanceCriterionCreate,
+    CreateSprintRequest,
     EpicCreate,
     FeedbackItemCreate,
     InitiativeCreate,
@@ -50,6 +55,7 @@ from product_delivery.models import (
 )
 from product_delivery.product_owner_agent import ProductOwnerAgent
 from product_delivery.product_owner_agent.agent import LLMScoringUnavailable
+from product_delivery.sprint_planner_agent import SprintPlannerAgent
 
 logger = logging.getLogger(__name__)
 
@@ -270,3 +276,42 @@ def list_feedback(
     # (→ 404) when the product is missing — no TOCTTOU window where a
     # concurrent delete could turn a 404 into a `200 []`.
     return get_store().list_feedback(product_id, status=status)
+
+
+# ---------------------------------------------------------------------------
+# Sprints (Phase 2 of #243)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/sprints", response_model=Sprint)
+def create_sprint(body: CreateSprintRequest) -> Sprint:
+    return get_store().create_sprint(
+        product_id=body.product_id,
+        name=body.name,
+        capacity_points=body.capacity_points,
+        starts_at=body.starts_at,
+        ends_at=body.ends_at,
+        status=body.status,
+        author=resolve_author(),
+    )
+
+
+@router.post("/sprints/{sprint_id}/plan", response_model=SprintPlanResult)
+def plan_sprint(sprint_id: str, body: SprintPlanRequest) -> SprintPlanResult:
+    """Run capacity-aware story selection for ``sprint_id``.
+
+    A missing sprint surfaces as 404 via ``UnknownProductDeliveryEntity``
+    raised inside the agent (delegating to ``select_sprint_scope`` /
+    ``get_sprint``). ``capacity_points=None`` falls back to the
+    sprint row's stored capacity.
+    """
+    agent = SprintPlannerAgent(store=get_store())
+    return agent.plan(sprint_id=sprint_id, capacity_points=body.capacity_points)
+
+
+@router.get("/sprints/{sprint_id}", response_model=SprintWithStories)
+def get_sprint(sprint_id: str) -> SprintWithStories:
+    result = get_store().get_sprint_with_stories(sprint_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"unknown sprint: {sprint_id}")
+    return result

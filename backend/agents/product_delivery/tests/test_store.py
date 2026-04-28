@@ -250,3 +250,265 @@ def test_feedback_rejects_cross_product_story_link() -> None:
             linked_story_id=s_b.id,
             author="alice",
         )
+
+
+# ---------------------------------------------------------------------------
+# Sprints (Phase 2 of #243)
+# ---------------------------------------------------------------------------
+
+
+def _seed_stories(store: ProductDeliveryStore, *, scores: list[tuple[float | None, float | None]]):
+    """Seed a product with one story per (wsjf, points) tuple.
+
+    Scores are applied via ``update_scores`` after create — the public
+    ``create_story`` API doesn't take ``wsjf_score`` directly, just like
+    in production.
+    """
+    p = store.create_product(name="P", description="", vision="", author="alice")
+    i = store.create_initiative(
+        product_id=p.id, title="I", summary="", status="proposed", author="alice"
+    )
+    e = store.create_epic(
+        initiative_id=i.id, title="E", summary="", status="proposed", author="alice"
+    )
+    out = []
+    for wsjf, pts in scores:
+        s = store.create_story(
+            epic_id=e.id,
+            title=f"story-{len(out)}",
+            user_story="",
+            status="proposed",
+            estimate_points=pts,
+            author="alice",
+        )
+        if wsjf is not None:
+            store.update_scores(kind="story", entity_id=s.id, wsjf_score=wsjf, rice_score=None)
+        out.append(s)
+    return p, out
+
+
+def test_sprint_crud_round_trip() -> None:
+    store = _store()
+    p = store.create_product(name="P", description="", vision="", author="alice")
+    sprint = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=13.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    assert sprint.capacity_points == 13.0
+    again = store.get_sprint(sprint.id)
+    assert again is not None and again.id == sprint.id
+
+    # Status updates work.
+    assert store.update_sprint_status(sprint_id=sprint.id, status="active")
+    assert (store.get_sprint(sprint.id) or sprint).status == "active"
+
+    # Listing scopes to the parent product.
+    listed = store.list_sprints_for_product(p.id)
+    assert [s.id for s in listed] == [sprint.id]
+
+
+def test_add_story_to_sprint_is_idempotent() -> None:
+    store = _store()
+    p, [s] = _seed_stories(store, scores=[(5.0, 3)])
+    sprint = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=5.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    assert store.add_story_to_sprint(sprint_id=sprint.id, story_id=s.id) is True
+    # Re-add: no-op (returns False, no exception).
+    assert store.add_story_to_sprint(sprint_id=sprint.id, story_id=s.id) is False
+    assert store.list_planned_story_ids(sprint.id) == [s.id]
+
+
+def test_select_sprint_scope_zero_capacity_skips_everything() -> None:
+    store = _store()
+    p, [s] = _seed_stories(store, scores=[(5.0, 1)])
+    sprint = store.create_sprint(
+        product_id=p.id,
+        name="S0",
+        capacity_points=0.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    result = store.select_sprint_scope(sprint_id=sprint.id, capacity_points=0.0)
+    assert result.selected_story_ids == []
+    assert s.id in result.skipped_story_ids
+    assert result.used_capacity == 0.0
+
+
+def test_select_sprint_scope_skips_oversize_story_then_takes_smaller() -> None:
+    store = _store()
+    p, [huge, small] = _seed_stories(
+        store,
+        scores=[(9.0, 100), (1.0, 1)],
+    )
+    sprint = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=5.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    result = store.select_sprint_scope(sprint_id=sprint.id, capacity_points=5.0)
+    # Greedy rolls past the oversize highest-WSJF story.
+    assert result.selected_story_ids == [small.id]
+    assert huge.id in result.skipped_story_ids
+
+
+def test_select_sprint_scope_ties_broken_by_created_at() -> None:
+    store = _store()
+    # Two stories with identical WSJF — tie-break is created_at ASC, so
+    # the first-created story wins when capacity only fits one.
+    p, [first, second] = _seed_stories(store, scores=[(5.0, 3), (5.0, 3)])
+    sprint = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=3.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    result = store.select_sprint_scope(sprint_id=sprint.id, capacity_points=3.0)
+    assert result.selected_story_ids == [first.id]
+    assert second.id in result.skipped_story_ids
+
+
+def test_select_sprint_scope_null_wsjf_ordered_last() -> None:
+    store = _store()
+    # One scored story + one unscored: scored picks first, unscored
+    # would be skipped if capacity ran out. Capacity 100 → both fit and
+    # the order proves NULLS LAST.
+    p, [scored, unscored] = _seed_stories(store, scores=[(7.0, 1), (None, 1)])
+    sprint = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=100.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    result = store.select_sprint_scope(sprint_id=sprint.id, capacity_points=100.0)
+    assert result.selected_story_ids == [scored.id, unscored.id]
+
+
+def test_select_sprint_scope_null_estimate_points_treated_as_zero() -> None:
+    store = _store()
+    p, [unestimated, sized] = _seed_stories(store, scores=[(9.0, None), (5.0, 3)])
+    sprint = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=3.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    result = store.select_sprint_scope(sprint_id=sprint.id, capacity_points=3.0)
+    # Unestimated counts as 0 → both fit inside a 3-point budget.
+    assert set(result.selected_story_ids) == {unestimated.id, sized.id}
+    assert result.used_capacity == 3.0
+
+
+def test_select_sprint_scope_excludes_stories_already_planned() -> None:
+    store = _store()
+    p, [s_a, s_b] = _seed_stories(store, scores=[(9.0, 2), (8.0, 2)])
+    s1 = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=2.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    plan1 = store.select_sprint_scope(sprint_id=s1.id, capacity_points=2.0)
+    assert plan1.selected_story_ids == [s_a.id]
+
+    s2 = store.create_sprint(
+        product_id=p.id,
+        name="S2",
+        capacity_points=100.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    plan2 = store.select_sprint_scope(sprint_id=s2.id, capacity_points=100.0)
+    # Story already in S1 must not appear in either bucket of S2.
+    assert s_a.id not in plan2.selected_story_ids
+    assert s_a.id not in plan2.skipped_story_ids
+    assert s_b.id in plan2.selected_story_ids
+
+
+def test_get_sprint_with_stories_orders_by_wsjf_desc_nulls_last() -> None:
+    store = _store()
+    p, stories = _seed_stories(
+        store,
+        scores=[(1.0, 1), (9.0, 1), (None, 1), (5.0, 1)],
+    )
+    sprint = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=100.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    store.select_sprint_scope(sprint_id=sprint.id, capacity_points=100.0)
+    view = store.get_sprint_with_stories(sprint.id)
+    assert view is not None
+    assert [s.title for s in view.stories[:2]] == ["story-1", "story-3"]  # WSJF 9.0, 5.0
+    assert view.stories[-1].title == "story-2"  # NULL last
+
+
+def test_release_crud_round_trip() -> None:
+    store = _store()
+    p = store.create_product(name="P", description="", vision="", author="alice")
+    sprint = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=5.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    rel = store.create_release(
+        sprint_id=sprint.id,
+        version="v0.1.0",
+        notes_path=None,
+        shipped_at=None,
+        author="alice",
+    )
+    assert rel.version == "v0.1.0"
+    assert store.get_release(rel.id) is not None
+    assert [r.id for r in store.list_releases_for_sprint(sprint.id)] == [rel.id]
+
+
+def test_create_release_404_for_unknown_sprint() -> None:
+    store = _store()
+    with pytest.raises(UnknownProductDeliveryEntity):
+        store.create_release(
+            sprint_id="missing",
+            version="v0.0.1",
+            notes_path=None,
+            shipped_at=None,
+            author="alice",
+        )
