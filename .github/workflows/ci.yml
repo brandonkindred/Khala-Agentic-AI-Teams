@@ -803,11 +803,16 @@ jobs:
           failed=0
           for m in $modules; do
             echo "::group::import $m"
+            # JOB_SERVICE_URL is a hard module-load requirement after #360
+            # (job_service_client raises RuntimeError when unset). Pass a
+            # placeholder so the constructor validates without phoning home;
+            # the import-smoke never actually calls the service.
             if docker run --rm \
                 -e TEAM_MODULE="$m" \
                 -e TEAM_NAME=smoke \
                 -e TEAM_PORT=8000 \
                 -e POSTGRES_HOST="" \
+                -e JOB_SERVICE_URL="http://job-service.invalid:8085" \
                 --entrypoint python \
                 "$image_tag" \
                 -c "import importlib, sys; importlib.import_module('$m'); sys.stdout.write('ok\n')"; then
