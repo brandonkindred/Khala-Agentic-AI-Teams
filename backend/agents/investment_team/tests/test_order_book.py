@@ -159,6 +159,53 @@ def test_requeue_twap_slices_passthrough() -> None:
     assert po.twap_slices_remaining is None
 
 
+def test_requeue_accepts_zero_twap_slices() -> None:
+    """``twap_slices_remaining=0`` is the terminal slice marker — TWAP just
+    drained — and must be accepted alongside ``None`` and positive ints.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    book.requeue(
+        po.order_id,
+        new_remaining_qty=4.0,
+        new_submitted_at="2024-01-03",
+        twap_slices_remaining=0,
+    )
+    assert po.twap_slices_remaining == 0
+
+
+@pytest.mark.parametrize("bad_slices", [-1, 1.5, "two", True, False])
+def test_requeue_rejects_bad_twap_slices(bad_slices) -> None:
+    """Negative, float, str, and bool values are all caller bugs. Bools are
+    rejected explicitly because ``isinstance(True, int)`` is True in Python
+    and silently accepting ``True``/``False`` as slice counts hides confusion
+    in the caller.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    with pytest.raises(
+        ValueError, match="twap_slices_remaining must be a non-negative int or None"
+    ):
+        book.requeue(
+            po.order_id,
+            new_remaining_qty=4.0,
+            new_submitted_at="2024-01-03",
+            twap_slices_remaining=bad_slices,
+        )
+    # State unchanged — rejected calls leave the order intact.
+    assert po.remaining_qty == 10.0
+    assert po.cumulative_filled_qty == 0.0
+    assert po.twap_slices_remaining is None
+
+
 def test_requeue_keeps_cumulative_filled_consistent() -> None:
     """``requeue`` must update ``cumulative_filled_qty`` so the invariant
     ``original_qty == cumulative_filled_qty + remaining_qty`` holds after each

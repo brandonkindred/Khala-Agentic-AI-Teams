@@ -183,6 +183,20 @@ class OrderBook:
                 f"requeue new_remaining_qty must not exceed current remaining_qty: "
                 f"current={po.remaining_qty!r} new={new_remaining_qty!r}"
             )
+        # TWAP slice counters are discrete and non-negative. ``bool`` is a
+        # subclass of ``int`` in Python, so we reject it explicitly to avoid
+        # ``True``/``False`` being silently accepted as 1/0 — TWAP scheduling
+        # treats slice counts as integers and a bool there indicates caller
+        # confusion.
+        if twap_slices_remaining is not None and (
+            isinstance(twap_slices_remaining, bool)
+            or not isinstance(twap_slices_remaining, int)
+            or twap_slices_remaining < 0
+        ):
+            raise ValueError(
+                f"requeue twap_slices_remaining must be a non-negative int or None, "
+                f"got {twap_slices_remaining!r}"
+            )
         po.submitted_at = new_submitted_at
         po.remaining_qty = new_remaining_qty
         po.cumulative_filled_qty = po.original_qty - new_remaining_qty
