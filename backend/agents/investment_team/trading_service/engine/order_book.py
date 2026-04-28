@@ -169,6 +169,14 @@ class OrderBook:
             # which are idempotent removals, ``requeue`` represents an active fill
             # update against an order the caller believes is still pending.
             raise KeyError(f"requeue: order_id {order_id!r} is not in the book")
+        # ``bool`` is a subclass of ``int`` (and therefore numeric) in Python,
+        # so ``True``/``False`` would otherwise pass the finite + range checks
+        # and silently land in ``remaining_qty`` as 1/0. That corrupts fill
+        # accounting downstream, so reject explicitly.
+        if isinstance(new_remaining_qty, bool):
+            raise ValueError(
+                f"requeue new_remaining_qty must be a real number, got bool {new_remaining_qty!r}"
+            )
         if not math.isfinite(new_remaining_qty):
             raise ValueError(f"requeue new_remaining_qty must be finite, got {new_remaining_qty!r}")
         if new_submitted_at < po.submitted_at:
@@ -223,7 +231,22 @@ class OrderBook:
         Scoping by ``parent_order_id`` prevents two independent brackets that
         happen to reuse the same ``oco_group_id`` from cross-cancelling each
         other's protective legs.
+
+        All three id arguments must be non-empty strings. ``OrderRequest``
+        stores ``oco_group_id`` and ``parent_order_id`` as ``Optional[str]``
+        with default ``None``, so calling with ``None`` here would
+        equality-match every ordinary parent order in the book and nuke
+        unrelated orders. Reject defensively.
         """
+        for name, value in (
+            ("oco_group_id", oco_group_id),
+            ("except_order_id", except_order_id),
+            ("parent_order_id", parent_order_id),
+        ):
+            if not isinstance(value, str) or not value:
+                raise TypeError(
+                    f"oco_cancel_siblings {name} must be a non-empty str, got {value!r}"
+                )
         cancelled: List[str] = []
         for oid in list(self._pending.keys()):
             po = self._pending[oid]

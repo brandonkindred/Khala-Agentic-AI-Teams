@@ -301,6 +301,25 @@ def test_requeue_rejects_nan_and_inf_remaining_qty() -> None:
     assert po.cumulative_filled_qty == 0.0
 
 
+@pytest.mark.parametrize("bad_qty", [True, False])
+def test_requeue_rejects_bool_remaining_qty(bad_qty) -> None:
+    """``bool`` is a subclass of ``int`` in Python, so ``True``/``False`` would
+    otherwise pass ``math.isfinite`` and the range checks and silently land in
+    ``remaining_qty`` as ``1``/``0``. Reject them explicitly.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    with pytest.raises(ValueError, match="must be a real number, got bool"):
+        book.requeue(po.order_id, new_remaining_qty=bad_qty, new_submitted_at="2024-01-03")
+    # State unchanged.
+    assert po.remaining_qty == 10.0
+    assert po.cumulative_filled_qty == 0.0
+
+
 def test_requeue_unknown_order_id_raises_keyerror() -> None:
     """A stale/missing id is a partial-fill bug, not an idempotent removal —
     raise loudly with a clear message rather than silently no-op like
@@ -411,6 +430,44 @@ def test_oco_cancel_siblings_empty_when_no_match() -> None:
         )
         == []
     )
+
+
+@pytest.mark.parametrize("arg", ["oco_group_id", "except_order_id", "parent_order_id"])
+@pytest.mark.parametrize("bad_value", [None, "", 123, 1.5])
+def test_oco_cancel_siblings_rejects_bad_id_args(arg, bad_value) -> None:
+    """``OrderRequest`` stores ``oco_group_id``/``parent_order_id`` as
+    ``Optional[str]`` defaulting to ``None``, so calling
+    ``oco_cancel_siblings`` with ``None`` (or any non-string) for either id
+    would equality-match every ordinary parent order in the book and nuke
+    unrelated orders. Reject all three id args defensively.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    sibling = book.submit_attached(
+        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        submitted_at="2024-01-03",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    kwargs: dict = {
+        "oco_group_id": "g1",
+        "except_order_id": sibling.order_id,
+        "parent_order_id": parent.order_id,
+    }
+    kwargs[arg] = bad_value
+    with pytest.raises(TypeError, match=f"{arg} must be a non-empty str"):
+        book.oco_cancel_siblings(
+            kwargs.pop("oco_group_id"),
+            except_order_id=kwargs["except_order_id"],
+            parent_order_id=kwargs["parent_order_id"],
+        )
+    # Nothing got cancelled — both pending orders are still in the book.
+    assert {po.order_id for po in book.all_pending()} == {parent.order_id, sibling.order_id}
 
 
 def test_oco_cancel_siblings_does_not_cross_brackets() -> None:
