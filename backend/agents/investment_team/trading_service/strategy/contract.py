@@ -185,8 +185,14 @@ class Fill(BaseModel):
     price: float  # post-slippage fill price
     timestamp: str
     reason: str = ""
-    fill_kind: FillKind = FillKind.FULL
-    unfilled_qty: float = 0.0
+    # Partial-fill annotations populated by the realistic execution path in
+    # #386 (Trading 5/5 Step 4). Default ``None`` means "engine has not
+    # annotated this fill" — which is more honest than claiming
+    # ``FillKind.FULL`` / ``unfilled_qty=0`` for fills the engine actually
+    # clipped at the participation cap. Step 4 will start populating real
+    # values; until then strategies should treat ``None`` as "unknown".
+    fill_kind: Optional[FillKind] = None
+    unfilled_qty: Optional[float] = None
     cumulative_filled_qty: Optional[float] = None
 
 

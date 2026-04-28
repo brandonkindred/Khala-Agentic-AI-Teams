@@ -500,12 +500,16 @@ class TradeRecord(BaseModel):
     exit_fill_price: Optional[float] = None
     entry_order_type: str = "market"
     exit_order_type: str = "market"
-    # Partial-fill accounting (populated by RealisticExecutionModel in Step 4 / #386).
-    # Default values match the legacy "no partial fill" semantics so existing trades
-    # serialize identically when exclude_defaults=True is used downstream.
-    participation_clipped: bool = False
-    partial_fill_count: int = 0
-    total_unfilled_qty: float = 0.0
+    # Partial-fill accounting populated by RealisticExecutionModel in
+    # #386 (Trading 5/5 Step 4). Default ``None`` means "engine has not
+    # annotated this trade" — which is more honest than claiming
+    # ``participation_clipped=False`` / counts of ``0`` for trades that
+    # the engine actually clipped at the participation cap. Step 4 will
+    # populate real values; until then consumers should treat ``None``
+    # as "unknown".
+    participation_clipped: Optional[bool] = None
+    partial_fill_count: Optional[int] = None
+    total_unfilled_qty: Optional[float] = None
 
 
 class BacktestRecord(BaseModel):
