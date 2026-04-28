@@ -53,6 +53,29 @@ def test_init_otel_reports_enabled() -> None:
     assert is_otel_enabled() is True
 
 
+def test_resolve_endpoint_for_log_reflects_export_state(monkeypatch) -> None:
+    """The init log must distinguish 'no exporter' from 'real endpoint'."""
+    from shared_observability.otel import _resolve_endpoint_for_log
+
+    for var in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    rendered = _resolve_endpoint_for_log()
+    assert "<default>" not in rendered
+    assert "none" in rendered.lower()
+
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    assert _resolve_endpoint_for_log() == "http://collector:4318"
+
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://traces:4318")
+    assert _resolve_endpoint_for_log() == "http://traces:4318"
+
+
 def test_get_tracer_and_meter_surface_is_usable() -> None:
     """Tracer and meter returned by the helpers must support the common API."""
     from shared_observability import get_meter, get_tracer
