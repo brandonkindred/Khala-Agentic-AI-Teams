@@ -126,9 +126,28 @@ def init_otel(
             "OpenTelemetry initialized: service=%s team=%s endpoint=%s",
             _service_name,
             team_key,
-            os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "<default>"),
+            _resolve_endpoint_for_log(),
         )
         return True
+
+
+def _resolve_endpoint_for_log() -> str:
+    """Render the configured OTLP endpoint for the init log line.
+
+    When no endpoint is set we skip exporter construction entirely (see
+    ``_otlp_endpoint_configured``), so logging ``<default>`` is misleading —
+    nothing is exported. Surface that explicitly so operators can tell at
+    a glance whether spans are leaving the process.
+    """
+    for var in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+    ):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return "<none; export disabled>"
 
 
 def _otlp_endpoint_configured() -> bool:
