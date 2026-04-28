@@ -132,7 +132,14 @@ class OrderBook:
     ) -> PendingOrder:
         """Single mutation point for a partial-fill remainder. Refreshes
         ``submitted_at`` so the look-ahead guard in
-        ``execution/bar_safety.py`` still holds on the next bar.
+        ``execution/bar_safety.py`` still holds on the next bar, and keeps
+        ``cumulative_filled_qty`` consistent with
+        ``original_qty - remaining_qty`` so downstream readers (Fill records,
+        backtest analytics) see correct partial-fill progress.
+
+        Bounds: ``new_remaining_qty`` must be in ``[0, current remaining_qty]``.
+        A partial fill can only shrink the remainder; growing it would imply a
+        negative fill, and a negative remainder has no execution semantics.
         """
         po = self._pending[order_id]
         if new_submitted_at < po.submitted_at:
@@ -140,8 +147,16 @@ class OrderBook:
                 f"requeue submitted_at must not regress: "
                 f"old={po.submitted_at!r} new={new_submitted_at!r}"
             )
+        if new_remaining_qty < 0:
+            raise ValueError(f"requeue new_remaining_qty must be >= 0, got {new_remaining_qty!r}")
+        if new_remaining_qty > po.remaining_qty:
+            raise ValueError(
+                f"requeue new_remaining_qty must not exceed current remaining_qty: "
+                f"current={po.remaining_qty!r} new={new_remaining_qty!r}"
+            )
         po.submitted_at = new_submitted_at
         po.remaining_qty = new_remaining_qty
+        po.cumulative_filled_qty = po.original_qty - new_remaining_qty
         po.twap_slices_remaining = twap_slices_remaining
         return po
 

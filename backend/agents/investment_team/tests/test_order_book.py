@@ -158,6 +158,74 @@ def test_requeue_twap_slices_passthrough() -> None:
     assert po.twap_slices_remaining is None
 
 
+def test_requeue_keeps_cumulative_filled_consistent() -> None:
+    """``requeue`` must update ``cumulative_filled_qty`` so the invariant
+    ``original_qty == cumulative_filled_qty + remaining_qty`` holds after each
+    partial-fill remainder. Otherwise downstream Fill / analytics readers see
+    stale fill progress.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    assert po.cumulative_filled_qty == 0.0
+
+    book.requeue(po.order_id, new_remaining_qty=6.0, new_submitted_at="2024-01-03")
+    assert po.cumulative_filled_qty == 4.0
+    assert po.original_qty == po.cumulative_filled_qty + po.remaining_qty
+
+    book.requeue(po.order_id, new_remaining_qty=1.0, new_submitted_at="2024-01-04")
+    assert po.cumulative_filled_qty == 9.0
+    assert po.original_qty == po.cumulative_filled_qty + po.remaining_qty
+
+    # Fully filled — remainder collapses to zero.
+    book.requeue(po.order_id, new_remaining_qty=0.0, new_submitted_at="2024-01-05")
+    assert po.cumulative_filled_qty == 10.0
+    assert po.remaining_qty == 0.0
+
+
+def test_requeue_rejects_negative_remaining_qty() -> None:
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    with pytest.raises(ValueError, match="must be >= 0"):
+        book.requeue(po.order_id, new_remaining_qty=-1.0, new_submitted_at="2024-01-03")
+    # State unchanged.
+    assert po.remaining_qty == 10.0
+    assert po.cumulative_filled_qty == 0.0
+
+
+def test_requeue_rejects_growing_remaining_qty() -> None:
+    """A partial fill can only shrink the remainder. Growing it (e.g. an off-by-one
+    or stale state in the caller) would imply a negative fill, which has no
+    execution semantics.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    # First a real partial fill.
+    book.requeue(po.order_id, new_remaining_qty=4.0, new_submitted_at="2024-01-03")
+
+    # Trying to grow back to 6.0 is rejected even though it's still <= original_qty.
+    with pytest.raises(ValueError, match="must not exceed current remaining_qty"):
+        book.requeue(po.order_id, new_remaining_qty=6.0, new_submitted_at="2024-01-04")
+    # State preserved from the legitimate partial fill.
+    assert po.remaining_qty == 4.0
+    assert po.cumulative_filled_qty == 6.0
+
+    # And a value larger than original_qty is also rejected.
+    with pytest.raises(ValueError, match="must not exceed current remaining_qty"):
+        book.requeue(po.order_id, new_remaining_qty=11.0, new_submitted_at="2024-01-04")
+
+
 # ---------------------------------------------------------------------------
 # OCO sibling cancellation
 # ---------------------------------------------------------------------------
