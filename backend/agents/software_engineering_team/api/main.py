@@ -504,29 +504,38 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    # Reject sprint_id under Temporal *before* create_job and *outside*
+    # the launch try/except — otherwise the broad `except Exception`
+    # below catches the 400 and re-wraps it as a 503 "Failed to start
+    # workflow" (Codex review on PR #396). Temporal-mode plumbing for
+    # sprint_id is a follow-up; this is a client-input error, not infra.
+    from software_engineering_team.temporal.client import is_temporal_enabled
+
+    temporal_enabled = is_temporal_enabled()
+    if temporal_enabled and request.sprint_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
+                "run without Temporal or omit sprint_id."
+            ),
+        )
+
     _start_stale_job_monitor_once()
 
     job_id = str(uuid.uuid4())
     create_job(job_id, str(repo_path), job_type="run_team")
+    # Persist sprint_id on the job payload so resume/restart paths can
+    # rehydrate the same scope (Codex review on PR #396). `None` is
+    # written explicitly so non-sprint runs don't carry a stale value
+    # from a previous job that reused the same row (defense in depth —
+    # create_job mints a fresh uuid so it shouldn't collide today).
+    update_job(job_id, sprint_id=request.sprint_id)
 
     try:
-        from software_engineering_team.temporal.client import is_temporal_enabled
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        if is_temporal_enabled():
-            # Temporal workflow path doesn't yet thread sprint_id through
-            # the workflow signature (#370 lands the thread-mode path
-            # only). Surface a clear error rather than silently dropping
-            # the field — operators using Temporal can opt into the
-            # sprint flow once the workflow is updated in a follow-up.
-            if request.sprint_id is not None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
-                        "run without Temporal or omit sprint_id."
-                    ),
-                )
+        if temporal_enabled:
             start_run_team_workflow(job_id, str(repo_path))
         else:
             thread = threading.Thread(
@@ -955,20 +964,38 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
         agent_crash_details=None,
     )
 
+    # Same Temporal+sprint_id guard as POST /run-team: surface as 400
+    # before entering the launch try/except so the broad handler can't
+    # downgrade it to 503 (Codex review on PR #396).
+    sprint_id = data.get("sprint_id")
+    from software_engineering_team.temporal.client import is_temporal_enabled
+
+    temporal_enabled = is_temporal_enabled()
+    if temporal_enabled and sprint_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
+                "this job was created with sprint_id and cannot be resumed under Temporal."
+            ),
+        )
+
     try:
-        from software_engineering_team.temporal.client import is_temporal_enabled
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
         # Pass previously submitted answers so the orchestrator doesn't re-ask questions
         submitted_answers = data.get("submitted_answers") or None
 
-        if is_temporal_enabled():
+        if temporal_enabled:
             start_run_team_workflow(job_id, str(repo_path))
         else:
             thread = threading.Thread(
                 target=_run_orchestrator_background,
                 args=(job_id, str(repo_path)),
-                kwargs={"resolved_questions_override": submitted_answers},
+                kwargs={
+                    "resolved_questions_override": submitted_answers,
+                    "sprint_id": sprint_id,
+                },
                 daemon=True,
             )
             thread.start()
@@ -1026,19 +1053,37 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    # Capture sprint_id before reset_job clears the payload, then
+    # re-persist it after the reset so a sprint-scoped restart goes
+    # back through the synthesized-spec path instead of silently
+    # falling back to repo spec parsing (Codex review on PR #396).
+    sprint_id = data.get("sprint_id")
+
+    from software_engineering_team.temporal.client import is_temporal_enabled
+
+    temporal_enabled = is_temporal_enabled()
+    if temporal_enabled and sprint_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
+                "this job was created with sprint_id and cannot be restarted under Temporal."
+            ),
+        )
+
     reset_job(job_id, str(repo_path), job_type="run_team")
-    update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
+    update_job(job_id, status=JOB_STATUS_RUNNING, error=None, sprint_id=sprint_id)
 
     try:
-        from software_engineering_team.temporal.client import is_temporal_enabled
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        if is_temporal_enabled():
+        if temporal_enabled:
             start_run_team_workflow(job_id, str(repo_path))
         else:
             thread = threading.Thread(
                 target=_run_orchestrator_background,
                 args=(job_id, str(repo_path)),
+                kwargs={"sprint_id": sprint_id},
                 daemon=True,
             )
             thread.start()

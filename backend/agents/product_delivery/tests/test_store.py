@@ -12,6 +12,7 @@ from product_delivery.postgres import SCHEMA
 from product_delivery.store import (
     CrossProductFeedbackLink,
     ProductDeliveryStore,
+    StoryAlreadyPlanned,
     UnknownProductDeliveryEntity,
     get_store,
 )
@@ -512,3 +513,38 @@ def test_create_release_404_for_unknown_sprint() -> None:
             shipped_at=None,
             author="alice",
         )
+
+
+def test_add_story_to_sprint_rejects_cross_sprint_double_plan() -> None:
+    """Schema-level UNIQUE(story_id) enforces one-sprint-per-story.
+
+    Two ``add_story_to_sprint`` calls into different sprints with the
+    same story id should raise ``StoryAlreadyPlanned`` (mapped to 409
+    at the route). Prevents the race window Codex flagged on PR #396.
+    """
+    store = _store()
+    p, [s] = _seed_stories(store, scores=[(5.0, 1)])
+    s1 = store.create_sprint(
+        product_id=p.id,
+        name="S1",
+        capacity_points=5.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    s2 = store.create_sprint(
+        product_id=p.id,
+        name="S2",
+        capacity_points=5.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="alice",
+    )
+    assert store.add_story_to_sprint(sprint_id=s1.id, story_id=s.id) is True
+    with pytest.raises(StoryAlreadyPlanned):
+        store.add_story_to_sprint(sprint_id=s2.id, story_id=s.id)
+    # The original assignment is intact.
+    assert store.list_planned_story_ids(s1.id) == [s.id]
+    assert store.list_planned_story_ids(s2.id) == []

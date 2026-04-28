@@ -166,9 +166,16 @@ SCHEMA: TeamSchema = TeamSchema(
         # Sprint ↔ Story join. A story can be planned into a sprint without
         # losing its place in the backlog hierarchy. Composite PK is the
         # (sprint_id, story_id) pair — `add_story_to_sprint` is idempotent
-        # via `ON CONFLICT DO NOTHING`. The reverse-direction index lets
-        # the planner ask "is this story already planned into any sprint?"
-        # in O(log n).
+        # via `ON CONFLICT DO NOTHING`.
+        #
+        # `UNIQUE(story_id)` enforces the planner's "one-sprint-per-story"
+        # invariant at the schema layer (Codex review on PR #396).
+        # ``select_sprint_scope`` filters candidates with ``NOT EXISTS``,
+        # but two concurrent planners could both pass that check and try
+        # to plant the same story into different sprints — the unique
+        # constraint closes that race window. Reusing the index for the
+        # reverse-direction "is this story already planned anywhere?"
+        # lookup that ``select_sprint_scope`` and the SE pipeline rely on.
         # -----------------------------------------------------------------
         """CREATE TABLE IF NOT EXISTS product_delivery_sprint_stories (
             sprint_id   TEXT NOT NULL REFERENCES product_delivery_sprints(id) ON DELETE CASCADE,
@@ -176,7 +183,7 @@ SCHEMA: TeamSchema = TeamSchema(
             planned_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (sprint_id, story_id)
         )""",
-        """CREATE INDEX IF NOT EXISTS idx_pd_sprint_stories_story
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_pd_sprint_stories_story
             ON product_delivery_sprint_stories(story_id)""",
     ],
     table_names=[

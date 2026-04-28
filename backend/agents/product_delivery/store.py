@@ -90,6 +90,18 @@ class CrossProductFeedbackLink(ValueError):
     """
 
 
+class StoryAlreadyPlanned(ValueError):
+    """A story was already planned into another sprint.
+
+    Phase 2 of #243 enforces a one-sprint-per-story invariant via
+    ``UNIQUE(story_id)`` on ``product_delivery_sprint_stories``.
+    Two concurrent ``select_sprint_scope`` calls could both pass the
+    ``NOT EXISTS`` candidate filter and race to insert the same story —
+    the unique index closes that window, and the violation lands here.
+    Mapped to HTTP 409 at the route layer.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Row specs + per-table column constants — single source of truth.
 # ---------------------------------------------------------------------------
@@ -951,13 +963,20 @@ class ProductDeliveryStore:
 
     @timed_query(store=_STORE, op="add_story_to_sprint")
     def add_story_to_sprint(self, *, sprint_id: str, story_id: str) -> bool:
-        """Idempotent: re-adding the same story is a silent no-op.
+        """Idempotent for the same ``(sprint_id, story_id)`` pair.
 
-        Returns True when the row was inserted, False when the
-        ``(sprint_id, story_id)`` pair already existed (PK conflict
-        handled via ``ON CONFLICT DO NOTHING``). FK violations on either
-        side surface as ``UnknownProductDeliveryEntity`` via the route's
-        global handler.
+        Returns True when the row was inserted, False when the same
+        pair already existed (PK conflict handled via
+        ``ON CONFLICT DO NOTHING``).
+
+        Schema-level invariant: a story can be in **at most one** sprint
+        at a time (``UNIQUE(story_id)`` on the join table — see
+        ``postgres/__init__.py``). Trying to plant the same story into a
+        *different* sprint trips that constraint and raises
+        ``StoryAlreadyPlanned`` (mapped to 409 by the route layer).
+
+        FK violations on either side surface as
+        ``UnknownProductDeliveryEntity`` via the route's global handler.
         """
         try:
             with self._conn() as conn, conn.cursor() as cur:
@@ -972,6 +991,13 @@ class ProductDeliveryStore:
         except psycopg_errors.ForeignKeyViolation as exc:
             raise UnknownProductDeliveryEntity(
                 f"sprint {sprint_id!r} or story {story_id!r} does not exist"
+            ) from exc
+        except psycopg_errors.UniqueViolation as exc:
+            # Story is already planned into a *different* sprint — the
+            # one-sprint-per-story invariant fired. Surface as a typed
+            # domain error so the route returns 409 instead of 500.
+            raise StoryAlreadyPlanned(
+                f"story {story_id!r} is already planned into another sprint"
             ) from exc
 
     @timed_query(store=_STORE, op="list_planned_story_ids")
@@ -1083,13 +1109,28 @@ class ProductDeliveryStore:
                     skipped.append(story)
             now = _now()
             if selected:
-                cur.executemany(
-                    """INSERT INTO product_delivery_sprint_stories
-                          (sprint_id, story_id, planned_at)
-                       VALUES (%s, %s, %s)
-                       ON CONFLICT (sprint_id, story_id) DO NOTHING""",
-                    [(sprint_id, s.id, now) for s in selected],
-                )
+                # `ON CONFLICT (sprint_id, story_id) DO NOTHING` only
+                # absorbs PK collisions (same pair re-inserted). The
+                # `UNIQUE(story_id)` constraint catches a different
+                # case: a concurrent planner planted one of these
+                # stories into a *different* sprint between our
+                # candidate read and our INSERT. Surface that as
+                # `StoryAlreadyPlanned` so the route returns 409 and
+                # the caller knows to re-plan with a fresh candidate
+                # set, instead of leaving the run with a 500.
+                try:
+                    cur.executemany(
+                        """INSERT INTO product_delivery_sprint_stories
+                              (sprint_id, story_id, planned_at)
+                           VALUES (%s, %s, %s)
+                           ON CONFLICT (sprint_id, story_id) DO NOTHING""",
+                        [(sprint_id, s.id, now) for s in selected],
+                    )
+                except psycopg_errors.UniqueViolation as exc:
+                    raise StoryAlreadyPlanned(
+                        "concurrent planner already claimed one of the selected stories; "
+                        "re-run plan with a refreshed candidate set"
+                    ) from exc
         remaining = capacity - used
         rationale = (
             f"Selected {len(selected)} stories totaling {used:g} points "

@@ -36,6 +36,7 @@ from product_delivery import (
     SprintPlanResult,
     SprintWithStories,
     Story,
+    StoryAlreadyPlanned,
     Task,
     UnknownProductDeliveryEntity,
     get_store,
@@ -72,6 +73,10 @@ router = APIRouter(prefix="/api/product-delivery", tags=["product-delivery"])
 _EXC_STATUS: dict[type[Exception], int] = {
     CrossProductFeedbackLink: 400,
     UnknownProductDeliveryEntity: 404,
+    # `UNIQUE(story_id)` on `product_delivery_sprint_stories` enforces
+    # one-sprint-per-story; concurrent planners or explicit re-plans
+    # surface here as 409 instead of a raw 500.
+    StoryAlreadyPlanned: 409,
     ProductDeliveryStorageUnavailable: 503,
     # LLM transport/model/parse failures during /groom — clients retry
     # the same way they do for a Postgres outage.

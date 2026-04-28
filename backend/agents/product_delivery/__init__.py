@@ -37,6 +37,7 @@ from product_delivery.store import (
     CrossProductFeedbackLink,
     ProductDeliveryStorageUnavailable,
     ProductDeliveryStore,
+    StoryAlreadyPlanned,
     UnknownProductDeliveryEntity,
     get_store,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "SprintPlanResult",
     "SprintWithStories",
     "Story",
+    "StoryAlreadyPlanned",
     "Task",
     "UnknownProductDeliveryEntity",
     "get_store",

@@ -35,6 +35,7 @@ from product_delivery.models import (
 )
 from product_delivery.store import (
     CrossProductFeedbackLink,
+    StoryAlreadyPlanned,
     UnknownProductDeliveryEntity,
 )
 
@@ -399,6 +400,10 @@ class _FakeStore:
             )
         if (sprint_id, story_id) in self.sprint_stories:
             return False
+        # Mirror the schema-level UNIQUE(story_id) constraint: a story
+        # can only live in one sprint at a time.
+        if any(sid == story_id for _, sid in self.sprint_stories):
+            raise StoryAlreadyPlanned(f"story {story_id!r} is already planned into another sprint")
         self.sprint_stories.append((sprint_id, story_id))
         return True
 
@@ -1565,3 +1570,43 @@ def test_get_sprint_404_when_missing(client: TestClient) -> None:
 def test_sprint_plan_404_when_sprint_missing(client: TestClient) -> None:
     r = client.post("/api/product-delivery/sprints/missing/plan", json={})
     assert r.status_code == 404
+
+
+def test_add_story_to_sprint_409_when_story_already_in_other_sprint(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    """Schema enforces one-sprint-per-story (Codex review on PR #396).
+
+    The route layer doesn't expose ``add_story_to_sprint`` directly
+    (planner does), but the underlying constraint should still
+    surface as 409 when a planner ever tries to plant the same story
+    into a different sprint. We exercise the fake's invariant directly
+    via the store's ``StoryAlreadyPlanned`` raise — the route's
+    exception handler maps it to 409.
+    """
+    client, fake = client_and_store
+    pid = _make_product_with_stories(
+        client,
+        fake,
+        stories=[{"title": "a", "estimate_points": 1, "wsjf": 5.0}],
+    )
+    s1 = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 5},
+    ).json()["id"]
+    s2 = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S2", "capacity_points": 5},
+    ).json()["id"]
+    # Plant the only story into S1 via the planner.
+    plan1 = client.post(
+        f"/api/product-delivery/sprints/{s1}/plan", json={"capacity_points": 5}
+    ).json()
+    assert len(plan1["selected_story_ids"]) == 1
+
+    # Manually attempt to plant it into S2 via the fake store directly —
+    # mirrors what a concurrent racing planner would hit at the schema
+    # level. The store raises StoryAlreadyPlanned, which the route's
+    # global handler maps to 409.
+    with pytest.raises(StoryAlreadyPlanned):
+        fake.add_story_to_sprint(sprint_id=s2, story_id=plan1["selected_story_ids"][0])
