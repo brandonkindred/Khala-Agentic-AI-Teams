@@ -248,6 +248,12 @@ class TradingService:
                             req = OrderRequest(**o)
                             req.validate_prices()
                             pending_for_prev.append(req)
+                        except NotImplementedError:
+                            # Runtime-support gates from validate_prices ("feature
+                            # ships in a later step of #379") must terminate the
+                            # run, not be silently dropped — that's the whole
+                            # point of the gates. See #383.
+                            raise
                         except Exception as exc:  # malformed request from strategy
                             logger.warning("dropping malformed order from strategy: %s", exc)
 
