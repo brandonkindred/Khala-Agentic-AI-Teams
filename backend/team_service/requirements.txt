@@ -20,6 +20,10 @@ APScheduler>=3.11,<4.0
 pytz>=2026.1
 python-dotenv>=1.2,<2.0
 yfinance>=1.2,<2.0
+# Investment team market-data cache (#376) — Parquet snapshot store.
+# Imported at module load by investment_team.market_data_cache.store, so the
+# investment_team container fails to start without it.
+pyarrow>=15.0,<22.0
 # Observability: team services auto-expose /metrics via team_service/entrypoint.py
 prometheus-fastapi-instrumentator>=7.1,<8.0
 # OpenTelemetry: every team container runs shared_observability.init_otel at startup
