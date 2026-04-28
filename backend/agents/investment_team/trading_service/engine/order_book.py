@@ -16,6 +16,15 @@ from typing import Dict, List, Optional
 
 from ..strategy.contract import OrderRequest, OrderSide, OrderType, TimeInForce
 
+# Tolerance below which a partial-fill remainder is treated as a terminal
+# zero. Float math in upstream sizing (typically ``prev_remaining - filled``
+# in the partial-fill path) can produce sub-epsilon residuals that aren't
+# exactly 0; without this clamp those orders would linger in the book
+# instead of being removed and the simulator could re-fill them. 1e-9 sits
+# safely below any meaningful trading quantity (fractional-share venues
+# generally don't go past 6 decimal places).
+FILL_QTY_EPSILON = 1e-9
+
 
 @dataclass
 class PendingOrder:
@@ -184,6 +193,14 @@ class OrderBook:
                 f"requeue submitted_at must not regress: "
                 f"old={po.submitted_at!r} new={new_submitted_at!r}"
             )
+        # Clamp sub-epsilon residuals (positive *or* negative) to exactly zero
+        # before the bounds checks so that a tiny remainder produced by float
+        # math (e.g. ``prev - filled`` accumulating ULP error) is treated as a
+        # terminal fill rather than lingering in the book. This also keeps the
+        # ``< 0`` check below from rejecting tiny negatives that are physically
+        # zero.
+        if abs(new_remaining_qty) < FILL_QTY_EPSILON:
+            new_remaining_qty = 0.0
         if new_remaining_qty < 0:
             raise ValueError(f"requeue new_remaining_qty must be >= 0, got {new_remaining_qty!r}")
         if new_remaining_qty > po.remaining_qty:
@@ -260,7 +277,17 @@ class OrderBook:
         return cancelled
 
     def children_of(self, parent_order_id: str) -> List[PendingOrder]:
-        """Direct children of ``parent_order_id`` (no recursion)."""
+        """Direct children of ``parent_order_id`` (no recursion).
+
+        Requires a non-empty string. ``OrderRequest.parent_order_id`` defaults
+        to ``None`` for non-bracket orders, so calling with ``None`` would
+        equality-match every top-level order in the book and cause callers to
+        treat unrelated entries as bracket children.
+        """
+        if not isinstance(parent_order_id, str) or not parent_order_id:
+            raise TypeError(
+                f"children_of parent_order_id must be a non-empty str, got {parent_order_id!r}"
+            )
         return [
             po for po in self._pending.values() if po.request.parent_order_id == parent_order_id
         ]

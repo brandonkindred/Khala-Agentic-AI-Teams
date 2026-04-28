@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from investment_team.trading_service.engine.order_book import (
+    FILL_QTY_EPSILON,
     OrderBook,
     PendingOrder,
 )
@@ -366,6 +367,82 @@ def test_requeue_zero_remainder_removes_order_from_book() -> None:
         book.requeue(po.order_id, new_remaining_qty=0.0, new_submitted_at="2024-01-05")
 
 
+@pytest.mark.parametrize("residual", [1e-15, 1e-12, FILL_QTY_EPSILON / 2])
+def test_requeue_clamps_tiny_positive_residual_to_zero(residual) -> None:
+    """Float math in upstream sizing (``prev_remaining - filled``) can produce
+    sub-epsilon remainders that aren't exactly 0. Without clamping, those
+    orders linger in the book and can be re-filled by the simulator. Verify
+    that any value with absolute magnitude below FILL_QTY_EPSILON is treated
+    as a terminal fill: the order is removed and ``cumulative_filled_qty``
+    equals ``original_qty``.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    book.requeue(po.order_id, new_remaining_qty=residual, new_submitted_at="2024-01-03")
+    assert po.remaining_qty == 0.0
+    assert po.cumulative_filled_qty == 10.0
+    assert po not in book.all_pending()
+    assert po not in book.pending_for_symbol("AAA")
+
+
+@pytest.mark.parametrize("residual", [-1e-15, -FILL_QTY_EPSILON / 2])
+def test_requeue_clamps_tiny_negative_residual_to_zero(residual) -> None:
+    """Tiny negatives from accumulated float error are physically zero and
+    shouldn't trip the ``< 0`` rejection. They should clamp the same way
+    positive sub-epsilon residuals do.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    book.requeue(po.order_id, new_remaining_qty=residual, new_submitted_at="2024-01-03")
+    assert po.remaining_qty == 0.0
+    assert po.cumulative_filled_qty == 10.0
+    assert po not in book.all_pending()
+
+
+def test_requeue_preserves_remainder_above_epsilon() -> None:
+    """A remainder safely above FILL_QTY_EPSILON should not be clamped — the
+    order stays in the book with the requested partial-fill remainder.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    above = FILL_QTY_EPSILON * 100  # 1e-7 — well above the clamp tolerance
+    book.requeue(po.order_id, new_remaining_qty=above, new_submitted_at="2024-01-03")
+    assert po.remaining_qty == above
+    assert po.cumulative_filled_qty == 10.0 - above
+    assert po in book.all_pending()
+
+
+def test_requeue_rejects_negative_above_epsilon() -> None:
+    """The clamp only swallows sub-epsilon negatives. A genuinely negative
+    remainder still gets rejected by the strict ``< 0`` guard.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    with pytest.raises(ValueError, match="must be >= 0"):
+        book.requeue(
+            po.order_id,
+            new_remaining_qty=-FILL_QTY_EPSILON * 1000,  # -1e-6, well past the clamp
+            new_submitted_at="2024-01-03",
+        )
+    assert po.remaining_qty == 10.0  # unchanged
+
+
 # ---------------------------------------------------------------------------
 # OCO sibling cancellation
 # ---------------------------------------------------------------------------
@@ -588,6 +665,23 @@ def test_children_of_returns_empty_for_unknown_parent() -> None:
         submitted_equity=100_000.0,
     )
     assert book.children_of("nope") == []
+
+
+@pytest.mark.parametrize("bad_parent", [None, "", 123, 1.5])
+def test_children_of_rejects_bad_parent_id(bad_parent) -> None:
+    """``OrderRequest.parent_order_id`` defaults to ``None`` for top-level
+    orders, so calling ``children_of(None)`` would equality-match every
+    top-level order and cause callers to apply child-order logic
+    (cancellation, etc.) to unrelated entries. Reject defensively.
+    """
+    book = OrderBook()
+    book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    with pytest.raises(TypeError, match="parent_order_id must be a non-empty str"):
+        book.children_of(bad_parent)
 
 
 # ---------------------------------------------------------------------------
