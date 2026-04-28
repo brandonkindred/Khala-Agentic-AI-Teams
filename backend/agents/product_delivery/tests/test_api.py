@@ -444,7 +444,17 @@ class _FakeStore:
                 s.created_at,
             ),
         )
-        return SprintWithStories(sprint=sprint, stories=ordered)
+        # Bucket ACs by story_id, ordered by created_at — same shape
+        # the real store fills in inside its single transaction.
+        acs_by_story: dict[str, list[AcceptanceCriterion]] = {}
+        for story in ordered:
+            acs_by_story[story.id] = sorted(
+                (a for a in self.acs.values() if a.story_id == story.id),
+                key=lambda a: a.created_at,
+            )
+        return SprintWithStories(
+            sprint=sprint, stories=ordered, acceptance_criteria_by_story_id=acs_by_story
+        )
 
     def select_sprint_scope(
         self, *, sprint_id: str, capacity_points: float | None = None
@@ -1697,6 +1707,34 @@ def test_plan_endpoint_accepts_empty_body(
     # Empty JSON body.
     r2 = client.post(f"/api/product-delivery/sprints/{sid}/plan", json={})
     assert r2.status_code == 200, r2.text
+
+
+def test_get_sprint_returns_acs_alongside_stories(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    """``get_sprint_with_stories`` populates ``acceptance_criteria_by_story_id``
+    so callers don't need follow-up queries (Codex review on PR #396).
+    """
+    client, fake = client_and_store
+    pid = _make_product_with_stories(
+        client,
+        fake,
+        stories=[{"title": "x", "estimate_points": 1, "wsjf": 5.0}],
+    )
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 5},
+    ).json()["id"]
+    story_id = next(s.id for s in fake.stories.values() if s.title == "x")
+    client.post(
+        "/api/product-delivery/acceptance-criteria",
+        json={"story_id": story_id, "text": "must work"},
+    )
+    client.post(f"/api/product-delivery/sprints/{sid}/plan", json={})
+    body = client.get(f"/api/product-delivery/sprints/{sid}").json()
+    # ACs are nested under `acceptance_criteria_by_story_id` keyed by id.
+    assert "acceptance_criteria_by_story_id" in body
+    assert [ac["text"] for ac in body["acceptance_criteria_by_story_id"][story_id]] == ["must work"]
 
 
 def test_create_sprint_rejects_inverted_window(

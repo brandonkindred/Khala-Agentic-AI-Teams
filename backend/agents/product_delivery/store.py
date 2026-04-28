@@ -295,6 +295,19 @@ def _validate_capacity_points(value: float | None) -> float:
     return float(value)
 
 
+def _validate_sprint_window(starts_at: datetime | None, ends_at: datetime | None) -> None:
+    """Mirror ``CreateSprintRequest._validate_window`` at the store layer.
+
+    Codex flagged that non-route callers (workflow code, future
+    backfill scripts) could persist inverted windows that the API
+    contract rejects, and downstream code assuming chronological
+    windows would silently misbehave. Equal timestamps are tolerated
+    — same call as the model validator.
+    """
+    if starts_at is not None and ends_at is not None and ends_at < starts_at:
+        raise ValueError("ends_at must be on or after starts_at")
+
+
 _T = TypeVar("_T", bound=BaseModel)
 
 
@@ -904,6 +917,7 @@ class ProductDeliveryStore:
         name = _validate_title(name, label="name")
         status = _validate_status(status)
         capacity = _validate_capacity_points(capacity_points)
+        _validate_sprint_window(starts_at, ends_at)
         now = _now()
         sid = _new_id()
         try:
@@ -1072,12 +1086,18 @@ class ProductDeliveryStore:
 
     @timed_query(store=_STORE, op="get_sprint_with_stories")
     def get_sprint_with_stories(self, sprint_id: str) -> SprintWithStories | None:
-        """Sprint header + planned stories, ordered by WSJF then created_at.
+        """Sprint header + planned stories + per-story acceptance criteria.
 
-        Two SELECTs in a single ``REPEATABLE READ`` transaction so the
-        sprint header and the story projection observe the same
-        snapshot — otherwise a concurrent unplan + delete between the
-        two could yield a stale sprint with vanished stories.
+        Three SELECTs in a single ``REPEATABLE READ`` transaction so
+        the sprint header, the story projection, and the AC fan-out
+        all observe the same snapshot. Without this, concurrent
+        backlog edits between the two reads could mix old stories
+        with new ACs (or vice versa) in the SE-pipeline's
+        synthesized spec — Codex flagged that on PR #396.
+
+        ACs are fetched in one batch with ``story_id = ANY(%s)`` and
+        bucketed in Python — same N+1-avoidance pattern as
+        ``get_backlog_tree``.
         """
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             _begin_repeatable_read(cur)
@@ -1098,7 +1118,22 @@ class ProductDeliveryStore:
                 (sprint_id,),
             )
             stories = [Story.model_validate(row) for row in cur.fetchall()]
-        return SprintWithStories(sprint=sprint, stories=stories)
+            acs_by_story: dict[str, list[AcceptanceCriterion]] = {}
+            if stories:
+                story_ids = [s.id for s in stories]
+                cur.execute(
+                    f"""SELECT {_AC_COLS}
+                       FROM product_delivery_acceptance_criteria
+                       WHERE story_id = ANY(%s)
+                       ORDER BY created_at""",
+                    (story_ids,),
+                )
+                for row in cur.fetchall():
+                    ac = AcceptanceCriterion.model_validate(row)
+                    acs_by_story.setdefault(ac.story_id, []).append(ac)
+        return SprintWithStories(
+            sprint=sprint, stories=stories, acceptance_criteria_by_story_id=acs_by_story
+        )
 
     @timed_query(store=_STORE, op="select_sprint_scope")
     def select_sprint_scope(
@@ -1177,21 +1212,24 @@ class ProductDeliveryStore:
             )
             candidates = [Story.model_validate(row) for row in cur.fetchall()]
             remaining_budget = max(0.0, capacity - existing_used)
-            selected: list[Story] = []
+            intended: list[Story] = []
             skipped: list[Story] = []
-            new_used = 0.0
             for story in candidates:
                 # Treat unestimated stories as size-0: they're in the
                 # plan, but don't consume budget. Avoids dropping
                 # newly-created stories that haven't been pointed yet.
                 cost = float(story.estimate_points) if story.estimate_points is not None else 0.0
-                if new_used + cost <= remaining_budget:
-                    selected.append(story)
-                    new_used += cost
+                running_cost = sum(
+                    float(s.estimate_points) if s.estimate_points is not None else 0.0
+                    for s in intended
+                )
+                if running_cost + cost <= remaining_budget:
+                    intended.append(story)
                 else:
                     skipped.append(story)
             now = _now()
-            if selected:
+            inserted_ids: set[str] = set()
+            if intended:
                 # `ON CONFLICT (sprint_id, story_id) DO NOTHING` only
                 # absorbs PK collisions (same pair re-inserted). The
                 # `UNIQUE(story_id)` constraint catches a different
@@ -1201,28 +1239,72 @@ class ProductDeliveryStore:
                 # `StoryAlreadyPlanned` so the route returns 409 and
                 # the caller knows to re-plan with a fresh candidate
                 # set, instead of leaving the run with a 500.
+                #
+                # ``RETURNING story_id`` gives us the rows we *actually*
+                # inserted (Codex review on PR #396): under concurrent
+                # plans on the same sprint, a PK conflict silently
+                # skips a row, and we'd otherwise misreport that row
+                # as newly selected. Using RETURNING means the result
+                # reflects persisted state, not intended state.
+                # ``executemany`` doesn't aggregate RETURNING across
+                # statements, so we issue per-row inserts in the same
+                # transaction — N is bounded by the candidate cap, so
+                # the extra round-trips are negligible compared to the
+                # backlog read above.
                 try:
-                    cur.executemany(
-                        """INSERT INTO product_delivery_sprint_stories
-                              (sprint_id, story_id, planned_at)
-                           VALUES (%s, %s, %s)
-                           ON CONFLICT (sprint_id, story_id) DO NOTHING""",
-                        [(sprint_id, s.id, now) for s in selected],
-                    )
+                    for story in intended:
+                        cur.execute(
+                            """INSERT INTO product_delivery_sprint_stories
+                                  (sprint_id, story_id, planned_at)
+                               VALUES (%s, %s, %s)
+                               ON CONFLICT (sprint_id, story_id) DO NOTHING
+                               RETURNING story_id""",
+                            (sprint_id, story.id, now),
+                        )
+                        row = cur.fetchone()
+                        if row is not None:
+                            # row is a dict (cursor uses dict_row); the
+                            # column is `story_id` regardless of factory.
+                            inserted_ids.add(row["story_id"] if isinstance(row, dict) else row[0])
                 except psycopg_errors.UniqueViolation as exc:
                     raise StoryAlreadyPlanned(
                         "concurrent planner already claimed one of the selected stories; "
                         "re-run plan with a refreshed candidate set"
                     ) from exc
-        total_used = existing_used + new_used
+            # Recompute the sprint's total load from persisted state so
+            # the response reflects what the database actually holds —
+            # not a derived snapshot that can drift under concurrency
+            # (Codex review on PR #396). Same transaction, so we're
+            # still on the REPEATABLE READ snapshot we opened above
+            # plus our own writes.
+            cur.execute(
+                """SELECT COALESCE(SUM(s.estimate_points), 0)::float AS used
+                   FROM product_delivery_sprint_stories ss
+                   JOIN product_delivery_stories s ON s.id = ss.story_id
+                   WHERE ss.sprint_id = %s""",
+                (sprint_id,),
+            )
+            total_row = cur.fetchone() or {"used": 0.0}
+            total_used = float(total_row["used"] or 0.0)
+        # Anything intended but not persisted (PK conflict from a racing
+        # concurrent plan on the same sprint) goes to the skipped bucket
+        # so the response stays accurate.
+        for story in intended:
+            if story.id not in inserted_ids:
+                skipped.append(story)
+        new_used = sum(
+            float(s.estimate_points) if s.estimate_points is not None else 0.0
+            for s in intended
+            if s.id in inserted_ids
+        )
         rationale = (
-            f"Selected {len(selected)} new stories totaling {new_used:g} points "
+            f"Selected {len(inserted_ids)} new stories totaling {new_used:g} points "
             f"({existing_count} already planned for {existing_used:g} points; "
             f"capacity {capacity:g}); skipped {len(skipped)} for capacity."
         )
         return SprintPlanResult(
             sprint_id=sprint_id,
-            selected_story_ids=[s.id for s in selected],
+            selected_story_ids=[s.id for s in intended if s.id in inserted_ids],
             skipped_story_ids=[s.id for s in skipped],
             used_capacity=total_used,
             remaining_capacity=max(0.0, capacity - total_used),

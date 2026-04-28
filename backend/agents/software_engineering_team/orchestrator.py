@@ -2195,14 +2195,12 @@ def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
     story_ids = [s.id for s in sprint_view.stories]
 
     # Markdown synthesis: per-story heading + user_story + bulleted ACs.
-    # Acceptance criteria live on the story, but we don't have the joined
-    # AC rows here — `get_sprint_with_stories` returns Story rows without
-    # AC nesting to keep the projection light. The flat AC list is built
-    # from the per-story projection (see below) so the synthesized doc
-    # matches what the planner reads downstream.
-    from product_delivery import get_store as _get_store  # noqa: PLC0415
-
-    store = _get_store()
+    # `acceptance_criteria_by_story_id` was populated by
+    # `get_sprint_with_stories` inside the same REPEATABLE READ
+    # transaction as the story fetch (Codex review on PR #396), so the
+    # AC rows we render here are guaranteed consistent with the story
+    # rows — no risk of a stale stories + fresh ACs mix from
+    # concurrent backlog edits.
     flat_ac_strings: list[str] = []
     sections: list[str] = [f"# Sprint: {sprint.name}", ""]
     if sprint.starts_at or sprint.ends_at:
@@ -2213,14 +2211,12 @@ def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
             window.append(f"end={sprint.ends_at.isoformat()}")
         sections.append("> " + ", ".join(window))
         sections.append("")
+    acs_by_story = sprint_view.acceptance_criteria_by_story_id or {}
     for story in sprint_view.stories:
         sections.append(f"## {story.title}")
         if story.user_story:
             sections.append(f"**User Story:** {story.user_story}")
-        # Read ACs per story — small N (planned scope), so an extra
-        # round trip is cheap and avoids materialising a join projection
-        # we don't need anywhere else.
-        ac_rows = _list_acceptance_criteria_for_story(store, story.id)
+        ac_rows = acs_by_story.get(story.id, [])
         if ac_rows:
             sections.append("")
             sections.append("**Acceptance criteria:**")
@@ -2243,32 +2239,6 @@ def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
         },
     )
     return requirements, spec_markdown
-
-
-def _list_acceptance_criteria_for_story(store: Any, story_id: str) -> List[Any]:
-    """Read AC rows for a single story.
-
-    The Phase 1 store doesn't expose a public per-story AC reader (ACs
-    come down with ``get_backlog_tree``), so we do a small SQL query
-    here. Kept private to this module — future cleanup could lift it
-    into ``ProductDeliveryStore`` proper if other callers need it.
-    """
-    from shared_postgres import get_conn, is_postgres_enabled  # noqa: PLC0415
-
-    if not is_postgres_enabled():
-        return []
-    from psycopg.rows import dict_row  # noqa: PLC0415
-
-    from product_delivery.models import AcceptanceCriterion  # noqa: PLC0415
-
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT id, story_id, text, satisfied, author, created_at, updated_at "
-            "FROM product_delivery_acceptance_criteria WHERE story_id = %s "
-            "ORDER BY created_at",
-            (story_id,),
-        )
-        return [AcceptanceCriterion.model_validate(row) for row in cur.fetchall()]
 
 
 def run_orchestrator(

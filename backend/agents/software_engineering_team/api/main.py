@@ -535,6 +535,36 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
             ),
         )
 
+    # Validate `sprint_id` exists *before* enqueuing the job (Codex
+    # review on PR #396) — otherwise a typo or a deleted sprint would
+    # return 200, kick off a background job, and surface as an async
+    # failure on the orchestrator side, wasting capacity and giving
+    # the client a misleading success response. Lazy import keeps the
+    # cross-team coupling soft.
+    if request.sprint_id is not None:
+        try:
+            from product_delivery import (  # noqa: PLC0415 — lazy cross-team import
+                ProductDeliveryStorageUnavailable,
+                get_store,
+            )
+        except ImportError as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"product_delivery store unavailable; cannot resolve sprint_id: {e}",
+            ) from e
+        try:
+            sprint = get_store().get_sprint(request.sprint_id)
+        except ProductDeliveryStorageUnavailable as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"product_delivery storage unavailable; cannot resolve sprint_id: {e}",
+            ) from e
+        if sprint is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"sprint {request.sprint_id!r} does not exist",
+            )
+
     _start_stale_job_monitor_once()
 
     job_id = str(uuid.uuid4())

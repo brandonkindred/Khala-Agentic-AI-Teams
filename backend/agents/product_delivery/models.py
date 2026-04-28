@@ -421,10 +421,23 @@ class CreateSprintRequest(BaseModel):
 
 
 class SprintWithStories(BaseModel):
-    """Sprint header + the planned stories, ordered by WSJF then created_at."""
+    """Sprint header + the planned stories, ordered by WSJF then created_at.
+
+    ``acceptance_criteria_by_story_id`` is populated by
+    ``ProductDeliveryStore.get_sprint_with_stories`` and is keyed by the
+    story id so callers can reconstruct the per-story AC list without
+    issuing follow-up queries (Codex review on PR #396 — fetching ACs
+    in the same transaction snapshot prevents a stale stories +
+    fresh ACs mix). The dict is empty when the planned-story list is
+    empty, never ``None``.
+    """
 
     sprint: Sprint
     stories: list[Story] = Field(default_factory=list)
+    acceptance_criteria_by_story_id: dict[str, list["AcceptanceCriterion"]] = Field(
+        default_factory=dict,
+        description="Maps story_id → ordered acceptance criteria, fetched in the same snapshot as stories.",
+    )
 
 
 class Release(_AuditedRow):

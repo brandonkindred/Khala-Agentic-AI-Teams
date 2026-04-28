@@ -98,14 +98,8 @@ def _ac(text: str, story_id: str) -> AcceptanceCriterion:
 
 
 class _StubStore:
-    def __init__(
-        self,
-        *,
-        sprint_view: SprintWithStories | None,
-        acs_by_story: dict[str, list[AcceptanceCriterion]] | None = None,
-    ) -> None:
+    def __init__(self, *, sprint_view: SprintWithStories | None) -> None:
         self._sprint_view = sprint_view
-        self._acs = acs_by_story or {}
 
     def get_sprint_with_stories(self, sprint_id: str) -> SprintWithStories | None:
         return self._sprint_view
@@ -115,13 +109,13 @@ class _StubStore:
 def patch_product_delivery(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Patch the lazy ``from product_delivery import get_store`` lookup.
 
-    The helper imports inside the function body, so we need to patch the
-    *module attribute* rather than ``orchestrator.get_store``. We also
-    stub ``_list_acceptance_criteria_for_story`` because it goes through
-    ``shared_postgres.get_conn`` directly when Postgres is enabled —
-    skipping it when the fake store is in play keeps the test pure.
+    The helper imports inside the function body, so we need to patch
+    the *module attribute*. ACs now ride along on
+    ``SprintWithStories.acceptance_criteria_by_story_id`` (Codex
+    review on PR #396 — fetched in the same snapshot as the stories),
+    so the stub store no longer needs a separate AC reader.
     """
-    state: dict[str, Any] = {"store": None, "acs": {}}
+    state: dict[str, Any] = {"store": None}
 
     import product_delivery as pd_mod
 
@@ -129,11 +123,6 @@ def patch_product_delivery(monkeypatch: pytest.MonkeyPatch) -> Any:
         return state["store"]
 
     monkeypatch.setattr(pd_mod, "get_store", _fake_get_store)
-
-    def _fake_list_ac(_store: Any, story_id: str) -> list[AcceptanceCriterion]:
-        return state["acs"].get(story_id, [])
-
-    monkeypatch.setattr(_orchestrator, "_list_acceptance_criteria_for_story", _fake_list_ac)
     return state
 
 
@@ -155,12 +144,18 @@ def test_load_requirements_from_sprint_synthesizes_from_stories(
         updated_at=_now(),
     )
     patch_product_delivery["store"] = _StubStore(
-        sprint_view=SprintWithStories(sprint=sprint, stories=[s1, s2]),
+        sprint_view=SprintWithStories(
+            sprint=sprint,
+            stories=[s1, s2],
+            acceptance_criteria_by_story_id={
+                "story-1": [
+                    _ac("submit returns 200", "story-1"),
+                    _ac("rate-limited", "story-1"),
+                ],
+                "story-2": [_ac("email is sent", "story-2")],
+            },
+        ),
     )
-    patch_product_delivery["acs"] = {
-        "story-1": [_ac("submit returns 200", "story-1"), _ac("rate-limited", "story-1")],
-        "story-2": [_ac("email is sent", "story-2")],
-    }
 
     requirements, spec_markdown = _orchestrator._load_requirements_from_sprint("sprint-1")
 
@@ -260,8 +255,9 @@ def test_load_requirements_from_sprint_falls_back_when_no_acs(patch_product_deli
         updated_at=_now(),
     )
     patch_product_delivery["store"] = _StubStore(
-        sprint_view=SprintWithStories(sprint=sprint, stories=[s])
+        sprint_view=SprintWithStories(
+            sprint=sprint, stories=[s], acceptance_criteria_by_story_id={}
+        )
     )
-    patch_product_delivery["acs"] = {}
     requirements, _ = _orchestrator._load_requirements_from_sprint("sprint-x")
     assert requirements.acceptance_criteria == ["Deliver according to planned story scope."]
