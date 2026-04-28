@@ -751,11 +751,16 @@ jobs:
             type=ref,event=pr
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: backend
           file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name == 'push' }}
+          # load: true makes the image available to the local Docker daemon so
+          # the smoke step below can `docker run` it. Required for the import
+          # smoke check; harmless for push runs (action emits both outputs).
+          load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: |
@@ -764,6 +769,58 @@ jobs:
           cache-to: |
             type=gha,mode=max,scope=${{ matrix.service }}
             ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/{0}/{1}:buildcache,mode=max', github.repository_owner, matrix.service) || '' }}
+
+      # Boot every TEAM_MODULE that runs inside this image and verify it
+      # imports cleanly. Catches the "added a top-level import in a team but
+      # forgot to add the package to team_service/requirements.txt" class of
+      # bug before it ever ships — the unit-test job installs
+      # agents/requirements.txt (a different file) so the failure mode only
+      # surfaces when the prod container actually starts.
+      - name: Import-smoke every TEAM_MODULE
+        env:
+          MATRIX_DOCKERFILE: ${{ matrix.dockerfile }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          # Strip leading "backend/" so the value matches docker-compose.yml,
+          # which uses paths relative to its build context (backend/).
+          dockerfile_rel="${MATRIX_DOCKERFILE#backend/}"
+          # First tag emitted by docker/metadata-action is the SHA tag, which
+          # is always present and unique to this build.
+          image_tag=$(printf '%s\n' "$IMAGE_TAGS" | head -n 1)
+          echo "Smoke target image: $image_tag"
+          echo "Looking for services in docker/docker-compose.yml using dockerfile=$dockerfile_rel"
+          modules=$(awk -v df="$dockerfile_rel" '
+            /^[[:space:]]+dockerfile:[[:space:]]+/ { current=$2 }
+            /^[[:space:]]+TEAM_MODULE:[[:space:]]+/ && current == df { print $2 }
+          ' docker/docker-compose.yml | sort -u)
+          if [ -z "$modules" ]; then
+            echo "No TEAM_MODULE entries found for $dockerfile_rel — nothing to smoke."
+            exit 0
+          fi
+          echo "Modules to import-smoke:"
+          printf '  %s\n' $modules
+          failed=0
+          for m in $modules; do
+            echo "::group::import $m"
+            if docker run --rm \
+                -e TEAM_MODULE="$m" \
+                -e TEAM_NAME=smoke \
+                -e TEAM_PORT=8000 \
+                -e POSTGRES_HOST="" \
+                --entrypoint python \
+                "$image_tag" \
+                -c "import importlib, sys; importlib.import_module('$m'); sys.stdout.write('ok\n')"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::import $m failed"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
 
   build-frontend:
     name: Build Frontend Docker image

@@ -34,10 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
-
-import pyarrow as pa
-import pyarrow.parquet as pq
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from shared_postgres import is_postgres_enabled
 from shared_postgres.client import get_conn
@@ -45,18 +42,33 @@ from shared_postgres.client import get_conn
 from ..market_data_service import OHLCVBar, compute_adv_from_bars
 from . import paths as _paths
 
+if TYPE_CHECKING:
+    import pyarrow as pa  # noqa: F401 — for forward-ref annotations only
+
 logger = logging.getLogger(__name__)
 
-_PARQUET_SCHEMA = pa.schema(
-    [
-        ("date", pa.string()),
-        ("open", pa.float64()),
-        ("high", pa.float64()),
-        ("low", pa.float64()),
-        ("close", pa.float64()),
-        ("volume", pa.float64()),
-    ]
-)
+# Lazy: built on first use by _get_parquet_schema().  Importing pyarrow at
+# module load would force every consumer of investment_team.api.main to have
+# pyarrow installed, even when no caller exercises the parquet write path.
+_PARQUET_SCHEMA: Any = None
+
+
+def _get_parquet_schema() -> Any:
+    global _PARQUET_SCHEMA
+    if _PARQUET_SCHEMA is None:
+        import pyarrow as pa  # noqa: PLC0415 — deliberate lazy import
+
+        _PARQUET_SCHEMA = pa.schema(
+            [
+                ("date", pa.string()),
+                ("open", pa.float64()),
+                ("high", pa.float64()),
+                ("low", pa.float64()),
+                ("close", pa.float64()),
+                ("volume", pa.float64()),
+            ]
+        )
+    return _PARQUET_SCHEMA
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +149,9 @@ def compute_dataset_fingerprint(per_symbol: Mapping[str, Sequence[OHLCVBar]]) ->
 # ---------------------------------------------------------------------------
 
 
-def _bars_to_table(bars: Sequence[OHLCVBar]) -> pa.Table:
+def _bars_to_table(bars: Sequence[OHLCVBar]) -> "pa.Table":
+    import pyarrow as pa  # noqa: PLC0415 — deliberate lazy import
+
     return pa.Table.from_pydict(
         {
             "date": [b.date for b in bars],
@@ -147,11 +161,11 @@ def _bars_to_table(bars: Sequence[OHLCVBar]) -> pa.Table:
             "close": [float(b.close) for b in bars],
             "volume": [float(b.volume) for b in bars],
         },
-        schema=_PARQUET_SCHEMA,
+        schema=_get_parquet_schema(),
     )
 
 
-def _table_to_bars(table: pa.Table) -> List[OHLCVBar]:
+def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
     cols = {
         name: table[name].to_pylist() for name in ("date", "open", "high", "low", "close", "volume")
     }
@@ -393,6 +407,8 @@ class MarketDataCache:
             )
             return None
         try:
+            import pyarrow.parquet as pq  # noqa: PLC0415 — deliberate lazy import
+
             table = pq.read_table(path)
         except Exception:
             logger.exception("failed to read parquet snapshot at %s; refetching", path)
@@ -428,6 +444,8 @@ class MarketDataCache:
         if out_path.exists():
             stamp = fetch_ts.strftime("%Y-%m-%dT%H%M%S%f")
             out_path = out_path.with_name(f"{stamp}.parquet")
+        import pyarrow.parquet as pq  # noqa: PLC0415 — deliberate lazy import
+
         pq.write_table(table, out_path, compression="snappy")
 
         meta = SnapshotMeta(

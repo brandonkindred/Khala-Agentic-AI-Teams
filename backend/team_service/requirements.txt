@@ -21,9 +21,14 @@ pytz>=2026.1
 python-dotenv>=1.2,<2.0
 yfinance>=1.2,<2.0
 # Investment team market-data cache (#376) — Parquet snapshot store.
-# Imported at module load by investment_team.market_data_cache.store, so the
-# investment_team container fails to start without it.
+# Imported lazily by investment_team.market_data_cache.store; required at
+# runtime when the parquet write path is exercised.
 pyarrow>=15.0,<22.0
+# Strategy Lab sandbox subprocess (strategy_lab/executor/indicators.py) imports
+# numpy + pandas at module load. Currently transitive via yfinance; pin
+# explicitly so strategy execution doesn't depend on yfinance's dep tree.
+numpy>=1.26,<3.0
+pandas>=2.2,<3.0
 # Observability: team services auto-expose /metrics via team_service/entrypoint.py
 prometheus-fastapi-instrumentator>=7.1,<8.0
 # OpenTelemetry: every team container runs shared_observability.init_otel at startup
