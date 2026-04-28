@@ -2178,6 +2178,7 @@ def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
     for a sprint run).
     """
     from product_delivery import (  # noqa: PLC0415 — lazy to avoid cross-team import at module load
+        TERMINAL_STORY_STATUSES,
         UnknownProductDeliveryEntity,
         get_store,
     )
@@ -2192,7 +2193,20 @@ def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
             "POST /api/product-delivery/sprints/{id}/plan first."
         )
     sprint = sprint_view.sprint
-    story_ids = [s.id for s in sprint_view.stories]
+    # Filter terminal-status stories before synthesis so the SE
+    # pipeline doesn't re-execute work that's already done /
+    # cancelled / closed (Codex review on PR #396). Stories may be
+    # marked terminal *after* planning — the planner only excludes
+    # them at *selection* time, so without this filter execution and
+    # planning would diverge. Uses the same `TERMINAL_STORY_STATUSES`
+    # set the planner does.
+    executable_stories = [s for s in sprint_view.stories if s.status not in TERMINAL_STORY_STATUSES]
+    if not executable_stories:
+        raise ValueError(
+            f"sprint {sprint_id!r} has no executable stories — every planned "
+            "story is in a terminal status (done/completed/cancelled/closed)."
+        )
+    story_ids = [s.id for s in executable_stories]
 
     # Markdown synthesis: per-story heading + user_story + bulleted ACs.
     # `acceptance_criteria_by_story_id` was populated by
@@ -2212,7 +2226,7 @@ def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
         sections.append("> " + ", ".join(window))
         sections.append("")
     acs_by_story = sprint_view.acceptance_criteria_by_story_id or {}
-    for story in sprint_view.stories:
+    for story in executable_stories:
         sections.append(f"## {story.title}")
         if story.user_story:
             sections.append(f"**User Story:** {story.user_story}")

@@ -233,6 +233,88 @@ def test_run_team_request_rejects_blank_sprint_id(blank: str) -> None:
         RunTeamRequest(repo_path="/tmp/x", sprint_id=blank)
 
 
+def _story_with_status(sid: str, title: str, status: str) -> Story:
+    """Like ``_story`` but lets the test set a specific status."""
+    return Story(
+        id=sid,
+        epic_id="epic-1",
+        title=title,
+        user_story="",
+        status=status,
+        wsjf_score=None,
+        rice_score=None,
+        estimate_points=None,
+        author="tester",
+        created_at=_now(),
+        updated_at=_now(),
+    )
+
+
+def test_load_requirements_skips_terminal_status_stories(patch_product_delivery: Any) -> None:
+    """Stories marked done/completed/cancelled/closed after planning must
+    NOT appear in the synthesized spec (Codex review on PR #396).
+    Otherwise execution would re-do already-finished work — divergent
+    from the planner, which excludes terminal stories at selection.
+    """
+    s_active = _story_with_status("story-1", "Active work", "in_progress")
+    s_done = _story_with_status("story-2", "Already done", "done")
+    s_cancelled = _story_with_status("story-3", "Cancelled work", "cancelled")
+    sprint = Sprint(
+        id="sprint-1",
+        product_id="product-1",
+        name="S1",
+        capacity_points=10.0,
+        starts_at=None,
+        ends_at=None,
+        status="active",
+        author="tester",
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    patch_product_delivery["store"] = _StubStore(
+        sprint_view=SprintWithStories(
+            sprint=sprint,
+            stories=[s_active, s_done, s_cancelled],
+            acceptance_criteria_by_story_id={},
+        ),
+    )
+
+    requirements, spec_markdown = _orchestrator._load_requirements_from_sprint("sprint-1")
+
+    # Only the active story is in metadata.story_ids and the markdown.
+    assert requirements.metadata["story_ids"] == ["story-1"]
+    assert "## Active work" in spec_markdown
+    assert "## Already done" not in spec_markdown
+    assert "## Cancelled work" not in spec_markdown
+
+
+def test_load_requirements_raises_when_all_stories_terminal(patch_product_delivery: Any) -> None:
+    """A sprint where every planned story is terminal-status raises
+    `ValueError` — same shape as the empty-scope case, never silently
+    falls back to repo spec parsing (Codex review on PR #396).
+    """
+    s_done = _story_with_status("story-1", "Done", "done")
+    sprint = Sprint(
+        id="sprint-x",
+        product_id="product-1",
+        name="X",
+        capacity_points=5.0,
+        starts_at=None,
+        ends_at=None,
+        status="completed",
+        author="tester",
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    patch_product_delivery["store"] = _StubStore(
+        sprint_view=SprintWithStories(
+            sprint=sprint, stories=[s_done], acceptance_criteria_by_story_id={}
+        )
+    )
+    with pytest.raises(ValueError, match="no executable stories"):
+        _orchestrator._load_requirements_from_sprint("sprint-x")
+
+
 def test_load_requirements_from_sprint_falls_back_when_no_acs(patch_product_delivery: Any) -> None:
     """When stories have no AC rows, we still produce a non-empty AC list.
 

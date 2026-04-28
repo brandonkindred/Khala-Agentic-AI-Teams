@@ -34,6 +34,7 @@ from product_delivery.models import (
 )
 from product_delivery.scoring import rice_score, wsjf_score
 from product_delivery.store import (
+    TERMINAL_STORY_STATUSES,
     CrossProductFeedbackLink,
     CrossProductSprintAssignment,
     ProductDeliveryStorageUnavailable,
@@ -64,6 +65,7 @@ __all__ = [
     "SprintWithStories",
     "Story",
     "StoryAlreadyPlanned",
+    "TERMINAL_STORY_STATUSES",
     "Task",
     "UnknownProductDeliveryEntity",
     "get_store",

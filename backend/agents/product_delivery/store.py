@@ -224,7 +224,12 @@ _FEEDBACK_SOURCE_MAX_LEN = 120
 # storing `Done` instead of `done` would slip past — keeping this
 # strict-lowercase for now matches the rest of the team's data and a
 # future status-enum migration can normalise on the way in.
-_TERMINAL_STORY_STATUSES = frozenset({"done", "completed", "cancelled", "closed"})
+#
+# Exposed as a public name so cross-team callers (e.g. the SE
+# orchestrator's synthesized-spec path) use the same definition the
+# planner does — keeps planning vs. execution behavior in lockstep.
+TERMINAL_STORY_STATUSES: frozenset[str] = frozenset({"done", "completed", "cancelled", "closed"})
+_TERMINAL_STORY_STATUSES = TERMINAL_STORY_STATUSES  # backwards-compatible alias
 
 
 def _validate_optional_finite_score(value: float | None, *, label: str) -> float | None:
@@ -306,15 +311,19 @@ def _validate_sprint_window(starts_at: datetime | None, ends_at: datetime | None
 
     The model uses ``AwareDatetime`` so the route layer rejects naive
     timestamps with a 422; this helper repeats the tz-awareness check
-    so a non-route caller passing a ``datetime.utcnow()`` doesn't
-    crash the comparison with ``TypeError`` and bypass the typed
-    domain ``ValueError`` path.
+    per-endpoint so a non-route caller passing a single-ended naive
+    bound (e.g. ``starts_at=datetime.utcnow(), ends_at=None``) still
+    raises a typed ``ValueError`` instead of silently inserting and
+    then crashing in the post-commit ``Sprint(...)`` validation
+    (Codex review on PR #396 — that path leaked invalid persisted
+    rows because the early-return ``return when None`` skipped the
+    naive-bound validation entirely).
     """
-    if starts_at is None or ends_at is None:
-        return
-    if starts_at.tzinfo is None or ends_at.tzinfo is None:
-        raise ValueError("starts_at and ends_at must both be timezone-aware")
-    if ends_at < starts_at:
+    if starts_at is not None and starts_at.tzinfo is None:
+        raise ValueError("starts_at must be timezone-aware")
+    if ends_at is not None and ends_at.tzinfo is None:
+        raise ValueError("ends_at must be timezone-aware")
+    if starts_at is not None and ends_at is not None and ends_at < starts_at:
         raise ValueError("ends_at must be on or after starts_at")
 
 

@@ -1779,6 +1779,35 @@ def test_create_sprint_rejects_naive_datetime(
     assert r.status_code == 422
 
 
+def test_validate_sprint_window_rejects_single_naive_endpoint() -> None:
+    """`_validate_sprint_window` must reject a single naive bound on its
+    own — even when the other side is None (Codex review on PR #396).
+    Otherwise non-route callers could slip a naive `starts_at` through,
+    insert the row, and crash inside the post-commit `Sprint(...)`
+    validation, leaving invalid persisted data behind.
+    """
+    from datetime import datetime, timezone
+
+    from product_delivery.store import _validate_sprint_window
+
+    naive = datetime(2026, 5, 1, 0, 0, 0)  # no tz
+    aware = datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    # Both None → no-op.
+    _validate_sprint_window(None, None)
+    # One side None + other side aware → no-op.
+    _validate_sprint_window(aware, None)
+    _validate_sprint_window(None, aware)
+    # Single-ended naive must raise.
+    with pytest.raises(ValueError, match="starts_at must be timezone-aware"):
+        _validate_sprint_window(naive, None)
+    with pytest.raises(ValueError, match="ends_at must be timezone-aware"):
+        _validate_sprint_window(None, naive)
+    # Mixed naive/aware also raises.
+    with pytest.raises(ValueError, match="ends_at must be timezone-aware"):
+        _validate_sprint_window(aware, naive)
+
+
 def test_add_story_to_sprint_rejects_cross_product_assignment(
     client_and_store: tuple[TestClient, _FakeStore],
 ) -> None:
