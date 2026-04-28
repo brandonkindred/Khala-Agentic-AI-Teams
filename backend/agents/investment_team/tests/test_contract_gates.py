@@ -83,6 +83,18 @@ def test_attached_take_profit_is_gated_until_step_7():
         req.validate_prices()
 
 
+def test_parent_order_id_is_gated_until_step_7():
+    req = _base(parent_order_id="parent-123")
+    with pytest.raises(NotImplementedError, match="#389"):
+        req.validate_prices()
+
+
+def test_oco_group_id_is_gated_until_step_7():
+    req = _base(oco_group_id="oco-1")
+    with pytest.raises(NotImplementedError, match="#389"):
+        req.validate_prices()
+
+
 def test_default_market_order_still_validates():
     """Sanity: the gates only fire on the new feature flags."""
     _base().validate_prices()

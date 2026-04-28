@@ -162,6 +162,16 @@ class OrderRequest(BaseModel):
                 "attached_stop_loss / attached_take_profit are not yet materialized "
                 "as bracket children; see #389 (Trading 5/5 Step 7) for runtime support"
             )
+        if self.parent_order_id is not None:
+            raise NotImplementedError(
+                "parent_order_id is not yet honored; see #389 (Trading 5/5 Step 7) "
+                "for bracket-child materialization"
+            )
+        if self.oco_group_id is not None:
+            raise NotImplementedError(
+                "oco_group_id is not yet honored; see #389 (Trading 5/5 Step 7) "
+                "for OCO sibling cancellation"
+            )
 
 
 class Fill(BaseModel):
