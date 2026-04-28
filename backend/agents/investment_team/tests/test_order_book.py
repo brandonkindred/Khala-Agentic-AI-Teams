@@ -19,6 +19,7 @@ from investment_team.trading_service.strategy.contract import (
     OrderRequest,
     OrderSide,
     OrderType,
+    TimeInForce,
     UnsupportedOrderFeatureError,
 )
 
@@ -224,6 +225,44 @@ def test_requeue_rejects_growing_remaining_qty() -> None:
     # And a value larger than original_qty is also rejected.
     with pytest.raises(ValueError, match="must not exceed current remaining_qty"):
         book.requeue(po.order_id, new_remaining_qty=11.0, new_submitted_at="2024-01-04")
+
+
+def test_requeue_rejects_nan_and_inf_remaining_qty() -> None:
+    """``NaN`` passes both ``< 0`` and ``> current`` checks vacuously, so an
+    explicit finite-check is needed to keep ``nan``/``inf`` out of fill state.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+
+    with pytest.raises(ValueError, match="must be finite"):
+        book.requeue(po.order_id, new_remaining_qty=float("nan"), new_submitted_at="2024-01-03")
+    with pytest.raises(ValueError, match="must be finite"):
+        book.requeue(po.order_id, new_remaining_qty=float("inf"), new_submitted_at="2024-01-03")
+    with pytest.raises(ValueError, match="must be finite"):
+        book.requeue(po.order_id, new_remaining_qty=float("-inf"), new_submitted_at="2024-01-03")
+
+    # State preserved — the rejected calls leave remaining/cumulative fields untouched.
+    assert po.remaining_qty == 10.0
+    assert po.cumulative_filled_qty == 0.0
+
+
+def test_requeue_unknown_order_id_raises_keyerror() -> None:
+    """A stale/missing id is a partial-fill bug, not an idempotent removal —
+    raise loudly with a clear message rather than silently no-op like
+    ``cancel`` / ``remove`` do.
+    """
+    book = OrderBook()
+    book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    with pytest.raises(KeyError, match="not in the book"):
+        book.requeue("o-bogus", new_remaining_qty=5.0, new_submitted_at="2024-01-03")
 
 
 # ---------------------------------------------------------------------------
@@ -476,3 +515,86 @@ def test_submit_attached_indexes_by_symbol() -> None:
     # Removing the child also clears the symbol index entry.
     book.remove(child.order_id)
     assert child not in book.pending_for_symbol("AAA")
+
+
+# ---------------------------------------------------------------------------
+# submit_attached re-runs *every* validate_prices() gate except the
+# parent_order_id / oco_group_id ones — i.e. malformed children (LIMIT
+# without limit_price, STOP without stop_price) and unsupported types
+# (TRAILING_STOP, IOC/FOK) must still be rejected at submission time so we
+# never queue an order that would crash the simulator later.
+# ---------------------------------------------------------------------------
+
+
+def _bracket_parent(book: OrderBook):
+    return book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+
+
+def test_submit_attached_rejects_limit_child_without_price() -> None:
+    book = OrderBook()
+    parent = _bracket_parent(book)
+    with pytest.raises(ValueError, match="limit order requires limit_price"):
+        book.submit_attached(
+            _base(qty=10.0, order_type=OrderType.LIMIT),  # limit_price missing
+            submitted_at="2024-01-03",
+            submitted_equity=100_000.0,
+            parent_order_id=parent.order_id,
+            oco_group_id="g1",
+        )
+    # Nothing got queued.
+    assert book.children_of(parent.order_id) == []
+
+
+def test_submit_attached_rejects_stop_child_without_price() -> None:
+    book = OrderBook()
+    parent = _bracket_parent(book)
+    with pytest.raises(ValueError, match="stop order requires stop_price"):
+        book.submit_attached(
+            _base(qty=10.0, order_type=OrderType.STOP),  # stop_price missing
+            submitted_at="2024-01-03",
+            submitted_equity=100_000.0,
+            parent_order_id=parent.order_id,
+            oco_group_id="g1",
+        )
+    assert book.children_of(parent.order_id) == []
+
+
+def test_submit_attached_rejects_trailing_stop_child() -> None:
+    """TRAILING_STOP is gated until #390 ships — the gate must still fire on
+    bracket children even though strategy-level submit was bypassed.
+    """
+    book = OrderBook()
+    parent = _bracket_parent(book)
+    with pytest.raises(UnsupportedOrderFeatureError, match="#390"):
+        book.submit_attached(
+            _base(qty=10.0, order_type=OrderType.TRAILING_STOP, stop_price=95.0),
+            submitted_at="2024-01-03",
+            submitted_equity=100_000.0,
+            parent_order_id=parent.order_id,
+            oco_group_id="g1",
+        )
+    assert book.children_of(parent.order_id) == []
+
+
+def test_submit_attached_rejects_ioc_child() -> None:
+    """IOC/FOK are gated until #388 ships — same as above."""
+    book = OrderBook()
+    parent = _bracket_parent(book)
+    with pytest.raises(UnsupportedOrderFeatureError, match="#388"):
+        book.submit_attached(
+            _base(
+                qty=10.0,
+                order_type=OrderType.LIMIT,
+                limit_price=110.0,
+                tif=TimeInForce.IOC,
+            ),
+            submitted_at="2024-01-03",
+            submitted_equity=100_000.0,
+            parent_order_id=parent.order_id,
+            oco_group_id="g1",
+        )
+    assert book.children_of(parent.order_id) == []

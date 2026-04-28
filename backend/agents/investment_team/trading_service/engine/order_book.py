@@ -10,6 +10,7 @@ them (or they expire by TIF, or the strategy cancels them).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -71,16 +72,27 @@ class OrderBook:
         parent_order_id: str,
         oco_group_id: str,
     ) -> PendingOrder:
-        """Submit a bracket / OCO child without re-running the strategy-side
-        ``validate_prices()`` gate. The parent order has already been risk-gated
-        at submit time; the engine-side materializer (Step 7 / #389) is
-        responsible for shape correctness of the attached leg.
+        """Submit a bracket / OCO child.
+
+        The point of this entry is to allow ``parent_order_id`` /
+        ``oco_group_id`` to be set on the queued order — the strategy-side
+        ``validate_prices()`` gate refuses both fields outright (they are
+        engine-internal). All *other* runtime-support gates and shape-consistency
+        checks (LIMIT requires ``limit_price``, STOP requires ``stop_price``,
+        no TRAILING_STOP / IOC / FOK / unfilled_policy until their respective
+        steps ship, no nested attachments) still apply; we re-run
+        ``validate_prices`` on a clone with parent/OCO cleared so we don't
+        re-fire the very gates this method is meant to bypass.
         """
-        self._next_id += 1
-        order_id = f"o{self._next_id}"
         attached_request = request.model_copy(
             update={"parent_order_id": parent_order_id, "oco_group_id": oco_group_id}
         )
+        attached_request.model_copy(
+            update={"parent_order_id": None, "oco_group_id": None}
+        ).validate_prices()
+
+        self._next_id += 1
+        order_id = f"o{self._next_id}"
         po = PendingOrder(
             order_id=order_id,
             request=attached_request,
@@ -141,7 +153,16 @@ class OrderBook:
         A partial fill can only shrink the remainder; growing it would imply a
         negative fill, and a negative remainder has no execution semantics.
         """
-        po = self._pending[order_id]
+        po = self._pending.get(order_id)
+        if po is None:
+            # Explicit raise (not silent no-op) — partial-fill flow should never
+            # call requeue on an order that's already been removed/cancelled, so
+            # surface the bug rather than masking it. Unlike ``cancel``/``remove``,
+            # which are idempotent removals, ``requeue`` represents an active fill
+            # update against an order the caller believes is still pending.
+            raise KeyError(f"requeue: order_id {order_id!r} is not in the book")
+        if not math.isfinite(new_remaining_qty):
+            raise ValueError(f"requeue new_remaining_qty must be finite, got {new_remaining_qty!r}")
         if new_submitted_at < po.submitted_at:
             raise ValueError(
                 f"requeue submitted_at must not regress: "
