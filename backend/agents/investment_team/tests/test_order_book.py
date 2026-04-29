@@ -240,7 +240,9 @@ def test_requeue_normalizes_z_suffix_timestamp() -> None:
         new_submitted_at="2024-01-02T10:00:00Z",
     )
     assert po.remaining_qty == 4.0
-    assert po.submitted_at == "2024-01-02T10:00:00Z"
+    # ``requeue`` canonicalises tz-aware timestamps to UTC ``+00:00`` form
+    # so all downstream consumers see a consistent string.
+    assert po.submitted_at == "2024-01-02T10:00:00+00:00"
 
     # And the other direction: existing has Z suffix, new has +00:00 — also
     # not a regression.
@@ -2073,3 +2075,108 @@ def test_requeue_rejects_non_numeric_remaining_qty(bad_qty) -> None:
         book.requeue(po.order_id, new_remaining_qty=bad_qty, new_submitted_at="2024-01-03")
     # State unchanged.
     assert po.remaining_qty == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Timestamp canonicalisation: ``requeue`` normalises tz-aware values to UTC
+# ``+00:00`` form so the look-ahead guard in ``execution/bar_safety.py``
+# (which compares bar timestamps to ``po.submitted_at`` lexicographically)
+# doesn't false-reject mixed-offset traces.
+# ---------------------------------------------------------------------------
+
+
+def test_requeue_canonicalizes_tz_aware_timestamp_to_utc() -> None:
+    """A non-UTC offset gets rewritten to the equivalent UTC instant."""
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02T05:00:00+00:00",
+        submitted_equity=100_000.0,
+    )
+    # 10:30 IST = 05:00 UTC (same instant); after canonicalisation the
+    # stored string is in UTC form regardless of caller-side offset.
+    book.requeue(
+        po.order_id,
+        new_remaining_qty=4.0,
+        new_submitted_at="2024-01-02T10:30:00+05:30",
+    )
+    assert po.submitted_at == "2024-01-02T05:00:00+00:00"
+
+
+def test_requeue_canonicalizes_compact_offset() -> None:
+    """``+0000`` (no colon) is a valid ISO 8601 offset that Python 3.10's
+    ``datetime.fromisoformat`` rejects; ``_normalize_ts`` rewrites it
+    before parse, and ``_canonicalize_ts`` then re-emits in canonical form.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02T05:00:00+00:00",
+        submitted_equity=100_000.0,
+    )
+    book.requeue(
+        po.order_id,
+        new_remaining_qty=3.0,
+        new_submitted_at="2024-01-02T05:00:00+0000",
+    )
+    assert po.submitted_at == "2024-01-02T05:00:00+00:00"
+
+
+def test_requeue_does_not_canonicalize_naive_date_string() -> None:
+    """Naive (date-only / no-offset) inputs round-trip unchanged so existing
+    callers using simple date strings aren't mangled into datetime form.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    book.requeue(po.order_id, new_remaining_qty=4.0, new_submitted_at="2024-01-03")
+    assert po.submitted_at == "2024-01-03"
+
+
+def test_requeue_handles_compact_offset_in_regression_check() -> None:
+    """A compact-offset timestamp must compare correctly against an
+    already-stored equivalent ``+00:00``-form timestamp — same instant
+    must not raise as a regression.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02T10:00:00+00:00",
+        submitted_equity=100_000.0,
+    )
+    # Same instant in compact form — must not raise.
+    book.requeue(
+        po.order_id,
+        new_remaining_qty=4.0,
+        new_submitted_at="2024-01-02T10:00:00+0000",
+    )
+    assert po.remaining_qty == 4.0
+
+
+def test_submit_attached_market_rejection_message_lists_supported_types() -> None:
+    """The MARKET-rejection message must point callers at types that are
+    actually supported (``LIMIT`` / ``STOP``) — not at ``STOP_LIMIT``
+    (doesn't exist) or ``TRAILING_STOP`` (still gated until #390).
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0, side=OrderSide.LONG),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        expect_brackets=True,
+    )
+    with pytest.raises(ValueError) as excinfo:
+        book.submit_attached(
+            _base(qty=10.0, side=OrderSide.SHORT, order_type=OrderType.MARKET),
+            submitted_at="2024-01-03",
+            submitted_equity=100_000.0,
+            parent_order_id=parent.order_id,
+            oco_group_id="g1",
+        )
+    msg = str(excinfo.value)
+    assert "LIMIT or STOP" in msg
+    # Make sure we're not pointing callers at non-existent or gated types.
+    assert "STOP_LIMIT" not in msg

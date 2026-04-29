@@ -11,8 +11,9 @@ them (or they expire by TIF, or the strategy cancels them).
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, NamedTuple, Optional
 
 from ..strategy.contract import OrderRequest, OrderSide, OrderType, TimeInForce
@@ -212,9 +213,9 @@ class OrderBook:
         # error rather than an unintended fill.
         if request.order_type == OrderType.MARKET:
             raise ValueError(
-                "submit_attached child must be LIMIT / STOP / STOP_LIMIT / TRAILING_STOP, "
-                "not MARKET — market children would fire immediately on the next bar "
-                "instead of acting as protective legs"
+                "submit_attached child must be LIMIT or STOP, not MARKET — market "
+                "children would fire immediately on the next bar instead of acting as "
+                "protective legs (TRAILING_STOP is gated until #390 / Step 8 lands)"
             )
         attached_request = request.model_copy(
             update={"parent_order_id": parent_order_id, "oco_group_id": oco_group_id}
@@ -460,7 +461,14 @@ class OrderBook:
                 f"requeue twap_slices_remaining must be a non-negative int or None, "
                 f"got {twap_slices_remaining!r}"
             )
-        po.submitted_at = new_submitted_at
+        # Canonicalise before storing so equivalent instants in different
+        # input formats (``Z`` vs ``+00:00`` vs ``+0000`` vs ``+05:30``)
+        # persist as the same string, and so the look-ahead guard in
+        # ``execution/bar_safety.py`` (which compares bar timestamps to
+        # ``po.submitted_at`` lexicographically) doesn't false-reject
+        # mixed-offset traces. Naive date-only inputs are returned
+        # unchanged so existing tests using ``"2024-01-02"`` aren't mangled.
+        po.submitted_at = _canonicalize_ts(new_submitted_at)
         po.remaining_qty = new_remaining_qty
         po.cumulative_filled_qty = po.original_qty - new_remaining_qty
         po.twap_slices_remaining = twap_slices_remaining
@@ -622,15 +630,30 @@ def _date_only(ts: str) -> str:
     return (ts or "")[:10]
 
 
+_COMPACT_OFFSET_RE = re.compile(r"([+-])(\d{2})(\d{2})$")
+
+
 def _normalize_ts(ts: str) -> str:
-    """Map a trailing ``Z`` (UTC zulu suffix) to ``+00:00``. Used as both a
-    pre-parse normaliser (so ``datetime.fromisoformat`` accepts the Z form on
-    Python < 3.11) and the fallback string compare for unparseable inputs.
+    """Best-effort ISO 8601 input normaliser used as both a pre-parse step
+    (so ``datetime.fromisoformat`` accepts variants Python < 3.11 doesn't)
+    and the fallback string-compare value for unparseable inputs.
+
+    Handles two non-canonical forms:
+
+    - Trailing ``Z`` (UTC zulu suffix) → ``+00:00``.
+    - Compact offsets ``±HHMM`` (no colon) → ``±HH:MM``. Without this,
+      values like ``+0000`` or ``+0530`` fail ``fromisoformat`` on Python
+      3.10 and force ``_ts_lt`` into the lexicographic fallback.
+
+    Anything else is returned unchanged.
     """
     if not isinstance(ts, str):
         return ts
     if ts.endswith("Z"):
         return ts[:-1] + "+00:00"
+    m = _COMPACT_OFFSET_RE.search(ts)
+    if m:
+        return ts[: m.start()] + f"{m.group(1)}{m.group(2)}:{m.group(3)}"
     return ts
 
 
@@ -644,6 +667,26 @@ def _try_parse_ts(ts: str) -> Optional[datetime]:
         return datetime.fromisoformat(_normalize_ts(ts))
     except ValueError:
         return None
+
+
+def _canonicalize_ts(ts: str) -> str:
+    """Re-emit a timestamp in a canonical ISO 8601 form so equivalent
+    instants in different input formats persist as the same string. UTC
+    is the canonical zone for tz-aware values; tz-naive inputs (e.g.
+    date-only ``"2024-01-02"`` strings used by the existing tests) are
+    returned unchanged so we don't mangle them into ``"2024-01-02T00:00:00"``.
+
+    Used by ``OrderBook.requeue`` to keep ``po.submitted_at`` in a
+    consistent format that the look-ahead guard in
+    ``execution/bar_safety.py`` can compare against bar timestamps with
+    plain string ``<=``.
+    """
+    if not isinstance(ts, str):
+        return ts
+    dt = _try_parse_ts(ts)
+    if dt is None or dt.tzinfo is None:
+        return ts
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def _ts_lt(new_ts: str, existing_ts: str) -> bool:
