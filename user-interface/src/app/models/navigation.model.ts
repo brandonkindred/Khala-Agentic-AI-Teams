@@ -84,7 +84,13 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'personal-assistant', label: 'Personal Assistant', icon: 'smart_toy', route: '/personal-assistant', group: 'personal' },
       { id: 'nutrition', label: 'Nutritionist', icon: 'restaurant_menu', route: '/nutrition', group: 'personal' },
-      { id: 'road-trip-planning', label: 'Road Trip Planning', icon: 'directions_car', route: '/road-trip-planning', group: 'personal' },
+    ],
+  },
+  {
+    key: 'travel',
+    label: 'Travel',
+    items: [
+      { id: 'road-trip-planning', label: 'Road Trip Planning', icon: 'directions_car', route: '/road-trip-planning', group: 'travel' },
     ],
   },
   {
