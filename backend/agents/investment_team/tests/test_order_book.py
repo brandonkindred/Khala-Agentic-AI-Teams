@@ -106,7 +106,7 @@ def test_remove_default_evicts_top_level_id() -> None:
 
     with pytest.raises(ValueError, match="not a known top-level order id"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -127,7 +127,7 @@ def test_remove_with_was_filled_preserves_top_level_id() -> None:
     book.remove(parent.order_id, was_filled=True)
 
     child = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -574,21 +574,27 @@ def test_oco_cancel_siblings_cancels_only_siblings() -> None:
     )
 
     sibling_a = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
         oco_group_id="g1",
     )
     sibling_b = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
         oco_group_id="g1",
     )
     unrelated = book.submit_attached(
-        _base(qty=5.0, symbol="BBB", order_type=OrderType.LIMIT, limit_price=55.0),
+        _base(
+            side=OrderSide.SHORT,
+            qty=5.0,
+            symbol="BBB",
+            order_type=OrderType.LIMIT,
+            limit_price=55.0,
+        ),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=other_parent.order_id,
@@ -647,7 +653,7 @@ def test_oco_cancel_siblings_rejects_mismatched_except_leg() -> None:
         submitted_equity=100_000.0,
     )
     sibling = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -680,7 +686,7 @@ def test_oco_cancel_siblings_rejects_bad_id_args(arg, bad_value) -> None:
         submitted_equity=100_000.0,
     )
     sibling = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -721,28 +727,40 @@ def test_oco_cancel_siblings_does_not_cross_brackets() -> None:
     )
 
     a_tp = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent_a.order_id,
         oco_group_id="g-shared",
     )
     a_sl = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent_a.order_id,
         oco_group_id="g-shared",
     )
     b_tp = book.submit_attached(
-        _base(qty=10.0, symbol="BBB", order_type=OrderType.LIMIT, limit_price=210.0),
+        _base(
+            side=OrderSide.SHORT,
+            qty=10.0,
+            symbol="BBB",
+            order_type=OrderType.LIMIT,
+            limit_price=210.0,
+        ),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent_b.order_id,
         oco_group_id="g-shared",
     )
     b_sl = book.submit_attached(
-        _base(qty=10.0, symbol="BBB", order_type=OrderType.STOP, stop_price=195.0),
+        _base(
+            side=OrderSide.SHORT,
+            qty=10.0,
+            symbol="BBB",
+            order_type=OrderType.STOP,
+            stop_price=195.0,
+        ),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent_b.order_id,
@@ -781,14 +799,14 @@ def test_children_of_returns_only_direct_children() -> None:
         submitted_equity=100_000.0,
     )
     child_a = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
         oco_group_id="g1",
     )
     child_b = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -801,7 +819,13 @@ def test_children_of_returns_only_direct_children() -> None:
         submitted_equity=100_000.0,
     )
     book.submit_attached(
-        _base(qty=5.0, symbol="BBB", order_type=OrderType.LIMIT, limit_price=55.0),
+        _base(
+            side=OrderSide.SHORT,
+            qty=5.0,
+            symbol="BBB",
+            order_type=OrderType.LIMIT,
+            limit_price=55.0,
+        ),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=other_parent.order_id,
@@ -873,7 +897,7 @@ def test_submit_attached_skips_risk_gates() -> None:
 
     # submit_attached must not raise on the same payload shape.
     child = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -893,7 +917,7 @@ def test_submit_attached_indexes_by_symbol() -> None:
         submitted_equity=100_000.0,
     )
     child = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -927,7 +951,9 @@ def test_submit_attached_rejects_limit_child_without_price() -> None:
     parent = _bracket_parent(book)
     with pytest.raises(ValueError, match="limit order requires limit_price"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.LIMIT),  # limit_price missing
+            _base(
+                side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT
+            ),  # limit_price missing
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -942,7 +968,7 @@ def test_submit_attached_rejects_stop_child_without_price() -> None:
     parent = _bracket_parent(book)
     with pytest.raises(ValueError, match="stop order requires stop_price"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.STOP),  # stop_price missing
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP),  # stop_price missing
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -959,7 +985,9 @@ def test_submit_attached_rejects_trailing_stop_child() -> None:
     parent = _bracket_parent(book)
     with pytest.raises(UnsupportedOrderFeatureError, match="#390"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.TRAILING_STOP, stop_price=95.0),
+            _base(
+                side=OrderSide.SHORT, qty=10.0, order_type=OrderType.TRAILING_STOP, stop_price=95.0
+            ),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -976,6 +1004,7 @@ def test_submit_attached_rejects_ioc_child() -> None:
         book.submit_attached(
             _base(
                 qty=10.0,
+                side=OrderSide.SHORT,
                 order_type=OrderType.LIMIT,
                 limit_price=110.0,
                 tif=TimeInForce.IOC,
@@ -1002,7 +1031,7 @@ def test_submit_attached_rejects_bad_parent_order_id(bad_parent) -> None:
     _bracket_parent(book)
     with pytest.raises(TypeError, match="parent_order_id must be a non-empty str"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=bad_parent,
@@ -1018,7 +1047,7 @@ def test_submit_attached_rejects_bad_oco_group_id(bad_group) -> None:
     parent = _bracket_parent(book)
     with pytest.raises(TypeError, match="oco_group_id must be a non-empty str"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -1041,7 +1070,7 @@ def test_submit_attached_rejects_unknown_parent_order_id() -> None:
     book = OrderBook()
     with pytest.raises(ValueError, match="not a known top-level order id"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id="o-typo",
@@ -1067,7 +1096,7 @@ def test_submit_attached_accepts_parent_after_removal() -> None:
     assert parent not in book.all_pending()
 
     child = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1091,7 +1120,7 @@ def test_submit_attached_rejects_cancelled_parent() -> None:
 
     with pytest.raises(ValueError, match="not a known top-level order id"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -1114,7 +1143,7 @@ def test_submit_attached_rejects_expired_parent() -> None:
 
     with pytest.raises(ValueError, match="not a known top-level order id"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -1136,7 +1165,7 @@ def test_submit_attached_rejects_attached_child_as_parent() -> None:
         submitted_equity=100_000.0,
     )
     child = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1146,7 +1175,7 @@ def test_submit_attached_rejects_attached_child_as_parent() -> None:
     # parent for another submit_attached must fail.
     with pytest.raises(ValueError, match="not a known top-level order id"):
         book.submit_attached(
-            _base(qty=5.0, order_type=OrderType.STOP, stop_price=95.0),
+            _base(side=OrderSide.SHORT, qty=5.0, order_type=OrderType.STOP, stop_price=95.0),
             submitted_at="2024-01-04",
             submitted_equity=100_000.0,
             parent_order_id=child.order_id,
@@ -1181,7 +1210,13 @@ def test_prune_keeps_active_parents() -> None:
     # Remove the parent but keep its child pending — parent_id is still
     # referenced by an active leg, so prune must keep it.
     book.submit_attached(
-        _base(qty=5.0, symbol="BBB", order_type=OrderType.LIMIT, limit_price=55.0),
+        _base(
+            side=OrderSide.SHORT,
+            qty=5.0,
+            symbol="BBB",
+            order_type=OrderType.LIMIT,
+            limit_price=55.0,
+        ),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent_with_child.order_id,
@@ -1195,14 +1230,16 @@ def test_prune_keeps_active_parents() -> None:
     assert pruned == 0
     # Both parent ids still admit new children.
     book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-04",
         submitted_equity=100_000.0,
         parent_order_id=pending_parent.order_id,
         oco_group_id="g1",
     )
     book.submit_attached(
-        _base(qty=5.0, symbol="BBB", order_type=OrderType.STOP, stop_price=45.0),
+        _base(
+            side=OrderSide.SHORT, qty=5.0, symbol="BBB", order_type=OrderType.STOP, stop_price=45.0
+        ),
         submitted_at="2024-01-04",
         submitted_equity=100_000.0,
         parent_order_id=parent_with_child.order_id,
@@ -1233,7 +1270,7 @@ def test_prune_evicts_fully_resolved_parents() -> None:
     # fully resolved.
     with pytest.raises(ValueError, match="not a known top-level order id"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
             submitted_at="2024-01-04",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -1300,14 +1337,14 @@ def test_expire_day_orders_cascades_to_pending_children() -> None:
     # Children submitted while the parent is still pending (preventive
     # bracket pattern). Use GTC so the children themselves don't expire.
     child_a = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
         oco_group_id="g1",
     )
     child_b = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1401,14 +1438,14 @@ def _bracket_with_two_children(book: OrderBook):
         submitted_equity=100_000.0,
     )
     child_a = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
         oco_group_id="g1",
     )
     child_b = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1475,7 +1512,7 @@ def test_filled_parent_remains_eligible_while_children_pending() -> None:
     book.remove(parent.order_id, was_filled=True)  # entry fills
     # Both children still pending — parent stays eligible.
     book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.STOP, stop_price=90.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=90.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1485,7 +1522,7 @@ def test_filled_parent_remains_eligible_while_children_pending() -> None:
     # leg pending, so still eligible.
     book.cancel(child_a.order_id)
     book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=120.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=120.0),
         submitted_at="2024-01-04",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1507,7 +1544,7 @@ def test_filled_parent_auto_evicted_when_last_child_resolves() -> None:
     book.requeue(child_a.order_id, new_remaining_qty=0.0, new_submitted_at="2024-01-03")
     # Parent still eligible — child_b is pending.
     book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.STOP, stop_price=90.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=90.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1520,7 +1557,7 @@ def test_filled_parent_auto_evicted_when_last_child_resolves() -> None:
     # Last child gone → parent auto-evicted. New submit_attached fails.
     with pytest.raises(ValueError, match="not a known top-level order id"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.STOP, stop_price=85.0),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=85.0),
             submitted_at="2024-01-04",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -1540,7 +1577,7 @@ def test_filled_parent_evicted_when_only_child_terminal_fills() -> None:
         submitted_equity=100_000.0,
     )
     child = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1550,7 +1587,7 @@ def test_filled_parent_evicted_when_only_child_terminal_fills() -> None:
     book.requeue(child.order_id, new_remaining_qty=0.0, new_submitted_at="2024-01-03")
     with pytest.raises(ValueError, match="not a known top-level order id"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
             submitted_at="2024-01-04",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -1588,7 +1625,13 @@ def test_submit_attached_rejects_symbol_mismatch() -> None:
     )
     with pytest.raises(ValueError, match="does not match parent"):
         book.submit_attached(
-            _base(qty=10.0, symbol="BBB", order_type=OrderType.LIMIT, limit_price=110.0),
+            _base(
+                side=OrderSide.SHORT,
+                qty=10.0,
+                symbol="BBB",
+                order_type=OrderType.LIMIT,
+                limit_price=110.0,
+            ),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -1610,7 +1653,13 @@ def test_submit_attached_accepts_matching_symbol_after_parent_filled() -> None:
     )
     book.remove(parent.order_id, was_filled=True)
     book.submit_attached(  # matching symbol — accepted
-        _base(qty=10.0, symbol="AAA", order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(
+            side=OrderSide.SHORT,
+            qty=10.0,
+            symbol="AAA",
+            order_type=OrderType.LIMIT,
+            limit_price=110.0,
+        ),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1618,7 +1667,13 @@ def test_submit_attached_accepts_matching_symbol_after_parent_filled() -> None:
     )
     with pytest.raises(ValueError, match="does not match parent"):
         book.submit_attached(
-            _base(qty=10.0, symbol="BBB", order_type=OrderType.STOP, stop_price=95.0),
+            _base(
+                side=OrderSide.SHORT,
+                qty=10.0,
+                symbol="BBB",
+                order_type=OrderType.STOP,
+                stop_price=95.0,
+            ),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
@@ -1656,7 +1711,7 @@ def test_no_auto_evict_while_parent_still_pending() -> None:
         submitted_equity=100_000.0,
     )
     child = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1665,7 +1720,7 @@ def test_no_auto_evict_while_parent_still_pending() -> None:
     book.cancel(child.order_id)
     # Parent is still pending → still eligible. Submit a new child.
     book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1685,7 +1740,13 @@ def test_cancel_only_cancels_direct_children_of_target() -> None:
         submitted_equity=100_000.0,
     )
     child_b = book.submit_attached(
-        _base(qty=5.0, symbol="BBB", order_type=OrderType.LIMIT, limit_price=55.0),
+        _base(
+            side=OrderSide.SHORT,
+            qty=5.0,
+            symbol="BBB",
+            order_type=OrderType.LIMIT,
+            limit_price=55.0,
+        ),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
         parent_order_id=parent_b.order_id,
@@ -1715,7 +1776,7 @@ def test_submit_attached_disarmed_when_parent_still_pending() -> None:
         submitted_equity=100_000.0,
     )
     child = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1735,7 +1796,7 @@ def test_submit_attached_armed_when_parent_already_filled() -> None:
     )
     book.remove(parent.order_id, was_filled=True)  # entry fills
     child = book.submit_attached(
-        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
         submitted_equity=100_000.0,
         parent_order_id=parent.order_id,
@@ -1756,10 +1817,126 @@ def test_submit_attached_rejects_market_child() -> None:
     )
     with pytest.raises(ValueError, match="not MARKET"):
         book.submit_attached(
-            _base(qty=10.0, order_type=OrderType.MARKET),
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.MARKET),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
             parent_order_id=parent.order_id,
             oco_group_id="g1",
         )
     assert book.children_of(parent.order_id) == []
+
+
+# ---------------------------------------------------------------------------
+# Bracket children must take the opposite side from the parent — protective
+# legs close out the parent's position. A same-side child would be silently
+# dropped by the simulator's same-side path, leaving the bracket unprotected.
+# ---------------------------------------------------------------------------
+
+
+def test_submit_attached_rejects_same_side_long_child() -> None:
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0, side=OrderSide.LONG),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    with pytest.raises(ValueError, match="must be opposite parent"):
+        book.submit_attached(
+            _base(side=OrderSide.LONG, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            submitted_at="2024-01-03",
+            submitted_equity=100_000.0,
+            parent_order_id=parent.order_id,
+            oco_group_id="g1",
+        )
+    assert book.children_of(parent.order_id) == []
+
+
+def test_submit_attached_rejects_same_side_short_child() -> None:
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0, side=OrderSide.SHORT),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    with pytest.raises(ValueError, match="must be opposite parent"):
+        book.submit_attached(
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.STOP, stop_price=110.0),
+            submitted_at="2024-01-03",
+            submitted_equity=100_000.0,
+            parent_order_id=parent.order_id,
+            oco_group_id="g1",
+        )
+
+
+def test_submit_attached_accepts_short_child_for_long_parent() -> None:
+    """Sanity: a LONG entry with a SHORT take-profit (protective leg) is
+    the canonical bracket and must succeed.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0, side=OrderSide.LONG),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    child = book.submit_attached(
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        submitted_at="2024-01-03",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    assert child.request.side == OrderSide.SHORT
+
+
+# ---------------------------------------------------------------------------
+# requeue's terminal-fill path forwards ``was_filled`` to ``remove()`` so
+# future callers (e.g. partial-fill on exits in #386) can opt out of the
+# eligible-parent registration.
+# ---------------------------------------------------------------------------
+
+
+def test_requeue_terminal_fill_default_was_filled_preserves_eligibility() -> None:
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    # Default ``was_filled=True`` (entry-style).
+    book.requeue(po.order_id, new_remaining_qty=0.0, new_submitted_at="2024-01-03")
+    # Parent's id is still eligible — bracket children can be activated.
+    book.submit_attached(
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        submitted_at="2024-01-04",
+        submitted_equity=100_000.0,
+        parent_order_id=po.order_id,
+        oco_group_id="g1",
+    )
+
+
+def test_requeue_terminal_fill_was_filled_false_evicts() -> None:
+    """A future caller handling a non-entry partial fill (e.g. an exit
+    closing out a position) passes ``was_filled=False`` so the order's id
+    is NOT registered as a future bracket parent.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    book.requeue(
+        po.order_id,
+        new_remaining_qty=0.0,
+        new_submitted_at="2024-01-03",
+        was_filled=False,
+    )
+    # Now the id is no longer eligible to receive bracket children.
+    with pytest.raises(ValueError, match="not a known top-level order id"):
+        book.submit_attached(
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            submitted_at="2024-01-04",
+            submitted_equity=100_000.0,
+            parent_order_id=po.order_id,
+            oco_group_id="g1",
+        )

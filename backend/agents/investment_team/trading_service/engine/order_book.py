@@ -13,9 +13,21 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 from ..strategy.contract import OrderRequest, OrderSide, OrderType, TimeInForce
+
+
+class _TopLevelMeta(NamedTuple):
+    """Metadata cached for an eligible bracket-parent id: its symbol and side
+    so ``submit_attached`` can validate that bracket children share the
+    parent's symbol and take the opposite side (protective legs close out
+    the parent's position).
+    """
+
+    symbol: str
+    side: OrderSide
+
 
 # Tolerance below which a partial-fill remainder is treated as a terminal
 # zero. Float math in upstream sizing (typically ``prev_remaining - filled``
@@ -72,7 +84,7 @@ class OrderBook:
     #
     # ``submit_attached`` is never inserted here, so an attached child can
     # never be promoted into a parent (multi-level bracket trees rejected).
-    _known_top_level_order_ids: Dict[str, str] = field(default_factory=dict)
+    _known_top_level_order_ids: Dict[str, _TopLevelMeta] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
 
@@ -108,7 +120,9 @@ class OrderBook:
             remaining_qty=request.qty,
         )
         self._pending[order_id] = po
-        self._known_top_level_order_ids[order_id] = request.symbol
+        self._known_top_level_order_ids[order_id] = _TopLevelMeta(
+            symbol=request.symbol, side=request.side
+        )
         self._by_symbol.setdefault(request.symbol, []).append(order_id)
         return po
 
@@ -148,8 +162,8 @@ class OrderBook:
         # are forbidden so the API stays as flat parent/child legs — multi-
         # level bracket trees would break ``children_of`` traversal and OCO
         # cancellation semantics.
-        parent_symbol = self._known_top_level_order_ids.get(parent_order_id)
-        if parent_symbol is None:
+        parent_meta = self._known_top_level_order_ids.get(parent_order_id)
+        if parent_meta is None:
             raise ValueError(
                 f"submit_attached parent_order_id {parent_order_id!r} is not a known "
                 f"top-level order id; submit the parent through OrderBook.submit() first "
@@ -159,10 +173,21 @@ class OrderBook:
         # (parent on AAA, child on BBB) would otherwise be accepted and then
         # routed under the child's symbol while still tagged with the parent /
         # OCO ids — corrupting bracket scoping and producing unrelated fills.
-        if request.symbol != parent_symbol:
+        if request.symbol != parent_meta.symbol:
             raise ValueError(
                 f"submit_attached child symbol {request.symbol!r} does not match parent "
-                f"{parent_order_id!r} symbol {parent_symbol!r}"
+                f"{parent_order_id!r} symbol {parent_meta.symbol!r}"
+            )
+        # Protective legs close out the parent's position, so they must take
+        # the *opposite* side. Otherwise the simulator's same-side path would
+        # silently drop the order at fill time (treating it as an attempted
+        # add-on), leaving the bracket leg unprotected and the position
+        # exposed to runaway moves.
+        if request.side == parent_meta.side:
+            raise ValueError(
+                f"submit_attached child side {request.side.value!r} must be opposite "
+                f"parent {parent_order_id!r} side {parent_meta.side.value!r} — "
+                f"protective legs close out the parent's position"
             )
         # Bracket / OCO children are protective legs. ``MARKET`` order types
         # would fire on the very next bar and execute as a standalone position
@@ -327,6 +352,7 @@ class OrderBook:
         new_remaining_qty: float,
         new_submitted_at: str,
         twap_slices_remaining: Optional[int] = None,
+        was_filled: bool = True,
     ) -> PendingOrder:
         """Single mutation point for a partial-fill remainder. Refreshes
         ``submitted_at`` so the look-ahead guard in
@@ -338,6 +364,15 @@ class OrderBook:
         Bounds: ``new_remaining_qty`` must be in ``[0, current remaining_qty]``.
         A partial fill can only shrink the remainder; growing it would imply a
         negative fill, and a negative remainder has no execution semantics.
+
+        ``was_filled`` (default ``True``) is forwarded to ``remove()`` when the
+        remainder collapses to zero (terminal fill). Default reflects the
+        primary use case — a partial-fill remainder being completed on a
+        top-level entry, which should preserve the parent's id in the
+        eligible-parent set for bracket activation. Future callers (e.g.
+        the partial-fill simulator in #386) that handle non-entry
+        partial-fills (such as exits) should pass ``was_filled=False`` so
+        those ids are *not* registered as eligible bracket parents.
         """
         po = self._pending.get(order_id)
         if po is None:
@@ -407,11 +442,11 @@ class OrderBook:
         if new_remaining_qty == 0:
             # Fully filled — drop from the book so downstream consumers (notably
             # FillSimulator, which still sizes from req.qty) can't re-fill it.
-            # ``was_filled=True`` keeps the id in ``_known_top_level_order_ids``
-            # so bracket children can still be activated against this parent.
-            # The returned PendingOrder reference still holds the final terminal
-            # state for the caller to read.
-            self.remove(order_id, was_filled=True)
+            # ``was_filled`` is forwarded so an entry-style terminal fill
+            # (default ``True``) preserves the parent's id for bracket
+            # activation, while exit-style partial fills (caller passes
+            # ``False``) correctly evict from the eligible-parent set.
+            self.remove(order_id, was_filled=was_filled)
         return po
 
     def oco_cancel_siblings(
