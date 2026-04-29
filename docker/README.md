@@ -35,6 +35,13 @@ This directory defines a **Docker Compose stack** that runs:
    podman compose -f docker/docker-compose.yml --env-file docker/.env up --build
    ```
 
+   > **Note (Podman / rootless runtimes):** The `temporal` service pins
+   > `user: "1000:1000"` because the `temporalio/auto-setup` image declares
+   > `USER temporal`, which some rootless OCI runtimes can't resolve and
+   > error out with `unable to find user temporal: no matching entries in
+   > passwd file`. The numeric form maps to the same identity the image
+   > already uses (UID/GID 1000) and is a no-op for daemon-mode Docker.
+
 3. **Access**
 
    | Service        | URL                         |
