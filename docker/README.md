@@ -35,12 +35,19 @@ This directory defines a **Docker Compose stack** that runs:
    podman compose -f docker/docker-compose.yml --env-file docker/.env up --build
    ```
 
-   > **Note (Podman / rootless runtimes):** The `temporal` service pins
-   > `user: "1000:1000"` because the `temporalio/auto-setup` image declares
-   > `USER temporal`, which some rootless OCI runtimes can't resolve and
-   > error out with `unable to find user temporal: no matching entries in
-   > passwd file`. The numeric form maps to the same identity the image
-   > already uses (UID/GID 1000) and is a no-op for daemon-mode Docker.
+   > **Note (Podman / rootless runtimes):** The `temporal` service exposes
+   > `user: "${TEMPORAL_USER:-}"`. The default (empty) lets the
+   > `temporalio/auto-setup` image use its built-in `USER temporal`
+   > directive — required for Docker / Docker Desktop / docker-userns-remap
+   > setups, where forcing a numeric UID can otherwise produce a generic
+   > `runc create failed: ... can't get final child's PID from pipe: EOF`
+   > because UID 1000 isn't always mappable through the user namespace.
+   > **Rootless Podman** users sometimes hit the opposite problem —
+   > `unable to find user temporal: no matching entries in passwd file` —
+   > because the runtime resolves the user before mounting the image
+   > rootfs. In that case, set `TEMPORAL_USER=1000:1000` in `docker/.env`;
+   > the numeric form maps to the same identity the image uses and skips
+   > the name lookup.
 
 3. **Access**
 
