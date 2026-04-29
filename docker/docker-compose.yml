@@ -43,6 +43,14 @@ services:
   temporal:
     image: temporalio/auto-setup:1.24.2
     container_name: khala-stack-temporal
+    # The auto-setup image declares `USER temporal` (UID/GID 1000) in its
+    # Dockerfile. Some OCI runtimes — most notably rootless Podman, but also
+    # Docker setups where the runtime resolves the user before mounting the
+    # image rootfs — fail that name lookup with:
+    #   "unable to find user temporal: no matching entries in passwd file"
+    # Pinning to the numeric UID:GID skips the name lookup and starts the
+    # container as the same identity the image already uses.
+    user: "1000:1000"
     depends_on:
       postgres:
         condition: service_healthy
