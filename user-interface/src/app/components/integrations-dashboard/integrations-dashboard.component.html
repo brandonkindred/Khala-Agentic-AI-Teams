@@ -1,491 +1,589 @@
-<h1>Integrations</h1>
-<p>Connect external services to receive agent notifications and updates.</p>
+<div class="integrations-page">
 
-  <mat-card class="google-browser-card">
-    @if (googleBrowserLoading) {
-      <mat-card-content>
-        <div class="loading-wrap">
-          <mat-spinner diameter="36"></mat-spinner>
-        </div>
-      </mat-card-content>
-    } @else {
-      <mat-card-header>
-        <div mat-card-avatar class="google-browser-avatar" aria-hidden="true">
-          <mat-icon>account_circle</mat-icon>
-        </div>
-        <mat-card-title>Google account (browser sign-in)</mat-card-title>
-        <mat-card-subtitle>
-          One Fernet-encrypted Gmail / Google login for <strong>every</strong> integration that uses
-          <strong>Sign in with Google</strong> in a real browser (e.g. Medium). Stored only in Postgres
-          (<code>encrypted_integration_credentials</code>) when the API runs with <code>POSTGRES_HOST</code>
-          (e.g. Docker Compose). Not available in local API dev without Postgres — passwords are never written to
-          SQLite.
-        </mat-card-subtitle>
-      </mat-card-header>
-      <mat-card-content>
-        @if (googleBrowserError) {
-          <div class="status-banner error-banner">
-            <mat-icon>error_outline</mat-icon>
-            <span>{{ googleBrowserError }}</span>
+  <header class="integrations-hero">
+    <div class="integrations-hero__copy">
+      <h1>Integrations</h1>
+      <p>Connect external services so your agents can sign in, post updates, and pull metrics on your behalf.</p>
+    </div>
+
+    <div class="integrations-hero__stats" role="status" aria-live="polite">
+      <div class="stat-pill">
+        <span class="stat-pill__value">{{ connectedCount }}<span class="stat-pill__divider">/</span>{{ totalIntegrations }}</span>
+        <span class="stat-pill__label">Connected</span>
+      </div>
+      <div class="stat-pill stat-pill--muted">
+        <span class="stat-pill__value">{{ totalIntegrations - connectedCount }}</span>
+        <span class="stat-pill__label">Pending setup</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="integrations-grid">
+
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <!-- Google account (browser sign-in)                               -->
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <article
+      class="integration-card"
+      [class.integration-card--expanded]="expanded === 'google'"
+      [attr.aria-busy]="googleBrowserLoading || null"
+    >
+      <header class="integration-card__head">
+        <div class="integration-card__brand">
+          <div class="integration-card__icon integration-card__icon--google" aria-hidden="true">
+            <mat-icon>account_circle</mat-icon>
           </div>
-        }
-        @if (!googleBrowserStorageAvailable) {
-          <div class="status-banner info-banner" role="status">
-            <mat-icon>info</mat-icon>
-            <span>
-              This feature is disabled: the API is not using PostgreSQL (<code>POSTGRES_HOST</code>). Run the stack with
-              Docker (or otherwise set <code>POSTGRES_HOST</code>) to save encrypted Google sign-in credentials.
+          <div class="integration-card__title-block">
+            <h2 class="integration-card__title">Google account</h2>
+            <p class="integration-card__tag">Shared browser sign-in</p>
+          </div>
+        </div>
+
+        <div class="integration-card__status">
+          @if (googleBrowserLoading) {
+            <mat-spinner diameter="20" class="integration-card__spinner"></mat-spinner>
+          } @else if (!googleBrowserStorageAvailable) {
+            <span class="status-chip status-chip--info" title="Postgres required">
+              <mat-icon aria-hidden="true">info</mat-icon>
+              Unavailable
             </span>
-          </div>
-        }
-        @if (googleBrowserSuccess) {
-          <div class="status-banner success-banner">
-            <mat-icon>check_circle_outline</mat-icon>
-            <span>{{ googleBrowserSuccess }}</span>
-          </div>
-        }
-        <div class="readiness-item inline-readiness">
-          <span class="readiness-label">Status</span>
-          <span class="readiness-value" [class.ready]="googleBrowserLoginConfigured">
-            @if (googleBrowserLoginConfigured) { Credentials saved } @else { Not configured }
-          </span>
+          } @else if (googleBrowserLoginConfigured) {
+            <span class="status-chip status-chip--success">
+              <mat-icon aria-hidden="true">check_circle</mat-icon>
+              Saved
+            </span>
+          } @else {
+            <span class="status-chip status-chip--neutral">Not configured</span>
+          }
         </div>
-        <div class="form-row">
-          <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Google email</mat-label>
-            <input
-              matInput
-              type="email"
-              [(ngModel)]="googleAccountEmail"
-              autocomplete="username"
-              [disabled]="!googleBrowserStorageAvailable"
-            />
-          </mat-form-field>
-        </div>
-        <div class="form-row">
-          <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Google password</mat-label>
-            <input
-              matInput
-              type="password"
-              [(ngModel)]="googleAccountPassword"
-              autocomplete="new-password"
-              [disabled]="!googleBrowserStorageAvailable"
-            />
-          </mat-form-field>
-        </div>
-        <div class="form-row medium-browser-cred-actions">
+      </header>
+
+      <p class="integration-card__summary">
+        One Fernet-encrypted Gmail / Google login that every <strong>Sign in with Google</strong> integration
+        (Medium, etc.) reuses. Stored only when <code>POSTGRES_HOST</code> is set; never written to SQLite.
+      </p>
+
+      <div class="integration-card__actions">
+        <button
+          type="button"
+          class="kh-btn-primary"
+          mat-flat-button
+          (click)="toggleExpanded('google')"
+          [disabled]="googleBrowserLoading"
+        >
+          <mat-icon>{{ expanded === 'google' ? 'expand_less' : 'tune' }}</mat-icon>
+          {{ expanded === 'google' ? 'Hide settings' : (googleBrowserLoginConfigured ? 'Manage' : 'Configure') }}
+        </button>
+
+        @if (googleBrowserLoginConfigured) {
           <button
-            mat-raised-button
-            color="primary"
             type="button"
-            (click)="saveGoogleBrowserLoginCredentials()"
-            [disabled]="
-              savingGoogleBrowserCredentials ||
-              !googleBrowserStorageAvailable ||
-              !googleAccountEmail.trim() ||
-              !googleAccountPassword
-            "
-          >
-            @if (savingGoogleBrowserCredentials) { Saving… } @else { Save encrypted credentials }
-          </button>
-          <button
             mat-stroked-button
             color="warn"
-            type="button"
             (click)="clearGoogleBrowserLoginCredentials()"
-            [disabled]="
-              clearingGoogleBrowserCredentials ||
-              !googleBrowserStorageAvailable ||
-              !googleBrowserLoginConfigured
-            "
+            [disabled]="clearingGoogleBrowserCredentials || !googleBrowserStorageAvailable"
           >
-            @if (clearingGoogleBrowserCredentials) { Clearing… } @else { Clear credentials }
+            @if (clearingGoogleBrowserCredentials) { Clearing… } @else { Disconnect }
           </button>
-        </div>
-      </mat-card-content>
-    }
-  </mat-card>
-
-  <mat-card class="slack-card">
-    @if (loadingSlack) {
-      <mat-card-content>
-        <div class="loading-wrap">
-          <mat-spinner diameter="36"></mat-spinner>
-        </div>
-      </mat-card-content>
-    } @else {
-    <mat-card-header>
-      <div mat-card-avatar class="slack-avatar">
-        <svg viewBox="0 0 122.8 122.8" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <path d="M25.8 77.6a12.9 12.9 0 0 1-12.9 12.9A12.9 12.9 0 0 1 0 77.6a12.9 12.9 0 0 1 12.9-12.9h12.9v12.9z" fill="#E01E5A"/>
-          <path d="M32.3 77.6a12.9 12.9 0 0 1 12.9-12.9 12.9 12.9 0 0 1 12.9 12.9v32.3a12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V77.6z" fill="#E01E5A"/>
-          <path d="M45.2 25.8A12.9 12.9 0 0 1 32.3 12.9 12.9 12.9 0 0 1 45.2 0a12.9 12.9 0 0 1 12.9 12.9v12.9H45.2z" fill="#36C5F0"/>
-          <path d="M45.2 32.3a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H12.9A12.9 12.9 0 0 1 0 45.2a12.9 12.9 0 0 1 12.9-12.9h32.3z" fill="#36C5F0"/>
-          <path d="M97 45.2a12.9 12.9 0 0 1 12.9-12.9 12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H97V45.2z" fill="#2EB67D"/>
-          <path d="M90.5 45.2a12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V12.9A12.9 12.9 0 0 1 77.6 0a12.9 12.9 0 0 1 12.9 12.9v32.3z" fill="#2EB67D"/>
-          <path d="M77.6 97a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V97h12.9z" fill="#ECB22E"/>
-          <path d="M77.6 90.5a12.9 12.9 0 0 1-12.9-12.9 12.9 12.9 0 0 1 12.9-12.9h32.3a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H77.6z" fill="#ECB22E"/>
-        </svg>
+        }
       </div>
-      <mat-card-title>Slack</mat-card-title>
-      <mat-card-subtitle>Post agent notifications to your Slack workspace.</mat-card-subtitle>
-    </mat-card-header>
 
-    <mat-card-content>
-
-      @if (error) {
-        <div class="status-banner error-banner">
-          <mat-icon>error_outline</mat-icon>
-          <span>{{ error }}</span>
-        </div>
-      }
-      @if (success) {
-        <div class="status-banner success-banner">
-          <mat-icon>check_circle_outline</mat-icon>
-          <span>{{ success }}</span>
-        </div>
-      }
-
-      <!-- ──────────────────────────────────────────── -->
-      <!-- CONNECTED STATE                              -->
-      <!-- ──────────────────────────────────────────── -->
-      @if (oauthConnected) {
-        <div class="connected-state">
-          <div class="connected-badge">
-            <mat-icon class="connected-icon">verified</mat-icon>
-            <div class="connected-text">
-              <span class="connected-label">Connected</span>
-              @if (teamName) {
-                <span class="team-name">{{ teamName }}</span>
-              }
+      @if (expanded === 'google') {
+        <div class="integration-card__body">
+          @if (googleBrowserError) {
+            <div class="status-banner status-banner--error">
+              <mat-icon aria-hidden="true">error_outline</mat-icon>
+              <span>{{ googleBrowserError }}</span>
             </div>
-            <button
-              mat-stroked-button
-              color="warn"
-              class="disconnect-btn"
-              (click)="disconnectSlack()"
-              [disabled]="disconnecting || saving"
-            >
-              @if (disconnecting) { Disconnecting… } @else { Disconnect }
-            </button>
-          </div>
+          }
+          @if (!googleBrowserStorageAvailable) {
+            <div class="status-banner status-banner--info">
+              <mat-icon aria-hidden="true">info</mat-icon>
+              <span>
+                The API is not running with PostgreSQL. Start the stack via Docker (or set
+                <code>POSTGRES_HOST</code>) to save encrypted Google credentials.
+              </span>
+            </div>
+          }
+          @if (googleBrowserSuccess) {
+            <div class="status-banner status-banner--success">
+              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
+              <span>{{ googleBrowserSuccess }}</span>
+            </div>
+          }
 
-          <mat-divider class="section-divider"></mat-divider>
-
-          <div class="form-row">
-            <mat-slide-toggle [(ngModel)]="slackEnabled" color="primary">
-              Enable notifications
-            </mat-slide-toggle>
-          </div>
-
-          <div class="form-row">
-            <mat-form-field appearance="outline" class="full-width">
-              <mat-label>Default channel</mat-label>
-              <input matInput [(ngModel)]="defaultChannel" placeholder="#engineering or C0ABC123DEF" />
-              <mat-hint>The channel your bot will post to. Invite the bot to the channel first.</mat-hint>
+          <div class="form-grid form-grid--two">
+            <mat-form-field appearance="outline">
+              <mat-label>Google email</mat-label>
+              <input
+                matInput
+                type="email"
+                [(ngModel)]="googleAccountEmail"
+                autocomplete="username"
+                [disabled]="!googleBrowserStorageAvailable"
+              />
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Google password</mat-label>
+              <input
+                matInput
+                type="password"
+                [(ngModel)]="googleAccountPassword"
+                autocomplete="new-password"
+                [disabled]="!googleBrowserStorageAvailable"
+              />
             </mat-form-field>
           </div>
 
-          <div class="form-row">
-            <mat-form-field appearance="outline" class="full-width">
-              <mat-label>Channel display name (optional)</mat-label>
-              <input matInput [(ngModel)]="channelDisplayName" placeholder="#engineering" />
-              <mat-hint>Label shown in this UI only.</mat-hint>
-            </mat-form-field>
-          </div>
-
-          <div class="form-row toggles">
-            <mat-slide-toggle [(ngModel)]="notifyOpenQuestions" color="primary">
-              Notify on open questions
-            </mat-slide-toggle>
-            <mat-slide-toggle [(ngModel)]="notifyPaResponses" color="primary">
-              Notify on Personal Assistant responses
-            </mat-slide-toggle>
-          </div>
-
-          <div class="form-row">
+          <div class="form-actions">
             <button
-              mat-raised-button
+              mat-flat-button
               color="primary"
-              (click)="saveSettings()"
-              [disabled]="saving || disconnecting"
+              type="button"
+              (click)="saveGoogleBrowserLoginCredentials()"
+              [disabled]="
+                savingGoogleBrowserCredentials ||
+                !googleBrowserStorageAvailable ||
+                !googleAccountEmail.trim() ||
+                !googleAccountPassword
+              "
             >
-              @if (saving) { Saving… } @else { Save settings }
+              @if (savingGoogleBrowserCredentials) { Saving… } @else { Save encrypted credentials }
             </button>
           </div>
         </div>
       }
+    </article>
 
-      <!-- ──────────────────────────────────────────── -->
-      <!-- NOT CONNECTED STATE                          -->
-      <!-- ──────────────────────────────────────────── -->
-      @if (!oauthConnected) {
-        <div class="not-connected-state">
-
-          <!-- App credentials -->
-          <p class="section-label">App credentials</p>
-          <p class="connect-description">
-            Enter your Slack app's Client ID and Client Secret, then click <strong>Add to Slack</strong>
-            to authorize access to your workspace.
-          </p>
-
-          <div class="form-row">
-            <mat-form-field appearance="outline" class="full-width">
-              <mat-label>Client ID</mat-label>
-              <input matInput [(ngModel)]="clientId" placeholder="1234567890.9876543210" autocomplete="off" />
-              @if (clientIdConfigured && !clientId) {
-                <mat-hint align="end">Configured ✓</mat-hint>
-              }
-              <mat-hint>Found on your Slack app's Basic Information page.</mat-hint>
-            </mat-form-field>
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <!-- Slack                                                          -->
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <article
+      class="integration-card"
+      [class.integration-card--expanded]="expanded === 'slack'"
+      [attr.aria-busy]="loadingSlack || null"
+    >
+      <header class="integration-card__head">
+        <div class="integration-card__brand">
+          <div class="integration-card__icon integration-card__icon--slack" aria-hidden="true">
+            <svg viewBox="0 0 122.8 122.8" xmlns="http://www.w3.org/2000/svg">
+              <path d="M25.8 77.6a12.9 12.9 0 0 1-12.9 12.9A12.9 12.9 0 0 1 0 77.6a12.9 12.9 0 0 1 12.9-12.9h12.9v12.9z" fill="#E01E5A"/>
+              <path d="M32.3 77.6a12.9 12.9 0 0 1 12.9-12.9 12.9 12.9 0 0 1 12.9 12.9v32.3a12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V77.6z" fill="#E01E5A"/>
+              <path d="M45.2 25.8A12.9 12.9 0 0 1 32.3 12.9 12.9 12.9 0 0 1 45.2 0a12.9 12.9 0 0 1 12.9 12.9v12.9H45.2z" fill="#36C5F0"/>
+              <path d="M45.2 32.3a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H12.9A12.9 12.9 0 0 1 0 45.2a12.9 12.9 0 0 1 12.9-12.9h32.3z" fill="#36C5F0"/>
+              <path d="M97 45.2a12.9 12.9 0 0 1 12.9-12.9 12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H97V45.2z" fill="#2EB67D"/>
+              <path d="M90.5 45.2a12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V12.9A12.9 12.9 0 0 1 77.6 0a12.9 12.9 0 0 1 12.9 12.9v32.3z" fill="#2EB67D"/>
+              <path d="M77.6 97a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V97h12.9z" fill="#ECB22E"/>
+              <path d="M77.6 90.5a12.9 12.9 0 0 1-12.9-12.9 12.9 12.9 0 0 1 12.9-12.9h32.3a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H77.6z" fill="#ECB22E"/>
+            </svg>
           </div>
-
-          <div class="form-row">
-            <mat-form-field appearance="outline" class="full-width">
-              <mat-label>Client Secret</mat-label>
-              <input matInput [(ngModel)]="clientSecret" type="password" placeholder="••••••••••••••••••••••••••••••••" autocomplete="new-password" />
-              <mat-hint>Required for OAuth. Never returned by the API after saving.</mat-hint>
-            </mat-form-field>
-          </div>
-
-          <div class="form-row">
-            <button
-              class="slack-connect-btn"
-              (click)="connectWithSlack()"
-              [disabled]="connecting"
-            >
-              @if (connecting) {
-                <span>Redirecting…</span>
+          <div class="integration-card__title-block">
+            <h2 class="integration-card__title">Slack</h2>
+            <p class="integration-card__tag">
+              @if (oauthConnected && teamName) {
+                {{ teamName }} workspace
               } @else {
-                <svg viewBox="0 0 122.8 122.8" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" class="btn-slack-logo">
-                  <path d="M25.8 77.6a12.9 12.9 0 0 1-12.9 12.9A12.9 12.9 0 0 1 0 77.6a12.9 12.9 0 0 1 12.9-12.9h12.9v12.9z" fill="#E01E5A"/>
-                  <path d="M32.3 77.6a12.9 12.9 0 0 1 12.9-12.9 12.9 12.9 0 0 1 12.9 12.9v32.3a12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V77.6z" fill="#E01E5A"/>
-                  <path d="M45.2 25.8A12.9 12.9 0 0 1 32.3 12.9 12.9 12.9 0 0 1 45.2 0a12.9 12.9 0 0 1 12.9 12.9v12.9H45.2z" fill="#36C5F0"/>
-                  <path d="M45.2 32.3a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H12.9A12.9 12.9 0 0 1 0 45.2a12.9 12.9 0 0 1 12.9-12.9h32.3z" fill="#36C5F0"/>
-                  <path d="M97 45.2a12.9 12.9 0 0 1 12.9-12.9 12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H97V45.2z" fill="#2EB67D"/>
-                  <path d="M90.5 45.2a12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V12.9A12.9 12.9 0 0 1 77.6 0a12.9 12.9 0 0 1 12.9 12.9v32.3z" fill="#2EB67D"/>
-                  <path d="M77.6 97a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V97h12.9z" fill="#ECB22E"/>
-                  <path d="M77.6 90.5a12.9 12.9 0 0 1-12.9-12.9 12.9 12.9 0 0 1 12.9-12.9h32.3a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H77.6z" fill="#ECB22E"/>
-                </svg>
-                <span>Add to Slack</span>
+                Agent notifications
               }
+            </p>
+          </div>
+        </div>
+
+        <div class="integration-card__status">
+          @if (loadingSlack) {
+            <mat-spinner diameter="20" class="integration-card__spinner"></mat-spinner>
+          } @else if (oauthConnected) {
+            <span class="status-chip status-chip--success">
+              <mat-icon aria-hidden="true">verified</mat-icon>
+              Connected
+            </span>
+          } @else {
+            <span class="status-chip status-chip--neutral">Not connected</span>
+          }
+        </div>
+      </header>
+
+      <p class="integration-card__summary">
+        Post agent updates, open questions, and Personal Assistant replies straight to your Slack channels.
+      </p>
+
+      <div class="integration-card__actions">
+        <button
+          type="button"
+          mat-flat-button
+          color="primary"
+          (click)="toggleExpanded('slack')"
+          [disabled]="loadingSlack"
+        >
+          <mat-icon>{{ expanded === 'slack' ? 'expand_less' : 'tune' }}</mat-icon>
+          {{ expanded === 'slack' ? 'Hide settings' : (oauthConnected ? 'Manage' : 'Configure') }}
+        </button>
+
+        @if (oauthConnected) {
+          <button
+            type="button"
+            mat-stroked-button
+            color="warn"
+            (click)="disconnectSlack()"
+            [disabled]="disconnecting || saving"
+          >
+            @if (disconnecting) { Disconnecting… } @else { Disconnect }
+          </button>
+        }
+      </div>
+
+      @if (expanded === 'slack') {
+        <div class="integration-card__body">
+          @if (error) {
+            <div class="status-banner status-banner--error">
+              <mat-icon aria-hidden="true">error_outline</mat-icon>
+              <span>{{ error }}</span>
+            </div>
+          }
+          @if (success) {
+            <div class="status-banner status-banner--success">
+              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
+              <span>{{ success }}</span>
+            </div>
+          }
+
+          @if (oauthConnected) {
+            <!-- ── CONNECTED — settings ─────────────────────────────── -->
+            <div class="connected-summary">
+              <mat-icon class="connected-summary__icon" aria-hidden="true">verified</mat-icon>
+              <div class="connected-summary__text">
+                <span class="connected-summary__label">Connected to</span>
+                @if (teamName) { <span class="connected-summary__name">{{ teamName }}</span> }
+              </div>
+            </div>
+
+            <div class="form-grid form-grid--two">
+              <mat-form-field appearance="outline">
+                <mat-label>Default channel</mat-label>
+                <input matInput [(ngModel)]="defaultChannel" placeholder="#engineering or C0ABC123DEF" />
+                <mat-hint>Invite the bot to the channel first.</mat-hint>
+              </mat-form-field>
+              <mat-form-field appearance="outline">
+                <mat-label>Channel display name (optional)</mat-label>
+                <input matInput [(ngModel)]="channelDisplayName" placeholder="#engineering" />
+                <mat-hint>Label shown in this UI only.</mat-hint>
+              </mat-form-field>
+            </div>
+
+            <div class="setting-row">
+              <mat-slide-toggle [(ngModel)]="slackEnabled" color="primary">
+                Enable notifications
+              </mat-slide-toggle>
+              <mat-slide-toggle [(ngModel)]="notifyOpenQuestions" color="primary">
+                Notify on open questions
+              </mat-slide-toggle>
+              <mat-slide-toggle [(ngModel)]="notifyPaResponses" color="primary">
+                Notify on Personal Assistant replies
+              </mat-slide-toggle>
+            </div>
+
+            <div class="form-actions">
+              <button
+                mat-flat-button
+                color="primary"
+                (click)="saveSettings()"
+                [disabled]="saving || disconnecting"
+              >
+                @if (saving) { Saving… } @else { Save settings }
+              </button>
+            </div>
+          } @else {
+            <!-- ── NOT CONNECTED — OAuth setup ──────────────────────── -->
+            <p class="form-hint">
+              Enter your Slack app's <strong>Client ID</strong> and <strong>Client Secret</strong>, then
+              authorize Khala to post into your workspace.
+            </p>
+
+            <div class="form-grid form-grid--two">
+              <mat-form-field appearance="outline">
+                <mat-label>Client ID</mat-label>
+                <input matInput [(ngModel)]="clientId" placeholder="1234567890.9876543210" autocomplete="off" />
+                @if (clientIdConfigured && !clientId) {
+                  <mat-hint align="end">Saved ✓</mat-hint>
+                }
+                <mat-hint>Slack app → Basic Information.</mat-hint>
+              </mat-form-field>
+              <mat-form-field appearance="outline">
+                <mat-label>Client Secret</mat-label>
+                <input matInput [(ngModel)]="clientSecret" type="password" placeholder="••••••••••••••••" autocomplete="new-password" />
+                <mat-hint>Never returned by the API after saving.</mat-hint>
+              </mat-form-field>
+            </div>
+
+            <div class="form-actions">
+              <button
+                type="button"
+                class="slack-connect-btn"
+                (click)="connectWithSlack()"
+                [disabled]="connecting"
+              >
+                @if (connecting) {
+                  <span>Redirecting…</span>
+                } @else {
+                  <svg viewBox="0 0 122.8 122.8" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" class="slack-connect-btn__logo">
+                    <path d="M25.8 77.6a12.9 12.9 0 0 1-12.9 12.9A12.9 12.9 0 0 1 0 77.6a12.9 12.9 0 0 1 12.9-12.9h12.9v12.9z" fill="#E01E5A"/>
+                    <path d="M32.3 77.6a12.9 12.9 0 0 1 12.9-12.9 12.9 12.9 0 0 1 12.9 12.9v32.3a12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V77.6z" fill="#E01E5A"/>
+                    <path d="M45.2 25.8A12.9 12.9 0 0 1 32.3 12.9 12.9 12.9 0 0 1 45.2 0a12.9 12.9 0 0 1 12.9 12.9v12.9H45.2z" fill="#36C5F0"/>
+                    <path d="M45.2 32.3a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H12.9A12.9 12.9 0 0 1 0 45.2a12.9 12.9 0 0 1 12.9-12.9h32.3z" fill="#36C5F0"/>
+                    <path d="M97 45.2a12.9 12.9 0 0 1 12.9-12.9 12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H97V45.2z" fill="#2EB67D"/>
+                    <path d="M90.5 45.2a12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V12.9A12.9 12.9 0 0 1 77.6 0a12.9 12.9 0 0 1 12.9 12.9v32.3z" fill="#2EB67D"/>
+                    <path d="M77.6 97a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9 12.9 12.9 0 0 1-12.9-12.9V97h12.9z" fill="#ECB22E"/>
+                    <path d="M77.6 90.5a12.9 12.9 0 0 1-12.9-12.9 12.9 12.9 0 0 1 12.9-12.9h32.3a12.9 12.9 0 0 1 12.9 12.9 12.9 12.9 0 0 1-12.9 12.9H77.6z" fill="#ECB22E"/>
+                  </svg>
+                  <span>Add to Slack</span>
+                }
+              </button>
+            </div>
+
+            <button mat-button class="advanced-toggle" (click)="showAdvanced = !showAdvanced">
+              <mat-icon>{{ showAdvanced ? 'expand_less' : 'expand_more' }}</mat-icon>
+              Advanced — configure manually with a webhook or bot token
             </button>
+
+            @if (showAdvanced) {
+              <div class="advanced-section">
+                <p class="form-hint">
+                  Use this if you prefer an Incoming Webhook or want to paste a bot token directly.
+                </p>
+
+                <div class="setting-row">
+                  <mat-slide-toggle [(ngModel)]="slackEnabled" color="primary">
+                    Enable Slack integration
+                  </mat-slide-toggle>
+                </div>
+
+                <div class="setting-row">
+                  <span class="setting-row__label">Delivery mode</span>
+                  <mat-radio-group [(ngModel)]="mode" aria-label="Slack mode">
+                    <mat-radio-button value="webhook">Incoming Webhook</mat-radio-button>
+                    <mat-radio-button value="bot">Bot token</mat-radio-button>
+                  </mat-radio-group>
+                </div>
+
+                @if (mode === 'webhook') {
+                  <div class="form-grid">
+                    <mat-form-field appearance="outline">
+                      <mat-label>Webhook URL</mat-label>
+                      <input matInput [(ngModel)]="webhookUrl" type="url" placeholder="https://hooks.slack.com/services/..." />
+                      <mat-hint>Create an Incoming Webhook in your Slack app and paste the URL.</mat-hint>
+                      @if (webhookConfigured && !webhookUrl) {
+                        <mat-hint align="end">Saved ✓</mat-hint>
+                      }
+                    </mat-form-field>
+                  </div>
+                }
+
+                @if (mode === 'bot') {
+                  <div class="form-grid form-grid--two">
+                    <mat-form-field appearance="outline">
+                      <mat-label>Bot token</mat-label>
+                      <input matInput [(ngModel)]="botToken" type="password" placeholder="xoxb-..." />
+                      @if (botTokenConfigured && !botToken) {
+                        <mat-hint align="end">Saved ✓</mat-hint>
+                      }
+                    </mat-form-field>
+                    <mat-form-field appearance="outline">
+                      <mat-label>Default channel</mat-label>
+                      <input matInput [(ngModel)]="defaultChannel" placeholder="#engineering or C123..." />
+                      <mat-hint>Used for all bot-mode notifications.</mat-hint>
+                    </mat-form-field>
+                  </div>
+                }
+
+                <div class="form-grid form-grid--two">
+                  <mat-form-field appearance="outline">
+                    <mat-label>Channel display name (optional)</mat-label>
+                    <input matInput [(ngModel)]="channelDisplayName" placeholder="#engineering" />
+                  </mat-form-field>
+                </div>
+
+                <div class="setting-row">
+                  <mat-slide-toggle [(ngModel)]="notifyOpenQuestions" color="primary">
+                    Notify on open questions
+                  </mat-slide-toggle>
+                  <mat-slide-toggle [(ngModel)]="notifyPaResponses" color="primary">
+                    Notify on Personal Assistant replies
+                  </mat-slide-toggle>
+                </div>
+
+                <div class="form-actions">
+                  <button mat-flat-button color="primary" (click)="saveAdvanced()" [disabled]="saving">
+                    @if (saving) { Saving… } @else { Save advanced settings }
+                  </button>
+                </div>
+              </div>
+            }
+          }
+        </div>
+      }
+    </article>
+
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <!-- Medium                                                         -->
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <article
+      class="integration-card"
+      [class.integration-card--expanded]="expanded === 'medium'"
+      [attr.aria-busy]="mediumLoading || null"
+    >
+      <header class="integration-card__head">
+        <div class="integration-card__brand">
+          <div class="integration-card__icon integration-card__icon--medium" aria-hidden="true">M</div>
+          <div class="integration-card__title-block">
+            <h2 class="integration-card__title">Medium</h2>
+            <p class="integration-card__tag">Stats &amp; publication</p>
+          </div>
+        </div>
+
+        <div class="integration-card__status">
+          @if (mediumLoading) {
+            <mat-spinner diameter="20" class="integration-card__spinner"></mat-spinner>
+          } @else if (mediumReadyForStats) {
+            <span class="status-chip status-chip--success">
+              <mat-icon aria-hidden="true">check_circle</mat-icon>
+              Ready
+            </span>
+          } @else if (mediumEnabled) {
+            <span class="status-chip status-chip--warning">
+              <mat-icon aria-hidden="true">pending</mat-icon>
+              Action needed
+            </span>
+          } @else {
+            <span class="status-chip status-chip--neutral">Disabled</span>
+          }
+        </div>
+      </header>
+
+      <p class="integration-card__summary">
+        Pull <strong>Medium statistics</strong> via a Playwright session. With Google sign-in, it reuses the
+        shared Google credentials above — no separate password needed.
+      </p>
+
+      <div class="integration-card__actions">
+        <button
+          type="button"
+          mat-flat-button
+          color="primary"
+          (click)="toggleExpanded('medium')"
+          [disabled]="mediumLoading"
+        >
+          <mat-icon>{{ expanded === 'medium' ? 'expand_less' : 'tune' }}</mat-icon>
+          {{ expanded === 'medium' ? 'Hide settings' : 'Configure' }}
+        </button>
+      </div>
+
+      @if (expanded === 'medium') {
+        <div class="integration-card__body">
+          @if (mediumError) {
+            <div class="status-banner status-banner--error">
+              <mat-icon aria-hidden="true">error_outline</mat-icon>
+              <span>{{ mediumError }}</span>
+            </div>
+          }
+          @if (mediumSuccess) {
+            <div class="status-banner status-banner--success">
+              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
+              <span>{{ mediumSuccess }}</span>
+            </div>
+          }
+
+          <div class="setting-row">
+            <mat-slide-toggle [(ngModel)]="mediumEnabled" color="primary">
+              Enable Medium integration
+            </mat-slide-toggle>
           </div>
 
-          <!-- Advanced / manual section -->
-          <mat-divider class="section-divider"></mat-divider>
+          <div class="readiness-grid">
+            <div class="readiness-tile" [class.readiness-tile--ready]="mediumIdentityReady">
+              <span class="readiness-tile__label">Identity</span>
+              <span class="readiness-tile__value">
+                @if (mediumIdentityReady) { Ready } @else { Pending }
+              </span>
+            </div>
+            <div class="readiness-tile" [class.readiness-tile--ready]="googleBrowserLoginConfigured">
+              <span class="readiness-tile__label">Shared Google login</span>
+              <span class="readiness-tile__value">
+                @if (googleBrowserLoginConfigured) { Saved } @else { None }
+              </span>
+            </div>
+            <div class="readiness-tile" [class.readiness-tile--ready]="mediumSessionConfigured">
+              <span class="readiness-tile__label">Browser session</span>
+              <span class="readiness-tile__value">
+                @if (mediumSessionConfigured) { Ready } @else { Missing }
+              </span>
+            </div>
+            <div class="readiness-tile" [class.readiness-tile--ready]="mediumReadyForStats">
+              <span class="readiness-tile__label">Stats run</span>
+              <span class="readiness-tile__value">
+                @if (mediumReadyForStats) { Ready } @else { Not ready }
+              </span>
+            </div>
+          </div>
 
-          <button mat-button class="advanced-toggle" (click)="showAdvanced = !showAdvanced">
-            <mat-icon>{{ showAdvanced ? 'expand_less' : 'expand_more' }}</mat-icon>
-            Advanced: configure manually
-          </button>
+          <div class="setting-row">
+            <span class="setting-row__label">Identity provider you use on Medium</span>
+            <mat-radio-group [(ngModel)]="mediumProvider" aria-label="Medium OAuth provider">
+              <mat-radio-button value="google">Google</mat-radio-button>
+              <mat-radio-button value="apple">Apple</mat-radio-button>
+              <mat-radio-button value="facebook">Facebook</mat-radio-button>
+              <mat-radio-button value="twitter">X (Twitter)</mat-radio-button>
+            </mat-radio-group>
+          </div>
 
-          @if (showAdvanced) {
-            <div class="advanced-section">
-              <p class="advanced-hint">
-                Use this if you prefer an Incoming Webhook or want to paste a bot token directly.
+          @if (mediumProvider !== 'google') {
+            <div class="status-banner status-banner--info">
+              <mat-icon aria-hidden="true">info</mat-icon>
+              <span>
+                {{ mediumProviderLabel }} selected. Browser automation is oriented around Google sign-in —
+                pick Google if you use “Continue with Google” on Medium.
+              </span>
+            </div>
+          }
+
+          @if (mediumEnabled && mediumProvider === 'google') {
+            <div class="subsection">
+              <h3 class="subsection__title">Capture Medium browser session</h3>
+              <p class="form-hint">
+                Uses the shared Google credentials at the top. Run <code>playwright install chromium</code> on
+                the API host once. Stats can also auto-sign-in if the session file goes missing.
               </p>
-
-              <div class="form-row">
-                <mat-slide-toggle [(ngModel)]="slackEnabled" color="primary">
-                  Enable Slack integration
-                </mat-slide-toggle>
-              </div>
-
-              <div class="form-row">
-                <span class="mode-label">Delivery mode</span>
-                <mat-radio-group [(ngModel)]="mode" aria-label="Slack mode">
-                  <mat-radio-button value="webhook">Incoming Webhook</mat-radio-button>
-                  <mat-radio-button value="bot">Bot token (chat.postMessage)</mat-radio-button>
-                </mat-radio-group>
-              </div>
-
-              @if (mode === 'webhook') {
-                <div class="form-row">
-                  <mat-form-field appearance="outline" class="full-width">
-                    <mat-label>Webhook URL</mat-label>
-                    <input matInput [(ngModel)]="webhookUrl" type="url" placeholder="https://hooks.slack.com/services/..." />
-                    <mat-hint>Create an Incoming Webhook in your Slack app and paste the URL here.</mat-hint>
-                    @if (webhookConfigured && !webhookUrl) {
-                      <mat-hint align="end">Webhook configured ✓</mat-hint>
-                    }
-                  </mat-form-field>
-                </div>
-              }
-
-              @if (mode === 'bot') {
-                <div class="form-row">
-                  <mat-form-field appearance="outline" class="full-width">
-                    <mat-label>Bot token</mat-label>
-                    <input matInput [(ngModel)]="botToken" type="password" placeholder="xoxb-..." />
-                    @if (botTokenConfigured && !botToken) {
-                      <mat-hint align="end">Token configured ✓</mat-hint>
-                    }
-                  </mat-form-field>
-                </div>
-                <div class="form-row">
-                  <mat-form-field appearance="outline" class="full-width">
-                    <mat-label>Default channel</mat-label>
-                    <input matInput [(ngModel)]="defaultChannel" placeholder="#engineering or C123..." />
-                    <mat-hint>Used for all Slack notifications in bot mode.</mat-hint>
-                  </mat-form-field>
-                </div>
-              }
-
-              <div class="form-row">
-                <mat-form-field appearance="outline" class="full-width">
-                  <mat-label>Channel display name (optional)</mat-label>
-                  <input matInput [(ngModel)]="channelDisplayName" placeholder="#engineering" />
-                  <mat-hint>Display label only.</mat-hint>
-                </mat-form-field>
-              </div>
-
-              <div class="form-row toggles">
-                <mat-slide-toggle [(ngModel)]="notifyOpenQuestions" color="primary">
-                  Notify on open questions
-                </mat-slide-toggle>
-                <mat-slide-toggle [(ngModel)]="notifyPaResponses" color="primary">
-                  Notify on Personal Assistant responses
-                </mat-slide-toggle>
-              </div>
-
-              <div class="form-row">
-                <button mat-raised-button color="primary" (click)="saveAdvanced()" [disabled]="saving">
-                  @if (saving) { Saving… } @else { Save }
+              <div class="form-actions">
+                <button
+                  mat-stroked-button
+                  color="primary"
+                  type="button"
+                  (click)="runMediumBrowserLogin()"
+                  [disabled]="mediumBrowserLoginRunning || mediumSaving || !googleBrowserLoginConfigured"
+                >
+                  @if (mediumBrowserLoginRunning) {
+                    Signing in via browser…
+                  } @else {
+                    Capture session now
+                  }
                 </button>
               </div>
             </div>
           }
-        </div>
-      }
 
-    </mat-card-content>
-    }
-  </mat-card>
-
-  <mat-card class="medium-card">
-    @if (mediumLoading) {
-      <mat-card-content>
-        <div class="loading-wrap">
-          <mat-spinner diameter="36"></mat-spinner>
-        </div>
-      </mat-card-content>
-    } @else {
-      <mat-card-header>
-        <div mat-card-avatar class="medium-avatar" aria-hidden="true">M</div>
-        <mat-card-title>Medium</mat-card-title>
-        <mat-card-subtitle>
-          Blogging <strong>Medium statistics</strong> use a Playwright <code>storage_state</code> on disk. With
-          <strong>Google</strong> as your Medium provider, use the shared Google credentials at the top of this page
-          and capture a browser session below.
-        </mat-card-subtitle>
-      </mat-card-header>
-      <mat-card-content>
-        @if (mediumError) {
-          <div class="status-banner error-banner">
-            <mat-icon>error_outline</mat-icon>
-            <span>{{ mediumError }}</span>
-          </div>
-        }
-        @if (mediumSuccess) {
-          <div class="status-banner success-banner">
-            <mat-icon>check_circle_outline</mat-icon>
-            <span>{{ mediumSuccess }}</span>
-          </div>
-        }
-
-        <div class="form-row">
-          <mat-slide-toggle [(ngModel)]="mediumEnabled" color="primary">
-            Enable Medium integration
-          </mat-slide-toggle>
-        </div>
-
-        <div class="medium-readiness-grid">
-          <div class="readiness-item">
-            <span class="readiness-label">Identity</span>
-            <span class="readiness-value" [class.ready]="mediumIdentityReady">
-              @if (mediumIdentityReady) { Ready } @else { Pending }
-            </span>
-          </div>
-          <div class="readiness-item">
-            <span class="readiness-label">Shared Google login</span>
-            <span class="readiness-value" [class.ready]="googleBrowserLoginConfigured">
-              @if (googleBrowserLoginConfigured) { Saved } @else { None }
-            </span>
-          </div>
-          <div class="readiness-item">
-            <span class="readiness-label">Browser session</span>
-            <span class="readiness-value" [class.ready]="mediumSessionConfigured">
-              @if (mediumSessionConfigured) { Ready } @else { Missing }
-            </span>
-          </div>
-          <div class="readiness-item">
-            <span class="readiness-label">Stats run readiness</span>
-            <span class="readiness-value" [class.ready]="mediumReadyForStats">
-              @if (mediumReadyForStats) { Ready } @else { Not ready }
-            </span>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <span class="mode-label">Identity provider you use on Medium</span>
-          <mat-radio-group [(ngModel)]="mediumProvider" aria-label="Medium OAuth provider">
-            <mat-radio-button value="google">Google</mat-radio-button>
-            <mat-radio-button value="apple">Apple</mat-radio-button>
-            <mat-radio-button value="facebook">Facebook</mat-radio-button>
-            <mat-radio-button value="twitter">X (Twitter)</mat-radio-button>
-          </mat-radio-group>
-        </div>
-
-        @if (mediumProvider !== 'google') {
-          <div class="status-banner">
-            <mat-icon>info</mat-icon>
-            <span>
-              {{ mediumProviderLabel }} selected. Browser automation for Medium is oriented around Google sign-in; pick
-              Google if you use “Continue with Google” on Medium.
-            </span>
-          </div>
-        }
-
-        @if (mediumEnabled && mediumProvider === 'google') {
-          <mat-divider class="section-divider"></mat-divider>
-          <h3 class="medium-section-title">Medium session (Playwright)</h3>
-          <p class="connect-description">
-            Uses the <strong>shared Google credentials</strong> at the top of this page. Run
-            <code>playwright install chromium</code> on the API host. Capture once to write
-            <code>storage_state</code>; stats can also auto-sign-in if the session file is missing.
-          </p>
-          <div class="form-row medium-browser-cred-actions">
+          <div class="form-actions form-actions--justify">
             <button
-              mat-stroked-button
+              mat-flat-button
               color="primary"
               type="button"
-              (click)="runMediumBrowserLogin()"
-              [disabled]="mediumBrowserLoginRunning || mediumSaving || !googleBrowserLoginConfigured"
+              (click)="saveMediumSettings()"
+              [disabled]="mediumSaving"
             >
-              @if (mediumBrowserLoginRunning) {
-                Signing in via browser…
-              } @else {
-                Capture Medium session (browser)
-              }
+              @if (mediumSaving) { Saving… } @else { Save Medium settings }
             </button>
           </div>
-        }
-
-        <mat-divider class="section-divider"></mat-divider>
-
-        <div class="form-row">
-          <button
-            mat-raised-button
-            color="primary"
-            type="button"
-            (click)="saveMediumSettings()"
-            [disabled]="mediumSaving"
-          >
-            @if (mediumSaving) { Saving… } @else { Save Medium settings }
-          </button>
         </div>
-      </mat-card-content>
-    }
-  </mat-card>
+      }
+    </article>
+
+  </div>
+</div>

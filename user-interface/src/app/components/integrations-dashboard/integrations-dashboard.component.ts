@@ -24,6 +24,8 @@ import type {
 
 const SLACK_WEBHOOK_PREFIX = 'https://hooks.slack.com/';
 
+type IntegrationKey = 'google' | 'slack' | 'medium';
+
 @Component({
   selector: 'app-integrations-dashboard',
   standalone: true,
@@ -53,6 +55,23 @@ export class IntegrationsDashboardComponent implements OnInit {
   disconnecting = false;
   error: string | null = null;
   success: string | null = null;
+
+  /** Which integration card is currently expanded inline. Only one at a time. */
+  expanded: IntegrationKey | null = null;
+
+  toggleExpanded(key: IntegrationKey): void {
+    this.expanded = this.expanded === key ? null : key;
+  }
+
+  readonly totalIntegrations = 3;
+
+  get connectedCount(): number {
+    let n = 0;
+    if (this.googleBrowserLoginConfigured) n += 1;
+    if (this.oauthConnected) n += 1;
+    if (this.mediumReadyForStats) n += 1;
+    return n;
+  }
 
   // OAuth connection state
   oauthConnected = false;
@@ -94,17 +113,21 @@ export class IntegrationsDashboardComponent implements OnInit {
         this.success = team
           ? `Connected to "${team}" workspace successfully.`
           : 'Slack connected successfully.';
+        this.expanded = 'slack';
         this.loadSlackConfig();
       } else if (params['slack_error']) {
         const errCode = params['slack_error'];
         this.error = this.friendlySlackOAuthError(errCode);
+        this.expanded = 'slack';
       }
       if (params['medium_google_connected']) {
         this.mediumSuccess = 'Google account linked for Medium workflow.';
+        this.expanded = 'medium';
         this.loadMediumConfig();
       }
       if (params['medium_error']) {
         this.mediumError = this.friendlyMediumOAuthError(String(params['medium_error']));
+        this.expanded = 'medium';
       }
     });
   }
