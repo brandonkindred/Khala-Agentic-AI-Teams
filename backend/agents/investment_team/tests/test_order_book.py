@@ -14,7 +14,7 @@ from datetime import datetime
 import pytest
 
 from investment_team.trading_service.engine.order_book import (
-    FILL_QTY_EPSILON,
+    FILL_QTY_REL_TOL,
     OrderBook,
     PendingOrder,
 )
@@ -501,14 +501,15 @@ def test_requeue_zero_remainder_removes_order_from_book() -> None:
         book.requeue(po.order_id, new_remaining_qty=0.0, new_submitted_at="2024-01-05")
 
 
-@pytest.mark.parametrize("residual", [1e-15, 1e-12, FILL_QTY_EPSILON / 2])
+@pytest.mark.parametrize("residual", [1e-15, 1e-14, 1e-13])
 def test_requeue_clamps_tiny_positive_residual_to_zero(residual) -> None:
     """Float math in upstream sizing (``prev_remaining - filled``) can produce
-    sub-epsilon remainders that aren't exactly 0. Without clamping, those
-    orders linger in the book and can be re-filled by the simulator. Verify
-    that any value with absolute magnitude below FILL_QTY_EPSILON is treated
-    as a terminal fill: the order is removed and ``cumulative_filled_qty``
-    equals ``original_qty``.
+    sub-ULP remainders that aren't exactly 0. Without clamping, those
+    orders linger in the book and can be re-filled by the simulator.
+
+    For ``original_qty=10``, the relative threshold is
+    ``10 * 1e-12 = 1e-11``, so values like ``1e-15`` / ``1e-14`` / ``1e-13``
+    are all comfortably below ULP-level error and get clamped.
     """
     book = OrderBook()
     po = book.submit(
@@ -524,11 +525,11 @@ def test_requeue_clamps_tiny_positive_residual_to_zero(residual) -> None:
     assert po not in book.pending_for_symbol("AAA")
 
 
-@pytest.mark.parametrize("residual", [-1e-15, -FILL_QTY_EPSILON / 2])
+@pytest.mark.parametrize("residual", [-1e-15, -1e-14, -1e-13])
 def test_requeue_clamps_tiny_negative_residual_to_zero(residual) -> None:
     """Tiny negatives from accumulated float error are physically zero and
     shouldn't trip the ``< 0`` rejection. They should clamp the same way
-    positive sub-epsilon residuals do.
+    positive sub-tolerance residuals do.
     """
     book = OrderBook()
     po = book.submit(
@@ -543,9 +544,11 @@ def test_requeue_clamps_tiny_negative_residual_to_zero(residual) -> None:
     assert po not in book.all_pending()
 
 
-def test_requeue_preserves_remainder_above_epsilon() -> None:
-    """A remainder safely above FILL_QTY_EPSILON should not be clamped — the
-    order stays in the book with the requested partial-fill remainder.
+def test_requeue_preserves_remainder_above_relative_threshold() -> None:
+    """A remainder safely above the relative tolerance threshold should not
+    be clamped. For ``original_qty=10``, the threshold is ``1e-11``; a
+    remainder of ``1e-7`` is six orders of magnitude above it and clearly
+    a real partial fill, not float noise.
     """
     book = OrderBook()
     po = book.submit(
@@ -554,15 +557,15 @@ def test_requeue_preserves_remainder_above_epsilon() -> None:
         submitted_equity=100_000.0,
         expect_brackets=True,
     )
-    above = FILL_QTY_EPSILON * 100  # 1e-7 — well above the clamp tolerance
+    above = 10.0 * FILL_QTY_REL_TOL * 1_000_000  # 1e-5 — well above the clamp
     book.requeue(po.order_id, new_remaining_qty=above, new_submitted_at="2024-01-03")
     assert po.remaining_qty == above
     assert po.cumulative_filled_qty == 10.0 - above
     assert po in book.all_pending()
 
 
-def test_requeue_rejects_negative_above_epsilon() -> None:
-    """The clamp only swallows sub-epsilon negatives. A genuinely negative
+def test_requeue_rejects_negative_above_relative_threshold() -> None:
+    """The clamp only swallows sub-tolerance negatives. A genuinely negative
     remainder still gets rejected by the strict ``< 0`` guard.
     """
     book = OrderBook()
@@ -575,10 +578,35 @@ def test_requeue_rejects_negative_above_epsilon() -> None:
     with pytest.raises(ValueError, match="must be >= 0"):
         book.requeue(
             po.order_id,
-            new_remaining_qty=-FILL_QTY_EPSILON * 1000,  # -1e-6, well past the clamp
+            new_remaining_qty=-1e-6,  # well past the relative-tolerance clamp
             new_submitted_at="2024-01-03",
         )
     assert po.remaining_qty == 10.0  # unchanged
+
+
+def test_requeue_does_not_clamp_legitimate_small_remainder() -> None:
+    """For a legitimately small order (e.g. fractional-token venue where
+    every quantity is sub-1e-9 in absolute terms), a remainder that would
+    be below the *absolute* sub-epsilon threshold of an earlier
+    implementation must NOT be clamped if it's still a meaningful fraction
+    of the order's own size. The clamp is *relative* to ``original_qty``.
+
+    Regression test for the reviewer's concern that an absolute
+    ``FILL_QTY_EPSILON`` threshold over-clamped real partial fills on
+    small orders.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=1e-8),  # legitimate fractional-token amount
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        expect_brackets=True,
+    )
+    # 5e-10 is 5% of the original 1e-8 — a meaningful partial-fill
+    # remainder, NOT ULP noise. Must not be clamped.
+    book.requeue(po.order_id, new_remaining_qty=5e-10, new_submitted_at="2024-01-03")
+    assert po.remaining_qty == 5e-10
+    assert po in book.all_pending()
 
 
 # ---------------------------------------------------------------------------

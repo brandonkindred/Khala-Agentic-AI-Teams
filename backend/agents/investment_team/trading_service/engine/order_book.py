@@ -30,14 +30,17 @@ class _TopLevelMeta(NamedTuple):
     side: OrderSide
 
 
-# Tolerance below which a partial-fill remainder is treated as a terminal
-# zero. Float math in upstream sizing (typically ``prev_remaining - filled``
-# in the partial-fill path) can produce sub-epsilon residuals that aren't
-# exactly 0; without this clamp those orders would linger in the book
-# instead of being removed and the simulator could re-fill them. 1e-9 sits
-# safely below any meaningful trading quantity (fractional-share venues
-# generally don't go past 6 decimal places).
-FILL_QTY_EPSILON = 1e-9
+# Relative tolerance for the float-math residual clamp in
+# ``OrderBook.requeue``. A remainder smaller than
+# ``po.original_qty * FILL_QTY_REL_TOL`` is treated as exactly 0 because
+# that's well below ULP-level error for the upstream sizing operands
+# (machine epsilon ≈ 2.2e-16; even after dozens of sequential subtractions
+# on operands of size N, accumulated ULP stays well under N * 1e-13).
+# A *relative* threshold avoids over-clamping legitimately small orders
+# (fractional-token / per-pip-quote venues, etc.) — a sub-epsilon-sized
+# absolute residual that's a meaningful fraction of an even smaller order
+# is real, not noise.
+FILL_QTY_REL_TOL = 1e-12
 
 
 @dataclass
@@ -432,13 +435,18 @@ class OrderBook:
                 f"requeue submitted_at must not regress: "
                 f"old={po.submitted_at!r} new={new_submitted_at!r}"
             )
-        # Clamp sub-epsilon residuals (positive *or* negative) to exactly zero
-        # before the bounds checks so that a tiny remainder produced by float
-        # math (e.g. ``prev - filled`` accumulating ULP error) is treated as a
-        # terminal fill rather than lingering in the book. This also keeps the
-        # ``< 0`` check below from rejecting tiny negatives that are physically
-        # zero.
-        if abs(new_remaining_qty) < FILL_QTY_EPSILON:
+        # Clamp sub-epsilon residuals (positive *or* negative) to exactly
+        # zero before the bounds checks so that a tiny remainder produced by
+        # float math (e.g. ``prev - filled`` accumulating ULP error) is
+        # treated as a terminal fill rather than lingering in the book. The
+        # threshold is *relative* to the order's own size so legitimately
+        # small orders (e.g. fractional-token venues where every quantity
+        # is sub-epsilon in absolute terms) don't have real partial-fill
+        # remainders silently swallowed. ``original_qty <= 0`` falls into
+        # the ``threshold == 0`` branch and never clamps — we never produce
+        # a zero-qty top-level order in normal flow, but be defensive.
+        clamp_threshold = po.original_qty * FILL_QTY_REL_TOL
+        if clamp_threshold > 0 and abs(new_remaining_qty) < clamp_threshold:
             new_remaining_qty = 0.0
         if new_remaining_qty < 0:
             raise ValueError(f"requeue new_remaining_qty must be >= 0, got {new_remaining_qty!r}")
