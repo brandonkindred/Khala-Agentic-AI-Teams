@@ -283,7 +283,11 @@ def test_cost_stress_trade_counts_reflect_each_stressed_run(monkeypatch) -> None
         )
 
     class _Fake:
-        def __init__(self, *, strategy_code, config, risk_limits=None):
+        def __init__(self, *, strategy_code, config, risk_limits=None, **_kwargs):
+            # ``**_kwargs`` keeps the stub signature-compatible as
+            # ``TradingService.__init__`` grows new kwargs (e.g.
+            # ``default_unfilled_policy`` from #385) without forcing every
+            # white-box test to keep up.
             self.config = config
 
         def run(self, stream, *, on_trade=None):
