@@ -51,6 +51,7 @@ def test_submit_initializes_partial_fill_fields() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     assert isinstance(po, PendingOrder)
     assert po.original_qty == 10.0
@@ -75,6 +76,7 @@ def test_submit_rejects_request_with_parent_order_id() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     bad_request = _base(qty=5.0).model_copy(update={"parent_order_id": parent.order_id})
     with pytest.raises(ValueError, match="must not receive a request with parent_order_id"):
@@ -101,6 +103,7 @@ def test_remove_default_evicts_top_level_id() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.remove(parent.order_id)  # default was_filled=False — non-fill path
 
@@ -123,6 +126,7 @@ def test_remove_with_was_filled_preserves_top_level_id() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.remove(parent.order_id, was_filled=True)
 
@@ -147,6 +151,7 @@ def test_submit_requeue_remove_cycle() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     order_id = po.order_id
 
@@ -177,6 +182,7 @@ def test_requeue_refreshes_submitted_at() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.requeue(po.order_id, new_remaining_qty=5.0, new_submitted_at="2024-01-05")
     assert po.submitted_at == "2024-01-05"
@@ -188,6 +194,7 @@ def test_requeue_stale_timestamp_raises() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-05",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Use ValueError (not assert) so the guard survives ``python -O``.
     with pytest.raises(ValueError, match="must not regress"):
@@ -204,6 +211,7 @@ def test_requeue_same_timestamp_allowed() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Equal timestamps are fine — the bar-safety guard fires only on strict
     # look-ahead, and intra-bar partial fills may legitimately requeue on the
@@ -223,6 +231,7 @@ def test_requeue_normalizes_z_suffix_timestamp() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02T10:00:00+00:00",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Same instant, just expressed with the Z suffix.
     book.requeue(
@@ -239,6 +248,7 @@ def test_requeue_normalizes_z_suffix_timestamp() -> None:
         _base(qty=5.0, symbol="BBB"),
         submitted_at="2024-01-02T10:00:00Z",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.requeue(
         po2.order_id,
@@ -254,6 +264,7 @@ def test_requeue_twap_slices_passthrough() -> None:
         _base(qty=12.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.requeue(
         po.order_id,
@@ -280,6 +291,7 @@ def test_requeue_accepts_zero_twap_slices() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.requeue(
         po.order_id,
@@ -302,6 +314,7 @@ def test_requeue_rejects_bad_twap_slices(bad_slices) -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(
         ValueError, match="twap_slices_remaining must be a non-negative int or None"
@@ -329,6 +342,7 @@ def test_requeue_keeps_cumulative_filled_consistent() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     assert po.cumulative_filled_qty == 0.0
 
@@ -356,6 +370,7 @@ def test_requeue_rejects_negative_remaining_qty() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(ValueError, match="must be >= 0"):
         book.requeue(po.order_id, new_remaining_qty=-1.0, new_submitted_at="2024-01-03")
@@ -374,6 +389,7 @@ def test_requeue_rejects_growing_remaining_qty() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # First a real partial fill.
     book.requeue(po.order_id, new_remaining_qty=4.0, new_submitted_at="2024-01-03")
@@ -399,6 +415,7 @@ def test_requeue_rejects_nan_and_inf_remaining_qty() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
 
     with pytest.raises(ValueError, match="must be finite"):
@@ -424,6 +441,7 @@ def test_requeue_rejects_bool_remaining_qty(bad_qty) -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(ValueError, match="must be a real number, got bool"):
         book.requeue(po.order_id, new_remaining_qty=bad_qty, new_submitted_at="2024-01-03")
@@ -442,6 +460,7 @@ def test_requeue_unknown_order_id_raises_keyerror() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(KeyError, match="not in the book"):
         book.requeue("o-bogus", new_remaining_qty=5.0, new_submitted_at="2024-01-03")
@@ -459,6 +478,7 @@ def test_requeue_zero_remainder_removes_order_from_book() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # First a real partial fill — order remains in the book.
     book.requeue(po.order_id, new_remaining_qty=4.0, new_submitted_at="2024-01-03")
@@ -492,6 +512,7 @@ def test_requeue_clamps_tiny_positive_residual_to_zero(residual) -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.requeue(po.order_id, new_remaining_qty=residual, new_submitted_at="2024-01-03")
     assert po.remaining_qty == 0.0
@@ -511,6 +532,7 @@ def test_requeue_clamps_tiny_negative_residual_to_zero(residual) -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.requeue(po.order_id, new_remaining_qty=residual, new_submitted_at="2024-01-03")
     assert po.remaining_qty == 0.0
@@ -527,6 +549,7 @@ def test_requeue_preserves_remainder_above_epsilon() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     above = FILL_QTY_EPSILON * 100  # 1e-7 — well above the clamp tolerance
     book.requeue(po.order_id, new_remaining_qty=above, new_submitted_at="2024-01-03")
@@ -544,6 +567,7 @@ def test_requeue_rejects_negative_above_epsilon() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(ValueError, match="must be >= 0"):
         book.requeue(
@@ -566,11 +590,13 @@ def test_oco_cancel_siblings_cancels_only_siblings() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     other_parent = book.submit(
         _base(qty=5.0, symbol="BBB"),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
 
     sibling_a = book.submit_attached(
@@ -632,6 +658,7 @@ def test_oco_cancel_siblings_rejects_stale_except_order_id() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(ValueError, match="is not currently pending"):
         book.oco_cancel_siblings(
@@ -651,6 +678,7 @@ def test_oco_cancel_siblings_rejects_mismatched_except_leg() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     sibling = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -684,6 +712,7 @@ def test_oco_cancel_siblings_rejects_bad_id_args(arg, bad_value) -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     sibling = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -719,11 +748,13 @@ def test_oco_cancel_siblings_does_not_cross_brackets() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     parent_b = book.submit(
         _base(qty=10.0, symbol="BBB"),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
 
     a_tp = book.submit_attached(
@@ -797,6 +828,7 @@ def test_children_of_returns_only_direct_children() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     child_a = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -817,6 +849,7 @@ def test_children_of_returns_only_direct_children() -> None:
         _base(qty=5.0, symbol="BBB"),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.submit_attached(
         _base(
@@ -842,6 +875,7 @@ def test_children_of_returns_empty_for_unknown_parent() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     assert book.children_of("nope") == []
 
@@ -858,6 +892,7 @@ def test_children_of_rejects_bad_parent_id(bad_parent) -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(TypeError, match="parent_order_id must be a non-empty str"):
         book.children_of(bad_parent)
@@ -879,6 +914,7 @@ def test_submit_attached_skips_risk_gates() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
 
     # Independent proof that the gate is real on the strategy path.
@@ -915,6 +951,7 @@ def test_submit_attached_indexes_by_symbol() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     child = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -943,6 +980,7 @@ def _bracket_parent(book: OrderBook):
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
 
 
@@ -1089,6 +1127,7 @@ def test_submit_attached_accepts_parent_after_removal() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Simulate the terminal-fill removal path used by ``requeue(0)``;
     # ``was_filled=True`` keeps the parent eligible for bracket children.
@@ -1115,6 +1154,7 @@ def test_submit_attached_rejects_cancelled_parent() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     assert book.cancel(parent.order_id) is True
 
@@ -1137,6 +1177,7 @@ def test_submit_attached_rejects_expired_parent() -> None:
         _base(qty=10.0, tif=TimeInForce.DAY),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     expired = book.expire_day_orders("2024-01-03")
     assert expired == [parent]
@@ -1163,6 +1204,7 @@ def test_submit_attached_rejects_attached_child_as_parent() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     child = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -1201,11 +1243,13 @@ def test_prune_keeps_active_parents() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     parent_with_child = book.submit(
         _base(qty=5.0, symbol="BBB"),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Remove the parent but keep its child pending — parent_id is still
     # referenced by an active leg, so prune must keep it.
@@ -1257,6 +1301,7 @@ def test_prune_evicts_fully_resolved_parents() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Filled-parent removal: keeps the id in the eligible-parent set so
     # ``prune_known_top_level_order_ids`` is the natural eviction path.
@@ -1291,6 +1336,7 @@ def test_expire_day_orders_uses_original_submitted_at() -> None:
         _base(qty=10.0, tif=TimeInForce.DAY),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Partial fill bumps ``submitted_at`` to D+1 so the look-ahead guard still
     # holds, but the original submission date is preserved separately.
@@ -1315,6 +1361,7 @@ def test_expire_day_orders_keeps_order_on_original_day() -> None:
         _base(qty=10.0, tif=TimeInForce.DAY),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Same-day requeue (the look-ahead guard allows equal timestamps).
     book.requeue(po.order_id, new_remaining_qty=5.0, new_submitted_at="2024-01-02")
@@ -1333,6 +1380,7 @@ def test_expire_day_orders_cascades_to_pending_children() -> None:
         _base(qty=10.0, tif=TimeInForce.DAY),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Children submitted while the parent is still pending (preventive
     # bracket pattern). Use GTC so the children themselves don't expire.
@@ -1376,6 +1424,7 @@ def test_requeue_treats_equivalent_offsets_as_equal() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02T10:00:00+05:30",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Same instant in UTC offset — must not raise.
     book.requeue(
@@ -1395,6 +1444,7 @@ def test_requeue_rejects_strictly_earlier_instant_across_offsets() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02T10:00:00+00:00",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # 09:00 IST = 03:30 UTC, which is before 10:00 UTC → regression.
     with pytest.raises(ValueError, match="must not regress"):
@@ -1436,6 +1486,7 @@ def _bracket_with_two_children(book: OrderBook):
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     child_a = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -1575,6 +1626,7 @@ def test_filled_parent_evicted_when_only_child_terminal_fills() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     child = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -1605,6 +1657,7 @@ def test_book_contains_membership_test() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     assert po.order_id in book
     assert "o-bogus" not in book
@@ -1622,6 +1675,7 @@ def test_submit_attached_rejects_symbol_mismatch() -> None:
         _base(qty=10.0, symbol="AAA"),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(ValueError, match="does not match parent"):
         book.submit_attached(
@@ -1650,6 +1704,7 @@ def test_submit_attached_accepts_matching_symbol_after_parent_filled() -> None:
         _base(qty=10.0, symbol="AAA"),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.remove(parent.order_id, was_filled=True)
     book.submit_attached(  # matching symbol — accepted
@@ -1691,6 +1746,7 @@ def test_requeue_rejects_non_string_submitted_at() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     for bad in (None, 123, 1.5, datetime(2024, 1, 5)):
         with pytest.raises(TypeError, match="must be a str"):
@@ -1709,6 +1765,7 @@ def test_no_auto_evict_while_parent_still_pending() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     child = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -1738,6 +1795,7 @@ def test_cancel_only_cancels_direct_children_of_target() -> None:
         _base(qty=5.0, symbol="BBB"),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     child_b = book.submit_attached(
         _base(
@@ -1774,6 +1832,7 @@ def test_submit_attached_disarmed_when_parent_still_pending() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     child = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -1793,6 +1852,7 @@ def test_submit_attached_armed_when_parent_already_filled() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.remove(parent.order_id, was_filled=True)  # entry fills
     child = book.submit_attached(
@@ -1814,6 +1874,7 @@ def test_submit_attached_rejects_market_child() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(ValueError, match="not MARKET"):
         book.submit_attached(
@@ -1839,6 +1900,7 @@ def test_submit_attached_rejects_same_side_long_child() -> None:
         _base(qty=10.0, side=OrderSide.LONG),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(ValueError, match="must be opposite parent"):
         book.submit_attached(
@@ -1857,6 +1919,7 @@ def test_submit_attached_rejects_same_side_short_child() -> None:
         _base(qty=10.0, side=OrderSide.SHORT),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     with pytest.raises(ValueError, match="must be opposite parent"):
         book.submit_attached(
@@ -1877,6 +1940,7 @@ def test_submit_attached_accepts_short_child_for_long_parent() -> None:
         _base(qty=10.0, side=OrderSide.LONG),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     child = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
@@ -1901,6 +1965,7 @@ def test_requeue_terminal_fill_default_was_filled_preserves_eligibility() -> Non
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     # Default ``was_filled=True`` (entry-style).
     book.requeue(po.order_id, new_remaining_qty=0.0, new_submitted_at="2024-01-03")
@@ -1924,6 +1989,7 @@ def test_requeue_terminal_fill_was_filled_false_evicts() -> None:
         _base(qty=10.0),
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
+        expect_brackets=True,
     )
     book.requeue(
         po.order_id,
@@ -1940,3 +2006,70 @@ def test_requeue_terminal_fill_was_filled_false_evicts() -> None:
             parent_order_id=po.order_id,
             oco_group_id="g1",
         )
+
+
+# ---------------------------------------------------------------------------
+# expect_brackets opt-in: only orders submitted with ``expect_brackets=True``
+# register in ``_known_top_level_order_ids``. Non-bracket strategies pay no
+# memory cost, and stale-id reuse drops to near-zero since the set only
+# contains parents the strategy has explicitly declared bracket intent for.
+# ---------------------------------------------------------------------------
+
+
+def test_submit_default_does_not_register_eligible_parent() -> None:
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        # expect_brackets omitted → defaults to False
+    )
+    # ``submit_attached`` correctly fails: the strategy didn't declare bracket
+    # intent at submission time, so the parent's id was never registered.
+    with pytest.raises(ValueError, match="not a known top-level order id"):
+        book.submit_attached(
+            _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            submitted_at="2024-01-03",
+            submitted_equity=100_000.0,
+            parent_order_id=parent.order_id,
+            oco_group_id="g1",
+        )
+
+
+def test_submit_with_expect_brackets_registers_eligible_parent() -> None:
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        expect_brackets=True,
+    )
+    # Now ``submit_attached`` succeeds — the strategy declared bracket intent.
+    child = book.submit_attached(
+        _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        submitted_at="2024-01-03",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    assert child.request.parent_order_id == parent.order_id
+
+
+# ---------------------------------------------------------------------------
+# requeue rejects non-numeric ``new_remaining_qty`` with a structured
+# ``TypeError`` rather than letting ``math.isfinite`` raise its own.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_qty", ["10", b"10", None, [10.0], object()])
+def test_requeue_rejects_non_numeric_remaining_qty(bad_qty) -> None:
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    with pytest.raises(TypeError, match="must be int or float"):
+        book.requeue(po.order_id, new_remaining_qty=bad_qty, new_submitted_at="2024-01-03")
+    # State unchanged.
+    assert po.remaining_qty == 10.0

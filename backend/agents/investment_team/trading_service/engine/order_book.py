@@ -66,12 +66,15 @@ class OrderBook:
     _pending: Dict[str, PendingOrder] = field(default_factory=dict)
     # Parallel index by symbol/side so fill_simulator doesn't have to scan.
     _by_symbol: Dict[str, List[str]] = field(default_factory=dict)
-    # Map of *eligible-parent* top-level order id → symbol. Used by
+    # Map of *eligible-parent* top-level order id → (symbol, side). Used by
     # ``submit_attached`` to reject children whose ``parent_order_id`` is not
-    # a real top-level order eligible to carry brackets, and to verify the
-    # child's symbol matches the parent's. Lifecycle:
+    # a real top-level order eligible to carry brackets, to verify the child's
+    # symbol matches, and to verify the child takes the opposite side.
+    # Lifecycle:
     #
-    # - Inserted on ``submit()`` (top-level entries).
+    # - Inserted by ``submit()`` *only when the caller passes*
+    #   ``expect_brackets=True`` (strategies that don't use brackets pay no
+    #   memory cost — non-bracket entries never enter this set).
     # - Discarded on ``cancel()`` and ``expire_day_orders()`` for top-level
     #   orders (cancelled / expired parents never opened, so attaching
     #   protective children to them would be a bug).
@@ -94,7 +97,19 @@ class OrderBook:
         *,
         submitted_at: str,
         submitted_equity: float,
+        expect_brackets: bool = False,
     ) -> PendingOrder:
+        """Submit a top-level order to the book.
+
+        ``expect_brackets`` (default ``False``) is the strategy's declaration
+        that one or more bracket / OCO children may be attached against this
+        order's id later via :meth:`submit_attached`. Only when ``True`` does
+        the order's id register in ``_known_top_level_order_ids`` — the
+        eligible-parent set ``submit_attached`` validates against. Non-
+        bracket strategies (the majority) get *zero* memory overhead from
+        the eligible-parent tracking; bracket strategies opt in explicitly,
+        which also makes intent visible at the call site.
+        """
         # Defense in depth — strategy-side ``validate_prices()`` already rejects
         # both fields, but ``submit()`` is the gateway that registers an id as
         # an *eligible bracket parent*. Refusing child-shaped requests here
@@ -120,9 +135,10 @@ class OrderBook:
             remaining_qty=request.qty,
         )
         self._pending[order_id] = po
-        self._known_top_level_order_ids[order_id] = _TopLevelMeta(
-            symbol=request.symbol, side=request.side
-        )
+        if expect_brackets:
+            self._known_top_level_order_ids[order_id] = _TopLevelMeta(
+                symbol=request.symbol, side=request.side
+            )
         self._by_symbol.setdefault(request.symbol, []).append(order_id)
         return po
 
@@ -389,6 +405,15 @@ class OrderBook:
         if isinstance(new_remaining_qty, bool):
             raise ValueError(
                 f"requeue new_remaining_qty must be a real number, got bool {new_remaining_qty!r}"
+            )
+        # Type-check before ``math.isfinite`` so non-numeric inputs (e.g. a
+        # malformed caller passing a string) raise a structured ``TypeError``
+        # with a clear message instead of the raw ``TypeError`` ``math``
+        # produces from inside its C implementation.
+        if not isinstance(new_remaining_qty, (int, float)):
+            raise TypeError(
+                f"requeue new_remaining_qty must be int or float, "
+                f"got {type(new_remaining_qty).__name__} {new_remaining_qty!r}"
             )
         if not math.isfinite(new_remaining_qty):
             raise ValueError(f"requeue new_remaining_qty must be finite, got {new_remaining_qty!r}")
