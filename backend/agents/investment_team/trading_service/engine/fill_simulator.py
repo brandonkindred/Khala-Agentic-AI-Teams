@@ -128,7 +128,10 @@ class FillSimulator:
                 self.portfolio.open(pos)
                 fill = self.portfolio.make_entry_fill(pos)
                 entry_fills.append(fill)
-                self.order_book.remove(po.order_id)
+                # Entry filled — keep the parent's id in the eligible-parent
+                # set so bracket / OCO children can later be activated against
+                # it via ``OrderBook.submit_attached`` (see #389).
+                self.order_book.remove(po.order_id, was_filled=True)
             elif has_position:
                 # Exit path: order closes out the open position. We only
                 # support full-qty exits in PR 1 (matches legacy behavior at
@@ -161,7 +164,12 @@ class FillSimulator:
                         reason="exit",
                     )
                 )
-                self.order_book.remove(po.order_id)
+                # Exit filled — fill (not a non-fill removal). ``was_filled``
+                # only affects how ``remove`` treats the *eligible-parent set*
+                # used by ``OrderBook.submit_attached``; passing ``True`` here
+                # is the right semantic because this is a fill, even though
+                # exit orders rarely have brackets attached after-the-fact.
+                self.order_book.remove(po.order_id, was_filled=True)
 
         return FillOutcome(
             entry_fills=entry_fills,

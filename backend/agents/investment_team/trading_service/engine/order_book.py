@@ -189,24 +189,29 @@ class OrderBook:
             ids.remove(order_id)
         # Cancelled top-level orders are no longer eligible parents — their
         # entry never produced (or won't produce any further) live exposure,
-        # so attaching protective children would be a bug.
+        # so attaching protective children would be a bug. Cascade-cancel
+        # any pending children so we don't leave orphan protective legs in
+        # the book without a live entry.
         if po.request.parent_order_id is None:
             self._known_top_level_order_ids.discard(order_id)
+            self._cascade_cancel_children(order_id)
         return True
 
     def remove(self, order_id: str, *, was_filled: bool = False) -> Optional[PendingOrder]:
         """Drop an order from the book.
 
         Pass ``was_filled=True`` *only* when the removal represents a real
-        terminal fill (used by ``requeue(... new_remaining_qty=0)``). In that
-        case the order's id is preserved in ``_known_top_level_order_ids`` so
+        terminal fill (used by ``requeue(... new_remaining_qty=0)`` and
+        ``FillSimulator``'s entry / exit fill paths). In that case the
+        order's id is preserved in ``_known_top_level_order_ids`` so
         bracket children can still be activated against it.
 
         The default ``was_filled=False`` is the safe choice for every other
         removal path (risk-gate rejection, insufficient capital, sibling
-        cancellation, expiry cascade, etc.) — those must evict the parent's
-        id from the eligible-parent set so subsequent ``submit_attached``
-        calls don't accidentally attach children to a never-opened entry.
+        cancellation, expiry cascade, manual removal). It evicts a top-level
+        parent's id from the eligible-parent set *and* cascade-cancels any
+        pending children so non-fill removals don't leave orphan bracket
+        legs in the book.
         """
         po = self._pending.pop(order_id, None)
         if po is not None:
@@ -215,7 +220,20 @@ class OrderBook:
                 ids.remove(order_id)
             if not was_filled and po.request.parent_order_id is None:
                 self._known_top_level_order_ids.discard(order_id)
+                self._cascade_cancel_children(order_id)
         return po
+
+    def _cascade_cancel_children(self, parent_id: str) -> None:
+        """Remove every pending child of ``parent_id`` (non-recursive).
+
+        Called by ``cancel`` and by ``remove(was_filled=False)`` on top-level
+        orders to keep orphan protective legs (TP / SL) out of the book when
+        the entry never opens. ``children_of`` only returns *direct*
+        children, so ``submit_attached``'s flat-bracket invariant means we
+        don't recurse.
+        """
+        for child in self.children_of(parent_id):
+            self.remove(child.order_id)
 
     def pending_for_symbol(self, symbol: str) -> List[PendingOrder]:
         return [self._pending[oid] for oid in self._by_symbol.get(symbol, [])]
@@ -433,9 +451,10 @@ class OrderBook:
 
     def expire_day_orders(self, current_date: str) -> List[PendingOrder]:
         """Expire DAY-TIF orders whose original submission date is strictly
-        earlier than ``current_date``. When the expired order is a top-level
-        bracket parent, also cascade-cancel any children currently pending so
-        we don't leave orphan protective legs in the book without an entry.
+        earlier than ``current_date``. Top-level expirations cascade-cancel
+        any pending attached children via ``remove()``'s default
+        (``was_filled=False``) lifecycle path so we don't leave orphan
+        protective legs in the book.
         """
         expired: List[PendingOrder] = []
         for oid in list(self._pending.keys()):
@@ -454,14 +473,8 @@ class OrderBook:
             # Compare date prefix only so intraday timestamps also work.
             if _date_only(anchor) < _date_only(current_date):
                 expired.append(po)
-                # Cascade to attached children *before* removing the parent so
-                # orphan bracket legs don't linger after the entry expired
-                # without filling. Only relevant for top-level orders since
-                # only they have children. ``remove()`` defaults to evicting
-                # the id from ``_known_top_level_order_ids`` (was_filled=False).
-                if po.request.parent_order_id is None:
-                    for child in self.children_of(oid):
-                        self.remove(child.order_id)
+                # ``remove(was_filled=False)`` evicts the parent from the
+                # eligible-parent set *and* cascades to any pending children.
                 self.remove(oid)
         return expired
 

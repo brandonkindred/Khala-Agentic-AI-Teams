@@ -1383,3 +1383,98 @@ def test_requeue_falls_back_to_string_compare_for_unparseable_ts() -> None:
     # And same lexicographic ordering forward — accepted.
     book.requeue(po.order_id, new_remaining_qty=4.0, new_submitted_at="bar-2024-01-03")
     assert po.remaining_qty == 4.0
+
+
+# ---------------------------------------------------------------------------
+# Cascade-cancel attached children when a top-level parent leaves the book
+# without filling. Covers cancel() and remove(was_filled=False); the
+# expire_day_orders cascade is exercised separately above.
+# ---------------------------------------------------------------------------
+
+
+def _bracket_with_two_children(book: OrderBook):
+    parent = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    child_a = book.submit_attached(
+        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    child_b = book.submit_attached(
+        _base(qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    return parent, child_a, child_b
+
+
+def test_cancel_cascades_to_pending_children() -> None:
+    """``cancel()`` on a top-level parent must cascade-cancel its attached
+    children. Otherwise an orphan TP / SL leg would still execute as a
+    standalone order even though the entry was cancelled.
+    """
+    book = OrderBook()
+    parent, child_a, child_b = _bracket_with_two_children(book)
+    assert book.cancel(parent.order_id) is True
+    # Parent and both children gone.
+    assert book.all_pending() == []
+    assert child_a not in book.all_pending()
+    assert child_b not in book.all_pending()
+
+
+def test_remove_unfilled_cascades_to_pending_children() -> None:
+    """``remove(was_filled=False)`` on a top-level parent must cascade for
+    the same reason as ``cancel()``: a non-filled removal (risk-rejection,
+    insufficient capital, manual cleanup) leaves no entry, so the
+    protective legs are orphans.
+    """
+    book = OrderBook()
+    parent, child_a, child_b = _bracket_with_two_children(book)
+    book.remove(parent.order_id)  # default was_filled=False
+    assert book.all_pending() == []
+    assert child_a not in book.all_pending()
+    assert child_b not in book.all_pending()
+
+
+def test_remove_filled_does_not_cascade_to_pending_children() -> None:
+    """``remove(was_filled=True)`` is the terminal-fill path. The parent
+    just opened, so its bracket children should *stay* live to protect the
+    new position. Cascade must not fire here.
+    """
+    book = OrderBook()
+    parent, child_a, child_b = _bracket_with_two_children(book)
+    book.remove(parent.order_id, was_filled=True)
+    pending_ids = {po.order_id for po in book.all_pending()}
+    assert pending_ids == {child_a.order_id, child_b.order_id}
+
+
+def test_cancel_only_cancels_direct_children_of_target() -> None:
+    """Cascade is scoped to the cancelled parent's *own* children — an
+    unrelated bracket shouldn't be touched.
+    """
+    book = OrderBook()
+    parent_a, child_a1, child_a2 = _bracket_with_two_children(book)
+    parent_b = book.submit(
+        _base(qty=5.0, symbol="BBB"),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    child_b = book.submit_attached(
+        _base(qty=5.0, symbol="BBB", order_type=OrderType.LIMIT, limit_price=55.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        parent_order_id=parent_b.order_id,
+        oco_group_id="g2",
+    )
+    book.cancel(parent_a.order_id)
+    pending_ids = {po.order_id for po in book.all_pending()}
+    assert pending_ids == {parent_b.order_id, child_b.order_id}
+    assert child_a1 not in book.all_pending()
+    assert child_a2 not in book.all_pending()
