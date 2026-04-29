@@ -61,6 +61,79 @@ def test_submit_initializes_partial_fill_fields() -> None:
     assert po.rejection_reason is None
 
 
+def test_submit_rejects_request_with_parent_order_id() -> None:
+    """Defense in depth — strategy-side ``validate_prices()`` already rejects
+    these fields, but ``submit()`` is the gateway that registers an id as an
+    eligible bracket parent. Refusing child-shaped requests here prevents an
+    internal caller that bypasses ``validate_prices`` from smuggling an
+    attached order into the eligible-parent set.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    bad_request = _base(qty=5.0).model_copy(update={"parent_order_id": parent.order_id})
+    with pytest.raises(ValueError, match="must not receive a request with parent_order_id"):
+        book.submit(bad_request, submitted_at="2024-01-03", submitted_equity=100_000.0)
+
+
+def test_submit_rejects_request_with_oco_group_id() -> None:
+    book = OrderBook()
+    bad_request = _base(qty=10.0).model_copy(update={"oco_group_id": "g1"})
+    with pytest.raises(ValueError, match="must not receive a request with parent_order_id"):
+        book.submit(bad_request, submitted_at="2024-01-02", submitted_equity=100_000.0)
+    assert book.all_pending() == []
+
+
+def test_remove_default_evicts_top_level_id() -> None:
+    """``remove(was_filled=False)`` (default) is the safe path used for risk-
+    rejection / insufficient-capital paths in ``fill_simulator``: the parent
+    never opened, so its id must be evicted from the eligible-parent set so
+    a later ``submit_attached`` doesn't attach children to a non-existent
+    entry. Distinct from ``requeue(0)`` which uses ``was_filled=True``.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    book.remove(parent.order_id)  # default was_filled=False — non-fill path
+
+    with pytest.raises(ValueError, match="not a known top-level order id"):
+        book.submit_attached(
+            _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+            submitted_at="2024-01-03",
+            submitted_equity=100_000.0,
+            parent_order_id=parent.order_id,
+            oco_group_id="g1",
+        )
+
+
+def test_remove_with_was_filled_preserves_top_level_id() -> None:
+    """``remove(was_filled=True)`` is the terminal-fill path — keeps the id
+    eligible so bracket children can still be activated against it.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    book.remove(parent.order_id, was_filled=True)
+
+    child = book.submit_attached(
+        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        submitted_at="2024-01-03",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    assert child.request.parent_order_id == parent.order_id
+
+
 # ---------------------------------------------------------------------------
 # Submit → requeue → remove cycle
 # ---------------------------------------------------------------------------
@@ -986,7 +1059,9 @@ def test_submit_attached_accepts_parent_after_removal() -> None:
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
     )
-    book.remove(parent.order_id)
+    # Simulate the terminal-fill removal path used by ``requeue(0)``;
+    # ``was_filled=True`` keeps the parent eligible for bracket children.
+    book.remove(parent.order_id, was_filled=True)
     assert parent not in book.all_pending()
 
     child = book.submit_attached(
@@ -1110,7 +1185,9 @@ def test_prune_keeps_active_parents() -> None:
         parent_order_id=parent_with_child.order_id,
         oco_group_id="g2",
     )
-    book.remove(parent_with_child.order_id)
+    # Filled parent (was_filled=True) — keeps the id in the eligible-parent
+    # set so the still-pending child can later be referenced.
+    book.remove(parent_with_child.order_id, was_filled=True)
 
     pruned = book.prune_known_top_level_order_ids()
     assert pruned == 0
@@ -1142,7 +1219,9 @@ def test_prune_evicts_fully_resolved_parents() -> None:
         submitted_at="2024-01-02",
         submitted_equity=100_000.0,
     )
-    book.remove(parent.order_id)
+    # Filled-parent removal: keeps the id in the eligible-parent set so
+    # ``prune_known_top_level_order_ids`` is the natural eviction path.
+    book.remove(parent.order_id, was_filled=True)
     assert book.children_of(parent.order_id) == []
 
     pruned = book.prune_known_top_level_order_ids()
@@ -1202,3 +1281,105 @@ def test_expire_day_orders_keeps_order_on_original_day() -> None:
     book.requeue(po.order_id, new_remaining_qty=5.0, new_submitted_at="2024-01-02")
     assert book.expire_day_orders("2024-01-02") == []
     assert po in book.all_pending()
+
+
+def test_expire_day_orders_cascades_to_pending_children() -> None:
+    """When a top-level DAY order expires unfilled, any already-pending
+    attached children must also be cancelled — otherwise the orphan
+    protective legs would execute as standalone orders without the parent
+    entry having ever opened.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0, tif=TimeInForce.DAY),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    # Children submitted while the parent is still pending (preventive
+    # bracket pattern). Use GTC so the children themselves don't expire.
+    child_a = book.submit_attached(
+        _base(qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    child_b = book.submit_attached(
+        _base(qty=10.0, order_type=OrderType.STOP, stop_price=95.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    # Parent expires at end-of-session — children must be cascaded out.
+    expired = book.expire_day_orders("2024-01-03")
+    assert expired == [parent]
+    assert book.all_pending() == []
+    assert child_a not in book.all_pending()
+    assert child_b not in book.all_pending()
+
+
+# ---------------------------------------------------------------------------
+# requeue uses datetime-aware timestamp comparison so equivalent ISO 8601
+# instants in different timezone offsets don't trip the regression guard.
+# ---------------------------------------------------------------------------
+
+
+def test_requeue_treats_equivalent_offsets_as_equal() -> None:
+    """``2024-01-02T10:00:00+05:30`` and ``2024-01-02T04:30:00+00:00`` are the
+    same instant. Lexicographic string compare would falsely reject the
+    second as a regression (``+`` ASCII < ``+05:30`` literally is fine, but
+    the time portion sorts ``04:`` before ``10:``). Datetime parsing fixes
+    this.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02T10:00:00+05:30",
+        submitted_equity=100_000.0,
+    )
+    # Same instant in UTC offset — must not raise.
+    book.requeue(
+        po.order_id,
+        new_remaining_qty=4.0,
+        new_submitted_at="2024-01-02T04:30:00+00:00",
+    )
+    assert po.remaining_qty == 4.0
+
+
+def test_requeue_rejects_strictly_earlier_instant_across_offsets() -> None:
+    """Datetime-aware compare still rejects a genuinely earlier instant
+    expressed in a different offset.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="2024-01-02T10:00:00+00:00",
+        submitted_equity=100_000.0,
+    )
+    # 09:00 IST = 03:30 UTC, which is before 10:00 UTC → regression.
+    with pytest.raises(ValueError, match="must not regress"):
+        book.requeue(
+            po.order_id,
+            new_remaining_qty=5.0,
+            new_submitted_at="2024-01-02T09:00:00+05:30",
+        )
+
+
+def test_requeue_falls_back_to_string_compare_for_unparseable_ts() -> None:
+    """When a timestamp doesn't parse as ISO 8601, the regression guard
+    falls back to normalised string comparison so callers using non-ISO
+    formats aren't silently accepted in either direction.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=10.0),
+        submitted_at="bar-2024-01-02",  # not ISO 8601
+        submitted_equity=100_000.0,
+    )
+    # Lexicographically earlier — should still raise via string fallback.
+    with pytest.raises(ValueError, match="must not regress"):
+        book.requeue(po.order_id, new_remaining_qty=5.0, new_submitted_at="bar-2024-01-01")
+    # And same lexicographic ordering forward — accepted.
+    book.requeue(po.order_id, new_remaining_qty=4.0, new_submitted_at="bar-2024-01-03")
+    assert po.remaining_qty == 4.0

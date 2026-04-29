@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional, Set
 
 from ..strategy.contract import OrderRequest, OrderSide, OrderType, TimeInForce
@@ -84,6 +85,19 @@ class OrderBook:
         submitted_at: str,
         submitted_equity: float,
     ) -> PendingOrder:
+        # Defense in depth — strategy-side ``validate_prices()`` already rejects
+        # both fields, but ``submit()`` is the gateway that registers an id as
+        # an *eligible bracket parent*. Refusing child-shaped requests here
+        # prevents an internal caller that bypasses ``validate_prices`` from
+        # smuggling an attached order into the eligible-parent set and creating
+        # multi-level bracket trees.
+        if request.parent_order_id is not None or request.oco_group_id is not None:
+            raise ValueError(
+                f"submit() must not receive a request with parent_order_id or "
+                f"oco_group_id set (got parent_order_id={request.parent_order_id!r}, "
+                f"oco_group_id={request.oco_group_id!r}); use submit_attached() "
+                f"for bracket / OCO children"
+            )
         self._next_id += 1
         order_id = f"o{self._next_id}"
         po = PendingOrder(
@@ -175,19 +189,32 @@ class OrderBook:
             ids.remove(order_id)
         # Cancelled top-level orders are no longer eligible parents — their
         # entry never produced (or won't produce any further) live exposure,
-        # so attaching protective children would be a bug. Use ``remove()``
-        # for the *fill* removal path so the parent stays in the set and
-        # bracket children can still be activated.
+        # so attaching protective children would be a bug.
         if po.request.parent_order_id is None:
             self._known_top_level_order_ids.discard(order_id)
         return True
 
-    def remove(self, order_id: str) -> Optional[PendingOrder]:
+    def remove(self, order_id: str, *, was_filled: bool = False) -> Optional[PendingOrder]:
+        """Drop an order from the book.
+
+        Pass ``was_filled=True`` *only* when the removal represents a real
+        terminal fill (used by ``requeue(... new_remaining_qty=0)``). In that
+        case the order's id is preserved in ``_known_top_level_order_ids`` so
+        bracket children can still be activated against it.
+
+        The default ``was_filled=False`` is the safe choice for every other
+        removal path (risk-gate rejection, insufficient capital, sibling
+        cancellation, expiry cascade, etc.) — those must evict the parent's
+        id from the eligible-parent set so subsequent ``submit_attached``
+        calls don't accidentally attach children to a never-opened entry.
+        """
         po = self._pending.pop(order_id, None)
         if po is not None:
             ids = self._by_symbol.get(po.request.symbol)
             if ids and order_id in ids:
                 ids.remove(order_id)
+            if not was_filled and po.request.parent_order_id is None:
+                self._known_top_level_order_ids.discard(order_id)
         return po
 
     def pending_for_symbol(self, symbol: str) -> List[PendingOrder]:
@@ -239,10 +266,11 @@ class OrderBook:
             )
         if not math.isfinite(new_remaining_qty):
             raise ValueError(f"requeue new_remaining_qty must be finite, got {new_remaining_qty!r}")
-        # Normalise both sides of the regression check before comparing so
-        # equivalent ISO 8601 instants in different formats (e.g. ``…Z`` vs
-        # ``…+00:00``) don't trip a false rejection.
-        if _normalize_ts(new_submitted_at) < _normalize_ts(po.submitted_at):
+        # Compare both sides as parsed datetimes when possible, falling back
+        # to normalised string compare when one side isn't ISO 8601. Otherwise
+        # equivalent ISO 8601 instants in different timezone offsets (e.g.
+        # ``+05:30`` vs ``+00:00``) would falsely reject as a regression.
+        if _ts_lt(new_submitted_at, po.submitted_at):
             raise ValueError(
                 f"requeue submitted_at must not regress: "
                 f"old={po.submitted_at!r} new={new_submitted_at!r}"
@@ -283,9 +311,11 @@ class OrderBook:
         if new_remaining_qty == 0:
             # Fully filled — drop from the book so downstream consumers (notably
             # FillSimulator, which still sizes from req.qty) can't re-fill it.
+            # ``was_filled=True`` keeps the id in ``_known_top_level_order_ids``
+            # so bracket children can still be activated against this parent.
             # The returned PendingOrder reference still holds the final terminal
             # state for the caller to read.
-            self.remove(order_id)
+            self.remove(order_id, was_filled=True)
         return po
 
     def oco_cancel_siblings(
@@ -402,9 +432,17 @@ class OrderBook:
     # ------------------------------------------------------------------
 
     def expire_day_orders(self, current_date: str) -> List[PendingOrder]:
+        """Expire DAY-TIF orders whose original submission date is strictly
+        earlier than ``current_date``. When the expired order is a top-level
+        bracket parent, also cascade-cancel any children currently pending so
+        we don't leave orphan protective legs in the book without an entry.
+        """
         expired: List[PendingOrder] = []
         for oid in list(self._pending.keys()):
-            po = self._pending[oid]
+            po = self._pending.get(oid)
+            if po is None:
+                # Already cascade-cancelled by an earlier parent in this loop.
+                continue
             if po.request.tif != TimeInForce.DAY:
                 continue
             # Anchor the expiry decision on ``original_submitted_at`` (immutable)
@@ -416,12 +454,15 @@ class OrderBook:
             # Compare date prefix only so intraday timestamps also work.
             if _date_only(anchor) < _date_only(current_date):
                 expired.append(po)
-                self.remove(oid)
-                # Same lifecycle rule as ``cancel``: an expired top-level
-                # order never opened (or finished its session unfilled), so
-                # it should not accept new bracket children afterwards.
+                # Cascade to attached children *before* removing the parent so
+                # orphan bracket legs don't linger after the entry expired
+                # without filling. Only relevant for top-level orders since
+                # only they have children. ``remove()`` defaults to evicting
+                # the id from ``_known_top_level_order_ids`` (was_filled=False).
                 if po.request.parent_order_id is None:
-                    self._known_top_level_order_ids.discard(oid)
+                    for child in self.children_of(oid):
+                        self.remove(child.order_id)
+                self.remove(oid)
         return expired
 
 
@@ -430,19 +471,48 @@ def _date_only(ts: str) -> str:
 
 
 def _normalize_ts(ts: str) -> str:
-    """Best-effort ISO 8601 normalisation for lexicographic comparison.
-
-    Maps a trailing ``Z`` (UTC zulu suffix) to ``+00:00`` so two equivalent
-    representations of the same instant compare equal as strings. Anything
-    else is returned unchanged — this is a defensive nudge, not a full ISO
-    parser; mixed timezone offsets / locale formats are still the caller's
-    responsibility.
+    """Map a trailing ``Z`` (UTC zulu suffix) to ``+00:00``. Used as both a
+    pre-parse normaliser (so ``datetime.fromisoformat`` accepts the Z form on
+    Python < 3.11) and the fallback string compare for unparseable inputs.
     """
     if not isinstance(ts, str):
         return ts
     if ts.endswith("Z"):
         return ts[:-1] + "+00:00"
     return ts
+
+
+def _try_parse_ts(ts: str) -> Optional[datetime]:
+    """Best-effort ISO 8601 parse. Returns ``None`` if the value isn't a
+    string or doesn't parse cleanly — callers fall back to string compare.
+    """
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(_normalize_ts(ts))
+    except ValueError:
+        return None
+
+
+def _ts_lt(new_ts: str, existing_ts: str) -> bool:
+    """True iff ``new_ts`` is *strictly* earlier than ``existing_ts``.
+
+    Parses both as ISO 8601 datetimes when possible and compares them
+    chronologically — so equivalent instants in different timezone offsets
+    (e.g. ``2024-01-02T10:00:00+05:30`` vs ``2024-01-02T04:30:00+00:00``)
+    correctly compare equal instead of being rejected as a regression by
+    raw string ordering.
+
+    Falls back to normalised string comparison when one side fails to
+    parse, or when one side is naive and the other is timezone-aware
+    (Python raises ``TypeError`` on mixed-awareness datetime comparisons).
+    """
+    new_dt = _try_parse_ts(new_ts)
+    existing_dt = _try_parse_ts(existing_ts)
+    if new_dt is not None and existing_dt is not None:
+        if (new_dt.tzinfo is None) == (existing_dt.tzinfo is None):
+            return new_dt < existing_dt
+    return _normalize_ts(new_ts) < _normalize_ts(existing_ts)
 
 
 # Convenience re-exports to make ``from .order_book import *`` unambiguous.
