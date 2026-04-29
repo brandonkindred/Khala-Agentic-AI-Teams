@@ -13,6 +13,7 @@ a convention. See ``strategy/streaming_harness.py`` and
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional
 
@@ -24,10 +25,30 @@ from .engine.execution_model import build_execution_model
 from .engine.fill_simulator import FillSimulator, FillSimulatorConfig
 from .engine.order_book import OrderBook
 from .engine.portfolio import Portfolio
-from .strategy.contract import OrderRequest, OrderSide, UnsupportedOrderFeatureError
+from .strategy.contract import (
+    OrderRequest,
+    OrderSide,
+    UnfilledPolicy,
+    UnsupportedOrderFeatureError,
+)
 from .strategy.streaming_harness import StrategyRuntimeError, StreamingHarness
 
 logger = logging.getLogger(__name__)
+
+
+def _partial_fill_defaults_enabled() -> bool:
+    """Whether parent-side application of ``default_unfilled_policy`` is on.
+
+    Off by default — Step 3 of #379 ships the wiring; Steps 4+ make the
+    downstream engine actually act on the policy. With the flag off, the
+    service ignores ``default_unfilled_policy`` entirely (acts as DROP
+    regardless), preserving today's byte-identical behavior.
+    """
+    return os.environ.get("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", "false").lower() in {
+        "true",
+        "1",
+        "yes",
+    }
 
 
 @dataclass
@@ -56,6 +77,7 @@ class TradingService:
         strategy_code: str,
         config: BacktestConfig,
         risk_limits: Optional["RiskLimits | Dict"] = None,
+        default_unfilled_policy: UnfilledPolicy = UnfilledPolicy.DROP,
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
@@ -68,6 +90,7 @@ class TradingService:
         else:
             limits = RiskLimits.from_legacy_dict(risk_limits or {})
         self._risk = RiskFilter(limits)
+        self._default_unfilled_policy = default_unfilled_policy
 
     # ------------------------------------------------------------------
 
@@ -176,7 +199,17 @@ class TradingService:
                         #    *this* (current) bar. These were submitted by the
                         #    strategy after seeing `prev_bar`.
                         if pending_for_prev:
+                            # #385 — apply the mode-level default unfilled
+                            # policy parent-side (after the request has left
+                            # the strategy process), so strategy bytes stay
+                            # identical regardless of the flag. Step 3 only
+                            # plumbs the value through; downstream consumers
+                            # (order_book / fill_simulator) start acting on
+                            # it in #386.
+                            apply_default = _partial_fill_defaults_enabled()
                             for req in pending_for_prev:
+                                if apply_default and req.unfilled_policy is None:
+                                    req.unfilled_policy = self._default_unfilled_policy
                                 equity = portfolio.mark_to_market()
                                 order_book.submit(
                                     req,

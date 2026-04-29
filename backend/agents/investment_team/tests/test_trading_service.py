@@ -18,7 +18,16 @@ import pytest
 
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import BacktestConfig, StrategySpec
+from investment_team.trading_service.data_stream.historical_replay import (
+    HistoricalReplayStream,
+)
+from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.modes.backtest import run_backtest
+from investment_team.trading_service.service import TradingService
+from investment_team.trading_service.strategy.contract import (
+    OrderRequest,
+    UnfilledPolicy,
+)
 
 
 def _uptrend_then_down_bars(symbol_bars: Dict[str, List[OHLCVBar]]) -> None:
@@ -240,3 +249,116 @@ def test_run_backtest_strict_fails_on_ohlc_violation() -> None:
         run_backtest(strategy=strategy, config=_config(), market_data=market_data)
     assert excinfo.value.report.severity == "fail"
     assert excinfo.value.report.per_symbol["AAA"].ohlc_violations == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #385 — default_unfilled_policy plumbing (gated feature flag)
+# ---------------------------------------------------------------------------
+
+
+def _capture_submitted_orders(monkeypatch) -> List[OrderRequest]:
+    """Wrap ``OrderBook.submit`` to capture every request handed to the book.
+
+    Used to assert what ``unfilled_policy`` value reaches the order book
+    after the parent-side mutation in ``TradingService``.
+    """
+    captured: List[OrderRequest] = []
+    real_submit = OrderBook.submit
+
+    def capturing_submit(self, request, **kwargs):
+        captured.append(request)
+        return real_submit(self, request, **kwargs)
+
+    monkeypatch.setattr(OrderBook, "submit", capturing_submit)
+    return captured
+
+
+@pytest.mark.parametrize(
+    ("mode_default", "flag_on", "expected_policy"),
+    [
+        # Backtest mode default = REQUEUE_NEXT_BAR; flag off → unchanged (None).
+        (UnfilledPolicy.REQUEUE_NEXT_BAR, False, None),
+        # Backtest mode default = REQUEUE_NEXT_BAR; flag on → applied.
+        (UnfilledPolicy.REQUEUE_NEXT_BAR, True, UnfilledPolicy.REQUEUE_NEXT_BAR),
+        # Paper mode default = DROP; flag off → unchanged (None).
+        (UnfilledPolicy.DROP, False, None),
+        # Paper mode default = DROP; flag on → applied.
+        (UnfilledPolicy.DROP, True, UnfilledPolicy.DROP),
+    ],
+    ids=[
+        "backtest_flag_off",
+        "backtest_flag_on",
+        "paper_flag_off",
+        "paper_flag_on",
+    ],
+)
+def test_default_unfilled_policy_gated_by_flag(
+    monkeypatch, mode_default, flag_on, expected_policy
+) -> None:
+    """Parent-side default applies only when the feature flag is on.
+
+    When the flag is off, behavior matches today exactly: ``unfilled_policy``
+    stays ``None`` on the request submitted to the order book regardless of
+    what the mode passed to ``TradingService``. When the flag is on, requests
+    that the strategy did not annotate get the mode default.
+    """
+    if flag_on:
+        monkeypatch.setenv("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", "true")
+    else:
+        monkeypatch.delenv("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", raising=False)
+
+    captured = _capture_submitted_orders(monkeypatch)
+
+    market_data: Dict[str, List[OHLCVBar]] = {}
+    _uptrend_then_down_bars(market_data)
+
+    service = TradingService(
+        strategy_code=_SMA_STRATEGY_CODE,
+        config=_config(),
+        default_unfilled_policy=mode_default,
+    )
+    stream = HistoricalReplayStream(market_data, timeframe="1d")
+    result = service.run(stream)
+
+    assert result.error is None, result.error
+    assert captured, "expected the SMA strategy to submit at least one order"
+    for req in captured:
+        assert req.unfilled_policy == expected_policy, (
+            f"flag_on={flag_on} mode_default={mode_default} "
+            f"expected unfilled_policy={expected_policy} but saw {req.unfilled_policy}"
+        )
+
+
+def test_run_backtest_passes_requeue_default_to_service(monkeypatch) -> None:
+    """``modes.backtest.run_backtest`` constructs the service with REQUEUE_NEXT_BAR."""
+    monkeypatch.setenv("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", "true")
+    captured = _capture_submitted_orders(monkeypatch)
+
+    market_data: Dict[str, List[OHLCVBar]] = {}
+    _uptrend_then_down_bars(market_data)
+
+    strategy = StrategySpec(
+        strategy_id="strat-sma-385-backtest",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="momentum via SMA(5)",
+        signal_definition="close vs sma(5)",
+        entry_rules=["close > sma(5)"],
+        exit_rules=["close < sma(5)"],
+        strategy_code=_SMA_STRATEGY_CODE,
+    )
+
+    run = run_backtest(strategy=strategy, config=_config(), market_data=market_data)
+
+    assert run.service_result.error is None, run.service_result.error
+    assert captured, "expected the SMA strategy to submit at least one order"
+    for req in captured:
+        assert req.unfilled_policy == UnfilledPolicy.REQUEUE_NEXT_BAR
+
+
+def test_partial_fill_defaults_flag_default_is_off(monkeypatch) -> None:
+    """With the env var unset, the helper reports ``False`` (opt-in semantics)."""
+    monkeypatch.delenv("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", raising=False)
+    from investment_team.trading_service.service import _partial_fill_defaults_enabled
+
+    assert _partial_fill_defaults_enabled() is False

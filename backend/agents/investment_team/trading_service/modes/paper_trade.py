@@ -47,6 +47,7 @@ from ..providers import (
     default_registry,
 )
 from ..service import TradingService, TradingServiceResult
+from ..strategy.contract import UnfilledPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,13 @@ def run_paper_trade(
         strategy_code=strategy.strategy_code,
         config=backtest_config,
         risk_limits=strategy.risk_limits,
+        # Paper trading mirrors live exchange behavior — when the
+        # participation cap clips an order, the unfilled remainder is
+        # dropped, not requeued. Explicit at the call site to document
+        # divergence from backtest mode. Gated by
+        # TRADING_PARTIAL_FILL_DEFAULTS_ENABLED until #386 wires
+        # consumption.
+        default_unfilled_policy=UnfilledPolicy.DROP,
     )
 
     # First attempt: primary provider.

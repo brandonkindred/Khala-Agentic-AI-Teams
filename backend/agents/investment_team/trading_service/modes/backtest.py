@@ -32,6 +32,7 @@ from ...trade_simulator import compute_metrics
 from ..data_stream.historical_replay import HistoricalReplayStream
 from ..providers import ProviderRegistry, default_registry
 from ..service import TradingService, TradingServiceResult
+from ..strategy.contract import UnfilledPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,12 @@ def run_backtest(
             strategy_code=strategy.strategy_code,
             config=run_config,
             risk_limits=strategy.risk_limits,
+            # Backtests prefer requeueing partial-fill remainders on the next
+            # bar over silently dropping them — research artifacts must
+            # surface the exposure gap. Gated by
+            # TRADING_PARTIAL_FILL_DEFAULTS_ENABLED until #386 wires
+            # consumption.
+            default_unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
         )
         outcome = service.run(stream)
         run_metrics = compute_metrics(
