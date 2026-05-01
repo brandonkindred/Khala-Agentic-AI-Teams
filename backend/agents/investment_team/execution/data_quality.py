@@ -515,11 +515,18 @@ def _ohlc_violation(bar: OHLCVBar) -> bool:
     if not all(math.isfinite(v) for v in (o, h, ll, c)):
         # Already counted by the NaN check; do not double-count.
         return False
-    if h < ll:
+
+    # Vendors can emit tiny floating-point drift (e.g., high a few ULPs below
+    # open/close). Treat invariants with a relative tolerance so we only flag
+    # materially broken bars.
+    scale = max(1.0, abs(o), abs(h), abs(ll), abs(c))
+    eps = 1e-9 * scale
+
+    if h + eps < ll:
         return True
-    if h < max(o, c):
+    if h + eps < max(o, c):
         return True
-    if ll > min(o, c):
+    if ll - eps > min(o, c):
         return True
     return False
 
