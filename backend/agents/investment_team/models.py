@@ -410,6 +410,73 @@ def get_fee_defaults(asset_class: str) -> dict[str, float]:
     )
 
 
+OrderLifecycleEventType = Literal[
+    "emitted",
+    "accepted",
+    "rejected",
+    "unfilled",
+    "warmup_dropped",
+    "entry_filled",
+    "exit_filled",
+]
+
+ZeroTradeCategory = Literal[
+    "NO_ORDERS_EMITTED",
+    "ONLY_WARMUP_ORDERS",
+    "ORDERS_REJECTED",
+    "ORDERS_UNFILLED",
+    "ENTRY_WITH_NO_EXIT",
+    "UNKNOWN_ZERO_TRADE_PATH",
+]
+
+
+class OrderLifecycleEvent(BaseModel):
+    """Compact order lifecycle event retained for backtest diagnostics."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    event_type: OrderLifecycleEventType
+    timestamp: Optional[str] = None
+    symbol: Optional[str] = None
+    side: Optional[str] = None
+    order_type: Optional[str] = None
+    reason: str = ""
+    detail: str = ""
+
+
+class OpenPositionDiagnostic(BaseModel):
+    """Snapshot of an open position at the end of a diagnostic backtest."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str
+    side: str
+    qty: float
+    entry_price: float
+    entry_timestamp: str
+
+
+class BacktestExecutionDiagnostics(BaseModel):
+    """Structured execution-path diagnostics for sparse or zero-trade backtests."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    zero_trade_category: Optional[ZeroTradeCategory] = None
+    summary: str = ""
+    bars_processed: int = Field(default=0, ge=0)
+    orders_emitted: int = Field(default=0, ge=0)
+    orders_accepted: int = Field(default=0, ge=0)
+    orders_rejected: int = Field(default=0, ge=0)
+    orders_rejection_reasons: Dict[str, int] = Field(default_factory=dict)
+    orders_unfilled: int = Field(default=0, ge=0)
+    warmup_orders_dropped: int = Field(default=0, ge=0)
+    entries_filled: int = Field(default=0, ge=0)
+    exits_emitted: int = Field(default=0, ge=0)
+    closed_trades: int = Field(default=0, ge=0)
+    open_positions_at_end: List[OpenPositionDiagnostic] = Field(default_factory=list)
+    last_order_events: List[OrderLifecycleEvent] = Field(default_factory=list)
+
+
 class BacktestResult(BaseModel):
     total_return_pct: float
     annualized_return_pct: float
@@ -436,6 +503,7 @@ class BacktestResult(BaseModel):
     signals_per_bar: Optional[float] = None
     cost_stress_results: Optional[List[Dict[str, Any]]] = None
     reject_reason: Optional[str] = None
+    execution_diagnostics: Optional[BacktestExecutionDiagnostics] = None
     # Issue #247 — walk-forward + DSR diagnostics. All Optional so legacy
     # single-window runs omit these fields entirely.
     deflated_sharpe: Optional[float] = None
