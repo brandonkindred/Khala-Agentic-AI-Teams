@@ -90,7 +90,7 @@ def _bar(ts: str, close: float, symbol: str = "BTC", tf: str = "15m") -> BarEven
             high=close + 0.1,
             low=close - 0.2,
             close=close,
-            volume=1.0,
+            volume=1_000_000.0,
         )
     )
 
@@ -217,7 +217,7 @@ def test_legacy_market_data_path_still_works() -> None:
                 high=101.0,
                 low=99.0,
                 close=100.5,
-                volume=1.0,
+                volume=1_000_000.0,
             )
         ]
     }

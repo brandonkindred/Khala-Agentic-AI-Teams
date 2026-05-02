@@ -133,6 +133,11 @@ class _StubProvider:
 
 
 def _hist_bar(ts: str, close: float, symbol: str = "BTC") -> BarEvent:
+    # ``volume`` must be large enough that the strategy's qty=1 order doesn't
+    # hit the realistic execution model's 10% participation cap on either
+    # entry or exit. Pre-#386 exits ignored the cap, so an arbitrary
+    # placeholder (1.0) worked; post-#386 the cap applies symmetrically and
+    # tiny-volume bars clip a qty=1 fill into a qty=0.1 partial.
     return BarEvent(
         bar=Bar(
             symbol=symbol,
@@ -142,7 +147,7 @@ def _hist_bar(ts: str, close: float, symbol: str = "BTC") -> BarEvent:
             high=close,
             low=close,
             close=close,
-            volume=1.0,
+            volume=1_000_000.0,
         )
     )
 
@@ -156,7 +161,7 @@ def _native_bar(close_ts: str, close: float, symbol: str = "BTC", tf: str = "1m"
         high=close,
         low=close,
         close=close,
-        volume=1.0,
+        volume=1_000_000.0,
     )
 
 

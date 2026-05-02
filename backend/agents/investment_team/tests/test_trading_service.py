@@ -502,7 +502,10 @@ def test_default_unfilled_policy_gated_by_flag(
     if flag_on:
         monkeypatch.setenv("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", "true")
     else:
-        monkeypatch.delenv("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", raising=False)
+        # Step 4 (#386) flipped the default to ``true`` once the engine
+        # started consuming the policy. Pin to ``false`` explicitly so the
+        # flag-off semantics stay testable without depending on the default.
+        monkeypatch.setenv("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", "false")
 
     captured = _capture_submitted_orders(monkeypatch)
 
@@ -553,9 +556,9 @@ def test_run_backtest_passes_requeue_default_to_service(monkeypatch) -> None:
         assert req.unfilled_policy == UnfilledPolicy.REQUEUE_NEXT_BAR
 
 
-def test_partial_fill_defaults_flag_default_is_off(monkeypatch) -> None:
-    """With the env var unset, the helper reports ``False`` (opt-in semantics)."""
+def test_partial_fill_defaults_flag_default_is_on(monkeypatch) -> None:
+    """With the env var unset, the helper reports ``True`` (Step 4 default)."""
     monkeypatch.delenv("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", raising=False)
     from investment_team.trading_service.service import _partial_fill_defaults_enabled
 
-    assert _partial_fill_defaults_enabled() is False
+    assert _partial_fill_defaults_enabled() is True

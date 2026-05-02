@@ -24,7 +24,7 @@ from typing import List, Optional
 from ...execution.bar_safety import BarSafetyAssertion
 from ...execution.risk_filter import RiskFilter
 from ...models import TradeRecord
-from ..strategy.contract import Bar, Fill, OrderSide
+from ..strategy.contract import Bar, Fill, FillKind, OrderSide, UnfilledPolicy
 from .execution_model import ExecutionModel, FillTerms, OptimisticExecutionModel
 from .order_book import OrderBook, PendingOrder
 from .portfolio import Portfolio, Position
@@ -122,41 +122,36 @@ class FillSimulator:
                 fill_bar_timestamp=bar.timestamp,
             )
 
-            has_position = bar.symbol in self.portfolio.positions
+            existing_pos = self.portfolio.positions.get(bar.symbol)
+            # Partial-entry continuation (#386): a requeued partial entry has
+            # ``cumulative_filled_qty > 0`` and an existing position whose
+            # ``entry_order_id`` matches this pending order. Without this
+            # branch the requeued order would hit the same-side-as-position
+            # guard below and get silently removed.
+            is_partial_entry_continuation = (
+                existing_pos is not None
+                and existing_pos.entry_order_id == po.order_id
+                and po.cumulative_filled_qty > 0
+            )
             is_entry = (
-                not has_position
+                not is_partial_entry_continuation
+                and existing_pos is None
                 and req.side in (OrderSide.LONG, OrderSide.SHORT)
-                and (
-                    # Treat an order as an entry when there's no open position and
-                    # the request direction would create one. Exit requests from
-                    # strategies are expressed as an opposite-side order on a
-                    # symbol where a position is already open.
-                    not has_position
-                )
             )
 
-            if is_entry:
-                pos = self._fill_entry(po, bar, terms)
-                if pos is None:
-                    continue
-                self.portfolio.open(pos)
-                fill = self.portfolio.make_entry_fill(pos)
-                entry_fills.append(fill)
-                # Entry filled — keep this id in the eligible-parent set so
-                # bracket / OCO children can later be activated against it via
-                # ``OrderBook.submit_attached`` (see #389). Only entries qualify
-                # as bracket parents; exit fills below intentionally use the
-                # default ``was_filled=False``.
-                self.order_book.remove(po.order_id, was_filled=True)
-            elif has_position:
-                # Exit path: order closes out the open position. We only
-                # support full-qty exits in PR 1 (matches legacy behavior at
-                # trade_simulator.py:560-565). Partial-fill caps from the
-                # execution model apply only to entries — exits always
-                # close the position fully.
-                pos = self.portfolio.positions[bar.symbol]
+            if is_partial_entry_continuation:
+                fill = self._continue_entry(po, bar, terms)
+                if fill is not None:
+                    entry_fills.append(fill)
+            elif is_entry:
+                fill = self._fill_entry(po, bar, terms)
+                if fill is not None:
+                    entry_fills.append(fill)
+            else:
+                # Has open position. Either an exit (opposite side) or a
+                # same-side add-on we currently don't support.
+                pos = existing_pos
                 if req.side == pos.side:
-                    # Ignoring same-side add-ons in PR 1 — log and leave.
                     logger.debug(
                         "ignoring same-side order %s for already-open %s position",
                         po.order_id,
@@ -164,31 +159,11 @@ class FillSimulator:
                     )
                     self.order_book.remove(po.order_id)
                     continue
-                trade = self._fill_exit(po, bar, terms)
-                if trade is None:
-                    continue
-                closed.append(trade)
-                exit_fills.append(
-                    Fill(
-                        order_id=po.order_id,
-                        client_order_id=req.client_order_id,
-                        symbol=bar.symbol,
-                        side=req.side,
-                        qty=pos.qty,
-                        price=trade.exit_price,
-                        timestamp=bar.timestamp,
-                        reason="exit",
-                    )
-                )
-                # Exit filled — close out the position. We pass the default
-                # ``was_filled=False`` here even though this *is* a fill,
-                # because ``was_filled=True`` is specifically for entries that
-                # may later carry bracket children. Exits don't open positions
-                # and so are never valid bracket parents — keeping their ids
-                # in ``_known_top_level_order_ids`` would let a later
-                # ``submit_attached`` accept the wrong order as a parent and
-                # mis-scope protective legs.
-                self.order_book.remove(po.order_id)
+                exit_fill, trade = self._fill_exit(po, bar, terms)
+                if exit_fill is not None:
+                    exit_fills.append(exit_fill)
+                if trade is not None:
+                    closed.append(trade)
 
         return FillOutcome(
             entry_fills=entry_fills,
@@ -226,20 +201,49 @@ class FillSimulator:
         po: PendingOrder,
         bar: Bar,
         terms: FillTerms,
-    ) -> Optional[Position]:
+    ) -> Optional[Fill]:
+        """First fill against an entry order. Opens the Position.
+
+        Returns the entry ``Fill`` (full or partial), or ``None`` when the
+        order was rejected (risk gate, insufficient capital, zero qty).
+        Side effect: drives ``portfolio.open`` and either ``order_book.remove``
+        or ``order_book.requeue`` based on the order's ``unfilled_policy``.
+        """
         req = po.request
         ref_price = terms.reference_price
-        # Apply the execution model's partial-fill cap (1.0 = full).
-        # Fractions below 1.0 mean the bar's dollar volume couldn't absorb
-        # the full request; the remainder is dropped, not re-quoted.
-        qty = req.qty * max(0.0, min(1.0, terms.qty_fraction))
-        if qty <= 0:
-            self.order_book.remove(po.order_id)
-            return None
-        # Vol-target sizing is not re-run here — strategies own sizing via
-        # ``ctx.submit_order(qty=...)``. The risk filter still caps via
-        # ``can_enter``, which mirrors the legacy engine's behavior.
-        notional = qty * ref_price
+        # ``po.remaining_qty`` is the same as ``req.qty`` on first fill
+        # (set by ``OrderBook.submit``). Reading from the pending order keeps
+        # the path uniform with ``_continue_entry``.
+        requested_qty = po.remaining_qty
+        qty_fraction = max(0.0, min(1.0, terms.qty_fraction))
+        filled_qty = requested_qty * qty_fraction
+        unfilled = requested_qty - filled_qty
+        dp = 4 if ref_price < 10 else 2
+
+        if filled_qty <= 0:
+            # No silent drop: emit a REJECTED Fill so the strategy sees the
+            # outcome. Route through ``_handle_entry_remainder`` so the
+            # order's ``unfilled_policy`` is honored — REQUEUE_NEXT_BAR
+            # gives the next bar a chance to recover instead of permanently
+            # dropping after a single no-liquidity bar. ``was_filled=False``
+            # because no position has opened yet (initial slice rejected),
+            # so the parent shouldn't remain registered as bracket-eligible.
+            self._handle_entry_remainder(po, bar, requested_qty, was_filled=False)
+            return Fill(
+                order_id=po.order_id,
+                client_order_id=req.client_order_id,
+                symbol=req.symbol,
+                side=req.side,
+                qty=0.0,
+                price=round(ref_price, dp),
+                timestamp=bar.timestamp,
+                reason="rejected_no_liquidity",
+                fill_kind=FillKind.REJECTED,
+                unfilled_qty=requested_qty,
+                cumulative_filled_qty=po.cumulative_filled_qty,
+            )
+
+        notional = filled_qty * ref_price
         equity = self.portfolio.mark_to_market()
         gate = self.risk.can_enter(req.symbol, notional, equity, self.portfolio.positions)
         if not gate.allowed:
@@ -257,54 +261,335 @@ class FillSimulator:
             return None
 
         slip_long_entry, _, slip_short_entry, _ = self._slippage_multipliers(terms.extra_slip_bps)
-        dp = 4 if ref_price < 10 else 2
         if req.side == OrderSide.LONG:
             fill_price = round(ref_price * slip_long_entry, dp)
         else:
             fill_price = round(ref_price * slip_short_entry, dp)
 
-        return Position(
+        is_partial = unfilled > 0
+        pos = Position(
             symbol=req.symbol,
             side=req.side,
-            qty=qty,
+            qty=filled_qty,
             entry_price=fill_price,
             entry_bid_price=round(ref_price, dp),
             entry_timestamp=bar.timestamp,
             entry_order_id=po.order_id,
             entry_client_order_id=req.client_order_id,
             entry_order_type=req.order_type.value,
+            # ``original_qty`` tracks the cumulative entry-filled qty (the
+            # qty we expect to exit to fully close), *not* the strategy's
+            # original request. Initialized to this slice's filled qty;
+            # ``_continue_entry`` bumps it on each follow-on fill. When the
+            # entry order is removed (DROP / full fill) ``original_qty``
+            # naturally settles at the actually-held qty so a subsequent
+            # exit for that qty hits ``is_closed``.
+            original_qty=filled_qty,
+            participation_clipped=is_partial,
+            total_unfilled_qty=unfilled,
+            # Counts the number of fill events on the entry side: initial
+            # fill = 1, every ``REQUEUE_NEXT_BAR`` continuation += 1. Exit
+            # slices don't bump this counter (see ``Position.reduce``).
+            partial_fill_count=1,
         )
+        self.portfolio.open(pos)
+        self._handle_entry_remainder(po, bar, unfilled)
+
+        return Fill(
+            order_id=po.order_id,
+            client_order_id=req.client_order_id,
+            symbol=pos.symbol,
+            side=pos.side,
+            qty=filled_qty,
+            price=fill_price,
+            timestamp=bar.timestamp,
+            reason="entry",
+            fill_kind=FillKind.PARTIAL if is_partial else FillKind.FULL,
+            unfilled_qty=unfilled,
+            cumulative_filled_qty=filled_qty,
+        )
+
+    def _continue_entry(
+        self,
+        po: PendingOrder,
+        bar: Bar,
+        terms: FillTerms,
+    ) -> Optional[Fill]:
+        """Apply a follow-on entry fill against an already-open position.
+
+        Used when ``REQUEUE_NEXT_BAR`` requeued an entry's partial-fill
+        remainder and the next bar's terms now allow more of it through.
+        """
+        req = po.request
+        ref_price = terms.reference_price
+        requested_qty = po.remaining_qty
+        qty_fraction = max(0.0, min(1.0, terms.qty_fraction))
+        filled_qty = requested_qty * qty_fraction
+        unfilled = requested_qty - filled_qty
+        dp = 4 if ref_price < 10 else 2
+
+        if filled_qty <= 0:
+            # Zero-fraction continuation — route through
+            # ``_handle_entry_remainder`` so the order's
+            # ``unfilled_policy`` is honored (e.g. ``REQUEUE_NEXT_BAR``
+            # gives the next bar a chance to recover; previously this
+            # branch unconditionally dropped, ignoring the policy).
+            # ``was_filled=True`` because the parent's first slice
+            # already opened a position — preserves bracket-attachment
+            # eligibility on the eventual ``remove`` path.
+            self._handle_entry_remainder(po, bar, requested_qty, was_filled=True)
+            return Fill(
+                order_id=po.order_id,
+                client_order_id=req.client_order_id,
+                symbol=req.symbol,
+                side=req.side,
+                qty=0.0,
+                price=round(ref_price, dp),
+                timestamp=bar.timestamp,
+                reason="rejected_no_liquidity",
+                fill_kind=FillKind.REJECTED,
+                unfilled_qty=requested_qty,
+                cumulative_filled_qty=po.cumulative_filled_qty,
+            )
+
+        slip_long_entry, _, slip_short_entry, _ = self._slippage_multipliers(terms.extra_slip_bps)
+        if req.side == OrderSide.LONG:
+            fill_price = round(ref_price * slip_long_entry, dp)
+        else:
+            fill_price = round(ref_price * slip_short_entry, dp)
+
+        # Re-apply the risk gate on every continuation slice. Exposure can
+        # have grown between bars (mark-to-market on other positions, fresh
+        # entries on different symbols) so an originally-approved order
+        # still needs to fit current limits before adding more shares to the
+        # position. Exclude this symbol's existing position from the snapshot
+        # so ``max_open_positions`` doesn't trip on our own presence, and
+        # pass the post-extend full notional so leverage / concentration
+        # checks see the exposure that *will* exist after this fill.
+        existing_pos = self.portfolio.positions[req.symbol]
+        post_extend_notional = (existing_pos.qty + filled_qty) * fill_price
+        positions_excluding_self = {
+            s: p for s, p in self.portfolio.positions.items() if s != req.symbol
+        }
+        equity = self.portfolio.mark_to_market()
+        gate = self.risk.can_enter(
+            req.symbol, post_extend_notional, equity, positions_excluding_self
+        )
+        if not gate.allowed:
+            logger.info("risk gate rejected entry continuation for %s: %s", req.symbol, gate.reason)
+            # ``was_filled=True`` — the parent already opened a position on
+            # the first slice (we wouldn't be in ``_continue_entry`` otherwise).
+            # Removing with the default ``False`` would evict the parent id
+            # from ``OrderBook``'s eligible-parent set and break any later
+            # ``submit_attached`` call against this parent.
+            self.order_book.remove(po.order_id, was_filled=True)
+            return None
+
+        # Capital check against the *additional* notional only — the existing
+        # position's capital is already deducted.
+        additional_notional = filled_qty * fill_price
+        if self.portfolio.capital < additional_notional:
+            logger.info(
+                "insufficient capital for %s entry continuation: need %.2f, have %.2f",
+                req.symbol,
+                additional_notional,
+                self.portfolio.capital,
+            )
+            # Same reasoning as the risk-gate branch above — preserve the
+            # parent's eligible-parent registration since the first slice
+            # already filled.
+            self.order_book.remove(po.order_id, was_filled=True)
+            return None
+
+        pos = self.portfolio.extend(req.symbol, filled_qty, fill_price, ref_price)
+        # ``original_qty`` mirrors the cumulative entry-filled qty; bump it
+        # so ``is_closed`` (compares ``cumulative_exit_qty`` to it) and
+        # ``TradeRecord.shares`` reflect the actually-held position.
+        pos.original_qty += filled_qty
+        is_partial = unfilled > 0
+        if is_partial:
+            pos.participation_clipped = True
+        pos.total_unfilled_qty += unfilled
+        pos.partial_fill_count += 1
+
+        self._handle_entry_remainder(po, bar, unfilled)
+
+        return Fill(
+            order_id=po.order_id,
+            client_order_id=req.client_order_id,
+            symbol=pos.symbol,
+            side=pos.side,
+            qty=filled_qty,
+            price=fill_price,
+            timestamp=bar.timestamp,
+            reason="entry",
+            fill_kind=FillKind.PARTIAL if is_partial else FillKind.FULL,
+            unfilled_qty=unfilled,
+            # Per-order cumulative entry fills (monotonic across all slices
+            # of *this* order). Reading from ``po.cumulative_filled_qty``
+            # plus the current slice keeps the value monotonic even if
+            # interim exits have shrunk ``pos.qty``.
+            cumulative_filled_qty=po.cumulative_filled_qty + filled_qty,
+        )
+
+    def _handle_entry_remainder(
+        self,
+        po: PendingOrder,
+        bar: Bar,
+        unfilled: float,
+        *,
+        was_filled: bool = True,
+    ) -> None:
+        """Decide whether to requeue or remove an entry order's remainder.
+
+        ``was_filled`` controls whether the parent stays registered in
+        ``OrderBook``'s eligible-parent set (only consequential when the
+        order was submitted with ``expect_brackets=True``). The default
+        ``True`` is correct for the typical path where at least one slice
+        already filled — including the no-liquidity *continuation* case,
+        because the partial entry that triggered the continuation has
+        already opened a position. For the no-liquidity *initial* case
+        (``_fill_entry`` with ``filled_qty <= 0``) the caller passes
+        ``False`` since no position has opened.
+        """
+        policy = po.request.unfilled_policy or UnfilledPolicy.DROP
+        if unfilled > 0 and policy == UnfilledPolicy.REQUEUE_NEXT_BAR:
+            self.order_book.requeue(
+                po.order_id,
+                new_remaining_qty=unfilled,
+                new_submitted_at=bar.timestamp,
+                was_filled=was_filled,
+            )
+            return
+        # TWAP_N is wired in #387; until then it falls through to DROP.
+        self.order_book.remove(po.order_id, was_filled=was_filled)
 
     def _fill_exit(
         self,
         po: PendingOrder,
         bar: Bar,
         terms: FillTerms,
-    ) -> Optional[TradeRecord]:
+    ) -> tuple[Optional[Fill], Optional[TradeRecord]]:
+        """Close (or partially close) the open position.
+
+        Returns ``(exit_fill, trade_record)``. ``trade_record`` is ``None``
+        until the position is fully closed (after partial exits, every
+        intermediate bar still emits an exit ``Fill`` but no record).
+        """
+        req = po.request
         pos = self.portfolio.positions[bar.symbol]
         ref_price = terms.reference_price
         dp = 4 if ref_price < 10 else 2
         _, slip_long_exit, _, slip_short_exit = self._slippage_multipliers(terms.extra_slip_bps)
-        # Apply slippage against the position's original direction.
         if pos.side == OrderSide.LONG:
             exit_price = round(ref_price * slip_long_exit, dp)
         else:
             exit_price = round(ref_price * slip_short_exit, dp)
 
-        # Realized P&L — matches trade_simulator._close_position math.
+        # Bound the exit fill by both the strategy's requested qty
+        # (``po.remaining_qty``, which OrderBook.submit pins to ``req.qty``
+        # on first slice and the requeue path shrinks on partial slices) and
+        # the position's currently-open qty. The position cap matters when
+        # an entry continuation runs earlier in the same bar and grows the
+        # position past what the strategy saw at submission time — without
+        # this min() the exit could close newly-added shares the strategy
+        # never intended to unwind.
+        fillable_qty = min(po.remaining_qty, pos.qty)
+        qty_fraction = max(0.0, min(1.0, terms.qty_fraction))
+        filled_qty = fillable_qty * qty_fraction
+        # Compute ``unfilled`` against the *order's* remaining request, not
+        # against ``fillable_qty``. If the strategy asked for more shares
+        # than are currently open (e.g. after a dropped partial entry), the
+        # not-fillable portion is real unfilled work from the strategy's
+        # perspective — reporting it as ``unfilled_qty=0`` would mislabel a
+        # truncated execution as fully complete and break resubmission /
+        # exposure-reconciliation logic.
+        unfilled = po.remaining_qty - filled_qty
+
+        if filled_qty <= 0:
+            # No liquidity for any exit slice on this bar. Decide whether to
+            # try again next bar or abandon the order; emit a REJECTED Fill
+            # either way so the strategy sees the outcome.
+            self._handle_exit_remainder(po, bar, unfilled)
+            rejected = Fill(
+                order_id=po.order_id,
+                client_order_id=req.client_order_id,
+                symbol=pos.symbol,
+                side=req.side,
+                qty=0.0,
+                price=round(ref_price, dp),
+                timestamp=bar.timestamp,
+                reason="rejected_no_liquidity",
+                fill_kind=FillKind.REJECTED,
+                unfilled_qty=po.remaining_qty,
+                cumulative_filled_qty=po.cumulative_filled_qty,
+            )
+            return rejected, None
+
+        self.portfolio.partial_close(bar.symbol, filled_qty, exit_price, ref_price)
+        # Only the participation-cap-clipped portion (``fillable_qty -
+        # filled_qty``) accumulates into ``pos.total_unfilled_qty`` — the
+        # over-ask portion (``po.remaining_qty - fillable_qty``) is a
+        # property of the strategy's request size relative to the live
+        # position, not a bar-level liquidity event, and the same ghost
+        # over-ask would re-appear on every requeued slice. Adding it
+        # bar-after-bar inflated ``TradeRecord.total_unfilled_qty`` past
+        # the original_qty (e.g. a 2000-share over-ask against a
+        # 1000-share position could report > 2000 unfilled).
+        cap_clipped = fillable_qty - filled_qty
+        if cap_clipped > 0:
+            pos.participation_clipped = True
+            pos.total_unfilled_qty += cap_clipped
+
+        is_closed = pos.is_closed
+        # ``fill_kind`` reports completeness of *this exit order*, not
+        # closure of the position: a strategy that intentionally requests a
+        # partial unwind (req.qty < pos.qty) gets a ``FULL`` exit Fill
+        # while the position keeps residual exposure. Conflating the two
+        # would mislabel partial-unwind fills as ``PARTIAL`` even when the
+        # order filled to its requested size.
+        exit_fill = Fill(
+            order_id=po.order_id,
+            client_order_id=req.client_order_id,
+            symbol=pos.symbol,
+            side=req.side,
+            qty=filled_qty,
+            price=exit_price,
+            timestamp=bar.timestamp,
+            reason="exit",
+            fill_kind=FillKind.FULL if unfilled <= 0 else FillKind.PARTIAL,
+            unfilled_qty=unfilled,
+            # Per-order cumulative exit fills (monotonic across all slices
+            # of *this* exit order). ``pos.cumulative_exit_qty`` is
+            # position-wide across multiple exit orders, which would let an
+            # independent later exit emit a value larger than its own
+            # requested qty — breaking per-order fill accounting.
+            cumulative_filled_qty=po.cumulative_filled_qty + filled_qty,
+        )
+
+        if not is_closed:
+            self._handle_exit_remainder(po, bar, unfilled)
+            return exit_fill, None
+
+        # Position fully closed — build the TradeRecord using the qty-weighted
+        # avg exit price across all partial exits so cumulative P&L is honest.
+        final_exit_price = pos.weighted_avg_exit_price
         cost_mult = self.config.transaction_cost_bps / 10_000.0
-        entry_notional = pos.entry_price * pos.qty
-        exit_notional = exit_price * pos.qty
+        entry_notional = pos.entry_price * pos.original_qty
+        exit_notional = final_exit_price * pos.original_qty
         if pos.side == OrderSide.LONG:
-            gross = (exit_price - pos.entry_price) * pos.qty
+            gross = (final_exit_price - pos.entry_price) * pos.original_qty
         else:
-            gross = (pos.entry_price - exit_price) * pos.qty
+            gross = (pos.entry_price - final_exit_price) * pos.original_qty
         tx_costs = (entry_notional + exit_notional) * cost_mult
         net = round(gross - tx_costs, 2)
 
         self._trade_num += 1
         self.portfolio.record_pnl(net)
-        self.portfolio.close(bar.symbol, exit_price)
+        # ``partial_close`` already credited cash for every slice; this terminal
+        # ``close`` just pops the position (pos.qty is ~0 by now).
+        self.portfolio.close(bar.symbol, final_exit_price)
+        self.order_book.remove(po.order_id)
 
         hold_days = _date_diff(pos.entry_timestamp, bar.timestamp)
         record = TradeRecord(
@@ -314,8 +599,8 @@ class FillSimulator:
             symbol=pos.symbol,
             side=pos.side.value,
             entry_price=pos.entry_price,
-            exit_price=exit_price,
-            shares=pos.qty,
+            exit_price=final_exit_price,
+            shares=pos.original_qty,
             position_value=round(entry_notional, 2),
             gross_pnl=round(gross, 2),
             net_pnl=net,
@@ -325,12 +610,42 @@ class FillSimulator:
             cumulative_pnl=self.portfolio.cumulative_pnl,
             entry_bid_price=pos.entry_bid_price,
             entry_fill_price=pos.entry_price,
-            exit_bid_price=round(ref_price, dp),
-            exit_fill_price=exit_price,
+            # Use the qty-weighted exit bid across all partial-exit slices
+            # so the reference price stays coherent with the weighted
+            # ``exit_price``. For single-bar full closes this collapses to
+            # the bar's own ref price (matches legacy behavior).
+            exit_bid_price=round(pos.weighted_avg_exit_bid_price, dp),
+            exit_fill_price=final_exit_price,
             entry_order_type=pos.entry_order_type,
             exit_order_type=po.request.order_type.value,
+            participation_clipped=pos.participation_clipped,
+            partial_fill_count=pos.partial_fill_count,
+            total_unfilled_qty=pos.total_unfilled_qty,
         )
-        return record
+        return exit_fill, record
+
+    def _handle_exit_remainder(
+        self,
+        po: PendingOrder,
+        bar: Bar,
+        unfilled: float,
+    ) -> None:
+        """Decide whether to requeue or remove an exit order's remainder.
+
+        Exit orders are never bracket parents (they don't open positions),
+        so ``was_filled=False`` is correct for both branches — see the
+        docstring at ``order_book.OrderBook.requeue``.
+        """
+        policy = po.request.unfilled_policy or UnfilledPolicy.DROP
+        if unfilled > 0 and policy == UnfilledPolicy.REQUEUE_NEXT_BAR:
+            self.order_book.requeue(
+                po.order_id,
+                new_remaining_qty=unfilled,
+                new_submitted_at=bar.timestamp,
+                was_filled=False,
+            )
+            return
+        self.order_book.remove(po.order_id)
 
 
 def _date_diff(t1: str, t2: str) -> int:

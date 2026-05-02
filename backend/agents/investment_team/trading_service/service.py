@@ -46,12 +46,12 @@ _MAX_ORDER_EVENTS = 20
 def _partial_fill_defaults_enabled() -> bool:
     """Whether parent-side application of ``default_unfilled_policy`` is on.
 
-    Off by default — Step 3 of #379 ships the wiring; Steps 4+ make the
-    downstream engine actually act on the policy. With the flag off, the
-    service ignores ``default_unfilled_policy`` entirely (acts as DROP
-    regardless), preserving today's byte-identical behavior.
+    On by default since #386 (Step 4) wired ``REQUEUE_NEXT_BAR`` into
+    ``FillSimulator``. Set ``TRADING_PARTIAL_FILL_DEFAULTS_ENABLED=false``
+    to fall back to the pre-Step-4 behavior (silent drop of partial-fill
+    remainders) — useful for parity comparisons against legacy snapshots.
     """
-    return os.environ.get("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", "false").lower() in {
+    return os.environ.get("TRADING_PARTIAL_FILL_DEFAULTS_ENABLED", "true").lower() in {
         "true",
         "1",
         "yes",
