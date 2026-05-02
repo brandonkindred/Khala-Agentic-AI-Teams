@@ -1017,3 +1017,62 @@ def test_twap_n_validation_requires_two_or_more_slices() -> None:
         unfilled_policy=UnfilledPolicy.TWAP_N,
         twap_slices=2,
     ).validate_prices()
+
+
+def test_twap_n_terminal_slice_respects_zero_liquidity() -> None:
+    """The TWAP_N final-slice force-flush bypasses the *participation cap*
+    but must still respect a hard zero-liquidity signal
+    (``qty_fraction == 0``) — otherwise custom execution models that use
+    a zero fraction to encode "no fill possible on this bar" (halt,
+    zero-volume bar) would produce impossible fills.
+
+    Regression for a Codex P2 review note on PR #419: when the terminal
+    slice's ``qty_fraction`` is 0 the order must drop cleanly via the
+    ``slices_remaining <= 0`` branch in ``_handle_entry_remainder``
+    rather than manufacturing a phantom fill against the bar.
+    """
+    portfolio = Portfolio(initial_capital=10_000_000.0)
+    order_book = OrderBook()
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        risk_filter=RiskFilter(RiskLimits(max_position_pct=100, max_gross_leverage=10.0)),
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        bar_safety=BarSafetyAssertion(),
+        execution_model=_ScriptedFractionModel(
+            {
+                "2024-01-02": 0.5,  # bar 1: 50% partial → seed slices_remaining=1
+                "2024-01-03": 0.0,  # bar 2 (terminal): zero liquidity
+            }
+        ),
+    )
+
+    order_book.submit(
+        _entry_order(2_000, policy=UnfilledPolicy.TWAP_N, twap_slices=2),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+
+    # Bar 1: 50% partial. ``_handle_entry_remainder`` seeds
+    # ``slices_remaining = 2 - 1 = 1`` (terminal-slice flag for bar 2).
+    bar1 = sim.process_bar(_bar("2024-01-02", price=100.0))
+    assert bar1.entry_fills[0].fill_kind == FillKind.PARTIAL
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+    pending = order_book.all_pending()
+    assert len(pending) == 1
+    assert pending[0].twap_slices_remaining == 1
+
+    # Bar 2: terminal slice, but qty_fraction=0 → no fill. The cap-bypass
+    # must NOT manufacture a phantom 1_000-share fill against a halted
+    # bar; the order drops cleanly via the slices_remaining<=0 branch.
+    bar2 = sim.process_bar(_bar("2024-01-03", price=100.0))
+    assert len(bar2.entry_fills) == 1
+    assert bar2.entry_fills[0].fill_kind == FillKind.REJECTED
+    assert bar2.entry_fills[0].qty == pytest.approx(0.0, abs=1e-9)
+    assert bar2.entry_fills[0].unfilled_qty == pytest.approx(1_000.0, rel=1e-9)
+    assert order_book.all_pending() == []
+
+    # Position still reflects only what actually filled (bar 1's 1_000) —
+    # no phantom shares from a manufactured terminal fill.
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+    assert portfolio.positions["AAA"].partial_fill_count == 1

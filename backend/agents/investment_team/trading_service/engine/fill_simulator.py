@@ -331,10 +331,18 @@ class FillSimulator:
         # see the true post-bar leftover.
         target_qty, force_flush = self._twap_slice_target(po)
         qty_fraction = max(0.0, min(1.0, terms.qty_fraction))
-        if force_flush:
+        if force_flush and qty_fraction > 0:
             # Final TWAP_N slice: bypass the participation cap so a
             # strategy that explicitly opted into TWAP gets full
-            # participation on its scheduled terminal bar (#387).
+            # participation on its scheduled terminal bar (#387). The
+            # cap-bypass is about ignoring soft participation limits;
+            # it is *not* a license to manufacture fills against a bar
+            # the execution model says cannot fill at all
+            # (``qty_fraction == 0``, e.g. zero-volume / halted bar).
+            # Falling through to the ``filled_qty <= 0`` branch below
+            # routes that case to the rejected-no-liquidity Fill and
+            # the ``slices_remaining <= 0`` drop path in
+            # ``_handle_entry_remainder``.
             filled_qty = target_qty
         else:
             filled_qty = target_qty * qty_fraction
