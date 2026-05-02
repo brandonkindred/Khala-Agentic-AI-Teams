@@ -131,7 +131,10 @@ def test_realistic_low_adv_emits_partial_entry_fill() -> None:
     assert fill.cumulative_filled_qty == pytest.approx(1_000.0, rel=1e-9)
 
     pos = portfolio.positions["AAA"]
-    assert pos.original_qty == 2_000
+    # ``original_qty`` tracks cumulative *entry-filled* qty, not the
+    # strategy's request — so a DROP / REJECT path leaves it at what's
+    # actually held, which is what subsequent exits will close against.
+    assert pos.original_qty == pytest.approx(1_000.0, rel=1e-9)
     assert pos.qty == pytest.approx(1_000.0, rel=1e-9)
     assert pos.participation_clipped is True
     assert pos.total_unfilled_qty == pytest.approx(1_000.0, rel=1e-9)
@@ -315,3 +318,131 @@ def test_exit_does_not_overfill_when_entry_continuation_grows_position() -> None
     assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
     # No TradeRecord yet — only original_qty exits trigger one.
     assert len(bar2.closed_trades) == 0
+
+
+def test_dropped_entry_remainder_does_not_strand_position() -> None:
+    """A partial entry with ``DROP`` followed by an exit for the held qty
+    must close the position cleanly.
+
+    Regression for a Codex review note on PR #417: ``Position.is_closed``
+    compares cumulative exits against ``original_qty``. If ``original_qty``
+    were pinned to the strategy's *request* (2000) instead of the
+    actually-filled qty (1000), exiting the held shares would leave the
+    position stranded with ``qty=0`` and no ``TradeRecord``.
+    """
+    sim, order_book, portfolio = _make_simulator()
+
+    # Bar 1: partial entry under DROP → pos.qty=1000, remainder=1000 dropped.
+    order_book.submit(
+        _entry_order(2_000, policy=UnfilledPolicy.DROP),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+    sim.process_bar(_bar("2024-01-02", price=100.0, volume=10_000))
+    assert order_book.all_pending() == [], "DROP must remove the remainder from the book"
+    pos = portfolio.positions["AAA"]
+    assert pos.qty == pytest.approx(1_000.0, rel=1e-9)
+    assert pos.original_qty == pytest.approx(1_000.0, rel=1e-9), (
+        "original_qty must reflect actually-held qty, not the abandoned request"
+    )
+
+    # Bar 2: exit the held qty (1000). Position must close cleanly.
+    order_book.submit(
+        _exit_order(1_000),
+        submitted_at="2024-01-02",
+        submitted_equity=10_000_000.0,
+    )
+    bar2 = sim.process_bar(_bar("2024-01-03", price=110.0, volume=10_000_000))
+    assert len(bar2.closed_trades) == 1
+    assert bar2.closed_trades[0].shares == pytest.approx(1_000.0, rel=1e-9)
+    assert "AAA" not in portfolio.positions, "position must be popped on full close"
+
+
+def test_partial_unwind_exit_reports_full_fill_kind() -> None:
+    """Strategy requests qty < pos.qty (partial unwind) and the exit fills
+    fully against high volume — ``Fill.fill_kind`` must be ``FULL`` (the
+    exit *order* completed) even though the position is still open.
+
+    Regression for a Codex P2 review note: ``fill_kind`` describes the
+    exit order's completeness, not the position's closure state.
+    """
+    sim, order_book, portfolio = _make_simulator()
+
+    # Open a 2000-qty position cleanly.
+    order_book.submit(
+        _entry_order(2_000),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+    sim.process_bar(_bar("2024-01-02", price=100.0, volume=10_000_000))
+    assert portfolio.positions["AAA"].qty == pytest.approx(2_000.0, rel=1e-9)
+
+    # Partial unwind: exit only 500 of the 2000.
+    order_book.submit(
+        _exit_order(500),
+        submitted_at="2024-01-02",
+        submitted_equity=10_000_000.0,
+    )
+    bar2 = sim.process_bar(_bar("2024-01-03", price=110.0, volume=10_000_000))
+
+    assert len(bar2.exit_fills) == 1
+    fill = bar2.exit_fills[0]
+    # Order filled to its requested size — must be FULL, not PARTIAL.
+    assert fill.fill_kind == FillKind.FULL
+    assert fill.unfilled_qty == pytest.approx(0.0, abs=1e-9)
+    assert fill.qty == pytest.approx(500.0, rel=1e-9)
+    # Position still open with residual exposure — no TradeRecord yet.
+    assert len(bar2.closed_trades) == 0
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_500.0, rel=1e-9)
+
+
+def test_risk_gate_re_applied_on_entry_continuation() -> None:
+    """A continuation slice must re-check the risk gate. If the limits no
+    longer admit the post-extend exposure, the continuation is rejected
+    even though the original entry's first slice fit at submit time.
+
+    Regression for a Codex P1 review note: ``can_enter`` was being
+    skipped on continuations, letting later slices breach
+    leverage / concentration limits set after the initial fill.
+    """
+    portfolio = Portfolio(initial_capital=1_000_000.0)
+    order_book = OrderBook()
+    # Tight concentration cap: a fully-filled 2000-share order at ~$100
+    # = $200k notional = 20% of equity. ``max_symbol_concentration_pct``
+    # at 15% admits the first 1000-share slice (10%) but rejects the
+    # post-extend total (20%).
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        risk_filter=RiskFilter(
+            RiskLimits(
+                max_position_pct=100,
+                max_symbol_concentration_pct=15,
+                max_gross_leverage=10.0,
+            )
+        ),
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        bar_safety=BarSafetyAssertion(),
+        execution_model=RealisticExecutionModel(participation_cap=0.10),
+    )
+
+    # First slice (1000 shares × $100 ≈ 10% concentration) fits. Remainder
+    # would push to 20% concentration, breaching max_position_pct=15.
+    order_book.submit(
+        _entry_order(2_000, policy=UnfilledPolicy.REQUEUE_NEXT_BAR),
+        submitted_at="2024-01-01",
+        submitted_equity=1_000_000.0,
+    )
+    bar1 = sim.process_bar(_bar("2024-01-02", price=100.0, volume=10_000))
+    assert len(bar1.entry_fills) == 1
+    assert bar1.entry_fills[0].fill_kind == FillKind.PARTIAL
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+
+    # Bar 2: high volume would otherwise let the continuation fully fill,
+    # but the risk gate rejects it.
+    bar2 = sim.process_bar(_bar("2024-01-03", price=100.0, volume=10_000_000))
+    assert bar2.entry_fills == [], "continuation must be rejected by risk gate"
+    # Position keeps its first-slice qty; the rejected continuation is
+    # removed from the book without growing exposure.
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+    assert order_book.all_pending() == []

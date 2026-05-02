@@ -272,7 +272,14 @@ class FillSimulator:
             entry_order_id=po.order_id,
             entry_client_order_id=req.client_order_id,
             entry_order_type=req.order_type.value,
-            original_qty=req.qty,
+            # ``original_qty`` tracks the cumulative entry-filled qty (the
+            # qty we expect to exit to fully close), *not* the strategy's
+            # original request. Initialized to this slice's filled qty;
+            # ``_continue_entry`` bumps it on each follow-on fill. When the
+            # entry order is removed (DROP / full fill) ``original_qty``
+            # naturally settles at the actually-held qty so a subsequent
+            # exit for that qty hits ``is_closed``.
+            original_qty=filled_qty,
             participation_clipped=is_partial,
             total_unfilled_qty=unfilled,
             # Counts the number of fill events on the entry side: initial
@@ -341,7 +348,30 @@ class FillSimulator:
         else:
             fill_price = round(ref_price * slip_short_entry, dp)
 
-        # Capital and risk checks against the *additional* notional only.
+        # Re-apply the risk gate on every continuation slice. Exposure can
+        # have grown between bars (mark-to-market on other positions, fresh
+        # entries on different symbols) so an originally-approved order
+        # still needs to fit current limits before adding more shares to the
+        # position. Exclude this symbol's existing position from the snapshot
+        # so ``max_open_positions`` doesn't trip on our own presence, and
+        # pass the post-extend full notional so leverage / concentration
+        # checks see the exposure that *will* exist after this fill.
+        existing_pos = self.portfolio.positions[req.symbol]
+        post_extend_notional = (existing_pos.qty + filled_qty) * fill_price
+        positions_excluding_self = {
+            s: p for s, p in self.portfolio.positions.items() if s != req.symbol
+        }
+        equity = self.portfolio.mark_to_market()
+        gate = self.risk.can_enter(
+            req.symbol, post_extend_notional, equity, positions_excluding_self
+        )
+        if not gate.allowed:
+            logger.info("risk gate rejected entry continuation for %s: %s", req.symbol, gate.reason)
+            self.order_book.remove(po.order_id)
+            return None
+
+        # Capital check against the *additional* notional only — the existing
+        # position's capital is already deducted.
         additional_notional = filled_qty * fill_price
         if self.portfolio.capital < additional_notional:
             logger.info(
@@ -354,6 +384,10 @@ class FillSimulator:
             return None
 
         pos = self.portfolio.extend(req.symbol, filled_qty, fill_price)
+        # ``original_qty`` mirrors the cumulative entry-filled qty; bump it
+        # so ``is_closed`` (compares ``cumulative_exit_qty`` to it) and
+        # ``TradeRecord.shares`` reflect the actually-held position.
+        pos.original_qty += filled_qty
         is_partial = unfilled > 0
         if is_partial:
             pos.participation_clipped = True
@@ -373,7 +407,11 @@ class FillSimulator:
             reason="entry",
             fill_kind=FillKind.PARTIAL if is_partial else FillKind.FULL,
             unfilled_qty=unfilled,
-            cumulative_filled_qty=pos.qty,
+            # Per-order cumulative entry fills (monotonic across all slices
+            # of *this* order). Reading from ``po.cumulative_filled_qty``
+            # plus the current slice keeps the value monotonic even if
+            # interim exits have shrunk ``pos.qty``.
+            cumulative_filled_qty=po.cumulative_filled_qty + filled_qty,
         )
 
     def _handle_entry_remainder(
@@ -458,6 +496,12 @@ class FillSimulator:
             pos.total_unfilled_qty += unfilled
 
         is_closed = pos.is_closed
+        # ``fill_kind`` reports completeness of *this exit order*, not
+        # closure of the position: a strategy that intentionally requests a
+        # partial unwind (req.qty < pos.qty) gets a ``FULL`` exit Fill
+        # while the position keeps residual exposure. Conflating the two
+        # would mislabel partial-unwind fills as ``PARTIAL`` even when the
+        # order filled to its requested size.
         exit_fill = Fill(
             order_id=po.order_id,
             client_order_id=req.client_order_id,
@@ -467,7 +511,7 @@ class FillSimulator:
             price=exit_price,
             timestamp=bar.timestamp,
             reason="exit",
-            fill_kind=FillKind.FULL if is_closed else FillKind.PARTIAL,
+            fill_kind=FillKind.FULL if unfilled <= 0 else FillKind.PARTIAL,
             unfilled_qty=unfilled,
             cumulative_filled_qty=pos.cumulative_exit_qty,
         )
