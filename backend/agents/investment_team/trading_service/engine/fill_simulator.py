@@ -222,8 +222,13 @@ class FillSimulator:
 
         if filled_qty <= 0:
             # No silent drop: emit a REJECTED Fill so the strategy sees the
-            # outcome, then remove the order.
-            self.order_book.remove(po.order_id)
+            # outcome. Route through ``_handle_entry_remainder`` so the
+            # order's ``unfilled_policy`` is honored — REQUEUE_NEXT_BAR
+            # gives the next bar a chance to recover instead of permanently
+            # dropping after a single no-liquidity bar. ``was_filled=False``
+            # because no position has opened yet (initial slice rejected),
+            # so the parent shouldn't remain registered as bracket-eligible.
+            self._handle_entry_remainder(po, bar, requested_qty, was_filled=False)
             return Fill(
                 order_id=po.order_id,
                 client_order_id=req.client_order_id,
@@ -324,10 +329,15 @@ class FillSimulator:
         dp = 4 if ref_price < 10 else 2
 
         if filled_qty <= 0:
-            # Zero-fraction continuation — drop the order; further requeue
-            # would just defer the same outcome. Emit a REJECTED Fill on the
-            # remainder so the strategy sees the abandonment.
-            self.order_book.remove(po.order_id)
+            # Zero-fraction continuation — route through
+            # ``_handle_entry_remainder`` so the order's
+            # ``unfilled_policy`` is honored (e.g. ``REQUEUE_NEXT_BAR``
+            # gives the next bar a chance to recover; previously this
+            # branch unconditionally dropped, ignoring the policy).
+            # ``was_filled=True`` because the parent's first slice
+            # already opened a position — preserves bracket-attachment
+            # eligibility on the eventual ``remove`` path.
+            self._handle_entry_remainder(po, bar, requested_qty, was_filled=True)
             return Fill(
                 order_id=po.order_id,
                 client_order_id=req.client_order_id,
@@ -427,21 +437,32 @@ class FillSimulator:
         po: PendingOrder,
         bar: Bar,
         unfilled: float,
+        *,
+        was_filled: bool = True,
     ) -> None:
-        """Decide whether to requeue or remove an entry order's remainder."""
+        """Decide whether to requeue or remove an entry order's remainder.
+
+        ``was_filled`` controls whether the parent stays registered in
+        ``OrderBook``'s eligible-parent set (only consequential when the
+        order was submitted with ``expect_brackets=True``). The default
+        ``True`` is correct for the typical path where at least one slice
+        already filled — including the no-liquidity *continuation* case,
+        because the partial entry that triggered the continuation has
+        already opened a position. For the no-liquidity *initial* case
+        (``_fill_entry`` with ``filled_qty <= 0``) the caller passes
+        ``False`` since no position has opened.
+        """
         policy = po.request.unfilled_policy or UnfilledPolicy.DROP
         if unfilled > 0 and policy == UnfilledPolicy.REQUEUE_NEXT_BAR:
             self.order_book.requeue(
                 po.order_id,
                 new_remaining_qty=unfilled,
                 new_submitted_at=bar.timestamp,
-                was_filled=True,
+                was_filled=was_filled,
             )
             return
         # TWAP_N is wired in #387; until then it falls through to DROP.
-        # Entries that fully fill or get DROPped both end here. ``was_filled=True``
-        # keeps the parent id eligible for bracket activation (#389).
-        self.order_book.remove(po.order_id, was_filled=True)
+        self.order_book.remove(po.order_id, was_filled=was_filled)
 
     def _fill_exit(
         self,

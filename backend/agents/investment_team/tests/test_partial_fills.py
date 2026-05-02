@@ -23,7 +23,10 @@ import pytest
 
 from investment_team.execution.bar_safety import BarSafetyAssertion
 from investment_team.execution.risk_filter import RiskFilter, RiskLimits
-from investment_team.trading_service.engine.execution_model import RealisticExecutionModel
+from investment_team.trading_service.engine.execution_model import (
+    FillTerms,
+    RealisticExecutionModel,
+)
 from investment_team.trading_service.engine.fill_simulator import (
     FillSimulator,
     FillSimulatorConfig,
@@ -720,3 +723,144 @@ def test_multi_bar_entry_records_weighted_entry_bid_price() -> None:
     bar3 = sim.process_bar(_bar("2024-01-04", price=120.0, volume=10_000_000))
     assert len(bar3.closed_trades) == 1
     assert bar3.closed_trades[0].entry_bid_price == pytest.approx(105.0, rel=1e-9)
+
+
+class _ScriptedFractionModel:
+    """Test stub: returns a per-bar ``qty_fraction`` keyed by bar timestamp.
+
+    Lets us drive ``_fill_entry`` / ``_continue_entry`` into the
+    ``filled_qty <= 0`` zero-fraction branch deterministically — the
+    realistic model can't actually return ``qty_fraction = 0`` from any
+    legitimate input, so the only way to test that branch's policy
+    handling is with a controlled stub.
+    """
+
+    name = "scripted-fraction"
+
+    def __init__(self, fractions: dict[str, float]) -> None:
+        self._fractions = fractions
+
+    def compute_fill_terms(self, req, bar, next_bar):
+        ref = bar.open
+        return FillTerms(
+            reference_price=ref,
+            qty_fraction=self._fractions.get(bar.timestamp, 1.0),
+            extra_slip_bps=0.0,
+        )
+
+
+def test_zero_fraction_continuation_honors_requeue_policy() -> None:
+    """A continuation slice that returns ``qty_fraction = 0`` (e.g.
+    transient no-liquidity bar under a custom execution model) must
+    honor ``UnfilledPolicy.REQUEUE_NEXT_BAR`` and re-queue the
+    remainder for the next bar instead of permanently dropping it.
+
+    Regression for a Codex P2 review note on PR #417: the previous
+    branch unconditionally called ``order_book.remove`` and ignored
+    the policy.
+    """
+    portfolio = Portfolio(initial_capital=10_000_000.0)
+    order_book = OrderBook()
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        risk_filter=RiskFilter(RiskLimits(max_position_pct=100, max_gross_leverage=10.0)),
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        bar_safety=BarSafetyAssertion(),
+        execution_model=_ScriptedFractionModel(
+            {
+                "2024-01-02": 0.5,  # bar 1: 50% partial
+                "2024-01-03": 0.0,  # bar 2: no liquidity
+                "2024-01-04": 1.0,  # bar 3: recovers, fills the rest
+            }
+        ),
+    )
+
+    order_book.submit(
+        _entry_order(2_000, policy=UnfilledPolicy.REQUEUE_NEXT_BAR),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+    # Bar 1: 50% partial → pos.qty=1000, requeue 1000.
+    sim.process_bar(_bar("2024-01-02", price=100.0))
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+
+    # Bar 2: zero-fraction → emit REJECTED Fill, but order must still
+    # be in the book (REQUEUE policy honored).
+    bar2 = sim.process_bar(_bar("2024-01-03", price=100.0))
+    assert len(bar2.entry_fills) == 1
+    assert bar2.entry_fills[0].fill_kind == FillKind.REJECTED
+    assert order_book.all_pending(), "REQUEUE_NEXT_BAR must keep the remainder pending"
+
+    # Bar 3: recovers → continuation fills the remaining 1000.
+    bar3 = sim.process_bar(_bar("2024-01-04", price=100.0))
+    assert len(bar3.entry_fills) == 1
+    assert bar3.entry_fills[0].fill_kind == FillKind.FULL
+    assert portfolio.positions["AAA"].qty == pytest.approx(2_000.0, rel=1e-9)
+
+
+def test_zero_fraction_continuation_drop_keeps_parent_eligible() -> None:
+    """When a zero-fraction continuation hits a non-REQUEUE policy
+    (DROP) and the order is removed, the parent must stay registered
+    in ``OrderBook``'s eligible-parent set — its first slice already
+    opened a position, so subsequent ``submit_attached`` calls must
+    still work.
+
+    Regression for a Codex P2 review note on PR #417: the previous
+    branch called ``order_book.remove`` with the default
+    ``was_filled=False`` and evicted the parent.
+    """
+    portfolio = Portfolio(initial_capital=10_000_000.0)
+    order_book = OrderBook()
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        risk_filter=RiskFilter(RiskLimits(max_position_pct=100, max_gross_leverage=10.0)),
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        bar_safety=BarSafetyAssertion(),
+        execution_model=_ScriptedFractionModel(
+            {
+                "2024-01-02": 0.5,  # bar 1: 50% partial
+                "2024-01-03": 0.0,  # bar 2: zero-fraction continuation
+            }
+        ),
+    )
+
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="parent-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=2_000,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            unfilled_policy=UnfilledPolicy.DROP,
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    sim.process_bar(_bar("2024-01-02", price=100.0))
+    sim.process_bar(_bar("2024-01-03", price=100.0))
+
+    # Continuation dropped under DROP policy; first-slice position remains.
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+    assert order_book.all_pending() == []
+
+    # Parent must still be eligible for bracket attachment.
+    order_book.submit_attached(
+        OrderRequest(
+            client_order_id="bracket-stop",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=1_000,
+            order_type=OrderType.STOP,
+            stop_price=95.0,
+            tif=TimeInForce.GTC,
+        ),
+        submitted_at="2024-01-03",
+        submitted_equity=10_000_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="bracket-group-1",
+    )
