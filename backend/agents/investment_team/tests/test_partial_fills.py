@@ -270,3 +270,48 @@ def test_partial_exit_records_weighted_avg_price() -> None:
     assert record.partial_fill_count == 1
     # Position fully closed.
     assert "AAA" not in portfolio.positions
+
+
+def test_exit_does_not_overfill_when_entry_continuation_grows_position() -> None:
+    """Same-bar entry continuation + exit must not over-close.
+
+    Regression for a Codex review note on PR #417: when a partial entry
+    is requeued and its remainder fills on the same bar an exit fires
+    against, ``_fill_exit`` must size the fill from
+    ``min(po.remaining_qty, pos.qty)`` — not from ``pos.qty`` alone —
+    or the exit will close newly-added shares the strategy never asked
+    to unwind.
+    """
+    sim, order_book, portfolio = _make_simulator()
+
+    # Bar 1 (low volume): partial entry → pos.qty=1000, remainder=1000 requeued.
+    order_book.submit(
+        _entry_order(2_000, policy=UnfilledPolicy.REQUEUE_NEXT_BAR),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+    sim.process_bar(_bar("2024-01-02", price=100.0, volume=10_000))
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+
+    # The strategy sees pos.qty=1000 and submits an exit for that qty —
+    # *before* the entry remainder fills next bar.
+    order_book.submit(
+        _exit_order(1_000),
+        submitted_at="2024-01-02",
+        submitted_equity=10_000_000.0,
+    )
+
+    # Bar 2 (high volume): entry continuation grows the position to 2000,
+    # then the exit fires. The exit must respect the strategy's req.qty
+    # (1000), not balloon to the new pos.qty (2000).
+    bar2 = sim.process_bar(_bar("2024-01-03", price=100.0, volume=10_000_000))
+
+    # Exit fill should be exactly the strategy's requested 1000.
+    assert len(bar2.exit_fills) == 1
+    assert bar2.exit_fills[0].qty == pytest.approx(1_000.0, rel=1e-9)
+    # Position remains open with the entry continuation's added shares —
+    # not silently emptied to zero.
+    assert "AAA" in portfolio.positions
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+    # No TradeRecord yet — only original_qty exits trigger one.
+    assert len(bar2.closed_trades) == 0

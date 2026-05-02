@@ -419,7 +419,15 @@ class FillSimulator:
         else:
             exit_price = round(ref_price * slip_short_exit, dp)
 
-        requested_exit_qty = po.remaining_qty if po.cumulative_filled_qty > 0 else pos.qty
+        # Bound the exit fill by both the strategy's requested qty
+        # (``po.remaining_qty``, which OrderBook.submit pins to ``req.qty``
+        # on first slice and the requeue path shrinks on partial slices) and
+        # the position's currently-open qty. The position cap matters when
+        # an entry continuation runs earlier in the same bar and grows the
+        # position past what the strategy saw at submission time — without
+        # this min() the exit could close newly-added shares the strategy
+        # never intended to unwind.
+        requested_exit_qty = min(po.remaining_qty, pos.qty)
         qty_fraction = max(0.0, min(1.0, terms.qty_fraction))
         filled_qty = requested_exit_qty * qty_fraction
         unfilled = requested_exit_qty - filled_qty
