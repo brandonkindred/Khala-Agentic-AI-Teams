@@ -446,3 +446,52 @@ def test_risk_gate_re_applied_on_entry_continuation() -> None:
     # removed from the book without growing exposure.
     assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
     assert order_book.all_pending() == []
+
+
+def test_over_ask_exit_reports_truncated_remainder_as_unfilled() -> None:
+    """An exit order requesting more shares than the position holds must
+    report the not-fillable portion as ``unfilled_qty`` — silently
+    truncating to the live position size and reporting ``unfilled_qty=0``
+    would mislabel the order as fully complete.
+
+    Regression for a Codex P2 review note on PR #417.
+    """
+    sim, order_book, portfolio = _make_simulator()
+
+    # Open a 500-qty position via a DROP-partial entry (req=2000, fills 500,
+    # remainder dropped). Position now has qty=500, original_qty=500.
+    order_book.submit(
+        _entry_order(2_000, policy=UnfilledPolicy.DROP),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+    # raw_part = (2000 * 100) / (5000 * 100) = 0.4 → qty_fraction = 0.25
+    # → filled_qty = 2000 * 0.25 = 500.
+    sim.process_bar(_bar("2024-01-02", price=100.0, volume=5_000))
+    assert portfolio.positions["AAA"].qty == pytest.approx(500.0, rel=1e-9)
+    assert portfolio.positions["AAA"].original_qty == pytest.approx(500.0, rel=1e-9)
+
+    # Strategy mistakenly asks to exit 1000 (more than held).
+    order_book.submit(
+        _exit_order(1_000),
+        submitted_at="2024-01-02",
+        submitted_equity=10_000_000.0,
+    )
+    bar2 = sim.process_bar(_bar("2024-01-03", price=110.0, volume=10_000_000))
+
+    # The actual close fills 500 (everything that exists), but the order
+    # asked for 1000 → ``unfilled_qty=500`` reflects what the strategy still
+    # wanted that could never execute.
+    assert len(bar2.exit_fills) == 1
+    fill = bar2.exit_fills[0]
+    assert fill.qty == pytest.approx(500.0, rel=1e-9)
+    assert fill.unfilled_qty == pytest.approx(500.0, rel=1e-9)
+    assert fill.fill_kind == FillKind.PARTIAL
+    # Per-order monotonic cumulative — *this exit order's* fills, not the
+    # position-wide cumulative_exit_qty.
+    assert fill.cumulative_filled_qty == pytest.approx(500.0, rel=1e-9)
+    # Position is fully closed (we exited everything that was held); the
+    # TradeRecord captures the actual round-trip.
+    assert len(bar2.closed_trades) == 1
+    assert bar2.closed_trades[0].shares == pytest.approx(500.0, rel=1e-9)
+    assert "AAA" not in portfolio.positions

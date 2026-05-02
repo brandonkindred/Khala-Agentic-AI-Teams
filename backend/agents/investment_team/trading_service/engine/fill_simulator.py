@@ -465,10 +465,17 @@ class FillSimulator:
         # position past what the strategy saw at submission time — without
         # this min() the exit could close newly-added shares the strategy
         # never intended to unwind.
-        requested_exit_qty = min(po.remaining_qty, pos.qty)
+        fillable_qty = min(po.remaining_qty, pos.qty)
         qty_fraction = max(0.0, min(1.0, terms.qty_fraction))
-        filled_qty = requested_exit_qty * qty_fraction
-        unfilled = requested_exit_qty - filled_qty
+        filled_qty = fillable_qty * qty_fraction
+        # Compute ``unfilled`` against the *order's* remaining request, not
+        # against ``fillable_qty``. If the strategy asked for more shares
+        # than are currently open (e.g. after a dropped partial entry), the
+        # not-fillable portion is real unfilled work from the strategy's
+        # perspective — reporting it as ``unfilled_qty=0`` would mislabel a
+        # truncated execution as fully complete and break resubmission /
+        # exposure-reconciliation logic.
+        unfilled = po.remaining_qty - filled_qty
 
         if filled_qty <= 0:
             # No liquidity for any exit slice on this bar. Decide whether to
@@ -485,8 +492,8 @@ class FillSimulator:
                 timestamp=bar.timestamp,
                 reason="rejected_no_liquidity",
                 fill_kind=FillKind.REJECTED,
-                unfilled_qty=requested_exit_qty,
-                cumulative_filled_qty=pos.cumulative_exit_qty,
+                unfilled_qty=po.remaining_qty,
+                cumulative_filled_qty=po.cumulative_filled_qty,
             )
             return rejected, None
 
@@ -513,7 +520,12 @@ class FillSimulator:
             reason="exit",
             fill_kind=FillKind.FULL if unfilled <= 0 else FillKind.PARTIAL,
             unfilled_qty=unfilled,
-            cumulative_filled_qty=pos.cumulative_exit_qty,
+            # Per-order cumulative exit fills (monotonic across all slices
+            # of *this* exit order). ``pos.cumulative_exit_qty`` is
+            # position-wide across multiple exit orders, which would let an
+            # independent later exit emit a value larger than its own
+            # requested qty — breaking per-order fill accounting.
+            cumulative_filled_qty=po.cumulative_filled_qty + filled_qty,
         )
 
         if not is_closed:
