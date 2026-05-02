@@ -43,24 +43,12 @@ def test_trailing_stop_is_gated_until_step_8():
         req.validate_prices()
 
 
-def test_ioc_is_gated_until_step_6():
-    req = _base(tif=TimeInForce.IOC)
-    with pytest.raises(NotImplementedError, match="#388"):
-        req.validate_prices()
-
-
-def test_fok_is_gated_until_step_6():
-    req = _base(tif=TimeInForce.FOK)
-    with pytest.raises(NotImplementedError, match="#388"):
-        req.validate_prices()
-
-
 def test_gates_raise_unsupported_order_feature_subclass():
     """The gates must raise the dedicated subclass, not bare
     ``NotImplementedError``, so streaming_harness only re-classifies real
     gate violations as ``unsupported_feature`` (and lets unrelated
     ``NotImplementedError`` from strategy code stay as ``runtime_error``)."""
-    req = _base(tif=TimeInForce.IOC)
+    req = _base(order_type=OrderType.TRAILING_STOP, stop_price=10.0)
     with pytest.raises(UnsupportedOrderFeatureError):
         req.validate_prices()
 
@@ -95,6 +83,13 @@ def test_default_market_order_still_validates():
     _base(order_type=OrderType.LIMIT, limit_price=100.0).validate_prices()
     _base(order_type=OrderType.STOP, stop_price=105.0).validate_prices()
     _base(tif=TimeInForce.GTC).validate_prices()
+    # IOC/FOK are runtime-supported as of #388 (Step 6) — the blanket
+    # submission-time gate is gone; only the shape-consistency check
+    # ("IOC/FOK only valid with market or limit orders") remains live.
+    _base(tif=TimeInForce.IOC).validate_prices()
+    _base(tif=TimeInForce.FOK).validate_prices()
+    _base(tif=TimeInForce.IOC, order_type=OrderType.LIMIT, limit_price=100.0).validate_prices()
+    _base(tif=TimeInForce.FOK, order_type=OrderType.LIMIT, limit_price=100.0).validate_prices()
 
 
 def test_unfilled_policies_validate_post_step_5():
