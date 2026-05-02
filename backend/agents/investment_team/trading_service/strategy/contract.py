@@ -161,11 +161,6 @@ class OrderRequest(BaseModel):
                 "trailing_stop is not yet supported by the execution engine; "
                 "see #390 (Trading 5/5 Step 8) for runtime support"
             )
-        if self.tif in (TimeInForce.IOC, TimeInForce.FOK):
-            raise UnsupportedOrderFeatureError(
-                f"{self.tif.value} time-in-force is not yet supported by the execution engine; "
-                "see #388 (Trading 5/5 Step 6) for runtime support"
-            )
         if self.attached_stop_loss is not None or self.attached_take_profit is not None:
             raise UnsupportedOrderFeatureError(
                 "attached_stop_loss / attached_take_profit are not yet materialized "

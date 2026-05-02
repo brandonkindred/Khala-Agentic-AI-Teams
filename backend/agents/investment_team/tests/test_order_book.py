@@ -1001,8 +1001,8 @@ def test_submit_attached_indexes_by_symbol() -> None:
 # submit_attached re-runs *every* validate_prices() gate except the
 # parent_order_id / oco_group_id ones — i.e. malformed children (LIMIT
 # without limit_price, STOP without stop_price) and unsupported types
-# (TRAILING_STOP, IOC/FOK) must still be rejected at submission time so we
-# never queue an order that would crash the simulator later.
+# (TRAILING_STOP) must still be rejected at submission time so we never
+# queue an order that would crash the simulator later.
 # ---------------------------------------------------------------------------
 
 
@@ -1056,27 +1056,6 @@ def test_submit_attached_rejects_trailing_stop_child() -> None:
         book.submit_attached(
             _base(
                 side=OrderSide.SHORT, qty=10.0, order_type=OrderType.TRAILING_STOP, stop_price=95.0
-            ),
-            submitted_at="2024-01-03",
-            submitted_equity=100_000.0,
-            parent_order_id=parent.order_id,
-            oco_group_id="g1",
-        )
-    assert book.children_of(parent.order_id) == []
-
-
-def test_submit_attached_rejects_ioc_child() -> None:
-    """IOC/FOK are gated until #388 ships — same as above."""
-    book = OrderBook()
-    parent = _bracket_parent(book)
-    with pytest.raises(UnsupportedOrderFeatureError, match="#388"):
-        book.submit_attached(
-            _base(
-                qty=10.0,
-                side=OrderSide.SHORT,
-                order_type=OrderType.LIMIT,
-                limit_price=110.0,
-                tif=TimeInForce.IOC,
             ),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,

@@ -24,7 +24,7 @@ from typing import List, Optional
 from ...execution.bar_safety import BarSafetyAssertion
 from ...execution.risk_filter import RiskFilter
 from ...models import TradeRecord
-from ..strategy.contract import Bar, Fill, FillKind, OrderSide, UnfilledPolicy
+from ..strategy.contract import Bar, Fill, FillKind, OrderSide, TimeInForce, UnfilledPolicy
 from .execution_model import ExecutionModel, FillTerms, OptimisticExecutionModel
 from .order_book import OrderBook, PendingOrder
 from .portfolio import Portfolio, Position
@@ -136,6 +136,21 @@ class FillSimulator:
                     self.order_book.remove(po.order_id)
                     continue
 
+            # Routing flags computed up-front so the IOC/FOK reject
+            # branches below can place their REJECTED Fill into the
+            # correct outcome list without re-deriving the dispatch.
+            is_partial_entry_continuation = (
+                existing_pos is not None
+                and existing_pos.entry_order_id == po.order_id
+                and po.cumulative_filled_qty > 0
+            )
+            is_entry = (
+                not is_partial_entry_continuation
+                and existing_pos is None
+                and req.side in (OrderSide.LONG, OrderSide.SHORT)
+            )
+            is_entry_side = is_entry or is_partial_entry_continuation
+
             # Determine whether this bar triggered the order and at what
             # terms (price, partial-fill fraction, adverse-selection
             # haircut). The execution model encapsulates the (model-
@@ -143,6 +158,32 @@ class FillSimulator:
             # owned below.
             terms = self.execution_model.compute_fill_terms(req, bar, next_bar)
             if terms is None:
+                # IOC / FOK semantics demand cancel-on-this-bar when the
+                # order doesn't trigger (e.g. a LIMIT IOC whose limit
+                # price didn't cross). Without this branch they would
+                # silently behave like DAY/GTC and stay alive across
+                # bars. Emit a REJECTED Fill so the strategy sees the
+                # outcome, then drop. Reference price is unavailable
+                # here (terms is None), so report the bar's close as a
+                # cosmetic price field — no money math is performed.
+                if req.tif in (TimeInForce.IOC, TimeInForce.FOK):
+                    dp = 4 if bar.close < 10 else 2
+                    rejected = Fill(
+                        order_id=po.order_id,
+                        client_order_id=req.client_order_id,
+                        symbol=req.symbol,
+                        side=req.side,
+                        qty=0.0,
+                        price=round(bar.close, dp),
+                        timestamp=bar.timestamp,
+                        reason=f"rejected_{req.tif.value}_no_trigger",
+                        fill_kind=FillKind.REJECTED,
+                        unfilled_qty=po.remaining_qty,
+                        cumulative_filled_qty=po.cumulative_filled_qty,
+                    )
+                    (entry_fills if is_entry_side else exit_fills).append(rejected)
+                    self.order_book.remove(po.order_id)
+                    continue
                 # ``TWAP_N`` orders consume a slice on every elapsed bar,
                 # not only on bars where the execution model triggers a
                 # fill. Without this, a ``LIMIT``/``STOP`` TWAP order
@@ -178,26 +219,48 @@ class FillSimulator:
                 fill_bar_timestamp=bar.timestamp,
             )
 
-            # ``existing_pos`` already fetched above for the stale-
-            # continuation guard; reuse it. Within a single iteration
-            # of this loop no other order has run, so portfolio state
-            # hasn't changed since the early lookup.
-
-            # Partial-entry continuation (#386): a requeued partial entry has
-            # ``cumulative_filled_qty > 0`` and an existing position whose
-            # ``entry_order_id`` matches this pending order. Without this
-            # branch the requeued order would hit the same-side-as-position
-            # guard below and get silently removed.
-            is_partial_entry_continuation = (
+            # FOK pre-check (before money math): a FOK order must fill its
+            # entire requested qty on this bar or reject outright. Two
+            # ways the bar can fail it:
+            #   (a) participation cap clips ``terms.qty_fraction`` < 1.0.
+            #   (b) on the exit path, the strategy asked for more shares
+            #       than the position currently holds — ``_fill_exit``
+            #       would otherwise clip via ``min(target_qty, pos.qty)``
+            #       and produce a PARTIAL despite ``qty_fraction == 1.0``.
+            # Same-side add-ons against an open position fall through to
+            # the existing silent suppression below; FOK doesn't change
+            # that path because the order never had a chance to fill.
+            if req.tif == TimeInForce.FOK and not (
                 existing_pos is not None
-                and existing_pos.entry_order_id == po.order_id
-                and po.cumulative_filled_qty > 0
-            )
-            is_entry = (
-                not is_partial_entry_continuation
-                and existing_pos is None
-                and req.side in (OrderSide.LONG, OrderSide.SHORT)
-            )
+                and not is_partial_entry_continuation
+                and req.side == existing_pos.side
+            ):
+                fok_partial = terms.qty_fraction < 1.0
+                if (
+                    not is_entry_side
+                    and existing_pos is not None
+                    and req.side != existing_pos.side
+                    and po.remaining_qty > existing_pos.qty
+                ):
+                    fok_partial = True
+                if fok_partial:
+                    dp = 4 if terms.reference_price < 10 else 2
+                    rejected = Fill(
+                        order_id=po.order_id,
+                        client_order_id=req.client_order_id,
+                        symbol=req.symbol,
+                        side=req.side,
+                        qty=0.0,
+                        price=round(terms.reference_price, dp),
+                        timestamp=bar.timestamp,
+                        reason="rejected_fok_partial",
+                        fill_kind=FillKind.REJECTED,
+                        unfilled_qty=req.qty,
+                        cumulative_filled_qty=po.cumulative_filled_qty,
+                    )
+                    (entry_fills if is_entry_side else exit_fills).append(rejected)
+                    self.order_book.remove(po.order_id)
+                    continue
 
             if is_partial_entry_continuation:
                 fill = self._continue_entry(po, bar, terms)
@@ -586,6 +649,14 @@ class FillSimulator:
         (``_fill_entry`` with ``filled_qty <= 0``) the caller passes
         ``False`` since no position has opened.
         """
+        # IOC override: the order's remainder is cancelled regardless of
+        # ``unfilled_policy`` (#388). The partial Fill that triggered
+        # this handler is already on the wire with ``fill_kind=PARTIAL``
+        # and ``unfilled_qty>0`` — the override only affects requeue vs
+        # drop, not the Fill itself.
+        if po.request.tif == TimeInForce.IOC and unfilled > 0:
+            self.order_book.remove(po.order_id, was_filled=was_filled)
+            return
         policy = po.request.unfilled_policy or UnfilledPolicy.DROP
         if unfilled > 0 and policy == UnfilledPolicy.REQUEUE_NEXT_BAR:
             self.order_book.requeue(
@@ -808,6 +879,13 @@ class FillSimulator:
         at fill-time, not submission), so accepting TWAP_N for any order
         means honoring it on both sides.
         """
+        # IOC override: the order's remainder is cancelled regardless of
+        # ``unfilled_policy`` (#388). Symmetric with the entry-side
+        # handler — the partial exit Fill is already emitted with
+        # ``fill_kind=PARTIAL`` so the strategy sees the unfilled qty.
+        if po.request.tif == TimeInForce.IOC and unfilled > 0:
+            self.order_book.remove(po.order_id)
+            return
         policy = po.request.unfilled_policy or UnfilledPolicy.DROP
         if unfilled > 0 and policy == UnfilledPolicy.REQUEUE_NEXT_BAR:
             self.order_book.requeue(
