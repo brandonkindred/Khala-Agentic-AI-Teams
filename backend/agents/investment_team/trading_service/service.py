@@ -19,7 +19,12 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from ..execution.bar_safety import LookAheadError
 from ..execution.risk_filter import RiskFilter, RiskLimits
-from ..models import BacktestConfig, TradeRecord
+from ..models import (
+    BacktestConfig,
+    BacktestExecutionDiagnostics,
+    OrderLifecycleEvent,
+    TradeRecord,
+)
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
 from .engine.execution_model import build_execution_model
 from .engine.fill_simulator import FillSimulator, FillSimulatorConfig
@@ -34,6 +39,8 @@ from .strategy.contract import (
 from .strategy.streaming_harness import StrategyRuntimeError, StreamingHarness
 
 logger = logging.getLogger(__name__)
+
+_MAX_ORDER_EVENTS = 20
 
 
 def _partial_fill_defaults_enabled() -> bool:
@@ -66,6 +73,72 @@ class TradingServiceResult:
     #: Populated for every ``run`` regardless of data source (legacy
     #: pre-fetched vs provider-driven).
     bars_processed: int = 0
+    execution_diagnostics: BacktestExecutionDiagnostics = field(
+        default_factory=BacktestExecutionDiagnostics
+    )
+
+
+def _record_event(
+    diagnostics: BacktestExecutionDiagnostics,
+    event_type: str,
+    *,
+    timestamp: Optional[str] = None,
+    symbol: Optional[str] = None,
+    side: Optional[str] = None,
+    order_type: Optional[str] = None,
+    reason: str = "",
+    detail: str = "",
+) -> None:
+    diagnostics.last_order_events.append(
+        OrderLifecycleEvent(
+            event_type=event_type,
+            timestamp=timestamp,
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            reason=reason,
+            detail=detail,
+        )
+    )
+    if len(diagnostics.last_order_events) > _MAX_ORDER_EVENTS:
+        del diagnostics.last_order_events[:-_MAX_ORDER_EVENTS]
+
+
+def _increment_rejection(diagnostics: BacktestExecutionDiagnostics, reason: str) -> None:
+    reason_key = reason or "unknown"
+    diagnostics.orders_rejected += 1
+    diagnostics.orders_rejection_reasons[reason_key] = (
+        diagnostics.orders_rejection_reasons.get(reason_key, 0) + 1
+    )
+
+
+def _finalize_diagnostics(result: TradingServiceResult) -> TradingServiceResult:
+    diagnostics = result.execution_diagnostics
+    diagnostics.bars_processed = result.bars_processed
+    diagnostics.warmup_orders_dropped = result.warmup_orders_dropped
+    diagnostics.closed_trades = len(result.trades)
+
+    if diagnostics.closed_trades > 0:
+        diagnostics.zero_trade_category = None
+        diagnostics.summary = (
+            f"Backtest closed {diagnostics.closed_trades} trade(s) "
+            f"across {diagnostics.bars_processed} post-warmup bar(s)."
+        )
+    elif diagnostics.warmup_orders_dropped > 0:
+        diagnostics.zero_trade_category = "ONLY_WARMUP_ORDERS"
+        diagnostics.summary = (
+            f"Backtest closed zero trades; dropped {diagnostics.warmup_orders_dropped} "
+            f"warm-up order(s) across {diagnostics.bars_processed} post-warmup bar(s)."
+        )
+    else:
+        diagnostics.zero_trade_category = "UNKNOWN_ZERO_TRADE_PATH"
+        diagnostics.summary = (
+            f"Backtest closed zero trades across {diagnostics.bars_processed} "
+            "post-warmup bar(s). "
+            "Full order lifecycle counters are not instrumented yet."
+        )
+
+    return result
 
 
 class TradingService:
@@ -138,7 +211,7 @@ class TradingService:
             except StrategyRuntimeError as exc:
                 result.error = str(exc)
                 result.lookahead_violation = exc.etype == "lookahead_violation"
-                return result
+                return _finalize_diagnostics(result)
 
             # We need one-bar lookahead in the fill simulator, so we buffer
             # the next bar. The strategy sees bar N; the fill simulator uses
@@ -316,13 +389,13 @@ class TradingService:
                 # violation so operators see a single error category.
                 result.error = str(exc)
                 result.lookahead_violation = True
-                return result
+                return _finalize_diagnostics(result)
             except StrategyRuntimeError as exc:
                 result.error = str(exc)
                 result.lookahead_violation = exc.etype == "lookahead_violation"
-                return result
+                return _finalize_diagnostics(result)
 
-        return result
+        return _finalize_diagnostics(result)
 
     # ------------------------------------------------------------------
 
