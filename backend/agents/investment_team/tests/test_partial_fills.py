@@ -1725,3 +1725,122 @@ def test_stale_partial_exit_dropped_on_untriggered_bar() -> None:
     bar_e = sim.process_bar(_bar("2024-01-06", price=100.0))
     assert bar_e.exit_fills == [], "stale TWAP exit must NOT fire against the newly-opened position"
     assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+
+
+def test_stale_partial_exit_dropped_when_position_replaced_same_bar() -> None:
+    """A partial-exit remainder must drop when its original target
+    position has been *replaced* by a different one on the same symbol
+    — covered by the ``working_against_entry_order_id`` mismatch path,
+    not the simpler ``existing_pos is None`` guard.
+
+    Concrete race: an entry order with a *lower* ``order_id`` (e.g. a
+    STOP entry submitted before the TWAP exit) sits in the book and
+    only triggers later. Between the partial fill and the trigger, the
+    original position is closed externally (no intermediate
+    ``process_bar`` runs in this scenario, so the existing_pos-is-None
+    guard never fires). Then a single bar runs where BOTH the stop
+    entry triggers AND the TWAP exit's terms come back: snapshot
+    iterates in id order, stop-entry fires first → opens a brand-new
+    position, TWAP exit fires next → sees ``existing_pos`` populated
+    but with a *different* ``entry_order_id`` than its bound id →
+    must drop via the new mismatch branch.
+
+    Regression for a Codex P1 review note on PR #419.
+    """
+    portfolio = Portfolio(initial_capital=10_000_000.0)
+    order_book = OrderBook()
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        risk_filter=RiskFilter(RiskLimits(max_position_pct=100, max_gross_leverage=10.0)),
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        bar_safety=BarSafetyAssertion(),
+        execution_model=_PerOrderTriggerModel(
+            {
+                "entry-1": {"2024-01-02": 1.0},
+                "exit-1": {"2024-01-03": 0.5, "2024-01-04": 1.0},
+                # ``stop-entry`` is submitted FIRST (lower order_id) but
+                # only triggers on bar D (after the original position is
+                # gone), simulating a STOP that finally crosses.
+                "stop-entry": {"2024-01-04": 1.0},
+            }
+        ),
+    )
+
+    # Order submission sequence dictates ``order_id`` ordering, which
+    # dictates snapshot iteration on the contested bar. ``stop-entry``
+    # MUST be submitted first so it processes BEFORE the TWAP exit on
+    # bar D — that's what creates the new position before the stale
+    # exit fires and exposes the mismatch path.
+    order_book.submit(
+        OrderRequest(
+            client_order_id="stop-entry",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=1_000,
+            order_type=OrderType.STOP,
+            stop_price=110.0,
+            tif=TimeInForce.GTC,
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+    # Then the entry that fills bar A.
+    order_book.submit(
+        _entry_order(4_000),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+    sim.process_bar(_bar("2024-01-02", price=100.0))
+    assert portfolio.positions["AAA"].qty == pytest.approx(4_000.0, rel=1e-9)
+
+    # Submit TWAP_N=4 exit AFTER the stop-entry (so its order_id is
+    # higher and it processes second on bar D's snapshot).
+    order_book.submit(
+        _exit_order(4_000, policy=UnfilledPolicy.TWAP_N, twap_slices=4),
+        submitted_at="2024-01-02",
+        submitted_equity=10_000_000.0,
+    )
+
+    # Bar B: TWAP exit partials (qty_fraction=0.5 → 2_000 of 4_000).
+    # Position now 2_000. TWAP remainder bound to entry-1's position
+    # via ``working_against_entry_order_id`` on its first fill.
+    sim.process_bar(_bar("2024-01-03", price=100.0))
+    assert portfolio.positions["AAA"].qty == pytest.approx(2_000.0, rel=1e-9)
+    twap_pending = [p for p in order_book.all_pending() if p.request.client_order_id == "exit-1"]
+    assert len(twap_pending) == 1
+    assert twap_pending[0].cumulative_filled_qty == pytest.approx(2_000.0, rel=1e-9)
+
+    # Simulate "another order closed the rest of the position" between
+    # bars B and D — directly close the remaining 2_000 via the
+    # portfolio. Crucially, do NOT call ``process_bar`` between this
+    # close and bar D, otherwise the existing_pos-is-None guard would
+    # fire and drop the TWAP exit before bar D's snapshot is taken.
+    portfolio.partial_close("AAA", 2_000.0, 100.0, 100.0)
+    portfolio.close("AAA", 100.0)
+    assert "AAA" not in portfolio.positions
+
+    # Bar D: snapshot iterates [stop-entry (low id), exit-1 (high id)].
+    # stop-entry processes first → ``existing_pos is None`` and
+    # cumulative=0 → ``is_entry=True`` → opens a brand-new LONG
+    # position with ``entry_order_id`` != entry-1's id. Then exit-1
+    # processes → ``existing_pos`` is the new position, cumulative=
+    # 2_000 > 0, but ``working_against_entry_order_id`` (entry-1) !=
+    # ``existing_pos.entry_order_id`` (stop-entry) → MUST drop via the
+    # new mismatch branch.
+    bar_d = sim.process_bar(_bar("2024-01-04", price=111.0))
+
+    # The stop-entry's new position is intact (1_000 shares).
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+    assert len(bar_d.entry_fills) == 1
+    assert bar_d.entry_fills[0].client_order_id == "stop-entry"
+    # Critical: no exit fill — the stale TWAP remainder must NOT have
+    # fired against the brand-new position from stop-entry.
+    assert bar_d.exit_fills == [], (
+        "stale TWAP exit (bound to entry-1's position) must NOT fire "
+        "against the new position opened by stop-entry — the mismatch "
+        "in working_against_entry_order_id should drop it"
+    )
+    # Stale exit-1 was removed; stop-entry's post-fill cleanup also
+    # removes its order. Book is empty.
+    assert order_book.all_pending() == []

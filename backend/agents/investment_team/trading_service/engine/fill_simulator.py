@@ -106,21 +106,35 @@ class FillSimulator:
                 continue
             req = po.request
 
-            # Stale-continuation guard: a pre-filled order with no live
-            # position is a stale continuation — typically a partially
-            # filled exit whose position was closed by an earlier order
-            # on this same bar (or a partial entry whose position was
-            # closed by a stop before its remainder could fill). Must
-            # drop on EVERY bar (triggered or not), otherwise the TWAP
-            # elapsed-bar tick below would keep the remainder alive
-            # across no-trigger bars long enough to fill against a
-            # newly-opened position on the same symbol on a later
-            # triggered bar. Fresh entries (``cumulative=0``) and live
-            # continuations (``existing_pos`` populated) are unaffected.
+            # Stale-continuation guard: a pre-filled order whose target
+            # position has vanished — *or has been replaced by a
+            # different one on the same symbol* — is stale and must
+            # drop. Two failure modes covered:
+            #   (a) ``existing_pos is None`` — the position was closed
+            #       by another order; falling through to ``_fill_entry``
+            #       would open a brand-new opposite-side position.
+            #   (b) ``existing_pos.entry_order_id !=
+            #       po.working_against_entry_order_id`` — the original
+            #       position was closed *and* replaced (e.g. a low-id
+            #       stop-entry that triggers later in the same bar's
+            #       snapshot, or a manual re-entry between bars). The
+            #       stale exit slice would otherwise close shares from
+            #       the brand-new, unrelated position.
+            # Must fire on EVERY bar (triggered or not), before the
+            # TWAP elapsed-bar tick below; otherwise an untriggered bar
+            # could keep a stale remainder alive long enough to fire
+            # against the wrong position on a later triggered bar.
+            # Fresh entries (``cumulative_filled_qty == 0``) and live
+            # continuations (target position still open and intact) are
+            # unaffected.
             existing_pos = self.portfolio.positions.get(bar.symbol)
-            if existing_pos is None and po.cumulative_filled_qty > 0:
-                self.order_book.remove(po.order_id)
-                continue
+            if po.cumulative_filled_qty > 0:
+                bound_id = po.working_against_entry_order_id
+                if existing_pos is None or (
+                    bound_id is not None and existing_pos.entry_order_id != bound_id
+                ):
+                    self.order_book.remove(po.order_id)
+                    continue
 
             # Determine whether this bar triggered the order and at what
             # terms (price, partial-fill fraction, adverse-selection
@@ -360,6 +374,11 @@ class FillSimulator:
             partial_fill_count=1,
         )
         self.portfolio.open(pos)
+        # Bind the order to the position it just opened so subsequent
+        # bars can detect "this is a stale continuation against a
+        # *different* position with the same symbol" — see the
+        # stale-continuation guard in ``process_bar``.
+        po.working_against_entry_order_id = po.order_id
         self._handle_entry_remainder(po, bar, unfilled)
 
         return Fill(
@@ -614,6 +633,13 @@ class FillSimulator:
         """
         req = po.request
         pos = self.portfolio.positions[bar.symbol]
+        # Bind the order to the position it's targeting on the first
+        # slice (before any cap-clip / portfolio mutation) so subsequent
+        # bars can detect "this position has been closed and replaced by
+        # a different one" — see the stale-continuation guard in
+        # ``process_bar``. Idempotent if already set.
+        if po.working_against_entry_order_id is None:
+            po.working_against_entry_order_id = pos.entry_order_id
         ref_price = terms.reference_price
         dp = 4 if ref_price < 10 else 2
         _, slip_long_exit, _, slip_short_exit = self._slippage_multipliers(terms.extra_slip_bps)
