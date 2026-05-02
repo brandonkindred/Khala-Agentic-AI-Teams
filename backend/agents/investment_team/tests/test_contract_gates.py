@@ -55,33 +55,6 @@ def test_fok_is_gated_until_step_6():
         req.validate_prices()
 
 
-def test_unfilled_policy_drop_is_gated_until_step_3():
-    req = _base(unfilled_policy=UnfilledPolicy.DROP)
-    with pytest.raises(NotImplementedError, match="#385"):
-        req.validate_prices()
-
-
-def test_unfilled_policy_requeue_is_gated_until_step_4():
-    req = _base(unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR)
-    with pytest.raises(NotImplementedError, match="#386"):
-        req.validate_prices()
-
-
-def test_unfilled_policy_twap_is_gated_until_step_5():
-    req = _base(unfilled_policy=UnfilledPolicy.TWAP_N, twap_slices=3)
-    with pytest.raises(NotImplementedError, match="#387"):
-        req.validate_prices()
-
-
-def test_twap_slices_alone_is_gated_until_step_5():
-    """``twap_slices`` set without ``unfilled_policy`` must hit the gate
-    rather than fall through to the consistency ``ValueError`` (which
-    ``TradingService``'s broad except would silently drop)."""
-    req = _base(twap_slices=3)
-    with pytest.raises(NotImplementedError, match="#387"):
-        req.validate_prices()
-
-
 def test_gates_raise_unsupported_order_feature_subclass():
     """The gates must raise the dedicated subclass, not bare
     ``NotImplementedError``, so streaming_harness only re-classifies real
@@ -122,3 +95,28 @@ def test_default_market_order_still_validates():
     _base(order_type=OrderType.LIMIT, limit_price=100.0).validate_prices()
     _base(order_type=OrderType.STOP, stop_price=105.0).validate_prices()
     _base(tif=TimeInForce.GTC).validate_prices()
+
+
+def test_unfilled_policies_validate_post_step_5():
+    """All three ``unfilled_policy`` values are honored by the engine after
+    #387 lands; ``validate_prices`` must accept them without raising."""
+    _base(unfilled_policy=UnfilledPolicy.DROP).validate_prices()
+    _base(unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR).validate_prices()
+    _base(unfilled_policy=UnfilledPolicy.TWAP_N, twap_slices=2).validate_prices()
+    _base(unfilled_policy=UnfilledPolicy.TWAP_N, twap_slices=10).validate_prices()
+
+
+def test_twap_slices_shape_consistency_still_enforced():
+    """The blanket gate is gone, but the shape-consistency checks at the
+    bottom of ``validate_prices`` are now the active validators for
+    TWAP_N's required-companion-fields invariant."""
+    # TWAP_N requires twap_slices >= 2.
+    with pytest.raises(ValueError, match="twap_n policy requires twap_slices >= 2"):
+        _base(unfilled_policy=UnfilledPolicy.TWAP_N).validate_prices()
+    with pytest.raises(ValueError, match="twap_n policy requires twap_slices >= 2"):
+        _base(unfilled_policy=UnfilledPolicy.TWAP_N, twap_slices=1).validate_prices()
+    # twap_slices is only valid when policy is TWAP_N.
+    with pytest.raises(ValueError, match="twap_slices may only be set when"):
+        _base(twap_slices=3).validate_prices()
+    with pytest.raises(ValueError, match="twap_slices may only be set when"):
+        _base(unfilled_policy=UnfilledPolicy.DROP, twap_slices=3).validate_prices()

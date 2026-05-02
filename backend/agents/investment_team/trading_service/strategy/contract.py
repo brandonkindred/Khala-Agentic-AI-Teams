@@ -73,6 +73,22 @@ class UnsupportedOrderFeatureError(NotImplementedError):
     """
 
 
+class InvalidTWAPOrderError(UnsupportedOrderFeatureError, ValueError):
+    """Raised when a strategy emits a ``TWAP_N`` order with malformed
+    ``twap_slices`` (missing, less than 2, or set without ``TWAP_N``).
+
+    Inherits from ``UnsupportedOrderFeatureError`` so ``TradingService.run``
+    surfaces it as a structured ``StrategyRuntimeError`` (matching how
+    pre-#387 the blanket ``unfilled_policy`` gate raised this same
+    superclass) — strategy bugs in TWAP parameters must NOT be silently
+    dropped by the broad ``except Exception`` malformed-order handler,
+    which would let typos in ``twap_slices`` quietly change trading
+    behavior. Also subclasses ``ValueError`` so existing
+    ``pytest.raises(ValueError, ...)`` assertions on the shape-
+    consistency invariant continue to match.
+    """
+
+
 class StopAttachment(BaseModel):
     """Stop-loss leg attached to an entry order; materialized into an OCO child on entry fill."""
 
@@ -150,11 +166,6 @@ class OrderRequest(BaseModel):
                 f"{self.tif.value} time-in-force is not yet supported by the execution engine; "
                 "see #388 (Trading 5/5 Step 6) for runtime support"
             )
-        if self.unfilled_policy is not None or self.twap_slices is not None:
-            raise UnsupportedOrderFeatureError(
-                "unfilled_policy / twap_slices are not yet honored by TradingService; "
-                "see #385 / #386 / #387 (Trading 5/5 Steps 3-5) for runtime support"
-            )
         if self.attached_stop_loss is not None or self.attached_take_profit is not None:
             raise UnsupportedOrderFeatureError(
                 "attached_stop_loss / attached_take_profit are not yet materialized "
@@ -189,9 +200,11 @@ class OrderRequest(BaseModel):
             raise ValueError(f"{self.tif.value} only valid with market or limit orders")
         if self.unfilled_policy == UnfilledPolicy.TWAP_N:
             if self.twap_slices is None or self.twap_slices < 2:
-                raise ValueError("twap_n policy requires twap_slices >= 2")
+                raise InvalidTWAPOrderError("twap_n policy requires twap_slices >= 2")
         elif self.twap_slices is not None:
-            raise ValueError("twap_slices may only be set when unfilled_policy is twap_n")
+            raise InvalidTWAPOrderError(
+                "twap_slices may only be set when unfilled_policy is twap_n"
+            )
         if (
             self.attached_stop_loss is not None or self.attached_take_profit is not None
         ) and self.parent_order_id is not None:

@@ -62,6 +62,18 @@ class PendingOrder:
     effective_stop_price: Optional[float] = None  # live trailing stop (Step 8 / #390)
     trailing_water: Optional[float] = None  # running high (LONG) / low (SHORT); Step 8
     armed: bool = True
+    # Identity of the position this order is committed to act against, set
+    # on the *first* fill: for entries it's ``po.order_id`` itself (the id
+    # of the position they just opened); for exits it's the existing
+    # position's ``entry_order_id`` (the entry that originally opened the
+    # position being closed). Used by ``process_bar``'s stale-continuation
+    # guard to drop pre-filled remainders whose original target position
+    # has been closed *and* replaced by an unrelated position on the same
+    # symbol — without this, a stale TWAP/REQUEUE remainder could fire
+    # against a brand-new position via ``_fill_exit`` (#387 review note).
+    # ``None`` for orders that haven't filled yet (cumulative_filled_qty
+    # == 0); the guard short-circuits in that case.
+    working_against_entry_order_id: Optional[str] = None
 
 
 @dataclass
