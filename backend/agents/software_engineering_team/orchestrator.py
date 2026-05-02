@@ -2167,6 +2167,98 @@ def _run_backend_frontend_workers(
     t_frontend.join()
 
 
+def _maybe_ship_sprint_release(
+    *,
+    sprint_id: Optional[str],
+    plan_dir: Path,
+    int_result: Any,
+    job_id: str,
+) -> None:
+    """Hook into the SE pipeline: ship a release if this is a sprint run.
+
+    Phase 3 of #243 / issue #371. Runs immediately after the Integration
+    phase. No-op when ``sprint_id`` is None — preserves the byte-identical
+    one-shot path for non-sprint runs.
+
+    Behavior:
+      * Skip silently when not all planned stories have reached a
+        terminal status (the sprint is still in flight).
+      * Otherwise call ``ReleaseManagerAgent.ship`` with the Integration
+        issues list so failures land as ``feedback_items`` tagged with
+        the sprint and the release notes go to ``plan/releases/<v>.md``.
+
+    Failure mode (per #371's "Failures are non-fatal" requirement):
+      * ``ReleaseManagerAgent.ship`` raising → log + open a high-severity
+        ``release-manager-error`` feedback item so the next groom sees
+        the gap.
+      * Anything else → log only; we never propagate from this hook.
+    """
+    if not sprint_id:
+        return
+    try:
+        from product_delivery import (  # noqa: PLC0415 — lazy cross-team import
+            get_store as _pd_get_store,
+        )
+        from product_delivery.release_manager_agent import (  # noqa: PLC0415
+            ReleaseManagerAgent,
+        )
+
+        pd_store = _pd_get_store()
+        open_count = pd_store.count_open_stories_in_sprint(sprint_id)
+        if open_count > 0:
+            logger.info(
+                "Release manager: sprint %s has %d open story(ies); deferring release.",
+                sprint_id,
+                open_count,
+            )
+            return
+        issues = list(getattr(int_result, "issues", []) or [])
+        release = ReleaseManagerAgent(pd_store).ship(
+            sprint_id=sprint_id,
+            plan_dir=plan_dir,
+            integration_issues=issues,
+        )
+        logger.info(
+            "Release manager: shipped %s for sprint %s -> %s (%d integration issue(s) promoted)",
+            release.version,
+            sprint_id,
+            release.notes_path,
+            len(issues),
+        )
+    except Exception as rm_err:
+        logger.warning(
+            "Release manager hook failed for sprint %s: %s",
+            sprint_id,
+            rm_err,
+            exc_info=True,
+        )
+        # Best-effort: drop a feedback row so the next groom sees the
+        # release-manager outage. Wrapped in its own try/except so a
+        # double failure (release manager + feedback intake) still
+        # leaves the SE run alone.
+        try:
+            from product_delivery import (  # noqa: PLC0415
+                get_store as _pd_get_store,
+            )
+
+            pd_store = _pd_get_store()
+            pid = pd_store.get_product_id_for_sprint(sprint_id)
+            if pid:
+                pd_store.create_feedback_item(
+                    product_id=pid,
+                    source="release-manager-error",
+                    raw_payload={"error": str(rm_err), "job_id": job_id},
+                    severity="high",
+                    linked_story_id=None,
+                    author="release-manager",
+                    sprint_id=sprint_id,
+                )
+        except Exception:
+            logger.exception(
+                "Release manager hook: failed to record release-manager-error feedback"
+            )
+
+
 def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
     """Synthesize ``(ProductRequirements, spec_markdown)`` from a sprint's stories.
 
@@ -3055,6 +3147,11 @@ def run_orchestrator(
         integration_agent = agents.get("integration")
         has_backend = backend_dir.is_dir() and any(backend_dir.rglob("*.py"))
         has_frontend = frontend_dir.is_dir() and any(frontend_dir.rglob("*.ts"))
+        # ``int_result`` is hoisted out of the try block so the
+        # release-manager hook (#371) can read its issues list whether
+        # Integration ran or not. ``None`` here means "Integration was
+        # skipped or threw"; the hook treats that as zero issues.
+        int_result: Any = None
         if integration_agent and has_backend and has_frontend and completed_code_task_ids:
             try:
                 from integration_team import IntegrationInput
@@ -3096,6 +3193,17 @@ def run_orchestrator(
                         )
             except Exception as int_err:
                 logger.warning("Integration phase failed (non-blocking): %s", int_err)
+
+        # Release manager hook (#371). No-op when not a sprint run; on a
+        # sprint run with all stories terminal, it writes the release
+        # row + plan/releases/<version>.md and promotes Integration
+        # issues into sprint-tagged feedback items. Always non-fatal.
+        _maybe_ship_sprint_release(
+            sprint_id=sprint_id,
+            plan_dir=plan_dir,
+            int_result=int_result,
+            job_id=job_id,
+        )
 
         # DevOps: containerize every git repo created by the pipeline (backend and frontend)
         devops_agent = agents.get("devops")
