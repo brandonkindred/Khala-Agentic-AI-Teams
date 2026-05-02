@@ -124,18 +124,65 @@ def _finalize_diagnostics(result: TradingServiceResult) -> TradingServiceResult:
             f"Backtest closed {diagnostics.closed_trades} trade(s) "
             f"across {diagnostics.bars_processed} post-warmup bar(s)."
         )
-    elif diagnostics.warmup_orders_dropped > 0:
+        return result
+
+    # An aborted run (subprocess crash, look-ahead violation, etc.) doesn't
+    # let the lifecycle counters speak for the strategy's intent — preserve
+    # the unknown category so callers don't misread a partial counter set
+    # as a clean zero-trade signal. Refinement-loop callers see the
+    # ``error``/``lookahead_violation`` fields on ``TradingServiceResult``
+    # for the actual failure mode.
+    if result.error is not None:
+        diagnostics.zero_trade_category = "UNKNOWN_ZERO_TRADE_PATH"
+        diagnostics.summary = f"Backtest aborted before completion: {result.error}"
+        return result
+
+    # Zero-trade categorisation. Counters populated by the run loop drive the
+    # category; the precedence below mirrors the order in which the failure
+    # would manifest along the strategy → submit → fill path.
+    if diagnostics.orders_emitted == 0 and diagnostics.warmup_orders_dropped > 0:
         diagnostics.zero_trade_category = "ONLY_WARMUP_ORDERS"
         diagnostics.summary = (
             f"Backtest closed zero trades; dropped {diagnostics.warmup_orders_dropped} "
             f"warm-up order(s) across {diagnostics.bars_processed} post-warmup bar(s)."
         )
+    elif diagnostics.orders_emitted == 0:
+        diagnostics.zero_trade_category = "NO_ORDERS_EMITTED"
+        diagnostics.summary = (
+            f"Backtest closed zero trades; strategy emitted no orders across "
+            f"{diagnostics.bars_processed} post-warmup bar(s)."
+        )
+    elif diagnostics.orders_rejected > 0 and diagnostics.orders_accepted == 0:
+        reasons = ", ".join(
+            f"{k}={v}" for k, v in sorted(diagnostics.orders_rejection_reasons.items())
+        )
+        diagnostics.zero_trade_category = "ORDERS_REJECTED"
+        diagnostics.summary = (
+            f"Backtest closed zero trades; all {diagnostics.orders_rejected} emitted "
+            f"order(s) were rejected ({reasons or 'unknown'})."
+        )
+    elif diagnostics.orders_unfilled > 0 and diagnostics.entries_filled == 0:
+        diagnostics.zero_trade_category = "ORDERS_UNFILLED"
+        diagnostics.summary = (
+            f"Backtest closed zero trades; {diagnostics.orders_unfilled} order(s) "
+            "left unfilled with no entry fills recorded."
+        )
+    elif diagnostics.entries_filled > 0 and diagnostics.exits_emitted == 0:
+        diagnostics.zero_trade_category = "ENTRY_WITH_NO_EXIT"
+        diagnostics.summary = (
+            f"Backtest closed zero trades; {diagnostics.entries_filled} entr(ies) "
+            "filled but the strategy never emitted an exit order."
+        )
     else:
         diagnostics.zero_trade_category = "UNKNOWN_ZERO_TRADE_PATH"
         diagnostics.summary = (
             f"Backtest closed zero trades across {diagnostics.bars_processed} "
-            "post-warmup bar(s). "
-            "Full order lifecycle counters are not instrumented yet."
+            f"post-warmup bar(s); counters: emitted={diagnostics.orders_emitted}, "
+            f"accepted={diagnostics.orders_accepted}, "
+            f"rejected={diagnostics.orders_rejected}, "
+            f"unfilled={diagnostics.orders_unfilled}, "
+            f"entries_filled={diagnostics.entries_filled}, "
+            f"exits_emitted={diagnostics.exits_emitted}."
         )
 
     return result
@@ -266,7 +313,19 @@ class TradingService:
                         if prev_bar is not None and (
                             cur_bar.timestamp[:10] != prev_bar.timestamp[:10]
                         ):
-                            order_book.expire_day_orders(cur_bar.timestamp)
+                            expired = order_book.expire_day_orders(cur_bar.timestamp)
+                            if expired:
+                                result.execution_diagnostics.orders_unfilled += len(expired)
+                                for ex in expired:
+                                    _record_event(
+                                        result.execution_diagnostics,
+                                        "unfilled",
+                                        timestamp=cur_bar.timestamp,
+                                        symbol=ex.request.symbol,
+                                        side=ex.request.side.value,
+                                        order_type=ex.request.order_type.value,
+                                        reason="day_expired",
+                                    )
 
                         # 2) Fill any orders from the previous iteration against
                         #    *this* (current) bar. These were submitted by the
@@ -288,6 +347,15 @@ class TradingService:
                                     req,
                                     submitted_at=prev_bar.timestamp,
                                     submitted_equity=equity,
+                                )
+                                result.execution_diagnostics.orders_accepted += 1
+                                _record_event(
+                                    result.execution_diagnostics,
+                                    "accepted",
+                                    timestamp=prev_bar.timestamp,
+                                    symbol=req.symbol,
+                                    side=req.side.value,
+                                    order_type=req.order_type.value,
                                 )
                             pending_for_prev = []
 
@@ -337,6 +405,15 @@ class TradingService:
                                 "dropped %d order(s) submitted during warm-up bar",
                                 len(resp.orders),
                             )
+                            for o in resp.orders:
+                                _record_event(
+                                    result.execution_diagnostics,
+                                    "warmup_dropped",
+                                    timestamp=cur_bar.timestamp,
+                                    symbol=o.get("symbol"),
+                                    side=o.get("side"),
+                                    order_type=o.get("order_type"),
+                                )
                         # Cancels during warm-up are also no-ops (no live order book).
                         prev_bar = cur_bar
                         continue
@@ -350,10 +427,27 @@ class TradingService:
                     # Orders submitted now are evaluated against the *next*
                     # bar (look-ahead-safe).
                     for o in resp.orders:
+                        result.execution_diagnostics.orders_emitted += 1
+                        _record_event(
+                            result.execution_diagnostics,
+                            "emitted",
+                            timestamp=cur_bar.timestamp,
+                            symbol=o.get("symbol"),
+                            side=o.get("side"),
+                            order_type=o.get("order_type"),
+                        )
                         try:
                             req = OrderRequest(**o)
                             req.validate_prices()
                             pending_for_prev.append(req)
+                            # An opposite-side order against an existing open
+                            # position is the strategy's exit intent. Counted
+                            # here (parent-side, before fill) so the diagnostic
+                            # reflects emission, not execution; #410 owns the
+                            # fill-side ``exit_filled`` event.
+                            held = portfolio.positions.get(req.symbol)
+                            if held is not None and held.side != req.side:
+                                result.execution_diagnostics.exits_emitted += 1
                         except UnsupportedOrderFeatureError as exc:
                             # Runtime-support gates from validate_prices ("feature
                             # ships in a later step of #379") must terminate the
@@ -364,12 +458,36 @@ class TradingService:
                             # subclass keeps unrelated ``NotImplementedError``s
                             # from strategy code in the generic catch below.
                             # See #383.
+                            _increment_rejection(
+                                result.execution_diagnostics, "unsupported_feature"
+                            )
+                            _record_event(
+                                result.execution_diagnostics,
+                                "rejected",
+                                timestamp=cur_bar.timestamp,
+                                symbol=o.get("symbol"),
+                                side=o.get("side"),
+                                order_type=o.get("order_type"),
+                                reason="unsupported_feature",
+                                detail=str(exc),
+                            )
                             raise StrategyRuntimeError(
                                 f"strategy emitted an unsupported order: {exc}",
                                 etype="unsupported_feature",
                             ) from exc
                         except Exception as exc:  # malformed request from strategy
                             logger.warning("dropping malformed order from strategy: %s", exc)
+                            _increment_rejection(result.execution_diagnostics, "malformed_request")
+                            _record_event(
+                                result.execution_diagnostics,
+                                "rejected",
+                                timestamp=cur_bar.timestamp,
+                                symbol=o.get("symbol"),
+                                side=o.get("side"),
+                                order_type=o.get("order_type"),
+                                reason="malformed_request",
+                                detail=str(exc),
+                            )
 
                     prev_bar = cur_bar
 
@@ -381,6 +499,18 @@ class TradingService:
                         "%d orders queued at end-of-stream with no next bar; dropped",
                         len(pending_for_prev),
                     )
+                    result.execution_diagnostics.orders_unfilled += len(pending_for_prev)
+                    last_ts = prev_bar.timestamp if prev_bar is not None else None
+                    for req in pending_for_prev:
+                        _record_event(
+                            result.execution_diagnostics,
+                            "unfilled",
+                            timestamp=last_ts,
+                            symbol=req.symbol,
+                            side=req.side.value,
+                            order_type=req.order_type.value,
+                            reason="end_of_stream",
+                        )
 
                 harness.send_end()
             except LookAheadError as exc:
