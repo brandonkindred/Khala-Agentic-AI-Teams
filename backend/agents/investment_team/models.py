@@ -410,6 +410,91 @@ def get_fee_defaults(asset_class: str) -> dict[str, float]:
     )
 
 
+# Issue #407 / parent #404 — zero-trade execution diagnostics envelope.
+# Producers (issues #408–#410) populate counters and recent lifecycle events;
+# the anomaly detector (issue #413) classifies the run with ``ZeroTradeCategory``;
+# the refinement prompt (issue #414) consumes the envelope.
+
+
+class ZeroTradeCategory(str, Enum):
+    """Deterministic classification of why a backtest produced zero closed trades.
+
+    ``None`` on ``BacktestExecutionDiagnostics.zero_trade_category`` means the
+    run was not zero-trade.
+    """
+
+    NO_ORDERS_EMITTED = "no_orders_emitted"
+    ORDERS_REJECTED = "orders_rejected"
+    ORDERS_UNFILLED = "orders_unfilled"
+    ENTRY_WITH_NO_EXIT = "entry_with_no_exit"
+    ONLY_WARMUP_ORDERS = "only_warmup_orders"
+
+
+class OrderLifecycleEventType(str, Enum):
+    EMITTED = "emitted"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    UNFILLED = "unfilled"
+    WARMUP_DROPPED = "warmup_dropped"
+    ENTRY_FILLED = "entry_filled"
+    EXIT_FILLED = "exit_filled"
+
+
+class OrderLifecycleEvent(BaseModel):
+    event_type: OrderLifecycleEventType
+    timestamp: str
+    symbol: Optional[str] = None
+    order_id: Optional[str] = None
+    side: Optional[str] = None
+    order_type: Optional[str] = None
+    quantity: Optional[float] = None
+    price: Optional[float] = None
+    reason: Optional[str] = None
+
+
+class OpenPositionDiagnostic(BaseModel):
+    symbol: str
+    quantity: float
+    entry_price: float
+    entry_date: str
+    bars_held: Optional[int] = None
+    unrealized_pnl: Optional[float] = None
+
+
+MAX_RECENT_ORDER_EVENTS: int = 50
+
+
+class BacktestExecutionDiagnostics(BaseModel):
+    """Structured execution diagnostics attached to a ``BacktestResult``.
+
+    Counters default to ``0`` and collections default empty so a producer can
+    construct the envelope once and increment in place. ``last_order_events``
+    is capped at :data:`MAX_RECENT_ORDER_EVENTS` (the tail is preserved).
+    """
+
+    bars_processed: int = 0
+    orders_emitted: int = 0
+    orders_accepted: int = 0
+    orders_rejected: int = 0
+    orders_unfilled: int = 0
+    warmup_orders_dropped: int = 0
+    entries_filled: int = 0
+    exits_emitted: int = 0
+    closed_trades: int = 0
+    orders_rejection_reasons: Dict[str, int] = Field(default_factory=dict)
+    last_order_events: List[OrderLifecycleEvent] = Field(default_factory=list)
+    open_positions_at_end: List[OpenPositionDiagnostic] = Field(default_factory=list)
+    zero_trade_category: Optional[ZeroTradeCategory] = None
+    summary: Optional[str] = None
+
+    @field_validator("last_order_events")
+    @classmethod
+    def _cap_last_order_events(cls, v: List[OrderLifecycleEvent]) -> List[OrderLifecycleEvent]:
+        if len(v) > MAX_RECENT_ORDER_EVENTS:
+            return v[-MAX_RECENT_ORDER_EVENTS:]
+        return v
+
+
 class BacktestResult(BaseModel):
     total_return_pct: float
     annualized_return_pct: float
@@ -449,6 +534,10 @@ class BacktestResult(BaseModel):
     acceptance_reason: Optional[str] = None
     regime_results: Optional[List[Dict[str, Any]]] = None
     fold_results: Optional[List[Dict[str, Any]]] = None
+    # Issue #407 / #404 — zero-trade execution diagnostics envelope. ``None`` on
+    # legacy persisted rows and on backtests that pre-date the producer wiring
+    # in issues #408–#410.
+    execution_diagnostics: Optional[BacktestExecutionDiagnostics] = None
 
 
 class TradeRecord(BaseModel):
