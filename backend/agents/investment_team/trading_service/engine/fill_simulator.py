@@ -166,7 +166,23 @@ class FillSimulator:
                 # outcome, then drop. Reference price is unavailable
                 # here (terms is None), so report the bar's close as a
                 # cosmetic price field — no money math is performed.
+                #
+                # Same-side add-on against an open position is suppressed
+                # exactly as it is on the triggered path (silent remove,
+                # no Fill emitted) so behaviour stays symmetric. IOC/FOK
+                # still demands cancel-this-bar — the order is removed
+                # so it doesn't linger as a stealth DAY/GTC — but no
+                # synthetic Fill is emitted, matching the triggered
+                # same-side suppression at the dispatch site below.
+                is_same_side_addon = (
+                    existing_pos is not None
+                    and not is_partial_entry_continuation
+                    and req.side == existing_pos.side
+                )
                 if req.tif in (TimeInForce.IOC, TimeInForce.FOK):
+                    if is_same_side_addon:
+                        self.order_book.remove(po.order_id)
+                        continue
                     dp = 4 if bar.close < 10 else 2
                     rejected = Fill(
                         order_id=po.order_id,

@@ -210,3 +210,51 @@ def test_ioc_overrides_requeue_next_bar_policy() -> None:
     assert outcome.entry_fills[0].fill_kind == FillKind.PARTIAL
     # No requeue despite REQUEUE_NEXT_BAR — IOC dominates.
     assert order_book.all_pending() == []
+
+
+def test_no_trigger_ioc_same_side_addon_drops_silently() -> None:
+    """A same-side IOC LIMIT add-on against an already-open position must be
+    silently suppressed (no Fill emitted) — same as the triggered same-side
+    add-on path. Without this guard, the no-trigger IOC/FOK branch would
+    emit a synthetic REJECTED Fill and route it as an exit fill, even
+    though the order was never going to fill regardless of TIF.
+    """
+    sim, order_book, portfolio = _make_simulator()
+
+    # Open a LONG position via a clean, fully-absorbed entry.
+    order_book.submit(
+        _entry_order(2_000),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+    sim.process_bar(_bar("2024-01-02", price=100.0, volume=10_000_000))
+    assert portfolio.positions["AAA"].qty == pytest.approx(2_000.0, rel=1e-9)
+
+    # Submit a same-side (LONG) IOC LIMIT add-on with a price that won't
+    # cross on the next bar (limit far below the bar's range).
+    order_book.submit(
+        OrderRequest(
+            client_order_id="addon-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=500,
+            order_type=OrderType.LIMIT,
+            limit_price=50.0,
+            tif=TimeInForce.IOC,
+        ),
+        submitted_at="2024-01-02",
+        submitted_equity=10_000_000.0,
+    )
+
+    outcome = sim.process_bar(_bar("2024-01-03", price=100.0, volume=10_000_000))
+
+    # No synthetic REJECTED fill — same-side suppression wins on both
+    # the triggered and no-trigger paths.
+    assert outcome.entry_fills == []
+    assert outcome.exit_fills == []
+    # Add-on order silently removed; the original position is untouched.
+    addon_pending = [
+        po for po in order_book.all_pending() if po.request.client_order_id == "addon-1"
+    ]
+    assert addon_pending == []
+    assert portfolio.positions["AAA"].qty == pytest.approx(2_000.0, rel=1e-9)
