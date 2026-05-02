@@ -17,14 +17,24 @@ from typing import Dict, List
 import pytest
 
 from investment_team.market_data_service import OHLCVBar
-from investment_team.models import BacktestConfig, StrategySpec
+from investment_team.models import (
+    BacktestConfig,
+    BacktestExecutionDiagnostics,
+    StrategySpec,
+)
 from investment_team.trading_service.data_stream.historical_replay import (
     HistoricalReplayStream,
 )
+from investment_team.trading_service.data_stream.protocol import BarEvent, EndOfStreamEvent
 from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.modes.backtest import run_backtest
-from investment_team.trading_service.service import TradingService
+from investment_team.trading_service.service import (
+    TradingService,
+    _increment_rejection,
+    _record_event,
+)
 from investment_team.trading_service.strategy.contract import (
+    Bar,
     OrderRequest,
     UnfilledPolicy,
 )
@@ -113,6 +123,59 @@ _LOOKAHEAD_STRATEGY_CODE = textwrap.dedent('''\
 ''')
 
 
+_NOOP_STRATEGY_CODE = textwrap.dedent('''\
+    """Strategy that intentionally emits no orders."""
+    from contract import Strategy
+
+
+    class NoopStrategy(Strategy):
+        def on_bar(self, ctx, bar):
+            return
+''')
+
+
+_WARMUP_ORDER_STRATEGY_CODE = textwrap.dedent('''\
+    """Strategy that submits an order even during warm-up."""
+    from contract import OrderSide, OrderType, Strategy
+
+
+    class WarmupOrderStrategy(Strategy):
+        def on_bar(self, ctx, bar):
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.LONG,
+                qty=1,
+                order_type=OrderType.MARKET,
+                reason="warmup_order",
+            )
+''')
+
+
+_BROKEN_START_STRATEGY_CODE = textwrap.dedent('''\
+    """Strategy that fails before any bars are processed."""
+    from contract import Strategy
+
+
+    class BrokenStartStrategy(Strategy):
+        def on_start(self, ctx):
+            raise RuntimeError("boom on start")
+
+        def on_bar(self, ctx, bar):
+            return
+''')
+
+
+_BROKEN_BAR_STRATEGY_CODE = textwrap.dedent('''\
+    """Strategy that fails while processing a normal bar."""
+    from contract import Strategy
+
+
+    class BrokenBarStrategy(Strategy):
+        def on_bar(self, ctx, bar):
+            raise RuntimeError("boom on bar")
+''')
+
+
 def _config() -> BacktestConfig:
     return BacktestConfig(
         start_date="2024-01-01",
@@ -156,6 +219,12 @@ def test_trading_service_runs_sma_strategy_and_produces_trade() -> None:
     assert trade.entry_date >= "2024-01-06"
     # Exit happened during the downtrend phase (bars after day 15).
     assert trade.exit_date > trade.entry_date
+    diagnostics = run.service_result.execution_diagnostics
+    assert diagnostics.zero_trade_category is None
+    assert diagnostics.closed_trades == len(run.trades)
+    assert diagnostics.bars_processed == run.service_result.bars_processed
+    assert diagnostics.warmup_orders_dropped == run.service_result.warmup_orders_dropped
+    assert diagnostics.summary
 
 
 def test_trading_service_surfaces_lookahead_violation() -> None:
@@ -183,6 +252,134 @@ def test_trading_service_surfaces_lookahead_violation() -> None:
     assert run.service_result.error is not None
     assert run.service_result.lookahead_violation is True
     assert not run.trades
+    diagnostics = run.service_result.execution_diagnostics
+    assert diagnostics.zero_trade_category == "UNKNOWN_ZERO_TRADE_PATH"
+    assert diagnostics.closed_trades == 0
+    assert diagnostics.summary
+
+
+def test_zero_trade_result_gets_unknown_diagnostics_until_order_counters_are_instrumented() -> None:
+    """A no-op strategy gets a deterministic #408 zero-trade category."""
+    market_data: Dict[str, List[OHLCVBar]] = {}
+    _uptrend_then_down_bars(market_data)
+
+    strategy = StrategySpec(
+        strategy_id="strat-noop-408",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="no-op",
+        signal_definition="none",
+        entry_rules=[],
+        exit_rules=[],
+        strategy_code=_NOOP_STRATEGY_CODE,
+    )
+
+    run = run_backtest(strategy=strategy, config=_config(), market_data=market_data)
+
+    assert run.service_result.error is None, run.service_result.error
+    assert not run.trades
+    diagnostics = run.service_result.execution_diagnostics
+    assert diagnostics.zero_trade_category == "UNKNOWN_ZERO_TRADE_PATH"
+    assert diagnostics.closed_trades == 0
+    assert diagnostics.bars_processed == run.service_result.bars_processed
+    assert "not instrumented yet" in diagnostics.summary
+
+
+def test_warmup_only_order_result_gets_warmup_diagnostics() -> None:
+    """Warm-up order drops are mirrored into finalized diagnostics."""
+    service = TradingService(strategy_code=_WARMUP_ORDER_STRATEGY_CODE, config=_config())
+    stream = [
+        BarEvent(
+            bar=Bar(
+                symbol="AAA",
+                timestamp="2024-01-01",
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1_000_000,
+            ),
+            is_warmup=True,
+        ),
+        EndOfStreamEvent(),
+    ]
+
+    result = service.run(stream)
+
+    assert result.error is None, result.error
+    assert not result.trades
+    assert result.bars_processed == 0
+    assert result.warmup_orders_dropped == 1
+    diagnostics = result.execution_diagnostics
+    assert diagnostics.zero_trade_category == "ONLY_WARMUP_ORDERS"
+    assert diagnostics.warmup_orders_dropped == result.warmup_orders_dropped
+    assert diagnostics.bars_processed == result.bars_processed
+    assert diagnostics.closed_trades == 0
+    assert diagnostics.summary
+
+
+def test_startup_error_return_path_includes_finalized_diagnostics() -> None:
+    """A failure before the first bar still returns a finalized envelope."""
+    service = TradingService(strategy_code=_BROKEN_START_STRATEGY_CODE, config=_config())
+
+    result = service.run([EndOfStreamEvent()])
+
+    assert result.error is not None
+    assert not result.trades
+    diagnostics = result.execution_diagnostics
+    assert diagnostics.zero_trade_category == "UNKNOWN_ZERO_TRADE_PATH"
+    assert diagnostics.bars_processed == 0
+    assert diagnostics.closed_trades == 0
+    assert diagnostics.summary
+
+
+def test_runtime_error_return_path_includes_finalized_diagnostics() -> None:
+    """A regular on_bar runtime failure still returns a finalized envelope."""
+    market_data: Dict[str, List[OHLCVBar]] = {}
+    _uptrend_then_down_bars(market_data)
+
+    strategy = StrategySpec(
+        strategy_id="strat-runtime-error-408",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="runtime error",
+        signal_definition="raise",
+        entry_rules=[],
+        exit_rules=[],
+        strategy_code=_BROKEN_BAR_STRATEGY_CODE,
+    )
+
+    run = run_backtest(strategy=strategy, config=_config(), market_data=market_data)
+
+    assert run.service_result.error is not None
+    assert run.service_result.lookahead_violation is False
+    assert not run.trades
+    diagnostics = run.service_result.execution_diagnostics
+    assert diagnostics.zero_trade_category == "UNKNOWN_ZERO_TRADE_PATH"
+    assert diagnostics.closed_trades == 0
+    assert diagnostics.summary
+
+
+def test_execution_diagnostic_helpers_cap_events_and_count_rejections() -> None:
+    """#408 helpers are deterministic even before lifecycle instrumentation uses them."""
+    diagnostics = BacktestExecutionDiagnostics()
+
+    for idx in range(25):
+        _record_event(diagnostics, "emitted", symbol=f"S{idx}", detail=str(idx))
+
+    assert len(diagnostics.last_order_events) == 20
+    assert diagnostics.last_order_events[0].symbol == "S5"
+    assert diagnostics.last_order_events[-1].symbol == "S24"
+
+    _increment_rejection(diagnostics, "malformed_request")
+    _increment_rejection(diagnostics, "malformed_request")
+    _increment_rejection(diagnostics, "")
+
+    assert diagnostics.orders_rejected == 3
+    assert diagnostics.orders_rejection_reasons == {
+        "malformed_request": 2,
+        "unknown": 1,
+    }
 
 
 def test_run_backtest_without_strategy_code_raises() -> None:
