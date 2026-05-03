@@ -451,3 +451,77 @@ def test_hook_ships_when_integration_not_applicable(
     # Release goes through; no feedback (nothing failed).
     assert len(store.releases) == 1
     assert store.feedback == []
+
+
+# ---------------------------------------------------------------------------
+# _initial_integration_outcome (#371 / Codex P2 round 3 on PR #424)
+# ---------------------------------------------------------------------------
+
+
+def test_initial_outcome_not_run_when_integration_not_applicable() -> None:
+    """No backend, no frontend, or no code → ``not_run``. Release ships."""
+    fn = _orchestrator._initial_integration_outcome
+    sentinel_agent = object()
+    # Missing backend
+    assert (
+        fn(
+            integration_agent=sentinel_agent,
+            has_backend=False,
+            has_frontend=True,
+            completed_code_task_ids=["t1"],
+        )
+        == "not_run"
+    )
+    # Missing frontend
+    assert (
+        fn(
+            integration_agent=sentinel_agent,
+            has_backend=True,
+            has_frontend=False,
+            completed_code_task_ids=["t1"],
+        )
+        == "not_run"
+    )
+    # No completed code tasks
+    assert (
+        fn(
+            integration_agent=sentinel_agent,
+            has_backend=True,
+            has_frontend=True,
+            completed_code_task_ids=[],
+        )
+        == "not_run"
+    )
+
+
+def test_initial_outcome_failed_when_agent_missing_but_applicable() -> None:
+    """Codex P2 round 3 (PR #424): an applicable run with no integration
+    agent is a misconfiguration, not "N/A" — the release hook must gate.
+    """
+    fn = _orchestrator._initial_integration_outcome
+    assert (
+        fn(
+            integration_agent=None,
+            has_backend=True,
+            has_frontend=True,
+            completed_code_task_ids=["t1"],
+        )
+        == "failed"
+    )
+
+
+def test_initial_outcome_pending_when_agent_present_and_applicable() -> None:
+    """Agent present + applicable → orchestrator runs it in-line and
+    upgrades the outcome to ``succeeded``/``failed`` itself.
+    """
+    fn = _orchestrator._initial_integration_outcome
+    sentinel_agent = object()
+    assert (
+        fn(
+            integration_agent=sentinel_agent,
+            has_backend=True,
+            has_frontend=True,
+            completed_code_task_ids=["t1"],
+        )
+        == "pending"
+    )

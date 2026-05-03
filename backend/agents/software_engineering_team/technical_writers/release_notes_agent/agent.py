@@ -92,63 +92,75 @@ class ReleaseNotesAgent:
 
     @staticmethod
     def _fallback(input_data: ReleaseNotesInput, error: str) -> ReleaseNotesOutput:
-        """Deterministic markdown when the LLM path fails.
-
-        Mirrors the prompt's section order so a downstream tool that
-        expects e.g. a "Stories shipped" heading still finds it.
+        """Backwards-compatible static-method wrapper around
+        :func:`build_fallback_release_notes`. The function is the
+        canonical entry point now (used by both the agent's internal
+        failure path and ``ReleaseManagerAgent.ship`` when a custom
+        writer raises unexpectedly — PR #424 Codex P1 review).
         """
-        lines: list[str] = []
-        lines.append(f"# Release {input_data.version}")
-        lines.append("")
-        lines.append(f"_Sprint: {input_data.sprint_name} ({input_data.sprint_id})_")
-        if input_data.shipped_at_iso:
-            lines.append(f"_Shipped at: {input_data.shipped_at_iso}_")
-        lines.append("")
-        lines.append("## Highlights")
-        lines.append("")
-        if input_data.stories:
-            for s in input_data.stories[:3]:
-                lines.append(f"- {s.title}")
-        else:
-            lines.append("_No stories recorded for this sprint._")
-        lines.append("")
-        lines.append("## Stories shipped")
-        lines.append("")
-        if input_data.stories:
-            for s in input_data.stories:
-                lines.extend(_render_story(s))
-        else:
-            lines.append("_None._")
-        lines.append("")
-        lines.append("## Known issues")
-        lines.append("")
-        if input_data.failures:
-            for f in input_data.failures:
-                lines.append(_render_failure(f))
-        else:
-            lines.append("_No issues recorded — sprint shipped clean._")
-        lines.append("")
-        lines.append("## Next-sprint candidates")
-        lines.append("")
-        if input_data.failures:
-            # Surface critical/high failures verbatim as candidate seeds.
-            top = [f for f in input_data.failures if f.severity in ("critical", "high")]
-            if not top:
-                top = input_data.failures[:3]
-            for f in top[:3]:
-                rec = f.recommendation or f.summary
-                lines.append(f"- {rec}")
-        else:
-            lines.append(
-                "- Review shipped stories with stakeholders before planning the next sprint."
-            )
-        lines.append("")
-        return ReleaseNotesOutput(
-            markdown="\n".join(lines).rstrip() + "\n",
-            summary=_FALLBACK_SUMMARY,
-            llm_failed=True,
-            error=error,
-        )
+        return build_fallback_release_notes(input_data, error)
+
+
+def build_fallback_release_notes(input_data: ReleaseNotesInput, error: str) -> ReleaseNotesOutput:
+    """Deterministic markdown when the LLM path (or any custom writer) fails.
+
+    Mirrors the prompt's section order so a downstream tool that
+    expects e.g. a "Stories shipped" heading still finds it. Exposed
+    as a module-level function so :class:`ReleaseManagerAgent` can
+    reuse it when an unexpected writer exception aborts ``run()`` —
+    release observability must survive notes-generation failures
+    (PR #424 Codex P1 review).
+    """
+    lines: list[str] = []
+    lines.append(f"# Release {input_data.version}")
+    lines.append("")
+    lines.append(f"_Sprint: {input_data.sprint_name} ({input_data.sprint_id})_")
+    if input_data.shipped_at_iso:
+        lines.append(f"_Shipped at: {input_data.shipped_at_iso}_")
+    lines.append("")
+    lines.append("## Highlights")
+    lines.append("")
+    if input_data.stories:
+        for s in input_data.stories[:3]:
+            lines.append(f"- {s.title}")
+    else:
+        lines.append("_No stories recorded for this sprint._")
+    lines.append("")
+    lines.append("## Stories shipped")
+    lines.append("")
+    if input_data.stories:
+        for s in input_data.stories:
+            lines.extend(_render_story(s))
+    else:
+        lines.append("_None._")
+    lines.append("")
+    lines.append("## Known issues")
+    lines.append("")
+    if input_data.failures:
+        for f in input_data.failures:
+            lines.append(_render_failure(f))
+    else:
+        lines.append("_No issues recorded — sprint shipped clean._")
+    lines.append("")
+    lines.append("## Next-sprint candidates")
+    lines.append("")
+    if input_data.failures:
+        # Surface critical/high failures verbatim as candidate seeds.
+        top = [f for f in input_data.failures if f.severity in ("critical", "high")]
+        if not top:
+            top = input_data.failures[:3]
+        for f in top[:3]:
+            rec = f.recommendation or f.summary
+            lines.append(f"- {rec}")
+    else:
+        lines.append("- Review shipped stories with stakeholders before planning the next sprint.")
+    lines.append("")
+    return ReleaseNotesOutput(
+        markdown="\n".join(lines).rstrip() + "\n",
+        summary=_FALLBACK_SUMMARY,
+        llm_failed=True,
+        error=error,
+    )
 
 
 def _render_story(story: ReleaseStorySummary) -> list[str]:

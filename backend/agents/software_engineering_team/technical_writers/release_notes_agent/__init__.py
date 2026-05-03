@@ -9,6 +9,7 @@ in ``plan/releases/<version>.md``. Phase 3 of #243 / issue #371.
 
 from software_engineering_team.technical_writers.release_notes_agent.agent import (
     ReleaseNotesAgent,
+    build_fallback_release_notes,
 )
 from software_engineering_team.technical_writers.release_notes_agent.models import (
     ReleaseFailure,
@@ -23,4 +24,5 @@ __all__ = [
     "ReleaseNotesInput",
     "ReleaseNotesOutput",
     "ReleaseStorySummary",
+    "build_fallback_release_notes",
 ]

@@ -2167,6 +2167,41 @@ def _run_backend_frontend_workers(
     t_frontend.join()
 
 
+def _initial_integration_outcome(
+    *,
+    integration_agent: Any,
+    has_backend: bool,
+    has_frontend: bool,
+    completed_code_task_ids: Any,
+) -> str:
+    """Compute the *pre-run* integration outcome.
+
+    Returns one of:
+      * ``"not_run"`` — Integration not applicable (no backend or no
+        frontend or no completed code tasks). Release hook ships.
+      * ``"failed"`` — Integration was applicable but the agent is
+        missing from ``agents``. Treated as a misconfiguration, not
+        N/A (PR #424 Codex P2 round 3): an environment with both
+        backend and frontend code that has no integration agent
+        would otherwise silently mint a release without contract
+        validation. Release hook gates the ship.
+      * ``"pending"`` — Integration is applicable and the agent is
+        present; caller should run it and upgrade the outcome to
+        ``"succeeded"`` (clean return) or ``"failed"`` (the call
+        threw). Sentinel value, not visible to the release hook.
+
+    Centralising the static branching here keeps the new
+    misconfiguration handling unit-testable without driving the
+    whole ``run_orchestrator``.
+    """
+    integration_applicable = bool(has_backend and has_frontend and completed_code_task_ids)
+    if not integration_applicable:
+        return "not_run"
+    if integration_agent is None:
+        return "failed"
+    return "pending"
+
+
 def _maybe_ship_sprint_release(
     *,
     sprint_id: Optional[str],
@@ -3191,11 +3226,32 @@ def run_orchestrator(
         # Integration outage would otherwise silently mint a release
         # row + skip failure-feedback intake.
         int_result: Any = None
-        # 3-state: "not_run" (Integration not applicable — no backend or
-        # no frontend or no code), "succeeded" (ran and returned),
-        # "failed" (agent itself threw).
-        integration_outcome: str = "not_run"
-        if integration_agent and has_backend and has_frontend and completed_code_task_ids:
+        # 3-state outcome visible to the release hook (#371): "not_run"
+        # (Integration N/A — no backend or no frontend or no code),
+        # "succeeded" (ran cleanly), "failed" (agent itself threw OR
+        # was missing in an environment that needs it — Codex P2
+        # round 3 on PR #424: "agent missing" with applicable code is
+        # a misconfiguration, not "N/A", so it must gate the ship).
+        # ``_initial_integration_outcome`` returns "pending" when we
+        # should now run the agent in-line.
+        integration_outcome: str = _initial_integration_outcome(
+            integration_agent=integration_agent,
+            has_backend=has_backend,
+            has_frontend=has_frontend,
+            completed_code_task_ids=completed_code_task_ids,
+        )
+        if integration_outcome == "failed":
+            logger.warning(
+                "Integration agent unavailable but the run has both backend and frontend "
+                "code with completed code tasks — classifying as failed so the release "
+                "hook gates the ship and opens a feedback item."
+            )
+        elif integration_outcome == "pending":
+            # Demote "pending" → "not_run" by default; we only upgrade
+            # to "failed" / "succeeded" if we actually attempt the
+            # call. (The "pending" sentinel must never reach the
+            # release hook — that branch isn't a 3-state outcome.)
+            integration_outcome = "not_run"
             try:
                 from integration_team import IntegrationInput
 

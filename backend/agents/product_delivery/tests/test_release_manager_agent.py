@@ -577,3 +577,39 @@ def test_ship_auto_version_handles_db_collision_with_suffix_bump(tmp_path: Path)
     assert not (plan_dir / "releases" / "2026-05-02.md").exists()
     assert (plan_dir / "releases" / "2026-05-02-1.md").exists()
     assert store.attempts == 2
+
+
+def test_ship_recovers_when_writer_raises(tmp_path: Path) -> None:
+    """Codex P1 round 3 (PR #424): an unexpected writer exception must
+    not abort the ship flow. Release observability is a stronger
+    contract than notes prose, so the agent falls back to deterministic
+    markdown via ``build_fallback_release_notes`` and continues.
+    """
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    view = _make_view(
+        [_story("story-1", status="done")],
+        acs={"story-1": [_ac("an-ac")]},
+    )
+    store = _StubStore(sprint_view=view, open_count=0)
+
+    class _BoomWriter:
+        def run(self, _input: Any) -> Any:
+            raise RuntimeError("simulated writer outage")
+
+    agent = ReleaseManagerAgent(store, notes_writer=_BoomWriter())  # type: ignore[arg-type]
+
+    release = agent.ship(
+        sprint_id="sprint-1",
+        plan_dir=plan_dir,
+        clock=_now,
+        author="orchestrator",
+    )
+    # Release row + notes file landed despite the writer failure.
+    assert len(store.created_releases) == 1
+    assert release.version == "2026-05-02"
+    body = (plan_dir / "releases" / "2026-05-02.md").read_text(encoding="utf-8")
+    # Deterministic fallback markdown carries the key headings.
+    assert body.startswith("# Release 2026-05-02")
+    assert "## Stories shipped" in body
+    assert "## Known issues" in body

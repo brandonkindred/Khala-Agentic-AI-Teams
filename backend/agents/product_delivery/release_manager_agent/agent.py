@@ -154,7 +154,7 @@ class ReleaseManagerAgent:
             devops_failures=devops_failures,
             plan_dir=plan_dir,
         )
-        notes_output = self._writer_or_resolve().run(notes_input)
+        notes_output = self._safe_run_writer(notes_input)
         if notes_output.llm_failed:
             logger.info(
                 "ReleaseManagerAgent: notes writer fell back to deterministic body for %s (%s)",
@@ -217,6 +217,34 @@ class ReleaseManagerAgent:
             else:
                 self._writer = self._factory()
         return self._writer
+
+    def _safe_run_writer(self, notes_input: Any) -> Any:
+        """Invoke the notes writer, falling back deterministically on any exception.
+
+        The production ``ReleaseNotesAgent`` already catches all internal
+        failures and returns ``llm_failed=True`` markdown — but a custom
+        writer (passed via ``notes_writer`` for testing or third-party
+        integration) might raise. Catching here protects release
+        observability: shipping must not abort because notes generation
+        threw (PR #424 Codex P1 review). The fallback uses the same
+        ``build_fallback_release_notes`` function the production writer
+        uses, so the markdown body shape matches what callers expect.
+        """
+        # Lazy import keeps the SE technical_writers package a soft
+        # dependency for callers that build their own notes writer.
+        from software_engineering_team.technical_writers.release_notes_agent import (  # noqa: PLC0415
+            build_fallback_release_notes,
+        )
+
+        try:
+            return self._writer_or_resolve().run(notes_input)
+        except Exception as exc:
+            logger.warning(
+                "ReleaseManagerAgent: notes writer raised %s (%s); using deterministic fallback",
+                type(exc).__name__,
+                exc,
+            )
+            return build_fallback_release_notes(notes_input, str(exc))
 
     def _normalise_base_version(self, version: str | None, shipped_at: datetime) -> str:
         """Sanitise an explicit version, or pick the date-stamp default.
