@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <strong>🌐 <a href="https://deepthought42.github.io/Khala-Agentic-AI-Teams/">Live site</a></strong> · <strong>📖 You're reading the README</strong>
+  <strong>🌐 <a href="https://brandonkindred.github.io/Khala-Agentic-AI-Teams/">Live site</a></strong> · <strong>📖 You're reading the README</strong>
 </p>
 
 <p align="center">
@@ -51,7 +51,7 @@ A personal project to figure out how to build agentic AI teams that actually wor
 If you want to build, tinker, and help push the frontier of multi-agent systems — welcome aboard.
 
 <p align="center">
-  <a href="https://deepthought42.github.io/Khala-Agentic-AI-Teams/">🌐 Live site</a> ·
+  <a href="https://brandonkindred.github.io/Khala-Agentic-AI-Teams/">🌐 Live site</a> ·
   <a href="#quickstart">🚀 Quickstart</a> ·
   <a href="ARCHITECTURE.md">📐 Architecture</a> ·
   <a href="#meet-the-current-roster">👥 Meet the roster</a> ·
