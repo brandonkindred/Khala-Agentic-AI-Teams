@@ -390,9 +390,15 @@ class OrderBook:
         # Amortized compaction: rebuild the bucket once dead entries match
         # or exceed live ones. Bounds the bucket to O(active-for-symbol)
         # over time, so this scan stays amortized O(active-for-symbol)
-        # even though each individual call walks tombstones too.
+        # even though each individual call walks tombstones too. When the
+        # rebuild produces an empty bucket (last live entry just got
+        # cancelled), drop the dict slot entirely so long-running
+        # paper-trade services that churn through symbols don't leak.
         if tombstones >= len(live) and tombstones > 0:
-            self._by_symbol[symbol] = deque(po.order_id for po in live)
+            if live:
+                self._by_symbol[symbol] = deque(po.order_id for po in live)
+            else:
+                self._by_symbol.pop(symbol, None)
         return live
 
     def all_pending(self) -> List[PendingOrder]:
@@ -630,8 +636,13 @@ class OrderBook:
                 live.append(po)
         # Same amortization rule as ``pending_for_symbol``: rebuild once
         # tombstones reach parity, keeping the bucket O(active-children).
+        # An empty rebuild drops the dict entry so the per-parent index
+        # doesn't accumulate slots for fully-resolved brackets.
         if tombstones >= len(live) and tombstones > 0:
-            self._by_parent[parent_order_id] = deque(po.order_id for po in live)
+            if live:
+                self._by_parent[parent_order_id] = deque(po.order_id for po in live)
+            else:
+                self._by_parent.pop(parent_order_id, None)
         return live
 
     def prune_known_top_level_order_ids(self) -> int:
@@ -659,6 +670,11 @@ class OrderBook:
         prunable = [oid for oid in self._known_top_level_order_ids if oid not in active]
         for oid in prunable:
             self._known_top_level_order_ids.pop(oid, None)
+            # Also drop the per-parent bucket — once the parent is no
+            # longer eligible to carry children, the bucket can never
+            # gain new entries; any entries still there are dead
+            # tombstones from cancelled/expired children.
+            self._by_parent.pop(oid, None)
         return len(prunable)
 
     # ------------------------------------------------------------------

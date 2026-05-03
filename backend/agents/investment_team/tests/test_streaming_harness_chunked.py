@@ -326,3 +326,41 @@ def test_service_chunked_path_runs_round_trip_strategy_without_lookahead() -> No
     diag = result.service_result.execution_diagnostics
     assert diag.orders_emitted > 0
     assert diag.orders_accepted > 0
+
+
+# ---------------------------------------------------------------------------
+# Self-review E1: TradingService.__init__ validates bar_chunk_size
+# ---------------------------------------------------------------------------
+
+
+def test_trading_service_rejects_invalid_bar_chunk_size() -> None:
+    """``bar_chunk_size`` must be ``None`` or a positive int. Without
+    validation, ``bar_chunk_size=0`` would silently fall back to per-bar
+    mode (because ``chunk_size > 1`` is False) and ``bar_chunk_size=-5``
+    would do the same — both hide caller bugs.
+    """
+    import pytest
+
+    from investment_team.models import BacktestConfig
+    from investment_team.trading_service.service import TradingService
+
+    config = BacktestConfig(
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        initial_capital=100_000.0,
+        transaction_cost_bps=0.0,
+        slippage_bps=0.0,
+    )
+
+    with pytest.raises(ValueError, match=r"bar_chunk_size must be >= 1"):
+        TradingService(strategy_code="x", config=config, bar_chunk_size=0)
+    with pytest.raises(ValueError, match=r"bar_chunk_size must be >= 1"):
+        TradingService(strategy_code="x", config=config, bar_chunk_size=-3)
+    with pytest.raises(TypeError, match=r"bar_chunk_size must be"):
+        TradingService(strategy_code="x", config=config, bar_chunk_size=True)
+    with pytest.raises(TypeError, match=r"bar_chunk_size must be"):
+        TradingService(strategy_code="x", config=config, bar_chunk_size="256")  # type: ignore[arg-type]
+    # Valid values must not raise.
+    TradingService(strategy_code="x", config=config, bar_chunk_size=None)
+    TradingService(strategy_code="x", config=config, bar_chunk_size=1)
+    TradingService(strategy_code="x", config=config, bar_chunk_size=256)

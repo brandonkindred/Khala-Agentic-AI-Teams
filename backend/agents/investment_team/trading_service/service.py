@@ -243,7 +243,17 @@ class TradingService:
         self._risk = RiskFilter(limits)
         self._default_unfilled_policy = default_unfilled_policy
         # Issue #377: when set, overrides ``BAR_CHUNK_SIZE`` env. Paper-trade
-        # mode pins this to 1 so live-bar handling never buffers.
+        # mode pins this to 1 so live-bar handling never buffers. Reject
+        # zero/negative or non-int explicitly so a future caller passing
+        # garbage doesn't silently fall back to per-bar mode.
+        if bar_chunk_size is not None:
+            if isinstance(bar_chunk_size, bool) or not isinstance(bar_chunk_size, int):
+                raise TypeError(
+                    f"bar_chunk_size must be a positive int or None, "
+                    f"got {type(bar_chunk_size).__name__} {bar_chunk_size!r}"
+                )
+            if bar_chunk_size < 1:
+                raise ValueError(f"bar_chunk_size must be >= 1, got {bar_chunk_size!r}")
         self._chunk_size_override = bar_chunk_size
 
     # ------------------------------------------------------------------
@@ -655,7 +665,16 @@ class TradingService:
             ) -> Dict[int, List[Dict]]:
                 grouped: Dict[int, List[Dict]] = {}
                 for rec, idx in zip(records, indices):
-                    if not isinstance(idx, int) or not (0 <= idx < chunk_len):
+                    # ``bool`` is a subclass of ``int`` in Python, so a
+                    # forged ``True``/``False`` would pass the range
+                    # check and route to bar 1 / bar 0. Reject it
+                    # explicitly to match the same defense in
+                    # ``OrderBook.requeue``'s numeric input checks.
+                    if (
+                        isinstance(idx, bool)
+                        or not isinstance(idx, int)
+                        or not (0 <= idx < chunk_len)
+                    ):
                         raise StrategyRuntimeError(
                             f"strategy emitted {kind} with out-of-range bar_index="
                             f"{idx!r} for chunk of size {chunk_len} (payload={rec!r})",

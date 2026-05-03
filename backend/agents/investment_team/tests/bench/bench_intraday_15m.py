@@ -123,7 +123,7 @@ def test_bench_chunked_protocol_speedup_over_per_bar() -> None:
     so operators tracking the production 10× target on sandboxed
     deployment can spot regressions.
     """
-    full = os.environ.get("BENCH_INTRADAY_FULL") in {"1", "true", "yes"}
+    full = os.environ.get("BENCH_INTRADAY_FULL", "").lower() in {"1", "true", "yes"}
     # Default fixture: ~10k events (5 sym × 2k bars). Full fixture:
     # ~250k events (10 sym × 25k bars, ~1y × 15m × 10sym).
     market = _synthetic_15m_bars(

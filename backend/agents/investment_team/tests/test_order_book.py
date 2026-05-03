@@ -9,6 +9,7 @@ stop) can rely on it.
 
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime
 
 import pytest
@@ -2280,3 +2281,91 @@ def test_cancel_cost_is_constant_under_growing_bucket() -> None:
         f"cancel scaling regressed: {sizes[0]} -> {timings[0]:.4f}s, "
         f"{sizes[1]} -> {timings[1]:.4f}s"
     )
+
+
+def test_pending_for_symbol_drops_empty_bucket_after_full_cancel() -> None:
+    """Self-review B1: when the last live order for a symbol is
+    cancelled and ``pending_for_symbol`` runs, compaction must drop
+    the empty bucket so long-running services don't accumulate dict
+    slots for symbols that no longer have pending orders.
+    """
+    book = OrderBook()
+    a = book.submit(_base(qty=1.0), submitted_at="2024-01-02", submitted_equity=1.0)
+    b = book.submit(_base(qty=1.0), submitted_at="2024-01-02", submitted_equity=1.0)
+    assert "AAA" in book._by_symbol
+
+    book.cancel(a.order_id)
+    book.cancel(b.order_id)
+    # Trigger compaction.
+    assert book.pending_for_symbol("AAA") == []
+    # Empty bucket dropped — no leak across symbol churn.
+    assert "AAA" not in book._by_symbol
+
+
+def test_children_of_drops_empty_bucket_after_all_children_cancelled() -> None:
+    """Self-review B1 (parent variant): children_of compacts an
+    all-tombstone bucket and must not leave an empty deque behind for
+    a parent that has no children left.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0, side=OrderSide.LONG),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        expect_brackets=True,
+    )
+    c1 = book.submit_attached(
+        _base(qty=10.0, side=OrderSide.SHORT, order_type=OrderType.LIMIT, limit_price=120.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    c2 = book.submit_attached(
+        _base(qty=10.0, side=OrderSide.SHORT, order_type=OrderType.STOP, stop_price=80.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    assert parent.order_id in book._by_parent
+
+    # Cancelling both children resolves the bracket; the parent's
+    # ``_by_parent`` entry must be reclaimed (either eagerly via
+    # ``_maybe_evict_resolved_parent`` or lazily via ``children_of``
+    # compaction). Either path must leave the dict slot empty.
+    book.cancel(c1.order_id)
+    book.cancel(c2.order_id)
+    # Force any lazy compaction.
+    book.children_of(parent.order_id)
+    assert parent.order_id not in book._by_parent
+
+
+def test_prune_known_top_level_order_ids_also_prunes_by_parent() -> None:
+    """Self-review B2: ``prune_known_top_level_order_ids`` exists for
+    long-running services. It must also drop the corresponding
+    ``_by_parent`` entry so a stale-bucket leak (whether from a future
+    regression in ``_maybe_evict_resolved_parent`` or a manual
+    bypass) gets reclaimed alongside the eligible-parent slot.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0, side=OrderSide.LONG),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        expect_brackets=True,
+    )
+    # Simulate a filled-entry parent with no further children: the
+    # eligible-parent slot is preserved (was_filled=True) so future
+    # ``submit_attached`` could still attach legs.
+    book.remove(parent.order_id, was_filled=True)
+    assert parent.order_id in book._known_top_level_order_ids
+    # Defense-in-depth: directly seed a stale ``_by_parent`` entry to
+    # simulate a future regression that leaves a bucket behind. Prune
+    # must reclaim it together with the eligible-parent slot.
+    book._by_parent[parent.order_id] = deque(["stale_child_id"])
+
+    pruned = book.prune_known_top_level_order_ids()
+    assert pruned >= 1
+    assert parent.order_id not in book._known_top_level_order_ids
+    assert parent.order_id not in book._by_parent

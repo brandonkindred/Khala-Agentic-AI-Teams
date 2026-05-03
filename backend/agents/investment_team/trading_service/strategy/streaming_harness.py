@@ -348,11 +348,22 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
     # Harness-private bar_index state for the chunked protocol (PR #425
     # review defense). ``_chunk_state["i"]`` is the harness-managed
     # current bar index during a chunk dispatch and ``None`` outside.
-    # Strategy code cannot reach this dict via ``ctx`` — it is captured
-    # only by the closure below. ``_tagged_emit`` overwrites
-    # ``bar_index`` on every emitted ``order``/``cancel`` so a strategy
-    # that mutates any context attribute can never forge an earlier
-    # bar_index after observing later bars in the chunk.
+    # ``_tagged_emit`` overwrites ``bar_index`` on every emitted
+    # ``order``/``cancel`` so a strategy that mutates any context
+    # attribute (or sets ``bar_index`` directly on the record dict
+    # before ``_emit`` is called) can never forge an earlier bar_index
+    # after observing later bars in the chunk.
+    #
+    # Threat model: this defends against *buggy* strategies that
+    # accidentally write to ``ctx`` attributes. A determined
+    # adversarial strategy can still defeat the defense via
+    # ``import _harness; _harness._chunk_state["i"] = 0`` because
+    # ``_chunk_state`` lives at module scope in the harness child
+    # process and Python doesn't enforce hard isolation. Closing that
+    # gap requires parent-side enforcement (e.g. ``bar_started``
+    # markers between bars that the parent uses to derive bar_index
+    # without trusting subprocess-emitted values) and is out of scope
+    # for #377.
     _chunk_state = {"i": None}
 
 
