@@ -9,6 +9,7 @@ stop) can rely on it.
 
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime
 
 import pytest
@@ -2136,3 +2137,235 @@ def test_submit_attached_market_rejection_message_lists_supported_types() -> Non
     assert "LIMIT or STOP" in msg
     # Make sure we're not pointing callers at non-existent or gated types.
     assert "STOP_LIMIT" not in msg
+
+
+# ---------------------------------------------------------------------------
+# Symbol-indexed bucket: O(1) cancel + lazy tombstone compaction (issue #377)
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_does_not_eagerly_scrub_symbol_bucket() -> None:
+    """``cancel`` must drop only from ``_pending`` (O(1)). The id is
+    expected to linger in the per-symbol deque as a tombstone until the
+    next ``pending_for_symbol`` read compacts the bucket. This is the
+    invariant that makes cancel cost independent of bucket size.
+    """
+    book = OrderBook()
+    po = book.submit(
+        _base(qty=1.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+    )
+    assert book.cancel(po.order_id) is True
+    # Tombstone present in the deque — confirms cancel didn't pay O(n).
+    assert po.order_id in book._by_symbol["AAA"]
+    # But cancel did remove it from the source-of-truth, so it isn't live.
+    assert po.order_id not in book
+    assert book.pending_for_symbol("AAA") == []
+
+
+def test_pending_for_symbol_filters_tombstones_and_compacts() -> None:
+    """``pending_for_symbol`` must hide cancelled tombstones and rebuild
+    the bucket once dead entries reach parity with live ones, so the
+    bucket stays bounded to O(active-for-symbol).
+    """
+    book = OrderBook()
+    submitted: list[str] = []
+    for _ in range(6):
+        po = book.submit(
+            _base(qty=1.0),
+            submitted_at="2024-01-02",
+            submitted_equity=100_000.0,
+        )
+        submitted.append(po.order_id)
+
+    # Cancel four of six → 4 tombstones, 2 live.
+    for oid in submitted[:4]:
+        assert book.cancel(oid) is True
+
+    # Bucket still carries every id pre-compaction.
+    assert len(book._by_symbol["AAA"]) == 6
+    live = book.pending_for_symbol("AAA")
+    assert [po.order_id for po in live] == submitted[4:]
+    # Compaction triggered: bucket now equals the live set.
+    assert list(book._by_symbol["AAA"]) == submitted[4:]
+
+
+def test_pending_for_symbol_no_compaction_when_few_tombstones() -> None:
+    """Compaction must NOT fire when tombstones are still in the
+    minority — rebuilding the deque on every read would defeat the
+    amortized bound.
+    """
+    book = OrderBook()
+    submitted: list[str] = []
+    for _ in range(6):
+        po = book.submit(
+            _base(qty=1.0),
+            submitted_at="2024-01-02",
+            submitted_equity=100_000.0,
+        )
+        submitted.append(po.order_id)
+
+    # Cancel just one of six → 1 tombstone, 5 live (well below parity).
+    book.cancel(submitted[0])
+    assert len(book._by_symbol["AAA"]) == 6
+    live = book.pending_for_symbol("AAA")
+    assert [po.order_id for po in live] == submitted[1:]
+    # Bucket left intact — tombstone count below the rebuild threshold.
+    assert list(book._by_symbol["AAA"]) == submitted
+
+
+def test_pending_for_symbol_preserves_submission_order_after_compaction() -> None:
+    """FIFO submission order must survive an interleaved cancel + read.
+    The fill simulator iterates this list per bar and several callers
+    rely on first-submitted-first-served semantics.
+    """
+    book = OrderBook()
+    a = book.submit(_base(qty=1.0), submitted_at="2024-01-02", submitted_equity=1.0)
+    b = book.submit(_base(qty=2.0), submitted_at="2024-01-02", submitted_equity=1.0)
+    c = book.submit(_base(qty=3.0), submitted_at="2024-01-02", submitted_equity=1.0)
+    d = book.submit(_base(qty=4.0), submitted_at="2024-01-02", submitted_equity=1.0)
+
+    book.cancel(b.order_id)
+    book.cancel(c.order_id)
+    # Force compaction.
+    live = book.pending_for_symbol("AAA")
+    assert [po.order_id for po in live] == [a.order_id, d.order_id]
+    assert list(book._by_symbol["AAA"]) == [a.order_id, d.order_id]
+
+
+def test_remove_leaves_tombstone_like_cancel() -> None:
+    """``remove`` shares the same O(1) hot path as ``cancel`` — id
+    leaves ``_pending`` but stays in the deque as a tombstone.
+    """
+    book = OrderBook()
+    po = book.submit(_base(qty=1.0), submitted_at="2024-01-02", submitted_equity=1.0)
+    book.remove(po.order_id)
+    assert po.order_id not in book
+    assert po.order_id in book._by_symbol["AAA"]
+    assert book.pending_for_symbol("AAA") == []
+
+
+def test_cancel_cost_is_constant_under_growing_bucket() -> None:
+    """Sanity check that cancel cost doesn't grow with bucket size.
+    Not a microbenchmark — we just confirm cancelling N orders at the
+    *front* of an N-deep bucket doesn't blow up runtime quadratically.
+    """
+    import time
+
+    sizes = [200, 1000]
+    timings: list[float] = []
+    for n in sizes:
+        book = OrderBook()
+        ids: list[str] = []
+        for _ in range(n):
+            po = book.submit(
+                _base(qty=1.0),
+                submitted_at="2024-01-02",
+                submitted_equity=1.0,
+            )
+            ids.append(po.order_id)
+        # Cancel the front half: under O(n) list.remove(), this is
+        # O(n²); under O(1) dict pop, it's O(n). We assert the 5×
+        # bucket-size only takes proportionally longer (≤ ~10×) and
+        # nowhere near 25× (the quadratic blow-up).
+        head = ids[: n // 2]
+        t0 = time.perf_counter()
+        for oid in head:
+            book.cancel(oid)
+        timings.append(time.perf_counter() - t0)
+
+    # Allow generous slack for noisy CI machines; a quadratic regression
+    # would land at ~25×, far beyond this bound.
+    assert timings[1] < timings[0] * 10, (
+        f"cancel scaling regressed: {sizes[0]} -> {timings[0]:.4f}s, "
+        f"{sizes[1]} -> {timings[1]:.4f}s"
+    )
+
+
+def test_pending_for_symbol_drops_empty_bucket_after_full_cancel() -> None:
+    """Self-review B1: when the last live order for a symbol is
+    cancelled and ``pending_for_symbol`` runs, compaction must drop
+    the empty bucket so long-running services don't accumulate dict
+    slots for symbols that no longer have pending orders.
+    """
+    book = OrderBook()
+    a = book.submit(_base(qty=1.0), submitted_at="2024-01-02", submitted_equity=1.0)
+    b = book.submit(_base(qty=1.0), submitted_at="2024-01-02", submitted_equity=1.0)
+    assert "AAA" in book._by_symbol
+
+    book.cancel(a.order_id)
+    book.cancel(b.order_id)
+    # Trigger compaction.
+    assert book.pending_for_symbol("AAA") == []
+    # Empty bucket dropped — no leak across symbol churn.
+    assert "AAA" not in book._by_symbol
+
+
+def test_children_of_drops_empty_bucket_after_all_children_cancelled() -> None:
+    """Self-review B1 (parent variant): children_of compacts an
+    all-tombstone bucket and must not leave an empty deque behind for
+    a parent that has no children left.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0, side=OrderSide.LONG),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        expect_brackets=True,
+    )
+    c1 = book.submit_attached(
+        _base(qty=10.0, side=OrderSide.SHORT, order_type=OrderType.LIMIT, limit_price=120.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    c2 = book.submit_attached(
+        _base(qty=10.0, side=OrderSide.SHORT, order_type=OrderType.STOP, stop_price=80.0),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    assert parent.order_id in book._by_parent
+
+    # Cancelling both children resolves the bracket; the parent's
+    # ``_by_parent`` entry must be reclaimed (either eagerly via
+    # ``_maybe_evict_resolved_parent`` or lazily via ``children_of``
+    # compaction). Either path must leave the dict slot empty.
+    book.cancel(c1.order_id)
+    book.cancel(c2.order_id)
+    # Force any lazy compaction.
+    book.children_of(parent.order_id)
+    assert parent.order_id not in book._by_parent
+
+
+def test_prune_known_top_level_order_ids_also_prunes_by_parent() -> None:
+    """Self-review B2: ``prune_known_top_level_order_ids`` exists for
+    long-running services. It must also drop the corresponding
+    ``_by_parent`` entry so a stale-bucket leak (whether from a future
+    regression in ``_maybe_evict_resolved_parent`` or a manual
+    bypass) gets reclaimed alongside the eligible-parent slot.
+    """
+    book = OrderBook()
+    parent = book.submit(
+        _base(qty=10.0, side=OrderSide.LONG),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000.0,
+        expect_brackets=True,
+    )
+    # Simulate a filled-entry parent with no further children: the
+    # eligible-parent slot is preserved (was_filled=True) so future
+    # ``submit_attached`` could still attach legs.
+    book.remove(parent.order_id, was_filled=True)
+    assert parent.order_id in book._known_top_level_order_ids
+    # Defense-in-depth: directly seed a stale ``_by_parent`` entry to
+    # simulate a future regression that leaves a bucket behind. Prune
+    # must reclaim it together with the eligible-parent slot.
+    book._by_parent[parent.order_id] = deque(["stale_child_id"])
+
+    pruned = book.prune_known_top_level_order_ids()
+    assert pruned >= 1
+    assert parent.order_id not in book._known_top_level_order_ids
+    assert parent.order_id not in book._by_parent

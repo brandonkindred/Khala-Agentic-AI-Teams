@@ -272,7 +272,11 @@ class StrategyContext:
     def __init__(self, *, emit) -> None:
         # ``emit`` is an injection point (callable taking a dict) so the same
         # class can be driven by the real stdout-backed harness in production
-        # and by a synchronous in-process driver in unit tests.
+        # and by a synchronous in-process driver in unit tests. Under the
+        # chunked protocol (issue #377), the harness substitutes a tagging
+        # wrapper so emitted ``order`` / ``cancel`` records get a
+        # harness-managed ``bar_index`` injected without any strategy-
+        # mutable attribute being involved (PR #425 review defense).
         self._emit = emit
         self._history: Dict[str, List[Bar]] = {}
         self._positions: Dict[str, _PositionSnapshot] = {}
@@ -369,10 +373,20 @@ class StrategyContext:
             oco_group_id=oco_group_id,
         )
         req.validate_prices()
+        # The chunked harness wraps ``self._emit`` to inject ``bar_index``
+        # using a harness-private closure (issue #377 / PR #425). We
+        # deliberately do NOT read ``self._current_bar_index`` here:
+        # strategy code can mutate that attribute, and a strategy that
+        # set it to an earlier bar after observing later bars in the
+        # chunk could backdate emissions and bypass look-ahead safety.
+        # Letting the harness be the sole source of truth makes that
+        # forge unreachable from strategy code.
         self._emit({"kind": "order", "payload": req.model_dump(mode="json")})
         return cid
 
     def cancel(self, order_id: str) -> None:
+        # See ``submit_order``: bar_index is injected by the harness's
+        # wrapped emit, not from any strategy-writable attribute.
         self._emit({"kind": "cancel", "payload": {"order_id": order_id}})
 
     # ------------------------------------------------------------------
@@ -414,6 +428,25 @@ class Strategy:
 
     def on_bar(self, ctx: StrategyContext, bar: Bar) -> None:
         """Called once per finalized bar. Primary decision point."""
+
+    def on_bars(self, ctx: StrategyContext, bars: List[Bar]) -> None:
+        """Reserved for future vectorised dispatch — **do not override**
+        under the chunked protocol introduced in issue #377.
+
+        The chunked harness rejects override of this method with a
+        ``contract_error`` because a vectorised override would receive
+        the whole chunk before the parent replays bars one-by-one,
+        letting a strategy peek at later bars and emit orders tagged to
+        earlier bar indices. The parent trusts ``bar_index`` for
+        ``submitted_at``, so the override path would bypass look-ahead
+        safety. Vectorised authors should run with ``BAR_CHUNK_SIZE=1``
+        (per-bar dispatch) and implement :meth:`on_bar` instead.
+
+        The default body is a no-op kept here so :meth:`type(instance).on_bars`
+        compares true to ``contract.Strategy.on_bars`` in the harness's
+        override check; subclasses that don't define ``on_bars`` skip the
+        rejection branch.
+        """
 
     def on_fill(self, ctx: StrategyContext, fill: Fill) -> None:
         """Called when a previously-submitted order fills."""

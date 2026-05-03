@@ -69,17 +69,29 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "integration: requires real Postgres + the central job service. Skipped unless invoked with `-m integration`.",
     )
+    config.addinivalue_line(
+        "markers",
+        "bench: wall-clock benchmark. Skipped unless invoked with `-m bench`.",
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Skip integration-marked tests unless `-m integration` was passed."""
+    """Skip integration-marked and bench-marked tests unless their marker
+    was selected via ``-m``. Mirrors how the integration suite stays out
+    of the default run; the bench suite (issue #377) is wall-clock
+    sensitive and would slow normal test cycles.
+    """
     selected = config.getoption("-m", default="") or ""
-    if "integration" in selected:
-        return
-    skip = pytest.mark.skip(reason="integration test; run with `pytest -m integration`")
-    for item in items:
-        if "integration" in item.keywords:
-            item.add_marker(skip)
+    if "integration" not in selected:
+        skip = pytest.mark.skip(reason="integration test; run with `pytest -m integration`")
+        for item in items:
+            if "integration" in item.keywords:
+                item.add_marker(skip)
+    if "bench" not in selected:
+        skip_bench = pytest.mark.skip(reason="benchmark; run with `pytest -m bench`")
+        for item in items:
+            if "bench" in item.keywords:
+                item.add_marker(skip_bench)
 
 
 # ---------------------------------------------------------------------------

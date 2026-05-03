@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import math
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, NamedTuple, Optional
+from typing import Deque, Dict, List, NamedTuple, Optional
 
 from ..strategy.contract import OrderRequest, OrderSide, OrderType, TimeInForce
 
@@ -80,8 +81,20 @@ class PendingOrder:
 class OrderBook:
     _next_id: int = 0
     _pending: Dict[str, PendingOrder] = field(default_factory=dict)
-    # Parallel index by symbol/side so fill_simulator doesn't have to scan.
-    _by_symbol: Dict[str, List[str]] = field(default_factory=dict)
+    # Per-symbol FIFO of order ids. ``cancel``/``remove`` only pop from
+    # ``_pending`` (O(1)); the entry left behind in this deque is a
+    # tombstone, filtered out on the next ``pending_for_symbol`` read.
+    # ``pending_for_symbol`` triggers an O(active-for-symbol) rebuild
+    # whenever tombstones outnumber live entries, keeping the bucket
+    # amortized to the live-order count.
+    _by_symbol: Dict[str, Deque[str]] = field(default_factory=dict)
+    # parent_order_id → FIFO of attached-child order ids. Same lazy
+    # tombstone pattern as ``_by_symbol``: ``cancel``/``remove`` only pop
+    # from ``_pending``; ``children_of`` filters on read and compacts when
+    # tombstones reach parity. Without this index ``children_of`` would
+    # scan ``_pending`` (O(N)) on every cancel cascade — defeating the
+    # O(1)-cancel guarantee of the symbol-bucket refactor.
+    _by_parent: Dict[str, Deque[str]] = field(default_factory=dict)
     # Map of *eligible-parent* top-level order id → (symbol, side). Used by
     # ``submit_attached`` to reject children whose ``parent_order_id`` is not
     # a real top-level order eligible to carry brackets, to verify the child's
@@ -155,7 +168,7 @@ class OrderBook:
             self._known_top_level_order_ids[order_id] = _TopLevelMeta(
                 symbol=request.symbol, side=request.side
             )
-        self._by_symbol.setdefault(request.symbol, []).append(order_id)
+        self._by_symbol.setdefault(request.symbol, deque()).append(order_id)
         return po
 
     def submit_attached(
@@ -263,16 +276,17 @@ class OrderBook:
         self._pending[order_id] = po
         # Note: do NOT add ``order_id`` to ``_known_top_level_order_ids`` —
         # attached children must not be eligible as future parents.
-        self._by_symbol.setdefault(attached_request.symbol, []).append(order_id)
+        self._by_symbol.setdefault(attached_request.symbol, deque()).append(order_id)
+        self._by_parent.setdefault(parent_order_id, deque()).append(order_id)
         return po
 
     def cancel(self, order_id: str) -> bool:
         po = self._pending.pop(order_id, None)
         if po is None:
             return False
-        ids = self._by_symbol.get(po.request.symbol)
-        if ids and order_id in ids:
-            ids.remove(order_id)
+        # Tombstone left in ``_by_symbol[symbol]`` is filtered by
+        # ``pending_for_symbol`` and reclaimed on the next compaction —
+        # this keeps ``cancel`` O(1).
         if po.request.parent_order_id is None:
             # Cancelled top-level: ineligible to parent further children +
             # cascade to any pending TP / SL legs.
@@ -312,9 +326,8 @@ class OrderBook:
         po = self._pending.pop(order_id, None)
         if po is None:
             return None
-        ids = self._by_symbol.get(po.request.symbol)
-        if ids and order_id in ids:
-            ids.remove(order_id)
+        # Tombstone left in ``_by_symbol[symbol]`` is filtered by
+        # ``pending_for_symbol`` and reclaimed on the next compaction.
         if po.request.parent_order_id is None:
             if not was_filled:
                 self._known_top_level_order_ids.pop(order_id, None)
@@ -352,12 +365,41 @@ class OrderBook:
         """
         if parent_id in self._pending:
             return
-        if any(po.request.parent_order_id == parent_id for po in self._pending.values()):
+        # ``children_of`` walks the per-parent deque (live + tombstones),
+        # filters by ``_pending`` membership, and compacts opportunistically;
+        # bounded by O(active children for parent) amortized.
+        if self.children_of(parent_id):
             return
         self._known_top_level_order_ids.pop(parent_id, None)
+        # Bracket fully resolved → drop the empty bucket so the per-parent
+        # index doesn't accumulate.
+        self._by_parent.pop(parent_id, None)
 
     def pending_for_symbol(self, symbol: str) -> List[PendingOrder]:
-        return [self._pending[oid] for oid in self._by_symbol.get(symbol, [])]
+        bucket = self._by_symbol.get(symbol)
+        if not bucket:
+            return []
+        live: List[PendingOrder] = []
+        tombstones = 0
+        for oid in bucket:
+            po = self._pending.get(oid)
+            if po is None:
+                tombstones += 1
+            else:
+                live.append(po)
+        # Amortized compaction: rebuild the bucket once dead entries match
+        # or exceed live ones. Bounds the bucket to O(active-for-symbol)
+        # over time, so this scan stays amortized O(active-for-symbol)
+        # even though each individual call walks tombstones too. When the
+        # rebuild produces an empty bucket (last live entry just got
+        # cancelled), drop the dict slot entirely so long-running
+        # paper-trade services that churn through symbols don't leak.
+        if tombstones >= len(live) and tombstones > 0:
+            if live:
+                self._by_symbol[symbol] = deque(po.order_id for po in live)
+            else:
+                self._by_symbol.pop(symbol, None)
+        return live
 
     def all_pending(self) -> List[PendingOrder]:
         return list(self._pending.values())
@@ -581,9 +623,27 @@ class OrderBook:
             raise TypeError(
                 f"children_of parent_order_id must be a non-empty str, got {parent_order_id!r}"
             )
-        return [
-            po for po in self._pending.values() if po.request.parent_order_id == parent_order_id
-        ]
+        bucket = self._by_parent.get(parent_order_id)
+        if not bucket:
+            return []
+        live: List[PendingOrder] = []
+        tombstones = 0
+        for oid in bucket:
+            po = self._pending.get(oid)
+            if po is None:
+                tombstones += 1
+            else:
+                live.append(po)
+        # Same amortization rule as ``pending_for_symbol``: rebuild once
+        # tombstones reach parity, keeping the bucket O(active-children).
+        # An empty rebuild drops the dict entry so the per-parent index
+        # doesn't accumulate slots for fully-resolved brackets.
+        if tombstones >= len(live) and tombstones > 0:
+            if live:
+                self._by_parent[parent_order_id] = deque(po.order_id for po in live)
+            else:
+                self._by_parent.pop(parent_order_id, None)
+        return live
 
     def prune_known_top_level_order_ids(self) -> int:
         """Reclaim memory from ``_known_top_level_order_ids``.
@@ -610,6 +670,11 @@ class OrderBook:
         prunable = [oid for oid in self._known_top_level_order_ids if oid not in active]
         for oid in prunable:
             self._known_top_level_order_ids.pop(oid, None)
+            # Also drop the per-parent bucket — once the parent is no
+            # longer eligible to carry children, the bucket can never
+            # gain new entries; any entries still there are dead
+            # tombstones from cancelled/expired children.
+            self._by_parent.pop(oid, None)
         return len(prunable)
 
     # ------------------------------------------------------------------

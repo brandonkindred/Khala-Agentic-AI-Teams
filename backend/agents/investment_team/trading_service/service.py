@@ -42,6 +42,36 @@ logger = logging.getLogger(__name__)
 
 _MAX_ORDER_EVENTS = 20
 
+# Default chunk size for the batched-bar protocol (issue #377). 1 keeps
+# byte-identical behaviour with the per-bar codepath; values >1 only take
+# effect when the strategy subprocess advertises ``chunked_bars`` in its
+# first ready. Paper-trade mode pins this to 1 regardless of env.
+_DEFAULT_BAR_CHUNK_SIZE = 1
+
+
+def _resolve_bar_chunk_size() -> int:
+    """Read ``BAR_CHUNK_SIZE`` from env, clamping to a positive int.
+
+    Default 1 (per-bar mode). Values >1 enable the chunked protocol when
+    the child advertises ``chunked_bars``. Invalid values fall back to
+    the default with a logged warning so a typo doesn't silently force
+    a 0-bar chunk that would deadlock the run loop.
+    """
+    raw = os.environ.get("BAR_CHUNK_SIZE")
+    if raw is None or raw == "":
+        return _DEFAULT_BAR_CHUNK_SIZE
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.warning("invalid BAR_CHUNK_SIZE=%r; using default %d", raw, _DEFAULT_BAR_CHUNK_SIZE)
+        return _DEFAULT_BAR_CHUNK_SIZE
+    if n < 1:
+        logger.warning(
+            "BAR_CHUNK_SIZE=%d must be >= 1; using default %d", n, _DEFAULT_BAR_CHUNK_SIZE
+        )
+        return _DEFAULT_BAR_CHUNK_SIZE
+    return n
+
 
 def _partial_fill_defaults_enabled() -> bool:
     """Whether parent-side application of ``default_unfilled_policy`` is on.
@@ -198,6 +228,7 @@ class TradingService:
         config: BacktestConfig,
         risk_limits: Optional["RiskLimits | Dict"] = None,
         default_unfilled_policy: UnfilledPolicy = UnfilledPolicy.DROP,
+        bar_chunk_size: Optional[int] = None,
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
@@ -211,6 +242,19 @@ class TradingService:
             limits = RiskLimits.from_legacy_dict(risk_limits or {})
         self._risk = RiskFilter(limits)
         self._default_unfilled_policy = default_unfilled_policy
+        # Issue #377: when set, overrides ``BAR_CHUNK_SIZE`` env. Paper-trade
+        # mode pins this to 1 so live-bar handling never buffers. Reject
+        # zero/negative or non-int explicitly so a future caller passing
+        # garbage doesn't silently fall back to per-bar mode.
+        if bar_chunk_size is not None:
+            if isinstance(bar_chunk_size, bool) or not isinstance(bar_chunk_size, int):
+                raise TypeError(
+                    f"bar_chunk_size must be a positive int or None, "
+                    f"got {type(bar_chunk_size).__name__} {bar_chunk_size!r}"
+                )
+            if bar_chunk_size < 1:
+                raise ValueError(f"bar_chunk_size must be >= 1, got {bar_chunk_size!r}")
+        self._chunk_size_override = bar_chunk_size
 
     # ------------------------------------------------------------------
 
@@ -246,6 +290,10 @@ class TradingService:
 
         result = TradingServiceResult()
 
+        chunk_size = self._chunk_size_override
+        if chunk_size is None:
+            chunk_size = _resolve_bar_chunk_size()
+
         with StreamingHarness(self.strategy_code) as harness:
             try:
                 harness.send_start(
@@ -259,6 +307,31 @@ class TradingService:
                 result.error = str(exc)
                 result.lookahead_violation = exc.etype == "lookahead_violation"
                 return _finalize_diagnostics(result)
+
+            # Issue #377: chunked-bar protocol. Only opt in when the env var
+            # asked for a chunk size > 1 *and* the child negotiated
+            # ``chunked_bars`` in its first ready. Falling back to per-bar
+            # silently keeps older child builds correct; a single warning
+            # tells operators the chunked path was requested but skipped.
+            use_chunked = chunk_size > 1 and harness.supports_chunked_bars
+            if chunk_size > 1 and not harness.supports_chunked_bars:
+                logger.warning(
+                    "BAR_CHUNK_SIZE=%d requested but strategy subprocess did not "
+                    "advertise chunked_bars; falling back to per-bar protocol",
+                    chunk_size,
+                )
+
+            if use_chunked:
+                return self._run_chunked(
+                    stream=stream,
+                    harness=harness,
+                    portfolio=portfolio,
+                    order_book=order_book,
+                    fill_sim=fill_sim,
+                    result=result,
+                    chunk_size=chunk_size,
+                    on_trade=on_trade,
+                )
 
             # We need one-bar lookahead in the fill simulator, so we buffer
             # the next bar. The strategy sees bar N; the fill simulator uses
@@ -524,6 +597,305 @@ class TradingService:
                 result.error = str(exc)
                 result.lookahead_violation = exc.etype == "lookahead_violation"
                 return _finalize_diagnostics(result)
+
+        return _finalize_diagnostics(result)
+
+    # ------------------------------------------------------------------
+    # Issue #377: chunked-bar protocol path. Buffers up to ``chunk_size``
+    # bars and sends them in a single ``send_bars`` round-trip; the
+    # subprocess returns orders/cancels tagged with ``bar_index`` so each
+    # one is routed back to the originating bar's timestamp — preserving
+    # ``BarSafetyAssertion`` semantics. Tradeoff: every bar in a chunk
+    # sees the same chunk-start state snapshot (capital/equity/positions).
+    # Strategies that depend on intra-chunk fill state should run with
+    # ``BAR_CHUNK_SIZE=1``; paper trading pins this in __init__.
+    # ------------------------------------------------------------------
+
+    def _run_chunked(
+        self,
+        *,
+        stream: Iterable[StreamEvent],
+        harness: StreamingHarness,
+        portfolio: Portfolio,
+        order_book: OrderBook,
+        fill_sim: FillSimulator,
+        result: TradingServiceResult,
+        chunk_size: int,
+        on_trade: Optional[Callable[[TradeRecord], None]],
+    ) -> TradingServiceResult:
+        prev_bar = None
+        pending_for_prev: List[OrderRequest] = []
+        event_iter = iter(stream)
+        peeked: Optional[StreamEvent] = None
+        chunk_buffer: List[tuple] = []  # (cur_bar, is_warmup, next_bar)
+        terminated = False
+
+        def _flush_chunk() -> bool:
+            """Send the buffered chunk, then replay per-bar pre/post logic
+            in order using the strategy's bar_index-tagged response.
+            Returns False if the run should terminate (drawdown breach).
+            """
+            nonlocal prev_bar, pending_for_prev
+            if not chunk_buffer:
+                return True
+            chunk_state = self._state(portfolio)
+            payload = [
+                {
+                    "bar": cb.model_dump(mode="json"),
+                    "state": chunk_state,
+                    "is_warmup": iw,
+                }
+                for (cb, iw, _) in chunk_buffer
+            ]
+            chunk_resp = harness.send_bars(bars=payload)
+
+            # Group orders/cancels by bar_index. Validate the index is
+            # in [0, len(chunk)) before bucketing — without this, a
+            # strategy bug (or a hand-set ``ctx._current_bar_index``
+            # outside the harness-managed range) would silently route
+            # the order to a phantom bar that the replay loop never
+            # consumes, dropping the emission with no diagnostic.
+            # Untagged records (None) likewise fail the range check;
+            # the chunked child always tags, so a missing tag is a
+            # protocol violation.
+            chunk_len = len(chunk_buffer)
+
+            def _validated(
+                records: List[Dict], indices: List[Optional[int]], kind: str
+            ) -> Dict[int, List[Dict]]:
+                grouped: Dict[int, List[Dict]] = {}
+                for rec, idx in zip(records, indices):
+                    # ``bool`` is a subclass of ``int`` in Python, so a
+                    # forged ``True``/``False`` would pass the range
+                    # check and route to bar 1 / bar 0. Reject it
+                    # explicitly to match the same defense in
+                    # ``OrderBook.requeue``'s numeric input checks.
+                    if (
+                        isinstance(idx, bool)
+                        or not isinstance(idx, int)
+                        or not (0 <= idx < chunk_len)
+                    ):
+                        raise StrategyRuntimeError(
+                            f"strategy emitted {kind} with out-of-range bar_index="
+                            f"{idx!r} for chunk of size {chunk_len} (payload={rec!r})",
+                            etype="protocol_error",
+                        )
+                    grouped.setdefault(idx, []).append(rec)
+                return grouped
+
+            orders_by_bar = _validated(chunk_resp.orders, chunk_resp.order_bar_indices, "order")
+            cancels_by_bar = _validated(chunk_resp.cancels, chunk_resp.cancel_bar_indices, "cancel")
+
+            for i, (cur_bar, is_warmup, next_bar) in enumerate(chunk_buffer):
+                bar_orders = orders_by_bar.get(i, [])
+                bar_cancels = cancels_by_bar.get(i, [])
+
+                if not is_warmup:
+                    # 1) Expire day orders on date change.
+                    if prev_bar is not None and (cur_bar.timestamp[:10] != prev_bar.timestamp[:10]):
+                        expired = order_book.expire_day_orders(cur_bar.timestamp)
+                        if expired:
+                            result.execution_diagnostics.orders_unfilled += len(expired)
+                            for ex in expired:
+                                _record_event(
+                                    result.execution_diagnostics,
+                                    "unfilled",
+                                    timestamp=cur_bar.timestamp,
+                                    symbol=ex.request.symbol,
+                                    side=ex.request.side.value,
+                                    order_type=ex.request.order_type.value,
+                                    reason="day_expired",
+                                )
+
+                    # 2) Submit pending_for_prev against this (current) bar.
+                    if pending_for_prev:
+                        apply_default = _partial_fill_defaults_enabled()
+                        for req in pending_for_prev:
+                            if apply_default and req.unfilled_policy is None:
+                                req.unfilled_policy = self._default_unfilled_policy
+                            equity = portfolio.mark_to_market()
+                            order_book.submit(
+                                req,
+                                submitted_at=prev_bar.timestamp,
+                                submitted_equity=equity,
+                            )
+                            result.execution_diagnostics.orders_accepted += 1
+                            _record_event(
+                                result.execution_diagnostics,
+                                "accepted",
+                                timestamp=prev_bar.timestamp,
+                                symbol=req.symbol,
+                                side=req.side.value,
+                                order_type=req.order_type.value,
+                            )
+                        pending_for_prev = []
+
+                    outcome = fill_sim.process_bar(cur_bar, next_bar=next_bar)
+                    for fill in outcome.entry_fills + outcome.exit_fills:
+                        # send_fill is per-fill; happens between chunks too.
+                        # The strategy sees fills from the *previous* chunk
+                        # before its next chunk arrives.
+                        harness.send_fill(
+                            fill=fill.model_dump(mode="json", exclude_defaults=True),
+                            state=self._state(portfolio),
+                        )
+                    result.trades.extend(outcome.closed_trades)
+                    if on_trade is not None:
+                        for trade in outcome.closed_trades:
+                            on_trade(trade)
+
+                    # 3) Drawdown circuit-breaker.
+                    portfolio.update_last_price(cur_bar.symbol, cur_bar.close)
+                    equity = portfolio.mark_to_market()
+                    dd = self._risk.check_drawdown(equity, portfolio.peak_equity)
+                    if dd.breached:
+                        result.terminated_reason = (
+                            f"max_drawdown breached "
+                            f"({dd.current_drawdown_pct:.1f}% >= {dd.limit_pct}%)"
+                        )
+                        chunk_buffer.clear()
+                        return False
+
+                    result.bars_processed += 1
+
+                # 4) Process the strategy's response for this bar.
+                if is_warmup:
+                    if bar_orders:
+                        result.warmup_orders_dropped += len(bar_orders)
+                        logger.info(
+                            "dropped %d order(s) submitted during warm-up bar",
+                            len(bar_orders),
+                        )
+                        for o in bar_orders:
+                            _record_event(
+                                result.execution_diagnostics,
+                                "warmup_dropped",
+                                timestamp=cur_bar.timestamp,
+                                symbol=o.get("symbol"),
+                                side=o.get("side"),
+                                order_type=o.get("order_type"),
+                            )
+                    prev_bar = cur_bar
+                    continue
+
+                for c in bar_cancels:
+                    oid = c.get("order_id")
+                    if oid:
+                        order_book.cancel(oid)
+
+                for o in bar_orders:
+                    result.execution_diagnostics.orders_emitted += 1
+                    _record_event(
+                        result.execution_diagnostics,
+                        "emitted",
+                        timestamp=cur_bar.timestamp,
+                        symbol=o.get("symbol"),
+                        side=o.get("side"),
+                        order_type=o.get("order_type"),
+                    )
+                    try:
+                        req = OrderRequest(**o)
+                        req.validate_prices()
+                        pending_for_prev.append(req)
+                        held = portfolio.positions.get(req.symbol)
+                        if held is not None and held.side != req.side:
+                            result.execution_diagnostics.exits_emitted += 1
+                    except UnsupportedOrderFeatureError as exc:
+                        _increment_rejection(result.execution_diagnostics, "unsupported_feature")
+                        _record_event(
+                            result.execution_diagnostics,
+                            "rejected",
+                            timestamp=cur_bar.timestamp,
+                            symbol=o.get("symbol"),
+                            side=o.get("side"),
+                            order_type=o.get("order_type"),
+                            reason="unsupported_feature",
+                            detail=str(exc),
+                        )
+                        chunk_buffer.clear()
+                        raise StrategyRuntimeError(
+                            f"strategy emitted an unsupported order: {exc}",
+                            etype="unsupported_feature",
+                        ) from exc
+                    except Exception as exc:
+                        logger.warning("dropping malformed order from strategy: %s", exc)
+                        _increment_rejection(result.execution_diagnostics, "malformed_request")
+                        _record_event(
+                            result.execution_diagnostics,
+                            "rejected",
+                            timestamp=cur_bar.timestamp,
+                            symbol=o.get("symbol"),
+                            side=o.get("side"),
+                            order_type=o.get("order_type"),
+                            reason="malformed_request",
+                            detail=str(exc),
+                        )
+
+                prev_bar = cur_bar
+
+            chunk_buffer.clear()
+            return True
+
+        try:
+            while True:
+                if peeked is not None:
+                    event = peeked
+                    peeked = None
+                else:
+                    event = next(event_iter, None)
+                if event is None or isinstance(event, EndOfStreamEvent):
+                    break
+                if not isinstance(event, BarEvent):
+                    continue
+                cur_bar = event.bar
+                is_warmup = event.is_warmup
+
+                next_bar = None
+                while True:
+                    peeked = next(event_iter, None)
+                    if peeked is None or isinstance(peeked, EndOfStreamEvent):
+                        break
+                    if isinstance(peeked, BarEvent):
+                        if peeked.bar.symbol == cur_bar.symbol:
+                            next_bar = peeked.bar
+                        break
+
+                chunk_buffer.append((cur_bar, is_warmup, next_bar))
+                if len(chunk_buffer) >= chunk_size:
+                    if not _flush_chunk():
+                        terminated = True
+                        break
+
+            if not terminated:
+                _flush_chunk()
+
+            if pending_for_prev:
+                logger.info(
+                    "%d orders queued at end-of-stream with no next bar; dropped",
+                    len(pending_for_prev),
+                )
+                result.execution_diagnostics.orders_unfilled += len(pending_for_prev)
+                last_ts = prev_bar.timestamp if prev_bar is not None else None
+                for req in pending_for_prev:
+                    _record_event(
+                        result.execution_diagnostics,
+                        "unfilled",
+                        timestamp=last_ts,
+                        symbol=req.symbol,
+                        side=req.side.value,
+                        order_type=req.order_type.value,
+                        reason="end_of_stream",
+                    )
+
+            harness.send_end()
+        except LookAheadError as exc:
+            result.error = str(exc)
+            result.lookahead_violation = True
+            return _finalize_diagnostics(result)
+        except StrategyRuntimeError as exc:
+            result.error = str(exc)
+            result.lookahead_violation = exc.etype == "lookahead_violation"
+            return _finalize_diagnostics(result)
 
         return _finalize_diagnostics(result)
 

@@ -229,6 +229,11 @@ def run_paper_trade(
         # TRADING_PARTIAL_FILL_DEFAULTS_ENABLED until #386 wires
         # consumption.
         default_unfilled_policy=UnfilledPolicy.DROP,
+        # Issue #377: paper trading always waits for live bars one at a
+        # time, so the batched-bar protocol's intra-chunk state staleness
+        # would corrupt decision-time portfolio reads. Pin to per-bar
+        # mode regardless of ``BAR_CHUNK_SIZE``.
+        bar_chunk_size=1,
     )
 
     # First attempt: primary provider.

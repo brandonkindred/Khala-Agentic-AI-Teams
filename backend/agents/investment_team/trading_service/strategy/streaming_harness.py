@@ -55,11 +55,23 @@ class StrategyRuntimeError(RuntimeError):
 
 @dataclass
 class HarnessResponse:
-    """One parent→child round-trip result."""
+    """One parent→child round-trip result.
+
+    ``bar_indices`` is a parallel list to ``orders`` (and ``cancels``,
+    ``logs``) populated when running the chunked protocol (issue #377).
+    Each entry is the 0-based position within the chunk of the bar that
+    generated the corresponding order, or ``None`` when running
+    per-bar / start / end / fill round-trips. The trading service uses
+    these indices to pin per-order ``submitted_at`` to the originating
+    bar's timestamp, preserving ``BarSafetyAssertion`` semantics.
+    """
 
     orders: List[Dict[str, Any]] = field(default_factory=list)
     cancels: List[Dict[str, Any]] = field(default_factory=list)
     logs: List[Dict[str, Any]] = field(default_factory=list)
+    order_bar_indices: List[Optional[int]] = field(default_factory=list)
+    cancel_bar_indices: List[Optional[int]] = field(default_factory=list)
+    capabilities: Dict[str, Any] = field(default_factory=dict)
 
 
 class StreamingHarness:
@@ -87,6 +99,10 @@ class StreamingHarness:
         self._tmpdir: Optional[tempfile.TemporaryDirectory] = None
         self._proc: Optional[subprocess.Popen] = None
         self._started_at: float = 0.0
+        # Filled from the first ``ready`` (issue #377). Empty dict means
+        # the child predates capability negotiation — treat as per-bar
+        # only (no ``chunked_bars``).
+        self._capabilities: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -172,11 +188,36 @@ class StreamingHarness:
     ) -> HarnessResponse:
         return self._exchange({"kind": "bar", "bar": bar, "state": state, "is_warmup": is_warmup})
 
+    def send_bars(self, *, bars: List[Dict[str, Any]]) -> HarnessResponse:
+        """Send a chunk of bars in a single round-trip (issue #377).
+
+        ``bars`` is a list of ``{"bar": {...}, "state": {...},
+        "is_warmup": bool}`` dicts. Each emitted ``order``/``cancel``
+        record carries a ``bar_index`` field that the parent uses to
+        route the order back to the source bar's timestamp. The chunk
+        terminates with a single ``ready`` ack.
+
+        Caller is responsible for checking :attr:`supports_chunked_bars`
+        and for falling back to :meth:`send_bar` per bar when the child
+        did not advertise ``chunked_bars``. The trading service does
+        this gating before opting in.
+        """
+        if not bars:
+            return HarnessResponse()
+        return self._exchange({"kind": "bars", "bars": bars})
+
     def send_fill(self, *, fill: Dict[str, Any], state: Dict[str, Any]) -> HarnessResponse:
         return self._exchange({"kind": "fill", "fill": fill, "state": state})
 
     def send_end(self) -> HarnessResponse:
         return self._exchange({"kind": "end"})
+
+    @property
+    def supports_chunked_bars(self) -> bool:
+        """True iff the child advertised ``chunked_bars`` in its first
+        ``ready``. False until ``send_start`` has returned.
+        """
+        return bool(self._capabilities.get("chunked_bars"))
 
     # ------------------------------------------------------------------
     # Internal: protocol round-trip
@@ -231,11 +272,23 @@ class StreamingHarness:
             kind = record.get("kind")
             if kind == "order":
                 resp.orders.append(record.get("payload", {}))
+                resp.order_bar_indices.append(record.get("bar_index"))
             elif kind == "cancel":
                 resp.cancels.append(record.get("payload", {}))
+                resp.cancel_bar_indices.append(record.get("bar_index"))
             elif kind == "log":
                 resp.logs.append(record)
             elif kind == "ready":
+                # Capability handshake (issue #377): the child advertises
+                # ``chunked_bars`` in its first ready after start. Update
+                # ``self._capabilities`` whenever a ready carries one so a
+                # late-binding child can still negotiate cleanly. Empty
+                # payloads from older builds remain treated as per-bar
+                # only via ``supports_chunked_bars``.
+                caps = record.get("capabilities")
+                if isinstance(caps, dict):
+                    self._capabilities = caps
+                    resp.capabilities = caps
                 return resp
             elif kind == "error":
                 etype = record.get("etype", "runtime_error")
@@ -292,6 +345,42 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
         sys.stdout.flush()
 
 
+    # Harness-private bar_index state for the chunked protocol (PR #425
+    # review defense). ``_chunk_state["i"]`` is the harness-managed
+    # current bar index during a chunk dispatch and ``None`` outside.
+    # ``_tagged_emit`` overwrites ``bar_index`` on every emitted
+    # ``order``/``cancel`` so a strategy that mutates any context
+    # attribute (or sets ``bar_index`` directly on the record dict
+    # before ``_emit`` is called) can never forge an earlier bar_index
+    # after observing later bars in the chunk.
+    #
+    # Threat model: this defends against *buggy* strategies that
+    # accidentally write to ``ctx`` attributes. A determined
+    # adversarial strategy can still defeat the defense via
+    # ``import _harness; _harness._chunk_state["i"] = 0`` because
+    # ``_chunk_state`` lives at module scope in the harness child
+    # process and Python doesn't enforce hard isolation. Closing that
+    # gap requires parent-side enforcement (e.g. ``bar_started``
+    # markers between bars that the parent uses to derive bar_index
+    # without trusting subprocess-emitted values) and is out of scope
+    # for #377.
+    _chunk_state = {"i": None}
+
+
+    def _tagged_emit(record):
+        kind = record.get("kind")
+        if kind in ("order", "cancel"):
+            idx = _chunk_state["i"]
+            if idx is None:
+                # Per-bar protocol or non-chunk emission: strip any
+                # bar_index a malicious strategy may have set on the
+                # record before _emit was called.
+                record.pop("bar_index", None)
+            else:
+                record["bar_index"] = idx
+        _emit(record)
+
+
     def _find_strategy_class():
         candidates = []
         for name in dir(strategy):
@@ -310,6 +399,13 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
         return candidates[0]
 
 
+    # Capability set advertised in the first ready (issue #377). The
+    # parent uses this to decide whether it may invoke ``send_bars``
+    # with chunked payloads. Older parents that don't read
+    # ``capabilities`` simply ignore the field.
+    _CAPABILITIES = {"chunked_bars": True}
+
+
     def main():
         try:
             cls = _find_strategy_class()
@@ -318,7 +414,9 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
             sys.exit(1)
 
         instance = cls()
-        ctx = contract.StrategyContext(emit=_emit)
+        # Use the bar_index-tagging emit so strategies can never forge
+        # bar_index regardless of what they do with ``ctx`` attributes.
+        ctx = contract.StrategyContext(emit=_tagged_emit)
         started = False
 
         for raw in sys.stdin:
@@ -342,6 +440,52 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
                     _apply_state(ctx, state, is_warmup=bool(msg.get("is_warmup", False)))
                     ctx._ingest_bar(bar)
                     instance.on_bar(ctx, bar)
+                elif kind == "bars":
+                    # Chunked-bar protocol (issue #377). Each entry has its
+                    # own ``state``/``is_warmup`` so the strategy sees the
+                    # parent-supplied state per bar; ``bar_index`` is set
+                    # on the context around each dispatch so emitted
+                    # orders/cancels are tagged for the originating bar.
+                    #
+                    # Override safety (PR review #425): a vectorised
+                    # ``on_bars`` override would receive the whole chunk
+                    # before the parent replays bars one-by-one, letting
+                    # the strategy peek at later bars and emit an order
+                    # tagged to an earlier ``bar_index``. ``_run_chunked``
+                    # trusts that index for ``submitted_at``, so the
+                    # override path could bypass look-ahead safety. Reject
+                    # outright; vectorised authors should run with
+                    # ``BAR_CHUNK_SIZE=1`` (per-bar dispatch) where bar
+                    # safety is enforced by the per-bar message protocol.
+                    if type(instance).on_bars is not contract.Strategy.on_bars:
+                        _emit({
+                            "kind": "error",
+                            "etype": "contract_error",
+                            "message": (
+                                "Overriding Strategy.on_bars is not supported under "
+                                "the chunked protocol: a vectorised override could "
+                                "see future bars in the chunk and emit orders tagged "
+                                "to earlier bars, bypassing look-ahead safety. "
+                                "Implement on_bar instead, or run with "
+                                "BAR_CHUNK_SIZE=1."
+                            ),
+                        })
+                        sys.exit(1)
+                    chunk = msg.get("bars") or []
+                    try:
+                        for i, item in enumerate(chunk):
+                            bar = contract.Bar(**item["bar"])
+                            state = item.get("state") or {}
+                            _apply_state(
+                                ctx, state, is_warmup=bool(item.get("is_warmup", False))
+                            )
+                            ctx._ingest_bar(bar)
+                            # Harness-managed bar_index for ``_tagged_emit``;
+                            # strategy code cannot reach ``_chunk_state``.
+                            _chunk_state["i"] = i
+                            instance.on_bar(ctx, bar)
+                    finally:
+                        _chunk_state["i"] = None
                 elif kind == "fill":
                     fill = contract.Fill(**msg["fill"])
                     state = msg.get("state") or {}
@@ -350,7 +494,7 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
                 elif kind == "end":
                     if started:
                         instance.on_end(ctx)
-                    _emit({"kind": "ready"})
+                    _emit({"kind": "ready", "capabilities": _CAPABILITIES})
                     return
                 else:
                     _emit({"kind": "error", "etype": "protocol_error",
@@ -382,7 +526,11 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
                        "message": f"{exc!s}\\n{tb}"})
                 sys.exit(1)
 
-            _emit({"kind": "ready"})
+            # Always include capabilities so even a parent that only
+            # inspects the *first* ready (e.g. legacy debug tooling) can
+            # negotiate, and a parent that re-checks before chunking
+            # always sees fresh state.
+            _emit({"kind": "ready", "capabilities": _CAPABILITIES})
 
 
     def _apply_state(ctx, state, *, is_warmup):
