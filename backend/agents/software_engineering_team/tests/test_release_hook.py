@@ -525,3 +525,80 @@ def test_initial_outcome_pending_when_agent_present_and_applicable() -> None:
         )
         == "pending"
     )
+
+
+# ---------------------------------------------------------------------------
+# _frontend_has_typescript (#371 / Codex P1 round 4 on PR #424)
+# ---------------------------------------------------------------------------
+
+
+def test_frontend_has_typescript_detects_dot_tsx_only_directory(tmp_path: Path) -> None:
+    """A React-style frontend with only ``*.tsx`` files (no ``*.ts``)
+    must be detected — otherwise it slips past the integration gate
+    and a sprint can ship without contract validation.
+    """
+    fe = tmp_path / "frontend"
+    (fe / "src").mkdir(parents=True)
+    (fe / "src" / "App.tsx").write_text("export const App = () => null;\n", encoding="utf-8")
+    assert _orchestrator._frontend_has_typescript(fe) is True
+
+
+def test_frontend_has_typescript_detects_dot_ts_only_directory(tmp_path: Path) -> None:
+    fe = tmp_path / "frontend"
+    fe.mkdir()
+    (fe / "main.ts").write_text("export {};\n", encoding="utf-8")
+    assert _orchestrator._frontend_has_typescript(fe) is True
+
+
+def test_frontend_has_typescript_returns_false_for_html_scss_only(tmp_path: Path) -> None:
+    """HTML/SCSS without TypeScript source isn't an integration-relevant
+    frontend; nothing for the API contract validator to look at.
+    """
+    fe = tmp_path / "frontend"
+    fe.mkdir()
+    (fe / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    (fe / "style.scss").write_text(".a {}\n", encoding="utf-8")
+    assert _orchestrator._frontend_has_typescript(fe) is False
+
+
+def test_frontend_has_typescript_returns_false_for_missing_dir(tmp_path: Path) -> None:
+    assert _orchestrator._frontend_has_typescript(tmp_path / "does-not-exist") is False
+
+
+# ---------------------------------------------------------------------------
+# Hook ordering (#371 / Codex P2 round 4 on PR #424)
+# ---------------------------------------------------------------------------
+
+
+def test_hook_skips_silently_when_open_stories_and_integration_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An in-flight sprint that *also* hit an Integration outage must
+    not generate ``release-manager-skipped`` feedback — the deferral
+    is already implied by the open stories. Only when the sprint is
+    shippable AND Integration failed do we surface the gap (Codex P2
+    round 4 on PR #424).
+    """
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    view = SprintWithStories(
+        sprint=_sprint(),
+        stories=[_story("s1", status="proposed")],
+        acceptance_criteria_by_story_id={},
+    )
+    store = _StubStore(sprint_view=view, open_count=1)
+    _install_stub_store(monkeypatch, store)
+
+    _orchestrator._maybe_ship_sprint_release(
+        sprint_id="sprint-1",
+        plan_dir=plan_dir,
+        int_result=None,
+        integration_outcome="failed",
+        job_id="job-1",
+    )
+    # No release row, no notes file (sprint not shippable).
+    assert store.releases == []
+    assert not (plan_dir / "releases").exists()
+    # Crucially, no "release-manager-skipped" feedback either — the
+    # open-stories deferral already explains why we didn't ship.
+    assert store.feedback == []

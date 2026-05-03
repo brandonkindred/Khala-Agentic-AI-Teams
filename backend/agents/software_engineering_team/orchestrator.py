@@ -2167,6 +2167,23 @@ def _run_backend_frontend_workers(
     t_frontend.join()
 
 
+def _frontend_has_typescript(frontend_dir: Path) -> bool:
+    """Return True when ``frontend_dir`` contains TypeScript source.
+
+    Matches what ``_read_repo_code`` pulls for the actual Integration
+    call (``.ts`` + ``.tsx`` + ``.html`` + ``.scss``). A React-style
+    TSX-only frontend would slip past a ``*.ts``-only check (PR #424
+    Codex P1 round 4) and bypass the integration gate the release
+    hook relies on. We check ``.ts`` and ``.tsx`` only — HTML/SCSS
+    without TS source isn't an integration-relevant frontend.
+    """
+    if not frontend_dir.is_dir():
+        return False
+    # Two rglob walks (rather than scanning every file once) so the
+    # any() short-circuits as soon as the first match hits.
+    return any(frontend_dir.rglob("*.ts")) or any(frontend_dir.rglob("*.tsx"))
+
+
 def _initial_integration_outcome(
     *,
     integration_agent: Any,
@@ -2252,6 +2269,21 @@ def _maybe_ship_sprint_release(
         )
 
         pd_store = _pd_get_store()
+        # Check sprint completion *before* classifying Integration as
+        # "failed" so we don't open a release-manager-skipped feedback
+        # for a sprint that's still mid-flight (PR #424 Codex P2 round
+        # 4: the deferral is already implied by open stories — emitting
+        # extra "skipped" alerts pollutes the next groom). Only when
+        # the sprint is shippable AND Integration failed do we surface
+        # the gap.
+        open_count = pd_store.count_open_stories_in_sprint(sprint_id)
+        if open_count > 0:
+            logger.info(
+                "Release manager: sprint %s has %d open story(ies); deferring release.",
+                sprint_id,
+                open_count,
+            )
+            return
         if integration_outcome == "failed":
             logger.warning(
                 "Release manager: Integration phase failed for sprint %s; deferring "
@@ -2273,14 +2305,6 @@ def _maybe_ship_sprint_release(
                     author="release-manager",
                     sprint_id=sprint_id,
                 )
-            return
-        open_count = pd_store.count_open_stories_in_sprint(sprint_id)
-        if open_count > 0:
-            logger.info(
-                "Release manager: sprint %s has %d open story(ies); deferring release.",
-                sprint_id,
-                open_count,
-            )
             return
         issues = list(getattr(int_result, "issues", []) or [])
         release = ReleaseManagerAgent(pd_store).ship(
@@ -3216,7 +3240,10 @@ def run_orchestrator(
         # Integration phase: validate backend-frontend API contract alignment
         integration_agent = agents.get("integration")
         has_backend = backend_dir.is_dir() and any(backend_dir.rglob("*.py"))
-        has_frontend = frontend_dir.is_dir() and any(frontend_dir.rglob("*.ts"))
+        # ``_frontend_has_typescript`` accepts both ``.ts`` and ``.tsx``
+        # so a React-style TSX-only frontend can't bypass the
+        # integration gate (PR #424 Codex P1 round 4).
+        has_frontend = _frontend_has_typescript(frontend_dir)
         # ``int_result`` is hoisted out of the try block so the
         # release-manager hook (#371) can read its issues list whether
         # Integration ran or not. ``None`` here means "Integration was
