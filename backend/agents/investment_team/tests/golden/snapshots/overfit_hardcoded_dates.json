@@ -87,7 +87,7 @@
     "sharpe_ci_low": null,
     "sharpe_ratio": -70.69,
     "signals_per_bar": 0.009921,
-    "sortino_ratio": -444.35,
+    "sortino_ratio": -444.24,
     "terminated_reason": null,
     "total_return_pct": 0.0,
     "volatility_pct": 0.06,

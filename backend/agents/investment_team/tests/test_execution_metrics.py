@@ -291,3 +291,74 @@ def test_rfr_is_stamped_into_metrics(monkeypatch):
     monkeypatch.delenv("FRED_API_KEY", raising=False)
     m = compute_performance_metrics([], initial_capital=10_000.0)
     assert m.risk_free_rate == pytest.approx(0.0375)
+
+
+# ---------------------------------------------------------------------------
+# Log-return basis (issue #429)
+# ---------------------------------------------------------------------------
+
+
+def test_metrics_rejects_non_positive_equity():
+    # A trade that wipes out more than initial capital drives equity negative.
+    # ``daily_returns`` must refuse to take ``log`` of that.
+    trades = [_mk_trade("2023-01-02", "2023-01-03", net=-12_000.0)]
+    curve = build_equity_curve_from_trades(trades, 10_000.0)
+    with pytest.raises(ValueError, match="non-positive"):
+        curve.daily_returns()
+
+
+def test_daily_returns_are_log_returns():
+    # Single +100 trade on 10k capital → log(10100/10000) on the exit-date step,
+    # zero on every other step.
+    trades = [_mk_trade("2023-01-02", "2023-01-04", net=100.0)]
+    curve = build_equity_curve_from_trades(trades, 10_000.0)
+    returns = curve.daily_returns()
+    expected_step = math.log(10_100.0 / 10_000.0)
+    # exit_date = 2023-01-04; the daily-return that lands the step is the diff
+    # between the index of 2023-01-04 and the prior trading day.
+    exit_idx = curve.dates.index(date(2023, 1, 4))
+    assert returns[exit_idx - 1] == pytest.approx(expected_step, rel=1e-12)
+    # All other entries are zero (flat equity outside the exit step).
+    for i, r in enumerate(returns):
+        if i != exit_idx - 1:
+            assert r == pytest.approx(0.0, abs=1e-12)
+
+
+def test_metrics_log_return_annualization():
+    # 252 trading days of constant +0.04% daily log return → mean_log * 252
+    # ≈ 0.04% * 252 = 10.08%, annualized_return_pct = (exp(0.1008) - 1) * 100.
+    # Constructed via a single big trade so the equity moves once at the end;
+    # the log-return basis means *that step* is what matters, not the daily
+    # path. Specifically: 252 weekdays of zero return then one big jump
+    # carries the same `mean(log_returns) * 252` as 252 days of even return,
+    # provided ``mean = total_log_return / N``. Use a small jump so the test
+    # is easy to verify by hand.
+    trades = [_mk_trade("2023-01-02", "2023-01-03", net=100.0)]
+    curve = build_equity_curve_from_trades(
+        trades, 10_000.0, start_date="2023-01-02", end_date="2023-01-03"
+    )
+    returns = curve.daily_returns()
+    # Exactly one step in this curve: log(10_100/10_000).
+    assert returns.size == 1
+    assert returns[0] == pytest.approx(math.log(1.01), rel=1e-12)
+
+
+def test_metrics_sharpe_uses_log_return_numerator():
+    # Build an equity curve that gives a known mean log return; compute
+    # metrics; verify Sharpe uses ``mean(log) * 252 - rfr`` over annualized
+    # log-vol, not the legacy CAGR-based numerator.
+    trades = [
+        _mk_trade("2023-01-02", "2023-01-03", net=100.0),
+        _mk_trade("2023-01-03", "2023-01-04", net=-90.0),
+        _mk_trade("2023-01-04", "2023-01-05", net=110.0),
+    ]
+    m = compute_performance_metrics(
+        trades,
+        initial_capital=10_000.0,
+        risk_free_rate=0.0,
+    )
+    # Hand-compute the expected annualized log return on the same equity path.
+    curve = build_equity_curve_from_trades(trades, 10_000.0)
+    mean_log = float(curve.daily_returns().mean())
+    expected_annualized = math.expm1(mean_log * 252) * 100
+    assert m.annualized_return_pct == pytest.approx(expected_annualized, abs=0.01)

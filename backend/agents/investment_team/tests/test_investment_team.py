@@ -664,16 +664,23 @@ def test_compute_metrics_empty_trades() -> None:
     assert result.sharpe_ratio == 0.0
 
 
-def test_compute_metrics_uses_cagr() -> None:
-    """Verify annualized return uses CAGR, not linear scaling."""
+def test_compute_metrics_log_return_annualization_over_multi_year_span() -> None:
+    """Verify annualized return uses ``mean(log_returns) * 252`` (log-return
+    basis), not naive ``total / years`` scaling. For a single +25 % step on
+    a 2.5-year curve, the log-return-based annual rate is ``expm1(log(1.25)
+    * 252 / N)`` where ``N`` is the number of trading days the curve spans
+    — empirically ~9.0 % for ~630 weekdays, well under the naive 10 %.
+    """
     from agents.investment_team.trade_simulator import compute_metrics
 
-    # 25% total return over 2.5 years → CAGR ≈ 9.54%, not 10%
+    # Exit on a weekday so the gain actually lands inside the equity curve
+    # (`build_equity_curve_from_trades` only stamps weekdays). 2023-06-30
+    # is a Friday.
     trades = [
         TradeRecord(
             trade_num=1,
-            entry_date="2021-01-01",
-            exit_date="2023-07-01",
+            entry_date="2021-01-04",
+            exit_date="2023-06-30",
             symbol="SPY",
             side="long",
             entry_price=100.0,
@@ -683,17 +690,18 @@ def test_compute_metrics_uses_cagr() -> None:
             gross_pnl=25000.0,
             net_pnl=25000.0,
             return_pct=25.0,
-            hold_days=912,
+            hold_days=911,
             outcome="win",
             cumulative_pnl=25000.0,
         ),
     ]
 
-    result = compute_metrics(trades, 100000.0, "2021-01-01", "2023-07-01")
+    result = compute_metrics(trades, 100000.0, "2021-01-04", "2023-06-30")
 
-    # CAGR for 25% over ~2.5 years should be ~9.5%, NOT 10%
+    # 25 % over ~2.5 years on a log-return basis annualizes well under the
+    # naive 10 %; sane band is 8–10 % regardless of exact weekday count.
     assert result.annualized_return_pct < 10.0
-    assert result.annualized_return_pct > 9.0
+    assert result.annualized_return_pct > 8.0
 
 
 # ---------------------------------------------------------------------------
