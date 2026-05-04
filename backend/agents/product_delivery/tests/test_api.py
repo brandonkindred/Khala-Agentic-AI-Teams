@@ -328,6 +328,7 @@ class _FakeStore:
         severity: str,
         linked_story_id: str | None,
         author: str,
+        sprint_id: str | None = None,
     ) -> FeedbackItem:
         if product_id not in self.products:
             raise UnknownProductDeliveryEntity(f"product {product_id!r} does not exist")
@@ -341,6 +342,20 @@ class _FakeStore:
                     f"story {linked_story_id!r} belongs to product "
                     f"{owning_product!r}, not {product_id!r}"
                 )
+        # Mirror the real store's #371 sprint-id existence check so a
+        # bogus sprint id surfaces as 404 instead of being silently
+        # nulled out by ON DELETE SET NULL semantics. Cross-product
+        # tagging is rejected as 400 (Codex review on PR #424) — same
+        # contract as the existing story-link check.
+        if sprint_id is not None:
+            sprint = self.sprints.get(sprint_id)
+            if sprint is None:
+                raise UnknownProductDeliveryEntity(f"sprint {sprint_id!r} does not exist")
+            if sprint.product_id != product_id:
+                raise CrossProductFeedbackLink(
+                    f"sprint {sprint_id!r} belongs to product "
+                    f"{sprint.product_id!r}, not {product_id!r}"
+                )
         return self._insert(
             "feedback",
             product_id=product_id,
@@ -349,6 +364,7 @@ class _FakeStore:
             severity=severity,
             status="open",
             linked_story_id=linked_story_id,
+            sprint_id=sprint_id,
             author=author,
         )
 
@@ -426,6 +442,63 @@ class _FakeStore:
         if sprint_id not in self.sprints:
             raise UnknownProductDeliveryEntity(f"unknown sprint: {sprint_id}")
         return [r for r in self.releases.values() if r.sprint_id == sprint_id]
+
+    def list_releases_for_product(self, product_id: str) -> list[Release]:
+        # Mirror the real store: unknown product → 404, otherwise return
+        # every release whose sprint belongs to this product, ordered by
+        # shipped_at desc-nulls-last, created_at desc.
+        if product_id not in self.products:
+            raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
+        rels = [
+            r
+            for r in self.releases.values()
+            if r.sprint_id in self.sprints and self.sprints[r.sprint_id].product_id == product_id
+        ]
+        return sorted(
+            rels,
+            key=lambda r: (
+                r.shipped_at is None,
+                # Negate via subtraction since datetimes don't support
+                # unary minus; flip the sign by sorting -timestamp.
+                -(r.shipped_at.timestamp() if r.shipped_at else 0.0),
+                -r.created_at.timestamp(),
+            ),
+        )
+
+    def count_open_stories_in_sprint(self, sprint_id: str) -> int:
+        if sprint_id not in self.sprints:
+            raise UnknownProductDeliveryEntity(f"unknown sprint: {sprint_id}")
+        ids = [s for sid, s in self.sprint_stories if sid == sprint_id]
+        return sum(
+            1
+            for i in ids
+            if i in self.stories
+            and (self.stories[i].status or "").strip().lower() not in _TERMINAL_STORY_STATUSES
+        )
+
+    def get_product_id_for_sprint(self, sprint_id: str) -> str | None:
+        sprint = self.sprints.get(sprint_id)
+        return sprint.product_id if sprint else None
+
+    def create_release(
+        self,
+        *,
+        sprint_id: str,
+        version: str,
+        notes_path: str | None,
+        shipped_at: Any,
+        author: str,
+    ) -> Release:
+        if sprint_id not in self.sprints:
+            raise UnknownProductDeliveryEntity(f"sprint {sprint_id!r} does not exist")
+        return self._insert(
+            "release",
+            sprint_id=sprint_id,
+            version=version,
+            notes_path=notes_path,
+            shipped_at=shipped_at,
+            author=author,
+        )
 
     def get_sprint_with_stories(self, sprint_id: str) -> SprintWithStories | None:
         sprint = self.sprints.get(sprint_id)
@@ -1916,3 +1989,260 @@ def test_add_story_to_sprint_409_when_story_already_in_other_sprint(
     # global handler maps to 409.
     with pytest.raises(StoryAlreadyPlanned):
         fake.add_story_to_sprint(sprint_id=s2, story_id=plan1["selected_story_ids"][0])
+
+
+# ---------------------------------------------------------------------------
+# Releases (Phase 3 of #243 / #371) — POST /releases, GET /releases?product_id
+# ---------------------------------------------------------------------------
+
+
+def test_create_release_via_post_returns_row(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    """`POST /releases` records a release row for an existing sprint."""
+    client, _ = client_and_store
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 5},
+    ).json()["id"]
+    resp = client.post(
+        "/api/product-delivery/releases",
+        json={
+            "sprint_id": sid,
+            "version": "2026-05-02",
+            "notes_path": "/repo/plan/releases/2026-05-02.md",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sprint_id"] == sid
+    assert body["version"] == "2026-05-02"
+    assert body["notes_path"].endswith("2026-05-02.md")
+    assert body["author"] == "tester"
+
+
+def test_create_release_unknown_sprint_returns_404(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, _ = client_and_store
+    resp = client.post(
+        "/api/product-delivery/releases",
+        json={"sprint_id": "missing", "version": "v1"},
+    )
+    assert resp.status_code == 404
+
+
+def test_list_releases_for_product_orders_shipped_first(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    """`GET /releases?product_id=…` returns every release across sprints.
+
+    Sort order: ``shipped_at`` desc with NULLS LAST, then ``created_at``
+    desc. Verifies the cross-sprint join + order contract that backs
+    AC #3 ("manual smoke: release file appears → GET /releases lists it").
+    """
+    client, _ = client_and_store
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    s1 = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 5},
+    ).json()["id"]
+    s2 = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S2", "capacity_points": 5},
+    ).json()["id"]
+    client.post(
+        "/api/product-delivery/releases",
+        json={
+            "sprint_id": s1,
+            "version": "2026-05-01",
+            "shipped_at": "2026-05-01T12:00:00Z",
+        },
+    )
+    client.post(
+        "/api/product-delivery/releases",
+        json={
+            "sprint_id": s2,
+            "version": "2026-05-02",
+            "shipped_at": "2026-05-02T12:00:00Z",
+        },
+    )
+    # Unshipped — falls to the tail under NULLS LAST.
+    client.post(
+        "/api/product-delivery/releases",
+        json={"sprint_id": s2, "version": "preview"},
+    )
+    resp = client.get(f"/api/product-delivery/releases?product_id={pid}")
+    assert resp.status_code == 200, resp.text
+    versions = [r["version"] for r in resp.json()]
+    assert versions[0] == "2026-05-02"
+    assert versions[1] == "2026-05-01"
+    assert versions[-1] == "preview"
+
+
+def test_list_releases_unknown_product_returns_404(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, _ = client_and_store
+    resp = client.get("/api/product-delivery/releases?product_id=missing")
+    assert resp.status_code == 404
+
+
+def test_create_feedback_with_sprint_id_round_trips(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    """`POST /feedback` accepts a `sprint_id` (#371) and round-trips it back."""
+    client, _ = client_and_store
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 5},
+    ).json()["id"]
+    resp = client.post(
+        "/api/product-delivery/feedback",
+        json={
+            "product_id": pid,
+            "source": "se-integration",
+            "raw_payload": {"description": "missing endpoint"},
+            "severity": "high",
+            "sprint_id": sid,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sprint_id"] == sid
+    assert body["severity"] == "high"
+
+
+def test_create_feedback_with_unknown_sprint_id_returns_404(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, _ = client_and_store
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    resp = client.post(
+        "/api/product-delivery/feedback",
+        json={
+            "product_id": pid,
+            "source": "se-integration",
+            "raw_payload": {},
+            "severity": "high",
+            "sprint_id": "missing",
+        },
+    )
+    assert resp.status_code == 404
+
+
+def test_create_feedback_rejects_cross_product_sprint(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    """Codex P2 review (PR #424): a feedback row for product A must not be
+    tagged with a sprint under product B.
+
+    The two FKs on ``feedback_items`` (``product_id`` → product,
+    ``sprint_id`` → sprint) can't enforce the transitive
+    sprint→product invariant on their own — we validate at the store
+    layer and surface as 400, the same shape as the existing
+    ``CrossProductFeedbackLink`` story-link check.
+    """
+    client, _ = client_and_store
+    pid_a = client.post("/api/product-delivery/products", json={"name": "A"}).json()["id"]
+    pid_b = client.post("/api/product-delivery/products", json={"name": "B"}).json()["id"]
+    sid_b = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid_b, "name": "Sprint-B", "capacity_points": 5},
+    ).json()["id"]
+
+    resp = client.post(
+        "/api/product-delivery/feedback",
+        json={
+            "product_id": pid_a,
+            "source": "se-integration",
+            "raw_payload": {},
+            "severity": "high",
+            "sprint_id": sid_b,
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert "sprint" in resp.json()["detail"].lower()
+
+
+def test_post_releases_gates_on_sprint_completion(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    """Codex P1 review (PR #424): manual ``POST /releases`` must not
+    mint a "shipped" release row for a sprint with open stories.
+    Mirrors the in-process ``ReleaseManagerAgent`` invariant.
+    """
+    client, fake = client_and_store
+    pid = _make_product_with_stories(
+        client,
+        fake,
+        stories=[{"title": "s1", "estimate_points": 3, "wsjf": 5.0}],
+    )
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 5},
+    ).json()["id"]
+    # Plan the story into the sprint so the sprint has work to ship.
+    plan = client.post(f"/api/product-delivery/sprints/{sid}/plan").json()
+    assert plan["selected_story_ids"], "sprint should have at least one planned story"
+
+    # The story is still in its default 'proposed' status — sprint is
+    # not complete; release attempt must be rejected.
+    resp = client.post(
+        "/api/product-delivery/releases",
+        json={"sprint_id": sid, "version": "premature"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert "open" in resp.json()["detail"].lower()
+
+
+def test_post_releases_rejects_duplicate_sprint_version(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    """Codex P2 review (PR #424): the schema's ``UNIQUE(sprint_id, version)``
+    surfaces as 409 instead of silently writing a second row pointing
+    at the same notes file.
+    """
+    client, fake = client_and_store
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    sid = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 5},
+    ).json()["id"]
+    # First release lands.
+    r1 = client.post(
+        "/api/product-delivery/releases",
+        json={"sprint_id": sid, "version": "v1.0.0"},
+    )
+    assert r1.status_code == 200, r1.text
+
+    # Mirror the schema-level UNIQUE constraint in the fake store: a
+    # second insert with the same (sprint_id, version) pair must
+    # raise ``DuplicateReleaseVersion``. The route's exception handler
+    # then maps it to 409.
+    from product_delivery.store import DuplicateReleaseVersion
+
+    original = fake.create_release
+
+    def _enforce_unique(**kwargs: Any) -> Release:
+        existing = [
+            r
+            for r in fake.releases.values()
+            if r.sprint_id == kwargs["sprint_id"] and r.version == kwargs["version"]
+        ]
+        if existing:
+            raise DuplicateReleaseVersion(
+                f"release {kwargs['version']!r} for sprint {kwargs['sprint_id']!r} already exists"
+            )
+        return original(**kwargs)
+
+    fake.create_release = _enforce_unique  # type: ignore[assignment]
+
+    r2 = client.post(
+        "/api/product-delivery/releases",
+        json={"sprint_id": sid, "version": "v1.0.0"},
+    )
+    assert r2.status_code == 409, r2.text
+    assert "v1.0.0" in r2.json()["detail"]

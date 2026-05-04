@@ -216,6 +216,12 @@ class FeedbackItem(_AuditedRow):
     severity: str = "normal"
     status: StatusStr = "open"
     linked_story_id: str | None = None
+    # Phase 3 (#371): when an SE-pipeline sprint run promotes an
+    # Integration / DevOps / QA failure into a feedback item, tag it
+    # with the originating sprint so the next ``POST /groom`` can scope
+    # candidate inputs to "what this sprint surfaced". Nullable because
+    # external feedback (support tickets, sales calls) has no sprint.
+    sprint_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +288,10 @@ class FeedbackItemCreate(BaseModel):
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     severity: str = "normal"
     linked_story_id: str | None = None
+    # Phase 3 (#371): optional sprint provenance. Set by the
+    # ReleaseManagerAgent when promoting Integration / DevOps / QA
+    # failures from a sprint run; left ``None`` for external feedback.
+    sprint_id: str | None = None
 
 
 class StatusUpdate(BaseModel):

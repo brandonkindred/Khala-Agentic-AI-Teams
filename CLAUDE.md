@@ -37,11 +37,16 @@ backend/
     llm_service/             # Centralized LLM client (Ollama, Claude)
     agent_registry/          # Agent Console catalog: loads per-agent YAML manifests, serves /api/agents
     agent_console/           # Agent Console Phase 3: Postgres-backed saved inputs, run history, diff, pruner
-    product_delivery/        # Phase 1 of the persistent Product Delivery Loop (#243): Postgres-backed
-                             # backlog (products → initiatives → epics → stories → tasks + acceptance
-                             # criteria + feedback_items), ProductOwnerAgent (WSJF/RICE), routes under
-                             # /api/product-delivery. In-process module mounted by unified_api (not a
-                             # proxy team). Sprints/releases/UI ship in follow-up issues.
+    product_delivery/        # Persistent Product Delivery Loop (#243), in-process module mounted by
+                             # unified_api at /api/product-delivery. Phase 1 (#369): backlog tables
+                             # (products → initiatives → epics → stories → tasks + acceptance criteria
+                             # + feedback_items), ProductOwnerAgent (WSJF/RICE). Phase 2 (#396): sprints
+                             # + releases tables, sprint_planner_agent, _load_requirements_from_sprint
+                             # in the SE orchestrator. Phase 3 (#371): release_manager_agent ships sprint
+                             # completion → plan/releases/<version>.md + product_delivery_releases row,
+                             # auto-promotes Integration / DevOps / QA failures into sprint-tagged
+                             # feedback_items so the next /groom sees them as candidate backlog seeds;
+                             # POST/GET /releases routes; SE Integration-phase hook (sprint runs only).
     shared_agent_invoke/     # Invoke shim mounted inside the sandbox image; exposes POST /_agents/{id}/invoke
     integrations/            # Shared integration contracts (Google login, Medium, etc.)
     artifact_registry/       # Shared artifact persistence

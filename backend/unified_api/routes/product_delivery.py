@@ -25,6 +25,7 @@ from product_delivery import (
     BacklogTree,
     CrossProductFeedbackLink,
     CrossProductSprintAssignment,
+    DuplicateReleaseVersion,
     Epic,
     FeedbackItem,
     GroomRequest,
@@ -32,7 +33,9 @@ from product_delivery import (
     Initiative,
     Product,
     ProductDeliveryStorageUnavailable,
+    Release,
     Sprint,
+    SprintNotComplete,
     SprintPlanRequest,
     SprintPlanResult,
     SprintWithStories,
@@ -45,6 +48,7 @@ from product_delivery import (
 )
 from product_delivery.models import (
     AcceptanceCriterionCreate,
+    CreateReleaseRequest,
     CreateSprintRequest,
     EpicCreate,
     FeedbackItemCreate,
@@ -82,6 +86,16 @@ _EXC_STATUS: dict[type[Exception], int] = {
     # one-sprint-per-story; concurrent planners or explicit re-plans
     # surface here as 409 instead of a raw 500.
     StoryAlreadyPlanned: 409,
+    # ReleaseManagerAgent (#371) only ships when every planned story has
+    # reached a terminal status. A premature ship attempt — e.g. an
+    # operator hitting POST /releases manually before the sprint is
+    # done — surfaces as 409 instead of writing a poisoned release row.
+    SprintNotComplete: 409,
+    # Duplicate release versions (concurrent ships, retries, or manual
+    # POST /releases reusing an existing version) surface here so the
+    # route returns 409 instead of silently overwriting historical
+    # release notes (PR #424 Codex review).
+    DuplicateReleaseVersion: 409,
     ProductDeliveryStorageUnavailable: 503,
     # LLM transport/model/parse failures during /groom — clients retry
     # the same way they do for a Postgres outage.
@@ -272,6 +286,7 @@ def create_feedback(body: FeedbackItemCreate) -> FeedbackItem:
         raw_payload=body.raw_payload,
         severity=body.severity,
         linked_story_id=body.linked_story_id,
+        sprint_id=body.sprint_id,
         author=resolve_author(),
     )
 
@@ -331,3 +346,51 @@ def get_sprint(sprint_id: str) -> SprintWithStories:
     if result is None:
         raise HTTPException(status_code=404, detail=f"unknown sprint: {sprint_id}")
     return result
+
+
+# ---------------------------------------------------------------------------
+# Releases (Phase 3 of #243 / #371)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/releases", response_model=Release)
+def create_release(body: CreateReleaseRequest) -> Release:
+    """Create a release row directly.
+
+    The SE-pipeline hook drives the typical "ship a sprint" flow via the
+    in-process ReleaseManagerAgent (which writes the markdown notes file
+    *and* the row), so this route is mainly used for backfills /
+    administrative recording.
+
+    Gates on sprint completion (PR #424 Codex review): if any planned
+    story is still non-terminal, raise ``SprintNotComplete`` (→ 409)
+    so a manual call can't mint a "shipped" release row for in-progress
+    work, breaking the invariant the ReleaseManagerAgent enforces.
+    A missing sprint surfaces as 404 via ``UnknownProductDeliveryEntity``;
+    a duplicate ``(sprint_id, version)`` pair surfaces as 409 via
+    ``DuplicateReleaseVersion``.
+    """
+    store = get_store()
+    open_count = store.count_open_stories_in_sprint(body.sprint_id)
+    if open_count > 0:
+        raise SprintNotComplete(
+            f"sprint {body.sprint_id!r} still has {open_count} open story(ies); "
+            "wait for them to reach a terminal status before recording a release."
+        )
+    return store.create_release(
+        sprint_id=body.sprint_id,
+        version=body.version,
+        notes_path=body.notes_path,
+        shipped_at=body.shipped_at,
+        author=resolve_author(),
+    )
+
+
+@router.get("/releases", response_model=list[Release])
+def list_releases(product_id: str) -> list[Release]:
+    """List every release under a product, newest-shipped first.
+
+    A missing product surfaces as 404 via ``UnknownProductDeliveryEntity``
+    so callers can branch on "you sent a bad id" vs. "no releases yet".
+    """
+    return get_store().list_releases_for_product(product_id)

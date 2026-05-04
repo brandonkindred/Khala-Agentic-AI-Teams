@@ -12,14 +12,20 @@ Schema shape (Phase 1 + Phase 2 of issue #243):
                   └── stories
                         ├── tasks
                         └── acceptance_criteria
-    feedback_items     (optionally linked to a story)
+    feedback_items     (optionally linked to a story; sprint_id added in #371
+                        so Integration / DevOps / QA failures auto-promoted by
+                        the ReleaseManagerAgent stay tagged with the sprint
+                        they originated from)
     sprints            (Phase 2 — sprint cadence on top of the backlog)
       └── sprint_stories  (M:N planned-into-sprint join)
       └── releases        (Phase 2 — table only; ReleaseManagerAgent ships in #371)
 
 Phase 2 additions are pure ``CREATE TABLE IF NOT EXISTS`` (no destructive
 migration). Releases ship the table in Phase 2 so #371 can land routes +
-the agent without re-touching this module.
+the agent without re-touching this module. Phase 3 (#371) appends one
+``ALTER TABLE … ADD COLUMN IF NOT EXISTS sprint_id`` to the feedback
+table — idempotent, so re-running on existing deployments leaves
+``sprint_id NULL`` for legacy rows.
 """
 
 from __future__ import annotations
@@ -132,6 +138,10 @@ SCHEMA: TeamSchema = TeamSchema(
         # -----------------------------------------------------------------
         # Sprints — cadence layer. A sprint scopes a planned slice of the
         # backlog into a time-boxed iteration. Phase 2 of #243.
+        #
+        # NOTE: the ``ALTER TABLE`` adding ``sprint_id`` to feedback_items
+        # is appended at the end of this list so the referenced
+        # ``product_delivery_sprints`` table already exists when DDL runs.
         # -----------------------------------------------------------------
         """CREATE TABLE IF NOT EXISTS product_delivery_sprints (
             id               TEXT PRIMARY KEY,
@@ -162,6 +172,17 @@ SCHEMA: TeamSchema = TeamSchema(
         )""",
         """CREATE INDEX IF NOT EXISTS idx_pd_releases_sprint
             ON product_delivery_releases(sprint_id)""",
+        # Phase 3 review (#371 / PR #424 Codex P2): a release version is
+        # the on-disk filename for ``plan/releases/<version>.md`` and
+        # the audit key for the row. Without this UNIQUE index a
+        # concurrent ship (or a manual ``POST /releases`` that reuses
+        # an existing version) would create a second row pointing at
+        # the same notes path, silently rewriting historical release
+        # notes. The constraint scopes to ``sprint_id`` because two
+        # different sprints can legitimately ship the same version
+        # string (e.g. "2026-05-02" on different products / sprints).
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_pd_releases_sprint_version
+            ON product_delivery_releases(sprint_id, version)""",
         # -----------------------------------------------------------------
         # Sprint ↔ Story join. A story can be planned into a sprint without
         # losing its place in the backlog hierarchy. Composite PK is the
@@ -185,6 +206,21 @@ SCHEMA: TeamSchema = TeamSchema(
         )""",
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_pd_sprint_stories_story
             ON product_delivery_sprint_stories(story_id)""",
+        # -----------------------------------------------------------------
+        # Phase 3 (#371): tag feedback items with the originating sprint so
+        # the ReleaseManagerAgent's auto-feedback intake (Integration /
+        # DevOps / QA failures during a sprint run) can be filtered for
+        # the next groom. ``ON DELETE SET NULL`` keeps the feedback row
+        # alive even when the sprint is GC'd — its ``raw_payload`` still
+        # carries enough context for triage. Idempotent: existing rows
+        # get ``NULL`` on first apply, and the column is unchanged on
+        # subsequent applies.
+        # -----------------------------------------------------------------
+        """ALTER TABLE IF EXISTS product_delivery_feedback_items
+            ADD COLUMN IF NOT EXISTS sprint_id TEXT
+            REFERENCES product_delivery_sprints(id) ON DELETE SET NULL""",
+        """CREATE INDEX IF NOT EXISTS idx_pd_feedback_sprint
+            ON product_delivery_feedback_items(sprint_id)""",
     ],
     table_names=[
         "product_delivery_sprint_stories",

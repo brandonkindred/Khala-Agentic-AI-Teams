@@ -114,6 +114,33 @@ class StoryAlreadyPlanned(ValueError):
     """
 
 
+class DuplicateReleaseVersion(ValueError):
+    """A release row already exists for the same ``(sprint_id, version)`` pair.
+
+    Phase 3 of #243 / PR #424 Codex review. Schema-level
+    ``UNIQUE(sprint_id, version)`` on ``product_delivery_releases``
+    enforces the audit invariant that a version string is the
+    on-disk filename for ``plan/releases/<version>.md``. Two ships
+    racing on the same explicit version, or an operator retrying
+    ``POST /releases`` with the same version, surface here so the
+    route returns 409 (re-pick a fresh version) instead of silently
+    creating a second row that points at the same notes file.
+    """
+
+
+class SprintNotComplete(ValueError):
+    """A release was requested for a sprint that still has open stories.
+
+    Phase 3 of #243 / issue #371. The ReleaseManagerAgent guards on
+    ``count_open_stories_in_sprint(sprint_id) == 0`` before writing a
+    release row + notes file; trying to ship a sprint whose planned
+    stories haven't all reached a terminal status raises this so the
+    SE-pipeline hook can log + skip without poisoning the release
+    history with a "shipped" record for incomplete work. Mapped to
+    HTTP 409 at the route layer.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Row specs + per-table column constants — single source of truth.
 # ---------------------------------------------------------------------------
@@ -274,10 +301,18 @@ _STORY_COLS_ALIASED = (
 _TASK_COLS = f"id, story_id, title, description, status, owner, {_AUDIT_COLS}"
 _AC_COLS = f"id, story_id, text, satisfied, {_AUDIT_COLS}"
 _FEEDBACK_COLS = (
-    f"id, product_id, source, raw_payload, severity, status, linked_story_id, {_AUDIT_COLS}"
+    "id, product_id, source, raw_payload, severity, status, linked_story_id, "
+    f"sprint_id, {_AUDIT_COLS}"
 )
 _SPRINT_COLS = f"id, product_id, name, capacity_points, starts_at, ends_at, status, {_AUDIT_COLS}"
 _RELEASE_COLS = f"id, sprint_id, version, notes_path, shipped_at, {_AUDIT_COLS}"
+# Alias-qualified projection for ``list_releases_for_product``'s JOIN
+# (every column exists on both ``product_delivery_releases`` and
+# ``product_delivery_sprints`` after the join, so unqualified names
+# would surface a "column reference is ambiguous" error from psycopg).
+_RELEASE_COLS_ALIASED = (
+    "r.id, r.sprint_id, r.version, r.notes_path, r.shipped_at, r.author, r.created_at, r.updated_at"
+)
 
 
 def _validate_capacity_points(value: float | None) -> float:
@@ -782,6 +817,7 @@ class ProductDeliveryStore:
         severity: str,
         linked_story_id: str | None,
         author: str,
+        sprint_id: str | None = None,
     ) -> FeedbackItem:
         # Validate product + cross-product linkage first, then insert. We
         # don't go through `_insert` because feedback_items needs the
@@ -830,9 +866,31 @@ class ProductDeliveryStore:
                             f"story {linked_story_id!r} belongs to product "
                             f"{row[0]!r}, not {product_id!r}"
                         )
+                # Validate sprint provenance up front so a bad id doesn't
+                # silently land as a NULL FK after ON DELETE SET NULL —
+                # we want the caller to see the 404, not a row with
+                # missing context. Also enforce that the sprint belongs
+                # to the same product (Codex review on PR #424): the
+                # schema FKs only constrain the two ids individually,
+                # so without this check a feedback row for product A
+                # could be tagged with a sprint under product B,
+                # polluting sprint-scoped grooming and reporting.
+                if sprint_id is not None:
+                    cur.execute(
+                        "SELECT product_id FROM product_delivery_sprints WHERE id = %s",
+                        (sprint_id,),
+                    )
+                    sprint_row = cur.fetchone()
+                    if sprint_row is None:
+                        raise UnknownProductDeliveryEntity(f"sprint {sprint_id!r} does not exist")
+                    if sprint_row[0] != product_id:
+                        raise CrossProductFeedbackLink(
+                            f"sprint {sprint_id!r} belongs to product "
+                            f"{sprint_row[0]!r}, not {product_id!r}"
+                        )
                 cur.execute(
                     f"""INSERT INTO product_delivery_feedback_items ({_FEEDBACK_COLS})
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         fid,
                         product_id,
@@ -841,6 +899,7 @@ class ProductDeliveryStore:
                         severity,
                         "open",
                         linked_story_id,
+                        sprint_id,
                         author,
                         now,
                         now,
@@ -869,6 +928,7 @@ class ProductDeliveryStore:
             severity=severity,
             status="open",
             linked_story_id=linked_story_id,
+            sprint_id=sprint_id,
             author=author,
             created_at=now,
             updated_at=now,
@@ -1090,6 +1150,59 @@ class ProductDeliveryStore:
             raise StoryAlreadyPlanned(
                 f"story {story_id!r} is already planned into another sprint"
             ) from exc
+
+    @timed_query(store=_STORE, op="count_open_stories_in_sprint")
+    def count_open_stories_in_sprint(self, sprint_id: str) -> int:
+        """Return how many planned stories are NOT in a terminal status.
+
+        Phase 3 (#371). Used by the SE-pipeline release hook as the
+        "is this sprint shippable?" guard — if the count is zero, the
+        ReleaseManagerAgent writes a release row + notes file.
+        Raises ``UnknownProductDeliveryEntity`` (→ 404) when the sprint
+        id is missing so the caller can distinguish "still has work" from
+        "you sent a bad id".
+
+        Status compare uses ``LOWER(TRIM(...))`` so a row stored as
+        ``"Done "`` (legacy / manual entry) still counts as terminal —
+        same normalisation ``select_sprint_scope`` does.
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            _begin_repeatable_read(cur)
+            cur.execute(
+                "SELECT 1 FROM product_delivery_sprints WHERE id = %s",
+                (sprint_id,),
+            )
+            if cur.fetchone() is None:
+                raise UnknownProductDeliveryEntity(f"unknown sprint: {sprint_id}")
+            cur.execute(
+                """SELECT COUNT(*)::int
+                   FROM product_delivery_sprint_stories ss
+                   JOIN product_delivery_stories s ON s.id = ss.story_id
+                   WHERE ss.sprint_id = %s
+                     AND LOWER(TRIM(s.status)) <> ALL(%s)""",
+                (sprint_id, list(_TERMINAL_STORY_STATUSES)),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+
+    @timed_query(store=_STORE, op="get_product_id_for_sprint")
+    def get_product_id_for_sprint(self, sprint_id: str) -> str | None:
+        """Return the sprint's product id, or ``None`` if the sprint is missing.
+
+        Phase 3 (#371). The SE-pipeline hook needs ``product_id`` to
+        open a ``release-manager-error`` feedback item on the
+        agent's outer try/except, but at that point the agent itself
+        has already failed — so we want a tiny, no-throw query rather
+        than re-running the whole sprint projection. Returns ``None``
+        instead of raising so the caller's error path stays simple.
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT product_id FROM product_delivery_sprints WHERE id = %s",
+                (sprint_id,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
 
     @timed_query(store=_STORE, op="list_planned_story_ids")
     def list_planned_story_ids(self, sprint_id: str) -> list[str]:
@@ -1400,6 +1513,15 @@ class ProductDeliveryStore:
                 )
         except psycopg_errors.ForeignKeyViolation as exc:
             raise UnknownProductDeliveryEntity(f"sprint {sprint_id!r} does not exist") from exc
+        except psycopg_errors.UniqueViolation as exc:
+            # Schema enforces UNIQUE(sprint_id, version) — a duplicate
+            # ship (concurrent or retry) lands here. Map to a typed
+            # domain error so the route returns 409 instead of 500
+            # and the ReleaseManagerAgent can clean up the on-disk
+            # notes file it just wrote (PR #424 Codex review).
+            raise DuplicateReleaseVersion(
+                f"release {version!r} for sprint {sprint_id!r} already exists"
+            ) from exc
         return Release(
             id=rid,
             sprint_id=sprint_id,
@@ -1446,6 +1568,42 @@ class ProductDeliveryStore:
                    WHERE sprint_id = %s
                    ORDER BY created_at DESC""",
                 (sprint_id,),
+            )
+            return [Release.model_validate(row) for row in cur.fetchall()]
+
+    @timed_query(store=_STORE, op="list_releases_for_product")
+    def list_releases_for_product(self, product_id: str) -> list[Release]:
+        """List releases for every sprint under ``product_id``, newest first.
+
+        Phase 3 (#371). Backs ``GET /api/product-delivery/releases?product_id=…``.
+        Joins ``releases → sprints`` so a single round trip returns the
+        full history without per-sprint fan-out at the route layer.
+        Raises ``UnknownProductDeliveryEntity`` when the product is
+        missing — same contract as ``list_feedback`` /
+        ``list_releases_for_sprint`` so callers can branch on 404 vs
+        ``200 []``. Both statements share one ``REPEATABLE READ``
+        snapshot so a concurrent product delete can't turn a 404 into
+        an empty list.
+
+        Order is ``shipped_at DESC NULLS LAST, created_at DESC`` — most
+        recently *shipped* releases bubble up, but unshipped (preview)
+        rows still surface at the tail in stable created-time order.
+        """
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            _begin_repeatable_read(cur)
+            cur.execute(
+                "SELECT 1 FROM product_delivery_products WHERE id = %s",
+                (product_id,),
+            )
+            if cur.fetchone() is None:
+                raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
+            cur.execute(
+                f"""SELECT {_RELEASE_COLS_ALIASED}
+                   FROM product_delivery_releases r
+                   JOIN product_delivery_sprints sp ON sp.id = r.sprint_id
+                   WHERE sp.product_id = %s
+                   ORDER BY r.shipped_at DESC NULLS LAST, r.created_at DESC""",
+                (product_id,),
             )
             return [Release.model_validate(row) for row in cur.fetchall()]
 

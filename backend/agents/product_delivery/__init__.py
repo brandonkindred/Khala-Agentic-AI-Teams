@@ -32,13 +32,16 @@ from product_delivery.models import (
     Story,
     Task,
 )
+from product_delivery.release_manager_agent import ReleaseManagerAgent
 from product_delivery.scoring import rice_score, wsjf_score
 from product_delivery.store import (
     TERMINAL_STORY_STATUSES,
     CrossProductFeedbackLink,
     CrossProductSprintAssignment,
+    DuplicateReleaseVersion,
     ProductDeliveryStorageUnavailable,
     ProductDeliveryStore,
+    SprintNotComplete,
     StoryAlreadyPlanned,
     UnknownProductDeliveryEntity,
     get_store,
@@ -49,6 +52,7 @@ __all__ = [
     "BacklogTree",
     "CrossProductFeedbackLink",
     "CrossProductSprintAssignment",
+    "DuplicateReleaseVersion",
     "Epic",
     "FeedbackItem",
     "GroomRequest",
@@ -59,7 +63,9 @@ __all__ = [
     "ProductDeliveryStore",
     "RankedBacklogItem",
     "Release",
+    "ReleaseManagerAgent",
     "Sprint",
+    "SprintNotComplete",
     "SprintPlanRequest",
     "SprintPlanResult",
     "SprintWithStories",
