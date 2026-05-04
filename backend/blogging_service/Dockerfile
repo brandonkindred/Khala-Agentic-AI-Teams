@@ -56,7 +56,9 @@ COPY agents/blogging /app/blogging
 COPY blogging_service/entrypoint.py /app/entrypoint.py
 
 RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
-    && chown -R appuser:appuser /app
+    && chown -R appuser:appuser /app \
+    && mkdir -p /data/agents \
+    && chown -R appuser:appuser /data
 USER appuser
 
 ENV PYTHONUNBUFFERED=1

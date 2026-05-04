@@ -2,14 +2,20 @@
 # Run from repo root: docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
 # Ports: 5432 Postgres, 7233 Temporal gRPC, 8080 Temporal UI, 4201 Angular UI, 8888 Unified API (direct)
 #
-# Static IPs and extra_hosts avoid reliance on Podman's embedded DNS (which can timeout resolving service names).
-# Network "khala-stack" is external: create once with docker/ensure-network.sh (or see README) to avoid
-# repeated "IPAM option driver has changed" errors when using Podman with docker-compose.
+# Static IPs and extra_hosts pin service addresses so DNS resolution failures
+# inside containers don't break inter-service traffic.
 
 services:
   postgres:
     image: postgres:18
     container_name: khala-stack-postgres
+    # 20+ team services × pool max ~10 connections each, plus Temporal, job-service,
+    # khala unified API, and the Agent Console pruner can easily exceed the default
+    # max_connections=100. Bump it so the stack doesn't run out of slots on cold start.
+    command:
+      - postgres
+      - -c
+      - max_connections=500
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -43,20 +49,6 @@ services:
   temporal:
     image: temporalio/auto-setup:1.24.2
     container_name: khala-stack-temporal
-    # The auto-setup image declares `USER temporal` (UID/GID 1000) in its
-    # Dockerfile. Some OCI runtimes — most notably rootless Podman — fail the
-    # by-name lookup with:
-    #   "unable to find user temporal: no matching entries in passwd file"
-    # Numeric UID:GID skips the name lookup. We expose this as
-    # `TEMPORAL_USER` (default empty = use the image's USER directive) because
-    # forcing `user: "1000:1000"` on rootless Docker / docker-userns-remap /
-    # Docker Desktop setups instead triggers:
-    #   "runc create failed: unable to start container process:
-    #    can't get final child's PID from pipe: EOF: OCI runtime error"
-    # when UID 1000 isn't mappable through the user namespace. Podman users
-    # who hit the name-lookup error should set `TEMPORAL_USER=1000:1000` in
-    # docker/.env. See docker/README.md.
-    user: "${TEMPORAL_USER:-}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -972,7 +964,11 @@ services:
 networks:
   stack:
     name: khala-stack
-    external: true
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/24
 
 volumes:
   # Renamed from `postgres_data` when the stack jumped to Postgres 18. Docker

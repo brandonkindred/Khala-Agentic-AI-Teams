@@ -133,7 +133,6 @@ Today Khala ships with 20 specialist teams behind one gateway, grouped loosely f
 
 ```bash
 cp docker/.env.example docker/.env   # set OLLAMA_API_KEY (Ollama Cloud is the default LLM)
-./docker/ensure-network.sh           # one-time: create the external network
 docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
 ```
 
@@ -146,7 +145,7 @@ Then open:
 - 📈 **Prometheus:** http://localhost:9090
 - 📊 **Grafana:** http://localhost:3000 (default `admin` / `admin`)
 
-Full details — ports, volumes, observability, Podman notes — in [`docker/README.md`](docker/README.md).
+Full details — ports, volumes, observability — in [`docker/README.md`](docker/README.md).
 
 ### The local way (hack on the code)
 

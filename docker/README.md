@@ -23,31 +23,11 @@ This directory defines a **Docker Compose stack** that runs:
 
    Use `--env-file docker/.env` so variables from `docker/.env` (e.g. `OLLAMA_API_KEY`) are passed into the containers.
 
-   **Docker:** One-time, ensure the network exists: `./docker/ensure-network.sh` (uses `docker network create` if you have Docker).
    ```bash
-   ./docker/ensure-network.sh
    docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
    ```
 
-   **Podman:** Use `podman compose` as a drop-in (requires a running Podman machine; on Windows, install WSL2 then `podman machine init` and `podman machine start`). **One-time:** create the external network so Compose doesn't try to manage it (avoids repeated "IPAM option driver has changed" errors):
-   ```bash
-   ./docker/ensure-network.sh
-   podman compose -f docker/docker-compose.yml --env-file docker/.env up --build
-   ```
-
-   > **Note (Podman / rootless runtimes):** The `temporal` service exposes
-   > `user: "${TEMPORAL_USER:-}"`. The default (empty) lets the
-   > `temporalio/auto-setup` image use its built-in `USER temporal`
-   > directive — required for Docker / Docker Desktop / docker-userns-remap
-   > setups, where forcing a numeric UID can otherwise produce a generic
-   > `runc create failed: ... can't get final child's PID from pipe: EOF`
-   > because UID 1000 isn't always mappable through the user namespace.
-   > **Rootless Podman** users sometimes hit the opposite problem —
-   > `unable to find user temporal: no matching entries in passwd file` —
-   > because the runtime resolves the user before mounting the image
-   > rootfs. In that case, set `TEMPORAL_USER=1000:1000` in `docker/.env`;
-   > the numeric form maps to the same identity the image uses and skips
-   > the name lookup.
+   Compose creates the `khala-stack` bridge network (subnet `172.28.0.0/24`) automatically on first `up`; nothing else needs to run beforehand.
 
 3. **Access**
 
@@ -129,16 +109,16 @@ Agents direct ports (when needed): 18000–18005 map to APIs 8000–8005.
 
 The Unified API (`khala` on 8888) only registers each team’s `/api/...` route when the matching `*_SERVICE_URL` is set (see `docker-compose.yml`). **Agentic Team Provisioning** requires `AGENTIC_TEAM_PROVISIONING_SERVICE_URL` pointing at the `agentic-team-provisioning-service` container (included in the full stack).
 
-## Resource limits (khala / Podman)
+## Resource limits (khala)
 
 The **khala** service is configured for 8 vCPUs and 2G memory (`deploy.resources` plus legacy `cpus` / `mem_limit`). After changing these in `docker-compose.yml`, recreate the container so limits apply:
 
 ```bash
-podman compose -f docker/docker-compose.yml down khala
-podman compose -f docker/docker-compose.yml --env-file docker/.env up -d khala
+docker compose -f docker/docker-compose.yml down khala
+docker compose -f docker/docker-compose.yml --env-file docker/.env up -d khala
 ```
 
-On **macOS** with Podman Machine, container memory is capped by the machine’s memory. If 2G is not applied, increase it and recreate the machine: `podman machine stop; podman machine set --memory 8192; podman machine start` (then recreate the container).
+On **macOS** with Docker Desktop, container memory is capped by the VM's memory limit (Docker Desktop → Settings → Resources). If 2G is not applied, raise the VM limit and restart Docker.
 
 ## Agents and Postgres
 

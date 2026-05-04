@@ -1,7 +1,7 @@
 # Prometheus scrape config for the Khala stack.
 # All targets use container DNS names on the khala-stack network. The
 # prometheus service declares matching extra_hosts entries in docker-compose.yml
-# so DNS resolution does not depend on Podman's embedded DNS.
+# so DNS resolution does not depend on the embedded Docker DNS.
 global:
   scrape_interval: 15s
   scrape_timeout: 10s
