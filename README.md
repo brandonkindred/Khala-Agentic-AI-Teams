@@ -27,9 +27,9 @@
 
 ## You don't need a team. You need a Khala.
 
-**You don't *point* Khala at a problem. You work with it.**
+**Khala is a set of Agentic AI teams that you collaborate with**
 
-Under the hood, Khala is a FastAPI gateway that mounts role-separated specialist teams under `/api/<team>` — each one a team-lead agent coordinating specialists over Pydantic contracts. But the point isn't the wiring. The point is that every team plugs into the same shared mind, so you can bring them in on whatever you're working on:
+Khala is made up of teams of [AWS Strands](https://strandsagents.com/) Agents. Each team has an assistant that collaborates with you and communicates with the team that they are assigned to. Every team plugs into the same shared mind, so you can bring them in on whatever you're working on:
 
 - **Ship a spec into code** → the Software Engineering team runs Discovery → Design → Execution → Integration alongside you: planning, code + tests + docs in parallel backend/frontend queues, merging to a `development` branch when the quality gates pass.
 - **Figure out a market** → Market Research pairs with you on user discovery and concept viability; Planning V3 turns the conversation into a PRD the dev teams can run with.
@@ -40,15 +40,15 @@ Under the hood, Khala is a FastAPI gateway that mounts role-separated specialist
 
 The teams share infrastructure — the gateway with its optional security pre-scan, a shared Postgres schema registry for migrated teams, a shared artifact cache, and a pluggable LLM client (Ollama Cloud, local Ollama, or Claude). Set `TEMPORAL_ADDRESS` and the teams that export Temporal workflows switch from in-process threads to durable executions that survive restarts; teams without workflows keep using threads.
 
-**And Khala is built to grow its own roster.** The real project here isn't the current 20 teams — it's the system that *makes* agentic teams and lets them operate as one mind. Describe a new team in plain English to the **Agentic Team Provisioning** team and it will design the roster and the process with you (and hand off to Agent Provisioning for the sandbox), or register one yourself in [`backend/unified_api/config.py`](backend/unified_api/config.py). Every lesson learned building the current teams feeds back into how the next ones get built.
+**And Khala is built to grow its own roster.** The real project here isn't the current agentic teams — it's the system that *makes* agentic teams and lets them operate as one mind. Describe a new team in plain English to the **Agentic Team Provisioning** team and it will design the roster and the process with you (and hand off to Agent Provisioning for the sandbox), or register one yourself in [`backend/unified_api/config.py`](backend/unified_api/config.py). Every lesson learned building the current teams feeds back into how the next ones get built.
 
 > **Many teams. One mind. One objective. Yours.**
 
-### What Khala actually is
+### What exactly is Khala?
 
-A personal project to figure out how to build agentic AI teams that actually work together. The honest arc: a vibe-coded experiment turning into a real engineered system, and from there into the thing I'm really after — **an agentic AI that can look at a problem, decide what kind of team would solve it, spin up ephemeral specialist agents to do the work, learn from what landed and what didn't, and keep the agents that earn their keep.** The 20 teams here today are the substrate for that learning, not the destination. Follow along.
+A personal project to figure out how to build agentic AI teams that work together. This started as a vibe-coded experiment and that was a disaster, so now I'm turning it into a real engineered system, and from there into the thing I'm really after, which is **an agentic AI that can look at a problem, decide what kind of team would solve it, spin up ephemeral specialist agents to do the work, learn from what landed and what didn't, and keep the agents that earn their keep.** The 20 teams here today are the substrate for that learning, not the destination. Follow along.
 
-If you want to build, tinker, and help push the frontier of multi-agent systems — welcome aboard.
+If you want to build, tinker, and help push the frontier of multi-agent systems then welcome aboard.
 
 <p align="center">
   <a href="https://brandonkindred.github.io/Khala-Agentic-AI-Teams/">🌐 Live site</a> ·
@@ -58,7 +58,7 @@ If you want to build, tinker, and help push the frontier of multi-agent systems 
   <a href="#add-your-own-team">🧬 Add your own team</a>
 </p>
 
-<sub>*(Named after the Protoss unifying religion from StarCraft — a psionic link joining many minds into one.)*</sub>
+<sub>*(Named after the Protoss unifying religion from StarCraft — a psionic link joining many minds into one. I'm a old school nerd, don't judge)*</sub>
 
 ---
 
@@ -83,7 +83,7 @@ If you want to build, tinker, and help push the frontier of multi-agent systems 
 
 Today Khala ships with 20 specialist teams behind one gateway, grouped loosely for navigation into Core Dev, Business, Content, and Personal. This is the **current** roster, not the ceiling — Khala is a system for *making* agentic teams, and the list grows (and prunes itself) as we learn what's useful. The authoritative source is always [`backend/unified_api/config.py`](backend/unified_api/config.py).
 
-### 🛠️ Core Dev — build, plan, and evolve software
+### Core Dev — build, plan, and evolve software
 
 | Team | Route | What it does |
 |---|---|---|
@@ -96,7 +96,7 @@ Today Khala ships with 20 specialist teams behind one gateway, grouped loosely f
 | **User Agent Founder** | `/api/user-agent-founder` | An autonomous "founder" that drives the SE team the way a real one would. |
 | **Deepthought** | `/api/deepthought` | Asks itself what specialists it needs, spawns them, synthesizes the answer. Turtles all the way down. |
 
-### 💼 Business — the grown-up functions
+### Business — the grown-up functions
 
 | Team | Route | What it does |
 |---|---|---|
@@ -106,7 +106,7 @@ Today Khala ships with 20 specialist teams behind one gateway, grouped loosely f
 | **AI Sales Team** | `/api/sales` | The full B2B pod — prospect, qualify, nurture, close. |
 | **Startup Advisor** | `/api/startup-advisor` | A persistent advisor with probing dialogue that picks up right where you left off. |
 
-### ✍️ Content — ideas into words into reach
+### Content — ideas into words into reach
 
 | Team | Route | What it does |
 |---|---|---|
@@ -114,7 +114,7 @@ Today Khala ships with 20 specialist teams behind one gateway, grouped loosely f
 | **Social Marketing** | `/api/social-marketing` | Cross-platform campaigns built by per-platform specialists who know the medium. |
 | **Branding** | `/api/branding` | Brand strategy, moodboards, and the writing and design standards to match. |
 
-### 🧘 Personal — life, optimized
+### Personal — life, optimized
 
 | Team | Route | What it does |
 |---|---|---|
@@ -129,7 +129,7 @@ Today Khala ships with 20 specialist teams behind one gateway, grouped loosely f
 
 ## Quickstart
 
-### 🚢 The Docker way (recommended — full stack)
+### The Docker way (recommended — full stack)
 
 ```bash
 cp docker/.env.example docker/.env   # set OLLAMA_API_KEY (Ollama Cloud is the default LLM)
@@ -148,7 +148,7 @@ Then open:
 
 Full details — ports, volumes, observability, Podman notes — in [`docker/README.md`](docker/README.md).
 
-### 🧑‍💻 The local way (hack on the code)
+### The local way (hack on the code)
 
 Local dev runs the Unified API as a single FastAPI process that mounts every enabled team's router in-process (no per-team containers). Teams that need Postgres (blogging, branding, startup_advisor, user_agent_founder, agentic_team_provisioning, nutrition, team_assistant, unified_api credentials) require a running Postgres — start one from `docker/docker-compose.yml` and export the `POSTGRES_*` env vars from [`CLAUDE.md`](CLAUDE.md) before launching.
 
@@ -271,7 +271,3 @@ More reference:
 ## License
 
 See [`LICENSE`](LICENSE).
-
-<p align="center">
-  <sub>Built by humans and their Khala.  ·  Many teams. One mind. One objective. Yours.</sub>
-</p>
