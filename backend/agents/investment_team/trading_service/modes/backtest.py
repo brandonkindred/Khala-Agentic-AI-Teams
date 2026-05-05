@@ -115,6 +115,13 @@ def run_backtest(
         legacy_fingerprint = compute_dataset_fingerprint(market_data)
 
     streaming_holder: Dict[str, Optional[CachingProviderHistoricalStream]] = {"current": None}
+    # Stressed-run streams are tracked separately so we can fall back to
+    # one of their fingerprints if the baseline exits early (e.g. via
+    # the TradingService drawdown breaker) and never drains its
+    # generator — without that fallback, ``dataset_fingerprint`` would
+    # silently regress to ``None`` for cost-stress runs that did
+    # generate fully replayed data.
+    stress_streams: List[CachingProviderHistoricalStream] = []
 
     def _build_stream(*, capture_fingerprint: bool) -> object:
         if has_legacy:
@@ -137,9 +144,13 @@ def run_backtest(
         # Only the baseline run records its stream into the holder so the
         # post-loop fingerprint read (#376) is a single-writer operation —
         # cost-stress workers run concurrently (#431) and would otherwise
-        # race on this slot.
+        # race on this slot. Stressed streams are appended to a side list
+        # (list.append is atomic under the GIL) so we still have access
+        # to their fingerprints if the baseline never drains.
         if capture_fingerprint:
             streaming_holder["current"] = stream
+        else:
+            stress_streams.append(stream)
         return stream
 
     def _run_once(
@@ -256,11 +267,20 @@ def run_backtest(
     # Issue #376 — surface the dataset fingerprint for byte-equality
     # checks on rerun.  Streaming path takes precedence over the legacy
     # hash so both routes converge on the same content-addressed key.
+    # Issue #431 — if the baseline exited early (drawdown breaker, etc.)
+    # and never drained its generator, fall back to any stressed-run
+    # stream that did, so reproducibility doesn't regress when cost-
+    # stress executions still produced fully replayed data.
     streaming_fp = (
         streaming_holder["current"].dataset_fingerprint
         if streaming_holder["current"] is not None
         else None
     )
+    if streaming_fp is None:
+        for s in stress_streams:
+            if s.dataset_fingerprint is not None:
+                streaming_fp = s.dataset_fingerprint
+                break
     fingerprint = streaming_fp or legacy_fingerprint
     if fingerprint:
         update["dataset_fingerprint"] = fingerprint
