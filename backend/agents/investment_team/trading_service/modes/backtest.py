@@ -207,20 +207,25 @@ def run_backtest(
         report = CostStressReport()
         multipliers = list(config.cost_stress_multipliers)
         workers = min(len(multipliers), os.cpu_count() or 4)
-        rows_by_mult: Dict[float, CostStressRow] = {}
+        # Index by input position, not multiplier value: callers may pass
+        # duplicate multipliers (e.g. for repeatability checks of a
+        # non-deterministic strategy), and each duplicate must produce its
+        # own row, matching the prior sequential behavior.
+        rows_by_index: List[Optional[CostStressRow]] = [None] * len(multipliers)
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cost-stress") as pool:
             futures = {
                 pool.submit(
                     _run_once,
                     _scaled_cost_config(config, multiplier),
                     capture_fingerprint=False,
-                ): multiplier
-                for multiplier in multipliers
+                ): idx
+                for idx, multiplier in enumerate(multipliers)
             }
             for fut in as_completed(futures):
-                multiplier = futures[fut]
+                idx = futures[fut]
+                multiplier = multipliers[idx]
                 stress_result, stress_metrics = fut.result()
-                rows_by_mult[multiplier] = CostStressRow(
+                rows_by_index[idx] = CostStressRow(
                     multiplier=multiplier,
                     sharpe_ratio=stress_metrics.sharpe_ratio,
                     annualized_return_pct=stress_metrics.annualized_return_pct,
@@ -230,8 +235,9 @@ def run_backtest(
                     # run's count, not the baseline's.
                     trade_count=len(stress_result.trades),
                 )
-        for multiplier in multipliers:
-            report.rows.append(rows_by_mult[multiplier])
+        for row in rows_by_index:
+            assert row is not None  # every future ran or raised
+            report.rows.append(row)
         update["cost_stress_results"] = report.to_payload()
 
         # Gate: fail when Sharpe at the 2x multiplier drops below the
