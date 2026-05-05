@@ -413,3 +413,33 @@ def test_metrics_single_point_equity_curve_preserves_annualized_return():
     # would require a drawdown; with a single up-step there's none, so we
     # only assert annualized_return_pct here).
     assert m.annualized_return_pct > 0.0
+
+
+def test_metrics_alpha_annualized_on_log_basis():
+    # ``_alpha_beta`` is fed log returns; alpha must therefore be annualized
+    # via ``expm1(alpha_daily * 252)``, not the legacy
+    # ``(1 + alpha_daily) ** 252 - 1`` simple-compounding form.
+    import numpy as _np
+
+    from investment_team.execution.metrics import _alpha_beta as _alpha_beta_helper
+
+    # Construct portfolio log returns = beta_true * benchmark + alpha_daily,
+    # so the regression recovers known parameters exactly.
+    rng = _np.random.default_rng(seed=0)
+    n = 60
+    bench = rng.normal(loc=0.0005, scale=0.01, size=n)
+    beta_true = 0.8
+    # 0.5% daily alpha → ~252% annualized; large enough that log vs simple
+    # compounding give visibly different annualized values.
+    alpha_daily_true = 0.005
+    port = beta_true * bench + alpha_daily_true
+
+    alpha_pct, beta, _ir = _alpha_beta_helper(port, bench, risk_free_daily=0.0)
+    expected_alpha_pct = round(math.expm1(alpha_daily_true * 252) * 100, 3)
+    simple_alpha_pct = round(((1 + alpha_daily_true) ** 252 - 1) * 100, 3)
+    assert beta == pytest.approx(beta_true, abs=1e-6)
+    assert alpha_pct == pytest.approx(expected_alpha_pct, abs=0.01)
+    # Sanity: simple-compounding form gives a materially different value at
+    # this alpha magnitude — ensure the test would have failed under the
+    # old ``(1 + alpha) ** 252 - 1`` code path.
+    assert abs(simple_alpha_pct - expected_alpha_pct) > 0.5

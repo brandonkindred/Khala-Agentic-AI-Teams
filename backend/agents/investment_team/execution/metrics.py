@@ -207,7 +207,8 @@ def _alpha_beta(
     cov = float(np.cov(br, pr, ddof=1)[0, 1])
     beta = cov / var_b
     alpha_daily = float(np.mean(pr) - beta * np.mean(br))
-    alpha_annual_pct = ((1 + alpha_daily) ** TRADING_DAYS_PER_YEAR - 1) * 100
+    # Inputs are log returns, so annualize alpha on the same basis via expm1.
+    alpha_annual_pct = math.expm1(alpha_daily * TRADING_DAYS_PER_YEAR) * 100
 
     # Active return uses the raw (pre-rfr-subtraction) series; rfr cancels in
     # the diff so we recover ``portfolio_returns - benchmark_returns``.
@@ -534,6 +535,10 @@ def bootstrap_sharpe_ci(
 
     Deterministic under fixed ``seed``. Falls back to ``(0.0, 0.0)`` when the
     series is too short to bootstrap.
+
+    ``returns`` are expected to be log returns — consistent with
+    :meth:`EquityCurve.daily_returns` and the rest of the module — so the
+    annual rfr is converted to log basis before being subtracted.
     """
     n = len(returns)
     if n < 2 or n_resamples < 1:
@@ -545,7 +550,7 @@ def bootstrap_sharpe_ci(
     if block_size < 1:
         raise ValueError(f"block_size must be >= 1, got {block_size}")
 
-    rfr = get_risk_free_rate(override=risk_free_rate)
+    rfr = math.log1p(get_risk_free_rate(override=risk_free_rate))
     rng = random.Random(seed)
     sharpes: List[float] = []
     for _ in range(n_resamples):

@@ -12,6 +12,7 @@ Pipeline:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -1038,7 +1039,13 @@ class StrategyLabOrchestrator:
         start_date: str,
         end_date: str,
     ) -> List[float]:
-        """Daily simple returns from the equity curve implied by the trades."""
+        """Daily log returns from the equity curve implied by the trades.
+
+        Log basis matches :meth:`EquityCurve.daily_returns` and the rest of
+        the metrics module, so OOS-Sharpe / DSR / bootstrap CIs computed
+        downstream share the same return convention as the in-sample
+        ``compute_performance_metrics`` Sharpe.
+        """
         curve = build_equity_curve_from_trades(
             trades, initial_capital, start_date=start_date, end_date=end_date
         )
@@ -1047,10 +1054,13 @@ class StrategyLabOrchestrator:
         out: List[float] = []
         for i in range(1, len(curve.equity)):
             prev = curve.equity[i - 1]
-            if prev <= 0:
+            curr = curve.equity[i]
+            if prev <= 0 or curr <= 0:
+                # Ruined or non-positive equity — log return undefined; emit
+                # 0.0 so the bootstrap doesn't blow up on a single bad step.
                 out.append(0.0)
             else:
-                out.append((curve.equity[i] - prev) / prev)
+                out.append(math.log(curr / prev))
         return out
 
     def _evaluate_regimes(

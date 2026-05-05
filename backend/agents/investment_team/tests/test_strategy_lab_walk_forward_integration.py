@@ -424,6 +424,33 @@ def test_daily_returns_from_trades_handles_empty_input():
     assert out == [] or all(r == 0.0 for r in out)
 
 
+def test_daily_returns_from_trades_emits_log_returns():
+    """OOS-Sharpe / DSR / bootstrap CI need the same return convention as the
+    in-sample Sharpe (log basis). A single +1k step on 100k equity should
+    produce ``log(101_000 / 100_000)`` on the exit-date step, not the simple
+    ``1_000 / 100_000`` ratio."""
+    import math as _math
+
+    trades = [
+        _mk_trade(
+            entry="2023-01-03",
+            exit_="2023-01-04",
+            net=1_000.0,
+            symbol="TST",
+        )
+    ]
+    out = StrategyLabOrchestrator._daily_returns_from_trades(
+        trades, 100_000.0, "2023-01-03", "2023-01-05"
+    )
+    assert len(out) >= 1
+    nonzero = [r for r in out if r != 0.0]
+    assert len(nonzero) == 1
+    assert nonzero[0] == pytest.approx(_math.log(101_000.0 / 100_000.0), rel=1e-12)
+    # Sanity: simple-return basis would yield exactly 0.01, which differs
+    # from log(1.01) ≈ 0.00995 — confirm we are NOT on simple basis.
+    assert nonzero[0] != pytest.approx(0.01, abs=1e-6)
+
+
 def test_equity_to_returns_skips_zero_or_negative_prev():
     """Zero/negative previous equity yields a 0.0 return at that step (no
     ZeroDivisionError, no NaN)."""
