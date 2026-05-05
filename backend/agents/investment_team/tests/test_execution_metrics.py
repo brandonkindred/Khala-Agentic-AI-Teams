@@ -307,6 +307,32 @@ def test_metrics_rejects_non_positive_equity():
         curve.daily_returns()
 
 
+def test_metrics_rejects_non_positive_equity_on_single_point_curve():
+    # Same-day wipeout: only one weekday in the equity span and equity is
+    # non-positive. The early-return for ``len < 2`` must NOT bypass the
+    # ruin guard — otherwise ``compute_performance_metrics`` would silently
+    # compute risk metrics on a meaningless curve.
+    from investment_team.execution.metrics import EquityCurve
+
+    curve = EquityCurve(
+        dates=[date(2023, 1, 3)],
+        equity=[-2_000.0],
+        initial_capital=10_000.0,
+    )
+    with pytest.raises(ValueError, match="non-positive"):
+        curve.daily_returns()
+
+
+def test_metrics_empty_curve_returns_empty_array_without_raising():
+    # An empty equity curve (no dates, no equity) is the legitimate "no data"
+    # state — it must not trip the ruin guard.
+    from investment_team.execution.metrics import EquityCurve
+
+    curve = EquityCurve(dates=[], equity=[], initial_capital=10_000.0)
+    out = curve.daily_returns()
+    assert out.size == 0
+
+
 def test_daily_returns_are_log_returns():
     # Single +100 trade on 10k capital → log(10100/10000) on the exit-date step,
     # zero on every other step.

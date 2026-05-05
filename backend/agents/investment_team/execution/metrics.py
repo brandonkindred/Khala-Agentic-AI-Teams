@@ -52,15 +52,17 @@ class EquityCurve:
 
         Non-positive equity (portfolio ruin) raises ``ValueError`` rather than
         being silently masked — log returns are undefined there and any
-        downstream Sharpe/Sortino/vol on a ruined curve is meaningless.
+        downstream Sharpe/Sortino/vol on a ruined curve is meaningless. The
+        guard runs even for ``len < 2`` curves (e.g. a same-day wipeout
+        ``[-2000]``) so the contract holds for one-point series too.
         """
-        if len(self.equity) < 2:
-            return np.empty(0, dtype=np.float64)
         arr = np.asarray(self.equity, dtype=np.float64)
-        if np.any(arr <= 0):
+        if arr.size > 0 and np.any(arr <= 0):
             raise ValueError(
                 "equity curve contains non-positive values; portfolio ruin is undefined"
             )
+        if arr.size < 2:
+            return np.empty(0, dtype=np.float64)
         return np.diff(np.log(arr))
 
 

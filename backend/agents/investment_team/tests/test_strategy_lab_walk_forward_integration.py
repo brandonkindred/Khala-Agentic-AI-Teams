@@ -451,6 +451,27 @@ def test_daily_returns_from_trades_emits_log_returns():
     assert nonzero[0] != pytest.approx(0.01, abs=1e-6)
 
 
+def test_daily_returns_from_trades_invalidates_ruin_series():
+    """A run whose equity curve crosses zero is ruin: the OOS return series
+    must NOT zero-pad the ruin step (which would let DSR / Sharpe CI report
+    the strategy as materially safer than it is). The helper returns an
+    empty list so every downstream consumer falls through its no-data
+    path."""
+    # Loss > initial capital drives equity negative on the exit date.
+    trades = [
+        _mk_trade(
+            entry="2023-01-03",
+            exit_="2023-01-04",
+            net=-150_000.0,
+            symbol="TST",
+        )
+    ]
+    out = StrategyLabOrchestrator._daily_returns_from_trades(
+        trades, 100_000.0, "2023-01-03", "2023-01-06"
+    )
+    assert out == []
+
+
 def test_equity_to_returns_skips_zero_or_negative_prev():
     """Zero/negative previous equity yields a 0.0 return at that step (no
     ZeroDivisionError, no NaN)."""
