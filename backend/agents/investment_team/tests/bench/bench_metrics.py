@@ -34,12 +34,16 @@ ratio sits in the 3-4× range on a modern CPython 3.11 runner —
 ``bench_intraday_15m.py`` (#377) hit the same hardware-realistic-
 vs-headline gap and adopted the same pattern.
 
-The default assertion checks ≥2× — always achievable when the
-vectorized engines are intact, and collapses to ~1× (a clear ~3.5×
-drop) the moment any of ``daily_returns``, ``_std``, or
-``_max_drawdown`` regresses to a Python loop. The measured speedup is
-printed unconditionally so operators can verify the production gain on
-heavier workloads.
+The default end-to-end assertion checks ≥2× — always achievable when
+the vectorized engines are intact, and collapses to ~1× (a clear ~3.5×
+drop) the moment ``daily_returns`` or ``_std`` regresses to a Python
+loop. ``_max_drawdown`` standalone has its own focused test
+(``test_bench_max_drawdown_helper_speedup``) because the helper is
+dominated by a list→ndarray copy in the end-to-end path; the focused
+test feeds it an ndarray to surface the true 4-5× NumPy speedup so a
+``_max_drawdown``-only regression is also caught. Measured speedups
+are printed unconditionally so operators can verify the production
+gain on heavier workloads.
 
 Marked ``@pytest.mark.bench`` so the default suite skips it; opt in with
 ``pytest -m bench`` (see ``backend/conftest.py`` for the auto-skip wiring).
@@ -87,6 +91,30 @@ def _synthetic_equity_curve(n_days: int = 2520, seed: int = 42) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def _loop_std(xs: list[float]) -> float:
+    """Pure-Python sample std (ddof=1) — mirrors the legacy ``_std`` shape."""
+    k = len(xs)
+    if k < 2:
+        return 0.0
+    m = sum(xs) / k
+    var = sum((x - m) ** 2 for x in xs) / (k - 1)
+    return math.sqrt(var)
+
+
+def _loop_max_drawdown(eq: list[float]) -> float:
+    """Pure-Python max drawdown — mirrors the legacy ``_max_drawdown`` shape."""
+    peak = eq[0]
+    max_dd = 0.0
+    for v in eq:
+        if v > peak:
+            peak = v
+        if peak > 0:
+            dd = (peak - v) / peak
+            if dd > max_dd:
+                max_dd = dd
+    return max_dd
+
+
 def _python_reference_metrics(equity: list[float]) -> tuple[float, float, float, float]:
     """Pure-Python Sharpe / Sortino / Calmar / max-DD over a daily equity series.
 
@@ -103,26 +131,6 @@ def _python_reference_metrics(equity: list[float]) -> tuple[float, float, float,
     log_returns: list[float] = []
     for i in range(1, n):
         log_returns.append(math.log(equity[i] / equity[i - 1]))
-
-    def _loop_std(xs: list[float]) -> float:
-        k = len(xs)
-        if k < 2:
-            return 0.0
-        m = sum(xs) / k
-        var = sum((x - m) ** 2 for x in xs) / (k - 1)
-        return math.sqrt(var)
-
-    def _loop_max_drawdown(eq: list[float]) -> float:
-        peak = eq[0]
-        max_dd = 0.0
-        for v in eq:
-            if v > peak:
-                peak = v
-            if peak > 0:
-                dd = (peak - v) / peak
-                if dd > max_dd:
-                    max_dd = dd
-        return max_dd
 
     mean_log = sum(log_returns) / len(log_returns)
     annualized_log_return = mean_log * TRADING_DAYS_PER_YEAR
@@ -228,12 +236,56 @@ def test_bench_vectorized_metrics_speedup_over_python_reference() -> None:
         f"vectorized={vectorized_min * 1000:.3f}ms speedup={speedup:.1f}x"
     )
 
-    # 2× catches the regression that matters here: re-introducing a Python
-    # loop in any of ``daily_returns`` / ``_std`` / ``_max_drawdown`` collapses
-    # the ratio to ~1× (a clear ~3.5× drop from the healthy ~3-4× baseline).
-    # Mirrors the threshold convention in ``bench_intraday_15m.py`` (#377);
-    # the headline ≥20× target lives in the docstring + printed ratio.
+    # 2× catches whole-pipeline regressions (full revert to Python collapses
+    # the ratio to ~1×) and partial regressions in ``daily_returns`` or
+    # ``_std`` (their re-Pythonization adds 200-500 µs to the vectorized
+    # path, dropping the ratio to ~1.5-1.7×). Mirrors the threshold
+    # convention in ``bench_intraday_15m.py`` (#377). A
+    # ``_max_drawdown``-only regression is not caught here because the
+    # production helper is dominated by its list→ndarray copy; that
+    # scenario is guarded by ``test_bench_max_drawdown_helper_speedup``
+    # below, which times the helper directly with an ndarray input.
     assert speedup >= 2.0, (
         f"vectorized metrics speedup {speedup:.1f}× below 2× regression target "
         f"(python={python_min * 1000:.2f}ms, vectorized={vectorized_min * 1000:.3f}ms)"
+    )
+
+
+def test_bench_max_drawdown_helper_speedup() -> None:
+    """``_max_drawdown`` alone must beat its pure-Python loop by ≥2×.
+
+    The end-to-end pipeline test cannot catch a regression that touches
+    only ``_max_drawdown``: the production helper accepts ``curve.equity``
+    (a Python list) and pays a list→ndarray copy on every call, which
+    dominates its wall-clock cost and shrinks the contribution of the
+    NumPy hot path inside the full pipeline. Feeding the helper an
+    ndarray here bypasses the conversion step and surfaces the true
+    NumPy-vs-Python speedup of the drawdown logic itself, so a regression
+    that reverts ``_max_drawdown`` to a Python loop is detected even when
+    ``daily_returns`` and ``_std`` remain vectorized.
+    """
+    equity_arr = _synthetic_equity_curve()
+    equity_list = equity_arr.tolist()
+
+    py_max_dd = _loop_max_drawdown(equity_list)
+    vec_max_dd, _ = _max_drawdown(equity_arr)
+    assert math.isclose(py_max_dd, vec_max_dd, rel_tol=1e-9, abs_tol=1e-12), (
+        f"max_dd diverged: python={py_max_dd!r} vectorized={vec_max_dd!r}"
+    )
+
+    python_min = _min_of_n(lambda: _loop_max_drawdown(equity_list))
+    vectorized_min = _min_of_n(lambda: _max_drawdown(equity_arr))
+
+    speedup = python_min / vectorized_min if vectorized_min > 0 else float("inf")
+    print(
+        f"\nbench_metrics[_max_drawdown]: python={python_min * 1e6:.1f}us "
+        f"vectorized={vectorized_min * 1e6:.1f}us speedup={speedup:.1f}x"
+    )
+
+    # Healthy ratio is ~4-5× on a 2520-element curve when ``_max_drawdown``
+    # gets an ndarray (no conversion overhead); reverting to a Python loop
+    # collapses it to ~1×. 2× sits comfortably between those.
+    assert speedup >= 2.0, (
+        f"_max_drawdown speedup {speedup:.1f}× below 2× regression target "
+        f"(python={python_min * 1e6:.1f}us, vectorized={vectorized_min * 1e6:.1f}us)"
     )
