@@ -19,6 +19,8 @@ only branch is where the ``MarketDataStream`` comes from.
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -114,7 +116,7 @@ def run_backtest(
 
     streaming_holder: Dict[str, Optional[CachingProviderHistoricalStream]] = {"current": None}
 
-    def _build_stream() -> object:
+    def _build_stream(*, capture_fingerprint: bool) -> object:
         if has_legacy:
             return HistoricalReplayStream(market_data, timeframe=timeframe)
         reg = registry or default_registry()
@@ -132,13 +134,20 @@ def run_backtest(
             timeframe=timeframe,
             as_of=as_of,
         )
-        streaming_holder["current"] = stream
+        # Only the baseline run records its stream into the holder so the
+        # post-loop fingerprint read (#376) is a single-writer operation —
+        # cost-stress workers run concurrently (#431) and would otherwise
+        # race on this slot.
+        if capture_fingerprint:
+            streaming_holder["current"] = stream
         return stream
 
     def _run_once(
         run_config: BacktestConfig,
+        *,
+        capture_fingerprint: bool = False,
     ) -> tuple[TradingServiceResult, BacktestResult]:
-        stream = _build_stream()
+        stream = _build_stream(capture_fingerprint=capture_fingerprint)
         service = TradingService(
             strategy_code=strategy.strategy_code,
             config=run_config,
@@ -160,7 +169,7 @@ def run_backtest(
         )
         return outcome, run_metrics
 
-    service_result, metrics = _run_once(config)
+    service_result, metrics = _run_once(config, capture_fingerprint=True)
 
     if service_result.error and not service_result.trades:
         logger.warning(
@@ -189,12 +198,29 @@ def run_backtest(
             update.setdefault("reject_reason", "low_signals_per_bar")
 
     # Phase 4: cost-stress replay.  Only runs when the flag is on.
+    # Issue #431: replays are pure CPU/sim against the cached dataset
+    # (#376), so fan them out across a thread pool. Ordering of
+    # ``report.rows`` must match ``config.cost_stress_multipliers``
+    # regardless of completion order — the ``min_sharpe_at_2x`` gate and
+    # downstream consumers rely on it.
     if config.cost_stress and config.cost_stress_multipliers:
         report = CostStressReport()
-        for multiplier in config.cost_stress_multipliers:
-            stress_result, stress_metrics = _run_once(_scaled_cost_config(config, multiplier))
-            report.rows.append(
-                CostStressRow(
+        multipliers = list(config.cost_stress_multipliers)
+        workers = min(len(multipliers), os.cpu_count() or 4)
+        rows_by_mult: Dict[float, CostStressRow] = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cost-stress") as pool:
+            futures = {
+                pool.submit(
+                    _run_once,
+                    _scaled_cost_config(config, multiplier),
+                    capture_fingerprint=False,
+                ): multiplier
+                for multiplier in multipliers
+            }
+            for fut in as_completed(futures):
+                multiplier = futures[fut]
+                stress_result, stress_metrics = fut.result()
+                rows_by_mult[multiplier] = CostStressRow(
                     multiplier=multiplier,
                     sharpe_ratio=stress_metrics.sharpe_ratio,
                     annualized_return_pct=stress_metrics.annualized_return_pct,
@@ -204,7 +230,8 @@ def run_backtest(
                     # run's count, not the baseline's.
                     trade_count=len(stress_result.trades),
                 )
-            )
+        for multiplier in multipliers:
+            report.rows.append(rows_by_mult[multiplier])
         update["cost_stress_results"] = report.to_payload()
 
         # Gate: fail when Sharpe at the 2x multiplier drops below the
