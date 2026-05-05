@@ -266,7 +266,17 @@ def compute_performance_metrics(
     curve = build_equity_curve_from_trades(
         trades, initial_capital, start_date=start_date, end_date=end_date
     )
-    returns = curve.daily_returns()
+    try:
+        returns = curve.daily_returns()
+    except ValueError:
+        # Equity curve crossed zero (portfolio ruin). Log returns are
+        # mathematically undefined there, but a single ruined fold should
+        # not abort the whole backtest / walk-forward run — callers in
+        # ``trading_service`` and ``strategy_lab`` don't catch this. Treat
+        # ruin as the no-data path: empty ``returns`` zeroes Sharpe /
+        # Sortino / Calmar / alpha while ``total_return_pct`` (computed
+        # below from ``total_pnl``) still surfaces the realized loss.
+        returns = np.empty(0, dtype=np.float64)
 
     total_pnl = sum(t.net_pnl for t in trades)
     total_return_frac = total_pnl / initial_capital if initial_capital > 0 else 0.0

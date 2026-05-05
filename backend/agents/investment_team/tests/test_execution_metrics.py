@@ -441,6 +441,31 @@ def test_metrics_single_point_equity_curve_preserves_annualized_return():
     assert m.annualized_return_pct > 0.0
 
 
+def test_metrics_handles_ruined_equity_curve_without_raising():
+    # A loss bigger than initial capital drives equity through zero —
+    # ``EquityCurve.daily_returns`` raises (log returns undefined), but
+    # ``compute_performance_metrics`` must catch and produce a safe no-data
+    # result so a single ruined fold doesn't abort the whole backtest /
+    # walk-forward run for upstream callers in ``trade_simulator`` and
+    # ``strategy_lab.orchestrator``.
+    trades = [_mk_trade("2023-01-02", "2023-01-03", net=-12_000.0)]
+    m = compute_performance_metrics(
+        trades,
+        initial_capital=10_000.0,
+        risk_free_rate=0.0,
+    )
+    # Realized loss is surfaced …
+    assert m.total_return_pct == pytest.approx(-120.0, abs=1e-3)
+    assert m.trade_count == 1
+    # … and risk metrics fall through to zeros (empty returns ⇒ no
+    # Sharpe / Sortino / Calmar / alpha to estimate).
+    assert m.annualized_return_pct == 0.0
+    assert m.sharpe_ratio == 0.0
+    assert m.sortino_ratio == 0.0
+    assert m.calmar_ratio == 0.0
+    assert m.alpha_pct is None
+
+
 def test_metrics_empty_equity_curve_does_not_annualize_total_return():
     # Weekend-only span: ``_weekday_range`` drops every day so ``curve.equity``
     # is empty even though the trade carries non-zero ``net_pnl``. The
