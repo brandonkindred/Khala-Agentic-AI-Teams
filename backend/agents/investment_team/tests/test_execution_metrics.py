@@ -291,3 +291,230 @@ def test_rfr_is_stamped_into_metrics(monkeypatch):
     monkeypatch.delenv("FRED_API_KEY", raising=False)
     m = compute_performance_metrics([], initial_capital=10_000.0)
     assert m.risk_free_rate == pytest.approx(0.0375)
+
+
+# ---------------------------------------------------------------------------
+# Log-return basis (issue #429)
+# ---------------------------------------------------------------------------
+
+
+def test_metrics_rejects_non_positive_equity():
+    # A trade that wipes out more than initial capital drives equity negative.
+    # ``daily_returns`` must refuse to take ``log`` of that.
+    trades = [_mk_trade("2023-01-02", "2023-01-03", net=-12_000.0)]
+    curve = build_equity_curve_from_trades(trades, 10_000.0)
+    with pytest.raises(ValueError, match="non-positive"):
+        curve.daily_returns()
+
+
+def test_metrics_rejects_non_positive_equity_on_single_point_curve():
+    # Same-day wipeout: only one weekday in the equity span and equity is
+    # non-positive. The early-return for ``len < 2`` must NOT bypass the
+    # ruin guard — otherwise ``compute_performance_metrics`` would silently
+    # compute risk metrics on a meaningless curve.
+    from investment_team.execution.metrics import EquityCurve
+
+    curve = EquityCurve(
+        dates=[date(2023, 1, 3)],
+        equity=[-2_000.0],
+        initial_capital=10_000.0,
+    )
+    with pytest.raises(ValueError, match="non-positive"):
+        curve.daily_returns()
+
+
+def test_metrics_empty_curve_returns_empty_array_without_raising():
+    # An empty equity curve (no dates, no equity) is the legitimate "no data"
+    # state — it must not trip the ruin guard.
+    from investment_team.execution.metrics import EquityCurve
+
+    curve = EquityCurve(dates=[], equity=[], initial_capital=10_000.0)
+    out = curve.daily_returns()
+    assert out.size == 0
+
+
+def test_daily_returns_are_log_returns():
+    # Single +100 trade on 10k capital → log(10100/10000) on the exit-date step,
+    # zero on every other step.
+    trades = [_mk_trade("2023-01-02", "2023-01-04", net=100.0)]
+    curve = build_equity_curve_from_trades(trades, 10_000.0)
+    returns = curve.daily_returns()
+    expected_step = math.log(10_100.0 / 10_000.0)
+    # exit_date = 2023-01-04; the daily-return that lands the step is the diff
+    # between the index of 2023-01-04 and the prior trading day.
+    exit_idx = curve.dates.index(date(2023, 1, 4))
+    assert returns[exit_idx - 1] == pytest.approx(expected_step, rel=1e-12)
+    # All other entries are zero (flat equity outside the exit step).
+    for i, r in enumerate(returns):
+        if i != exit_idx - 1:
+            assert r == pytest.approx(0.0, abs=1e-12)
+
+
+def test_metrics_log_return_annualization():
+    # 252 trading days of constant +0.04% daily log return → mean_log * 252
+    # ≈ 0.04% * 252 = 10.08%, annualized_return_pct = (exp(0.1008) - 1) * 100.
+    # Constructed via a single big trade so the equity moves once at the end;
+    # the log-return basis means *that step* is what matters, not the daily
+    # path. Specifically: 252 weekdays of zero return then one big jump
+    # carries the same `mean(log_returns) * 252` as 252 days of even return,
+    # provided ``mean = total_log_return / N``. Use a small jump so the test
+    # is easy to verify by hand.
+    trades = [_mk_trade("2023-01-02", "2023-01-03", net=100.0)]
+    curve = build_equity_curve_from_trades(
+        trades, 10_000.0, start_date="2023-01-02", end_date="2023-01-03"
+    )
+    returns = curve.daily_returns()
+    # Exactly one step in this curve: log(10_100/10_000).
+    assert returns.size == 1
+    assert returns[0] == pytest.approx(math.log(1.01), rel=1e-12)
+
+
+def test_metrics_sharpe_uses_log_return_numerator():
+    # Build an equity curve that gives a known mean log return; compute
+    # metrics; verify Sharpe uses ``mean(log) * 252 - rfr`` over annualized
+    # log-vol, not the legacy CAGR-based numerator.
+    trades = [
+        _mk_trade("2023-01-02", "2023-01-03", net=100.0),
+        _mk_trade("2023-01-03", "2023-01-04", net=-90.0),
+        _mk_trade("2023-01-04", "2023-01-05", net=110.0),
+    ]
+    m = compute_performance_metrics(
+        trades,
+        initial_capital=10_000.0,
+        risk_free_rate=0.0,
+    )
+    # Hand-compute the expected annualized log return on the same equity path.
+    curve = build_equity_curve_from_trades(trades, 10_000.0)
+    mean_log = float(curve.daily_returns().mean())
+    expected_annualized = math.expm1(mean_log * 252) * 100
+    assert m.annualized_return_pct == pytest.approx(expected_annualized, abs=0.01)
+
+
+def test_metrics_sharpe_uses_log_basis_risk_free_rate():
+    # With a non-zero rfr the Sharpe / Sortino numerator must subtract a
+    # log-basis rfr (``log1p(rfr)``), not the simple annual rate, otherwise
+    # the convention mixing skews Sharpe systematically. Verify by computing
+    # both candidates and asserting the metric matches the log-basis one.
+    rfr_simple = 0.05
+    trades = [
+        _mk_trade("2023-01-02", "2023-01-03", net=200.0),
+        _mk_trade("2023-01-03", "2023-01-04", net=-150.0),
+        _mk_trade("2023-01-04", "2023-01-05", net=180.0),
+        _mk_trade("2023-01-05", "2023-01-06", net=-160.0),
+        _mk_trade("2023-01-06", "2023-01-09", net=220.0),
+    ]
+    m = compute_performance_metrics(
+        trades,
+        initial_capital=10_000.0,
+        risk_free_rate=rfr_simple,
+    )
+    curve = build_equity_curve_from_trades(trades, 10_000.0)
+    returns = curve.daily_returns()
+    mean_log = float(returns.mean())
+    annualized_log = mean_log * 252
+    annualized_vol = float(returns.std(ddof=1)) * math.sqrt(252)
+    expected_sharpe_log = (annualized_log - math.log1p(rfr_simple)) / annualized_vol
+    expected_sharpe_simple = (annualized_log - rfr_simple) / annualized_vol
+    assert m.sharpe_ratio == pytest.approx(round(expected_sharpe_log, 4), abs=1e-4)
+    # Sanity: at rfr=5% the two values differ enough to fail the wrong one.
+    assert abs(expected_sharpe_log - expected_sharpe_simple) > 1e-4
+
+
+def test_metrics_single_point_equity_curve_preserves_annualized_return():
+    # Same-day trade: span_start == span_end yields a one-weekday equity
+    # curve and an empty ``daily_returns`` array. Annualized return must
+    # still be derived from the realized total return rather than zeroed.
+    trades = [_mk_trade("2023-01-03", "2023-01-03", net=500.0)]
+    m = compute_performance_metrics(
+        trades,
+        initial_capital=10_000.0,
+        risk_free_rate=0.0,
+        start_date="2023-01-03",
+        end_date="2023-01-03",
+    )
+    assert m.total_return_pct == pytest.approx(5.0, abs=1e-3)
+    expected_annualized_pct = math.expm1(math.log1p(0.05) * 252) * 100
+    assert m.annualized_return_pct == pytest.approx(expected_annualized_pct, abs=0.01)
+    # Calmar should also be non-zero now (annual return > 0 / max_dd > 0
+    # would require a drawdown; with a single up-step there's none, so we
+    # only assert annualized_return_pct here).
+    assert m.annualized_return_pct > 0.0
+
+
+def test_metrics_handles_ruined_equity_curve_without_raising():
+    # A loss bigger than initial capital drives equity through zero —
+    # ``EquityCurve.daily_returns`` raises (log returns undefined), but
+    # ``compute_performance_metrics`` must catch and produce a safe no-data
+    # result so a single ruined fold doesn't abort the whole backtest /
+    # walk-forward run for upstream callers in ``trade_simulator`` and
+    # ``strategy_lab.orchestrator``.
+    trades = [_mk_trade("2023-01-02", "2023-01-03", net=-12_000.0)]
+    m = compute_performance_metrics(
+        trades,
+        initial_capital=10_000.0,
+        risk_free_rate=0.0,
+    )
+    # Realized loss is surfaced …
+    assert m.total_return_pct == pytest.approx(-120.0, abs=1e-3)
+    assert m.trade_count == 1
+    # … and risk metrics fall through to zeros (empty returns ⇒ no
+    # Sharpe / Sortino / Calmar / alpha to estimate).
+    assert m.annualized_return_pct == 0.0
+    assert m.sharpe_ratio == 0.0
+    assert m.sortino_ratio == 0.0
+    assert m.calmar_ratio == 0.0
+    assert m.alpha_pct is None
+
+
+def test_metrics_empty_equity_curve_does_not_annualize_total_return():
+    # Weekend-only span: ``_weekday_range`` drops every day so ``curve.equity``
+    # is empty even though the trade carries non-zero ``net_pnl``. The
+    # single-point fallback must NOT fire here — there are zero observations
+    # to anchor an annualization, so annualized return must stay 0.0.
+    trades = [
+        # Sat → Sun trade with realized PnL; both endpoints are weekend.
+        _mk_trade("2023-01-07", "2023-01-08", net=500.0)
+    ]
+    m = compute_performance_metrics(
+        trades,
+        initial_capital=10_000.0,
+        risk_free_rate=0.0,
+        start_date="2023-01-07",
+        end_date="2023-01-08",
+    )
+    # ``total_return_pct`` reflects the realized PnL …
+    assert m.total_return_pct == pytest.approx(5.0, abs=1e-3)
+    # … but annualization on zero observations is meaningless and stays 0.0.
+    assert m.annualized_return_pct == 0.0
+    assert m.sharpe_ratio == 0.0
+    assert m.calmar_ratio == 0.0
+
+
+def test_metrics_alpha_annualized_on_log_basis():
+    # ``_alpha_beta`` is fed log returns; alpha must therefore be annualized
+    # via ``expm1(alpha_daily * 252)``, not the legacy
+    # ``(1 + alpha_daily) ** 252 - 1`` simple-compounding form.
+    import numpy as _np
+
+    from investment_team.execution.metrics import _alpha_beta as _alpha_beta_helper
+
+    # Construct portfolio log returns = beta_true * benchmark + alpha_daily,
+    # so the regression recovers known parameters exactly.
+    rng = _np.random.default_rng(seed=0)
+    n = 60
+    bench = rng.normal(loc=0.0005, scale=0.01, size=n)
+    beta_true = 0.8
+    # 0.5% daily alpha → ~252% annualized; large enough that log vs simple
+    # compounding give visibly different annualized values.
+    alpha_daily_true = 0.005
+    port = beta_true * bench + alpha_daily_true
+
+    alpha_pct, beta, _ir = _alpha_beta_helper(port, bench, risk_free_daily=0.0)
+    expected_alpha_pct = round(math.expm1(alpha_daily_true * 252) * 100, 3)
+    simple_alpha_pct = round(((1 + alpha_daily_true) ** 252 - 1) * 100, 3)
+    assert beta == pytest.approx(beta_true, abs=1e-6)
+    assert alpha_pct == pytest.approx(expected_alpha_pct, abs=0.01)
+    # Sanity: simple-compounding form gives a materially different value at
+    # this alpha magnitude — ensure the test would have failed under the
+    # old ``(1 + alpha) ** 252 - 1`` code path.
+    assert abs(simple_alpha_pct - expected_alpha_pct) > 0.5

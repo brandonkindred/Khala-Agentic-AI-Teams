@@ -25,6 +25,8 @@ from datetime import date, timedelta
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 from .risk_free_rate import get_risk_free_rate
 
 if TYPE_CHECKING:  # pragma: no cover — avoids models ↔ execution import cycle
@@ -45,19 +47,23 @@ class EquityCurve:
     equity: List[float] = field(default_factory=list)
     initial_capital: float = 0.0
 
-    def daily_returns(self) -> List[float]:
-        """Simple arithmetic daily returns from the equity series."""
-        if len(self.equity) < 2:
-            return []
-        out: List[float] = []
-        for i in range(1, len(self.equity)):
-            prev = self.equity[i - 1]
-            cur = self.equity[i]
-            if prev <= 0:
-                out.append(0.0)
-            else:
-                out.append((cur - prev) / prev)
-        return out
+    def daily_returns(self) -> np.ndarray:
+        """Daily log returns from the equity series.
+
+        Non-positive equity (portfolio ruin) raises ``ValueError`` rather than
+        being silently masked — log returns are undefined there and any
+        downstream Sharpe/Sortino/vol on a ruined curve is meaningless. The
+        guard runs even for ``len < 2`` curves (e.g. a same-day wipeout
+        ``[-2000]``) so the contract holds for one-point series too.
+        """
+        arr = np.asarray(self.equity, dtype=np.float64)
+        if arr.size > 0 and np.any(arr <= 0):
+            raise ValueError(
+                "equity curve contains non-positive values; portfolio ruin is undefined"
+            )
+        if arr.size < 2:
+            return np.empty(0, dtype=np.float64)
+        return np.diff(np.log(arr))
 
 
 @dataclass
@@ -157,65 +163,64 @@ def build_equity_curve_from_trades(
 # ---------------------------------------------------------------------------
 
 
-def _std(xs: Sequence[float]) -> float:
-    n = len(xs)
-    if n < 2:
+def _std(xs: "np.ndarray | Sequence[float]") -> float:
+    arr = np.asarray(xs, dtype=np.float64)
+    if arr.size < 2:
         return 0.0
-    m = sum(xs) / n
-    var = sum((x - m) ** 2 for x in xs) / (n - 1)
-    return math.sqrt(var)
+    return float(np.std(arr, ddof=1))
 
 
-def _max_drawdown(equity: Sequence[float]) -> tuple[float, int]:
-    if not equity:
+def _max_drawdown(equity: "np.ndarray | Sequence[float]") -> tuple[float, int]:
+    arr = np.asarray(equity, dtype=np.float64)
+    if arr.size == 0:
         return 0.0, 0
-    peak = equity[0]
-    peak_idx = 0
-    max_dd = 0.0
-    max_dur = 0
-    for i, v in enumerate(equity):
-        if v > peak:
-            peak = v
-            peak_idx = i
-        if peak > 0:
-            dd = (peak - v) / peak
-            if dd > max_dd:
-                max_dd = dd
-                max_dur = i - peak_idx
-    return max_dd, max_dur
+    peaks = np.maximum.accumulate(arr)
+    safe_peaks = np.where(peaks > 0, peaks, 1.0)
+    dd = np.where(peaks > 0, (peaks - arr) / safe_peaks, 0.0)
+    trough_idx = int(np.argmax(dd))
+    if trough_idx == 0:
+        return float(dd[0]), 0
+    peak_idx = int(np.argmax(arr[: trough_idx + 1]))
+    return float(dd[trough_idx]), trough_idx - peak_idx
 
 
 def _alpha_beta(
-    portfolio_returns: Sequence[float],
-    benchmark_returns: Sequence[float],
+    portfolio_returns: "np.ndarray | Sequence[float]",
+    benchmark_returns: "np.ndarray | Sequence[float]",
     risk_free_daily: float,
 ) -> tuple[Optional[float], Optional[float], Optional[float]]:
     """Return ``(alpha_pct_annualized, beta, information_ratio)``.
 
     Regression: ``(Rp - Rf) = alpha + beta * (Rb - Rf) + eps`` on daily data.
     """
-    n = min(len(portfolio_returns), len(benchmark_returns))
+    pr_full = np.asarray(portfolio_returns, dtype=np.float64)
+    br_full = np.asarray(benchmark_returns, dtype=np.float64)
+    n = min(pr_full.size, br_full.size)
     if n < 10:
         return None, None, None
 
-    pr = [portfolio_returns[i] - risk_free_daily for i in range(n)]
-    br = [benchmark_returns[i] - risk_free_daily for i in range(n)]
+    pr = pr_full[:n] - risk_free_daily
+    br = br_full[:n] - risk_free_daily
 
-    mean_b = sum(br) / n
-    mean_p = sum(pr) / n
-    cov = sum((br[i] - mean_b) * (pr[i] - mean_p) for i in range(n)) / (n - 1)
-    var_b = sum((x - mean_b) ** 2 for x in br) / (n - 1)
-
+    var_b = float(np.var(br, ddof=1))
     if var_b <= 0:
         return None, None, None
 
+    cov = float(np.cov(br, pr, ddof=1)[0, 1])
     beta = cov / var_b
-    alpha_daily = mean_p - beta * mean_b
-    alpha_annual_pct = ((1 + alpha_daily) ** TRADING_DAYS_PER_YEAR - 1) * 100
+    alpha_daily = float(np.mean(pr) - beta * np.mean(br))
+    # Inputs are log returns, so annualize alpha on the same basis via expm1.
+    alpha_annual_pct = math.expm1(alpha_daily * TRADING_DAYS_PER_YEAR) * 100
 
-    active = [portfolio_returns[i] - benchmark_returns[i] for i in range(n)]
-    tracking = _std(active)
-    ir = (sum(active) / n) / tracking * math.sqrt(TRADING_DAYS_PER_YEAR) if tracking > 0 else None
+    # Active return uses the raw (pre-rfr-subtraction) series; rfr cancels in
+    # the diff so we recover ``portfolio_returns - benchmark_returns``.
+    active = pr_full[:n] - br_full[:n]
+    tracking = float(np.std(active, ddof=1)) if active.size >= 2 else 0.0
+    ir = (
+        float(np.mean(active) / tracking * math.sqrt(TRADING_DAYS_PER_YEAR))
+        if tracking > 0
+        else None
+    )
 
     return round(alpha_annual_pct, 3), round(beta, 4), (round(ir, 3) if ir is not None else None)
 
@@ -261,21 +266,43 @@ def compute_performance_metrics(
     curve = build_equity_curve_from_trades(
         trades, initial_capital, start_date=start_date, end_date=end_date
     )
-    returns = curve.daily_returns()
+    try:
+        returns = curve.daily_returns()
+    except ValueError:
+        # Equity curve crossed zero (portfolio ruin). Log returns are
+        # mathematically undefined there, but a single ruined fold should
+        # not abort the whole backtest / walk-forward run — callers in
+        # ``trading_service`` and ``strategy_lab`` don't catch this. Treat
+        # ruin as the no-data path: empty ``returns`` zeroes Sharpe /
+        # Sortino / Calmar / alpha while ``total_return_pct`` (computed
+        # below from ``total_pnl``) still surfaces the realized loss.
+        returns = np.empty(0, dtype=np.float64)
 
     total_pnl = sum(t.net_pnl for t in trades)
     total_return_frac = total_pnl / initial_capital if initial_capital > 0 else 0.0
     total_return_pct = round(total_return_frac * 100, 3)
 
-    # CAGR from the equity span.
-    if curve.dates:
-        span_days = max(1, (curve.dates[-1] - curve.dates[0]).days)
-        years = max(span_days / 365.25, 1 / 365.25)
-        if 1 + total_return_frac > 0:
-            annualized_return_frac = (1 + total_return_frac) ** (1 / years) - 1
-        else:
-            annualized_return_frac = -1.0
+    # Annualized log return: ``mean(log_returns) * 252`` reported as a simple
+    # rate via ``expm1``. Internally consistent with Sharpe (same numerator)
+    # and independent of calendar span — log returns are additive.
+    if returns.size > 0:
+        mean_log = float(np.mean(returns))
+        annualized_log_return = mean_log * TRADING_DAYS_PER_YEAR
+        annualized_return_frac = math.expm1(annualized_log_return)
+    elif len(curve.equity) == 1 and total_return_frac > -1.0 and total_return_frac != 0.0:
+        # Single-point equity curve (e.g. same-day trade or one-weekday span):
+        # ``daily_returns`` is empty but realized PnL exists. Treat the
+        # observed total return as a one-period log return and annualize, so
+        # the metric isn't silently zeroed.
+        #
+        # Restricted to ``len == 1`` rather than ``returns.size == 0`` to
+        # avoid annualizing from a fully empty curve (e.g. a weekend-only
+        # ``start_date``/``end_date`` window where ``_weekday_range`` drops
+        # every day) — that has zero observations to anchor an annualization.
+        annualized_log_return = math.log1p(total_return_frac) * TRADING_DAYS_PER_YEAR
+        annualized_return_frac = math.expm1(annualized_log_return)
     else:
+        annualized_log_return = 0.0
         annualized_return_frac = 0.0
     annualized_return_pct = round(annualized_return_frac * 100, 3)
 
@@ -284,16 +311,28 @@ def compute_performance_metrics(
     annualized_vol_frac = daily_vol * math.sqrt(TRADING_DAYS_PER_YEAR)
     annualized_vol_pct = round(annualized_vol_frac * 100, 3)
 
-    # Sharpe (excess-return / vol, annualized).
+    # Risk-free rate on log basis: the numerator is annualized log return,
+    # so the rfr term must also be log-basis to keep the Sharpe / Sortino
+    # subtraction in the same convention.
+    rfr_log = math.log1p(rfr)
+
+    # Sharpe (excess log return / vol, annualized).
     if annualized_vol_frac > 0:
-        sharpe = (annualized_return_frac - rfr) / annualized_vol_frac
+        sharpe = (annualized_log_return - rfr_log) / annualized_vol_frac
     else:
         sharpe = 0.0
 
-    # Sortino (downside deviation).
-    downside = [r for r in returns if r < 0]
-    dd_vol = _std(downside) * math.sqrt(TRADING_DAYS_PER_YEAR) if downside else 0.0
-    sortino = (annualized_return_frac - rfr) / dd_vol if dd_vol > 0 else 0.0
+    # Sortino (downside deviation, on log returns).
+    if returns.size > 0:
+        downside = returns[returns < 0]
+        dd_vol = (
+            float(np.std(downside, ddof=1)) * math.sqrt(TRADING_DAYS_PER_YEAR)
+            if downside.size >= 2
+            else 0.0
+        )
+    else:
+        dd_vol = 0.0
+    sortino = (annualized_log_return - rfr_log) / dd_vol if dd_vol > 0 else 0.0
 
     # Max drawdown & duration.
     max_dd_frac, max_dd_days = _max_drawdown(curve.equity)
@@ -320,7 +359,7 @@ def compute_performance_metrics(
         )
         if bench_returns is not None:
             alpha_pct, beta, info_ratio = _alpha_beta(
-                returns, bench_returns, risk_free_daily=rfr / TRADING_DAYS_PER_YEAR
+                returns, bench_returns, risk_free_daily=rfr_log / TRADING_DAYS_PER_YEAR
             )
 
     return PerformanceMetrics(
@@ -346,24 +385,20 @@ def _align_benchmark_returns(
     curve: EquityCurve,
     bench_dates: List[date],
     bench_equity: List[float],
-) -> Optional[List[float]]:
+) -> Optional[np.ndarray]:
     if len(bench_dates) != len(bench_equity) or len(curve.dates) < 2:
         return None
     by_date = dict(zip(bench_dates, bench_equity))
-    aligned: List[float] = []
+    aligned_vals: List[float] = []
     for d in curve.dates:
         val = by_date.get(d)
         if val is None:
             return None
-        aligned.append(val)
-    returns: List[float] = []
-    for i in range(1, len(aligned)):
-        prev = aligned[i - 1]
-        if prev <= 0:
-            returns.append(0.0)
-        else:
-            returns.append((aligned[i] - prev) / prev)
-    return returns
+        aligned_vals.append(val)
+    aligned = np.asarray(aligned_vals, dtype=np.float64)
+    if np.any(aligned <= 0):
+        return None
+    return np.diff(np.log(aligned))
 
 
 # ---------------------------------------------------------------------------
@@ -455,18 +490,18 @@ def compute_deflated_sharpe(
 
 
 def _annualized_sharpe_from_returns(
-    returns: Sequence[float],
+    returns: "Sequence[float] | np.ndarray",
     *,
     periods_per_year: int,
     rfr_annual: float,
 ) -> float:
-    if len(returns) < 2:
+    arr = np.asarray(returns, dtype=np.float64)
+    if arr.size < 2:
         return 0.0
-    daily_vol = _std(returns)
+    daily_vol = float(np.std(arr, ddof=1))
     if daily_vol <= 0:
         return 0.0
-    mean = sum(returns) / len(returns)
-    annual_return = mean * periods_per_year
+    annual_return = float(np.mean(arr)) * periods_per_year
     annual_vol = daily_vol * math.sqrt(periods_per_year)
     return (annual_return - rfr_annual) / annual_vol
 
@@ -517,6 +552,10 @@ def bootstrap_sharpe_ci(
 
     Deterministic under fixed ``seed``. Falls back to ``(0.0, 0.0)`` when the
     series is too short to bootstrap.
+
+    ``returns`` are expected to be log returns — consistent with
+    :meth:`EquityCurve.daily_returns` and the rest of the module — so the
+    annual rfr is converted to log basis before being subtracted.
     """
     n = len(returns)
     if n < 2 or n_resamples < 1:
@@ -528,7 +567,7 @@ def bootstrap_sharpe_ci(
     if block_size < 1:
         raise ValueError(f"block_size must be >= 1, got {block_size}")
 
-    rfr = get_risk_free_rate(override=risk_free_rate)
+    rfr = math.log1p(get_risk_free_rate(override=risk_free_rate))
     rng = random.Random(seed)
     sharpes: List[float] = []
     for _ in range(n_resamples):

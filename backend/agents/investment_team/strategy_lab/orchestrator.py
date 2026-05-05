@@ -12,6 +12,7 @@ Pipeline:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -1038,19 +1039,33 @@ class StrategyLabOrchestrator:
         start_date: str,
         end_date: str,
     ) -> List[float]:
-        """Daily simple returns from the equity curve implied by the trades."""
+        """Daily log returns from the equity curve implied by the trades.
+
+        Log basis matches :meth:`EquityCurve.daily_returns` and the rest of
+        the metrics module, so OOS-Sharpe / DSR / bootstrap CIs computed
+        downstream share the same return convention as the in-sample
+        ``compute_performance_metrics`` Sharpe.
+
+        If the equity curve crosses zero (portfolio ruin), the series is
+        returned **empty** rather than zero-padding the ruin step. Zeroing
+        a wipeout would convert it to a neutral day and let the OOS DSR /
+        Sharpe CI / moments report misleadingly low risk; an empty series
+        falls through every downstream consumer
+        (:func:`summarize_return_moments`, :func:`compute_deflated_sharpe`,
+        :func:`bootstrap_sharpe_ci`) as their well-defined "no data" path.
+        """
         curve = build_equity_curve_from_trades(
             trades, initial_capital, start_date=start_date, end_date=end_date
         )
         if len(curve.equity) < 2:
             return []
+        if any(v <= 0 for v in curve.equity):
+            # Ruin: invalidate the whole series. Any downstream Sharpe / DSR
+            # / CI on a curve that touched zero would be meaningless.
+            return []
         out: List[float] = []
         for i in range(1, len(curve.equity)):
-            prev = curve.equity[i - 1]
-            if prev <= 0:
-                out.append(0.0)
-            else:
-                out.append((curve.equity[i] - prev) / prev)
+            out.append(math.log(curve.equity[i] / curve.equity[i - 1]))
         return out
 
     def _evaluate_regimes(

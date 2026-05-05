@@ -36,3 +36,6 @@ opentelemetry-instrumentation-logging>=0.62b0,<1.0
 # pulled in transitively by shared_postgres.register_all_team_schemas walking
 # the registry into investment_team.market_data_cache.postgres.
 pyarrow>=15.0,<22.0
+# Investment team metrics engine (#429) — vectorized Sharpe/Sortino/max-DD
+# in investment_team.execution.metrics. Pin matches backend/requirements.txt.
+numpy>=2.4,<3.0
