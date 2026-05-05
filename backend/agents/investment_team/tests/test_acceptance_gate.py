@@ -108,7 +108,7 @@ def test_missing_fields_emit_single_incomplete_warning():
     assert not results[0].passed
     assert "missing" in results[0].details.lower()
     # Enumerates each missing field so the orchestrator can report precisely.
-    for field in ("deflated_sharpe", "oos_sharpe", "is_oos_degradation_pct", "oos_trade_count"):
+    for field in ("oos_sharpe", "is_oos_degradation_pct", "oos_trade_count"):
         assert field in results[0].details
 
 

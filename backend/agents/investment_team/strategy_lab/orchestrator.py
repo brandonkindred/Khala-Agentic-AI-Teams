@@ -162,15 +162,7 @@ class StrategyLabOrchestrator:
         all_gate_results: List[QualityGateResult] = []
         refinement_attempts: List[str] = []
         trades: List[TradeRecord] = []
-        metrics = BacktestResult(
-            total_return_pct=0,
-            annualized_return_pct=0,
-            volatility_pct=0,
-            sharpe_ratio=0,
-            max_drawdown_pct=0,
-            win_rate_pct=0,
-            profit_factor=0,
-        )
+        metrics = compute_metrics([], config.initial_capital, config.start_date, config.end_date)
         execution_succeeded = False
         market_data: Optional[Dict[str, List[OHLCVBar]]] = None
 

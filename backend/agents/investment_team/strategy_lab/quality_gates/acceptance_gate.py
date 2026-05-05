@@ -49,8 +49,6 @@ class AcceptanceGate:
         DSR itself is already deflated upstream.
         """
         missing: List[str] = []
-        if result.deflated_sharpe is None:
-            missing.append("deflated_sharpe")
         if result.oos_sharpe is None:
             missing.append("oos_sharpe")
         if result.is_oos_degradation_pct is None:

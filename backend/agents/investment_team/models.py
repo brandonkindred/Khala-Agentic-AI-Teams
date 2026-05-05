@@ -246,11 +246,6 @@ class BacktestConfig(BaseModel):
     rebalance_frequency: str = "monthly"
     transaction_cost_bps: float = Field(default=5.0, ge=0)
     slippage_bps: float = Field(default=2.0, ge=0)
-    # Phase 1: metrics engine selection + risk-free rate override.
-    # ``metrics_engine`` defaults to the new daily-equity-curve estimator.
-    # ``"legacy"`` routes through the inter-trade-return estimator used before
-    # the Phase 1 refactor — kept for one release to allow side-by-side diffs.
-    metrics_engine: str = Field(default="daily", pattern=r"^(daily|legacy)$")
     risk_free_rate: Optional[float] = Field(
         default=None,
         description=(
@@ -485,16 +480,13 @@ class BacktestResult(BaseModel):
     max_drawdown_pct: float
     win_rate_pct: float
     profit_factor: float
-    # Phase 1 — daily-equity-curve metrics. Optional for backwards compat with
-    # ``BacktestRecord`` rows persisted before the refactor landed.
-    sortino_ratio: Optional[float] = None
-    calmar_ratio: Optional[float] = None
-    max_drawdown_duration_days: Optional[int] = None
-    risk_free_rate: Optional[float] = None
+    sortino_ratio: float = 0.0
+    calmar_ratio: float = 0.0
+    max_drawdown_duration_days: int = 0
+    risk_free_rate: float = 0.0
     alpha_pct: Optional[float] = None
     beta: Optional[float] = None
     information_ratio: Optional[float] = None
-    metrics_engine: str = "legacy"
     # Phase 3: set when the drawdown circuit-breaker or a hard termination
     # condition (look-ahead, data error) short-circuited the run.  None
     # means the run completed through end-of-stream.
@@ -504,9 +496,8 @@ class BacktestResult(BaseModel):
     cost_stress_results: Optional[List[Dict[str, Any]]] = None
     reject_reason: Optional[str] = None
     execution_diagnostics: Optional[BacktestExecutionDiagnostics] = None
-    # Issue #247 — walk-forward + DSR diagnostics. All Optional so legacy
-    # single-window runs omit these fields entirely.
-    deflated_sharpe: Optional[float] = None
+    # Issue #247 — walk-forward + DSR diagnostics.
+    deflated_sharpe: float = 0.0
     sharpe_ci_low: Optional[float] = None
     sharpe_ci_high: Optional[float] = None
     is_sharpe: Optional[float] = None
@@ -531,6 +522,16 @@ class BacktestResult(BaseModel):
     # captured (e.g. fully external pre-fetched dicts that bypass the
     # cache).
     dataset_fingerprint: Optional[str] = None
+
+    @field_validator("sortino_ratio", "calmar_ratio", "risk_free_rate", "deflated_sharpe", mode="before")
+    @classmethod
+    def _coerce_float_none_to_zero(cls, v: object) -> object:
+        return 0.0 if v is None else v
+
+    @field_validator("max_drawdown_duration_days", mode="before")
+    @classmethod
+    def _coerce_int_none_to_zero(cls, v: object) -> object:
+        return 0 if v is None else v
 
 
 class TradeRecord(BaseModel):

@@ -5,9 +5,6 @@ asserts that the resulting metrics match a stored JSON snapshot.  Snapshots
 live next to this module under ``snapshots/`` and are written automatically
 the first time a test runs against a new reference output; updating a
 snapshot is a deliberate two-step act (delete the file, re-run).
-
-Each test snapshots **both** the Phase 1 daily metrics engine and the legacy
-engine so any accidental drift in either path fails CI.
 """
 
 from __future__ import annotations
@@ -20,7 +17,6 @@ from typing import Any, Dict, List
 import pytest
 
 from investment_team.models import BacktestConfig, StrategySpec, TradeRecord
-from investment_team.trade_simulator import compute_metrics
 from investment_team.trading_service.modes.backtest import run_backtest
 
 from .fixtures import DEFAULT_DAYS, golden_market_data
@@ -109,15 +105,6 @@ def _run(name: str, code: str) -> Dict[str, Any]:
     market_data = golden_market_data(n_days=DEFAULT_DAYS)
     result = run_backtest(strategy=spec, config=config, market_data=market_data)
 
-    daily = result.result.model_dump()
-    legacy_metrics = compute_metrics(
-        result.trades,
-        config.initial_capital,
-        config.start_date,
-        config.end_date,
-        metrics_engine="legacy",
-    )
-
     return {
         "config": {
             "start_date": config.start_date,
@@ -127,8 +114,7 @@ def _run(name: str, code: str) -> Dict[str, Any]:
             "bars_per_symbol": DEFAULT_DAYS,
         },
         "trades": _summarize_trades(result.trades),
-        "metrics_daily": daily,
-        "metrics_legacy": legacy_metrics.model_dump(),
+        "metrics_daily": result.result.model_dump(),
     }
 
 

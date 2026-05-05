@@ -2945,7 +2945,6 @@ def _run_live_paper_trading_background(
             initial_capital=request.initial_capital,
             transaction_cost_bps=tx_cost,
             slippage_bps=slip,
-            metrics_engine="legacy",
         )
         paper_cfg = PaperTradeConfig(
             symbols=symbols,

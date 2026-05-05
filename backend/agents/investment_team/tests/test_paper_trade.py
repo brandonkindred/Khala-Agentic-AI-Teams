@@ -203,7 +203,6 @@ def _btc_config() -> BacktestConfig:
         initial_capital=100_000.0,
         transaction_cost_bps=0.0,
         slippage_bps=0.0,
-        metrics_engine="legacy",
     )
 
 
