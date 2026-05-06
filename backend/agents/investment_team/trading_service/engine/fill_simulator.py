@@ -235,6 +235,17 @@ class FillSimulator:
                     )
                     (entry_fills if is_entry_side else exit_fills).append(rejected)
                     self.order_book.remove(po.order_id)
+                    events.append(
+                        FillDiagnosticEvent(
+                            kind="rejected",
+                            order_id=po.order_id,
+                            timestamp=bar.timestamp,
+                            symbol=req.symbol,
+                            side=req.side.value,
+                            order_type=req.order_type.value,
+                            reason=f"{req.tif.value}_no_trigger",
+                        )
+                    )
                     continue
                 # ``TWAP_N`` orders consume a slice on every elapsed bar,
                 # not only on bars where the execution model triggers a
@@ -312,6 +323,17 @@ class FillSimulator:
                     )
                     (entry_fills if is_entry_side else exit_fills).append(rejected)
                     self.order_book.remove(po.order_id)
+                    events.append(
+                        FillDiagnosticEvent(
+                            kind="rejected",
+                            order_id=po.order_id,
+                            timestamp=bar.timestamp,
+                            symbol=req.symbol,
+                            side=req.side.value,
+                            order_type=req.order_type.value,
+                            reason="fok_partial",
+                        )
+                    )
                     continue
 
             if is_partial_entry_continuation:

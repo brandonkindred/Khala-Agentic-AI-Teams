@@ -292,6 +292,64 @@ def test_insufficient_capital_emits_rejected_event() -> None:
     assert rejections[0].symbol == "BBB"
 
 
+def test_ioc_no_trigger_emits_rejected_event() -> None:
+    """An IOC order whose limit price never crosses on the next bar is
+    cancelled cancel-on-this-bar, with a ``ioc_no_trigger`` rejection event
+    so the zero-trade refinement loop can see the failure category."""
+    sim, order_book, _ = _make_simulator()
+    # IOC LIMIT at $50 (far below market) → ExecutionModel returns None
+    # because the limit price doesn't cross the next bar's price action.
+    # The IOC pre-empts DAY/GTC behaviour and rejects on this bar.
+    order_book.submit(
+        OrderRequest(
+            client_order_id="ioc-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=5,
+            order_type=OrderType.LIMIT,
+            limit_price=50.0,
+            tif=TimeInForce.IOC,
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+
+    outcome = sim.process_bar(_bar("2024-01-02", price=100.0))
+
+    rejections = [e for e in outcome.diagnostic_events if e.kind == "rejected"]
+    assert len(rejections) == 1
+    assert rejections[0].reason == "ioc_no_trigger"
+
+
+def test_fok_partial_emits_rejected_event() -> None:
+    """A FOK order that can only partially fill (participation cap clipped
+    below 100%) is rejected outright with a ``fok_partial`` event."""
+    sim, order_book, _ = _make_simulator(realistic=True)
+    # Same shape as the participation-cap math at the top of test_partial_fills:
+    # qty=2_000 against a low-volume bar drives qty_fraction=0.5; FOK rejects.
+    order_book.submit(
+        OrderRequest(
+            client_order_id="fok-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=2_000,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.FOK,
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+
+    outcome = sim.process_bar(_bar("2024-01-02", price=100.0, volume=10_000))
+
+    rejections = [e for e in outcome.diagnostic_events if e.kind == "rejected"]
+    assert len(rejections) == 1
+    assert rejections[0].reason == "fok_partial"
+    # The REJECTED Fill is still emitted on the entry side.
+    assert len(outcome.entry_fills) == 1
+    assert outcome.entry_fills[0].fill_kind.value == "rejected"
+
+
 def test_same_side_addon_emits_rejected_event() -> None:
     """Submitting another long against an already-open long position is
     silently dropped at the order book; the event surfaces the suppression."""
