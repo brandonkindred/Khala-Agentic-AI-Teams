@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from ...models import BacktestConfig, StrategySpec, TradeRecord
+from ...models import BacktestConfig, BacktestExecutionDiagnostics, StrategySpec, TradeRecord
 from .backtest import run_backtest
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ class StrategyRunResult:
     stderr: str = ""
     execution_time_seconds: float = 0.0
     error_type: Optional[str] = None
+    execution_diagnostics: Optional[BacktestExecutionDiagnostics] = None
 
 
 # Keys here match the legacy sandbox ``error_type`` taxonomy so the
@@ -86,12 +87,19 @@ def run_strategy_code(
         run = run_backtest(strategy=strategy, config=config, market_data=market_data)
     except ValueError as exc:
         # Typically raised when strategy_code is missing or the market_data
-        # arg is ambiguous — surface as a generic runtime error.
+        # arg is ambiguous — surface as a generic runtime error. No service
+        # result exists at this point, so synthesize a minimal diagnostics
+        # envelope tagged ``UNKNOWN_ZERO_TRADE_PATH`` so the refinement loop
+        # still sees that this was a startup-time failure.
         return StrategyRunResult(
             success=False,
             error_type=_RUNTIME_ERROR_TYPE,
             stderr=str(exc)[:2000],
             execution_time_seconds=time.monotonic() - start,
+            execution_diagnostics=BacktestExecutionDiagnostics(
+                zero_trade_category="UNKNOWN_ZERO_TRADE_PATH",
+                summary=f"Strategy startup failure before backtest could run: {str(exc)[:500]}",
+            ),
         )
 
     elapsed = time.monotonic() - start
@@ -104,6 +112,7 @@ def run_strategy_code(
             error_type=_LOOKAHEAD_ERROR_TYPE,
             stderr=(service_result.error or "")[:2000],
             execution_time_seconds=elapsed,
+            execution_diagnostics=service_result.execution_diagnostics,
         )
     if service_result.error:
         # Any surfaced service error — initialisation failure, mid-run
@@ -120,12 +129,14 @@ def run_strategy_code(
             error_type=_RUNTIME_ERROR_TYPE,
             stderr=service_result.error[:2000],
             execution_time_seconds=elapsed,
+            execution_diagnostics=service_result.execution_diagnostics,
         )
 
     return StrategyRunResult(
         success=True,
         trades=run.trades,
         execution_time_seconds=elapsed,
+        execution_diagnostics=service_result.execution_diagnostics,
     )
 
 
