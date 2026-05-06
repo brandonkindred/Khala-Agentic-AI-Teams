@@ -20,7 +20,13 @@ import textwrap
 from typing import List
 
 from investment_team.market_data_service import OHLCVBar, compute_adv_from_bars
-from investment_team.models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
+from investment_team.models import (
+    BacktestConfig,
+    BacktestExecutionDiagnostics,
+    BacktestResult,
+    StrategySpec,
+    TradeRecord,
+)
 from investment_team.strategy_lab.quality_gates.backtest_anomaly import (
     BacktestAnomalyDetector,
 )
@@ -354,6 +360,84 @@ def test_cost_stress_disabled_leaves_results_none() -> None:
         market_data={"AAA": _bars(20)},
     )
     assert result.result.cost_stress_results is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #411 — execution diagnostics envelope on baseline BacktestResult
+# ---------------------------------------------------------------------------
+
+
+_NO_ORDER_CODE = textwrap.dedent('''\
+    """Never submits an order — exercises the no-orders-emitted diagnostics path."""
+    from contract import Strategy
+
+
+    class NoOrders(Strategy):
+        def on_bar(self, ctx, bar):
+            return
+''')
+
+
+def test_baseline_attaches_execution_diagnostics() -> None:
+    """A normal round-trip backtest surfaces ``execution_diagnostics`` on the result."""
+    result = run_backtest(
+        strategy=_spec(_ROUND_TRIP_CODE, "rt-diag"),
+        config=_config(),
+        market_data={"AAA": _bars(20)},
+    )
+    diag = result.result.execution_diagnostics
+    assert diag is not None
+    assert isinstance(diag, BacktestExecutionDiagnostics)
+    assert diag.bars_processed == result.service_result.bars_processed
+    assert diag.bars_processed > 0
+    assert diag.orders_emitted >= diag.entries_filled
+
+
+def test_cost_stress_rows_stay_compact_without_diagnostics() -> None:
+    """Cost-stress replay rows must keep their compact ``CostStressRow`` shape (#411)."""
+    result = run_backtest(
+        strategy=_spec(_ROUND_TRIP_CODE, "stress-compact"),
+        config=_config(
+            transaction_cost_bps=1.0,
+            slippage_bps=1.0,
+            cost_stress=True,
+        ),
+        market_data={"AAA": _bars(20)},
+    )
+    rows = result.result.cost_stress_results
+    assert rows is not None
+    expected_keys = {
+        "multiplier",
+        "sharpe_ratio",
+        "annualized_return_pct",
+        "max_drawdown_pct",
+        "trade_count",
+    }
+    for r in rows:
+        assert set(r.keys()) == expected_keys
+    # Baseline result still carries diagnostics alongside the compact rows.
+    assert result.result.execution_diagnostics is not None
+
+
+def test_zero_trade_baseline_carries_execution_diagnostics() -> None:
+    """A strategy that never emits an order still surfaces a populated envelope.
+
+    Downstream sub-issues (#413, #414) consume ``zero_trade_category`` and
+    the order-lifecycle counters off this envelope, so the zero-trade path
+    must not leave ``execution_diagnostics`` as ``None`` on the persisted
+    ``BacktestResult``.
+    """
+    result = run_backtest(
+        strategy=_spec(_NO_ORDER_CODE, "no-orders"),
+        config=_config(),
+        market_data={"AAA": _bars(20)},
+    )
+    diag = result.result.execution_diagnostics
+    assert diag is not None
+    assert diag.bars_processed > 0
+    assert diag.orders_emitted == 0
+    assert diag.closed_trades == 0
+    assert diag.zero_trade_category == "NO_ORDERS_EMITTED"
 
 
 # ---------------------------------------------------------------------------

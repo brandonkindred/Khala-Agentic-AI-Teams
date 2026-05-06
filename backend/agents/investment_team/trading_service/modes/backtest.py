@@ -198,6 +198,14 @@ def run_backtest(
     if service_result.terminated_reason:
         update["terminated_reason"] = service_result.terminated_reason
 
+    # Issue #411 — surface the TradingService's execution diagnostics envelope
+    # on the baseline BacktestResult so Strategy Lab's anomaly detector and
+    # refinement prompts (#413, #414) can reason about zero-trade categories,
+    # order lifecycle counters, and rejection reasons without reaching into
+    # the raw service_result. Cost-stress replay rows stay compact — the
+    # CostStressRow shape is intentionally not extended.
+    update["execution_diagnostics"] = service_result.execution_diagnostics
+
     # Phase 4: signals-per-bar is computed off the bars the strategy
     # subprocess actually received — the TradingService counts non-warmup
     # bars as it runs, so both the legacy pre-fetched path and the
