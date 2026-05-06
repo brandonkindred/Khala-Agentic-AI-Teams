@@ -68,7 +68,203 @@
     },
     "dataset_fingerprint": "0208fd94d618909ae3d24532db28f9795def93386fb41804d816c9fa94357c30",
     "deflated_sharpe": 0.0,
-    "execution_diagnostics": null,
+    "execution_diagnostics": {
+      "bars_processed": 504,
+      "closed_trades": 9,
+      "entries_filled": 10,
+      "exits_emitted": 9,
+      "last_order_events": [
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-10"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-10"
+        },
+        {
+          "detail": "",
+          "event_type": "unfilled",
+          "order_type": "market",
+          "reason": "day_expired",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-11"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-11"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-11"
+        },
+        {
+          "detail": "",
+          "event_type": "unfilled",
+          "order_type": "market",
+          "reason": "day_expired",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-12"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-12"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-12"
+        },
+        {
+          "detail": "",
+          "event_type": "unfilled",
+          "order_type": "market",
+          "reason": "day_expired",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-13"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-13"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-13"
+        },
+        {
+          "detail": "",
+          "event_type": "unfilled",
+          "order_type": "market",
+          "reason": "day_expired",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-16"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-16"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-16"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-12-16"
+        },
+        {
+          "detail": "",
+          "event_type": "unfilled",
+          "order_type": "market",
+          "reason": "day_expired",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-17"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-12-16"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-17"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "AAA",
+          "timestamp": "2024-12-17"
+        },
+        {
+          "detail": "",
+          "event_type": "entry_filled",
+          "order_type": "market",
+          "reason": "full",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-12-17"
+        }
+      ],
+      "open_positions_at_end": [],
+      "orders_accepted": 140,
+      "orders_emitted": 140,
+      "orders_rejected": 0,
+      "orders_rejection_reasons": {},
+      "orders_unfilled": 120,
+      "summary": "Backtest closed 9 trade(s) across 504 post-warmup bar(s).",
+      "warmup_orders_dropped": 0,
+      "zero_trade_category": null
+    },
     "fold_results": null,
     "information_ratio": null,
     "is_oos_degradation_pct": null,

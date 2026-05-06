@@ -68,7 +68,203 @@
     },
     "dataset_fingerprint": "0208fd94d618909ae3d24532db28f9795def93386fb41804d816c9fa94357c30",
     "deflated_sharpe": 0.0,
-    "execution_diagnostics": null,
+    "execution_diagnostics": {
+      "bars_processed": 504,
+      "closed_trades": 5,
+      "entries_filled": 5,
+      "exits_emitted": 5,
+      "last_order_events": [
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-05-06"
+        },
+        {
+          "detail": "",
+          "event_type": "exit_filled",
+          "order_type": "market",
+          "reason": "full",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-05-07"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-06-03"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-06-03"
+        },
+        {
+          "detail": "",
+          "event_type": "entry_filled",
+          "order_type": "market",
+          "reason": "full",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-06-04"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-07-01"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-07-01"
+        },
+        {
+          "detail": "",
+          "event_type": "exit_filled",
+          "order_type": "market",
+          "reason": "full",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-07-02"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-07-29"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-07-29"
+        },
+        {
+          "detail": "",
+          "event_type": "entry_filled",
+          "order_type": "market",
+          "reason": "full",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-07-30"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-08-26"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-08-26"
+        },
+        {
+          "detail": "",
+          "event_type": "exit_filled",
+          "order_type": "market",
+          "reason": "full",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-08-27"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-09-23"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-09-23"
+        },
+        {
+          "detail": "",
+          "event_type": "entry_filled",
+          "order_type": "market",
+          "reason": "full",
+          "side": "long",
+          "symbol": "BBB",
+          "timestamp": "2024-09-24"
+        },
+        {
+          "detail": "",
+          "event_type": "emitted",
+          "order_type": "market",
+          "reason": "",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-10-21"
+        },
+        {
+          "detail": "",
+          "event_type": "accepted",
+          "order_type": "market",
+          "reason": "",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-10-21"
+        },
+        {
+          "detail": "",
+          "event_type": "exit_filled",
+          "order_type": "market",
+          "reason": "full",
+          "side": "short",
+          "symbol": "BBB",
+          "timestamp": "2024-10-22"
+        }
+      ],
+      "open_positions_at_end": [],
+      "orders_accepted": 10,
+      "orders_emitted": 10,
+      "orders_rejected": 0,
+      "orders_rejection_reasons": {},
+      "orders_unfilled": 0,
+      "summary": "Backtest closed 5 trade(s) across 504 post-warmup bar(s).",
+      "warmup_orders_dropped": 0,
+      "zero_trade_category": null
+    },
     "fold_results": null,
     "information_ratio": null,
     "is_oos_degradation_pct": null,
