@@ -31,6 +31,23 @@ async def _lifespan(application: FastAPI):
         register_team_schemas(USER_AGENT_FOUNDER_POSTGRES_SCHEMA)
     except Exception:
         logger.exception("user_agent_founder postgres schema registration failed")
+    # Backstop for local dev (`uvicorn user_agent_founder.api.main:app`):
+    # the team_service entrypoint normally starts the Temporal worker
+    # via TEAM_TEMPORAL_WORKER_MODULE before uvicorn accepts requests, but
+    # when running this app standalone there is no entrypoint. Calling the
+    # idempotent start helper here ensures the worker (and its connected
+    # client) is up either way. No-op when TEMPORAL_ADDRESS is unset.
+    try:
+        from user_agent_founder.temporal.worker import (
+            start_user_agent_founder_temporal_worker_thread,
+        )
+
+        start_user_agent_founder_temporal_worker_thread()
+    except Exception:
+        logger.warning(
+            "user_agent_founder Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
     yield
     try:
         from shared_postgres import close_pool
