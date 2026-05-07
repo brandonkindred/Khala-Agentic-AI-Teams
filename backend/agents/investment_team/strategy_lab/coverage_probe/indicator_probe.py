@@ -960,6 +960,22 @@ def _column_from(node: ast.expr) -> Optional[str]:
         if isinstance(slc, ast.Constant) and isinstance(slc.value, str):
             if slc.value in _OHLCV_COLUMNS:
                 return slc.value
+    # ``[b.volume for b in history]`` — strategies routinely pass a
+    # history comprehension into a single-series helper. Recognise the
+    # element's OHLCV attribute when the comprehension target name
+    # matches the element's value (i.e. ``b`` in both places); we don't
+    # need to validate ``history`` itself.
+    if isinstance(node, ast.ListComp) and len(node.generators) == 1:
+        elt = node.elt
+        target = node.generators[0].target
+        if (
+            isinstance(elt, ast.Attribute)
+            and elt.attr in _OHLCV_COLUMNS
+            and isinstance(elt.value, ast.Name)
+            and isinstance(target, ast.Name)
+            and elt.value.id == target.id
+        ):
+            return elt.attr
     return None
 
 
@@ -1010,6 +1026,10 @@ def _indicator_call(
     if func_name in _SERIES_INDICATORS:
         helper = _SERIES_INDICATORS[func_name]
         column = _series_arg_column(node)
+        if column is None:
+            # Explicit but unrecognised input (e.g. a custom series).
+            # Drop rather than substitute close — see _series_arg_column.
+            return None
         # Series helpers: rsi(series, period), sma(series, period), ...
         period = _resolve_period_arg(node, name_periods, positional_index=1)
 
@@ -1097,6 +1117,8 @@ def _tuple_indicator_subscript(
 
     if sig_kind == "series":
         column = _series_arg_column(call)
+        if column is None:
+            return None
 
         def _eval_tuple_series(df: pd.DataFrame) -> pd.Series:
             if column not in df.columns:
@@ -1169,18 +1191,35 @@ def _resolve_known_kwargs(
 def _collect_name_evaluators(
     on_bar: ast.AST, name_periods: Dict[str, int]
 ) -> Dict[str, Callable[[pd.DataFrame], pd.Series]]:
-    """Bind local ``Name = <indicator_call>`` assignments inside ``on_bar``.
+    """Bind local ``Name = <expr>`` assignments inside ``on_bar`` whose RHS
+    resolves to a data-dependent operand.
 
     Walks ``on_bar``'s body for simple ``name = <expr>`` and
-    ``name: T = <expr>`` assignments where the RHS resolves to an
-    indicator evaluator we can call. Used so that
+    ``name: T = <expr>`` assignments and compiles each RHS through the
+    same ``_build_operand`` pipeline used for predicate operands. This
+    covers two canonical generated-strategy shapes:
 
-        sma_var = sma(close, 200)
-        if bar.close > sma_var:
-            ...
+    1. Bare indicator call ::
 
-    (the canonical generated-strategy shape) actually reaches the
-    coverage check rather than getting dropped.
+           sma_var = sma(close, 200)
+           if bar.close > sma_var:
+               ...
+
+    2. Derived threshold (binop with a literal) ::
+
+           threshold = sma(close, 5) * 1.02
+           if close > threshold:
+               ...
+
+    Without (2), a refactor that pulls the constant out of the
+    comparison into a Name binding silently dropped the entire
+    subcondition and the report degenerated to UNKNOWN_LOW_COVERAGE.
+
+    Bindings are accumulated progressively so a chain like
+    ``a = sma(close, 5); b = a * 1.02; if x > b:`` resolves the second
+    binding through the first. Source order isn't formally guaranteed
+    by ``ast.walk`` but is stable for the simple, top-level assignment
+    chains generated strategies actually produce.
     """
     bindings: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {}
     for node in ast.walk(on_bar):
@@ -1194,15 +1233,15 @@ def _collect_name_evaluators(
             value = node.value
         else:
             continue
-        evaluator = _indicator_call(value, name_periods) if value is not None else None
-        if evaluator is None:
+        if value is None:
+            continue
+        operand = _build_operand(value, name_periods, bindings)
+        if operand is None or not operand.data_dependent:
             continue
         for target in targets:
             if isinstance(target, ast.Name):
-                bindings.setdefault(target.id, evaluator)
+                bindings.setdefault(target.id, operand.fn)
     return bindings
-
-    return None
 
 
 def _func_name(func: ast.expr) -> Optional[str]:
@@ -1213,17 +1252,20 @@ def _func_name(func: ast.expr) -> Optional[str]:
     return None
 
 
-def _series_arg_column(call: ast.Call) -> str:
+def _series_arg_column(call: ast.Call) -> Optional[str]:
     """Pick the source column for a single-series indicator call.
 
-    Defaults to ``close`` when the strategy passes something we can't
-    pin to an OHLCV column (e.g. ``rsi(self.history)``).
+    A bare call like ``sma()`` falls back to ``close`` (rare, but
+    harmless: no other column is implied). When the strategy passes an
+    *explicit* argument that we can't pin to an OHLCV column —
+    ``rsi(self.history)``, ``sma(custom_series)``, etc. — return
+    ``None`` so the caller drops the indicator entirely. Silently
+    substituting ``close`` would mis-evaluate volume/OHLC filters and
+    produce false COVERAGE_OK reports.
     """
-    if call.args:
-        col = _column_from(call.args[0])
-        if col is not None:
-            return col
-    return "close"
+    if not call.args:
+        return "close"
+    return _column_from(call.args[0])
 
 
 def _resolve_period_arg(

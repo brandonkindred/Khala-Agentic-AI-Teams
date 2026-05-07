@@ -491,6 +491,97 @@ def test_contradictory_same_predicate_symbol_gates_drop_group() -> None:
     assert report.subconditions == []
 
 
+def test_indicator_with_history_listcomp_input_uses_correct_column() -> None:
+    """``sma([b.volume for b in history], 5)`` must compute over the
+    volume column, not silently fall back to close. With flat
+    ``volume=1000`` and ``close=100`` the predicate
+    ``volume > vol_avg * 1.5`` is structurally false; the probe must
+    flag INDICATOR_FILTER_TOO_RESTRICTIVE rather than COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                vol_avg = sma([b.volume for b in history], 5)
+                if volume > vol_avg * 1.5:
+                    pass
+        """
+    )
+    df = _flat_ohlcv(n=30)  # flat volume=1_000_000
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    # Flat data: sma(volume) == volume, so volume > sma(volume)*1.5 is
+    # never true. If the probe had defaulted to close it would have
+    # computed sma(close)*1.5 ≈ 150 and reported COVERAGE_OK because
+    # volume (1_000_000) is greater than that.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_indicator_with_unrecognised_explicit_input_is_dropped() -> None:
+    """``rsi(self.history)`` with an opaque input must be dropped, not
+    silently substituted with close. Otherwise the probe would compute
+    coverage against the wrong series and a real blocker could become
+    COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if rsi(self.history) < 25:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # The single subcondition is unrecognised → no recognised
+    # subconditions → UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert report.subconditions == []
+
+
+def test_derived_threshold_assign_is_bound() -> None:
+    """``threshold = sma(close, 5) * 1.02`` must bind ``threshold`` to
+    the BinOp evaluator so the later comparison ``close > threshold``
+    reaches the coverage check. Without the BinOp-of-indicator binding
+    the Name lookup fails and the comparison is dropped.
+    """
+    code_named = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                threshold = sma(close, 5) * 1.02
+                if close > threshold:
+                    pass
+        """
+    )
+    code_inline = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 5) * 1.02:
+                    pass
+        """
+    )
+    df = _flat_ohlcv(n=50)
+    df.loc[df.index[25:], "close"] = 105.0  # half the bars above the 1.02 band
+
+    named = run_indicator_probe(strategy_code=code_named, market_data={"AAPL": df})
+    inline = run_indicator_probe(strategy_code=code_inline, market_data={"AAPL": df})
+
+    # The named form must produce the same coverage outcome as the
+    # inline form. Without the fix the named form would have returned
+    # UNKNOWN_LOW_COVERAGE because ``threshold`` would never have been
+    # bound.
+    assert named.coverage_category is inline.coverage_category
+    assert len(named.subconditions) == 1
+    assert len(inline.subconditions) == 1
+    assert named.subconditions[0].hit_count == inline.subconditions[0].hit_count
+    assert named.subconditions[0].hit_count > 0
+
+
 def test_atr_positional_period_is_resolved() -> None:
     """``atr(high, low, close, N)`` puts the period at args[3], not args[1].
 
