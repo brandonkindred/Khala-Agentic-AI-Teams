@@ -690,6 +690,7 @@ services:
     container_name: khala-user-agent-founder-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
