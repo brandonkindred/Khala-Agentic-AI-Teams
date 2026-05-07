@@ -82,6 +82,21 @@ SAMPLE_CONSISTENCY_JSON = json.dumps(
 
 
 @pytest.fixture(autouse=True)
+def _patched_market_research_job_client(monkeypatch, fake_job_client):
+    """Route the team's job_store ``_client`` factory through the in-memory fake.
+
+    Lets ``test_api.py`` exercise the FastAPI app end-to-end without requiring
+    the real job service or Postgres. Also clears the module-level singleton
+    cache so a real client cached at import time can't leak in.
+    """
+    from market_research_team.shared import job_store as js
+
+    monkeypatch.setattr(js, "_client_instance", None, raising=False)
+    monkeypatch.setattr(js, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
+
+
+@pytest.fixture(autouse=True)
 def _mock_strands(monkeypatch):
     """Patch Strands agent construction and graph invocation for all tests.
 

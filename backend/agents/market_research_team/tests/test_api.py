@@ -1,7 +1,8 @@
 """API tests for the Market Research team — async-only job flow.
 
-Hits the team API which calls the real job service.  Marked integration
-pending follow-up to mock the team's ``_client`` factory.
+Exercises the team API against the in-memory ``fake_job_client`` fixture
+(autouse-patched in ``tests/conftest.py``), so no real job service or
+Postgres is required.
 """
 
 from __future__ import annotations
@@ -15,8 +16,6 @@ from fastapi.testclient import TestClient
 
 from market_research_team.api import main as api_main
 from market_research_team.api.main import app
-
-pytestmark = [pytest.mark.integration]
 
 client = TestClient(app)
 
