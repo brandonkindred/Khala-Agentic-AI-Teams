@@ -517,6 +517,12 @@ class CoverageReport(BaseModel):
     likely_blockers: List[LikelyBlocker] = Field(default_factory=list)
 
 
+class RuleIndex(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    rules: dict[str, str] = Field(default_factory=dict)
+
+
 class BacktestResult(BaseModel):
     total_return_pct: float
     annualized_return_pct: float
