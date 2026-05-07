@@ -804,6 +804,36 @@ def test_bool_call_on_compare_delegates_to_compare_subcond() -> None:
     assert report.subconditions[0].hit_count > 0
 
 
+def test_cached_compare_entry_predicate_binds_through_bool() -> None:
+    """``_entry = close > sma(close, 5)`` followed by ``if pos is None
+    and bool(_entry):`` is the documented hand-written shape that caches
+    a comparison rule into a local. The probe must bind ``_entry`` to
+    the comparison's evaluator so ``bool(_entry)`` resolves and the
+    probe diagnoses the cached rule rather than reporting
+    UNKNOWN_LOW_COVERAGE.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                _entry = close > sma(close, 5)
+                pos = ctx.position(bar.symbol)
+                if pos is None and bool(_entry):
+                    pass
+        """
+    )
+    df = _flat_ohlcv(n=50)
+    df.loc[df.index[25:], "close"] = 105.0  # rising step → close > sma half the bars
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert len(report.subconditions) == 1
+    sc = report.subconditions[0]
+    # The label is the bool(_entry) wrapper; the underlying comparison
+    # evaluator must run, so hits should be > 0 on this fixture.
+    assert sc.hit_count > 0
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

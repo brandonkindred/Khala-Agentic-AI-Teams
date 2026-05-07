@@ -1235,13 +1235,53 @@ def _collect_name_evaluators(
             continue
         if value is None:
             continue
-        operand = _build_operand(value, name_periods, bindings)
-        if operand is None or not operand.data_dependent:
+        evaluator = _resolve_assign_evaluator(value, name_periods, bindings)
+        if evaluator is None:
             continue
         for target in targets:
             if isinstance(target, ast.Name):
-                bindings.setdefault(target.id, operand.fn)
+                bindings.setdefault(target.id, evaluator)
     return bindings
+
+
+def _resolve_assign_evaluator(
+    value: ast.expr,
+    name_periods: Dict[str, int],
+    bindings: Dict[str, Callable[[pd.DataFrame], pd.Series]],
+) -> Optional[Callable[[pd.DataFrame], pd.Series]]:
+    """Compile an assignment RHS into a ``df -> Series`` evaluator.
+
+    Handles three flavours, in order:
+
+    1. **Data-dependent operand expression** (indicator call, indicator
+       BinOp, column reference) via :func:`_build_operand` — covers
+       ``threshold = sma(close, 5) * 1.02``.
+    2. **Cached comparison** (``_entry = close > sma(close, 5)``) — the
+       boolean mask becomes the evaluator so a downstream ``bool(_entry)``
+       in :func:`_build_truthy_subcond` resolves to the original
+       comparison's coverage.
+    3. **Cached truthy expression** (``_entry = bool(close > 0)``) —
+       same as (2) after unwrapping the ``bool(...)``.
+    """
+    operand = _build_operand(value, name_periods, bindings)
+    if operand is not None and operand.data_dependent:
+        return operand.fn
+
+    inner = value
+    if (
+        isinstance(inner, ast.Call)
+        and isinstance(inner.func, ast.Name)
+        and inner.func.id == "bool"
+        and len(inner.args) == 1
+        and not inner.keywords
+    ):
+        inner = inner.args[0]
+
+    if isinstance(inner, ast.Compare):
+        sub = _build_subcond(inner, name_periods, bindings)
+        if sub is not None:
+            return sub.evaluate
+    return None
 
 
 def _func_name(func: ast.expr) -> Optional[str]:
