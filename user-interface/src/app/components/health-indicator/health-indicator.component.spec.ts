@@ -34,4 +34,12 @@ describe('HealthIndicatorComponent', () => {
     c.ngOnInit();
     expect(c.status).toBe('error');
   });
+
+  it('should treat status "healthy" as ok (agent provisioning convention)', () => {
+    const f = TestBed.createComponent(HealthIndicatorComponent);
+    const c = f.componentInstance;
+    c.healthCheck = () => of({ status: 'healthy' });
+    c.ngOnInit();
+    expect(c.status).toBe('ok');
+  });
 });

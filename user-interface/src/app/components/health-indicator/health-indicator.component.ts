@@ -28,7 +28,10 @@ export class HealthIndicatorComponent implements OnInit {
     if (this.healthCheck) {
       this.healthCheck()
         .pipe(
-          map((r) => (r?.status === 'ok' ? 'ok' : 'error')),
+          map((r) => {
+            const s = (r?.status ?? '').toLowerCase();
+            return s === 'ok' || s === 'healthy' ? 'ok' : 'error';
+          }),
           catchError(() => of('error'))
         )
         .subscribe((s) => {
