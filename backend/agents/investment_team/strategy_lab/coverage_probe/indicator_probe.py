@@ -707,6 +707,24 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 or_compound = _build_compound_or_subcond(term, name_periods, name_evaluators)
                 if or_compound is not None:
                     own_subs.append(or_compound)
+                    # If the OR is fully symbol-gated (every leg restricted
+                    # via ``bar.symbol == "X"``), the OR-compound's
+                    # ``target_symbols`` is the union of those gates.
+                    # Propagate that allowlist to the GROUP level so
+                    # sibling AND-conjuncts are evaluated only against
+                    # the gated symbols. Without this, a predicate like
+                    # ``(bar.symbol == "AAPL" or bar.symbol == "MSFT")
+                    # and close > 100`` lets the sibling ``close > 100``
+                    # count hits from unrelated symbols (GOOG); the
+                    # report then flags ``CONJUNCTION_NEVER_TRUE``
+                    # instead of the actionable
+                    # ``INDICATOR_FILTER_TOO_RESTRICTIVE`` on the
+                    # gated symbols.
+                    if or_compound.target_symbols is not None:
+                        if own_symbols is None:
+                            own_symbols = set(or_compound.target_symbols)
+                        else:
+                            own_symbols &= or_compound.target_symbols
                 continue
             # Truthiness term — ``bool(x)`` or a bare ``Name`` referencing
             # a precomputed indicator. Required for the ideation/codegen

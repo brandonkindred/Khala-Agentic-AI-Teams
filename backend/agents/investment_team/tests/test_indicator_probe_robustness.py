@@ -1832,6 +1832,67 @@ def test_or_with_unrestricted_leg_treats_warmup_as_universal() -> None:
     assert report.coverage_category is not CoverageCategory.INSUFFICIENT_BARS
 
 
+def test_or_allowlist_propagates_to_and_group() -> None:
+    """A nested OR allowlist must restrict the entire AND group.
+
+    Predicate:
+        ``(bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100``
+
+    Universe: AAPL/MSFT close=50 (never satisfy ``close > 100``),
+    GOOG close=200 (would satisfy ``close > 100`` but is not in the
+    allowlist).
+
+    Without propagation the group's ``target_symbols`` stays ``None``
+    so the sibling ``close > 100`` subcond's hit count includes GOOG
+    bars. Both legs then have non-zero hits but their conjunction is
+    empty → the probe flags ``CONJUNCTION_NEVER_TRUE``, hiding the
+    actionable ``INDICATOR_FILTER_TOO_RESTRICTIVE`` on the gated
+    symbols. With propagation the AND group is restricted to
+    ``{AAPL, MSFT}``, ``close > 100`` evaluates only against their
+    bars (zero hits), and the probe surfaces the indicator filter as
+    a blocker.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={
+            "AAPL": _df(50.0),
+            "MSFT": _df(50.0),
+            "GOOG": _df(200.0),
+        },
+    )
+
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    # The actionable blocker is the ``close > 100`` zero-hit on the
+    # allowlisted symbols, not a conjunction issue.
+    assert report.likely_blockers
+    blocker_reasons = {b.reason for b in report.likely_blockers}
+    assert "indicator_filter_zero_hits" in blocker_reasons
+    assert "conjunction_never_true" not in blocker_reasons
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
