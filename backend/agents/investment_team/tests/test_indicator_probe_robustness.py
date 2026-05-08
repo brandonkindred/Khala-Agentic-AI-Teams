@@ -2128,6 +2128,96 @@ def test_nested_or_with_unknown_leg_suppresses_and_zero_hit_blocker() -> None:
     assert all(b.reason != "indicator_filter_zero_hits" for b in report.likely_blockers)
 
 
+def test_or_group_with_ancestor_disjoint_from_tail_flags_conjunction() -> None:
+    """An OR predicate nested under an AND ancestor must flag
+    ``CONJUNCTION_NEVER_TRUE`` when the ancestor's mask is disjoint
+    from the OR-tail's union, even though every leg fires
+    individually.
+
+    Strategy::
+
+        if close > 100:
+            if close < 50 or volume > 0:
+                pass
+
+    Universe: bars with close=200 have volume=0; bars with close=20
+    have volume=10000. Each individual subcond fires:
+    - ``close > 100`` fires on close=200 bars.
+    - ``close < 50`` fires on close=20 bars.
+    - ``volume > 0`` fires on close=20 bars (volume=10000).
+
+    Without the OR-aware conjunction check the probe would skip the
+    classifier (group is OR-with-ancestors) and return ``COVERAGE_OK``.
+    The actual predicate ``close>100 AND (close<50 OR volume>0)`` is
+    empty because the close>100 bars have volume=0 and don't satisfy
+    close<50 either, so the report must classify as
+    ``CONJUNCTION_NEVER_TRUE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100:
+                    if close < 50 or volume > 0:
+                        pass
+        """
+    )
+    n = 20
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.array([200.0] * 10 + [20.0] * 10)
+    volume = np.array([0.0] * 10 + [10_000.0] * 10)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": volume,
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.CONJUNCTION_NEVER_TRUE
+    assert report.likely_blockers
+    assert report.likely_blockers[0].reason == "conjunction_never_true"
+
+
+def test_or_group_with_ancestor_overlap_returns_coverage_ok() -> None:
+    """Sanity: when the ancestor and at least one OR-tail leg fire on
+    overlapping bars, the predicate is reachable and the probe must
+    classify as COVERAGE_OK — the new OR-aware conjunction check
+    must not over-flag."""
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100:
+                    if close < 50 or volume > 0:
+                        pass
+        """
+    )
+    n = 20
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # All bars have close=200 (close>100) AND volume>0, so the OR-tail
+    # fires on the same bars as the ancestor.
+    close = np.full(n, 200.0)
+    volume = np.full(n, 10_000.0)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": volume,
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

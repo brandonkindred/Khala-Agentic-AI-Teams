@@ -369,9 +369,34 @@ def _aggregate(
                 group_masks.append(mask)
                 global_idx += 1
             if group_masks:
-                conjunction_mask = group_masks[0]
-                for m in group_masks[1:]:
-                    conjunction_mask = conjunction_mask & m
+                # For AND groups the conjunction is the bar-wise AND
+                # of every leg's mask. For OR groups with AND-required
+                # ancestors plus an OR tail, the actual predicate is
+                # ``ancestors AND (or_tail_1 OR or_tail_2 OR ...)`` —
+                # taking the AND of every group mask would require
+                # ALL OR legs to fire, which is too restrictive.
+                # Combine ancestors-AND with or-tail-OR so the
+                # conjunction count reflects the real predicate and
+                # downstream classification can flag a never-true
+                # nested OR predicate.
+                if group.combinator == "or" and group.ancestor_count > 0:
+                    ancestor_masks = group_masks[: group.ancestor_count]
+                    or_tail_masks = group_masks[group.ancestor_count :]
+                    if ancestor_masks:
+                        conjunction_mask = ancestor_masks[0]
+                        for m in ancestor_masks[1:]:
+                            conjunction_mask = conjunction_mask & m
+                    else:
+                        conjunction_mask = pd.Series(True, index=df.index, dtype=bool)
+                    if or_tail_masks:
+                        or_mask = or_tail_masks[0]
+                        for m in or_tail_masks[1:]:
+                            or_mask = or_mask | m
+                        conjunction_mask = conjunction_mask & or_mask
+                else:
+                    conjunction_mask = group_masks[0]
+                    for m in group_masks[1:]:
+                        conjunction_mask = conjunction_mask & m
                 group_conjunction_hits[group_idx] += int(conjunction_mask.sum())
                 group_evaluated[group_idx] = True
                 symbol_contributed = True
@@ -526,24 +551,51 @@ def _aggregate(
             **base_kwargs,
         )
 
-    # Find any single AND ``if`` predicate whose legs all fire
-    # individually but whose bar-wise AND is empty. We only flag
-    # CONJUNCTION_NEVER_TRUE for a real per-predicate contradiction —
-    # never across unrelated ``if`` branches, and never on OR groups
-    # (their bar-wise AND is meaningless under disjunction semantics).
+    # Find any single ``if`` predicate whose component masks all fire
+    # individually but whose true conjunction is empty. We flag
+    # CONJUNCTION_NEVER_TRUE for two shapes:
+    #
+    # - **AND groups** with 2+ legs, each individually firing, but
+    #   their bar-wise AND is zero — a real per-predicate
+    #   contradiction.
+    # - **OR groups** with one or more AND-required ancestors PLUS at
+    #   least one OR-tail leg, where each ancestor and at least one
+    #   OR-tail leg individually fire but the actual predicate
+    #   ``ancestors AND (or_tail_1 OR or_tail_2 OR ...)`` is empty.
+    #   Without this an ancestor-and-(disjoint OR tail) predicate is
+    #   silently classified as ``COVERAGE_OK``.
+    #
+    # We never flag this for plain OR groups (no ancestors): their
+    # bar-wise AND is meaningless under disjunction semantics, and
+    # the OR-tail-all-zero rule already covers their unreachability.
     empty_conj_group: Optional[_Group] = None
     base = 0
     for group_idx, group in enumerate(groups):
         legs = len(group.subconds)
-        if (
-            group.combinator == "and"
-            and legs >= 2
-            and group_evaluated[group_idx]
-            and group_conjunction_hits[group_idx] == 0
-            and all(sub_hit_counts[base + k] > 0 for k in range(legs))
-        ):
-            empty_conj_group = group
-            break
+        if not group_evaluated[group_idx] or group_conjunction_hits[group_idx] != 0:
+            base += legs
+            continue
+        if any(group.subconds[k].has_unknown_leg for k in range(legs)):
+            # Unknown alternative present — can't prove the predicate
+            # is unreachable. Suppress the blocker (mirrors the OR
+            # zero-hit suppression elsewhere).
+            base += legs
+            continue
+        if group.combinator == "and":
+            if legs >= 2 and all(sub_hit_counts[base + k] > 0 for k in range(legs)):
+                empty_conj_group = group
+                break
+        else:  # "or"
+            if group.ancestor_count >= 1 and legs > group.ancestor_count:
+                ancestor_hits_ok = all(
+                    sub_hit_counts[base + k] > 0 for k in range(group.ancestor_count)
+                )
+                or_tail_any_fire = any(
+                    sub_hit_counts[base + k] > 0 for k in range(group.ancestor_count, legs)
+                )
+                if ancestor_hits_ok and or_tail_any_fire:
+                    empty_conj_group = group
+                    break
         base += legs
 
     if empty_conj_group is not None:
