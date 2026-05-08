@@ -14,8 +14,10 @@ on the no-attachment path and two follow-ups from the PR review:
    sized to the cumulative position (default backtest policy).
 8. Partial bracket-exit fill requeues the surviving leg (after OCO cancel
    removes the sibling) so residual position exposure stays protected.
-9. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
-   gated until #390 — runtime materialization lands with Step 8.
+9. Continuation rejection of a partial-fill bracket parent (risk-gate or
+   capital check) still materializes legs for the open position.
+10. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
+    gated until #390 — runtime materialization lands with Step 8.
 """
 
 from __future__ import annotations
@@ -473,6 +475,84 @@ def test_partial_bracket_exit_requeues_remainder_after_oco_cancel() -> None:
     assert len(bar4.closed_trades) == 1
     assert "AAA" not in portfolio.positions
     assert order_book.all_pending() == []
+
+
+# ---------------------------------------------------------------------------
+# Bracket parent abandoned mid-flight (continuation fails capital / risk
+# check after a partial entry fill) must still get protective legs for the
+# already-opened position (Codex P1 follow-up on commit 2b390a5)
+# ---------------------------------------------------------------------------
+
+
+def test_continuation_risk_gate_rejection_materializes_brackets_for_open_position() -> None:
+    """A 200-share bracket that fills 100 on bar 2, then has the
+    continuation rejected by the risk gate on bar 3 (post-extend notional
+    exceeds ``max_symbol_concentration_pct`` of equity), must still
+    materialize protective legs sized to the 100 shares actually open —
+    otherwise the residual position runs unprotected."""
+    portfolio = Portfolio(initial_capital=12_000.0)
+    order_book = OrderBook()
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        # ``max_symbol_concentration_pct`` is what gates ``can_enter`` per
+        # symbol; raise it to 100 so the 83% first slice is admitted but the
+        # 167% post-extend continuation breaches the cap.
+        risk_filter=RiskFilter(
+            RiskLimits(
+                max_position_pct=100,
+                max_gross_leverage=10.0,
+                max_symbol_concentration_pct=100,
+            )
+        ),
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        bar_safety=BarSafetyAssertion(),
+        execution_model=RealisticExecutionModel(participation_cap=0.10),
+    )
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=200.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            attached_stop_loss=StopAttachment(stop_price=95.0),
+            attached_take_profit=LimitAttachment(limit_price=110.0),
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=12_000.0,
+        expect_brackets=True,
+    )
+
+    # Bar 2: low ADV (1_000 * 100 = 100_000 dollar volume; 200 * 100 = 20_000
+    # notional → raw 0.20 → cap clips to 0.5 → 100 shares fill, 100 requeued).
+    # First slice's 10_000 notional is 83% of 12_000 equity → under the 100%
+    # ``max_symbol_concentration_pct`` cap → admitted.
+    sim.process_bar(_bar("2024-01-02", open_price=100.0, volume=1_000.0))
+    assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
+    assert parent.order_id in order_book, "parent should still be pending after partial fill"
+    assert order_book.children_of(parent.order_id) == []
+
+    # Bar 3: ample liquidity but the post-extend notional (200 * 100 = 20_000)
+    # is 167% of equity (~12_000) → above the 100% ``max_symbol_concentration_pct``
+    # cap → the risk gate rejects the continuation slice. The fix materializes
+    # brackets sized to the 100-share open position before returning.
+    sim.process_bar(_bar("2024-01-03", open_price=100.0, volume=10_000_000.0))
+
+    assert parent.order_id not in order_book
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 2, "abandoned bracket parent must still spawn protective legs"
+    sl = next(c for c in children if c.request.order_type == OrderType.STOP)
+    tp = next(c for c in children if c.request.order_type == OrderType.LIMIT)
+    assert sl.request.qty == pytest.approx(100.0, rel=1e-9)
+    assert tp.request.qty == pytest.approx(100.0, rel=1e-9)
+    assert sl.armed is True and tp.armed is True
+    assert sl.submitted_at == "2024-01-03"
+    assert tp.submitted_at == "2024-01-03"
+    # Position is still open — the 100 shares from bar 2 weren't unwound.
+    assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------

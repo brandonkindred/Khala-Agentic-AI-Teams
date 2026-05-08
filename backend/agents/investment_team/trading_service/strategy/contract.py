@@ -172,6 +172,31 @@ class OrderRequest(BaseModel):
                 "execution engine; see #390 (Trading 5/5 Step 8) for trailing-stop "
                 "runtime support"
             )
+        # ``parent_order_id`` / ``oco_group_id`` are engine-internal: the
+        # bracket materializer in ``FillSimulator`` calls
+        # ``OrderBook.submit_attached`` which clones the request with these
+        # fields cleared before re-running ``validate_prices``, so this
+        # gate doesn't block the engine path. It DOES block strategy code
+        # that tries to set them via ``StrategyContext.submit_order`` — a
+        # bracket child must be created via the engine, not by the strategy
+        # itself, so trapping here keeps the request stream well-formed
+        # and routes a programming error through the structured
+        # ``unsupported_feature`` rejection rather than crashing the run
+        # at ``OrderBook.submit``'s defense-in-depth ``ValueError``.
+        if self.parent_order_id is not None:
+            raise UnsupportedOrderFeatureError(
+                "parent_order_id is engine-internal; bracket children are "
+                "created by the engine via OrderBook.submit_attached. Strategies "
+                "must leave parent_order_id unset and rely on attached_stop_loss "
+                "/ attached_take_profit instead."
+            )
+        if self.oco_group_id is not None:
+            raise UnsupportedOrderFeatureError(
+                "oco_group_id is engine-internal; bracket children are "
+                "created by the engine via OrderBook.submit_attached. Strategies "
+                "must leave oco_group_id unset and rely on attached_stop_loss "
+                "/ attached_take_profit instead."
+            )
         # Shape-consistency checks. Most are currently unreachable because
         # the gates above fire first, but they remain in place so that when
         # each gate is lifted by its corresponding step, the consistency

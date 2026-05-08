@@ -669,6 +669,7 @@ class FillSimulator:
             # from ``OrderBook``'s eligible-parent set and break any later
             # ``submit_attached`` call against this parent.
             self.order_book.remove(po.order_id, was_filled=True)
+            self._maybe_materialize_brackets_on_abandon(po=po, bar=bar)
             return None, f"risk_gate:{gate.reason}"
 
         # Capital check against the *additional* notional only — the existing
@@ -685,6 +686,7 @@ class FillSimulator:
             # parent's eligible-parent registration since the first slice
             # already filled.
             self.order_book.remove(po.order_id, was_filled=True)
+            self._maybe_materialize_brackets_on_abandon(po=po, bar=bar)
             return None, "insufficient_capital"
 
         pos = self.portfolio.extend(req.symbol, filled_qty, fill_price, ref_price)
@@ -1164,6 +1166,32 @@ class FillSimulator:
     # ------------------------------------------------------------------
     # Bracket / OCO materialization (#389)
     # ------------------------------------------------------------------
+
+    def _maybe_materialize_brackets_on_abandon(
+        self,
+        *,
+        po: PendingOrder,
+        bar: Bar,
+    ) -> None:
+        """Materialize protective legs when ``_continue_entry`` abandons an
+        already-filled bracket parent (risk-gate or insufficient-capital
+        rejection of a continuation slice).
+
+        These rejection paths return early without going through
+        ``_handle_entry_remainder``, so the post-handler materializer block
+        in ``_continue_entry`` doesn't fire — but the parent has been
+        ``remove(was_filled=True)``-ed and a position is open. Without
+        this hook the residual position runs unprotected (no SL, no TP).
+        Sized to the existing position's cumulative entry-filled qty so
+        the legs cover everything that was actually opened.
+        """
+        req = po.request
+        if req.attached_stop_loss is None and req.attached_take_profit is None:
+            return
+        pos = self.portfolio.positions.get(req.symbol)
+        if pos is None:
+            return
+        self._materialize_bracket_children(po=po, bar=bar, filled_qty=pos.original_qty)
 
     def _materialize_bracket_children(
         self,

@@ -56,9 +56,9 @@ def test_gates_raise_unsupported_order_feature_subclass():
 def test_attachments_validate_post_step_7():
     """Bracket attachments (``attached_stop_loss`` / ``attached_take_profit``)
     are runtime-supported as of #389; ``validate_prices`` must accept them
-    without raising. The mutual-exclusion check
-    (``test_attachments_and_parent_order_id_are_mutually_exclusive``) is now
-    the live invariant."""
+    without raising. (``parent_order_id`` / ``oco_group_id`` remain rejected
+    on the strategy path — see ``test_parent_order_id_is_engine_internal``.)
+    """
     _base(attached_stop_loss=StopAttachment(stop_price=95.0)).validate_prices()
     _base(attached_take_profit=LimitAttachment(limit_price=110.0)).validate_prices()
     _base(
@@ -67,31 +67,25 @@ def test_attachments_validate_post_step_7():
     ).validate_prices()
 
 
-def test_parent_order_id_and_oco_group_id_validate_post_step_7():
-    """``parent_order_id`` / ``oco_group_id`` are engine-internal — set by
-    ``OrderBook.submit_attached`` on bracket children. ``validate_prices``
-    no longer rejects them outright; the gateway-level rejection
-    (top-level ``OrderBook.submit`` refuses to accept them) is exercised
-    in ``test_order_book``."""
-    _base(parent_order_id="parent-123").validate_prices()
-    _base(oco_group_id="oco-1").validate_prices()
-    _base(parent_order_id="parent-123", oco_group_id="oco-1").validate_prices()
+def test_parent_order_id_is_engine_internal():
+    """``parent_order_id`` is set by ``OrderBook.submit_attached`` when the
+    engine materializes a bracket child; strategies must NOT supply it.
+    ``submit_attached`` re-runs ``validate_prices`` on a clone with the
+    field cleared, so this gate doesn't block the engine path while
+    keeping strategy-side requests well-formed (otherwise a strategy
+    that passed it would crash the run at ``OrderBook.submit``'s
+    defense-in-depth ``ValueError`` rather than producing a structured
+    ``unsupported_feature`` rejection)."""
+    req = _base(parent_order_id="parent-123")
+    with pytest.raises(UnsupportedOrderFeatureError, match="engine-internal"):
+        req.validate_prices()
 
 
-def test_attachments_and_parent_order_id_are_mutually_exclusive():
-    """Attachments may only be set on entry-creating orders. A bracket
-    child (``parent_order_id`` set) carrying further attachments would
-    imply a multi-level bracket tree, which the API does not support."""
-    with pytest.raises(ValueError, match="entry-creating orders"):
-        _base(
-            parent_order_id="parent-123",
-            attached_stop_loss=StopAttachment(stop_price=95.0),
-        ).validate_prices()
-    with pytest.raises(ValueError, match="entry-creating orders"):
-        _base(
-            parent_order_id="parent-123",
-            attached_take_profit=LimitAttachment(limit_price=110.0),
-        ).validate_prices()
+def test_oco_group_id_is_engine_internal():
+    """Same as ``parent_order_id`` — set by ``OrderBook.submit_attached``."""
+    req = _base(oco_group_id="oco-1")
+    with pytest.raises(UnsupportedOrderFeatureError, match="engine-internal"):
+        req.validate_prices()
 
 
 def test_default_market_order_still_validates():
