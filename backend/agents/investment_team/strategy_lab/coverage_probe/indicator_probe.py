@@ -2490,17 +2490,20 @@ def _tuple_indicator_subscript(
 
         return _eval_tuple_series
 
+    # ``sig_kind == "hlc"`` (stochastic): honour explicit positional
+    # series inputs the same way the non-tuple HLC path does. Without
+    # this, ``stochastic(high, high, close, 3)[0]`` (or any synthetic
+    # series) was silently evaluated against the default
+    # high/low/close columns — measuring a different indicator than
+    # the runtime.
+    high_in = _positional_series_input(call, 0, "high", name_evaluators)
+    low_in = _positional_series_input(call, 1, "low", name_evaluators)
+    close_in = _positional_series_input(call, 2, "close", name_evaluators)
+    if high_in is None or low_in is None or close_in is None:
+        return None
+
     def _eval_tuple_hlc(df: pd.DataFrame) -> pd.Series:
-        for col in ("high", "low", "close"):
-            if col not in df.columns:
-                return pd.Series(float("nan"), index=df.index)
-        return helper(
-            df["high"].astype(float),
-            df["low"].astype(float),
-            df["close"].astype(float),
-            *extra_pos,
-            **extra_kwargs,
-        )[idx]
+        return helper(high_in(df), low_in(df), close_in(df), *extra_pos, **extra_kwargs)[idx]
 
     return _eval_tuple_hlc
 

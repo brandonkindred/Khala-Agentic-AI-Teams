@@ -3432,6 +3432,56 @@ def test_vacant_guard_clause_with_real_entry_before_still_classifies() -> None:
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
 
 
+def test_stochastic_explicit_unrecognised_input_drops_indicator() -> None:
+    """A stochastic call whose first three positional args include an
+    unrecognised series (e.g. a synthetic local) must be declined —
+    the tuple-indicator HLC path shouldn't silently substitute the
+    default columns the way the non-tuple HLC path was already
+    refusing to.
+
+    Strategy:
+        ``synth = self.compute_synth_high()
+          if stochastic(synth, low, close, 3)[0] > 0:``
+
+    With the fix the synthetic series can't be resolved, ``stochastic``
+    is declined, and no subcondition is recognised.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                synth = self.compute_synth_high()
+                if stochastic(synth, low, close, 3)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_stochastic_with_recognised_explicit_columns_still_works() -> None:
+    """Sanity: ``stochastic(high, low, close, 3)[0]`` (the standard
+    call) still resolves and produces a recognised subcondition.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if stochastic(high, low, close, 3)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
