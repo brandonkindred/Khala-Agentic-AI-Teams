@@ -2404,13 +2404,17 @@ def _resolve_series_input(
     call: ast.Call,
     name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
 ) -> Optional[Callable[[pd.DataFrame], pd.Series]]:
-    """Resolve the first positional arg of a series-indicator call to a
-    ``df -> Series`` callable.
+    """Resolve the series-indicator call's input to a ``df -> Series`` callable.
 
-    Three resolution paths in order:
+    Resolution paths in order:
 
-    1. **Bare call** (``sma()``) — defaults to the close column. Rare in
-       practice but harmless since no other column is implied.
+    1. **Positional or ``series=`` / ``data=`` kwarg** — recognise the
+       same set of expression shapes (OHLCV column references and
+       bound local names) regardless of how the strategy passed the
+       input. Strategies routinely use the kwarg form
+       (``sma(series=volume, period=20)``); without this, ``call.args``
+       is empty and we'd fall through to the bare-call default
+       (``close``), reporting a volume-based filter against prices.
     2. **OHLCV column reference** — ``close``, ``bar.volume``,
        ``df['close']``, or ``[b.X for b in history]`` — pinned via
        :func:`_column_from`.
@@ -2419,14 +2423,29 @@ def _resolve_series_input(
        :func:`_collect_name_evaluators` already understood) and then
        passed the local into the indicator, look up the binding and use
        its callable directly.
+    4. **Bare call** (``sma()``) — defaults to the close column. Rare
+       in practice but harmless since no other column is implied.
 
     Returns ``None`` when an explicit argument can't be resolved by any
     of those paths — the caller then drops the indicator rather than
     silently substituting ``close``, which would mis-evaluate volume /
     OHLC filters and produce false ``COVERAGE_OK`` reports.
     """
-    if not call.args:
+    arg0: Optional[ast.expr] = None
+    if call.args:
+        arg0 = call.args[0]
+    else:
+        # Kwarg-only form: look for a recognised series keyword. Both
+        # ``series=`` and ``data=`` are common in indicator helpers.
+        for kw in call.keywords:
+            if kw.arg in {"series", "data"}:
+                arg0 = kw.value
+                break
 
+    if arg0 is None:
+        # Bare call ``sma()`` with no positional or recognised series
+        # kwarg — default to the close column. Harmless since no other
+        # column is implied.
         def _default_close(df: pd.DataFrame) -> pd.Series:
             if "close" in df.columns:
                 return df["close"].astype(float)
@@ -2434,7 +2453,6 @@ def _resolve_series_input(
 
         return _default_close
 
-    arg0 = call.args[0]
     column = _column_from(arg0)
     if column is not None:
 
