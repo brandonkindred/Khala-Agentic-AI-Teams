@@ -719,11 +719,28 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         own_subs: List[_Subcond] = []
         for leg in test.values:
             if isinstance(leg, ast.Compare):
-                # Symbol gates inside an OR are degenerate — each leg
-                # would constrain a different symbol, but the OR makes
-                # them alternatives. Skip the symbol-gate fast path here
-                # and let _build_subcond run normally so the leg shows
-                # up as a real coverage row.
+                # Standalone ``bar.symbol == "X"`` legs are symbol
+                # allowlists: the leg is true exactly on bars from "X".
+                # Without this branch ``_build_subcond`` rejects the gate
+                # (no data-dependent operand), the leg is dropped, and a
+                # predicate like ``bar.symbol == "AAPL" or close > 100``
+                # collapses to just ``close > 100`` with disjunction
+                # semantics — if ``close > 100`` has zero hits the probe
+                # falsely flags ``INDICATOR_FILTER_TOO_RESTRICTIVE`` even
+                # though every AAPL bar satisfies the predicate. Mirror
+                # the nested-OR helper: emit an always-true mask scoped
+                # by the leg's symbol so the aggregator counts AAPL bars
+                # as a firing leg.
+                sym = _symbol_gate(leg)
+                if sym is not None:
+                    own_subs.append(
+                        _Subcond(
+                            label=_format_label(leg),
+                            evaluate=_always_true,
+                            target_symbols=frozenset({sym}),
+                        )
+                    )
+                    continue
                 sub = _build_subcond(leg, name_periods, name_evaluators)
                 if sub is not None:
                     own_subs.append(sub)

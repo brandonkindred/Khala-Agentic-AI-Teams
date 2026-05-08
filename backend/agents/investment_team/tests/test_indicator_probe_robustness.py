@@ -1675,6 +1675,53 @@ def test_reassignment_to_scalar_clears_stale_indicator_binding() -> None:
     assert report.subconditions[0].hit_count == 0
 
 
+def test_top_level_or_preserves_standalone_symbol_gate() -> None:
+    """A top-level OR predicate with a standalone ``bar.symbol == "X"``
+    leg must be treated as a firing leg on bars from X. Without this
+    fix ``_build_subcond`` drops the gate, the OR collapses to its
+    other legs, and a zero-hit price leg falsely flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` even though every AAPL bar
+    satisfies the predicate.
+
+    Strategy:
+        ``if bar.symbol == "AAPL" or close > 100:``
+
+    Universe: AAPL with close=50 (never > 100). The ``close > 100``
+    leg has zero hits but the ``bar.symbol == "AAPL"`` leg fires on
+    every AAPL bar — the OR is satisfied so the report must classify
+    as ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" or close > 100:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 50.0),
+            "high": np.full(n, 51.0),
+            "low": np.full(n, 49.0),
+            "close": np.full(n, 50.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    # Both legs should surface as coverage rows; the symbol-gate leg
+    # fires on every AAPL bar and ``close > 100`` is the zero-hit row.
+    assert len(report.subconditions) == 2
+    labels = [sc.label for sc in report.subconditions]
+    assert any("bar.symbol" in lbl for lbl in labels)
+    assert any("close > 100" in lbl for lbl in labels)
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
