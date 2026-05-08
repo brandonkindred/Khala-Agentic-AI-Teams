@@ -690,14 +690,15 @@ services:
     container_name: khala-user-agent-founder-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
       TEAM_MODULE: user_agent_founder.api.main
       TEAM_NAME: user_agent_founder
       TEAM_PORT: "8109"
-      TEAM_TEMPORAL_WORKER_MODULE: ""
-      TEAM_TEMPORAL_WORKER_FUNC: ""
+      TEAM_TEMPORAL_WORKER_MODULE: user_agent_founder.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_user_agent_founder_temporal_worker_thread
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
     ports: ["8109:8109"]
