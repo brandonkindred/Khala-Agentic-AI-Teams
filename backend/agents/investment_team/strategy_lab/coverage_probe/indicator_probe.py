@@ -161,22 +161,36 @@ def run_indicator_probe(
     """
     symbols_checked = sum(1 for df in market_data.values() if isinstance(df, pd.DataFrame))
     bars_checked = sum(len(df) for df in market_data.values() if isinstance(df, pd.DataFrame))
+    # Warmup is a per-symbol time-series property: a 150-period SMA on
+    # a 100-bar DataFrame is all NaN regardless of how many other
+    # symbols are present. Compare against the longest single symbol's
+    # bar count so a multi-symbol universe with no individually
+    # warm-enough series correctly classifies as INSUFFICIENT_BARS
+    # rather than letting the all-NaN indicators silently flow through
+    # to a false INDICATOR_FILTER_TOO_RESTRICTIVE.
+    max_per_symbol_bars = max(
+        (len(df) for df in market_data.values() if isinstance(df, pd.DataFrame)),
+        default=0,
+    )
     base_kwargs = {
         "symbols_checked": symbols_checked,
         "bars_checked": bars_checked,
         "warmup_bars_required": int(max(0, warmup_bars_required)),
     }
 
-    if warmup_bars_required > 0 and bars_checked < warmup_bars_required:
+    if warmup_bars_required > 0 and max_per_symbol_bars < warmup_bars_required:
         return CoverageReport(
             coverage_category=CoverageCategory.INSUFFICIENT_BARS,
             summary=(
-                f"insufficient bars: {bars_checked} available, {warmup_bars_required} required"
+                f"insufficient per-symbol history: longest series has "
+                f"{max_per_symbol_bars} bars, {warmup_bars_required} required"
             ),
             likely_blockers=[
                 LikelyBlocker(
                     reason="insufficient_bars",
-                    evidence=f"bars_checked={bars_checked} < warmup={warmup_bars_required}",
+                    evidence=(
+                        f"max_per_symbol_bars={max_per_symbol_bars} < warmup={warmup_bars_required}"
+                    ),
                 )
             ],
             **base_kwargs,
@@ -619,6 +633,17 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 if sub is not None:
                     own_subs.append(sub)
                 continue
+            if isinstance(leg, ast.BoolOp) and isinstance(leg.op, ast.And):
+                # Compound OR leg, e.g. ``(close > 100 and volume > 0)``
+                # in ``(A and B) or (C and D)``. Each conjunct is built
+                # individually and the leg's evaluator is the bar-wise
+                # AND of all inner masks — that compound mask is what
+                # the disjunction needs to test. Drops cleanly to None
+                # when no inner term is recognisable.
+                compound = _build_compound_and_subcond(leg, name_periods, name_evaluators)
+                if compound is not None:
+                    own_subs.append(compound)
+                continue
             truthy = _build_truthy_subcond(leg, name_periods, name_evaluators)
             if truthy is not None:
                 own_subs.append(truthy)
@@ -1046,6 +1071,70 @@ def _build_truthy_subcond(
         return s.fillna(0).astype(bool)
 
     return _Subcond(label=label, evaluate=_eval)
+
+
+def _build_compound_and_subcond(
+    leg: ast.BoolOp,
+    name_periods: Dict[str, int],
+    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
+) -> Optional[_Subcond]:
+    """Build a single subcond for an ``and``-conjunction inside an OR leg.
+
+    For predicates like ``(close > 100 and volume > 0) or (rsi(close)
+    < 30 and volume > 0)`` each OR leg is an ``ast.BoolOp(And, ...)``
+    rather than an ``ast.Compare``. The disjunction's truthfulness on a
+    given bar depends on the bar-wise AND of each leg's inner
+    conjuncts, so we synthesise one ``_Subcond`` whose evaluator runs
+    the inner subconds and ANDs their masks together.
+
+    Returns ``None`` if no inner term is recognisable (so the OR leg is
+    simply skipped, matching how unrecognised top-level legs are
+    handled).
+    """
+    inner: List[_Subcond] = []
+    for term in _flatten_top_terms(leg):
+        if isinstance(term, ast.Compare):
+            sub = _build_subcond(term, name_periods, name_evaluators)
+        else:
+            sub = _build_truthy_subcond(term, name_periods, name_evaluators)
+        if sub is not None:
+            inner.append(sub)
+    if not inner:
+        return None
+    if len(inner) == 1:
+        # Only one recognisable conjunct — emit it directly so the
+        # report row reflects the actual AST node rather than wrapping
+        # a single mask in a redundant compound layer.
+        return inner[0]
+
+    label = _format_compound_label(leg)
+    inner_fns = [s.evaluate for s in inner]
+
+    def _eval_compound(df: pd.DataFrame) -> pd.Series:
+        masks: List[pd.Series] = []
+        for fn in inner_fns:
+            try:
+                series = fn(df)
+            except Exception:  # noqa: BLE001
+                series = pd.Series(False, index=df.index, dtype=bool)
+            masks.append(pd.Series(series, index=df.index).fillna(False).astype(bool))
+        result = masks[0]
+        for m in masks[1:]:
+            result = result & m
+        return result
+
+    return _Subcond(label=label, evaluate=_eval_compound)
+
+
+def _format_compound_label(node: ast.expr) -> str:
+    try:
+        text = ast.unparse(node)
+    except Exception:  # noqa: BLE001
+        text = "<compound>"
+    text = text.strip()
+    if len(text) > _MAX_LABEL_LEN:
+        text = text[: _MAX_LABEL_LEN - 1] + "…"
+    return text
 
 
 def _format_label(node: ast.Compare) -> str:

@@ -722,6 +722,109 @@ def test_named_series_arg_resolves_via_binding() -> None:
     assert len(report.subconditions) == 1
 
 
+def test_warmup_uses_per_symbol_max_history() -> None:
+    """Warmup is a per-symbol time-series property. Two 100-bar
+    DataFrames with ``warmup_bars_required=150`` must classify as
+    INSUFFICIENT_BARS — no individual symbol has enough history to
+    compute a 150-period indicator. The previous aggregate-row guard
+    (sum=200 ≥ 150) wrongly let the probe through and the all-NaN
+    indicators surfaced as INDICATOR_FILTER_TOO_RESTRICTIVE.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 150):
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=100)
+    msft = _flat_ohlcv(n=100)
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=150,
+    )
+    assert report.coverage_category is CoverageCategory.INSUFFICIENT_BARS
+    assert report.bars_checked == 200  # aggregate count preserved on the model
+    assert report.warmup_bars_required == 150
+    assert report.likely_blockers
+    assert report.likely_blockers[0].reason == "insufficient_bars"
+
+
+def test_warmup_passes_when_one_symbol_has_enough_history() -> None:
+    """When at least one symbol has enough bars, the probe proceeds.
+    Underwarmed symbols' indicator NaNs flow through ``fillna(False)``
+    so they contribute zero hits but don't falsely block the report.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=200)
+    msft = _flat_ohlcv(n=50)
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=150,
+    )
+    # AAPL satisfies warmup; MSFT's 50 bars contribute too.
+    # ``close > 0`` fires on every bar, so COVERAGE_OK.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_compound_or_legs_are_recognised() -> None:
+    """``(A and B) or (C and D)`` — each OR leg is a BoolOp(And, ...),
+    not a Compare. Each compound leg must be built as a single subcond
+    whose evaluator is the bar-wise AND of its inner conjuncts.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (close > 50 and volume > 0) or (close < -10 and volume > 0):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Left leg fires on every bar (close=100 > 50, volume > 0); right
+    # leg never fires. The OR is satisfied via the left leg.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    # Both compound legs surface as coverage rows so users see the
+    # dead alternative.
+    labels = [sc.label for sc in report.subconditions]
+    assert any("close > 50" in lbl and "volume > 0" in lbl for lbl in labels)
+    assert any("close < -10" in lbl and "volume > 0" in lbl for lbl in labels)
+
+
+def test_compound_or_legs_all_zero_flag_too_restrictive() -> None:
+    """If every compound OR leg's bar-wise AND is empty, the disjunction
+    never fires and the predicate is genuinely blocked.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (close > 1000 and volume > 0) or (close < -10 and volume > 0):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    blocker_reasons = [b.reason for b in report.likely_blockers]
+    assert "or_group_never_fires" in blocker_reasons
+
+
 def test_or_predicate_with_three_legs_recognised() -> None:
     """OR predicates with more than two legs must each surface as a
     coverage row.
