@@ -98,6 +98,14 @@ class _Operand:
 class _Subcond:
     label: str
     evaluate: Callable[[pd.DataFrame], pd.Series]
+    # Optional per-subcond symbol filter. Used by compound OR legs that
+    # contain a ``bar.symbol == "X"`` gate alongside their indicator
+    # condition: dropping the gate and evaluating the price mask against
+    # every DataFrame would let an unrelated symbol satisfy the leg.
+    # When set, the aggregator forces the mask to all-False on bars
+    # from non-matching symbols and restricts the row's hit-rate
+    # denominator to those symbols' bars. ``None`` = applies to all.
+    target_symbols: Optional[frozenset] = None
 
 
 @dataclass
@@ -272,12 +280,21 @@ def _aggregate(
                 continue
             group_masks: List[pd.Series] = []
             for sub in group.subconds:
-                try:
-                    series = sub.evaluate(df)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("subcondition %r failed on %s: %s", sub.label, symbol, exc)
-                    series = pd.Series(False, index=df.index, dtype=bool)
-                mask = pd.Series(series, index=df.index).fillna(False).astype(bool)
+                # Per-subcond symbol filter (compound OR legs that
+                # captured a ``bar.symbol == "X"`` gate). When the
+                # current DataFrame's symbol isn't in the leg's filter,
+                # force its mask to all-False so its contribution to
+                # both hit count and conjunction is zero — without this
+                # an unrelated symbol could appear to satisfy the leg.
+                if sub.target_symbols is not None and symbol not in sub.target_symbols:
+                    mask = pd.Series(False, index=df.index, dtype=bool)
+                else:
+                    try:
+                        series = sub.evaluate(df)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("subcondition %r failed on %s: %s", sub.label, symbol, exc)
+                        series = pd.Series(False, index=df.index, dtype=bool)
+                    mask = pd.Series(series, index=df.index).fillna(False).astype(bool)
                 hits = int(mask.sum())
                 sub_hit_counts[global_idx] += hits
                 if hits:
@@ -305,16 +322,27 @@ def _aggregate(
             **base_kwargs,
         )
 
-    # Deduplicate the SubconditionCoverage list by (label, target_symbols)
+    # Deduplicate the SubconditionCoverage list by (label, effective_symbols)
     # so symbol-gated duplicates stay distinct — same predicate text
     # under two different ``bar.symbol == "X"`` branches must surface as
     # two coverage rows so a per-symbol zero-hit blocker is visible.
+    # The effective filter is the intersection of the group-level filter
+    # (from outer ``bar.symbol == "X"`` ancestors) and the per-subcond
+    # filter (from compound OR legs that captured a symbol gate).
     subcoverages: List[SubconditionCoverage] = []
     seen_keys: set = set()
-    for sub, syms, hits, last in zip(
+    for sub, group_syms, hits, last in zip(
         flat_subconds, flat_subcond_symbols, sub_hit_counts, sub_last_true
     ):
-        key = (sub.label, syms)
+        if group_syms is None and sub.target_symbols is None:
+            effective_syms: Optional[frozenset] = None
+        elif group_syms is None:
+            effective_syms = sub.target_symbols
+        elif sub.target_symbols is None:
+            effective_syms = group_syms
+        else:
+            effective_syms = group_syms & sub.target_symbols
+        key = (sub.label, effective_syms)
         if key in seen_keys:
             continue
         seen_keys.add(key)
@@ -322,8 +350,8 @@ def _aggregate(
         # bars in its target_symbols, so dividing by the global total
         # would understate the per-symbol coverage rate. Restrict the
         # denominator to the bars that could have contributed.
-        if syms is not None:
-            denom = sum(per_symbol_bars.get(s, 0) for s in syms)
+        if effective_syms is not None:
+            denom = sum(per_symbol_bars.get(s, 0) for s in effective_syms)
         else:
             denom = total_eval_bars
         rate = (hits / denom) if denom > 0 else 0.0
@@ -331,8 +359,8 @@ def _aggregate(
         # report distinguishes symbol-gated duplicates without growing
         # the model schema.
         label = sub.label
-        if syms is not None and syms:
-            label = f"{label} [{','.join(sorted(syms))}]"
+        if effective_syms:
+            label = f"{label} [{','.join(sorted(effective_syms))}]"
         subcoverages.append(
             SubconditionCoverage(
                 label=label,
@@ -1092,19 +1120,41 @@ def _build_compound_and_subcond(
     handled).
     """
     inner: List[_Subcond] = []
+    leg_symbols: Optional[set] = None
     for term in _flatten_top_terms(leg):
         if isinstance(term, ast.Compare):
+            # Symbol gates inside a compound OR leg constrain THAT leg
+            # to the gated symbols. Capture them here so the synthetic
+            # subcond carries a per-leg filter; otherwise the price/
+            # indicator mask would evaluate against every DataFrame and
+            # an unrelated symbol could appear to satisfy the leg.
+            sym = _symbol_gate(term)
+            if sym is not None:
+                if leg_symbols is None:
+                    leg_symbols = {sym}
+                else:
+                    # Same intra-predicate intersection rule as the
+                    # AND path: ``bar.symbol == "X" and bar.symbol == "Y"``
+                    # is unreachable.
+                    leg_symbols &= {sym}
+                continue
             sub = _build_subcond(term, name_periods, name_evaluators)
         else:
             sub = _build_truthy_subcond(term, name_periods, name_evaluators)
         if sub is not None:
             inner.append(sub)
+    target_symbols = frozenset(leg_symbols) if leg_symbols is not None else None
+    # Empty intersection means the leg's symbol filter is unsatisfiable
+    # — drop it like the existing _process_if path does for AND groups.
+    if target_symbols is not None and not target_symbols:
+        return None
     if not inner:
         return None
-    if len(inner) == 1:
-        # Only one recognisable conjunct — emit it directly so the
-        # report row reflects the actual AST node rather than wrapping
-        # a single mask in a redundant compound layer.
+    if len(inner) == 1 and target_symbols is None:
+        # Only one recognisable conjunct and no per-leg filter — emit
+        # it directly so the report row reflects the actual AST node
+        # rather than wrapping a single mask in a redundant compound
+        # layer.
         return inner[0]
 
     label = _format_compound_label(leg)
@@ -1118,12 +1168,14 @@ def _build_compound_and_subcond(
             except Exception:  # noqa: BLE001
                 series = pd.Series(False, index=df.index, dtype=bool)
             masks.append(pd.Series(series, index=df.index).fillna(False).astype(bool))
+        if not masks:
+            return pd.Series(True, index=df.index, dtype=bool)
         result = masks[0]
         for m in masks[1:]:
             result = result & m
         return result
 
-    return _Subcond(label=label, evaluate=_eval_compound)
+    return _Subcond(label=label, evaluate=_eval_compound, target_symbols=target_symbols)
 
 
 def _format_compound_label(node: ast.expr) -> str:
@@ -1502,13 +1554,97 @@ def _collect_name_evaluators(
             continue
         if value is None:
             continue
-        evaluator = _resolve_assign_evaluator(value, name_periods, bindings)
-        if evaluator is None:
-            continue
+
+        # Tuple / list unpacking targets — ``upper, mid, lower =
+        # bollinger_bands(closes, 20)`` is the documented usage pattern
+        # for the tuple-returning helpers, and binding each name to
+        # its corresponding output series lets a downstream
+        # ``if bar.close > upper:`` resolve normally.
         for target in targets:
+            if isinstance(target, (ast.Tuple, ast.List)):
+                _bind_tuple_unpack(target, value, name_periods, bindings)
+                continue
             if isinstance(target, ast.Name):
-                bindings.setdefault(target.id, evaluator)
+                evaluator = _resolve_assign_evaluator(value, name_periods, bindings)
+                if evaluator is not None:
+                    bindings.setdefault(target.id, evaluator)
     return bindings
+
+
+def _bind_tuple_unpack(
+    target: ast.expr,
+    value: ast.expr,
+    name_periods: Dict[str, int],
+    bindings: Dict[str, Callable[[pd.DataFrame], pd.Series]],
+) -> None:
+    """Bind ``a, b, c = <tuple_indicator_call>`` element-wise.
+
+    The tuple-returning helpers (``macd``, ``bollinger_bands``,
+    ``stochastic``) emit one Series per element. Pre-existing code only
+    recognised the ``[idx]`` subscript form (``bollinger_bands(close,
+    20)[0]``); this also handles the unpacked-assignment form so the
+    documented pattern ::
+
+        upper, mid, lower = bollinger_bands(closes, 20)
+        if bar.close > upper:
+            ...
+
+    no longer drops to UNKNOWN_LOW_COVERAGE.
+    """
+    if not isinstance(value, ast.Call):
+        return
+    func_name = _func_name(value.func)
+    if func_name is None or func_name not in _TUPLE_INDICATORS:
+        return
+    elements = list(getattr(target, "elts", []))
+    if not elements:
+        return
+    sig_kind, helper, max_idx, kwarg_names = _TUPLE_INDICATORS[func_name]
+    if len(elements) > max_idx:
+        # Unpacking would TypeError at runtime — don't bind anything.
+        return
+    positional_start = 1 if sig_kind == "series" else 3
+    extra_pos = _trailing_numeric_args(value, name_periods, start_index=positional_start)
+    extra_kwargs = _resolve_known_kwargs(value, name_periods, kwarg_names)
+
+    if sig_kind == "series":
+        series_input = _resolve_series_input(value, bindings)
+        if series_input is None:
+            return
+        for idx, elem in enumerate(elements):
+            if not isinstance(elem, ast.Name):
+                continue
+
+            def _make(idx=idx, helper=helper, sin=series_input, ep=extra_pos, ek=extra_kwargs):
+                def _eval(df: pd.DataFrame) -> pd.Series:
+                    return helper(sin(df), *ep, **ek)[idx]
+
+                return _eval
+
+            bindings.setdefault(elem.id, _make())
+        return
+
+    # sig_kind == "hlc"
+    for idx, elem in enumerate(elements):
+        if not isinstance(elem, ast.Name):
+            continue
+
+        def _make(idx=idx, helper=helper, ep=extra_pos, ek=extra_kwargs):
+            def _eval(df: pd.DataFrame) -> pd.Series:
+                for col in ("high", "low", "close"):
+                    if col not in df.columns:
+                        return pd.Series(float("nan"), index=df.index)
+                return helper(
+                    df["high"].astype(float),
+                    df["low"].astype(float),
+                    df["close"].astype(float),
+                    *ep,
+                    **ek,
+                )[idx]
+
+            return _eval
+
+        bindings.setdefault(elem.id, _make())
 
 
 def _resolve_assign_evaluator(

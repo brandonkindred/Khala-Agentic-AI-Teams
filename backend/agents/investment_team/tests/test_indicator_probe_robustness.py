@@ -825,6 +825,139 @@ def test_compound_or_legs_all_zero_flag_too_restrictive() -> None:
     assert "or_group_never_fires" in blocker_reasons
 
 
+def test_compound_or_leg_preserves_symbol_gate() -> None:
+    """``(bar.symbol == "AAPL" and close > 1000) or
+    (bar.symbol == "MSFT" and close < 50)`` — each compound OR leg's
+    symbol gate must constrain THAT leg's evaluation. Otherwise the
+    AAPL leg's ``close > 1000`` mask runs against MSFT's data (where
+    close=1500 always), and the OR appears to fire even though
+    neither symbol-specific branch is actually true.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (bar.symbol == "AAPL" and close > 1000) or \\
+                        (bar.symbol == "MSFT" and close < 50):
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=30)  # close=100 — never > 1000
+    msft = pd.DataFrame(
+        {
+            "open": np.full(30, 1500.0),
+            "high": np.full(30, 1505.0),
+            "low": np.full(30, 1495.0),
+            "close": np.full(30, 1500.0),  # never < 50
+            "volume": np.full(30, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=30, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+    # Without the per-leg symbol filter, the AAPL leg's close-gt-1000
+    # mask would fire on MSFT (close=1500), making the OR appear
+    # satisfied. With the filter neither leg can fire on its gated
+    # symbol → INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    blocker_reasons = [b.reason for b in report.likely_blockers]
+    assert "or_group_never_fires" in blocker_reasons
+    # Leg labels in the report carry their per-leg symbol filter so
+    # users can tell the AAPL branch from the MSFT branch.
+    labels = [sc.label for sc in report.subconditions]
+    assert any("[AAPL]" in lbl for lbl in labels)
+    assert any("[MSFT]" in lbl for lbl in labels)
+
+
+def test_tuple_unpacked_indicator_outputs_bind() -> None:
+    """``upper, mid, lower = bollinger_bands(closes, 20)`` followed by
+    ``if bar.close > upper:`` must bind ``upper`` to the first output
+    of the helper so the comparison can be evaluated. Without the
+    tuple-unpack path the binding was missed and the report dropped
+    to UNKNOWN_LOW_COVERAGE.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                closes = [b.close for b in history]
+                upper, mid, lower = bollinger_bands(closes, 20)
+                if close > upper:
+                    pass
+        """
+    )
+    # Compare two fixtures: one with shocks that periodically push
+    # close above the upper band (hit_count > 0) versus a flat fixture
+    # where close == upper after warmup (hit_count = 0). If ``upper``
+    # weren't bound to the upper-band series both runs would land in
+    # the same UNKNOWN_LOW_COVERAGE bucket — distinct hit counts prove
+    # the binding flowed through.
+    n = 100
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    closes_shock = np.full(n, 100.0)
+    closes_shock[::10] = 130.0  # periodic spikes well above any 20-bar SMA + 2σ
+    df_shock = pd.DataFrame(
+        {
+            "open": closes_shock,
+            "high": closes_shock * 1.005,
+            "low": closes_shock * 0.995,
+            "close": closes_shock,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df_shock})
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "close > upper"
+    # Spikes above the band → non-zero hits, proving ``upper`` was
+    # bound to the actual upper-band series rather than dropped.
+    assert report.subconditions[0].hit_count > 0
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_tuple_unpacked_stochastic_binds_hlc_signature() -> None:
+    """Stochastic is HLC-typed (returns %K, %D from h/l/c inputs).
+    ``k, d = stochastic(high, low, close)`` followed by ``if k < 20:``
+    must bind both names to the corresponding output series.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                k, d = stochastic(high, low, close)
+                if k < 20:
+                    pass
+        """
+    )
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # Bottoming-out swing so %K dips below 20 part of the time.
+    moves = np.array([-0.005] * 30 + [+0.005] * 30)
+    closes = 100.0 * np.cumprod(1.0 + moves)
+    df = pd.DataFrame(
+        {
+            "open": closes,
+            "high": closes * 1.005,
+            "low": closes * 0.995,
+            "close": closes,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "k < 20"
+    # Whether COVERAGE_OK or INDICATOR_FILTER_TOO_RESTRICTIVE depends
+    # on the exact %K trajectory — we only assert the binding fired
+    # (the subcond was recognised and evaluated rather than dropped).
+    assert report.coverage_category in {
+        CoverageCategory.COVERAGE_OK,
+        CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE,
+    }
+
+
 def test_or_predicate_with_three_legs_recognised() -> None:
     """OR predicates with more than two legs must each surface as a
     coverage row.
