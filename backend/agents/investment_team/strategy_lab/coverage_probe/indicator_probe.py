@@ -1653,7 +1653,15 @@ def _build_compound_and_subcond(
 
     Returns ``None`` if no inner term is recognisable (so the OR leg is
     simply skipped, matching how unrecognised top-level legs are
-    handled).
+    handled). **Also returns ``None`` when any inner conjunct can't be
+    modelled**, even if other conjuncts are recognised — the
+    synthesised AND-of-known-conjuncts would be an upper bound on the
+    actual mask (the AND fires on a SUBSET of the recognised mask, not
+    a superset), so claiming the leg fires whenever the recognised
+    half does would be too permissive. Declining lets the parent
+    ``_process_or_if`` / ``_build_compound_or_subcond`` mark the
+    enclosing OR as having an unknown leg and suppress its
+    ``or_group_never_fires`` blocker.
     """
     inner: List[_Subcond] = []
     leg_symbols: Optional[set] = None
@@ -1679,6 +1687,14 @@ def _build_compound_and_subcond(
             sub = _build_truthy_subcond(term, name_periods, name_evaluators)
         if sub is not None:
             inner.append(sub)
+        else:
+            # An unmodellable conjunct (e.g. ``self.custom_ok(bar)`` or
+            # an unsupported expression) means we can't soundly compute
+            # the AND mask — the recognised conjuncts' AND is a
+            # superset of the real mask. Decline so the parent OR
+            # treats this leg as unknown rather than reporting it as
+            # firing whenever the recognised half fires.
+            return None
     target_symbols = frozenset(leg_symbols) if leg_symbols is not None else None
     # Empty intersection means the leg's symbol filter is unsatisfiable
     # — drop it like the existing _process_if path does for AND groups.

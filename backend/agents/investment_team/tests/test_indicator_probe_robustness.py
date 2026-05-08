@@ -2359,6 +2359,49 @@ def test_helper_method_self_assignment_does_not_shadow_init() -> None:
     assert report.subconditions[0].hit_count == n
 
 
+def test_and_compound_with_unknown_conjunct_in_or_leg_is_declined() -> None:
+    """A compound AND inside an OR leg with an unmodellable conjunct
+    must NOT have the recognised half claim the entire leg fires.
+
+    Strategy:
+        ``if (close > 0 and self.custom_ok(bar)) or close < -999:``
+
+    Universe: flat ``close=100``. The recognised conjunct ``close > 0``
+    fires on every bar. The ``self.custom_ok(bar)`` guard is unknown.
+    The other OR leg ``close < -999`` has zero hits.
+
+    Without the fix the AND-compound silently dropped
+    ``self.custom_ok``, returned a leg that fires whenever
+    ``close > 0`` fires, and the OR's first leg fired on every bar →
+    `COVERAGE_OK`. With the fix ``_build_compound_and_subcond``
+    declines (returns None), ``_process_or_if`` records the AND-leg
+    as unknown via ``has_unknown_or_leg=True``, and the
+    ``or_group_never_fires`` blocker is suppressed for the OR's
+    remaining zero-hit ``close < -999`` leg. The probe must NOT
+    classify as ``INDICATOR_FILTER_TOO_RESTRICTIVE`` and must NOT
+    classify as ``COVERAGE_OK`` based on the falsely-firing AND leg.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (close > 0 and self.custom_ok(bar)) or close < -999:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+
+    # The AND-leg is unknown so the OR-tail-all-zero blocker is
+    # suppressed; we don't have evidence the predicate fires either.
+    assert report.coverage_category is not CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    # And no firing-leg blocker should claim the predicate is
+    # unreachable based only on close < -999.
+    assert all(b.reason != "or_group_never_fires" for b in report.likely_blockers)
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
