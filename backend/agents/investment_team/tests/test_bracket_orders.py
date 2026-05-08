@@ -12,7 +12,9 @@ on the no-attachment path and two follow-ups from the PR review:
 6. No-attachment regression: plain entry round-trip is unchanged.
 7. ``REQUEUE_NEXT_BAR`` partial-fill terminal slice materializes brackets
    sized to the cumulative position (default backtest policy).
-8. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
+8. Partial bracket-exit fill requeues the surviving leg (after OCO cancel
+   removes the sibling) so residual position exposure stays protected.
+9. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
    gated until #390 — runtime materialization lands with Step 8.
 """
 
@@ -33,6 +35,7 @@ from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio
 from investment_team.trading_service.strategy.contract import (
     Bar,
+    FillKind,
     LimitAttachment,
     OrderRequest,
     OrderSide,
@@ -398,6 +401,78 @@ def test_requeue_partial_entry_materializes_brackets_on_terminal_fill() -> None:
     assert tp.submitted_at == "2024-01-03"
     assert sl.armed is True and tp.armed is True
     assert portfolio.positions["AAA"].qty == pytest.approx(2_000.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Partial bracket-exit fill must requeue the remainder so residual position
+# exposure stays protected (Codex P1 follow-up on commit 5189795)
+# ---------------------------------------------------------------------------
+
+
+def test_partial_bracket_exit_requeues_remainder_after_oco_cancel() -> None:
+    """When the realistic execution model only partially fills a protective
+    leg (low-ADV bar clipped by the participation cap), the OCO cancel
+    has already removed the sibling — so the surviving leg MUST stay
+    alive for the residual position. Verifies the leg is requeued via
+    ``REQUEUE_NEXT_BAR`` and the residual qty closes on a follow-up bar.
+    """
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=2_000.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            attached_stop_loss=StopAttachment(stop_price=95.0),
+            attached_take_profit=LimitAttachment(limit_price=110.0),
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    # Bar 2: full entry fill on a deep bar → SL / TP children materialized.
+    sim.process_bar(_bar("2024-01-02", open_price=100.0, volume=10_000_000.0))
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 2
+
+    # Bar 3: TP triggers (high >= 110) on a low-ADV bar. Notional 2_000 * 110
+    # = 220_000 vs bar dollar volume 10_000 * 110 = 1_100_000 → raw_participation
+    # = 0.20, capped at 0.10 → qty_fraction 0.5 → 1_000 fills, 1_000 remains.
+    bar3 = sim.process_bar(
+        _bar("2024-01-03", open_price=109.0, high=112.0, low=107.0, close=110.0, volume=10_000.0)
+    )
+    assert len(bar3.exit_fills) == 1
+    assert bar3.exit_fills[0].fill_kind == FillKind.PARTIAL
+    assert bar3.exit_fills[0].qty == pytest.approx(1_000.0, rel=1e-9)
+
+    # OCO sibling already cancelled on the first fill.
+    surviving = order_book.children_of(parent.order_id)
+    assert len(surviving) == 1, "stop sibling should be cancelled by OCO"
+    assert surviving[0].request.order_type == OrderType.LIMIT
+    # Remainder requeued (via REQUEUE_NEXT_BAR) so the residual position
+    # stays protected; submitted_at advanced to the partial-fill bar.
+    assert surviving[0].remaining_qty == pytest.approx(1_000.0, rel=1e-9)
+    assert surviving[0].cumulative_filled_qty == pytest.approx(1_000.0, rel=1e-9)
+    assert surviving[0].submitted_at == "2024-01-03"
+
+    # Position still half-open, no closed trade yet.
+    assert portfolio.positions["AAA"].qty == pytest.approx(1_000.0, rel=1e-9)
+    assert bar3.closed_trades == []
+
+    # Bar 4: deep bar with high >= 110 → residual TP fills, position closes.
+    bar4 = sim.process_bar(
+        _bar(
+            "2024-01-04", open_price=110.0, high=112.0, low=109.0, close=111.0, volume=10_000_000.0
+        )
+    )
+    assert len(bar4.exit_fills) == 1
+    assert bar4.exit_fills[0].qty == pytest.approx(1_000.0, rel=1e-9)
+    assert len(bar4.closed_trades) == 1
+    assert "AAA" not in portfolio.positions
+    assert order_book.all_pending() == []
 
 
 # ---------------------------------------------------------------------------

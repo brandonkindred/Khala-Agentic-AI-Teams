@@ -1183,6 +1183,11 @@ class FillSimulator:
         ``tif=GTC`` so the protective legs survive across sessions —
         otherwise a DAY child would expire at the end of the entry-fill
         session and leave the position unprotected overnight.
+        ``unfilled_policy=REQUEUE_NEXT_BAR`` keeps the surviving leg alive
+        when the realistic execution model partially fills it on a low-
+        liquidity bar — without it, ``_handle_exit_remainder`` would drop
+        the unfilled remainder while the OCO cancel had already removed
+        the sibling, leaving residual position exposure unprotected.
         """
         req = po.request
         child_side = OrderSide.SHORT if req.side == OrderSide.LONG else OrderSide.LONG
@@ -1197,6 +1202,7 @@ class FillSimulator:
                 order_type=OrderType.STOP,
                 stop_price=sl.stop_price,
                 tif=TimeInForce.GTC,
+                unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
                 reason="bracket_sl",
             )
             self.order_book.submit_attached(
@@ -1216,6 +1222,7 @@ class FillSimulator:
                 order_type=OrderType.LIMIT,
                 limit_price=tp.limit_price,
                 tif=TimeInForce.GTC,
+                unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
                 reason="bracket_tp",
             )
             self.order_book.submit_attached(
