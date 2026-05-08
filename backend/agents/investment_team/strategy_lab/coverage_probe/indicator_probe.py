@@ -1397,6 +1397,25 @@ def _build_compound_or_subcond(
     inner: List[_Subcond] = []
     for term in leg.values:
         if isinstance(term, ast.Compare):
+            # ``bar.symbol == "X"`` as a standalone OR leg is a symbol
+            # allowlist — the leg is true exactly on bars from "X".
+            # Without this branch ``_build_subcond`` rejects the gate
+            # (no data-dependent operand), the leg is dropped, and a
+            # surrounding AND like
+            # ``(bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100``
+            # collapses to just ``close > 100`` evaluated against every
+            # symbol — an unrelated symbol then satisfies the predicate
+            # and the probe falsely reports COVERAGE_OK.
+            sym = _symbol_gate(term)
+            if sym is not None:
+                inner.append(
+                    _Subcond(
+                        label=_format_label(term),
+                        evaluate=_always_true,
+                        target_symbols=frozenset({sym}),
+                    )
+                )
+                continue
             sub = _build_subcond(term, name_periods, name_evaluators)
         elif isinstance(term, ast.BoolOp) and isinstance(term.op, ast.And):
             sub = _build_compound_and_subcond(term, name_periods, name_evaluators)
@@ -1451,6 +1470,17 @@ def _build_compound_or_subcond(
         target_symbols=outer_target,
         or_legs=inner_legs,
     )
+
+
+def _always_true(df: pd.DataFrame) -> pd.Series:
+    """Mask that is True on every bar of ``df``.
+
+    Used as the evaluator for an OR leg whose only content is a
+    ``bar.symbol == "X"`` gate: the gate's ``target_symbols`` already
+    constrains the leg to firing on the matching symbol's bars, so
+    within those bars the leg is unconditionally true.
+    """
+    return pd.Series(True, index=df.index, dtype=bool)
 
 
 def _format_compound_label(node: ast.expr) -> str:
@@ -1852,6 +1882,17 @@ def _collect_name_evaluators(
                     # filters when the second assignment is the one
                     # the entry test actually uses.
                     bindings[target.id] = evaluator
+                else:
+                    # Reassignment whose RHS doesn't resolve to a
+                    # data-dependent evaluator (e.g. a scalar literal,
+                    # an unsupported call). Drop any prior indicator
+                    # binding so downstream lookups fall through to
+                    # numeric-literal / OHLCV resolution. Without this,
+                    # ``threshold = sma(close, 5); threshold = 150``
+                    # leaves the stale SMA binding in place and the
+                    # predicate ``close > threshold`` evaluates against
+                    # the SMA instead of the literal 150.
+                    bindings.pop(target.id, None)
     return bindings
 
 

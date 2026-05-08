@@ -1568,6 +1568,113 @@ def test_warmup_check_unaffected_when_any_group_is_universal() -> None:
     assert report.coverage_category is not CoverageCategory.INSUFFICIENT_BARS
 
 
+def test_or_symbol_allowlist_inside_and_predicate() -> None:
+    """A symbol allowlist written as an OR inside a larger AND must
+    still gate the indicator side.
+
+    Predicate:
+        ``if (bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100:``
+
+    Universe: AAPL with close=50 (never > 100), MSFT with close=50,
+    TSLA with close=200 (would satisfy ``close > 100`` if the symbol
+    allowlist is dropped).
+
+    Without the fix, each ``bar.symbol == X`` Compare leg is sent to
+    ``_build_subcond`` and rejected (no data-dependent operand), so
+    the OR collapses to nothing and the AND keeps only ``close > 100``
+    evaluated against every symbol — TSLA bars satisfy and the probe
+    falsely reports ``COVERAGE_OK``. With the fix,
+    ``_build_compound_or_subcond`` captures the symbol gates as
+    per-leg ``target_symbols``, the outer OR subcond is gated to
+    ``{AAPL, MSFT}``, and TSLA bars contribute False so the AND
+    correctly flags the predicate as unreachable
+    (``CONJUNCTION_NEVER_TRUE`` or ``INDICATOR_FILTER_TOO_RESTRICTIVE``
+    — either is correct; the bug surfaces as ``COVERAGE_OK``).
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={
+            "AAPL": _df(50.0),
+            "MSFT": _df(50.0),
+            "TSLA": _df(200.0),
+        },
+    )
+
+    # The allowlisted symbols never satisfy ``close > 100``; TSLA's
+    # close=200 must NOT be allowed to fire because TSLA isn't in the
+    # OR allowlist. The bug surfaces as COVERAGE_OK (TSLA satisfies);
+    # both CONJUNCTION_NEVER_TRUE and INDICATOR_FILTER_TOO_RESTRICTIVE
+    # correctly flag the predicate as unreachable.
+    assert report.coverage_category in {
+        CoverageCategory.CONJUNCTION_NEVER_TRUE,
+        CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE,
+    }
+    assert report.coverage_category is not CoverageCategory.COVERAGE_OK
+
+
+def test_reassignment_to_scalar_clears_stale_indicator_binding() -> None:
+    """A scalar reassignment after an indicator binding must clear the
+    indicator entry from ``name_evaluators``, so downstream predicate
+    resolution falls through to the literal value.
+
+    Strategy:
+        threshold = sma(close, 5)   # binds indicator
+        threshold = 150             # rebinds to scalar
+        if close > threshold:       # must evaluate close > 150
+
+    Without the fix, ``_resolve_assign_evaluator(150, ...)`` returns
+    None and the existing ``threshold -> sma(close, 5)`` binding stays
+    in ``name_evaluators``. ``_build_operand`` consults
+    ``name_evaluators`` before numeric literals, so the predicate
+    evaluates ``close > sma(close, 5)`` instead of ``close > 150`` —
+    on flat ``close=100`` data, that fires roughly half the bars and
+    the probe wrongly reports COVERAGE_OK. With the fix the stale
+    binding is dropped, ``threshold`` resolves through ``name_periods``
+    to 150, ``close > 150`` is unreachable on close=100, and the probe
+    flags ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                threshold = sma(close, 5)
+                threshold = 150
+                if close > threshold:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv(n=60)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
