@@ -160,10 +160,16 @@ class FillSimulator:
             # against the wrong position on a later triggered bar.
             # Fresh entries (``cumulative_filled_qty == 0``) and live
             # continuations (target position still open and intact) are
-            # unaffected.
+            # unaffected. Bracket children (#389) are also bound at
+            # materialization (``working_against_entry_order_id`` set to the
+            # parent entry's id), so the same guard catches a child whose
+            # target position has been closed by a separate exit before
+            # either OCO leg fired — without it the child would later
+            # trigger as ``is_entry`` and open a brand-new opposite-side
+            # position.
             existing_pos = self.portfolio.positions.get(bar.symbol)
-            if po.cumulative_filled_qty > 0:
-                bound_id = po.working_against_entry_order_id
+            bound_id = po.working_against_entry_order_id
+            if po.cumulative_filled_qty > 0 or bound_id is not None:
                 if existing_pos is None or (
                     bound_id is not None and existing_pos.entry_order_id != bound_id
                 ):
@@ -1216,6 +1222,13 @@ class FillSimulator:
         liquidity bar — without it, ``_handle_exit_remainder`` would drop
         the unfilled remainder while the OCO cancel had already removed
         the sibling, leaving residual position exposure unprotected.
+        Each child has ``working_against_entry_order_id`` set to the parent
+        entry's id at materialization (rather than waiting for the first
+        fill in ``_fill_exit``) so the stale-continuation guard in
+        ``process_bar`` drops the child if the position is closed by a
+        separate exit before any OCO leg triggers — otherwise a later
+        stop/limit hit would route through ``_fill_entry`` and open a
+        brand-new opposite-side position.
         """
         req = po.request
         child_side = OrderSide.SHORT if req.side == OrderSide.LONG else OrderSide.LONG
@@ -1233,13 +1246,14 @@ class FillSimulator:
                 unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
                 reason="bracket_sl",
             )
-            self.order_book.submit_attached(
+            sl_child = self.order_book.submit_attached(
                 sl_req,
                 submitted_at=bar.timestamp,
                 submitted_equity=po.submitted_equity,
                 parent_order_id=po.order_id,
                 oco_group_id=oco_group_id,
             )
+            sl_child.working_against_entry_order_id = po.order_id
         if req.attached_take_profit is not None:
             tp = req.attached_take_profit
             tp_req = OrderRequest(
@@ -1253,13 +1267,14 @@ class FillSimulator:
                 unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
                 reason="bracket_tp",
             )
-            self.order_book.submit_attached(
+            tp_child = self.order_book.submit_attached(
                 tp_req,
                 submitted_at=bar.timestamp,
                 submitted_equity=po.submitted_equity,
                 parent_order_id=po.order_id,
                 oco_group_id=oco_group_id,
             )
+            tp_child.working_against_entry_order_id = po.order_id
 
 
 def _date_diff(t1: str, t2: str) -> int:

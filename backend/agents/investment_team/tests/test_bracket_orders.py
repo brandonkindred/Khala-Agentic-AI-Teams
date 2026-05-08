@@ -16,7 +16,10 @@ on the no-attachment path and two follow-ups from the PR review:
    removes the sibling) so residual position exposure stays protected.
 9. Continuation rejection of a partial-fill bracket parent (risk-gate or
    capital check) still materializes legs for the open position.
-10. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
+10. Bracket children are bound to the parent position at materialization,
+    so a separate exit that closes the position drops the children
+    instead of letting a later trigger open a new opposite-side position.
+11. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
     gated until #390 — runtime materialization lands with Step 8.
 """
 
@@ -553,6 +556,77 @@ def test_continuation_risk_gate_rejection_materializes_brackets_for_open_positio
     assert tp.submitted_at == "2024-01-03"
     # Position is still open — the 100 shares from bar 2 weren't unwound.
     assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Bracket children must NOT outlive the position they protect: if a separate
+# exit closes the position before either OCO leg triggers, the children must
+# be dropped rather than open a brand-new opposite-side position on a later
+# stop/limit hit (Codex P1 follow-up on commit 8502876)
+# ---------------------------------------------------------------------------
+
+
+def test_bracket_children_dropped_when_position_closed_by_separate_exit() -> None:
+    """Without binding children to the parent position at materialization,
+    a manual market exit that closes the LONG position before the SL/TP
+    children fire would leave the children pending; a later bar whose low
+    crossed the stop level would route the SHORT STOP through
+    ``_fill_entry`` (existing_pos is None → ``is_entry=True``) and open a
+    fresh SHORT position. Setting ``working_against_entry_order_id`` at
+    materialization plus extending the stale-continuation guard to also
+    fire on cumulative_filled_qty == 0 (when bound) drops the children
+    cleanly."""
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        _bracket_entry(qty=10.0, stop_price=95.0, take_profit_price=110.0),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    # Bar 2: entry fills, children materialized.
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    assert portfolio.positions["AAA"].qty == pytest.approx(10.0, rel=1e-9)
+    assert len(order_book.children_of(parent.order_id)) == 2
+
+    # A manual SHORT market exit submitted between bars (simulating a
+    # separate strategy decision or an external position close) — note no
+    # parent_order_id / oco_group_id, so the OCO cancel block in _fill_exit
+    # does NOT fire and the bracket children stay in the book.
+    order_book.submit(
+        OrderRequest(
+            client_order_id="manual-exit",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+        ),
+        submitted_at="2024-01-02",
+        submitted_equity=10_000_000.0,
+    )
+
+    # Bar 3: manual exit fills, position closes. Bracket children stay
+    # pending in the book (they have no OCO relationship with the manual
+    # exit).
+    sim.process_bar(_bar("2024-01-03", open_price=100.0))
+    assert "AAA" not in portfolio.positions
+    survivors_before = order_book.children_of(parent.order_id)
+    assert len(survivors_before) == 2, (
+        "manual exit should not cancel bracket children — only the OCO "
+        "relationship between siblings does"
+    )
+
+    # Bar 4: bar's low (93) crosses the SL stop_price (95). WITHOUT THE FIX
+    # the SHORT STOP would route through _fill_entry (no position open) and
+    # open a fresh SHORT position. WITH THE FIX the stale-continuation
+    # guard drops both children and emits no fills.
+    bar4 = sim.process_bar(_bar("2024-01-04", open_price=97.0, high=98.0, low=93.0, close=94.0))
+    assert bar4.entry_fills == [], "stale bracket child must not open a new position"
+    assert bar4.exit_fills == []
+    assert bar4.closed_trades == []
+    assert "AAA" not in portfolio.positions
+    assert order_book.children_of(parent.order_id) == []
 
 
 # ---------------------------------------------------------------------------
