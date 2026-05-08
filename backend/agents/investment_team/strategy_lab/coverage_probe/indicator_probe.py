@@ -1484,7 +1484,18 @@ def _collect_name_periods(
                 bindings.setdefault(target.attr, ivalue)
 
     def _iter_outer_assigns(node: ast.AST):
-        """Yield Assign / AnnAssign nodes lexically in scope for the strategy.
+        """Yield ``(node, scope)`` tuples for assignments lexically in
+        scope for the strategy.
+
+        ``scope`` is ``"module"`` for module-level (or nested
+        non-strategy compound) assignments and ``"class"`` for
+        assignments inside the strategy ``ClassDef`` (class body and
+        constructor body). The caller uses the scope to decide
+        ``setdefault`` vs ``overwrite`` semantics: module scope is
+        outer-most and only seeds defaults, class scope **overrides**
+        module-level bindings because Python's runtime ``self.WINDOW``
+        resolves through the class attribute regardless of any
+        same-named module constant.
 
         When ``strategy_class`` is set, descend into module / function
         bodies as usual but only into the strategy's own ``ClassDef``.
@@ -1511,7 +1522,9 @@ def _collect_name_periods(
 
         When ``strategy_class`` is None, behaves like ``ast.walk`` over
         Assigns/AnnAssigns but still skips function bodies (the
-        previous behaviour incorrectly recorded function locals).
+        previous behaviour incorrectly recorded function locals). All
+        yielded entries use ``"module"`` scope since there is no
+        identified class boundary.
         """
         _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
         if strategy_class is not None and isinstance(node, ast.ClassDef):
@@ -1523,12 +1536,12 @@ def _collect_name_periods(
             # the recursive call.
             for child in node.body:
                 if isinstance(child, (ast.Assign, ast.AnnAssign)):
-                    yield child
+                    yield child, "class"
                 elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
                         for sub in ast.walk(child):
                             if isinstance(sub, (ast.Assign, ast.AnnAssign)):
-                                yield sub
+                                yield sub, "class"
                 else:
                     yield from _iter_outer_assigns(child)
             return
@@ -1540,19 +1553,24 @@ def _collect_name_periods(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             return
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            yield node
+            yield node, "module"
         for child in ast.iter_child_nodes(node):
             yield from _iter_outer_assigns(child)
 
-    # Pass 1: outer-scope assignments (module / strategy class /
-    # __init__) using ``setdefault`` so cross-scope class constants
-    # stay isolated. Sibling helper classes are skipped.
-    for node in _iter_outer_assigns(tree):
+    # Pass 1: outer-scope assignments. Module scope uses ``setdefault``
+    # so cross-scope constants stay isolated; the strategy class's own
+    # body and ``__init__`` use overwrite, because a class-level
+    # ``WINDOW = 3`` shadows a module-level ``WINDOW = 1`` for any
+    # ``self.WINDOW`` reference at runtime. Walking module-first then
+    # class-second keeps source order; the per-scope flag controls the
+    # write semantics.
+    for node, scope in _iter_outer_assigns(tree):
+        is_class = scope == "class"
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                _record(target, node.value, overwrite=False)
+                _record(target, node.value, overwrite=is_class)
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            _record(node.target, node.value, overwrite=False)
+            _record(node.target, node.value, overwrite=is_class)
 
     # Pass 2: inner-scope assignments on the entry control-flow path
     # overwrite the outer binding. We skip exit branches of position
@@ -2043,6 +2061,17 @@ def _indicator_call(
             return None
         # Series helpers: rsi(series, period), sma(series, period), ...
         period = _resolve_period_arg(node, name_periods, positional_index=1)
+        # If the strategy passed an explicit period that we can't
+        # resolve to a positive integer literal (e.g. ``sma(close,
+        # PERIOD + 1)`` or ``rsi(close, dynamic_window)``), drop the
+        # indicator rather than silently substitute the helper's
+        # default. Falling through to ``helper(s)`` would either
+        # TypeError (for helpers without defaults — the aggregator
+        # then forces the mask to all-False and the predicate
+        # falsely flags ``INDICATOR_FILTER_TOO_RESTRICTIVE``) or
+        # silently evaluate a different period from the runtime.
+        if period is None and _period_arg_present(node, positional_index=1):
+            return None
 
         def _eval_series(df: pd.DataFrame) -> pd.Series:
             s = series_input(df)
@@ -2057,6 +2086,8 @@ def _indicator_call(
         # HLC helpers: atr(high, low, close, period), adx(high, low, close, period).
         # The period is the 4th positional arg (index 3), not the 2nd.
         period = _resolve_period_arg(node, name_periods, positional_index=3)
+        if period is None and _period_arg_present(node, positional_index=3):
+            return None
 
         def _eval_hlc(df: pd.DataFrame) -> pd.Series:
             for col in ("high", "low", "close"):
@@ -2510,3 +2541,22 @@ def _resolve_period_arg(
         if value is not None and value > 0 and float(value).is_integer():
             return int(value)
     return None
+
+
+def _period_arg_present(call: ast.Call, *, positional_index: int = 1) -> bool:
+    """Return True iff the call supplies an explicit period argument.
+
+    Matches the same positional and kwarg slots as
+    :func:`_resolve_period_arg` but ignores the value's resolvability —
+    the caller uses this to distinguish "no period passed" (use
+    helper default) from "period passed but unresolved" (drop the
+    indicator). Without this distinction, ``sma(close, PERIOD + 1)``
+    falls through to ``helper(s)`` which either TypeErrors (for
+    helpers with no default — the aggregator then forces the mask
+    to all-False) or silently evaluates a different period from the
+    runtime.
+    """
+    for kw in call.keywords:
+        if kw.arg in {"period", "length", "window", "n"}:
+            return True
+    return len(call.args) > positional_index

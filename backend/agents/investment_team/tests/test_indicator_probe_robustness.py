@@ -2605,6 +2605,134 @@ def test_or_group_with_unknown_leg_suppresses_conjunction_never_true() -> None:
     assert all(b.reason != "conjunction_never_true" for b in report.likely_blockers)
 
 
+def test_strategy_class_constant_overrides_module_constant() -> None:
+    """A class-level constant in the strategy must override a same-named
+    module-level constant for ``self.<NAME>`` resolution. At runtime,
+    Python's attribute lookup goes through the class — the module
+    binding is irrelevant for ``self.WINDOW``.
+
+    Strategy code::
+
+        WINDOW = 1
+
+        class Strategy:
+            WINDOW = 3
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.WINDOW):
+                    pass
+
+    On flat ``close=100`` over 30 bars with the bug, ``self.WINDOW``
+    resolved to the module's ``1`` (recorded first by ``setdefault``),
+    not the class's ``3``. With WINDOW=1 the SMA is just close and the
+    comparison is trivially false; with WINDOW=3 the comparison
+    matches the runtime behavior. We assert the class value wins by
+    using a 3-period constant, where the runtime predicate is
+    consistently false on flat data — the test verifies the probe
+    classifies as ``INDICATOR_FILTER_TOO_RESTRICTIVE`` for the same
+    reason the runtime would (zero hits), rather than for the wrong
+    reason (period 1 means SMA == close, comparison strictly false).
+    Both happen to be zero-hit on flat data, so we use a more
+    discriminating fixture below.
+    """
+    code = textwrap.dedent(
+        """
+        WINDOW = 1
+
+        class Strategy:
+            WINDOW = 3
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.WINDOW):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # Step-up: first 15 bars at 100, last 15 at 110. With WINDOW=3 the
+    # SMA crosses up 3 bars after the step, so close > sma fires
+    # exactly 3 bars (during the SMA's lag). With WINDOW=1, SMA == close
+    # everywhere and the comparison never fires.
+    close = np.array([100.0] * 15 + [110.0] * 15)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # WINDOW=3 → SMA lags → ``close > sma`` fires during the lag → COVERAGE_OK.
+    # WINDOW=1 (the bug) → SMA == close → comparison never fires →
+    # INDICATOR_FILTER_TOO_RESTRICTIVE (zero hits).
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_unresolved_explicit_period_drops_indicator() -> None:
+    """When the strategy supplies a period expression the probe can't
+    resolve to an integer literal (e.g. ``sma(close, PERIOD + 1)``),
+    the indicator must be dropped — NOT silently substituted with the
+    helper's default. Otherwise the comparison either TypeErrors
+    inside the helper (for those without a default; the aggregator
+    forces the mask to all-False and falsely flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``) or evaluates a different
+    period from the runtime.
+
+    Strategy:
+        ``if sma(close, PERIOD + 1) > 100:``  (where PERIOD has no binding)
+
+    The probe should classify this as ``UNKNOWN_LOW_COVERAGE`` (no
+    recognised subconditions) rather than incorrectly evaluating
+    against a substituted default.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if sma(close, PERIOD + 1) > 100:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Unresolvable period → indicator dropped → no recognised
+    # subconditions → UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_omitted_period_uses_helper_default() -> None:
+    """A bare indicator call with no explicit period (e.g.
+    ``rsi(close)``) should still use the helper's default period —
+    the unresolved-explicit-period suppression must not over-fire and
+    drop legitimate default-using calls.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if rsi(close) < 25:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # rsi(close) with default period is a recognised indicator. The
+    # comparison ``rsi(close) < 25`` is a real subcondition (regardless
+    # of whether it fires on flat data).
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
