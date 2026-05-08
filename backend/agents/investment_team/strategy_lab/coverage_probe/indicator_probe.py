@@ -378,8 +378,14 @@ def _aggregate(
                 # Combine ancestors-AND with or-tail-OR so the
                 # conjunction count reflects the real predicate and
                 # downstream classification can flag a never-true
-                # nested OR predicate.
-                if group.combinator == "or" and group.ancestor_count > 0:
+                # nested OR predicate. For plain OR groups (no
+                # ancestors), the predicate is just ``or_1 OR or_2
+                # OR ...`` so use the bar-wise OR — without this,
+                # disjoint firing legs (e.g. ``close > 100 or close
+                # < 50``) AND to zero and the unknown-leg fallthrough
+                # mis-reports a clearly-firing predicate as
+                # ``UNKNOWN_LOW_COVERAGE``.
+                if group.combinator == "or":
                     ancestor_masks = group_masks[: group.ancestor_count]
                     or_tail_masks = group_masks[group.ancestor_count :]
                     if ancestor_masks:

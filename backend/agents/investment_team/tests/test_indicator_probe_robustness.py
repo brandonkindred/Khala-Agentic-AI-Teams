@@ -3235,6 +3235,53 @@ def test_early_return_with_named_constant_neq_propagates_filter() -> None:
     assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
 
 
+def test_plain_or_with_disjoint_legs_and_unknown_leg_is_coverage_ok() -> None:
+    """A plain OR (no ancestors) with disjoint recognised legs plus an
+    un-modellable leg must classify as ``COVERAGE_OK`` — the OR fires
+    on bars where at least one leg fires, regardless of whether the
+    legs' bar-wise AND is empty.
+
+    Strategy::
+
+        if close > 100 or close < 50 or self.custom_ok(bar):
+            pass
+
+    Universe: flat ``close=200`` → ``close > 100`` fires every bar,
+    ``close < 50`` has zero hits, ``self.custom_ok`` is unknown. The
+    OR is satisfied on every bar.
+
+    Without the fix the conjunction-hits computation took the bar-wise
+    AND of recognised legs (``close > 100`` ∩ ``close < 50`` = empty).
+    The unknown-leg fallthrough then saw ``group_conjunction_hits == 0``
+    as "no positive evidence" and returned ``UNKNOWN_LOW_COVERAGE``,
+    even though ``close > 100`` clearly fires every bar.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100 or close < 50 or self.custom_ok(bar):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.full(n, 200.0)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
