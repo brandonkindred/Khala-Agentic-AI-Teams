@@ -650,15 +650,25 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     # fall through to numeric-literal / OHLCV
                     # resolution.
                     name_evaluators.pop(target.id, None)
-                # Period-int side: positive integer literal.
+                # Numeric-scalar side: record any positive number,
+                # preserving int-ness when the value is integer-valued
+                # so period-use sites stay clean. Non-integer floats
+                # like ``limit = 100.5`` must also be preserved here:
+                # ``_build_operand`` resolves ``Name`` literals through
+                # this dict, so without it ``if close > limit:`` would
+                # be dropped and the probe would degenerate to
+                # ``UNKNOWN_LOW_COVERAGE``. Period-use sites
+                # (:func:`_resolve_period_arg`) re-validate
+                # ``is_integer()`` so a float threshold is never
+                # misapplied as an indicator window.
                 v = _numeric_literal(value, name_periods)
-                if v is not None and float(v) > 0 and float(v).is_integer():
-                    name_periods[target.id] = int(v)
+                if v is not None and v > 0:
+                    name_periods[target.id] = int(v) if float(v).is_integer() else float(v)
             elif isinstance(target, ast.Attribute):
                 # ``self.WINDOW = N`` — record by attribute name.
                 v = _numeric_literal(value, name_periods)
-                if v is not None and float(v) > 0 and float(v).is_integer():
-                    name_periods[target.attr] = int(v)
+                if v is not None and v > 0:
+                    name_periods[target.attr] = int(v) if float(v).is_integer() else float(v)
 
     def _budgeted_extend(group_subs: List[_Subcond], extras: List[_Subcond]) -> bool:
         """Append extras into group within the global subcond budget.
@@ -1338,7 +1348,7 @@ def _collect_name_periods(
     tree: ast.AST,
     function_node: Optional[ast.AST] = None,
     strategy_class: Optional[ast.ClassDef] = None,
-) -> Dict[str, int]:
+) -> Dict[str, Union[int, float]]:
     """Bind ``NAME = <int>`` for later ``Name`` / ``self.NAME`` resolution.
 
     Walks every ``Assign`` / ``AnnAssign`` whose target is either:
@@ -1368,15 +1378,20 @@ def _collect_name_periods(
     ``INDICATOR_FILTER_TOO_RESTRICTIVE`` / ``COVERAGE_OK`` calls for
     common tuning-variable refactors.
     """
-    bindings: Dict[str, int] = {}
+    bindings: Dict[str, Union[int, float]] = {}
 
     def _record(target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
         # Reuse the same numeric-literal extractor used downstream so
         # negative ints and unary-minus constants resolve consistently.
+        # Allow any positive number — non-integer floats are stored as
+        # float to support threshold locals like ``limit = 100.5`` that
+        # appear as ``Name`` operands in ``if close > limit:``. Period-
+        # use sites validate ``is_integer()`` at lookup time so a float
+        # is never misapplied as an indicator window.
         v = _numeric_literal(value, bindings)
-        if v is None or float(v) <= 0 or not float(v).is_integer():
+        if v is None or v <= 0:
             return
-        ivalue = int(v)
+        ivalue: Union[int, float] = int(v) if float(v).is_integer() else float(v)
         if isinstance(target, ast.Name):
             if overwrite:
                 bindings[target.id] = ivalue
@@ -2314,14 +2329,20 @@ def _resolve_period_arg(
     helper's positional signature: 1 for series helpers like
     ``rsi(series, period)``, 3 for HLC helpers like
     ``atr(high, low, close, period)``.
+
+    Periods must be positive integers — ``name_periods`` may now hold
+    non-integer scalar bindings (e.g. ``limit = 100.5``) so threshold
+    locals can resolve in operand-side comparisons. Validate
+    ``is_integer()`` at lookup time so a float threshold is never
+    silently truncated and applied as an indicator window.
     """
     for kw in call.keywords:
         if kw.arg in {"period", "length", "window", "n"}:
             value = _numeric_literal(kw.value, name_periods)
-            if value is not None and value > 0:
+            if value is not None and value > 0 and float(value).is_integer():
                 return int(value)
     if len(call.args) > positional_index:
         value = _numeric_literal(call.args[positional_index], name_periods)
-        if value is not None and value > 0:
+        if value is not None and value > 0 and float(value).is_integer():
             return int(value)
     return None

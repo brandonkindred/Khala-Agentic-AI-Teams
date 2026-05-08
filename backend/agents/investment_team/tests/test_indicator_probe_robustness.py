@@ -2046,6 +2046,53 @@ def test_or_with_unknown_leg_suppresses_false_restrictive_blocker() -> None:
     assert all(b.reason != "or_group_never_fires" for b in report.likely_blockers)
 
 
+def test_float_threshold_local_is_preserved() -> None:
+    """A non-integer threshold hoisted into a local must resolve in
+    comparisons. Period-use sites still validate ``is_integer()`` so a
+    float threshold is never misapplied as an indicator window.
+
+    Strategy:
+        limit = 100.5
+        if close > limit:
+            pass
+
+    Without the fix the binding pass only recorded positive integers,
+    so ``limit = 100.5`` was dropped, ``_build_operand`` couldn't
+    resolve the ``Name`` literal, the comparison was skipped, and the
+    probe degenerated to ``UNKNOWN_LOW_COVERAGE`` with no
+    subconditions.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                limit = 100.5
+                if close > limit:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # Half the bars above 100.5, half below.
+    close = np.array([90.0] * 15 + [110.0] * 15)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    sc = report.subconditions[0]
+    assert sc.hit_count == 15  # exactly the bars where close=110 > 100.5
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
