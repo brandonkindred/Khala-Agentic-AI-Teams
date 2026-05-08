@@ -1121,6 +1121,15 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         if gate_residual is None:
                             if not _visit(stmt.body, ancestors, current_symbols):
                                 return False
+                            # Vacant guard-clause: ``if pos is None:
+                            # return`` (or any single ``return``).
+                            # Subsequent siblings only execute when
+                            # ``pos is not None`` — the exit path.
+                            # Skip them so a follow-up ``if close < 0:
+                            # sell()`` doesn't get classified as
+                            # entry coverage.
+                            if _is_return_only_body(stmt.body):
+                                break
                         else:
                             if not _process_if(
                                 gate_residual,
@@ -1256,6 +1265,18 @@ def _classify_position_check(test: ast.expr) -> Optional[str]:
     if isinstance(op, (ast.IsNot, ast.NotEq)):
         return "occupied"
     return None
+
+
+def _is_return_only_body(stmts: List[ast.stmt]) -> bool:
+    """True iff ``stmts`` is a single ``return`` (with or without value).
+
+    Used by :func:`_visit` to detect guard-clause shapes like
+    ``if pos is None: return``. The reviewer pointed out that after
+    such a guard, subsequent siblings only execute on the opposite
+    branch — they're exit-only logic and shouldn't be analysed as
+    entry coverage.
+    """
+    return len(stmts) == 1 and isinstance(stmts[0], ast.Return)
 
 
 def _early_return_symbol_guard(
@@ -2367,13 +2388,24 @@ def _indicator_call(
         if period is None and _period_arg_present(node, positional_index=3):
             return None
 
+        # Resolve each of the three positional series inputs. If the
+        # strategy provided an explicit arg the probe can't reduce to
+        # a known OHLCV column or bound local series, decline rather
+        # than silently substitute the default — without this,
+        # ``atr(low, low, close, 14)`` (or a synthetic series via a
+        # local) was evaluated against ``df['high']`` and the report
+        # described coverage of a different indicator from the
+        # runtime.
+        high_in = _positional_series_input(node, 0, "high", name_evaluators)
+        low_in = _positional_series_input(node, 1, "low", name_evaluators)
+        close_in = _positional_series_input(node, 2, "close", name_evaluators)
+        if high_in is None or low_in is None or close_in is None:
+            return None
+
         def _eval_hlc(df: pd.DataFrame) -> pd.Series:
-            for col in ("high", "low", "close"):
-                if col not in df.columns:
-                    return pd.Series(float("nan"), index=df.index)
-            high = df["high"].astype(float)
-            low = df["low"].astype(float)
-            close = df["close"].astype(float)
+            high = high_in(df)
+            low = low_in(df)
+            close = close_in(df)
             if period is not None:
                 return helper(high, low, close, int(period))
             return helper(high, low, close)
@@ -2384,16 +2416,16 @@ def _indicator_call(
         helper = _OHLCV_INDICATORS[func_name]
 
         # vwap(high, low, close, volume) — no scalar period, just OHLCV inputs.
+        # Same explicit-arg validation as HLC.
+        high_in = _positional_series_input(node, 0, "high", name_evaluators)
+        low_in = _positional_series_input(node, 1, "low", name_evaluators)
+        close_in = _positional_series_input(node, 2, "close", name_evaluators)
+        volume_in = _positional_series_input(node, 3, "volume", name_evaluators)
+        if high_in is None or low_in is None or close_in is None or volume_in is None:
+            return None
+
         def _eval_ohlcv(df: pd.DataFrame) -> pd.Series:
-            for col in ("high", "low", "close", "volume"):
-                if col not in df.columns:
-                    return pd.Series(float("nan"), index=df.index)
-            return helper(
-                df["high"].astype(float),
-                df["low"].astype(float),
-                df["close"].astype(float),
-                df["volume"].astype(float),
-            )
+            return helper(high_in(df), low_in(df), close_in(df), volume_in(df))
 
         return _eval_ohlcv
 
@@ -2754,6 +2786,61 @@ def _func_name(func: ast.expr) -> Optional[str]:
         return func.id.lower()
     if isinstance(func, ast.Attribute):
         return func.attr.lower()
+    return None
+
+
+def _positional_series_input(
+    call: ast.Call,
+    positional_index: int,
+    default_column: str,
+    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
+) -> Optional[Callable[[pd.DataFrame], pd.Series]]:
+    """Resolve one positional series-input arg of an HLC / OHLCV helper.
+
+    HLC helpers (``atr``, ``adx``) take ``(high, low, close, period)``
+    and OHLCV helpers (``vwap``) take ``(high, low, close, volume)``.
+    Each input slot defaults to the same-named column when omitted,
+    but if the strategy supplied an explicit positional arg the probe
+    must honour it — substituting the default would silently evaluate
+    coverage against a different indicator than the runtime
+    (``atr(low, low, close, 14)`` is meaningfully different from
+    ``atr(high, low, close, 14)``).
+
+    Returns a ``(df) -> Series`` callable when the slot resolves
+    cleanly (omitted → default column; explicit OHLCV column or
+    bound local series → that input). Returns ``None`` when the
+    user supplied an explicit arg that can't be reduced to a known
+    column or bound name; the caller declines the indicator.
+    """
+    if positional_index >= len(call.args):
+        # Slot not supplied — use the default OHLCV column.
+        def _default(df: pd.DataFrame, c: str = default_column) -> pd.Series:
+            if c in df.columns:
+                return df[c].astype(float)
+            return pd.Series(float("nan"), index=df.index)
+
+        return _default
+
+    arg = call.args[positional_index]
+    column = _column_from(arg)
+    if column is not None:
+
+        def _from_column(df: pd.DataFrame, c: str = column) -> pd.Series:
+            if c in df.columns:
+                return df[c].astype(float)
+            return pd.Series(float("nan"), index=df.index)
+
+        return _from_column
+
+    if isinstance(arg, ast.Name) and name_evaluators is not None:
+        evaluator = name_evaluators.get(arg.id)
+        if evaluator is not None:
+
+            def _from_binding(df: pd.DataFrame, ev=evaluator) -> pd.Series:
+                return ev(df).astype(float)
+
+            return _from_binding
+
     return None
 
 

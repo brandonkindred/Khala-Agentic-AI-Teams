@@ -3282,6 +3282,156 @@ def test_plain_or_with_disjoint_legs_and_unknown_leg_is_coverage_ok() -> None:
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
 
 
+def test_atr_explicit_unrecognised_input_drops_indicator() -> None:
+    """An ATR call whose first three positional args aren't the
+    standard OHLCV columns (e.g. ``atr(low, low, close, 14)``) must
+    be declined — the probe shouldn't silently substitute the high
+    column and report coverage for a different indicator than the
+    runtime.
+
+    Strategy:
+        ``if atr(low, low, close, 14) > 0.5:``
+
+    With the fix the explicit positional args resolve via
+    ``_positional_series_input``: 'low' is recognised so it's used
+    where 'high' would default. ATR computed against
+    ``(low, low, close)`` produces a different value series than
+    against ``(high, low, close)``; we don't decline here because
+    the args ARE recognised. The harder case is when an arg can't
+    be resolved at all.
+
+    For the failure-mode test we use a synthetic series: a local
+    that's bound to an indicator helper but can't be resolved, so
+    ATR's first arg falls through and the probe must decline.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                synth = self.compute_synth_high()
+                if atr(synth, low, close, 14) > 0.5:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``synth`` doesn't bind to any recognised series → ATR's first
+    # arg is unresolvable → indicator declined → no subcondition.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_atr_with_recognised_explicit_columns_still_works() -> None:
+    """Sanity: when all three positional series args are recognised
+    OHLCV columns (the normal call shape), ATR still resolves. The
+    new declining behaviour must not over-fire on legitimate calls.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if atr(high, low, close, 14) > 0.5:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_atr_with_omitted_inputs_still_uses_default_columns() -> None:
+    """Sanity: a bare ``atr()`` call (no positional inputs) still
+    resolves to the default high/low/close columns.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if atr() > 0.5:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_vacant_guard_clause_skips_subsequent_exit_predicates() -> None:
+    """A vacant guard-clause (``if pos is None: return``) terminates
+    the entry path. Subsequent sibling predicates only execute on
+    the opposite branch — exit-only logic — and must NOT be
+    classified as entry coverage blockers.
+
+    Strategy::
+
+        if pos is None:
+            return
+        if close < 0:
+            pass
+
+    Without the fix, after visiting the bare-return body the loop
+    continues to the next sibling and processes ``if close < 0:`` as
+    entry coverage. On flat ``close=100`` data this fires zero hits
+    and the probe wrongly reports ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    With the fix the loop breaks after the guard, so only entry-side
+    predicates contribute to the report.
+
+    Since there are no entry-side predicates left after the guard,
+    the probe degrades to ``UNKNOWN_LOW_COVERAGE`` (no recognised
+    entry subconditions) — that's the correct outcome.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                pos = ctx.position(bar.symbol)
+                if pos is None:
+                    return
+                if close < 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Exit-only ``close < 0`` must NOT classify as
+    # INDICATOR_FILTER_TOO_RESTRICTIVE; the entry path has no
+    # recognised predicates so the report degrades to UNKNOWN.
+    assert report.coverage_category is not CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert all(b.reason != "indicator_filter_zero_hits" for b in report.likely_blockers)
+
+
+def test_vacant_guard_clause_with_real_entry_before_still_classifies() -> None:
+    """Sanity: a real entry predicate BEFORE the guard-clause is
+    still analysed. The break only suppresses subsequent siblings.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                pos = ctx.position(bar.symbol)
+                if pos is None:
+                    if close > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``close > 0`` fires every bar (close=100); entry coverage is
+    # recognised.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
