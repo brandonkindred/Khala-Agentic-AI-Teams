@@ -636,6 +636,92 @@ def test_or_predicate_with_all_legs_zero_is_too_restrictive() -> None:
     assert " OR " in blocker.evidence
 
 
+def test_or_under_ancestor_keeps_or_semantics() -> None:
+    """``if close > 0: if close > 0 or close < 0:`` is reachable on
+    positive prices because the inner OR's first leg always fires.
+    The probe must keep OR semantics even when the OR is nested under
+    an ancestor — the dead ``close < 0`` leg should not flag a
+    blocker, since one firing leg satisfies the disjunction.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0:
+                    if close > 0 or close < 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Without the ancestor_count fix, the inner OR's ``close < 0``
+    # leg was treated as an AND-required conjunct of the outer-plus-
+    # inner group and reported as INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    labels = {sc.label for sc in report.subconditions}
+    # The dead leg still surfaces as a coverage row (so users see it),
+    # but it isn't a blocker.
+    assert "close > 0" in labels
+    assert "close < 0" in labels
+
+
+def test_or_under_ancestor_zero_hit_ancestor_still_blocks() -> None:
+    """OR-with-ancestor: a zero-hit ancestor is still an AND-required
+    blocker. ``if close > 1000: if close > 0 or close < 0:`` — the
+    outer ancestor never fires on a flat fixture, so the predicate is
+    blocked regardless of the inner OR's coverage.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 1000:
+                    if close > 0 or close < 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    # The ancestor leg gets flagged via the AND zero-hit rule even
+    # though the group's combinator is OR.
+    blocker_reasons = [b.reason for b in report.likely_blockers]
+    assert "indicator_filter_zero_hits" in blocker_reasons
+    blocker_evidence = [b.evidence for b in report.likely_blockers]
+    assert any("close > 1000" in e for e in blocker_evidence)
+
+
+def test_named_series_arg_resolves_via_binding() -> None:
+    """``closes = [b.close for b in history]; rsi(closes, 14) < 25``
+    must evaluate the indicator over the bound series rather than
+    being dropped because ``closes`` isn't directly an OHLCV column.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                closes = [b.close for b in history]
+                if rsi(closes, 14) < -50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # The indicator was previously dropped because args[0] was a
+    # ``Name`` not directly recognisable as an OHLCV column. With the
+    # name-binding resolution it's evaluated normally; rsi < -50 is
+    # never true so the predicate is correctly classified as
+    # INDICATOR_FILTER_TOO_RESTRICTIVE rather than UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+
+
 def test_or_predicate_with_three_legs_recognised() -> None:
     """OR predicates with more than two legs must each surface as a
     coverage row.

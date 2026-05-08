@@ -118,11 +118,22 @@ class _Group:
     groups flag a blocker as soon as *any* leg is zero, while OR groups
     flag a blocker only when *all* legs are zero (since one firing leg
     is enough to satisfy the disjunction).
+
+    ``ancestor_count`` is the number of leading ``subconds`` that came
+    from enclosing AND-conjuncts (ancestors) when the group itself is
+    an OR. Those ancestors remain *required* AND-gates, while the
+    remaining tail entries are the OR alternatives. The aggregator
+    treats positions ``[0:ancestor_count]`` under AND zero-hit rules
+    and the tail under OR all-zero rules — so a real ancestor blocker
+    still surfaces, but a single dead OR alternative doesn't falsely
+    flag a coverage gap. Defaults to ``0`` (all legs in the same
+    combinator class).
     """
 
     subconds: List[_Subcond]
     target_symbols: Optional[set]
     combinator: str = "and"
+    ancestor_count: int = 0
 
 
 def run_indicator_probe(
@@ -337,36 +348,51 @@ def _aggregate(
         # ``target_symbols`` is a regular ``set`` (mutable, unhashable)
         # — freeze it for the dedupe key.
         symbols_key = frozenset(group.target_symbols) if group.target_symbols is not None else None
-        if group.combinator == "and":
-            for k in range(legs):
-                if leg_hits[k] != 0:
-                    continue
-                key = (leg_labels[k], symbols_key)
-                if key in flagged_keys:
-                    continue
-                flagged_keys.add(key)
-                evidence = leg_labels[k]
-                if group.target_symbols:
-                    evidence = f"{evidence} [{','.join(sorted(group.target_symbols))}]"
-                blockers.append(
-                    LikelyBlocker(
-                        reason="indicator_filter_zero_hits",
-                        evidence=evidence,
-                        hit_rate=0.0,
-                    )
-                )
-        elif legs >= 1 and all(h == 0 for h in leg_hits):
-            # Every leg of the OR is zero — the disjunction never fires.
-            evidence = " OR ".join(leg_labels)
+
+        def _flag_and_zero(k: int) -> None:
+            """Flag a single zero-hit AND-required leg (ancestor or AND-group)."""
+            key = (leg_labels[k], symbols_key)
+            if key in flagged_keys:
+                return
+            flagged_keys.add(key)
+            evidence = leg_labels[k]
             if group.target_symbols:
                 evidence = f"{evidence} [{','.join(sorted(group.target_symbols))}]"
             blockers.append(
                 LikelyBlocker(
-                    reason="or_group_never_fires",
+                    reason="indicator_filter_zero_hits",
                     evidence=evidence,
                     hit_rate=0.0,
                 )
             )
+
+        if group.combinator == "and":
+            for k in range(legs):
+                if leg_hits[k] == 0:
+                    _flag_and_zero(k)
+        else:  # "or"
+            # Ancestors are still AND-required even when the group's
+            # own predicate is a disjunction — a zero-hit ancestor
+            # blocks the predicate regardless of whether any OR leg
+            # fires. Apply the AND zero-hit rule to positions
+            # [0..ancestor_count) and the disjunction-all-zero rule to
+            # the OR-leg tail.
+            for k in range(group.ancestor_count):
+                if leg_hits[k] == 0:
+                    _flag_and_zero(k)
+            or_tail_hits = leg_hits[group.ancestor_count :]
+            or_tail_labels = leg_labels[group.ancestor_count :]
+            if or_tail_hits and all(h == 0 for h in or_tail_hits):
+                evidence = " OR ".join(or_tail_labels)
+                if group.target_symbols:
+                    evidence = f"{evidence} [{','.join(sorted(group.target_symbols))}]"
+                blockers.append(
+                    LikelyBlocker(
+                        reason="or_group_never_fires",
+                        evidence=evidence,
+                        hit_rate=0.0,
+                    )
+                )
         base += legs
 
     if blockers:
@@ -606,10 +632,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 return False
             return True
 
+        # Ancestors stay AND-required; OR legs are alternatives. We
+        # carry both in one group with combinator="or" plus an
+        # ``ancestor_count`` so _aggregate knows where the AND-tail
+        # ends and the OR-leg head begins. (See _Group docstring for
+        # the per-position rule.)
         group_subs: List[_Subcond] = []
-        # Ancestors stay AND-conjuncts; OR legs are this group's own
-        # alternatives. The combinator flag tells _aggregate which
-        # zero-hit rule to use.
         if not _budgeted_extend(group_subs, ancestors):
             if group_subs:
                 groups.append(
@@ -617,37 +645,29 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         subconds=group_subs,
                         target_symbols=ancestor_symbols,
                         combinator="and",
+                        ancestor_count=len(group_subs),
                     )
                 )
             return False
+        ancestor_count = len(group_subs)
         if not _budgeted_extend(group_subs, own_subs):
             if group_subs:
                 groups.append(
                     _Group(
                         subconds=group_subs,
                         target_symbols=ancestor_symbols,
-                        combinator="or" if not ancestors else "and",
+                        combinator="or",
+                        ancestor_count=ancestor_count,
                     )
                 )
             return False
         if group_subs:
-            # When the group has ancestors AND OR-legs together, the
-            # ancestors are AND-conjuncts and the OR-legs are
-            # alternatives — modelling that hybrid correctly needs more
-            # than a single combinator field. We keep the simplest
-            # correct bound: when there are no ancestors, classify as a
-            # pure OR group; otherwise fall back to AND, which preserves
-            # the existing ancestor-coverage signal at the cost of
-            # treating zero-hit OR legs more strictly than they deserve.
-            # That's an under-flagging direction (we may surface a real
-            # never-fire leg as a blocker even when the OR's other leg
-            # covers it) but it never produces a false COVERAGE_OK.
-            combinator = "or" if not ancestors else "and"
             groups.append(
                 _Group(
                     subconds=group_subs,
                     target_symbols=ancestor_symbols,
-                    combinator=combinator,
+                    combinator="or",
+                    ancestor_count=ancestor_count,
                 )
             )
         # Body sees no extra ancestors — see docstring.
@@ -1076,7 +1096,7 @@ def _build_operand(
             data_dependent=False,
         )
 
-    indicator_fn = _indicator_call(node, name_periods)
+    indicator_fn = _indicator_call(node, name_periods, name_evaluators)
     if indicator_fn is not None:
         return _Operand(fn=indicator_fn, data_dependent=True)
 
@@ -1166,13 +1186,15 @@ def _numeric_literal(node: ast.expr, name_periods: Dict[str, int]) -> Optional[f
 
 
 def _indicator_call(
-    node: ast.expr, name_periods: Dict[str, int]
+    node: ast.expr,
+    name_periods: Dict[str, int],
+    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
 ) -> Optional[Callable[[pd.DataFrame], pd.Series]]:
     # Tuple-returning helpers are only recognised inside a Subscript with
     # a constant integer index — without one we can't tell which leg the
     # user meant to compare against.
     if isinstance(node, ast.Subscript):
-        return _tuple_indicator_subscript(node, name_periods)
+        return _tuple_indicator_subscript(node, name_periods, name_evaluators)
 
     if not isinstance(node, ast.Call):
         return None
@@ -1182,20 +1204,19 @@ def _indicator_call(
 
     if func_name in _SERIES_INDICATORS:
         helper = _SERIES_INDICATORS[func_name]
-        column = _series_arg_column(node)
-        if column is None:
+        series_input = _resolve_series_input(node, name_evaluators)
+        if series_input is None:
             # Explicit but unrecognised input (e.g. a custom series).
-            # Drop rather than substitute close — see _series_arg_column.
+            # Drop rather than substitute close — see _resolve_series_input.
             return None
         # Series helpers: rsi(series, period), sma(series, period), ...
         period = _resolve_period_arg(node, name_periods, positional_index=1)
 
         def _eval_series(df: pd.DataFrame) -> pd.Series:
-            if column not in df.columns:
-                return pd.Series(float("nan"), index=df.index)
+            s = series_input(df)
             if period is not None:
-                return helper(df[column].astype(float), int(period))
-            return helper(df[column].astype(float))
+                return helper(s, int(period))
+            return helper(s)
 
         return _eval_series
 
@@ -1239,7 +1260,9 @@ def _indicator_call(
 
 
 def _tuple_indicator_subscript(
-    node: ast.Subscript, name_periods: Dict[str, int]
+    node: ast.Subscript,
+    name_periods: Dict[str, int],
+    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
 ) -> Optional[Callable[[pd.DataFrame], pd.Series]]:
     """Resolve ``bollinger_bands(close, 20)[0]`` and similar.
 
@@ -1273,14 +1296,12 @@ def _tuple_indicator_subscript(
     extra_kwargs = _resolve_known_kwargs(call, name_periods, kwarg_names)
 
     if sig_kind == "series":
-        column = _series_arg_column(call)
-        if column is None:
+        series_input = _resolve_series_input(call, name_evaluators)
+        if series_input is None:
             return None
 
         def _eval_tuple_series(df: pd.DataFrame) -> pd.Series:
-            if column not in df.columns:
-                return pd.Series(float("nan"), index=df.index)
-            return helper(df[column].astype(float), *extra_pos, **extra_kwargs)[idx]
+            return helper(series_input(df), *extra_pos, **extra_kwargs)[idx]
 
         return _eval_tuple_series
 
@@ -1449,20 +1470,61 @@ def _func_name(func: ast.expr) -> Optional[str]:
     return None
 
 
-def _series_arg_column(call: ast.Call) -> Optional[str]:
-    """Pick the source column for a single-series indicator call.
+def _resolve_series_input(
+    call: ast.Call,
+    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
+) -> Optional[Callable[[pd.DataFrame], pd.Series]]:
+    """Resolve the first positional arg of a series-indicator call to a
+    ``df -> Series`` callable.
 
-    A bare call like ``sma()`` falls back to ``close`` (rare, but
-    harmless: no other column is implied). When the strategy passes an
-    *explicit* argument that we can't pin to an OHLCV column —
-    ``rsi(self.history)``, ``sma(custom_series)``, etc. — return
-    ``None`` so the caller drops the indicator entirely. Silently
-    substituting ``close`` would mis-evaluate volume/OHLC filters and
-    produce false COVERAGE_OK reports.
+    Three resolution paths in order:
+
+    1. **Bare call** (``sma()``) — defaults to the close column. Rare in
+       practice but harmless since no other column is implied.
+    2. **OHLCV column reference** — ``close``, ``bar.volume``,
+       ``df['close']``, or ``[b.X for b in history]`` — pinned via
+       :func:`_column_from`.
+    3. **Bound local Name** — when the strategy did
+       ``closes = [b.close for b in history]`` (or any other shape that
+       :func:`_collect_name_evaluators` already understood) and then
+       passed the local into the indicator, look up the binding and use
+       its callable directly.
+
+    Returns ``None`` when an explicit argument can't be resolved by any
+    of those paths — the caller then drops the indicator rather than
+    silently substituting ``close``, which would mis-evaluate volume /
+    OHLC filters and produce false ``COVERAGE_OK`` reports.
     """
     if not call.args:
-        return "close"
-    return _column_from(call.args[0])
+
+        def _default_close(df: pd.DataFrame) -> pd.Series:
+            if "close" in df.columns:
+                return df["close"].astype(float)
+            return pd.Series(float("nan"), index=df.index)
+
+        return _default_close
+
+    arg0 = call.args[0]
+    column = _column_from(arg0)
+    if column is not None:
+
+        def _from_column(df: pd.DataFrame, c: str = column) -> pd.Series:
+            if c in df.columns:
+                return df[c].astype(float)
+            return pd.Series(float("nan"), index=df.index)
+
+        return _from_column
+
+    if isinstance(arg0, ast.Name) and name_evaluators is not None:
+        evaluator = name_evaluators.get(arg0.id)
+        if evaluator is not None:
+
+            def _from_binding(df: pd.DataFrame, ev=evaluator) -> pd.Series:
+                return ev(df).astype(float)
+
+            return _from_binding
+
+    return None
 
 
 def _resolve_period_arg(
