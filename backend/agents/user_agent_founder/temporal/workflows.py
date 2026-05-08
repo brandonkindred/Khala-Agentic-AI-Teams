@@ -28,10 +28,22 @@ def run_pipeline_activity(run_id: str) -> dict[str, Any]:
     """
     from user_agent_founder.agent import FounderAgent
     from user_agent_founder.orchestrator import run_workflow
-    from user_agent_founder.store import get_founder_store
+    from user_agent_founder.store import get_founder_store, get_persona_store
 
     store = get_founder_store()
-    agent = FounderAgent()
+    run = store.get_run(run_id)
+    persona = (
+        get_persona_store().get_persona(run.persona_id)
+        if run is not None and run.persona_id
+        else None
+    )
+    if persona is not None:
+        agent = FounderAgent(
+            system_prompt=persona.system_prompt,
+            spec_generation_prompt=persona.spec_generation_prompt,
+        )
+    else:
+        agent = FounderAgent()
     # run_workflow resolves the adapter from the run row's target_team_key
     # when none is supplied — keeps this boundary thin.
     run_workflow(run_id, store, agent)

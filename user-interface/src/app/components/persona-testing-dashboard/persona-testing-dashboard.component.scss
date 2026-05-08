@@ -5,6 +5,23 @@
   font-size: var(--kh-text-md, 0.9375rem);
 }
 
+// ── Header Actions ────────────────────────────────────────────────────────
+
+.dashboard-actions {
+  display: flex;
+  gap: var(--kh-space-2, 0.5rem);
+  margin-bottom: var(--kh-space-4, 1rem);
+}
+
+.builtin-chip {
+  margin-left: var(--kh-space-2, 0.5rem);
+  font-size: 0.65rem;
+  height: 18px;
+  padding: 0 8px;
+  background: var(--kh-accent-subtle, #e3f2fd);
+  color: var(--kh-accent-text, #1565c0);
+}
+
 // ── Persona Selector ──────────────────────────────────────────────────────
 
 .section-title {
@@ -103,6 +120,17 @@
   .run-date {
     font-size: 0.7rem;
     color: var(--kh-text-muted, rgba(0, 0, 0, 0.54));
+  }
+
+  .run-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--kh-space-2, 0.5rem);
+  }
+
+  .run-meta {
+    font-size: 0.7rem;
+    color: var(--kh-text-secondary, rgba(0, 0, 0, 0.7));
   }
 
   .run-error {

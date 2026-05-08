@@ -43,7 +43,15 @@ class _FakeCursor:
 
         # INSERT into runs
         if sql_l.startswith("insert into user_agent_founder_runs"):
-            run_id, status, target_team_key, created_at, updated_at = params
+            (
+                run_id,
+                status,
+                target_team_key,
+                persona_id,
+                project_name,
+                created_at,
+                updated_at,
+            ) = params
             self._db["runs"][run_id] = {
                 "run_id": run_id,
                 "status": status,
@@ -52,6 +60,8 @@ class _FakeCursor:
                 "spec_content": None,
                 "repo_path": None,
                 "target_team_key": target_team_key,
+                "persona_id": persona_id,
+                "project_name": project_name,
                 "created_at": created_at,
                 "updated_at": updated_at,
                 "error": None,
@@ -180,6 +190,28 @@ def test_create_run_returns_uuid_and_inserts_pending_row(store, fake_pg):
 def test_create_run_persists_explicit_target_team_key(store, fake_pg):
     run_id = store.create_run(target_team_key="some_other_team")
     assert fake_pg["runs"][run_id]["target_team_key"] == "some_other_team"
+
+
+def test_create_run_persists_persona_id_and_project_name(store, fake_pg):
+    run_id = store.create_run(
+        run_id="fixed-run-id",
+        persona_id="qa-bot",
+        project_name="taskflow-mvp-aabbccdd",
+    )
+    row = fake_pg["runs"][run_id]
+    assert row["persona_id"] == "qa-bot"
+    assert row["project_name"] == "taskflow-mvp-aabbccdd"
+
+
+def test_get_run_exposes_persona_id_and_project_name(store):
+    run_id = store.create_run(
+        persona_id="qa-bot",
+        project_name="proj-x",
+    )
+    run = store.get_run(run_id)
+    assert run is not None
+    assert run.persona_id == "qa-bot"
+    assert run.project_name == "proj-x"
 
 
 def test_get_run_exposes_target_team_key(store):

@@ -1,0 +1,78 @@
+<h2 mat-dialog-title>
+  {{ data.mode === 'edit' ? 'Edit persona' : 'Create persona' }}
+</h2>
+
+<mat-dialog-content class="persona-editor-dialog__content">
+  <mat-form-field appearance="outline">
+    <mat-label>Name</mat-label>
+    <input
+      matInput
+      [ngModel]="name()"
+      (ngModelChange)="name.set($event)"
+      placeholder="e.g. QA-First Founder"
+      cdkFocusInitial
+    />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Description</mat-label>
+    <textarea
+      matInput
+      rows="2"
+      [ngModel]="description()"
+      (ngModelChange)="description.set($event)"
+      placeholder="One-line summary shown on the persona card."
+    ></textarea>
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Icon (Material Icons name)</mat-label>
+    <input
+      matInput
+      [ngModel]="icon()"
+      (ngModelChange)="icon.set($event)"
+      placeholder="e.g. rocket_launch, bug_report, science"
+    />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>System prompt (persona voice / values)</mat-label>
+    <textarea
+      matInput
+      rows="20"
+      [ngModel]="systemPrompt()"
+      (ngModelChange)="systemPrompt.set($event)"
+      placeholder="You are ... Your core values are ..."
+    ></textarea>
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Spec generation prompt (what product to spec)</mat-label>
+    <textarea
+      matInput
+      rows="15"
+      [ngModel]="specGenerationPrompt()"
+      (ngModelChange)="specGenerationPrompt.set($event)"
+      placeholder="Write a product specification for ..."
+    ></textarea>
+  </mat-form-field>
+
+  @if (serverError()) {
+    <p class="persona-editor-dialog__error" role="alert">
+      <mat-icon>error</mat-icon>
+      {{ serverError() }}
+    </p>
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button (click)="cancel()" [disabled]="busy()">Cancel</button>
+  <button
+    mat-flat-button
+    color="primary"
+    (click)="submit()"
+    [disabled]="busy() || !isValid()"
+  >
+    {{ data.mode === 'edit' ? 'Save changes' : 'Create' }}
+  </button>
+</mat-dialog-actions>

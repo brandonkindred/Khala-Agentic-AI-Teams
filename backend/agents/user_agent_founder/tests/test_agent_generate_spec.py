@@ -42,6 +42,8 @@ def _make_agent_without_init(strands_agent_stub: object) -> object:
 
     founder = agent_module.FounderAgent.__new__(agent_module.FounderAgent)
     founder._agent = strands_agent_stub
+    founder._system_prompt = agent_module.FOUNDER_SYSTEM_PROMPT
+    founder._spec_generation_prompt = agent_module.SPEC_GENERATION_PROMPT
     return founder
 
 

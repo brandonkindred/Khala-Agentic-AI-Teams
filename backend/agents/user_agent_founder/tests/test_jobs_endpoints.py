@@ -104,14 +104,56 @@ def fake_job_store(monkeypatch):
 
 @pytest.fixture
 def fake_store(monkeypatch):
-    """Patch the founder Postgres store with a MagicMock."""
+    """Patch the founder Postgres store with a MagicMock.
+
+    ``/start`` mints the run_id up-front (uuid hex) and passes it into
+    ``create_run`` as a kwarg, so create_run.return_value is irrelevant.
+    The deterministic id used by tests is set via the ``fixed_run_id``
+    fixture below — keep this store stub free of return-value assumptions.
+    """
     from user_agent_founder.api import main as api_main
 
     store = MagicMock()
-    store.create_run.return_value = "run-123"
+    store.create_run.return_value = None
     store.delete_run.return_value = True
     monkeypatch.setattr(api_main, "get_founder_store", lambda: store)
     return store
+
+
+@pytest.fixture
+def fake_persona_store(monkeypatch):
+    """Patch the persona store; ``startup-founder`` is always present."""
+    from user_agent_founder.api import main as api_main
+    from user_agent_founder.store import StoredPersona
+
+    p = StoredPersona(
+        persona_id="startup-founder",
+        name="Startup Founder",
+        description="d",
+        icon="rocket_launch",
+        system_prompt="s",
+        spec_generation_prompt="g",
+        is_builtin=True,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    store = MagicMock()
+    store.get_persona.side_effect = lambda pid: p if pid == "startup-founder" else None
+    store.list_personas.return_value = [p]
+    monkeypatch.setattr(api_main, "get_persona_store", lambda: store)
+    return store
+
+
+@pytest.fixture
+def fixed_run_id(monkeypatch):
+    """Make ``uuid4().hex`` deterministic so tests can assert on the run id."""
+    from user_agent_founder.api import main as api_main
+
+    class _FixedUUID:
+        hex = "deadbeefdeadbeefdeadbeefdeadbeef"
+
+    monkeypatch.setattr(api_main, "uuid4", lambda: _FixedUUID())
+    return _FixedUUID.hex
 
 
 @pytest.fixture
@@ -134,17 +176,19 @@ def fake_dispatch(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_start_creates_job_and_dispatches(fake_job_store, fake_store, fake_dispatch):
+def test_start_creates_job_and_dispatches(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store, fixed_run_id
+):
     from user_agent_founder.api.main import start_founder_workflow
 
     resp = start_founder_workflow()
 
-    assert resp.job_id == "run-123"
+    assert resp.job_id == fixed_run_id
     assert resp.status == "running"
-    assert fake_dispatch == ["run-123"]
+    assert fake_dispatch == [fixed_run_id]
     assert fake_job_store.create_calls == [
         (
-            "run-123",
+            fixed_run_id,
             {
                 "status": "running",
                 "label": "Testing Personas workflow",
@@ -152,21 +196,41 @@ def test_start_creates_job_and_dispatches(fake_job_store, fake_store, fake_dispa
             },
         )
     ]
-    assert fake_job_store.jobs["run-123"]["status"] == "running"
-    # Default target_team_key is recorded on create_run.
-    fake_store.create_run.assert_called_once_with(target_team_key="software_engineering")
+    assert fake_job_store.jobs[fixed_run_id]["status"] == "running"
+    # Default target_team_key + persona_id are recorded on create_run, with
+    # a slug+suffix project name when the caller didn't supply one.
+    fake_store.create_run.assert_called_once_with(
+        target_team_key="software_engineering",
+        run_id=fixed_run_id,
+        persona_id="startup-founder",
+        project_name=f"startup-founder-{fixed_run_id[:8]}",
+    )
 
 
-def test_start_passes_explicit_target_team_key_through(fake_job_store, fake_store, fake_dispatch):
+def test_start_passes_explicit_persona_and_project_name(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store, fixed_run_id
+):
     from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
 
-    resp = start_founder_workflow(StartRunRequest(target_team_key="software_engineering"))
+    resp = start_founder_workflow(
+        StartRunRequest(
+            target_team_key="software_engineering",
+            project_name="my-custom-name",
+        )
+    )
 
-    assert resp.job_id == "run-123"
-    fake_store.create_run.assert_called_once_with(target_team_key="software_engineering")
+    assert resp.job_id == fixed_run_id
+    fake_store.create_run.assert_called_once_with(
+        target_team_key="software_engineering",
+        run_id=fixed_run_id,
+        persona_id="startup-founder",
+        project_name="my-custom-name",
+    )
 
 
-def test_start_rejects_unknown_target_team_key(fake_job_store, fake_store, fake_dispatch):
+def test_start_rejects_unknown_target_team_key(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store
+):
     from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
 
     with pytest.raises(HTTPException) as excinfo:
@@ -176,7 +240,20 @@ def test_start_rejects_unknown_target_team_key(fake_job_store, fake_store, fake_
     assert fake_dispatch == []
 
 
-def test_start_marks_job_failed_when_dispatch_raises(fake_job_store, fake_store, monkeypatch):
+def test_start_rejects_unknown_persona(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store
+):
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    with pytest.raises(HTTPException) as excinfo:
+        start_founder_workflow(StartRunRequest(persona_id="ghost"))
+    assert excinfo.value.status_code == 404
+    assert fake_dispatch == []
+
+
+def test_start_marks_job_failed_when_dispatch_raises(
+    fake_job_store, fake_store, fake_persona_store, fixed_run_id, monkeypatch
+):
     from user_agent_founder.api import main as api_main
 
     def _boom(run_id: str) -> str:
@@ -188,8 +265,8 @@ def test_start_marks_job_failed_when_dispatch_raises(fake_job_store, fake_store,
         api_main.start_founder_workflow()
 
     assert excinfo.value.status_code == 500
-    assert fake_job_store.jobs["run-123"]["status"] == "failed"
-    assert "no worker" in fake_job_store.jobs["run-123"]["error"]
+    assert fake_job_store.jobs[fixed_run_id]["status"] == "failed"
+    assert "no worker" in fake_job_store.jobs[fixed_run_id]["error"]
 
 
 # ---------------------------------------------------------------------------

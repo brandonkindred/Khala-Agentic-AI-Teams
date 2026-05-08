@@ -1,0 +1,57 @@
+<h2 mat-dialog-title>Start Test</h2>
+
+<mat-dialog-content class="start-test-dialog__content">
+  <mat-form-field appearance="outline">
+    <mat-label>Persona</mat-label>
+    <mat-select
+      [ngModel]="personaId()"
+      (ngModelChange)="personaId.set($event)"
+      cdkFocusInitial
+    >
+      @for (p of data.personas; track p.id) {
+        <mat-option [value]="p.id">{{ p.name }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Target team</mat-label>
+    <mat-select
+      [ngModel]="targetTeamKey()"
+      (ngModelChange)="targetTeamKey.set($event)"
+    >
+      @for (t of data.teams; track t.team_key) {
+        <mat-option [value]="t.team_key">{{ t.display_name }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Project name (optional)</mat-label>
+    <input
+      matInput
+      [ngModel]="projectName()"
+      (ngModelChange)="projectName.set($event)"
+      placeholder="taskflow-mvp"
+    />
+  </mat-form-field>
+
+  @if (serverError()) {
+    <p class="start-test-dialog__error" role="alert">
+      <mat-icon>error</mat-icon>
+      {{ serverError() }}
+    </p>
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button (click)="cancel()" [disabled]="busy()">Cancel</button>
+  <button
+    mat-flat-button
+    color="primary"
+    (click)="submit()"
+    [disabled]="busy() || !isValid()"
+  >
+    Start Test
+  </button>
+</mat-dialog-actions>

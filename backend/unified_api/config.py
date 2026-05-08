@@ -214,10 +214,10 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         timeout_seconds=120.0,
     ),
     "user_agent_founder": TeamConfig(
-        name="User Agent Founder",
+        name="Testing Personas",
         prefix="/api/user-agent-founder",
-        description="Autonomous startup founder agent that drives the SE team to build a task management service",
-        tags=["user-agent", "founder", "simulation"],
+        description="Create personas and direct them to autonomously test other teams.",
+        tags=["persona", "testing", "simulation"],
         cell="core_dev",
         timeout_seconds=300.0,
     ),

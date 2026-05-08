@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from contextlib import asynccontextmanager
 from typing import Any, Optional
+from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from shared_observability import init_otel, instrument_fastapi_app
 from user_agent_founder.agent import FounderAgent
 from user_agent_founder.orchestrator import run_workflow
 from user_agent_founder.postgres import SCHEMA as USER_AGENT_FOUNDER_POSTGRES_SCHEMA
-from user_agent_founder.store import DEFAULT_TARGET_TEAM_KEY, get_founder_store
-from user_agent_founder.targets import get_adapter
+from user_agent_founder.store import (
+    DEFAULT_TARGET_TEAM_KEY,
+    StoredPersona,
+    get_founder_store,
+    get_persona_store,
+)
+from user_agent_founder.targets import ADAPTERS, get_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +38,14 @@ async def _lifespan(application: FastAPI):
         register_team_schemas(USER_AGENT_FOUNDER_POSTGRES_SCHEMA)
     except Exception:
         logger.exception("user_agent_founder postgres schema registration failed")
+    try:
+        inserted = get_persona_store().seed_builtins()
+        logger.info(
+            "persona startup-founder %s",
+            "seeded (builtin)" if inserted else "already present",
+        )
+    except Exception:
+        logger.exception("user_agent_founder persona seeding failed")
     # Backstop for local dev (`uvicorn user_agent_founder.api.main:app`):
     # the team_service entrypoint normally starts the Temporal worker
     # via TEAM_TEMPORAL_WORKER_MODULE before uvicorn accepts requests, but
@@ -74,10 +89,25 @@ instrument_fastapi_app(app, team_key="user_agent_founder")
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_PERSONA_ID = "startup-founder"
+
+
 class StartRunRequest(BaseModel):
+    persona_id: str = Field(
+        default=DEFAULT_PERSONA_ID,
+        description="Which persona drives this run. Must exist in PersonaStore.",
+    )
     target_team_key: str = Field(
         default=DEFAULT_TARGET_TEAM_KEY,
         description="Which target team this persona run drives. Must be a key in targets.ADAPTERS.",
+    )
+    project_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional project slug for the target team. When omitted, computed "
+            "server-side as '<slug(persona_name)>-<run_id[:8]>' to guarantee "
+            "uniqueness across repeat runs."
+        ),
     )
 
 
@@ -107,6 +137,8 @@ class RunStatusResponse(BaseModel):
     spec_content: Optional[str] = None
     repo_path: Optional[str] = None
     target_team_key: str = DEFAULT_TARGET_TEAM_KEY
+    persona_id: Optional[str] = None
+    project_name: Optional[str] = None
     created_at: str
     updated_at: str
     error: Optional[str] = None
@@ -119,6 +151,8 @@ class RunSummaryResponse(BaseModel):
     se_job_id: Optional[str] = None
     analysis_job_id: Optional[str] = None
     target_team_key: str = DEFAULT_TARGET_TEAM_KEY
+    persona_id: Optional[str] = None
+    project_name: Optional[str] = None
     created_at: str
     updated_at: str
     error: Optional[str] = None
@@ -131,6 +165,27 @@ class RunListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+def _build_agent_for_run(run_id: str) -> FounderAgent:
+    """Construct a FounderAgent using the persona prompts associated with a run.
+
+    Resolves the persona via the run row's ``persona_id``. Falls back to
+    the bundled default prompts if either the run or the persona row is
+    missing — keeps thread-mode dispatch resilient against orphaned rows
+    while still picking up custom voices when present.
+    """
+    store = get_founder_store()
+    run = store.get_run(run_id)
+    if run is None or not run.persona_id:
+        return FounderAgent()
+    persona = get_persona_store().get_persona(run.persona_id)
+    if persona is None:
+        return FounderAgent()
+    return FounderAgent(
+        system_prompt=persona.system_prompt,
+        spec_generation_prompt=persona.spec_generation_prompt,
+    )
 
 
 def _dispatch_founder_run(run_id: str) -> str:
@@ -153,7 +208,7 @@ def _dispatch_founder_run(run_id: str) -> str:
         pass
 
     store = get_founder_store()
-    agent = FounderAgent()
+    agent = _build_agent_for_run(run_id)
     run = store.get_run(run_id)
     team_key = (run.target_team_key if run is not None else None) or DEFAULT_TARGET_TEAM_KEY
     adapter = get_adapter(team_key)
@@ -168,8 +223,34 @@ def _dispatch_founder_run(run_id: str) -> str:
     return "thread"
 
 
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify_persona_name(name: str, *, max_len: int = 32) -> str:
+    """Lowercase, hyphen-separated, ``[a-z0-9-]`` only. Falls back to 'persona'."""
+    slug = _SLUG_RE.sub("-", name.lower()).strip("-")
+    slug = slug[:max_len].rstrip("-")
+    return slug or "persona"
+
+
+def _persona_to_info(p: StoredPersona) -> "PersonaInfo":
+    return PersonaInfo(
+        id=p.persona_id,
+        name=p.name,
+        description=p.description,
+        icon=p.icon,
+        is_builtin=p.is_builtin,
+        system_prompt=p.system_prompt,
+        spec_generation_prompt=p.spec_generation_prompt,
+        created_at=p.created_at,
+        updated_at=p.updated_at,
+    )
+
+
 @app.post("/start", response_model=StartRunResponse)
-def start_founder_workflow(request: StartRunRequest | None = None) -> StartRunResponse:
+def start_founder_workflow(
+    request: Optional[StartRunRequest] = None,
+) -> StartRunResponse:
     """Kick off the autonomous founder workflow.
 
     The agent will:
@@ -183,16 +264,27 @@ def start_founder_workflow(request: StartRunRequest | None = None) -> StartRunRe
     """
     from user_agent_founder.shared import job_store
 
-    target_team_key = request.target_team_key if request else DEFAULT_TARGET_TEAM_KEY
+    req = request or StartRunRequest()
     # Validate up-front so an unknown key returns 400 instead of crashing the
     # background dispatch thread later.
     try:
-        get_adapter(target_team_key)
+        get_adapter(req.target_team_key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    persona = get_persona_store().get_persona(req.persona_id)
+    if persona is None:
+        raise HTTPException(status_code=404, detail=f"Persona {req.persona_id!r} not found")
+
     store = get_founder_store()
-    run_id = store.create_run(target_team_key=target_team_key)
+    run_id = uuid4().hex
+    project_name = req.project_name or (f"{_slugify_persona_name(persona.name)}-{run_id[:8]}")
+    store.create_run(
+        target_team_key=req.target_team_key,
+        run_id=run_id,
+        persona_id=persona.persona_id,
+        project_name=project_name,
+    )
 
     job_store.create_job(
         run_id,
@@ -235,6 +327,8 @@ def get_run_status(run_id: str) -> RunStatusResponse:
         spec_content=run.spec_content,
         repo_path=run.repo_path,
         target_team_key=run.target_team_key,
+        persona_id=run.persona_id,
+        project_name=run.project_name,
         created_at=run.created_at,
         updated_at=run.updated_at,
         error=run.error,
@@ -265,6 +359,8 @@ def list_runs() -> RunListResponse:
                 se_job_id=r.se_job_id,
                 analysis_job_id=r.analysis_job_id,
                 target_team_key=r.target_team_key,
+                persona_id=r.persona_id,
+                project_name=r.project_name,
                 created_at=r.created_at,
                 updated_at=r.updated_at,
                 error=r.error,
@@ -301,10 +397,40 @@ class PersonaInfo(BaseModel):
     name: str
     description: str
     icon: str
+    is_builtin: bool = False
+    system_prompt: str = ""
+    spec_generation_prompt: str = ""
+    created_at: str = ""
+    updated_at: str = ""
 
 
 class PersonaListResponse(BaseModel):
     personas: list[PersonaInfo]
+
+
+class CreatePersonaRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    description: str = Field(..., min_length=1, max_length=2000)
+    icon: str = Field("person", min_length=1, max_length=64)
+    system_prompt: str = Field(..., min_length=1)
+    spec_generation_prompt: str = Field(..., min_length=1)
+
+
+class UpdatePersonaRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    description: Optional[str] = Field(None, min_length=1, max_length=2000)
+    icon: Optional[str] = Field(None, min_length=1, max_length=64)
+    system_prompt: Optional[str] = Field(None, min_length=1)
+    spec_generation_prompt: Optional[str] = Field(None, min_length=1)
+
+
+class TestableTeam(BaseModel):
+    team_key: str
+    display_name: str
+
+
+class TestableTeamsResponse(BaseModel):
+    teams: list[TestableTeam]
 
 
 class ChatMessageResponse(BaseModel):
@@ -335,21 +461,68 @@ class RunArtifactsResponse(BaseModel):
 
 @app.get("/personas", response_model=PersonaListResponse)
 def list_personas() -> PersonaListResponse:
-    """Return the list of available project personas for SE team testing."""
-    return PersonaListResponse(
-        personas=[
-            PersonaInfo(
-                id="startup-founder",
-                name="Startup Founder",
-                description=(
-                    "Alex Chen — a bootstrapped startup founder building TaskFlow. "
-                    "Budget-conscious, speed-first, UX-obsessed. Generates a task management "
-                    "product spec and drives the SE team autonomously."
-                ),
-                icon="rocket_launch",
-            ),
-        ]
+    """Return all personas available for testing other teams."""
+    personas = get_persona_store().list_personas()
+    return PersonaListResponse(personas=[_persona_to_info(p) for p in personas])
+
+
+@app.post("/personas", response_model=PersonaInfo, status_code=201)
+def create_persona(request: CreatePersonaRequest) -> PersonaInfo:
+    persona = get_persona_store().create_persona(
+        name=request.name,
+        description=request.description,
+        icon=request.icon,
+        system_prompt=request.system_prompt,
+        spec_generation_prompt=request.spec_generation_prompt,
     )
+    return _persona_to_info(persona)
+
+
+@app.get("/personas/{persona_id}", response_model=PersonaInfo)
+def get_persona(persona_id: str) -> PersonaInfo:
+    persona = get_persona_store().get_persona(persona_id)
+    if persona is None:
+        raise HTTPException(status_code=404, detail=f"Persona {persona_id!r} not found")
+    return _persona_to_info(persona)
+
+
+@app.put("/personas/{persona_id}", response_model=PersonaInfo)
+def update_persona(persona_id: str, request: UpdatePersonaRequest) -> PersonaInfo:
+    """Edit a persona. Built-in personas are editable like any other row."""
+    updates = request.model_dump(exclude_unset=True, exclude_none=True)
+    if not updates:
+        # No-op edit: return the current row instead of issuing a UPDATE.
+        existing = get_persona_store().get_persona(persona_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail=f"Persona {persona_id!r} not found")
+        return _persona_to_info(existing)
+    persona = get_persona_store().update_persona(persona_id, **updates)
+    if persona is None:
+        raise HTTPException(status_code=404, detail=f"Persona {persona_id!r} not found")
+    return _persona_to_info(persona)
+
+
+@app.delete("/personas/{persona_id}", status_code=204, response_class=Response)
+def delete_persona(persona_id: str) -> Response:
+    """Delete a persona. Built-ins are deletable; the seed will recreate them on restart."""
+    if not get_persona_store().delete_persona(persona_id):
+        raise HTTPException(status_code=404, detail=f"Persona {persona_id!r} not found")
+    return Response(status_code=204)
+
+
+@app.get("/testable-teams", response_model=TestableTeamsResponse)
+def list_testable_teams() -> TestableTeamsResponse:
+    """List the target teams a persona can test, derived from targets.ADAPTERS."""
+    try:
+        from unified_api.config import TEAM_CONFIGS
+    except Exception:
+        TEAM_CONFIGS = {}
+    teams: list[TestableTeam] = []
+    for team_key in ADAPTERS:
+        cfg = TEAM_CONFIGS.get(team_key)
+        display_name = cfg.name if cfg is not None else team_key.replace("_", " ").title()
+        teams.append(TestableTeam(team_key=team_key, display_name=display_name))
+    return TestableTeamsResponse(teams=teams)
 
 
 @app.get("/runs/{run_id}/artifacts", response_model=RunArtifactsResponse)
@@ -444,7 +617,7 @@ def send_chat_message(run_id: str, request: SendChatRequest) -> ChatHistoryRespo
     }
 
     # Get persona response
-    agent = FounderAgent()
+    agent = _build_agent_for_run(run_id)
     try:
         response = agent.chat(request.message, context)
     except Exception as exc:

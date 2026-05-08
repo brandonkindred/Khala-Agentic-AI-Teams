@@ -6,12 +6,29 @@ import { switchMap } from 'rxjs/operators';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatCardModule } from '@angular/material/card';
+import { MatChipsModule } from '@angular/material/chips';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { JobActionsService } from '../../services/job-actions.service';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
-import type { JobSource, PersonaInfo, PersonaTestRun } from '../../models';
+import type {
+  JobSource,
+  PersonaInfo,
+  PersonaTestRun,
+  TestableTeam,
+} from '../../models';
+import {
+  PersonaEditorDialogComponent,
+  PersonaEditorDialogData,
+  PersonaEditorDialogResult,
+} from './persona-editor-dialog.component';
+import {
+  StartTestDialogComponent,
+  StartTestDialogData,
+  StartTestDialogResult,
+} from './start-test-dialog.component';
 
 const TEAM_SOURCE: JobSource = 'user_agent_founder';
 const POLL_RUNS_MS = 15_000;
@@ -26,8 +43,10 @@ const RESUMABLE_STATUSES = new Set<string>(['failed', 'interrupted', 'agent_cras
     MatButtonModule,
     MatIconModule,
     MatCardModule,
+    MatChipsModule,
     MatProgressBarModule,
     MatTooltipModule,
+    MatDialogModule,
     DashboardShellComponent,
   ],
   templateUrl: './persona-testing-dashboard.component.html',
@@ -37,30 +56,30 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
   private readonly api = inject(PersonaTestingApiService);
   private readonly jobActions = inject(JobActionsService);
   private readonly router = inject(Router);
+  private readonly dialog = inject(MatDialog);
   private runsSub: Subscription | null = null;
 
   personas: PersonaInfo[] = [];
+  teams: TestableTeam[] = [];
   allRuns: PersonaTestRun[] = [];
   runningRuns: PersonaTestRun[] = [];
   completedRuns: PersonaTestRun[] = [];
   starting = false;
   startError: string | null = null;
+  personaError: string | null = null;
   actionPending = new Set<string>();
   actionError: string | null = null;
 
   ngOnInit(): void {
-    this.api.getPersonas().subscribe({
-      next: (resp) => (this.personas = resp.personas),
+    this.refreshPersonas();
+    this.api.getTestableTeams().subscribe({
+      next: (resp) => (this.teams = resp.teams),
     });
 
     this.runsSub = timer(0, POLL_RUNS_MS)
       .pipe(switchMap(() => this.api.getRuns()))
       .subscribe({
-        next: (resp) => {
-          this.allRuns = resp.runs;
-          this.runningRuns = this.allRuns.filter((r) => !TERMINAL_STATUSES.includes(r.status));
-          this.completedRuns = this.allRuns.filter((r) => TERMINAL_STATUSES.includes(r.status));
-        },
+        next: (resp) => this.applyRuns(resp.runs),
       });
   }
 
@@ -68,20 +87,113 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
     this.runsSub?.unsubscribe();
   }
 
-  startTest(): void {
-    this.starting = true;
-    this.startError = null;
-    this.api.startTest().subscribe({
-      next: (resp) => {
-        this.starting = false;
-        this.router.navigate(['/persona-testing/audit', resp.run_id]);
-      },
+  // ── Persona CRUD ─────────────────────────────────────────────────
+
+  openCreateDialog(): void {
+    const ref = this.dialog.open<
+      PersonaEditorDialogComponent,
+      PersonaEditorDialogData,
+      PersonaEditorDialogResult
+    >(PersonaEditorDialogComponent, {
+      data: { mode: 'create' },
+      width: '720px',
+    });
+    ref.afterClosed().subscribe((result) => {
+      if (!result) return;
+      this.personaError = null;
+      this.api.createPersona(result).subscribe({
+        next: () => this.refreshPersonas(),
+        error: (err) => {
+          this.personaError = err?.error?.detail ?? 'Failed to create persona';
+        },
+      });
+    });
+  }
+
+  openEditDialog(persona: PersonaInfo): void {
+    const ref = this.dialog.open<
+      PersonaEditorDialogComponent,
+      PersonaEditorDialogData,
+      PersonaEditorDialogResult
+    >(PersonaEditorDialogComponent, {
+      data: { mode: 'edit', persona },
+      width: '720px',
+    });
+    ref.afterClosed().subscribe((result) => {
+      if (!result) return;
+      this.personaError = null;
+      this.api.updatePersona(persona.id, result).subscribe({
+        next: () => this.refreshPersonas(),
+        error: (err) => {
+          this.personaError = err?.error?.detail ?? 'Failed to update persona';
+        },
+      });
+    });
+  }
+
+  deletePersona(persona: PersonaInfo): void {
+    const confirmed = window.confirm(
+      `Delete persona "${persona.name}"? This cannot be undone.` +
+        (persona.is_builtin
+          ? ' (Built-in personas re-seed on next API restart.)'
+          : ''),
+    );
+    if (!confirmed) return;
+    this.personaError = null;
+    this.api.deletePersona(persona.id).subscribe({
+      next: () => this.refreshPersonas(),
       error: (err) => {
-        this.starting = false;
-        this.startError = err?.error?.detail ?? 'Failed to start test';
+        this.personaError = err?.error?.detail ?? 'Failed to delete persona';
       },
     });
   }
+
+  // ── Start Test ───────────────────────────────────────────────────
+
+  openStartTestDialog(initialPersonaId?: string): void {
+    if (!this.personas.length || !this.teams.length) return;
+    const ref = this.dialog.open<
+      StartTestDialogComponent,
+      StartTestDialogData,
+      StartTestDialogResult
+    >(StartTestDialogComponent, {
+      data: {
+        personas: this.personas,
+        teams: this.teams,
+        initialPersonaId,
+      },
+      width: '480px',
+    });
+    ref.afterClosed().subscribe((result) => {
+      if (!result) return;
+      this.starting = true;
+      this.startError = null;
+      this.api.startTest(result).subscribe({
+        next: (resp) => {
+          this.starting = false;
+          this.router.navigate(['/persona-testing/audit', resp.job_id]);
+        },
+        error: (err) => {
+          this.starting = false;
+          this.startError = err?.error?.detail ?? 'Failed to start test';
+        },
+      });
+    });
+  }
+
+  // ── Run lookups ──────────────────────────────────────────────────
+
+  personaName(personaId: string | undefined): string {
+    if (!personaId) return '—';
+    return this.personas.find((p) => p.id === personaId)?.name ?? personaId;
+  }
+
+  teamName(teamKey: string | undefined): string {
+    if (!teamKey) return '—';
+    return this.teams.find((t) => t.team_key === teamKey)?.display_name ?? teamKey;
+  }
+
+  // ── Run actions / polling (unchanged behavior) ───────────────────
 
   openAudit(runId: string): void {
     this.router.navigate(['/persona-testing/audit', runId]);
@@ -92,9 +204,6 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
   }
 
   canStop(run: PersonaTestRun): boolean {
-    // Any non-terminal status is cancellable — this mirrors the backend's
-    // ``_cancellable_statuses()`` gate and avoids drift when the orchestrator
-    // adds new intermediate phases (e.g. ``answering_analysis_questions``).
     return !TERMINAL_STATUSES.includes(run.status);
   }
 
@@ -106,13 +215,21 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
     return TERMINAL_STATUSES.includes(run.status) || RESUMABLE_STATUSES.has(run.status);
   }
 
+  private refreshPersonas(): void {
+    this.api.getPersonas().subscribe({
+      next: (resp) => (this.personas = resp.personas),
+    });
+  }
+
+  private applyRuns(runs: PersonaTestRun[]): void {
+    this.allRuns = runs;
+    this.runningRuns = runs.filter((r) => !TERMINAL_STATUSES.includes(r.status));
+    this.completedRuns = runs.filter((r) => TERMINAL_STATUSES.includes(r.status));
+  }
+
   private refreshRuns(): void {
     this.api.getRuns().subscribe({
-      next: (resp) => {
-        this.allRuns = resp.runs;
-        this.runningRuns = this.allRuns.filter((r) => !TERMINAL_STATUSES.includes(r.status));
-        this.completedRuns = this.allRuns.filter((r) => TERMINAL_STATUSES.includes(r.status));
-      },
+      next: (resp) => this.applyRuns(resp.runs),
     });
   }
 
@@ -126,10 +243,10 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
       action === 'stop'
         ? this.jobActions.stop(TEAM_SOURCE, run.run_id)
         : action === 'resume'
-        ? this.jobActions.resume(TEAM_SOURCE, run.run_id)
-        : action === 'restart'
-        ? this.jobActions.restart(TEAM_SOURCE, run.run_id)
-        : this.jobActions.delete(TEAM_SOURCE, run.run_id);
+          ? this.jobActions.resume(TEAM_SOURCE, run.run_id)
+          : action === 'restart'
+            ? this.jobActions.restart(TEAM_SOURCE, run.run_id)
+            : this.jobActions.delete(TEAM_SOURCE, run.run_id);
 
     call$.subscribe({
       next: () => {

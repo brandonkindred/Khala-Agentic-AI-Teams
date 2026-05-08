@@ -434,7 +434,7 @@ def run_workflow(
             team_key = getattr(run, "target_team_key", None) or "software_engineering"
             adapter = get_adapter(team_key)
 
-        project_name = f"user-agent-founder-{run_id}"
+        project_name = getattr(run, "project_name", None) or f"user-agent-founder-{run_id}"
 
         # Phase 1: Generate the product spec (skip if already done)
         if run is not None and run.spec_content:

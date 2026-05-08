@@ -1,43 +1,72 @@
 <app-dashboard-shell
   title="Testing Personas"
-  subtitle="Test the software engineering team by selecting a project persona and running an autonomous end-to-end build."
+  subtitle="Create personas and direct them to autonomously test your teams."
   icon="science"
 >
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
-<!-- Persona Selector                                                       -->
+<!-- Header Actions                                                         -->
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section class="dashboard-actions">
+  <button
+    mat-flat-button
+    color="primary"
+    (click)="openStartTestDialog()"
+    [disabled]="starting || !personas.length || !teams.length"
+  >
+    <mat-icon>play_arrow</mat-icon>
+    @if (starting) {
+      Starting…
+    } @else {
+      Start Test
+    }
+  </button>
+  <button mat-stroked-button (click)="openCreateDialog()">
+    <mat-icon>add</mat-icon> Create Persona
+  </button>
+</section>
+
+@if (startError) {
+  <p class="error-text">{{ startError }}</p>
+}
+@if (personaError) {
+  <p class="error-text">{{ personaError }}</p>
+}
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<!-- Personas                                                               -->
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 <section class="persona-selector">
-  <h2 class="section-title">Select a Persona</h2>
+  <h2 class="section-title">Personas</h2>
   <div class="persona-cards">
     @for (persona of personas; track persona.id) {
       <mat-card class="persona-card" appearance="outlined">
         <mat-card-header>
           <mat-icon mat-card-avatar class="persona-icon">{{ persona.icon }}</mat-icon>
-          <mat-card-title>{{ persona.name }}</mat-card-title>
+          <mat-card-title>
+            {{ persona.name }}
+            @if (persona.is_builtin) {
+              <mat-chip class="builtin-chip" disableRipple>builtin</mat-chip>
+            }
+          </mat-card-title>
           <mat-card-subtitle>{{ persona.id }}</mat-card-subtitle>
         </mat-card-header>
         <mat-card-content>
           <p>{{ persona.description }}</p>
         </mat-card-content>
         <mat-card-actions align="end">
-          <button mat-raised-button color="primary" (click)="startTest()" [disabled]="starting">
-            <mat-icon>play_arrow</mat-icon>
-            @if (starting) {
-              Starting...
-            } @else {
-              Start Test
-            }
+          <button mat-icon-button matTooltip="Edit" (click)="openEditDialog(persona)">
+            <mat-icon>edit</mat-icon>
+          </button>
+          <button mat-icon-button matTooltip="Delete" (click)="deletePersona(persona)">
+            <mat-icon>delete</mat-icon>
           </button>
         </mat-card-actions>
       </mat-card>
     }
   </div>
-  @if (startError) {
-    <p class="error-text">{{ startError }}</p>
-  }
   @if (!personas.length) {
-    <p class="muted-text">Loading personas...</p>
+    <p class="muted-text">Loading personas…</p>
   }
 </section>
 
@@ -53,6 +82,13 @@
           <div class="run-row">
             <span class="run-id">{{ run.run_id }}</span>
             <span class="run-status status-running">{{ formatStatus(run.status) }}</span>
+          </div>
+          <div class="run-meta-row">
+            <span class="run-meta">Persona: {{ personaName(run.persona_id) }}</span>
+            <span class="run-meta">Team: {{ teamName(run.target_team_key) }}</span>
+            @if (run.project_name) {
+              <span class="run-meta">Project: {{ run.project_name }}</span>
+            }
           </div>
           <span class="run-date">Started {{ run.created_at }}</span>
           <mat-progress-bar mode="indeterminate"></mat-progress-bar>
@@ -92,6 +128,13 @@
           <div class="run-row">
             <span class="run-id">{{ run.run_id }}</span>
             <span class="run-status" [class]="'status-' + run.status">{{ formatStatus(run.status) }}</span>
+          </div>
+          <div class="run-meta-row">
+            <span class="run-meta">Persona: {{ personaName(run.persona_id) }}</span>
+            <span class="run-meta">Team: {{ teamName(run.target_team_key) }}</span>
+            @if (run.project_name) {
+              <span class="run-meta">Project: {{ run.project_name }}</span>
+            }
           </div>
           <span class="run-date">{{ run.updated_at }}</span>
           @if (run.error) {
@@ -142,7 +185,7 @@
   <div class="empty-state">
     <mat-icon class="empty-state-icon">science</mat-icon>
     <h2>No test runs yet</h2>
-    <p>Select a persona above and click "Start Test" to begin an autonomous test of the software engineering team.</p>
+    <p>Click "Start Test" above to direct a persona at one of your teams.</p>
   </div>
 }
 </app-dashboard-shell>

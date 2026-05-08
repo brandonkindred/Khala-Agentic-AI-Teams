@@ -20,9 +20,15 @@ def test_activity_calls_orchestrator_with_reconstructed_deps(monkeypatch):
     import user_agent_founder.temporal as uaf_temporal
 
     fake_store = MagicMock(name="FounderRunStore")
+    # No run row → activity skips persona lookup and uses the default agent.
+    fake_store.get_run.return_value = None
+    fake_persona_store = MagicMock(name="PersonaStore")
     fake_agent = MagicMock(name="FounderAgent")
     monkeypatch.setattr("user_agent_founder.store.get_founder_store", lambda: fake_store)
-    monkeypatch.setattr("user_agent_founder.agent.FounderAgent", lambda: fake_agent)
+    monkeypatch.setattr("user_agent_founder.store.get_persona_store", lambda: fake_persona_store)
+    # FounderAgent now takes optional prompt kwargs; the default-path call
+    # passes none.
+    monkeypatch.setattr("user_agent_founder.agent.FounderAgent", lambda *args, **kwargs: fake_agent)
 
     captured: dict = {}
 
@@ -37,6 +43,8 @@ def test_activity_calls_orchestrator_with_reconstructed_deps(monkeypatch):
 
     assert result == {"run_id": "run-xyz"}
     assert captured == {"run_id": "run-xyz", "store": fake_store, "agent": fake_agent}
+    # Default path: persona store is never queried when run row is None.
+    fake_persona_store.get_persona.assert_not_called()
 
 
 def test_activity_signature_is_string_not_dict():

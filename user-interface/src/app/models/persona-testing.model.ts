@@ -1,9 +1,38 @@
-/** Available persona for SE team testing. */
+/** A persona that can be directed to autonomously test another team. */
 export interface PersonaInfo {
   id: string;
   name: string;
   description: string;
   icon: string;
+  is_builtin: boolean;
+  system_prompt: string;
+  spec_generation_prompt: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Body for POST /personas. */
+export interface CreatePersonaRequest {
+  name: string;
+  description: string;
+  icon: string;
+  system_prompt: string;
+  spec_generation_prompt: string;
+}
+
+/** Body for PUT /personas/{id}. All fields optional. */
+export interface UpdatePersonaRequest {
+  name?: string;
+  description?: string;
+  icon?: string;
+  system_prompt?: string;
+  spec_generation_prompt?: string;
+}
+
+/** A target team that personas can drive (from GET /testable-teams). */
+export interface TestableTeam {
+  team_key: string;
+  display_name: string;
 }
 
 /** Summary of a persona test run (from GET /runs). */
@@ -12,6 +41,9 @@ export interface PersonaTestRun {
   status: string;
   se_job_id?: string;
   analysis_job_id?: string;
+  target_team_key?: string;
+  persona_id?: string;
+  project_name?: string;
   created_at: string;
   updated_at: string;
   error?: string;
@@ -32,6 +64,13 @@ export interface PersonaTestRunDetail extends PersonaTestRun {
   spec_content?: string;
   repo_path?: string;
   decisions: PersonaDecision[];
+}
+
+/** Body for POST /start. */
+export interface StartTestRequest {
+  persona_id: string;
+  target_team_key: string;
+  project_name?: string;
 }
 
 /** Artifacts produced during a persona test run (from GET /runs/{run_id}/artifacts). */

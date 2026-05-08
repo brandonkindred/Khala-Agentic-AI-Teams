@@ -29,6 +29,25 @@ SCHEMA = TeamSchema(
         """ALTER TABLE user_agent_founder_runs
             ADD COLUMN IF NOT EXISTS target_team_key TEXT
             NOT NULL DEFAULT 'software_engineering'""",
+        """ALTER TABLE user_agent_founder_runs
+            ADD COLUMN IF NOT EXISTS persona_id TEXT""",
+        """ALTER TABLE user_agent_founder_runs
+            ADD COLUMN IF NOT EXISTS project_name TEXT""",
+        """UPDATE user_agent_founder_runs
+            SET persona_id = COALESCE(persona_id, 'startup-founder'),
+                project_name = COALESCE(project_name, 'taskflow-mvp')
+            WHERE persona_id IS NULL OR project_name IS NULL""",
+        """CREATE TABLE IF NOT EXISTS user_agent_founder_personas (
+            persona_id              TEXT PRIMARY KEY,
+            name                    TEXT NOT NULL,
+            description             TEXT NOT NULL,
+            icon                    TEXT NOT NULL DEFAULT 'person',
+            system_prompt           TEXT NOT NULL,
+            spec_generation_prompt  TEXT NOT NULL,
+            is_builtin              BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at              TIMESTAMPTZ NOT NULL,
+            updated_at              TIMESTAMPTZ NOT NULL
+        )""",
         """CREATE TABLE IF NOT EXISTS user_agent_founder_decisions (
             id             BIGSERIAL PRIMARY KEY,
             run_id         TEXT NOT NULL,
@@ -56,5 +75,6 @@ SCHEMA = TeamSchema(
         "user_agent_founder_runs",
         "user_agent_founder_decisions",
         "user_agent_founder_chat_messages",
+        "user_agent_founder_personas",
     ],
 )

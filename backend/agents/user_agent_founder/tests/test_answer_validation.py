@@ -40,6 +40,8 @@ def _make_agent_without_init() -> object:
     ``self._agent``, so we can leave it unset.
     """
     founder = agent_module.FounderAgent.__new__(agent_module.FounderAgent)
+    founder._system_prompt = agent_module.FOUNDER_SYSTEM_PROMPT
+    founder._spec_generation_prompt = agent_module.SPEC_GENERATION_PROMPT
     return founder
 
 

@@ -3,6 +3,7 @@ import { inject, Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import type {
+  CreatePersonaRequest,
   FounderJobSummary,
   PersonaInfo,
   PersonaTestRun,
@@ -10,6 +11,9 @@ import type {
   PersonaDecision,
   PersonaChatHistory,
   RunArtifacts,
+  StartTestRequest,
+  TestableTeam,
+  UpdatePersonaRequest,
 } from '../models';
 
 @Injectable({ providedIn: 'root' })
@@ -21,10 +25,41 @@ export class PersonaTestingApiService {
     return this.http.get<{ personas: PersonaInfo[] }>(`${this.baseUrl}/personas`);
   }
 
-  startTest(): Observable<{ run_id: string; status: string; message: string }> {
-    return this.http.post<{ run_id: string; status: string; message: string }>(
+  getPersona(id: string): Observable<PersonaInfo> {
+    return this.http.get<PersonaInfo>(
+      `${this.baseUrl}/personas/${encodeURIComponent(id)}`,
+    );
+  }
+
+  createPersona(payload: CreatePersonaRequest): Observable<PersonaInfo> {
+    return this.http.post<PersonaInfo>(`${this.baseUrl}/personas`, payload);
+  }
+
+  updatePersona(id: string, payload: UpdatePersonaRequest): Observable<PersonaInfo> {
+    return this.http.put<PersonaInfo>(
+      `${this.baseUrl}/personas/${encodeURIComponent(id)}`,
+      payload,
+    );
+  }
+
+  deletePersona(id: string): Observable<void> {
+    return this.http.delete<void>(
+      `${this.baseUrl}/personas/${encodeURIComponent(id)}`,
+    );
+  }
+
+  getTestableTeams(): Observable<{ teams: TestableTeam[] }> {
+    return this.http.get<{ teams: TestableTeam[] }>(
+      `${this.baseUrl}/testable-teams`,
+    );
+  }
+
+  startTest(
+    payload: StartTestRequest,
+  ): Observable<{ job_id: string; status: string; message: string }> {
+    return this.http.post<{ job_id: string; status: string; message: string }>(
       `${this.baseUrl}/start`,
-      {},
+      payload,
     );
   }
 

@@ -216,14 +216,20 @@ Respond with a JSON object (no markdown fencing):
 class FounderAgent:
     """Simulates a budget-conscious, speed-first, UX-obsessed startup founder."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        system_prompt: str | None = None,
+        spec_generation_prompt: str | None = None,
+    ) -> None:
         from strands import Agent
 
         from llm_service import get_strands_model
 
+        self._system_prompt = system_prompt or FOUNDER_SYSTEM_PROMPT
+        self._spec_generation_prompt = spec_generation_prompt or SPEC_GENERATION_PROMPT
         self._agent = Agent(
             model=get_strands_model("user_agent_founder"),
-            system_prompt=FOUNDER_SYSTEM_PROMPT,
+            system_prompt=self._system_prompt,
         )
 
     def _call(self, prompt: str, *, max_retries: int = 3) -> str:
@@ -240,16 +246,28 @@ class FounderAgent:
                 return str(result).strip()
             except Exception as exc:
                 exc_text = str(exc).lower()
-                is_transient = any(k in exc_text for k in (
-                    "500", "502", "503", "504",
-                    "internal server error", "service unavailable",
-                    "timeout", "connection", "reset",
-                ))
+                is_transient = any(
+                    k in exc_text
+                    for k in (
+                        "500",
+                        "502",
+                        "503",
+                        "504",
+                        "internal server error",
+                        "service unavailable",
+                        "timeout",
+                        "connection",
+                        "reset",
+                    )
+                )
                 if is_transient and attempt < max_retries:
-                    wait = 2 ** attempt * 5  # 5s, 10s, 20s
+                    wait = 2**attempt * 5  # 5s, 10s, 20s
                     logger.warning(
                         "LLM call failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1, max_retries + 1, wait, str(exc)[:200],
+                        attempt + 1,
+                        max_retries + 1,
+                        wait,
+                        str(exc)[:200],
                     )
                     _time.sleep(wait)
                     continue
@@ -283,16 +301,28 @@ class FounderAgent:
                 return str(result).strip()
             except Exception as exc:
                 exc_text = str(exc).lower()
-                is_transient = any(k in exc_text for k in (
-                    "500", "502", "503", "504",
-                    "internal server error", "service unavailable",
-                    "timeout", "connection", "reset",
-                ))
+                is_transient = any(
+                    k in exc_text
+                    for k in (
+                        "500",
+                        "502",
+                        "503",
+                        "504",
+                        "internal server error",
+                        "service unavailable",
+                        "timeout",
+                        "connection",
+                        "reset",
+                    )
+                )
                 if is_transient and attempt < max_retries:
-                    wait = 2 ** attempt * 5  # 5s, 10s, 20s
+                    wait = 2**attempt * 5  # 5s, 10s, 20s
                     logger.warning(
                         "LLM call failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1, max_retries + 1, wait, str(exc)[:200],
+                        attempt + 1,
+                        max_retries + 1,
+                        wait,
+                        str(exc)[:200],
                     )
                     _time.sleep(wait)
                     continue
@@ -308,7 +338,7 @@ class FounderAgent:
         than the Strands ``Agent`` to avoid the JSON-only transport rejecting
         a Markdown reply.
         """
-        return self._call_text(SPEC_GENERATION_PROMPT, system_prompt=FOUNDER_SYSTEM_PROMPT)
+        return self._call_text(self._spec_generation_prompt, system_prompt=self._system_prompt)
 
     def answer_question(self, question: dict[str, Any]) -> dict[str, Any]:
         """Answer a pending question from the SE team.
@@ -361,7 +391,7 @@ class FounderAgent:
         answer = generate_structured(
             prompt,
             schema=bounded_schema,
-            system_prompt=FOUNDER_SYSTEM_PROMPT,
+            system_prompt=self._system_prompt,
             agent_key="user_agent_founder",
         )
         return answer.model_dump()
@@ -370,10 +400,13 @@ class FounderAgent:
         """Respond to a user chat message in the founder persona."""
         recent = context.get("recent_decisions", "none yet")
         if isinstance(recent, list):
-            recent = "\n".join(
-                f"- {d.get('question_text', '?')}: {d.get('answer_text', '?')}"
-                for d in recent[-5:]
-            ) or "none yet"
+            recent = (
+                "\n".join(
+                    f"- {d.get('question_text', '?')}: {d.get('answer_text', '?')}"
+                    for d in recent[-5:]
+                )
+                or "none yet"
+            )
         prompt = CHAT_PROMPT.format(
             status=context.get("status", "unknown"),
             recent_decisions=recent,
