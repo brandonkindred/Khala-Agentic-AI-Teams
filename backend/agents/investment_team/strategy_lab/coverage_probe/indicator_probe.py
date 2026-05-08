@@ -18,7 +18,7 @@ from __future__ import annotations
 import ast
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -106,6 +106,14 @@ class _Subcond:
     # from non-matching symbols and restricts the row's hit-rate
     # denominator to those symbols' bars. ``None`` = applies to all.
     target_symbols: Optional[frozenset] = None
+    # Inner OR-leg subconds, exposed for symbol-aware evaluation when
+    # this subcond was synthesised by ``_build_compound_or_subcond``.
+    # The aggregator iterates these legs per-symbol and skips any whose
+    # ``target_symbols`` doesn't include the current symbol — without
+    # this an unrelated symbol could satisfy a leg gated to AAPL/MSFT
+    # and falsely flip the OR (and the surrounding AND) to true.
+    # ``None`` for non-OR-compound subconds.
+    or_legs: Optional[Tuple["_Subcond", ...]] = None
 
 
 @dataclass
@@ -288,6 +296,33 @@ def _aggregate(
                 # an unrelated symbol could appear to satisfy the leg.
                 if sub.target_symbols is not None and symbol not in sub.target_symbols:
                     mask = pd.Series(False, index=df.index, dtype=bool)
+                elif sub.or_legs is not None:
+                    # Compound OR with per-leg symbol gates — evaluate
+                    # each leg under its own ``target_symbols`` filter
+                    # and OR the masks. Without this the OR wrapper
+                    # would drop the per-leg gates and an unrelated
+                    # symbol's prices could satisfy a leg restricted to
+                    # AAPL/MSFT, falsely flipping the OR (and the
+                    # enclosing AND) to true.
+                    leg_masks: List[pd.Series] = []
+                    for leg in sub.or_legs:
+                        if leg.target_symbols is not None and symbol not in leg.target_symbols:
+                            leg_masks.append(pd.Series(False, index=df.index, dtype=bool))
+                            continue
+                        try:
+                            leg_series = leg.evaluate(df)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("or-leg %r failed on %s: %s", leg.label, symbol, exc)
+                            leg_series = pd.Series(False, index=df.index, dtype=bool)
+                        leg_masks.append(
+                            pd.Series(leg_series, index=df.index).fillna(False).astype(bool)
+                        )
+                    if leg_masks:
+                        mask = leg_masks[0]
+                        for m in leg_masks[1:]:
+                            mask = mask | m
+                    else:
+                        mask = pd.Series(False, index=df.index, dtype=bool)
                 else:
                     try:
                         series = sub.evaluate(df)
@@ -533,10 +568,13 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
     if not strategy_code:
         return []
     tree = ast.parse(strategy_code)
-    name_periods = _collect_name_periods(tree)
     on_bar = _find_on_bar(tree)
     if on_bar is None:
         return []
+    # Pass on_bar to the period collector so a function-local
+    # ``WINDOW = 5`` shadows any module/class-level ``WINDOW = 200`` —
+    # matching Python's lexical scope.
+    name_periods = _collect_name_periods(tree, function_node=on_bar)
 
     # Pre-pass: bind any local Name to its computed indicator. Strategies
     # following the standard template (see prompts/ideation_system.md)
@@ -986,7 +1024,10 @@ def _flatten_top_terms(test: ast.expr) -> List[ast.expr]:
     return [test]
 
 
-def _collect_name_periods(tree: ast.AST) -> Dict[str, int]:
+def _collect_name_periods(
+    tree: ast.AST,
+    function_node: Optional[ast.AST] = None,
+) -> Dict[str, int]:
     """Bind ``NAME = <int>`` for later ``Name`` / ``self.NAME`` resolution.
 
     Walks every ``Assign`` / ``AnnAssign`` whose target is either:
@@ -999,10 +1040,19 @@ def _collect_name_periods(tree: ast.AST) -> Dict[str, int]:
     Strategies generated from the standard ideation prompt encourage
     class tuning knobs and ``self.WINDOW`` access; without this both the
     AST walk and downstream lookup would miss the binding entirely.
+
+    When ``function_node`` is provided, a second pass walks just that
+    function's body and **overwrites** any outer-scope binding that
+    shares a name. Python's lexical scope means a local
+    ``WINDOW = 5`` inside ``on_bar`` shadows a module/class-level
+    ``WINDOW = 200``; without the override the probe would evaluate
+    ``sma(close, WINDOW)`` against the outer 200, producing false
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` / ``COVERAGE_OK`` calls for
+    common tuning-variable refactors.
     """
     bindings: Dict[str, int] = {}
 
-    def _record(target: ast.expr, value: ast.expr) -> None:
+    def _record(target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
         # Reuse the same numeric-literal extractor used downstream so
         # negative ints and unary-minus constants resolve consistently.
         v = _numeric_literal(value, bindings)
@@ -1010,19 +1060,39 @@ def _collect_name_periods(tree: ast.AST) -> Dict[str, int]:
             return
         ivalue = int(v)
         if isinstance(target, ast.Name):
-            bindings.setdefault(target.id, ivalue)
+            if overwrite:
+                bindings[target.id] = ivalue
+            else:
+                bindings.setdefault(target.id, ivalue)
         elif isinstance(target, ast.Attribute):
             # ``self.WINDOW`` (or any other instance attribute) — record
             # by attribute name so a later ``self.WINDOW`` reference
             # resolves through _numeric_literal's Attribute branch.
-            bindings.setdefault(target.attr, ivalue)
+            if overwrite:
+                bindings[target.attr] = ivalue
+            else:
+                bindings.setdefault(target.attr, ivalue)
 
+    # Pass 1: outer-scope assignments (module / class / __init__) using
+    # ``setdefault`` so cross-scope class constants stay isolated.
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                _record(target, node.value)
+                _record(target, node.value, overwrite=False)
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            _record(node.target, node.value)
+            _record(node.target, node.value, overwrite=False)
+
+    # Pass 2: inner-scope assignments inside the target function (e.g.
+    # ``on_bar``) overwrite the outer binding. Python evaluates the
+    # local ``WINDOW = 5`` at runtime, so the probe must too.
+    if function_node is not None:
+        for node in ast.walk(function_node):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    _record(target, node.value, overwrite=True)
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                _record(node.target, node.value, overwrite=True)
+
     return bindings
 
 
@@ -1226,13 +1296,17 @@ def _build_compound_or_subcond(
         return inner[0]
 
     label = _format_compound_label(leg)
-    inner_fns = [s.evaluate for s in inner]
+    inner_legs: Tuple[_Subcond, ...] = tuple(inner)
 
     def _eval_or(df: pd.DataFrame) -> pd.Series:
+        # Symbol-blind fallback: used outside the aggregator (e.g. unit
+        # tests that call ``sub.evaluate(df)`` directly). The aggregator
+        # prefers ``or_legs`` so per-leg ``target_symbols`` are honoured;
+        # this path simply ORs every leg's mask.
         masks: List[pd.Series] = []
-        for fn in inner_fns:
+        for leg_sub in inner_legs:
             try:
-                series = fn(df)
+                series = leg_sub.evaluate(df)
             except Exception:  # noqa: BLE001
                 series = pd.Series(False, index=df.index, dtype=bool)
             masks.append(pd.Series(series, index=df.index).fillna(False).astype(bool))
@@ -1243,7 +1317,26 @@ def _build_compound_or_subcond(
             result = result | m
         return result
 
-    return _Subcond(label=label, evaluate=_eval_or)
+    # Outer target_symbols: when every leg is symbol-gated, the OR can
+    # only fire on bars from the union of those gates. Restricting the
+    # outer subcond keeps the per-row hit-rate denominator aligned with
+    # the bars that could have contributed. If any leg is unconstrained,
+    # the OR can fire on any symbol so the outer gate stays ``None``.
+    leg_filters = [leg_sub.target_symbols for leg_sub in inner_legs]
+    if leg_filters and all(f is not None for f in leg_filters):
+        union: frozenset = frozenset()
+        for f in leg_filters:
+            union = union | f
+        outer_target: Optional[frozenset] = union if union else None
+    else:
+        outer_target = None
+
+    return _Subcond(
+        label=label,
+        evaluate=_eval_or,
+        target_symbols=outer_target,
+        or_legs=inner_legs,
+    )
 
 
 def _format_compound_label(node: ast.expr) -> str:

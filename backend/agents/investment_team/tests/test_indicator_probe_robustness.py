@@ -1307,6 +1307,109 @@ def test_cached_compare_entry_predicate_binds_through_bool() -> None:
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
 
 
+def test_nested_or_under_and_preserves_per_leg_symbol_filter() -> None:
+    """Per-leg ``bar.symbol == "X"`` gates inside an OR wrapper must
+    survive into the aggregator, otherwise an unrelated symbol's data
+    can satisfy a leg restricted to AAPL/MSFT and falsely flip the OR.
+
+    Predicate:
+        ``volume > 0 and ((bar.symbol == "AAPL" and close > 1000)
+                          or (bar.symbol == "MSFT" and close > 500))``
+
+    Data: AAPL/MSFT close=200 (never exceed their thresholds), TSLA
+    close=2000 (would satisfy ``close > 1000`` if its symbol gate is
+    dropped). Without the per-leg filter the OR wrapper folds the AAPL
+    leg's mask over every DataFrame, TSLA bars satisfy ``close > 1000``,
+    and the AND group reports ``COVERAGE_OK``. With the fix the leg's
+    ``target_symbols`` survives, TSLA contributes False to both legs,
+    and the OR is empty so the AND group flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if volume > 0 and (
+                    (bar.symbol == "AAPL" and close > 1000)
+                    or (bar.symbol == "MSFT" and close > 500)
+                ):
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={
+            "AAPL": _df(200.0),
+            "MSFT": _df(200.0),
+            "TSLA": _df(2000.0),
+        },
+    )
+
+    # Both gated legs are unreachable: AAPL never exceeds 1000, MSFT
+    # never exceeds 500, and TSLA's 2000 close must NOT satisfy either
+    # leg because its symbol isn't in the per-leg gate.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_function_local_period_shadows_outer_scope() -> None:
+    """A function-local ``WINDOW = 5`` must override a module/class-level
+    ``WINDOW = 200`` when resolving ``sma(close, WINDOW)``. Python uses
+    the local value at runtime; the probe must too. Without the fix
+    ``setdefault`` keeps the first (outer) binding and the probe
+    evaluates against ``sma(close, 200)`` over a 30-bar fixture, which
+    has no warmup-complete bars and yields zero hits — falsely flagging
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        WINDOW = 200
+
+        class S:
+            def on_bar(self, ctx, bar):
+                WINDOW = 5
+                if close > sma(close, WINDOW):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # With WINDOW=5 the SMA has plenty of warm-up-complete bars and the
+    # comparison fires partially across the swing. With the bug
+    # (WINDOW=200) every bar would be NaN → zero hits.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
