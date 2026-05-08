@@ -2998,6 +2998,243 @@ def test_reassign_local_to_non_literal_clears_stale_scalar_binding() -> None:
     assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
 
 
+def test_symbol_gate_resolves_named_string_constant() -> None:
+    """A symbol gate that compares ``bar.symbol`` to a named string
+    constant must restrict the predicate to the constant's symbol —
+    not be silently dropped because the RHS isn't an inline literal.
+
+    Strategy::
+
+        TARGET_SYMBOL = "BBB"
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET_SYMBOL and close > 100:
+                    pass
+
+    Universe: BBB with close=50 (never > 100), AAA with close=200
+    (would satisfy ``close > 100`` if the symbol gate is dropped).
+    Without the fix the gate is dropped (RHS isn't a Constant), the
+    AND collapses to ``close > 100`` evaluated against every symbol,
+    AAA satisfies, and the probe falsely reports COVERAGE_OK. With
+    the fix ``_symbol_gate`` resolves ``TARGET_SYMBOL`` via
+    ``name_strings`` and the AND group is gated to ``{BBB}``, where
+    ``close > 100`` has zero hits → ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET_SYMBOL = "BBB"
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET_SYMBOL and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+
+    # AAA can't satisfy because the gate restricts to BBB; BBB never
+    # exceeds 100. The predicate is unreachable on this universe.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_symbol_gate_resolves_self_attribute_string_constant() -> None:
+    """Same fix covers ``self.<NAME>`` references via ``__init__``.
+
+    Strategy::
+
+        class Strategy:
+            def __init__(self):
+                self.TARGET = "BBB"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self):
+                self.TARGET = "BBB"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_early_return_symbol_neq_guard_propagates_filter() -> None:
+    """``if bar.symbol != "BBB": return`` followed by an entry
+    predicate must propagate the implicit ``{BBB}`` filter to the
+    entry predicate, so an unrelated symbol can't satisfy a sibling
+    indicator condition.
+
+    Strategy::
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol != "BBB":
+                    return
+                if close > 100:
+                    pass
+
+    Universe: BBB with close=50 (never > 100), AAA with close=200
+    (would satisfy if the implicit guard isn't propagated). Without
+    the fix, ``close > 100`` is evaluated against every DataFrame,
+    AAA satisfies, and the probe reports COVERAGE_OK even though the
+    entry path is unreachable for the target. With the fix the
+    implicit ``{BBB}`` filter restricts the predicate and BBB has
+    zero hits → ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol != "BBB":
+                    return
+                if close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_early_return_symbol_not_in_guard_propagates_filter() -> None:
+    """``if bar.symbol not in ("BBB", "CCC"): return`` propagates
+    ``{BBB, CCC}`` to subsequent predicates."""
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in ("BBB", "CCC"):
+                    return
+                if close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={
+            "BBB": _df(50.0),
+            "CCC": _df(50.0),
+            "AAA": _df(200.0),  # high close but not in the allowlist
+        },
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_early_return_with_named_constant_neq_propagates_filter() -> None:
+    """``if bar.symbol != TARGET_SYMBOL: return`` works when
+    TARGET_SYMBOL is a named constant — exercises the
+    ``name_strings`` resolution inside the guard detector.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET_SYMBOL = "BBB"
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol != TARGET_SYMBOL:
+                    return
+                if close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

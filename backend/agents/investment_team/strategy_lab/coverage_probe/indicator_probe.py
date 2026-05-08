@@ -726,6 +726,14 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
     # strategy's bare-name attribute bindings.
     strategy_class = _find_strategy_class(tree, on_bar)
     name_periods = _collect_name_periods(tree, function_node=None, strategy_class=strategy_class)
+    # String-constant bindings (``TARGET_SYMBOL = "BBB"``) — used by
+    # ``_symbol_gate`` so ``bar.symbol == TARGET_SYMBOL`` resolves to
+    # the same gated subcondition as ``bar.symbol == "BBB"``. Without
+    # this, the symbol gate is dropped and a sibling indicator
+    # condition is evaluated against every fetched DataFrame, letting
+    # an unrelated symbol satisfy the predicate and falsely flagging
+    # COVERAGE_OK.
+    name_strings = _collect_name_strings(tree, strategy_class=strategy_class)
     # Local name → indicator evaluator bindings start empty. The
     # walker fills them as it encounters assignments in source order
     # and only the bindings established before a given predicate are
@@ -834,7 +842,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         own_symbols: Optional[set] = None
         for term in _flatten_top_terms(test):
             if isinstance(term, ast.Compare):
-                sym = _symbol_gate(term)
+                sym = _symbol_gate(term, name_strings)
                 if sym is not None:
                     # Multiple ``bar.symbol == X`` gates within a single
                     # ``and`` are conjoined, so a second different literal
@@ -860,7 +868,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             # leaving the AND predicate's coverage decision based on
             # only the surviving Compare conjuncts.
             if isinstance(term, ast.BoolOp) and isinstance(term.op, ast.Or):
-                or_compound = _build_compound_or_subcond(term, name_periods, name_evaluators)
+                or_compound = _build_compound_or_subcond(
+                    term, name_periods, name_evaluators, name_strings
+                )
                 if or_compound is not None:
                     own_subs.append(or_compound)
                     # If the OR is fully symbol-gated (every leg restricted
@@ -954,7 +964,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # the nested-OR helper: emit an always-true mask scoped
                 # by the leg's symbol so the aggregator counts AAPL bars
                 # as a firing leg.
-                sym = _symbol_gate(leg)
+                sym = _symbol_gate(leg, name_strings)
                 if sym is not None:
                     own_subs.append(
                         _Subcond(
@@ -977,7 +987,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # AND of all inner masks — that compound mask is what
                 # the disjunction needs to test. Drops cleanly to None
                 # when no inner term is recognisable.
-                compound = _build_compound_and_subcond(leg, name_periods, name_evaluators)
+                compound = _build_compound_and_subcond(
+                    leg, name_periods, name_evaluators, name_strings
+                )
                 if compound is not None:
                     own_subs.append(compound)
                 else:
@@ -1059,6 +1071,15 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # internal reassignments to siblings or parents.
         saved_evals = dict(name_evaluators)
         saved_periods = dict(name_periods)
+        # Implicit symbol filter accumulated from early-return guards
+        # at this scope. ``if bar.symbol != "BBB": return`` excludes
+        # all symbols other than BBB for any statement that follows in
+        # the same block — sibling predicates must be evaluated under
+        # this implied gate, otherwise an unrelated symbol could
+        # satisfy a price filter and the report would falsely flip to
+        # COVERAGE_OK even though the live entry path is unreachable
+        # for the target.
+        current_symbols: Optional[set] = ancestor_symbols
         try:
             for stmt in stmts:
                 # Apply assignments in source order so each predicate
@@ -1071,6 +1092,16 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     continue
 
                 if isinstance(stmt, ast.If):
+                    # Early-return symbol guard: ``if bar.symbol != "X":
+                    # return`` (or ``not in (...)``). Update the
+                    # implicit symbol filter for subsequent siblings
+                    # rather than emitting a coverage row for the
+                    # guard itself.
+                    guard_syms = _early_return_symbol_guard(stmt, name_strings)
+                    if guard_syms is not None:
+                        current_symbols = _intersect_symbols(current_symbols, guard_syms)
+                        continue
+
                     # ``if pos is None: ... else: ...`` (and the inverted
                     # ``if pos is not None: <exit> else: <entry>``) is the
                     # documented entry/exit gate. The codegen also produces
@@ -1082,7 +1113,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     position_check, gate_residual = _strip_position_gate(stmt.test)
                     if position_check == "vacant":  # pos is None — body is entry
                         if gate_residual is None:
-                            if not _visit(stmt.body, ancestors, ancestor_symbols):
+                            if not _visit(stmt.body, ancestors, current_symbols):
                                 return False
                         else:
                             if not _process_if(
@@ -1090,17 +1121,17 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                                 stmt.body,
                                 [],
                                 ancestors,
-                                ancestor_symbols,
+                                current_symbols,
                             ):
                                 return False
                         continue
                     if position_check == "occupied":  # pos is not None — orelse is entry
-                        if not _visit(stmt.orelse, ancestors, ancestor_symbols):
+                        if not _visit(stmt.orelse, ancestors, current_symbols):
                             return False
                         continue
 
                     if not _process_if(
-                        stmt.test, stmt.body, stmt.orelse, ancestors, ancestor_symbols
+                        stmt.test, stmt.body, stmt.orelse, ancestors, current_symbols
                     ):
                         return False
                 else:
@@ -1111,7 +1142,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     for field in _BLOCK_FIELDS:
                         inner = getattr(stmt, field, None)
                         if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
-                            if not _visit(inner, ancestors, ancestor_symbols):
+                            if not _visit(inner, ancestors, current_symbols):
                                 return False
                     # ast.Try has handlers; each handler.body is a stmt list.
                     handlers = getattr(stmt, "handlers", None)
@@ -1119,7 +1150,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         for h in handlers:
                             h_body = getattr(h, "body", None)
                             if isinstance(h_body, list) and h_body:
-                                if not _visit(h_body, ancestors, ancestor_symbols):
+                                if not _visit(h_body, ancestors, current_symbols):
                                     return False
             return True
         finally:
@@ -1221,12 +1252,120 @@ def _classify_position_check(test: ast.expr) -> Optional[str]:
     return None
 
 
-def _symbol_gate(node: ast.Compare) -> Optional[str]:
+def _early_return_symbol_guard(
+    stmt: ast.If,
+    name_strings: Optional[Dict[str, str]] = None,
+) -> Optional[set]:
+    """Detect ``if bar.symbol != "X": return`` (or ``not in (...)``).
+
+    Returns the set of symbols the strategy is implicitly restricted to
+    AFTER the guard has run — i.e. the symbols whose code path
+    continues past the guard. Used by :func:`_visit` to propagate the
+    implicit symbol filter into subsequent sibling predicates.
+
+    The guard's ``body`` must consist of a single bare ``return`` (or a
+    ``return None``). Compound bodies, conditional returns, or
+    side-effecting bodies aren't recognised because the implication
+    isn't unambiguously "skip all but X".
+
+    Recognised shapes:
+
+    - ``if bar.symbol != "X": return`` → ``{"X"}``
+    - ``if bar.symbol != TARGET_SYMBOL: return`` (with
+      ``TARGET_SYMBOL = "BBB"`` resolved via ``name_strings``) → ``{"BBB"}``
+    - ``if bar.symbol not in ("X", "Y"): return`` → ``{"X", "Y"}``
+
+    Returns ``None`` for anything else; the caller then processes the
+    if as a normal predicate.
+    """
+    # Body must be a single bare return.
+    if len(stmt.body) != 1:
+        return None
+    body0 = stmt.body[0]
+    if not isinstance(body0, ast.Return):
+        return None
+    if body0.value is not None:
+        # ``return None`` is equivalent to bare return; anything else
+        # (a value-bearing return) is too suggestive of a real path
+        # we'd rather not assume nothing about.
+        if not (isinstance(body0.value, ast.Constant) and body0.value.value is None):
+            return None
+    # An ``orelse`` here means there's a follow-up branch the strategy
+    # cares about, which doesn't fit the simple "early return" guard
+    # shape. Skip.
+    if stmt.orelse:
+        return None
+
+    test = stmt.test
+
+    def _is_bar_symbol(n: ast.expr) -> bool:
+        return (
+            isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "bar"
+            and n.attr == "symbol"
+        )
+
+    def _resolve_string(n: ast.expr) -> Optional[str]:
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            return n.value
+        if name_strings is None:
+            return None
+        if isinstance(n, ast.Name):
+            return name_strings.get(n.id)
+        if (
+            isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name)
+            and n.value.id in {"self", "cls"}
+        ):
+            return name_strings.get(n.attr)
+        return None
+
+    # ``bar.symbol != X`` / ``X != bar.symbol`` → allow {X}
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        op = test.ops[0]
+        if isinstance(op, ast.NotEq):
+            left, right = test.left, test.comparators[0]
+            if _is_bar_symbol(left):
+                sym = _resolve_string(right)
+                if sym is not None:
+                    return {sym}
+            if _is_bar_symbol(right):
+                sym = _resolve_string(left)
+                if sym is not None:
+                    return {sym}
+        # ``bar.symbol not in (X, Y)`` → allow {X, Y}
+        if isinstance(op, ast.NotIn):
+            left, right = test.left, test.comparators[0]
+            if _is_bar_symbol(left) and isinstance(right, (ast.Tuple, ast.List, ast.Set)):
+                syms: set = set()
+                for elt in right.elts:
+                    s = _resolve_string(elt)
+                    if s is None:
+                        return None
+                    syms.add(s)
+                if syms:
+                    return syms
+    return None
+
+
+def _symbol_gate(
+    node: ast.Compare,
+    name_strings: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
     """Detect ``bar.symbol == "X"`` (or ``"X" == bar.symbol``).
 
     Returns the literal symbol when matched; ``None`` otherwise. Used to
     constrain a group's evaluation to the matching symbol's DataFrame
     rather than evaluating against every symbol in the universe.
+
+    When ``name_strings`` is supplied, also resolves ``Name`` /
+    ``self.X`` / ``cls.X`` references to their bound string constant
+    (e.g. ``TARGET_SYMBOL = "BBB"`` followed by ``bar.symbol ==
+    TARGET_SYMBOL``). Without this, a strategy that hoists the target
+    symbol into a tuning constant would have its gate dropped, and a
+    sibling indicator condition would silently evaluate against every
+    fetched DataFrame.
     """
     if len(node.ops) != 1 or not isinstance(node.ops[0], (ast.Eq, ast.Is)):
         return None
@@ -1241,7 +1380,19 @@ def _symbol_gate(node: ast.Compare) -> Optional[str]:
         )
 
     def _string_const(n: ast.expr) -> Optional[str]:
-        return n.value if isinstance(n, ast.Constant) and isinstance(n.value, str) else None
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            return n.value
+        if name_strings is None:
+            return None
+        if isinstance(n, ast.Name):
+            return name_strings.get(n.id)
+        if (
+            isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name)
+            and n.value.id in {"self", "cls"}
+        ):
+            return name_strings.get(n.attr)
+        return None
 
     if _is_bar_symbol(left):
         sym = _string_const(right)
@@ -1473,6 +1624,69 @@ def _find_strategy_class(tree: ast.AST, on_bar: ast.AST) -> Optional[ast.ClassDe
             if child is on_bar:
                 return node
     return None
+
+
+def _collect_name_strings(
+    tree: ast.AST,
+    strategy_class: Optional[ast.ClassDef] = None,
+) -> Dict[str, str]:
+    """Bind ``NAME = "<string>"`` for string-constant resolution.
+
+    Mirrors :func:`_collect_name_periods` but for string-valued
+    assignments. Used by :func:`_symbol_gate` so a target-symbol
+    constant like ``TARGET_SYMBOL = "BBB"`` resolves
+    ``bar.symbol == TARGET_SYMBOL`` to the same gate as the
+    string-literal form.
+
+    Honours the same scoping rules as the period collector: skips
+    sibling helper classes, descends only into the strategy class's
+    constructor for ``self.<NAME>`` bindings, and skips function
+    bodies (their locals aren't class/module constants).
+    """
+    bindings: Dict[str, str] = {}
+    _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
+
+    def _record(target: ast.expr, value: ast.expr) -> None:
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            return
+        if isinstance(target, ast.Name):
+            bindings.setdefault(target.id, value.value)
+        elif isinstance(target, ast.Attribute):
+            bindings.setdefault(target.attr, value.value)
+
+    def _walk(node: ast.AST):
+        if strategy_class is not None and isinstance(node, ast.ClassDef):
+            if node is not strategy_class:
+                return
+            for child in node.body:
+                if isinstance(child, ast.Assign):
+                    for t in child.targets:
+                        _record(t, child.value)
+                elif isinstance(child, ast.AnnAssign) and child.value is not None:
+                    _record(child.target, child.value)
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if child.name in _CONSTRUCTOR_NAMES:
+                        for sub in ast.walk(child):
+                            if isinstance(sub, ast.Assign):
+                                for t in sub.targets:
+                                    _record(t, sub.value)
+                            elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
+                                _record(sub.target, sub.value)
+                else:
+                    _walk(child)
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                _record(t, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            _record(node.target, node.value)
+        for child in ast.iter_child_nodes(node):
+            _walk(child)
+
+    _walk(tree)
+    return bindings
 
 
 def _collect_name_periods(
@@ -1736,6 +1950,7 @@ def _build_compound_and_subcond(
     leg: ast.BoolOp,
     name_periods: Dict[str, int],
     name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
+    name_strings: Optional[Dict[str, str]] = None,
 ) -> Optional[_Subcond]:
     """Build a single subcond for an ``and``-conjunction inside an OR leg.
 
@@ -1767,7 +1982,7 @@ def _build_compound_and_subcond(
             # subcond carries a per-leg filter; otherwise the price/
             # indicator mask would evaluate against every DataFrame and
             # an unrelated symbol could appear to satisfy the leg.
-            sym = _symbol_gate(term)
+            sym = _symbol_gate(term, name_strings)
             if sym is not None:
                 if leg_symbols is None:
                     leg_symbols = {sym}
@@ -1829,6 +2044,7 @@ def _build_compound_or_subcond(
     leg: ast.BoolOp,
     name_periods: Dict[str, int],
     name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
+    name_strings: Optional[Dict[str, str]] = None,
 ) -> Optional[_Subcond]:
     """Build a single subcond for an ``or``-disjunction inside a larger
     AND predicate.
@@ -1857,7 +2073,7 @@ def _build_compound_or_subcond(
             # collapses to just ``close > 100`` evaluated against every
             # symbol — an unrelated symbol then satisfies the predicate
             # and the probe falsely reports COVERAGE_OK.
-            sym = _symbol_gate(term)
+            sym = _symbol_gate(term, name_strings)
             if sym is not None:
                 inner.append(
                     _Subcond(
@@ -1869,7 +2085,7 @@ def _build_compound_or_subcond(
                 continue
             sub = _build_subcond(term, name_periods, name_evaluators)
         elif isinstance(term, ast.BoolOp) and isinstance(term.op, ast.And):
-            sub = _build_compound_and_subcond(term, name_periods, name_evaluators)
+            sub = _build_compound_and_subcond(term, name_periods, name_evaluators, name_strings)
         else:
             sub = _build_truthy_subcond(term, name_periods, name_evaluators)
         if sub is not None:
