@@ -2556,6 +2556,55 @@ def test_indicator_kwarg_volume_input_distinguishes_from_close() -> None:
     assert report_kwarg.subconditions[0].hit_count > 0
 
 
+def test_or_group_with_unknown_leg_suppresses_conjunction_never_true() -> None:
+    """An OR group with an AND-required ancestor and one un-modellable
+    OR-tail leg must NOT report ``CONJUNCTION_NEVER_TRUE`` based on
+    only the recognised half. The unknown alternative may make the OR
+    fire on the ancestor's bars, so flagging unreachable would be a
+    false positive.
+
+    Strategy::
+
+        if close > 100:
+            if close < 50 or self.custom_ok(bar):
+                pass
+
+    Universe: bars with close=200 (satisfies ancestor close>100, fails
+    close<50). Without the fix the recognised leg ``close < 50`` fires
+    on no close>100 bar, the conjunction is empty, and the
+    ``CONJUNCTION_NEVER_TRUE`` classifier flags the predicate
+    unreachable — but ``self.custom_ok`` may fire on those bars. With
+    the fix ``group.has_unknown_or_leg=True`` causes the classifier to
+    skip the group.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100:
+                    if close < 50 or self.custom_ok(bar):
+                        pass
+        """
+    )
+    n = 20
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.full(n, 200.0)  # always > 100, never < 50
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is not CoverageCategory.CONJUNCTION_NEVER_TRUE
+    assert all(b.reason != "conjunction_never_true" for b in report.likely_blockers)
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

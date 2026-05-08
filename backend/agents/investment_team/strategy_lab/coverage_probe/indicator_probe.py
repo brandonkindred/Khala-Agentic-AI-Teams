@@ -575,10 +575,16 @@ def _aggregate(
         if not group_evaluated[group_idx] or group_conjunction_hits[group_idx] != 0:
             base += legs
             continue
-        if any(group.subconds[k].has_unknown_leg for k in range(legs)):
+        if group.has_unknown_or_leg or any(group.subconds[k].has_unknown_leg for k in range(legs)):
             # Unknown alternative present — can't prove the predicate
             # is unreachable. Suppress the blocker (mirrors the OR
-            # zero-hit suppression elsewhere).
+            # zero-hit suppression elsewhere). The group-level flag
+            # covers OR groups whose entire OR-tail leg was un-modellable
+            # (and therefore not in ``group.subconds``); the per-subcond
+            # flag covers nested-OR ``_Subcond``s synthesised by
+            # ``_build_compound_or_subcond`` whose recognised legs DID
+            # land in ``group.subconds`` but which had a sibling
+            # un-modellable leg.
             base += legs
             continue
         if group.combinator == "and":
