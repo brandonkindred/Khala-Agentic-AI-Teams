@@ -2298,6 +2298,67 @@ def test_negative_named_threshold_is_preserved() -> None:
     assert report.subconditions[0].hit_count == 0
 
 
+def test_helper_method_self_assignment_does_not_shadow_init() -> None:
+    """A helper method ordered before ``__init__`` that assigns to
+    ``self.<NAME>`` must not pre-empt the constructor's value via the
+    bare-attribute keying.
+
+    Strategy code::
+
+        class Strategy:
+            def helper(self):
+                self.THRESHOLD = 100   # state mutation, not a constant
+
+            def __init__(self):
+                self.THRESHOLD = 10    # the actual constant
+
+            def on_bar(self, ctx, bar):
+                if close > self.THRESHOLD:
+                    pass
+
+    On flat ``close=50`` data with the bug, ``self.THRESHOLD`` resolves
+    to 100 (helper's value, recorded first) and ``close > 100`` has
+    zero hits → ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With the fix
+    only ``__init__``'s body is walked for self-attribute bindings,
+    so ``self.THRESHOLD`` resolves to 10, ``close > 10`` fires on
+    every bar → ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def helper(self):
+                self.THRESHOLD = 100
+
+            def __init__(self):
+                self.THRESHOLD = 10
+
+            def on_bar(self, ctx, bar):
+                if close > self.THRESHOLD:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.full(n, 50.0)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # close=50 > THRESHOLD=10 fires on every bar; close=50 > 100 fires
+    # on no bar. Asserting COVERAGE_OK proves __init__'s value won.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == n
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

@@ -1484,12 +1484,40 @@ def _collect_name_periods(
         bodies as usual but only into the strategy's own ``ClassDef``.
         Sibling helper classes are skipped so their same-named
         attributes can't pre-empt the strategy's bare-attr bindings.
+
+        Inside the strategy class, only the constructor's body
+        (``__init__`` / ``__post_init__``) is walked for
+        ``self.<NAME>`` assignments. Other methods like ``on_bar`` or
+        a private ``_helper`` are runtime entry points whose
+        ``self.<NAME> = ...`` lines are state mutations, not constants.
+        Without this restriction, a helper method ordered before
+        ``__init__`` in the class body would seed the binding via
+        ``setdefault`` and ``__init__``'s actual value would never bind
+        — ``self.THRESHOLD`` would resolve to whatever the helper set
+        rather than what the live strategy state holds.
+
         When ``strategy_class`` is None, behaves like ``ast.walk``
         (the previous behaviour).
         """
+        _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
         if strategy_class is not None and isinstance(node, ast.ClassDef):
             if node is not strategy_class:
                 return
+            # Walk class-body Assign / AnnAssign directly. For
+            # FunctionDef children, only descend into the constructor.
+            # Nested ClassDefs follow the strategy_class skip rule via
+            # the recursive call.
+            for child in node.body:
+                if isinstance(child, (ast.Assign, ast.AnnAssign)):
+                    yield child
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if child.name in _CONSTRUCTOR_NAMES:
+                        for sub in ast.walk(child):
+                            if isinstance(sub, (ast.Assign, ast.AnnAssign)):
+                                yield sub
+                else:
+                    yield from _iter_outer_assigns(child)
+            return
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             yield node
         for child in ast.iter_child_nodes(node):
