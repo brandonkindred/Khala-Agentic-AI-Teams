@@ -24,7 +24,16 @@ from typing import List, Optional, Tuple
 from ...execution.bar_safety import BarSafetyAssertion
 from ...execution.risk_filter import RiskFilter
 from ...models import TradeRecord
-from ..strategy.contract import Bar, Fill, FillKind, OrderSide, TimeInForce, UnfilledPolicy
+from ..strategy.contract import (
+    Bar,
+    Fill,
+    FillKind,
+    OrderRequest,
+    OrderSide,
+    OrderType,
+    TimeInForce,
+    UnfilledPolicy,
+)
 from .execution_model import ExecutionModel, FillTerms, OptimisticExecutionModel
 from .order_book import OrderBook, PendingOrder
 from .portfolio import Portfolio, Position
@@ -541,6 +550,19 @@ class FillSimulator:
         # stale-continuation guard in ``process_bar``.
         po.working_against_entry_order_id = po.order_id
         self._handle_entry_remainder(po, bar, unfilled)
+        # Bracket / OCO materialization (#389): once the parent's first slice
+        # has opened a position *and* has been terminally filled, submit the
+        # linked protective legs so they can fire on subsequent bars. Must run
+        # AFTER ``_handle_entry_remainder`` so the membership check below
+        # reflects whether the parent is still pending — full fills remove
+        # the parent (``submit_attached`` returns ``armed=True``); partial
+        # fills (REQUEUE / TWAP) leave the parent pending and Step 7 skips
+        # materialization (REQUEUE-grown brackets are deferred — a known
+        # limitation; ``test_bracket_orders.py`` covers the full-fill path).
+        if (
+            req.attached_stop_loss is not None or req.attached_take_profit is not None
+        ) and po.order_id not in self.order_book:
+            self._materialize_bracket_children(po=po, bar=bar, filled_qty=filled_qty)
 
         return (
             Fill(
@@ -873,6 +895,24 @@ class FillSimulator:
             return rejected, None
 
         self.portfolio.partial_close(bar.symbol, filled_qty, exit_price, ref_price)
+        # OCO sibling cancellation (#389): on the first non-rejected fill of
+        # a bracket child, cancel the protective leg we DIDN'T just hit so
+        # it can't also fire. Must run BEFORE the survivor is removed
+        # from the book (full-close path at ``order_book.remove(...)`` below)
+        # — ``oco_cancel_siblings`` validates that ``except_order_id`` is
+        # still pending. Gated on ``cumulative_filled_qty == 0`` so on a
+        # partial-exit child the cancel fires once on the first slice and
+        # not on every requeued continuation bar.
+        if (
+            req.parent_order_id is not None
+            and req.oco_group_id is not None
+            and po.cumulative_filled_qty == 0
+        ):
+            self.order_book.oco_cancel_siblings(
+                req.oco_group_id,
+                except_order_id=po.order_id,
+                parent_order_id=req.parent_order_id,
+            )
         # Only the participation-cap-clipped portion (``fillable_qty -
         # filled_qty``) accumulates into ``pos.total_unfilled_qty`` — the
         # over-ask portion (``po.remaining_qty - fillable_qty``) is a
@@ -1108,6 +1148,71 @@ class FillSimulator:
             )
             return
         self.order_book.remove(po.order_id)
+
+    # ------------------------------------------------------------------
+    # Bracket / OCO materialization (#389)
+    # ------------------------------------------------------------------
+
+    def _materialize_bracket_children(
+        self,
+        *,
+        po: PendingOrder,
+        bar: Bar,
+        filled_qty: float,
+    ) -> None:
+        """Submit ``StopAttachment`` / ``LimitAttachment`` legs as OCO children.
+
+        Called once per parent on a successful terminal-fill entry slice.
+        Each child is opposite-side to the parent, sized to ``filled_qty``,
+        and tagged with a deterministic ``oco_group_id`` derived from the
+        parent so OCO sibling cancellation can scope correctly.
+        ``submitted_at=bar.timestamp`` blocks same-bar fills via the
+        bar-safety guard (children are eligible from the next bar onward).
+        ``tif=GTC`` so the protective legs survive across sessions —
+        otherwise a DAY child would expire at the end of the entry-fill
+        session and leave the position unprotected overnight.
+        """
+        req = po.request
+        child_side = OrderSide.SHORT if req.side == OrderSide.LONG else OrderSide.LONG
+        oco_group_id = f"oco_{po.order_id}"
+        if req.attached_stop_loss is not None:
+            sl = req.attached_stop_loss
+            sl_req = OrderRequest(
+                client_order_id=sl.client_order_id or f"{req.client_order_id}_sl",
+                symbol=req.symbol,
+                side=child_side,
+                qty=filled_qty,
+                order_type=OrderType.STOP,
+                stop_price=sl.stop_price,
+                tif=TimeInForce.GTC,
+                reason="bracket_sl",
+            )
+            self.order_book.submit_attached(
+                sl_req,
+                submitted_at=bar.timestamp,
+                submitted_equity=po.submitted_equity,
+                parent_order_id=po.order_id,
+                oco_group_id=oco_group_id,
+            )
+        if req.attached_take_profit is not None:
+            tp = req.attached_take_profit
+            tp_req = OrderRequest(
+                client_order_id=tp.client_order_id or f"{req.client_order_id}_tp",
+                symbol=req.symbol,
+                side=child_side,
+                qty=filled_qty,
+                order_type=OrderType.LIMIT,
+                limit_price=tp.limit_price,
+                tif=TimeInForce.GTC,
+                reason="bracket_tp",
+            )
+            self.order_book.submit_attached(
+                tp_req,
+                submitted_at=bar.timestamp,
+                submitted_equity=po.submitted_equity,
+                parent_order_id=po.order_id,
+                oco_group_id=oco_group_id,
+            )
 
 
 def _date_diff(t1: str, t2: str) -> int:

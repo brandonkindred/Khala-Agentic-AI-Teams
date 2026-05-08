@@ -53,32 +53,49 @@ def test_gates_raise_unsupported_order_feature_subclass():
         req.validate_prices()
 
 
-def test_attached_stop_loss_is_gated_until_step_7():
-    req = _base(attached_stop_loss=StopAttachment(stop_price=10.0))
-    with pytest.raises(NotImplementedError, match="#389"):
-        req.validate_prices()
+def test_attachments_validate_post_step_7():
+    """Bracket attachments (``attached_stop_loss`` / ``attached_take_profit``)
+    are runtime-supported as of #389; ``validate_prices`` must accept them
+    without raising. The mutual-exclusion check
+    (``test_attachments_and_parent_order_id_are_mutually_exclusive``) is now
+    the live invariant."""
+    _base(attached_stop_loss=StopAttachment(stop_price=95.0)).validate_prices()
+    _base(attached_take_profit=LimitAttachment(limit_price=110.0)).validate_prices()
+    _base(
+        attached_stop_loss=StopAttachment(stop_price=95.0),
+        attached_take_profit=LimitAttachment(limit_price=110.0),
+    ).validate_prices()
 
 
-def test_attached_take_profit_is_gated_until_step_7():
-    req = _base(attached_take_profit=LimitAttachment(limit_price=120.0))
-    with pytest.raises(NotImplementedError, match="#389"):
-        req.validate_prices()
+def test_parent_order_id_and_oco_group_id_validate_post_step_7():
+    """``parent_order_id`` / ``oco_group_id`` are engine-internal — set by
+    ``OrderBook.submit_attached`` on bracket children. ``validate_prices``
+    no longer rejects them outright; the gateway-level rejection
+    (top-level ``OrderBook.submit`` refuses to accept them) is exercised
+    in ``test_order_book``."""
+    _base(parent_order_id="parent-123").validate_prices()
+    _base(oco_group_id="oco-1").validate_prices()
+    _base(parent_order_id="parent-123", oco_group_id="oco-1").validate_prices()
 
 
-def test_parent_order_id_is_gated_until_step_7():
-    req = _base(parent_order_id="parent-123")
-    with pytest.raises(NotImplementedError, match="#389"):
-        req.validate_prices()
-
-
-def test_oco_group_id_is_gated_until_step_7():
-    req = _base(oco_group_id="oco-1")
-    with pytest.raises(NotImplementedError, match="#389"):
-        req.validate_prices()
+def test_attachments_and_parent_order_id_are_mutually_exclusive():
+    """Attachments may only be set on entry-creating orders. A bracket
+    child (``parent_order_id`` set) carrying further attachments would
+    imply a multi-level bracket tree, which the API does not support."""
+    with pytest.raises(ValueError, match="entry-creating orders"):
+        _base(
+            parent_order_id="parent-123",
+            attached_stop_loss=StopAttachment(stop_price=95.0),
+        ).validate_prices()
+    with pytest.raises(ValueError, match="entry-creating orders"):
+        _base(
+            parent_order_id="parent-123",
+            attached_take_profit=LimitAttachment(limit_price=110.0),
+        ).validate_prices()
 
 
 def test_default_market_order_still_validates():
-    """Sanity: the gates only fire on the new feature flags."""
+    """Sanity: the remaining gates only fire on still-deferred features."""
     _base().validate_prices()
     _base(order_type=OrderType.LIMIT, limit_price=100.0).validate_prices()
     _base(order_type=OrderType.STOP, stop_price=105.0).validate_prices()

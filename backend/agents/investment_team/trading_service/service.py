@@ -529,6 +529,16 @@ class TradingService:
                                     req,
                                     submitted_at=prev_bar.timestamp,
                                     submitted_equity=equity,
+                                    # #389: register the parent as eligible to
+                                    # carry bracket children when the strategy
+                                    # attached protective legs. ``submit_attached``
+                                    # rejects children whose parent isn't in the
+                                    # eligible-parent set; non-bracket entries
+                                    # pay zero overhead (flag is False).
+                                    expect_brackets=(
+                                        req.attached_stop_loss is not None
+                                        or req.attached_take_profit is not None
+                                    ),
                                 )
                                 result.execution_diagnostics.orders_accepted += 1
                                 _record_event(
@@ -836,6 +846,13 @@ class TradingService:
                                 req,
                                 submitted_at=prev_bar.timestamp,
                                 submitted_equity=equity,
+                                # #389: register the parent as eligible to
+                                # carry bracket children when the strategy
+                                # attached protective legs.
+                                expect_brackets=(
+                                    req.attached_stop_loss is not None
+                                    or req.attached_take_profit is not None
+                                ),
                             )
                             result.execution_diagnostics.orders_accepted += 1
                             _record_event(

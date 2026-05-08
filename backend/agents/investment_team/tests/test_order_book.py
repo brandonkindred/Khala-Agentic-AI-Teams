@@ -935,11 +935,13 @@ def test_children_of_rejects_bad_parent_id(bad_parent) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_submit_attached_skips_risk_gates() -> None:
-    """``submit_attached`` must accept a request with ``parent_order_id`` /
-    ``oco_group_id`` set even though calling ``validate_prices()`` directly on
-    the same payload still raises (the gate is owned by the strategy-side
-    service path; engine-side bracket materialization owns its own correctness).
+def test_submit_attached_accepts_parent_and_oco_ids() -> None:
+    """``submit_attached`` is the engine-internal entry point for bracket
+    children: it accepts a request and re-tags it with ``parent_order_id`` /
+    ``oco_group_id`` server-side. The same fields are rejected by the
+    top-level ``OrderBook.submit()`` so a strategy can't smuggle a bracket
+    child in as a parent (multi-level bracket trees would break
+    ``children_of`` traversal and OCO scoping).
     """
     book = OrderBook()
     parent = book.submit(
@@ -949,7 +951,9 @@ def test_submit_attached_skips_risk_gates() -> None:
         expect_brackets=True,
     )
 
-    # Independent proof that the gate is real on the strategy path.
+    # Independent proof that the top-level gateway rejects child-shaped
+    # requests (the gate moved from ``validate_prices`` to ``submit`` when
+    # #389 lifted the strategy-side gate so the engine can wire up brackets).
     gated = OrderRequest(
         client_order_id="child",
         symbol="AAA",
@@ -960,10 +964,10 @@ def test_submit_attached_skips_risk_gates() -> None:
         parent_order_id=parent.order_id,
         oco_group_id="g1",
     )
-    with pytest.raises(UnsupportedOrderFeatureError):
-        gated.validate_prices()
+    with pytest.raises(ValueError, match="parent_order_id or oco_group_id"):
+        book.submit(gated, submitted_at="2024-01-03", submitted_equity=100_000.0)
 
-    # submit_attached must not raise on the same payload shape.
+    # submit_attached must accept a clean child payload and tag it.
     child = book.submit_attached(
         _base(side=OrderSide.SHORT, qty=10.0, order_type=OrderType.LIMIT, limit_price=110.0),
         submitted_at="2024-01-03",
