@@ -2733,6 +2733,83 @@ def test_omitted_period_uses_helper_default() -> None:
     assert len(report.subconditions) == 1
 
 
+def test_unresolved_tuple_indicator_subscript_drops_indicator() -> None:
+    """A tuple-indicator subscript with an explicit positional parameter
+    we can't resolve (e.g. ``macd(close, PERIOD + 1)[0]``) must drop
+    the indicator, not silently substitute the helper's defaults.
+
+    Strategy:
+        ``if macd(close, PERIOD + 1)[0] > 0:``  (no PERIOD binding)
+
+    Without the fix ``_trailing_numeric_args`` broke at the unresolved
+    arg and called ``macd(s)`` with default fast/slow/signal, evaluating
+    a different indicator from the runtime — a misleading
+    ``COVERAGE_OK`` (or zero-hit blocker) for the wrong reason. With
+    the fix the tuple-indicator helper is declined and no
+    subcondition is recognised.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close, PERIOD + 1)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unresolved_tuple_unpack_skips_binding() -> None:
+    """An unpacked tuple-indicator with an unresolved positional
+    parameter must not bind any of the unpacked names. ``_build_operand``
+    later falls through to OHLCV / numeric resolution and the
+    comparison is dropped rather than evaluating a substituted helper.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                upper, mid, lower = bollinger_bands(close, PERIOD + 1)
+                if close > upper:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``upper`` doesn't bind, so ``close > upper`` has an unresolvable
+    # RHS and the comparison is dropped → UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_tuple_indicator_with_resolvable_period_still_works() -> None:
+    """Sanity: a tuple-indicator with all positional args as numeric
+    literals still resolves cleanly — the new None-on-unresolved
+    behavior must not over-fire on legitimate calls.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close, 5, 10, 4)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # The tuple-indicator helper is recognised and produces a
+    # subcondition row (regardless of whether it fires on flat data).
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

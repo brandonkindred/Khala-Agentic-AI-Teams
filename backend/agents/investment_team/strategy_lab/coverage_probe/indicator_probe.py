@@ -2156,6 +2156,12 @@ def _tuple_indicator_subscript(
     # (period / num_std / fast / etc.) — i.e. one past the data inputs.
     positional_start = 1 if sig_kind == "series" else 3
     extra_pos = _trailing_numeric_args(call, name_periods, start_index=positional_start)
+    if extra_pos is None:
+        # Strategy passed an explicit positional config we can't
+        # resolve (e.g. ``macd(close, PERIOD + 1)``). Decline rather
+        # than substitute the helper's default — same guard the
+        # series / HLC indicator path uses for unresolved periods.
+        return None
     extra_kwargs = _resolve_known_kwargs(call, name_periods, kwarg_names)
 
     if sig_kind == "series":
@@ -2188,21 +2194,32 @@ def _trailing_numeric_args(
     name_periods: Dict[str, int],
     *,
     start_index: int,
-) -> List[Union[int, float]]:
+) -> Optional[List[Union[int, float]]]:
     """Collect positional numeric args from ``start_index`` onwards.
 
-    Stops at the first non-numeric positional — the user passed a
-    Name/expression we can't safely interpret, and silently substituting
-    a guess would mis-classify the strategy. Trailing numeric args after
-    the data inputs (``num_std`` / ``slow`` / ``signal`` / etc.) are
-    preserved in source order and int-ness is preserved so helpers like
-    ``rolling(window=N)`` get an int rather than a float.
+    Returns the resolved values when every positional arg from
+    ``start_index`` to the end is a numeric literal we can interpret.
+    Returns ``None`` when any positional arg in that range can't be
+    resolved (e.g. ``macd(close, PERIOD + 1)`` — the user supplied an
+    explicit value but the probe can't reduce it to a literal). The
+    caller treats ``None`` as "decline this indicator" rather than
+    substituting the helper's default, which would silently evaluate
+    a different indicator from the runtime.
+
+    An empty positional tail (``start_index >= len(call.args)``)
+    returns ``[]`` — the user simply omitted these args and the
+    helper's default applies.
+
+    Trailing numeric args after the data inputs (``num_std`` /
+    ``slow`` / ``signal`` / etc.) are preserved in source order and
+    int-ness is preserved so helpers like ``rolling(window=N)`` get
+    an int rather than a float.
     """
     out: List[Union[int, float]] = []
     for i in range(start_index, len(call.args)):
         v = _numeric_literal(call.args[i], name_periods)
         if v is None:
-            break
+            return None
         out.append(int(v) if float(v).is_integer() else v)
     return out
 
@@ -2347,6 +2364,13 @@ def _bind_tuple_unpack(
         return
     positional_start = 1 if sig_kind == "series" else 3
     extra_pos = _trailing_numeric_args(value, name_periods, start_index=positional_start)
+    if extra_pos is None:
+        # Unpacked tuple-indicator with an unresolved positional config
+        # (e.g. ``upper, _, _ = bollinger_bands(close, PERIOD + 1)``).
+        # Don't bind anything — downstream lookups fall through and the
+        # comparison gets dropped rather than evaluating against a
+        # different indicator than the runtime.
+        return
     extra_kwargs = _resolve_known_kwargs(value, name_periods, kwarg_names)
 
     if sig_kind == "series":
