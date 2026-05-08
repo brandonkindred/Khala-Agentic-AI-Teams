@@ -2902,6 +2902,102 @@ def test_resolvable_tuple_indicator_kwarg_still_works() -> None:
     assert len(report.subconditions) == 1
 
 
+def test_or_with_unknown_leg_zero_recognised_classifies_unknown() -> None:
+    """When an OR predicate has an un-modellable alternative AND every
+    recognised leg has zero hits, the report must classify as
+    ``UNKNOWN_LOW_COVERAGE``, not ``COVERAGE_OK``. We have no positive
+    evidence the predicate fires — only a custom guard that *might*.
+
+    Strategy:
+        ``if self.custom_ok(bar) or close < -999:``
+
+    Universe: flat ``close=100`` (never satisfies ``close < -999``).
+    Without the new fallthrough check the blocker was suppressed
+    (correctly — custom_ok may fire) but the report fell through to
+    ``COVERAGE_OK`` with summary "indicator subconditions fired at
+    least once" — misleading, since every reported hit count is zero.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if self.custom_ok(bar) or close < -999:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_or_with_unknown_leg_some_recognised_stays_coverage_ok() -> None:
+    """Sanity: when the recognised legs DO fire and the group's
+    conjunction has hits, the unknown-leg fallthrough must NOT flip
+    to ``UNKNOWN_LOW_COVERAGE`` — we have positive coverage signal.
+
+    Strategy:
+        ``if self.custom_ok(bar) or close > 0:``
+
+    Universe: flat ``close=100`` → ``close > 0`` fires every bar.
+    The unknown leg's presence shouldn't downgrade a clearly-firing
+    OR.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if self.custom_ok(bar) or close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_reassign_local_to_non_literal_clears_stale_scalar_binding() -> None:
+    """A scalar local that's later reassigned to a non-literal value
+    must NOT keep its prior literal binding for downstream resolution.
+
+    Strategy:
+        LIMIT = 200
+        LIMIT = self.dynamic_limit()
+        if close > LIMIT:
+            pass
+
+    Without the fix, the first assignment recorded ``LIMIT = 200`` in
+    ``name_periods``; the second assignment cleared the indicator
+    binding (``_resolve_assign_evaluator`` returned None) but
+    ``name_periods["LIMIT"]`` stayed at 200. ``_build_operand``
+    resolved ``LIMIT`` through ``name_periods``, the comparison
+    became ``close > 200``, and the report misclassified based on the
+    stale literal. With the fix the non-literal RHS pops both the
+    evaluator and the period-int binding, so ``close > LIMIT``
+    resolves to nothing and the comparison drops.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                LIMIT = 200
+                LIMIT = self.dynamic_limit()
+                if close > LIMIT:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``LIMIT`` no longer resolves to anything → comparison dropped →
+    # UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

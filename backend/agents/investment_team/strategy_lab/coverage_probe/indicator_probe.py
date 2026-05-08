@@ -619,6 +619,52 @@ def _aggregate(
             **base_kwargs,
         )
 
+    # Final fallthrough check: if every group with an unknown OR leg
+    # has zero recognised firing legs and zero conjunction hits, we
+    # have no positive evidence the predicate fires — only an
+    # un-modellable alternative that *might*. Return
+    # ``UNKNOWN_LOW_COVERAGE`` rather than ``COVERAGE_OK`` so a sparse
+    # / zero-trade backtest isn't mislabelled "healthy" when the
+    # probe genuinely doesn't know.
+    base = 0
+    has_unknown_evidence = False
+    has_recognised_evidence = False
+    for group_idx, group in enumerate(groups):
+        legs = len(group.subconds)
+        if not group_evaluated[group_idx]:
+            base += legs
+            continue
+        leg_hits = [sub_hit_counts[base + k] for k in range(legs)]
+        group_unknown = group.has_unknown_or_leg or any(
+            group.subconds[k].has_unknown_leg for k in range(legs)
+        )
+        if group_unknown:
+            has_unknown_evidence = True
+            # Did any recognised leg fire AND the group's overall
+            # conjunction land on at least one bar? If so we have
+            # positive coverage signal even with the unknown
+            # alternative, so the report can stay COVERAGE_OK.
+            if group_conjunction_hits[group_idx] > 0 and any(h > 0 for h in leg_hits):
+                has_recognised_evidence = True
+        else:
+            # Group has no unknown legs and got past the blocker
+            # checks → its mere existence is recognised coverage.
+            if any(h > 0 for h in leg_hits):
+                has_recognised_evidence = True
+        base += legs
+
+    if has_unknown_evidence and not has_recognised_evidence:
+        return CoverageReport(
+            coverage_category=CoverageCategory.UNKNOWN_LOW_COVERAGE,
+            summary=(
+                "predicate has un-modellable alternative(s) and recognised legs "
+                "produced no firing bars — coverage is unknown"
+            ),
+            subconditions=subcoverages,
+            likely_blockers=[],
+            **base_kwargs,
+        )
+
     return CoverageReport(
         coverage_category=CoverageCategory.COVERAGE_OK,
         summary="indicator subconditions fired at least once",
@@ -739,11 +785,21 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 v = _numeric_literal(value, name_periods)
                 if v is not None:
                     name_periods[target.id] = int(v) if float(v).is_integer() else float(v)
+                else:
+                    # Non-literal RHS (e.g. ``LIMIT = self.dynamic_limit()``).
+                    # Drop any prior scalar binding so downstream
+                    # ``_build_operand`` lookups treat the comparison
+                    # as unmodelled rather than evaluating against the
+                    # stale literal that the previous assignment set.
+                    name_periods.pop(target.id, None)
             elif isinstance(target, ast.Attribute):
                 # ``self.WINDOW = N`` — record by attribute name.
                 v = _numeric_literal(value, name_periods)
                 if v is not None:
                     name_periods[target.attr] = int(v) if float(v).is_integer() else float(v)
+                else:
+                    # Same drop-stale rule for ``self.X = <non-literal>``.
+                    name_periods.pop(target.attr, None)
 
     def _budgeted_extend(group_subs: List[_Subcond], extras: List[_Subcond]) -> bool:
         """Append extras into group within the global subcond budget.
