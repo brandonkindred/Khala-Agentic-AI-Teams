@@ -582,6 +582,80 @@ def test_derived_threshold_assign_is_bound() -> None:
     assert named.subconditions[0].hit_count > 0
 
 
+def test_or_predicate_with_one_firing_leg_is_coverage_ok() -> None:
+    """``if close > 100 or rsi(close, 14) < 30:`` — even when one leg
+    never fires, the OR is satisfied as long as the other does. Must
+    classify ``COVERAGE_OK`` and surface both legs as coverage rows.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 50 or close > 1000:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},  # close=100 — > 50 always, > 1000 never
+    )
+    # The ``> 1000`` leg never fires but the OR is still satisfied via
+    # the ``> 50`` leg. Must NOT classify INDICATOR_FILTER_TOO_RESTRICTIVE
+    # — that would wrongly suggest the entry is blocked.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 2
+    by_label = {sc.label: sc for sc in report.subconditions}
+    assert by_label["close > 50"].hit_count == 60
+    assert by_label["close > 1000"].hit_count == 0
+
+
+def test_or_predicate_with_all_legs_zero_is_too_restrictive() -> None:
+    """When every leg of the OR is zero-hit the disjunction never fires
+    and the entry is genuinely blocked. Must classify
+    INDICATOR_FILTER_TOO_RESTRICTIVE with an ``or_group_never_fires``
+    blocker that lists all legs.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close < -10 or close > 1000:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.likely_blockers) == 1
+    blocker = report.likely_blockers[0]
+    assert blocker.reason == "or_group_never_fires"
+    assert "close < -10" in blocker.evidence
+    assert "close > 1000" in blocker.evidence
+    assert " OR " in blocker.evidence
+
+
+def test_or_predicate_with_three_legs_recognised() -> None:
+    """OR predicates with more than two legs must each surface as a
+    coverage row.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 50 or close > 1000 or close < -10:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 3
+
+
 def test_atr_positional_period_is_resolved() -> None:
     """``atr(high, low, close, N)`` puts the period at args[3], not args[1].
 

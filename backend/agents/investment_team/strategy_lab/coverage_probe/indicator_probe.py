@@ -111,10 +111,18 @@ class _Group:
     predicate intersects with itself contradictorily (e.g. two
     ``bar.symbol == "X"`` and ``bar.symbol == "Y"`` in one ``and``); the
     group is dropped before emission.
+
+    ``combinator`` is ``"and"`` for the default conjunctive predicate
+    and ``"or"`` when the test was a top-level ``BoolOp(Or, ...)``. The
+    aggregation classifier flips its zero-hit rule accordingly: AND
+    groups flag a blocker as soon as *any* leg is zero, while OR groups
+    flag a blocker only when *all* legs are zero (since one firing leg
+    is enough to satisfy the disjunction).
     """
 
     subconds: List[_Subcond]
     target_symbols: Optional[set]
+    combinator: str = "and"
 
 
 def run_indicator_probe(
@@ -309,37 +317,83 @@ def _aggregate(
             )
         )
 
-    zero_hits = [sc for sc in subcoverages if sc.hit_count == 0]
+    # Per-group zero-hit detection. The blocker rule depends on the
+    # group's combinator:
+    #
+    # - ``and`` groups: a single zero-hit leg blocks the predicate
+    #   (existing behaviour).
+    # - ``or`` groups: only ALL legs being zero blocks the predicate;
+    #   any firing leg satisfies the disjunction.
     blockers: List[LikelyBlocker] = []
-    if zero_hits:
-        category = CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
-        summary = f"{len(zero_hits)} of {len(subcoverages)} indicator subconditions never fired"
-        for sc in zero_hits:
+    flagged_keys: set = set()
+    base = 0
+    for group_idx, group in enumerate(groups):
+        legs = len(group.subconds)
+        if not group_evaluated[group_idx]:
+            base += legs
+            continue
+        leg_hits = [sub_hit_counts[base + k] for k in range(legs)]
+        leg_labels = [group.subconds[k].label for k in range(legs)]
+        # ``target_symbols`` is a regular ``set`` (mutable, unhashable)
+        # — freeze it for the dedupe key.
+        symbols_key = frozenset(group.target_symbols) if group.target_symbols is not None else None
+        if group.combinator == "and":
+            for k in range(legs):
+                if leg_hits[k] != 0:
+                    continue
+                key = (leg_labels[k], symbols_key)
+                if key in flagged_keys:
+                    continue
+                flagged_keys.add(key)
+                evidence = leg_labels[k]
+                if group.target_symbols:
+                    evidence = f"{evidence} [{','.join(sorted(group.target_symbols))}]"
+                blockers.append(
+                    LikelyBlocker(
+                        reason="indicator_filter_zero_hits",
+                        evidence=evidence,
+                        hit_rate=0.0,
+                    )
+                )
+        elif legs >= 1 and all(h == 0 for h in leg_hits):
+            # Every leg of the OR is zero — the disjunction never fires.
+            evidence = " OR ".join(leg_labels)
+            if group.target_symbols:
+                evidence = f"{evidence} [{','.join(sorted(group.target_symbols))}]"
             blockers.append(
                 LikelyBlocker(
-                    reason="indicator_filter_zero_hits",
-                    evidence=sc.label,
+                    reason="or_group_never_fires",
+                    evidence=evidence,
                     hit_rate=0.0,
                 )
             )
+        base += legs
+
+    if blockers:
+        if any(b.reason == "indicator_filter_zero_hits" for b in blockers):
+            summary = f"{len(blockers)} of {len(subcoverages)} indicator subconditions never fired"
+        else:
+            summary = "or-predicate has no firing leg"
         return CoverageReport(
-            coverage_category=category,
+            coverage_category=CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE,
             summary=summary,
             subconditions=subcoverages,
             likely_blockers=blockers[:_MAX_LIKELY_BLOCKERS],
             **base_kwargs,
         )
 
-    # Find any single ``if`` predicate whose legs all fire individually
-    # but whose bar-wise AND is empty. We only flag CONJUNCTION_NEVER_TRUE
-    # for a real per-predicate contradiction — never across unrelated
-    # ``if`` branches.
+    # Find any single AND ``if`` predicate whose legs all fire
+    # individually but whose bar-wise AND is empty. We only flag
+    # CONJUNCTION_NEVER_TRUE for a real per-predicate contradiction —
+    # never across unrelated ``if`` branches, and never on OR groups
+    # (their bar-wise AND is meaningless under disjunction semantics).
     empty_conj_group: Optional[_Group] = None
     base = 0
     for group_idx, group in enumerate(groups):
         legs = len(group.subconds)
         if (
-            legs >= 2
+            group.combinator == "and"
+            and legs >= 2
             and group_evaluated[group_idx]
             and group_conjunction_hits[group_idx] == 0
             and all(sub_hit_counts[base + k] > 0 for k in range(legs))
@@ -449,6 +503,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         ancestor stack. Used both for real ``ast.If`` statements and for
         synthesised ifs after stripping a position-gate conjunct.
         """
+        # Top-level OR predicate: each leg becomes an independent
+        # subcondition row but the group's blocker classification uses
+        # disjunction (only too-restrictive when ALL legs are zero).
+        if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+            return _process_or_if(test, body, orelse, ancestors, ancestor_symbols)
+
         own_subs: List[_Subcond] = []
         own_symbols: Optional[set] = None
         for term in _flatten_top_terms(test):
@@ -495,6 +555,103 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         if group_subs and not (effective_symbols is not None and not effective_symbols):
             groups.append(_Group(subconds=group_subs, target_symbols=effective_symbols))
         if not _visit(body, ancestors + own_subs, effective_symbols):
+            return False
+        if not _visit(orelse, ancestors, ancestor_symbols):
+            return False
+        return True
+
+    def _process_or_if(
+        test: ast.BoolOp,
+        body: List[ast.stmt],
+        orelse: List[ast.stmt],
+        ancestors: List[_Subcond],
+        ancestor_symbols: Optional[set],
+    ) -> bool:
+        """Process ``if A or B or C:`` — each leg becomes an independent
+        subcondition row, classified disjunctively at aggregation time.
+
+        Body recursion runs with bare ancestors rather than
+        ``ancestors + or_legs`` because we don't have a single conjunct
+        to attach: any one of the legs being true is sufficient for the
+        body, and modelling the OR as an extra ancestor would amount to
+        building a synthetic merged-mask we can't represent in the
+        per-Subcond ``evaluate`` callback. Conservative under-flagging
+        on the body's nested coverage is preferable to over-flagging.
+
+        ``orelse`` recursion remains bare-ancestor (consistent with the
+        AND path).
+        """
+        own_subs: List[_Subcond] = []
+        for leg in test.values:
+            if isinstance(leg, ast.Compare):
+                # Symbol gates inside an OR are degenerate — each leg
+                # would constrain a different symbol, but the OR makes
+                # them alternatives. Skip the symbol-gate fast path here
+                # and let _build_subcond run normally so the leg shows
+                # up as a real coverage row.
+                sub = _build_subcond(leg, name_periods, name_evaluators)
+                if sub is not None:
+                    own_subs.append(sub)
+                continue
+            truthy = _build_truthy_subcond(leg, name_periods, name_evaluators)
+            if truthy is not None:
+                own_subs.append(truthy)
+
+        if not own_subs:
+            # No recognised legs — fall through to body / orelse without
+            # emitting a group, so nested ``if`` analysis still runs.
+            if not _visit(body, ancestors, ancestor_symbols):
+                return False
+            if not _visit(orelse, ancestors, ancestor_symbols):
+                return False
+            return True
+
+        group_subs: List[_Subcond] = []
+        # Ancestors stay AND-conjuncts; OR legs are this group's own
+        # alternatives. The combinator flag tells _aggregate which
+        # zero-hit rule to use.
+        if not _budgeted_extend(group_subs, ancestors):
+            if group_subs:
+                groups.append(
+                    _Group(
+                        subconds=group_subs,
+                        target_symbols=ancestor_symbols,
+                        combinator="and",
+                    )
+                )
+            return False
+        if not _budgeted_extend(group_subs, own_subs):
+            if group_subs:
+                groups.append(
+                    _Group(
+                        subconds=group_subs,
+                        target_symbols=ancestor_symbols,
+                        combinator="or" if not ancestors else "and",
+                    )
+                )
+            return False
+        if group_subs:
+            # When the group has ancestors AND OR-legs together, the
+            # ancestors are AND-conjuncts and the OR-legs are
+            # alternatives — modelling that hybrid correctly needs more
+            # than a single combinator field. We keep the simplest
+            # correct bound: when there are no ancestors, classify as a
+            # pure OR group; otherwise fall back to AND, which preserves
+            # the existing ancestor-coverage signal at the cost of
+            # treating zero-hit OR legs more strictly than they deserve.
+            # That's an under-flagging direction (we may surface a real
+            # never-fire leg as a blocker even when the OR's other leg
+            # covers it) but it never produces a false COVERAGE_OK.
+            combinator = "or" if not ancestors else "and"
+            groups.append(
+                _Group(
+                    subconds=group_subs,
+                    target_symbols=ancestor_symbols,
+                    combinator=combinator,
+                )
+            )
+        # Body sees no extra ancestors — see docstring.
+        if not _visit(body, ancestors, ancestor_symbols):
             return False
         if not _visit(orelse, ancestors, ancestor_symbols):
             return False
