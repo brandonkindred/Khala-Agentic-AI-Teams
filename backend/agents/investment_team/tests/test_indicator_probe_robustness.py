@@ -2402,6 +2402,72 @@ def test_and_compound_with_unknown_conjunct_in_or_leg_is_declined() -> None:
     assert all(b.reason != "or_group_never_fires" for b in report.likely_blockers)
 
 
+def test_module_helper_function_local_does_not_shadow_class_constant() -> None:
+    """A module-level helper function's local assignment must NOT
+    pre-empt the strategy class's same-named class constant.
+
+    Strategy code::
+
+        def helper():
+            WINDOW = 999  # function-local, not a module constant
+
+        class Strategy:
+            WINDOW = 2
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.WINDOW):
+                    pass
+
+    On flat ``close=100`` data with the bug, the helper's local
+    ``WINDOW = 999`` was recorded first via ``setdefault`` and
+    ``self.WINDOW`` resolved to 999. ``sma(close, 999)`` on a 60-bar
+    fixture is all NaN → zero hits → ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    With the fix the helper's body is skipped entirely (function locals
+    are not class/module constants) and ``self.WINDOW`` resolves to 2;
+    ``close > sma(close, 2)`` on flat data has equality (NaN warmup
+    aside, the comparison is False where close == sma) — the test
+    asserts the probe did NOT silently use the helper's value, which
+    we verify by confirming the report is NOT
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` (with WINDOW=2 the SMA is
+    defined and the predicate flips to a benign category).
+    """
+    code = textwrap.dedent(
+        """
+        def helper():
+            WINDOW = 999
+
+        class Strategy:
+            WINDOW = 2
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.WINDOW):
+                    pass
+        """
+    )
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = ([+0.005] * 10 + [-0.005] * 10) * 3
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # WINDOW=2 has plenty of warmup-complete bars on a 60-bar fixture
+    # and the predicate fires partially. WINDOW=999 (the helper's
+    # local, used pre-fix) would yield zero hits.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

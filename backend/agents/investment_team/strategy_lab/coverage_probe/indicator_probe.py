@@ -1496,8 +1496,16 @@ def _collect_name_periods(
         — ``self.THRESHOLD`` would resolve to whatever the helper set
         rather than what the live strategy state holds.
 
-        When ``strategy_class`` is None, behaves like ``ast.walk``
-        (the previous behaviour).
+        Module-level helper ``FunctionDef`` / ``AsyncFunctionDef``
+        bodies are also skipped (a helper's local ``WINDOW = 999``
+        is not a module constant; without this skip a sibling helper
+        ordered before the strategy class could pre-empt
+        ``class Strategy: WINDOW = 2`` and ``self.WINDOW`` would
+        resolve to the helper's value).
+
+        When ``strategy_class`` is None, behaves like ``ast.walk`` over
+        Assigns/AnnAssigns but still skips function bodies (the
+        previous behaviour incorrectly recorded function locals).
         """
         _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
         if strategy_class is not None and isinstance(node, ast.ClassDef):
@@ -1517,6 +1525,13 @@ def _collect_name_periods(
                                 yield sub
                 else:
                     yield from _iter_outer_assigns(child)
+            return
+        # Module / nested compound: skip function / async-function
+        # bodies entirely — their locals belong to that function's
+        # scope, not to the strategy. Descending into them would let a
+        # sibling ``def helper(): WINDOW = 999`` pre-empt the
+        # strategy's class-level constant via ``setdefault``.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             return
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             yield node
