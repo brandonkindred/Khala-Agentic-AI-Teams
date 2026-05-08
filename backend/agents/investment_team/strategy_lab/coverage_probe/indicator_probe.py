@@ -177,40 +177,11 @@ def run_indicator_probe(
     """
     symbols_checked = sum(1 for df in market_data.values() if isinstance(df, pd.DataFrame))
     bars_checked = sum(len(df) for df in market_data.values() if isinstance(df, pd.DataFrame))
-    # Warmup is a per-symbol time-series property: a 150-period SMA on
-    # a 100-bar DataFrame is all NaN regardless of how many other
-    # symbols are present. Compare against the longest single symbol's
-    # bar count so a multi-symbol universe with no individually
-    # warm-enough series correctly classifies as INSUFFICIENT_BARS
-    # rather than letting the all-NaN indicators silently flow through
-    # to a false INDICATOR_FILTER_TOO_RESTRICTIVE.
-    max_per_symbol_bars = max(
-        (len(df) for df in market_data.values() if isinstance(df, pd.DataFrame)),
-        default=0,
-    )
     base_kwargs = {
         "symbols_checked": symbols_checked,
         "bars_checked": bars_checked,
         "warmup_bars_required": int(max(0, warmup_bars_required)),
     }
-
-    if warmup_bars_required > 0 and max_per_symbol_bars < warmup_bars_required:
-        return CoverageReport(
-            coverage_category=CoverageCategory.INSUFFICIENT_BARS,
-            summary=(
-                f"insufficient per-symbol history: longest series has "
-                f"{max_per_symbol_bars} bars, {warmup_bars_required} required"
-            ),
-            likely_blockers=[
-                LikelyBlocker(
-                    reason="insufficient_bars",
-                    evidence=(
-                        f"max_per_symbol_bars={max_per_symbol_bars} < warmup={warmup_bars_required}"
-                    ),
-                )
-            ],
-            **base_kwargs,
-        )
 
     try:
         subconds = _extract_subconditions(strategy_code)
@@ -226,6 +197,51 @@ def run_indicator_probe(
         return CoverageReport(
             coverage_category=CoverageCategory.UNKNOWN_LOW_COVERAGE,
             summary="no recognized indicator subconditions found",
+            **base_kwargs,
+        )
+
+    # Warmup is a per-symbol time-series property: a 150-period SMA on
+    # a 100-bar DataFrame is all NaN regardless of how many other
+    # symbols are present. Compare against the longest single symbol's
+    # bar count so a multi-symbol universe with no individually
+    # warm-enough series correctly classifies as INSUFFICIENT_BARS
+    # rather than letting the all-NaN indicators silently flow through
+    # to a false INDICATOR_FILTER_TOO_RESTRICTIVE.
+    #
+    # When every extracted group is symbol-gated (``bar.symbol == "X"``
+    # or per-leg OR gates), restrict the warmup denominator to the
+    # union of those gates: an unrelated symbol with plenty of history
+    # cannot rescue the warmup check for the gated symbols, so its
+    # bar count must not be counted. If any group is universal (no
+    # symbol filter), every DataFrame is potentially in scope and the
+    # check stays over the full universe.
+    target_symbols = _union_target_symbols(subconds)
+    if target_symbols is None:
+        warmup_dfs = [df for df in market_data.values() if isinstance(df, pd.DataFrame)]
+    else:
+        warmup_dfs = [
+            df
+            for sym, df in market_data.items()
+            if sym in target_symbols and isinstance(df, pd.DataFrame)
+        ]
+    max_per_symbol_bars = max((len(df) for df in warmup_dfs), default=0)
+
+    if warmup_bars_required > 0 and max_per_symbol_bars < warmup_bars_required:
+        evidence = f"max_per_symbol_bars={max_per_symbol_bars} < warmup={warmup_bars_required}"
+        if target_symbols is not None:
+            evidence = f"{evidence} [{','.join(sorted(target_symbols))}]"
+        return CoverageReport(
+            coverage_category=CoverageCategory.INSUFFICIENT_BARS,
+            summary=(
+                f"insufficient per-symbol history: longest series has "
+                f"{max_per_symbol_bars} bars, {warmup_bars_required} required"
+            ),
+            likely_blockers=[
+                LikelyBlocker(
+                    reason="insufficient_bars",
+                    evidence=evidence,
+                )
+            ],
             **base_kwargs,
         )
 
@@ -962,6 +978,47 @@ def _symbol_gate(node: ast.Compare) -> Optional[str]:
     return None
 
 
+def _union_target_symbols(groups: List[_Group]) -> Optional[set]:
+    """Return the union of symbols any group could possibly fire on, or ``None``.
+
+    Used by :func:`run_indicator_probe` to size the warmup check to the
+    symbols that can actually satisfy a predicate. Returns ``None`` when
+    at least one group is **fully unconstrained** — i.e. neither the
+    group-level filter nor any subcond filter narrows the symbol space —
+    so the warmup check stays over every fetched DataFrame.
+
+    Otherwise the result is the union of each group's per-level gates
+    (group ``target_symbols`` ∪ subcond ``target_symbols`` ∪ OR-leg
+    ``target_symbols``). The union is conservative for warmup: it
+    includes every symbol that could conceivably contribute to the
+    group's predicate, so we won't over-flag ``INSUFFICIENT_BARS``.
+    """
+    union: set = set()
+    for g in groups:
+        group_syms: Optional[set] = None
+        if g.target_symbols is not None:
+            group_syms = set(g.target_symbols)
+        for sub in g.subconds:
+            if sub.target_symbols is not None:
+                if group_syms is None:
+                    group_syms = set(sub.target_symbols)
+                else:
+                    group_syms.update(sub.target_symbols)
+            if sub.or_legs is not None:
+                for leg in sub.or_legs:
+                    if leg.target_symbols is not None:
+                        if group_syms is None:
+                            group_syms = set(leg.target_symbols)
+                        else:
+                            group_syms.update(leg.target_symbols)
+        if group_syms is None:
+            # Fully unconstrained group — predicate could fire on any
+            # fetched symbol. Treat the warmup as universal.
+            return None
+        union.update(group_syms)
+    return union if union else None
+
+
 def _intersect_symbols(a: Optional[set], b: Optional[set]) -> Optional[set]:
     """Combine ancestor and own symbol filters under conjunction.
 
@@ -994,6 +1051,61 @@ def _find_on_bar(tree: ast.AST) -> Optional[ast.AST]:
         if fallback is None and name in fallback_names:
             fallback = node
     return fallback
+
+
+def _iter_entry_path_assigns(node: ast.AST):
+    """Yield ``Assign`` / ``AnnAssign`` nodes on the entry control-flow path.
+
+    Skips the non-entry branch of any ``if`` whose test is (or is gated
+    by) a position check — the same routing :func:`_visit` applies on
+    the main traversal. Without this filter, an exit-branch reassignment
+    like ``ma = sma(close, 200)`` would shadow the entry-branch's
+    ``ma = sma(close, 5)`` because the binding pass uses overwrite
+    semantics; the probe would then evaluate the entry comparison
+    against the exit-path indicator and falsely flag
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+
+    Module/class scope (where there is no entry/exit distinction) calls
+    :func:`ast.walk` directly; this helper is for the function-local
+    pass only.
+    """
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        yield node
+
+    if isinstance(node, ast.If):
+        # ``_strip_position_gate`` handles both bare ``if pos is None:``
+        # and combined ``if pos is None and <entry>:`` shapes — same
+        # logic _visit uses to route the main traversal.
+        position_check, _residual = _strip_position_gate(node.test)
+        if position_check == "vacant":
+            for child in node.body:
+                yield from _iter_entry_path_assigns(child)
+            return
+        if position_check == "occupied":
+            for child in node.orelse:
+                yield from _iter_entry_path_assigns(child)
+            return
+        for child in node.body:
+            yield from _iter_entry_path_assigns(child)
+        for child in node.orelse:
+            yield from _iter_entry_path_assigns(child)
+        return
+
+    # Non-if compound statements: descend through standard block fields.
+    for field in _BLOCK_FIELDS:
+        children = getattr(node, field, None)
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, ast.AST):
+                    yield from _iter_entry_path_assigns(child)
+    handlers = getattr(node, "handlers", None)
+    if isinstance(handlers, list):
+        for h in handlers:
+            h_body = getattr(h, "body", None)
+            if isinstance(h_body, list):
+                for child in h_body:
+                    if isinstance(child, ast.AST):
+                        yield from _iter_entry_path_assigns(child)
 
 
 def _flatten_test(test: ast.expr) -> List[ast.Compare]:
@@ -1082,11 +1194,13 @@ def _collect_name_periods(
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             _record(node.target, node.value, overwrite=False)
 
-    # Pass 2: inner-scope assignments inside the target function (e.g.
-    # ``on_bar``) overwrite the outer binding. Python evaluates the
-    # local ``WINDOW = 5`` at runtime, so the probe must too.
+    # Pass 2: inner-scope assignments on the entry control-flow path
+    # overwrite the outer binding. We skip exit branches of position
+    # checks so an exit-only reassignment can't shadow the entry-path
+    # binding (matches the entry-only routing used by _visit and the
+    # name-evaluator collector).
     if function_node is not None:
-        for node in ast.walk(function_node):
+        for node in _iter_entry_path_assigns(function_node):
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     _record(target, node.value, overwrite=True)
@@ -1702,7 +1816,10 @@ def _collect_name_evaluators(
     chains generated strategies actually produce.
     """
     bindings: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {}
-    for node in ast.walk(on_bar):
+    # Entry-path-only walk: skip exit branches of position-check ifs so
+    # an exit reassignment like ``ma = sma(close, 200)`` can't shadow
+    # the entry's ``ma = sma(close, 5)``.
+    for node in _iter_entry_path_assigns(on_bar):
         targets: List[ast.expr] = []
         value: Optional[ast.expr] = None
         if isinstance(node, ast.Assign):

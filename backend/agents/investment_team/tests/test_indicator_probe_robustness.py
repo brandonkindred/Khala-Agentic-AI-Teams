@@ -1410,6 +1410,164 @@ def test_function_local_period_shadows_outer_scope() -> None:
     assert report.subconditions[0].hit_count > 0
 
 
+def test_exit_branch_reassignment_does_not_shadow_entry_binding() -> None:
+    """Exit-branch reassignments inside a position-check ``orelse`` must
+    not overwrite an entry-branch binding. The recent overwrite-not-
+    setdefault fix applied to all reassignments in the on_bar walk;
+    without scoping it to the entry control-flow path, the codegen
+    pattern below evaluates the entry comparison against the exit
+    branch's 200-period MA and falsely flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+
+    Strategy:
+        ma = sma(close, 5)
+        if pos is None:
+            if close > ma: enter
+        else:
+            ma = sma(close, 200)   # exit-only reassignment
+
+    On a 30-bar swing fixture the entry's 5-period MA has plenty of
+    warmup-complete bars and ``close > ma`` partially fires. With the
+    bug the exit binding (200-period) wins, every bar is NaN, and
+    hits=0 → ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                ma = sma(close, 5)
+                pos = ctx.position(bar.symbol)
+                if pos is None:
+                    if close > ma:
+                        pass
+                else:
+                    ma = sma(close, 200)
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_warmup_check_restricted_to_gated_symbols() -> None:
+    """Warmup denominator must shrink to the symbols that can satisfy a
+    symbol-gated predicate. An unrelated long DataFrame in the universe
+    must not rescue the warmup check when the gated symbol is too short.
+
+    Strategy gates entry to AAPL only:
+        if bar.symbol == "AAPL" and close > sma(close, 50): enter
+
+    Universe: AAPL with 10 bars, MSFT with 100 bars,
+    warmup_bars_required=50.
+
+    With the bug the global ``max_per_symbol_bars=100`` (from MSFT)
+    passes the warmup check; AAPL's SMA(50) is all-NaN over its 10
+    bars, hits=0, and the probe wrongly reports
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With the fix the warmup
+    denominator is restricted to AAPL → 10 bars < 50 →
+    ``INSUFFICIENT_BARS``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" and close > sma(close, 50):
+                    pass
+        """
+    )
+    aapl = pd.DataFrame(
+        {
+            "open": np.full(10, 100.0),
+            "high": np.full(10, 101.0),
+            "low": np.full(10, 99.0),
+            "close": np.full(10, 100.0),
+            "volume": np.full(10, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=10, freq="D"),
+    )
+    msft = pd.DataFrame(
+        {
+            "open": np.full(100, 200.0),
+            "high": np.full(100, 201.0),
+            "low": np.full(100, 199.0),
+            "close": np.full(100, 200.0),
+            "volume": np.full(100, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=100, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=50,
+    )
+
+    assert report.coverage_category is CoverageCategory.INSUFFICIENT_BARS
+    assert len(report.likely_blockers) == 1
+    blocker = report.likely_blockers[0]
+    assert blocker.reason == "insufficient_bars"
+    assert "AAPL" in (blocker.evidence or "")
+
+
+def test_warmup_check_unaffected_when_any_group_is_universal() -> None:
+    """If any extracted group has no symbol filter, the warmup check
+    falls back to the full universe — a universal group can satisfy
+    on any fetched symbol, so any sufficiently long DataFrame meets it.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 50):
+                    pass
+        """
+    )
+    short = pd.DataFrame(
+        {
+            "open": np.full(10, 100.0),
+            "high": np.full(10, 101.0),
+            "low": np.full(10, 99.0),
+            "close": np.full(10, 100.0),
+            "volume": np.full(10, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=10, freq="D"),
+    )
+    long = pd.DataFrame(
+        {
+            "open": np.full(100, 100.0),
+            "high": np.full(100, 101.0),
+            "low": np.full(100, 99.0),
+            "close": np.full(100, 100.0),
+            "volume": np.full(100, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=100, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": short, "MSFT": long},
+        warmup_bars_required=50,
+    )
+
+    # Predicate is unrestricted by symbol; MSFT's 100 bars satisfy
+    # warmup so we shouldn't short-circuit on INSUFFICIENT_BARS.
+    assert report.coverage_category is not CoverageCategory.INSUFFICIENT_BARS
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
