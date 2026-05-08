@@ -2810,6 +2810,98 @@ def test_tuple_indicator_with_resolvable_period_still_works() -> None:
     assert len(report.subconditions) == 1
 
 
+def test_unresolved_tuple_indicator_kwarg_drops_indicator() -> None:
+    """A tuple-indicator with a known kwarg whose value can't be
+    resolved (e.g. ``bollinger_bands(close, 20, num_std=self.band_width)[0]``)
+    must drop the indicator, not silently substitute the helper's
+    default for the unresolved kwarg.
+
+    Without the fix ``_resolve_known_kwargs`` skipped the kwarg and
+    called ``bollinger_bands(close, 20)`` with the default
+    ``num_std=2.0`` — evaluating a different band width from the
+    runtime. With the fix the helper is declined and no subcondition
+    is recognised.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > bollinger_bands(close, 20, num_std=self.band_width)[0]:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unresolved_macd_kwarg_drops_indicator() -> None:
+    """Same fix covers ``macd`` with an unresolvable ``fast``/``slow``/
+    ``signal`` kwarg.
+
+    Strategy:
+        ``if macd(close, fast=dynamic_fast)[0] > 0:``  (no dynamic_fast binding)
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close, fast=dynamic_fast)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unresolved_tuple_unpack_kwarg_skips_binding() -> None:
+    """An unpacked tuple-indicator with an unresolvable known kwarg
+    must not bind any of the unpacked names. ``_build_operand`` later
+    falls through to OHLCV / numeric resolution and the comparison is
+    dropped.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                upper, mid, lower = bollinger_bands(close, 20, num_std=self.band_width)
+                if close > upper:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_resolvable_tuple_indicator_kwarg_still_works() -> None:
+    """Sanity: tuple-indicator with all kwargs as numeric literals
+    still resolves cleanly. The new None-on-unresolved kwarg behavior
+    must not over-fire on legitimate kwarg values.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > bollinger_bands(close, 20, num_std=0.1)[0]:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

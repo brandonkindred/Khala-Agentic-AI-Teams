@@ -2163,6 +2163,12 @@ def _tuple_indicator_subscript(
         # series / HLC indicator path uses for unresolved periods.
         return None
     extra_kwargs = _resolve_known_kwargs(call, name_periods, kwarg_names)
+    if extra_kwargs is None:
+        # Unresolvable known kwarg, e.g.
+        # ``bollinger_bands(close, 20, num_std=self.band_width)``.
+        # Decline so the comparison drops rather than evaluating the
+        # helper with its default for the unresolved kwarg.
+        return None
 
     if sig_kind == "series":
         series_input = _resolve_series_input(call, name_evaluators)
@@ -2228,12 +2234,21 @@ def _resolve_known_kwargs(
     call: ast.Call,
     name_periods: Dict[str, int],
     known: tuple,
-) -> Dict[str, Union[int, float]]:
+) -> Optional[Dict[str, Union[int, float]]]:
     """Pick out keyword arguments the helper actually accepts.
 
     Unknown kwargs are dropped — passing them through would TypeError
     inside the helper. Numeric values preserve int-ness for the same
     reason as :func:`_trailing_numeric_args`.
+
+    Returns ``None`` when any **known** kwarg has a value the probe
+    can't reduce to a numeric literal (e.g. ``bollinger_bands(close,
+    20, num_std=self.band_width)`` where ``self.band_width`` isn't a
+    constant). The caller treats ``None`` as "decline this indicator"
+    rather than substituting the helper's default for the unresolved
+    kwarg, which would silently evaluate a different indicator from
+    the runtime. Unknown kwargs are still dropped without declining
+    because the runtime would raise on them.
     """
     out: Dict[str, Union[int, float]] = {}
     for kw in call.keywords:
@@ -2241,7 +2256,7 @@ def _resolve_known_kwargs(
             continue
         v = _numeric_literal(kw.value, name_periods)
         if v is None:
-            continue
+            return None
         out[kw.arg] = int(v) if float(v).is_integer() else v
     return out
 
@@ -2372,6 +2387,9 @@ def _bind_tuple_unpack(
         # different indicator than the runtime.
         return
     extra_kwargs = _resolve_known_kwargs(value, name_periods, kwarg_names)
+    if extra_kwargs is None:
+        # Same guard for unresolvable known kwargs in the unpack form.
+        return
 
     if sig_kind == "series":
         series_input = _resolve_series_input(value, bindings)
