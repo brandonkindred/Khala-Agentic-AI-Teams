@@ -150,6 +150,12 @@ class _Group:
     target_symbols: Optional[set]
     combinator: str = "and"
     ancestor_count: int = 0
+    # True when at least one OR-tail leg of this group could not be
+    # statically modelled (e.g. a custom method call). The aggregator
+    # then suppresses the ``or_group_never_fires`` blocker for the
+    # group: with an unmodelled alternative present we can't prove
+    # the OR is unreachable, so flagging would be a false positive.
+    has_unknown_or_leg: bool = False
 
 
 def run_indicator_probe(
@@ -475,7 +481,12 @@ def _aggregate(
                     _flag_and_zero(k)
             or_tail_hits = leg_hits[group.ancestor_count :]
             or_tail_labels = leg_labels[group.ancestor_count :]
-            if or_tail_hits and all(h == 0 for h in or_tail_hits):
+            # Suppress the all-zero-OR-tail blocker when at least one
+            # leg of the source predicate could not be statically
+            # modelled (e.g. ``self.custom_ok(bar)``). With an
+            # un-modelled alternative present we can't prove the OR is
+            # unreachable, so flagging would be a false positive.
+            if or_tail_hits and all(h == 0 for h in or_tail_hits) and not group.has_unknown_or_leg:
                 evidence = " OR ".join(or_tail_labels)
                 if group.target_symbols:
                     evidence = f"{evidence} [{','.join(sorted(group.target_symbols))}]"
@@ -782,6 +793,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         AND path).
         """
         own_subs: List[_Subcond] = []
+        # Track legs we couldn't statically model (e.g. an unrecognised
+        # method call like ``self.custom_ok(bar)``). When at least one
+        # leg is unknown the OR's "all known legs zero" rule must NOT
+        # flag a blocker — the un-modelled alternative may make the
+        # entry reachable, so flagging would be a false positive.
+        has_unknown_leg = False
         for leg in test.values:
             if isinstance(leg, ast.Compare):
                 # Standalone ``bar.symbol == "X"`` legs are symbol
@@ -809,6 +826,8 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 sub = _build_subcond(leg, name_periods, name_evaluators)
                 if sub is not None:
                     own_subs.append(sub)
+                else:
+                    has_unknown_leg = True
                 continue
             if isinstance(leg, ast.BoolOp) and isinstance(leg.op, ast.And):
                 # Compound OR leg, e.g. ``(close > 100 and volume > 0)``
@@ -820,10 +839,14 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 compound = _build_compound_and_subcond(leg, name_periods, name_evaluators)
                 if compound is not None:
                     own_subs.append(compound)
+                else:
+                    has_unknown_leg = True
                 continue
             truthy = _build_truthy_subcond(leg, name_periods, name_evaluators)
             if truthy is not None:
                 own_subs.append(truthy)
+            else:
+                has_unknown_leg = True
 
         if not own_subs:
             # No recognised legs — fall through to body / orelse without
@@ -860,6 +883,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         target_symbols=ancestor_symbols,
                         combinator="or",
                         ancestor_count=ancestor_count,
+                        has_unknown_or_leg=has_unknown_leg,
                     )
                 )
             return False
@@ -870,6 +894,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     target_symbols=ancestor_symbols,
                     combinator="or",
                     ancestor_count=ancestor_count,
+                    has_unknown_or_leg=has_unknown_leg,
                 )
             )
         # Body sees no extra ancestors — see docstring.

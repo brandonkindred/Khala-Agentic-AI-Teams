@@ -2011,6 +2011,41 @@ def test_helper_class_period_does_not_apply_when_strategy_constant_missing() -> 
     assert report.subconditions[0].hit_count > 0
 
 
+def test_or_with_unknown_leg_suppresses_false_restrictive_blocker() -> None:
+    """When an OR predicate has an unrecognised leg (e.g. a custom
+    method call we can't model), the probe must NOT flag
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` based only on the recognised
+    legs being zero — the unknown alternative may make the entry
+    reachable.
+
+    Strategy:
+        ``if self.custom_ok(bar) or close < -50:``
+
+    Universe: flat ``close=100`` (never satisfies ``close < -50``).
+    Without the fix the un-modelled ``self.custom_ok(bar)`` leg is
+    silently dropped, the surviving ``close < -50`` leg has zero hits,
+    and the aggregator emits an ``or_group_never_fires`` blocker —
+    classifying ``INDICATOR_FILTER_TOO_RESTRICTIVE`` even though the
+    custom call may make the predicate fire. With the fix the
+    ``has_unknown_or_leg`` flag suppresses the blocker.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if self.custom_ok(bar) or close < -50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+
+    assert report.coverage_category is not CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert all(b.reason != "or_group_never_fires" for b in report.likely_blockers)
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
