@@ -2218,6 +2218,86 @@ def test_or_group_with_ancestor_overlap_returns_coverage_ok() -> None:
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
 
 
+def test_zero_valued_named_threshold_is_preserved() -> None:
+    """A named zero (or negative) threshold must resolve in
+    comparisons. Period-use sites still validate ``> 0`` and
+    ``is_integer()`` so a zero / negative scalar is never misapplied
+    as an indicator window.
+
+    Strategy::
+
+        ZERO_LINE = 0
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close)[0] > ZERO_LINE:
+                    pass
+
+    Without the fix the binding pass rejected non-positive numbers, so
+    ``ZERO_LINE`` wasn't recorded, ``_build_operand`` couldn't resolve
+    the ``Name``, the comparison was dropped, and the probe
+    degenerated to ``UNKNOWN_LOW_COVERAGE``.
+    """
+    code = textwrap.dedent(
+        """
+        ZERO_LINE = 0
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close)[0] > ZERO_LINE:
+                    pass
+        """
+    )
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # Sawtooth so MACD oscillates around zero — should fire on roughly
+    # half the warmup-complete bars.
+    moves = ([+0.005] * 10 + [-0.005] * 10) * 3
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # The comparison must be recognised — i.e. NOT degenerate to
+    # UNKNOWN_LOW_COVERAGE — and produce a subcondition row.
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_negative_named_threshold_is_preserved() -> None:
+    """Same fix covers negative thresholds. ``LOWER = -1.0; if close < LOWER:``
+    must surface as a subcondition rather than being dropped at the
+    binding pass."""
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                LOWER = -1.0
+                if close < LOWER:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``close == 100`` never goes below ``-1.0``, so the predicate is
+    # too restrictive. The point is that the comparison was
+    # *recognised* (not silently dropped); a flat-data zero-hit row is
+    # surfaced as INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

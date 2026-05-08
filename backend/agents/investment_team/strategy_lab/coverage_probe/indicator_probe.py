@@ -716,24 +716,27 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     # fall through to numeric-literal / OHLCV
                     # resolution.
                     name_evaluators.pop(target.id, None)
-                # Numeric-scalar side: record any positive number,
-                # preserving int-ness when the value is integer-valued
-                # so period-use sites stay clean. Non-integer floats
-                # like ``limit = 100.5`` must also be preserved here:
+                # Numeric-scalar side: record any numeric value
+                # (including zero and negatives), preserving int-ness
+                # when the value is integer-valued so period-use sites
+                # stay clean. Non-integer floats and zero/negative
+                # thresholds must also be preserved here:
                 # ``_build_operand`` resolves ``Name`` literals through
-                # this dict, so without it ``if close > limit:`` would
-                # be dropped and the probe would degenerate to
+                # this dict, so without it ``ZERO_LINE = 0; if
+                # macd(close)[0] > ZERO_LINE:`` and similar predicates
+                # would be dropped and the probe would degenerate to
                 # ``UNKNOWN_LOW_COVERAGE``. Period-use sites
                 # (:func:`_resolve_period_arg`) re-validate
-                # ``is_integer()`` so a float threshold is never
-                # misapplied as an indicator window.
+                # ``> 0`` and ``is_integer()`` so a non-positive or
+                # float threshold is never misapplied as an indicator
+                # window.
                 v = _numeric_literal(value, name_periods)
-                if v is not None and v > 0:
+                if v is not None:
                     name_periods[target.id] = int(v) if float(v).is_integer() else float(v)
             elif isinstance(target, ast.Attribute):
                 # ``self.WINDOW = N`` — record by attribute name.
                 v = _numeric_literal(value, name_periods)
-                if v is not None and v > 0:
+                if v is not None:
                     name_periods[target.attr] = int(v) if float(v).is_integer() else float(v)
 
     def _budgeted_extend(group_subs: List[_Subcond], extras: List[_Subcond]) -> bool:
@@ -1449,13 +1452,15 @@ def _collect_name_periods(
     def _record(target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
         # Reuse the same numeric-literal extractor used downstream so
         # negative ints and unary-minus constants resolve consistently.
-        # Allow any positive number — non-integer floats are stored as
-        # float to support threshold locals like ``limit = 100.5`` that
-        # appear as ``Name`` operands in ``if close > limit:``. Period-
-        # use sites validate ``is_integer()`` at lookup time so a float
-        # is never misapplied as an indicator window.
+        # Allow any numeric value — zero, negatives, and non-integer
+        # floats are stored alongside positive ints to support
+        # threshold locals like ``ZERO_LINE = 0`` or ``limit = 100.5``
+        # that appear as ``Name`` operands in comparisons. Period-use
+        # sites validate ``> 0`` and ``is_integer()`` at lookup time
+        # so non-positive or float values are never misapplied as
+        # indicator windows.
         v = _numeric_literal(value, bindings)
-        if v is None or v <= 0:
+        if v is None:
             return
         ivalue: Union[int, float] = int(v) if float(v).is_integer() else float(v)
         if isinstance(target, ast.Name):
