@@ -2093,6 +2093,41 @@ def test_float_threshold_local_is_preserved() -> None:
     assert sc.hit_count == 15  # exactly the bars where close=110 > 100.5
 
 
+def test_nested_or_with_unknown_leg_suppresses_and_zero_hit_blocker() -> None:
+    """A nested OR inside an AND must NOT trigger an
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` blocker on its zero-hit
+    recognised leg when the OR also contains an un-modellable leg —
+    the unknown alternative may make the OR (and thus the AND) fire.
+
+    Strategy:
+        ``if close > 0 and (self.custom_ok(bar) or close < -50):``
+
+    Universe: flat ``close=100`` (never satisfies ``close < -50``).
+    Without the fix the OR-compound's mask is just ``close < -50`` (the
+    unknown leg is silently dropped), so the second AND-conjunct has
+    zero hits and the aggregator emits ``indicator_filter_zero_hits``
+    — falsely flagging the predicate as too restrictive even though
+    ``self.custom_ok(bar)`` may make the OR reachable. With the fix
+    the OR-compound subcond carries ``has_unknown_leg=True`` and the
+    AND zero-hit rule is suppressed.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (self.custom_ok(bar) or close < -50):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+
+    assert report.coverage_category is not CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert all(b.reason != "indicator_filter_zero_hits" for b in report.likely_blockers)
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

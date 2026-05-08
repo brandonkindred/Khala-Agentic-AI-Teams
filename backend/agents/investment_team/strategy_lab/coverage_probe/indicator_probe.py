@@ -114,6 +114,14 @@ class _Subcond:
     # and falsely flip the OR (and the surrounding AND) to true.
     # ``None`` for non-OR-compound subconds.
     or_legs: Optional[Tuple["_Subcond", ...]] = None
+    # True when this subcond was synthesised from an OR whose source
+    # AST had at least one un-modellable leg (e.g. ``self.custom_ok(bar)``
+    # — a custom method call). With an unmodelled alternative present
+    # we can't prove the OR is unreachable, so the aggregator must skip
+    # the AND zero-hit blocker for this leg even when the recognised
+    # legs fired zero times. Mirrors ``_Group.has_unknown_or_leg`` but
+    # for nested-OR subconds inside an AND.
+    has_unknown_leg: bool = False
 
 
 @dataclass
@@ -467,7 +475,13 @@ def _aggregate(
 
         if group.combinator == "and":
             for k in range(legs):
-                if leg_hits[k] == 0:
+                # Suppress the AND zero-hit blocker for nested-OR
+                # subconds whose source AST had at least one
+                # un-modellable leg. With an unknown alternative
+                # present we can't prove the OR is unreachable, so
+                # flagging based on the recognised legs' zero hits
+                # would be a false positive.
+                if leg_hits[k] == 0 and not group.subconds[k].has_unknown_leg:
                     _flag_and_zero(k)
         else:  # "or"
             # Ancestors are still AND-required even when the group's
@@ -477,7 +491,7 @@ def _aggregate(
             # [0..ancestor_count) and the disjunction-all-zero rule to
             # the OR-leg tail.
             for k in range(group.ancestor_count):
-                if leg_hits[k] == 0:
+                if leg_hits[k] == 0 and not group.subconds[k].has_unknown_leg:
                     _flag_and_zero(k)
             or_tail_hits = leg_hits[group.ancestor_count :]
             or_tail_labels = leg_labels[group.ancestor_count :]
@@ -1635,6 +1649,7 @@ def _build_compound_or_subcond(
     Returns ``None`` when no inner leg is recognisable.
     """
     inner: List[_Subcond] = []
+    has_unknown_leg = False
     for term in leg.values:
         if isinstance(term, ast.Compare):
             # ``bar.symbol == "X"`` as a standalone OR leg is a symbol
@@ -1663,9 +1678,17 @@ def _build_compound_or_subcond(
             sub = _build_truthy_subcond(term, name_periods, name_evaluators)
         if sub is not None:
             inner.append(sub)
+        else:
+            # Track un-modellable legs (e.g. ``self.custom_ok(bar)`` —
+            # custom method calls). The synthesised OR-compound subcond
+            # carries a ``has_unknown_leg`` flag so the parent AND
+            # group's zero-hit blocker rule can suppress false
+            # positives when the recognised legs zero out but an
+            # unknown alternative may still make the OR fire.
+            has_unknown_leg = True
     if not inner:
         return None
-    if len(inner) == 1:
+    if len(inner) == 1 and not has_unknown_leg:
         return inner[0]
 
     label = _format_compound_label(leg)
@@ -1709,6 +1732,7 @@ def _build_compound_or_subcond(
         evaluate=_eval_or,
         target_symbols=outer_target,
         or_legs=inner_legs,
+        has_unknown_leg=has_unknown_leg,
     )
 
 
