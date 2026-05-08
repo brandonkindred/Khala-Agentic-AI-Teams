@@ -598,6 +598,19 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 if sub is not None:
                     own_subs.append(sub)
                 continue
+            # A nested OR inside the top-level AND, e.g.
+            # ``if close > 0 and (volume < 0 or close < -1):`` — flatten
+            # the disjunction into a single AND-conjunct subcond whose
+            # evaluator is the bar-wise OR of the inner legs' masks.
+            # Without this the OR was sent to _build_truthy_subcond,
+            # returned None, and the whole disjunction was dropped —
+            # leaving the AND predicate's coverage decision based on
+            # only the surviving Compare conjuncts.
+            if isinstance(term, ast.BoolOp) and isinstance(term.op, ast.Or):
+                or_compound = _build_compound_or_subcond(term, name_periods, name_evaluators)
+                if or_compound is not None:
+                    own_subs.append(or_compound)
+                continue
             # Truthiness term — ``bool(x)`` or a bare ``Name`` referencing
             # a precomputed indicator. Required for the ideation/codegen
             # shape ``_entry = sma(close, 200) > bar.close`` followed by
@@ -1178,6 +1191,61 @@ def _build_compound_and_subcond(
     return _Subcond(label=label, evaluate=_eval_compound, target_symbols=target_symbols)
 
 
+def _build_compound_or_subcond(
+    leg: ast.BoolOp,
+    name_periods: Dict[str, int],
+    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
+) -> Optional[_Subcond]:
+    """Build a single subcond for an ``or``-disjunction inside a larger
+    AND predicate.
+
+    For predicates like ``if close > 0 and (volume < 0 or close < -1):``
+    the inner ``BoolOp(Or, ...)`` is one term of the outer AND, but it
+    isn't a Compare or a truthiness expression — without explicit
+    handling it gets dropped and the AND classification is based on
+    only the surviving Compare conjuncts. Build an outer ``_Subcond``
+    whose evaluator is the bar-wise OR of each inner leg's mask. The
+    leg can itself be a ``Compare``, a ``BoolOp(And)`` (delegated to
+    the existing AND compound builder), or a truthiness term.
+
+    Returns ``None`` when no inner leg is recognisable.
+    """
+    inner: List[_Subcond] = []
+    for term in leg.values:
+        if isinstance(term, ast.Compare):
+            sub = _build_subcond(term, name_periods, name_evaluators)
+        elif isinstance(term, ast.BoolOp) and isinstance(term.op, ast.And):
+            sub = _build_compound_and_subcond(term, name_periods, name_evaluators)
+        else:
+            sub = _build_truthy_subcond(term, name_periods, name_evaluators)
+        if sub is not None:
+            inner.append(sub)
+    if not inner:
+        return None
+    if len(inner) == 1:
+        return inner[0]
+
+    label = _format_compound_label(leg)
+    inner_fns = [s.evaluate for s in inner]
+
+    def _eval_or(df: pd.DataFrame) -> pd.Series:
+        masks: List[pd.Series] = []
+        for fn in inner_fns:
+            try:
+                series = fn(df)
+            except Exception:  # noqa: BLE001
+                series = pd.Series(False, index=df.index, dtype=bool)
+            masks.append(pd.Series(series, index=df.index).fillna(False).astype(bool))
+        if not masks:
+            return pd.Series(False, index=df.index, dtype=bool)
+        result = masks[0]
+        for m in masks[1:]:
+            result = result | m
+        return result
+
+    return _Subcond(label=label, evaluate=_eval_or)
+
+
 def _format_compound_label(node: ast.expr) -> str:
     try:
         text = ast.unparse(node)
@@ -1567,7 +1635,13 @@ def _collect_name_evaluators(
             if isinstance(target, ast.Name):
                 evaluator = _resolve_assign_evaluator(value, name_periods, bindings)
                 if evaluator is not None:
-                    bindings.setdefault(target.id, evaluator)
+                    # Overwrite — Python semantics use the latest
+                    # assignment. A first-wins ``setdefault`` lets a
+                    # stale earlier binding survive a reassignment in
+                    # the same scope, which can mask zero-coverage
+                    # filters when the second assignment is the one
+                    # the entry test actually uses.
+                    bindings[target.id] = evaluator
     return bindings
 
 
@@ -1621,7 +1695,7 @@ def _bind_tuple_unpack(
 
                 return _eval
 
-            bindings.setdefault(elem.id, _make())
+            bindings[elem.id] = _make()
         return
 
     # sig_kind == "hlc"
@@ -1644,7 +1718,7 @@ def _bind_tuple_unpack(
 
             return _eval
 
-        bindings.setdefault(elem.id, _make())
+        bindings[elem.id] = _make()
 
 
 def _resolve_assign_evaluator(

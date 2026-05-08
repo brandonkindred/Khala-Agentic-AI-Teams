@@ -958,6 +958,83 @@ def test_tuple_unpacked_stochastic_binds_hlc_signature() -> None:
     }
 
 
+def test_nested_or_under_and_is_evaluated() -> None:
+    """``if close > 0 and (volume < 0 or close < -1):`` — the inner OR
+    is one term of the outer AND. Without nested-OR handling the inner
+    disjunction was dropped and the AND classification was based only
+    on the surviving Compare conjunct (`close > 0` always fires →
+    false COVERAGE_OK). Now the inner OR is built as a compound
+    AND-conjunct whose mask is the bar-wise OR of its legs; both legs
+    fail on flat data so the AND classifies INDICATOR_FILTER_TOO_RESTRICTIVE.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (volume < 0 or close < -1):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    # Both AND conjuncts surface as coverage rows: the bare ``close > 0``
+    # and the synthetic ``volume < 0 or close < -1`` compound.
+    labels = [sc.label for sc in report.subconditions]
+    assert "close > 0" in labels
+    assert any("volume < 0" in lbl and "close < -1" in lbl for lbl in labels)
+
+
+def test_nested_or_under_and_with_one_leg_firing_is_coverage_ok() -> None:
+    """``if close > 0 and (volume > 0 or close < -1):`` — the inner OR
+    fires via ``volume > 0`` on every bar (flat fixture has volume=1M).
+    Both AND legs satisfied → COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (volume > 0 or close < -1):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_reassigned_local_uses_latest_binding() -> None:
+    """Python uses the latest local assignment. ``threshold = sma(close,
+    5) - 1; threshold = sma(close, 5) + 1000; if close > threshold:``
+    on flat data is impossible (close=100, threshold≈1100), but the
+    previous ``setdefault`` made the first stale binding stick and the
+    probe wrongly reported COVERAGE_OK from ``threshold=99``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                threshold = sma(close, 5) - 1
+                threshold = sma(close, 5) + 1000
+                if close > threshold:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # close=100, second threshold = sma(close, 5) + 1000 ≈ 1100 — never
+    # satisfied. Must classify INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
 def test_or_predicate_with_three_legs_recognised() -> None:
     """OR predicates with more than two legs must each surface as a
     coverage row.
