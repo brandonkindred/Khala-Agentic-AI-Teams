@@ -587,20 +587,63 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
     on_bar = _find_on_bar(tree)
     if on_bar is None:
         return []
-    # Pass on_bar to the period collector so a function-local
-    # ``WINDOW = 5`` shadows any module/class-level ``WINDOW = 200`` —
-    # matching Python's lexical scope.
-    name_periods = _collect_name_periods(tree, function_node=on_bar)
-
-    # Pre-pass: bind any local Name to its computed indicator. Strategies
-    # following the standard template (see prompts/ideation_system.md)
-    # write ``sma_var = sma(close, 200)`` then ``if bar.close > sma_var``
-    # — the comparison's RHS is a Name, not a Call, so without this pass
-    # the subcondition is dropped.
-    name_evaluators = _collect_name_evaluators(on_bar, name_periods)
+    # Outer-scope (module / class / __init__) period bindings only.
+    # Function-local ``WINDOW = 5`` shadowing (and all
+    # ``Name = <indicator>`` bindings inside on_bar) are now applied
+    # **flow-sensitively** in :func:`_visit` so a later reassignment
+    # can't shadow a predicate that lexically precedes it.
+    name_periods = _collect_name_periods(tree, function_node=None)
+    # Local name → indicator evaluator bindings start empty. The
+    # walker fills them as it encounters assignments in source order
+    # and only the bindings established before a given predicate are
+    # visible to that predicate.
+    name_evaluators: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {}
 
     groups: List[_Group] = []
     state = {"total": 0}
+
+    def _apply_assign_inplace(stmt: ast.stmt) -> None:
+        """Update name_evaluators / name_periods from a single assignment.
+
+        Mirrors the per-target logic of the previous global pre-pass
+        (``_collect_name_evaluators`` and the function-local pass of
+        ``_collect_name_periods``) but applied **flow-sensitively** —
+        the walker calls this in source order so an assignment only
+        affects predicates that lexically follow it. Without this,
+        ``ma = sma(close, 5); if close > ma; ma = 999`` evaluated the
+        predicate against the later 999 binding instead of the SMA.
+        """
+        if isinstance(stmt, ast.Assign):
+            value = stmt.value
+            targets = stmt.targets
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            value = stmt.value
+            targets = [stmt.target]
+        else:
+            return
+        for target in targets:
+            if isinstance(target, (ast.Tuple, ast.List)):
+                _bind_tuple_unpack(target, value, name_periods, name_evaluators)
+                continue
+            if isinstance(target, ast.Name):
+                evaluator = _resolve_assign_evaluator(value, name_periods, name_evaluators)
+                if evaluator is not None:
+                    name_evaluators[target.id] = evaluator
+                else:
+                    # RHS is a scalar / unsupported call — drop any
+                    # prior indicator binding so downstream lookups
+                    # fall through to numeric-literal / OHLCV
+                    # resolution.
+                    name_evaluators.pop(target.id, None)
+                # Period-int side: positive integer literal.
+                v = _numeric_literal(value, name_periods)
+                if v is not None and float(v) > 0 and float(v).is_integer():
+                    name_periods[target.id] = int(v)
+            elif isinstance(target, ast.Attribute):
+                # ``self.WINDOW = N`` — record by attribute name.
+                v = _numeric_literal(value, name_periods)
+                if v is not None and float(v) > 0 and float(v).is_integer():
+                    name_periods[target.attr] = int(v)
 
     def _budgeted_extend(group_subs: List[_Subcond], extras: List[_Subcond]) -> bool:
         """Append extras into group within the global subcond budget.
@@ -819,57 +862,83 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
     ) -> bool:
-        for stmt in stmts:
-            if isinstance(stmt, ast.If):
-                # ``if pos is None: ... else: ...`` (and the inverted
-                # ``if pos is not None: <exit> else: <entry>``) is the
-                # documented entry/exit gate. The codegen also produces
-                # combined forms like ``if pos is None and <entry>:`` /
-                # ``elif pos is not None and <exit>:`` — the ``elif`` is
-                # represented as a nested ``if`` inside the parent's
-                # orelse, so we must strip the position-gate conjunct
-                # from the test and route the rest accordingly.
-                position_check, gate_residual = _strip_position_gate(stmt.test)
-                if position_check == "vacant":  # pos is None — body is entry
-                    if gate_residual is None:
-                        if not _visit(stmt.body, ancestors, ancestor_symbols):
-                            return False
-                    else:
-                        if not _process_if(
-                            gate_residual,
-                            stmt.body,
-                            [],
-                            ancestors,
-                            ancestor_symbols,
-                        ):
-                            return False
-                    continue
-                if position_check == "occupied":  # pos is not None — orelse is entry
-                    if not _visit(stmt.orelse, ancestors, ancestor_symbols):
-                        return False
+        # Transactional: snapshot at entry, restore at exit. Each call
+        # to _visit (including the recursive descents from _process_if /
+        # _process_or_if into body / orelse) leaves the caller's
+        # ``name_evaluators`` and ``name_periods`` unchanged, while
+        # mutations persist across sibling statements within this
+        # for-loop. This gives flow-sensitivity without leaking branch-
+        # internal reassignments to siblings or parents.
+        saved_evals = dict(name_evaluators)
+        saved_periods = dict(name_periods)
+        try:
+            for stmt in stmts:
+                # Apply assignments in source order so each predicate
+                # sees only the bindings established by lexically
+                # preceding statements. Without this a later
+                # reassignment leaks back to earlier predicates via the
+                # shared dicts.
+                if isinstance(stmt, ast.Assign) or isinstance(stmt, ast.AnnAssign):
+                    _apply_assign_inplace(stmt)
                     continue
 
-                if not _process_if(stmt.test, stmt.body, stmt.orelse, ancestors, ancestor_symbols):
-                    return False
-            else:
-                # Descend into compound statements (For, While, With,
-                # Try, FunctionDef body) but pass through ancestors so
-                # ``for x in ...: if close > 100: ...`` still inherits
-                # nothing, which is correct.
-                for field in _BLOCK_FIELDS:
-                    inner = getattr(stmt, field, None)
-                    if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
-                        if not _visit(inner, ancestors, ancestor_symbols):
-                            return False
-                # ast.Try has handlers; each handler.body is a stmt list.
-                handlers = getattr(stmt, "handlers", None)
-                if isinstance(handlers, list):
-                    for h in handlers:
-                        h_body = getattr(h, "body", None)
-                        if isinstance(h_body, list) and h_body:
-                            if not _visit(h_body, ancestors, ancestor_symbols):
+                if isinstance(stmt, ast.If):
+                    # ``if pos is None: ... else: ...`` (and the inverted
+                    # ``if pos is not None: <exit> else: <entry>``) is the
+                    # documented entry/exit gate. The codegen also produces
+                    # combined forms like ``if pos is None and <entry>:`` /
+                    # ``elif pos is not None and <exit>:`` — the ``elif`` is
+                    # represented as a nested ``if`` inside the parent's
+                    # orelse, so we must strip the position-gate conjunct
+                    # from the test and route the rest accordingly.
+                    position_check, gate_residual = _strip_position_gate(stmt.test)
+                    if position_check == "vacant":  # pos is None — body is entry
+                        if gate_residual is None:
+                            if not _visit(stmt.body, ancestors, ancestor_symbols):
                                 return False
-        return True
+                        else:
+                            if not _process_if(
+                                gate_residual,
+                                stmt.body,
+                                [],
+                                ancestors,
+                                ancestor_symbols,
+                            ):
+                                return False
+                        continue
+                    if position_check == "occupied":  # pos is not None — orelse is entry
+                        if not _visit(stmt.orelse, ancestors, ancestor_symbols):
+                            return False
+                        continue
+
+                    if not _process_if(
+                        stmt.test, stmt.body, stmt.orelse, ancestors, ancestor_symbols
+                    ):
+                        return False
+                else:
+                    # Descend into compound statements (For, While, With,
+                    # Try, FunctionDef body) but pass through ancestors so
+                    # ``for x in ...: if close > 100: ...`` still inherits
+                    # nothing, which is correct.
+                    for field in _BLOCK_FIELDS:
+                        inner = getattr(stmt, field, None)
+                        if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
+                            if not _visit(inner, ancestors, ancestor_symbols):
+                                return False
+                    # ast.Try has handlers; each handler.body is a stmt list.
+                    handlers = getattr(stmt, "handlers", None)
+                    if isinstance(handlers, list):
+                        for h in handlers:
+                            h_body = getattr(h, "body", None)
+                            if isinstance(h_body, list) and h_body:
+                                if not _visit(h_body, ancestors, ancestor_symbols):
+                                    return False
+            return True
+        finally:
+            name_evaluators.clear()
+            name_evaluators.update(saved_evals)
+            name_periods.clear()
+            name_periods.update(saved_periods)
 
     body = getattr(on_bar, "body", None)
     if isinstance(body, list):
@@ -1001,33 +1070,78 @@ def _union_target_symbols(groups: List[_Group]) -> Optional[set]:
     Used by :func:`run_indicator_probe` to size the warmup check to the
     symbols that can actually satisfy a predicate. Returns ``None`` when
     at least one group is **fully unconstrained** — i.e. neither the
-    group-level filter nor any subcond filter narrows the symbol space —
-    so the warmup check stays over every fetched DataFrame.
+    group-level filter nor any required subcond filter narrows the
+    symbol space — so the warmup check stays over every fetched
+    DataFrame.
 
-    Otherwise the result is the union of each group's per-level gates
-    (group ``target_symbols`` ∪ subcond ``target_symbols`` ∪ OR-leg
-    ``target_symbols``). The union is conservative for warmup: it
-    includes every symbol that could conceivably contribute to the
-    group's predicate, so we won't over-flag ``INSUFFICIENT_BARS``.
+    Combinator-aware:
+
+    * **AND groups**: the predicate fires only when every conjunct
+      holds, so the symbol space is the union of each conjunct's gate
+      (we use union rather than intersection conservatively — for
+      warmup we want every symbol that could conceivably contribute,
+      so we don't over-flag ``INSUFFICIENT_BARS``). A nested OR
+      subcond (``sub.or_legs``) with any unrestricted leg contributes
+      no narrowing because that leg can fire on any symbol.
+
+    * **OR groups**: the predicate fires when any leg holds. AND-required
+      ancestors (positions ``[0:ancestor_count)``) still narrow the
+      group, but if any OR-tail leg is unrestricted, the OR can fire
+      on any symbol — so the group is universal unless ancestors
+      narrow it.
     """
     union: set = set()
     for g in groups:
         group_syms: Optional[set] = None
         if g.target_symbols is not None:
             group_syms = set(g.target_symbols)
-        for sub in g.subconds:
+
+        if g.combinator == "or":
+            and_required = g.subconds[: g.ancestor_count]
+            or_tail = g.subconds[g.ancestor_count :]
+        else:
+            and_required = list(g.subconds)
+            or_tail = []
+
+        for sub in and_required:
             if sub.target_symbols is not None:
                 if group_syms is None:
                     group_syms = set(sub.target_symbols)
                 else:
                     group_syms.update(sub.target_symbols)
             if sub.or_legs is not None:
-                for leg in sub.or_legs:
-                    if leg.target_symbols is not None:
+                # Nested OR inside an AND term. If any leg is
+                # unrestricted, the OR subcond is universal — it
+                # contributes no narrowing to the AND. Otherwise
+                # union the leg gates (the OR can only fire on the
+                # union of leg symbols).
+                if any(leg.target_symbols is None for leg in sub.or_legs):
+                    pass
+                else:
+                    for leg in sub.or_legs:
+                        if leg.target_symbols is not None:
+                            if group_syms is None:
+                                group_syms = set(leg.target_symbols)
+                            else:
+                                group_syms.update(leg.target_symbols)
+
+        if or_tail:
+            if any(t.target_symbols is None for t in or_tail):
+                # OR-tail is universal: an unrestricted leg can fire
+                # on any symbol so the disjunction's symbol space is
+                # unbounded. The group's only remaining constraint is
+                # whatever the AND-required prefix imposed via
+                # ``group_syms`` above.
+                if group_syms is None:
+                    return None
+            else:
+                for t in or_tail:
+                    if t.target_symbols:
                         if group_syms is None:
-                            group_syms = set(leg.target_symbols)
+                            group_syms = set(t.target_symbols)
                         else:
-                            group_syms.update(leg.target_symbols)
+                            group_syms.update(t.target_symbols)
+
         if group_syms is None:
             # Fully unconstrained group — predicate could fire on any
             # fetched symbol. Treat the warmup as universal.

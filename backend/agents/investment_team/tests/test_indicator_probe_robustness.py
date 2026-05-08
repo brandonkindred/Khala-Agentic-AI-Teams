@@ -1722,6 +1722,116 @@ def test_top_level_or_preserves_standalone_symbol_gate() -> None:
     assert any("close > 100" in lbl for lbl in labels)
 
 
+def test_later_reassignment_does_not_shadow_earlier_predicate() -> None:
+    """A reassignment that appears AFTER a predicate must not shadow
+    the binding the predicate sees.
+
+    Strategy:
+        ma = sma(close, 5)
+        if close > ma:
+            pass
+        ma = 999          # later reassignment
+
+    Without flow-sensitive bindings, the global pre-pass walked all
+    assignments first; with the recent overwrite-on-resolved /
+    pop-on-unresolved fix, the trailing ``ma = 999`` cleared the SMA
+    binding so ``_build_operand`` resolved ``ma`` through name_periods
+    to 999. The predicate evaluated as ``close > 999`` and on flat
+    ``close=100`` data the probe wrongly reported
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With flow-sensitive
+    bindings the predicate sees the SMA binding (the only one in
+    scope at its location) and the report classifies as
+    ``COVERAGE_OK`` because ``close > sma(close, 5)`` partially fires
+    on a swing fixture.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                ma = sma(close, 5)
+                if close > ma:
+                    pass
+                ma = 999
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_or_with_unrestricted_leg_treats_warmup_as_universal() -> None:
+    """An OR predicate with one symbol-gated leg and one unrestricted
+    leg must NOT narrow the warmup denominator to the gate's symbols.
+
+    Strategy:
+        ``if bar.symbol == "AAPL" or close > 100:``
+
+    Universe: AAPL with 10 bars, MSFT with 100 bars,
+    warmup_bars_required=50.
+
+    The unrestricted ``close > 100`` leg can fire on any symbol, so a
+    long enough MSFT history satisfies the warmup check on its own —
+    we should NOT short-circuit on ``INSUFFICIENT_BARS``. Without the
+    fix the warmup denominator is restricted to AAPL (the only gated
+    symbol observed), AAPL's 10 bars < 50, and the probe wrongly
+    reports ``INSUFFICIENT_BARS``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" or close > 100:
+                    pass
+        """
+    )
+    aapl = pd.DataFrame(
+        {
+            "open": np.full(10, 100.0),
+            "high": np.full(10, 101.0),
+            "low": np.full(10, 99.0),
+            "close": np.full(10, 100.0),
+            "volume": np.full(10, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=10, freq="D"),
+    )
+    msft = pd.DataFrame(
+        {
+            "open": np.full(100, 200.0),
+            "high": np.full(100, 201.0),
+            "low": np.full(100, 199.0),
+            "close": np.full(100, 200.0),
+            "volume": np.full(100, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=100, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=50,
+    )
+
+    # The OR has an unrestricted leg, so the predicate could fire on
+    # any symbol — the warmup check must consider every fetched
+    # DataFrame, not just AAPL.
+    assert report.coverage_category is not CoverageCategory.INSUFFICIENT_BARS
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
