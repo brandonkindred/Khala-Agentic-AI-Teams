@@ -279,6 +279,14 @@ class FillSimulator:
                     was_filled = po.cumulative_filled_qty > 0
                     if new_slices_remaining <= 0:
                         self.order_book.remove(po.order_id, was_filled=was_filled)
+                        # Bracket / OCO materialization (#389): if the parent
+                        # had attachments and at least one prior slice opened
+                        # a position, the TWAP horizon expiring without a
+                        # final-bar trigger leaves an open partial position.
+                        # Submit protective legs sized to the existing
+                        # position so it doesn't run unprotected.
+                        if was_filled:
+                            self._maybe_materialize_brackets_on_abandon(po=po, bar=bar)
                     else:
                         self.order_book.requeue(
                             po.order_id,

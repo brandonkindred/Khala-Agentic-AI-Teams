@@ -19,7 +19,9 @@ on the no-attachment path and two follow-ups from the PR review:
 10. Bracket children are bound to the parent position at materialization,
     so a separate exit that closes the position drops the children
     instead of letting a later trigger open a new opposite-side position.
-11. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
+11. TWAP_N bracket parent that ages out via the no-trigger counter still
+    materializes protective legs for the partially-filled position.
+12. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
     gated until #390 — runtime materialization lands with Step 8.
 """
 
@@ -627,6 +629,72 @@ def test_bracket_children_dropped_when_position_closed_by_separate_exit() -> Non
     assert bar4.closed_trades == []
     assert "AAA" not in portfolio.positions
     assert order_book.children_of(parent.order_id) == []
+
+
+# ---------------------------------------------------------------------------
+# TWAP_N bracket parent that ages out via the no-trigger counter must still
+# materialize protective legs for the partially-filled position (Codex P2
+# follow-up on commit 9b7888b)
+# ---------------------------------------------------------------------------
+
+
+def test_twap_age_out_bracket_parent_materializes_brackets_for_open_position() -> None:
+    """A bracketed TWAP_N LIMIT entry that fills its first slice (seeding
+    ``twap_slices_remaining``) and then has its remaining slices all expire
+    on no-trigger bars must still materialize protective legs sized to the
+    open position. The ``process_bar`` TWAP-tick branch removes the parent
+    with ``was_filled=True`` outside ``_handle_entry_remainder`` /
+    ``_continue_entry``, so the post-handler materializer never runs
+    without an explicit hook in that branch."""
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=200.0,
+            order_type=OrderType.LIMIT,
+            limit_price=100.0,
+            tif=TimeInForce.DAY,
+            unfilled_policy=UnfilledPolicy.TWAP_N,
+            twap_slices=2,
+            attached_stop_loss=StopAttachment(stop_price=95.0),
+            attached_take_profit=LimitAttachment(limit_price=110.0),
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    # Bar 2: low (98) ≤ limit_price (100) → trigger fires → first slice
+    # partially fills against a low-ADV bar (200 * 100 = 20_000 notional vs
+    # 1_000 * 100 = 100_000 dollar volume → raw 0.20 → cap clips to 0.5 →
+    # 100 fills, 100 requeued; ``twap_slices_remaining`` seeded to 1).
+    sim.process_bar(
+        _bar("2024-01-02", open_price=99.0, high=101.0, low=98.0, close=100.0, volume=1_000.0)
+    )
+    assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
+    assert parent.order_id in order_book
+    assert order_book.children_of(parent.order_id) == []
+
+    # Bar 3: bar.low (104) > limit_price (100) for LONG LIMIT → no trigger
+    # → ``compute_fill_terms`` returns None → process_bar's TWAP_N tick
+    # decrements ``twap_slices_remaining`` from 1 to 0 → parent removed
+    # with ``was_filled=True``. The fix materializes brackets sized to the
+    # 100-share open position before the loop continues.
+    sim.process_bar(_bar("2024-01-03", open_price=105.0, high=107.0, low=104.0, close=106.0))
+
+    assert parent.order_id not in order_book
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 2, "TWAP-aged-out bracket parent must still spawn protective legs"
+    sl = next(c for c in children if c.request.order_type == OrderType.STOP)
+    tp = next(c for c in children if c.request.order_type == OrderType.LIMIT)
+    assert sl.request.qty == pytest.approx(100.0, rel=1e-9)
+    assert tp.request.qty == pytest.approx(100.0, rel=1e-9)
+    assert sl.armed is True and tp.armed is True
+    assert sl.submitted_at == "2024-01-03"
+    assert tp.submitted_at == "2024-01-03"
+    assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------
