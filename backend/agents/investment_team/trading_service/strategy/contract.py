@@ -161,6 +161,17 @@ class OrderRequest(BaseModel):
                 "trailing_stop is not yet supported by the execution engine; "
                 "see #390 (Trading 5/5 Step 8) for runtime support"
             )
+        # Bracket attachments are runtime-supported as of #389, but the
+        # trailing-stop variant of ``StopAttachment`` is still gated until
+        # #390. Reject at submit time rather than silently materializing as
+        # a fixed STOP — that would backtest a different strategy than the
+        # one the author wrote.
+        if self.attached_stop_loss is not None and self.attached_stop_loss.trail_offset is not None:
+            raise UnsupportedOrderFeatureError(
+                "attached_stop_loss.trail_offset is not yet supported by the "
+                "execution engine; see #390 (Trading 5/5 Step 8) for trailing-stop "
+                "runtime support"
+            )
         # Shape-consistency checks. Most are currently unreachable because
         # the gates above fire first, but they remain in place so that when
         # each gate is lifted by its corresponding step, the consistency

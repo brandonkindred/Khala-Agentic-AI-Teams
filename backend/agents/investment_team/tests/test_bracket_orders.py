@@ -1,6 +1,7 @@
 """Bracket / OCO materialization tests (Trading 5/5 Step 7 — issue #389).
 
-Covers the five acceptance bullets from the issue:
+Covers the five acceptance bullets from the issue plus a regression guard
+on the no-attachment path and two follow-ups from the PR review:
 
 1. Entry fill materializes two children with shared ``oco_group_id`` and
    ``parent_order_id`` set.
@@ -8,8 +9,11 @@ Covers the five acceptance bullets from the issue:
 3. Stop-loss fills first → take-profit removed.
 4. Parent never fills (e.g. LIMIT not crossed) → no children materialized.
 5. Children not eligible for fill on the same bar as parent entry (bar-safety).
-
-A sixth case for trailing stops will land with #390 (Step 8).
+6. No-attachment regression: plain entry round-trip is unchanged.
+7. ``REQUEUE_NEXT_BAR`` partial-fill terminal slice materializes brackets
+   sized to the cumulative position (default backtest policy).
+8. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
+   gated until #390 — runtime materialization lands with Step 8.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ from investment_team.trading_service.strategy.contract import (
     OrderType,
     StopAttachment,
     TimeInForce,
+    UnfilledPolicy,
+    UnsupportedOrderFeatureError,
 )
 
 
@@ -337,3 +343,103 @@ def test_no_attachment_path_is_unchanged() -> None:
     assert len(outcome.closed_trades) == 1
     assert "AAA" not in portfolio.positions
     assert order_book.all_pending() == []
+
+
+# ---------------------------------------------------------------------------
+# REQUEUE_NEXT_BAR partial-fill entries materialize brackets at the terminal
+# slice (default backtest policy — Codex P1)
+# ---------------------------------------------------------------------------
+
+
+def test_requeue_partial_entry_materializes_brackets_on_terminal_fill() -> None:
+    """A bracket entry that's clipped by the participation cap and requeued
+    must still get its protective legs once the parent terminally fills.
+    Children are sized to the *cumulative* opened position, not the first
+    slice alone.
+    """
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=2_000.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            attached_stop_loss=StopAttachment(stop_price=95.0),
+            attached_take_profit=LimitAttachment(limit_price=110.0),
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    # Bar 2: low ADV → 50% partial fill (notional 200k vs $1M bar = 0.20
+    # raw participation, capped at 0.10 → qty_fraction=0.5 → 1_000 filled).
+    sim.process_bar(_bar("2024-01-02", open_price=100.0, volume=10_000.0))
+    assert parent.order_id in order_book, "parent should still be pending after partial fill"
+    assert order_book.children_of(parent.order_id) == [], "no brackets yet — wait for terminal fill"
+
+    # Bar 3: high ADV → remainder fills cleanly, parent terminally completes.
+    sim.process_bar(_bar("2024-01-03", open_price=100.0, volume=10_000_000.0))
+    assert parent.order_id not in order_book
+
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 2
+    sl = next(c for c in children if c.request.order_type == OrderType.STOP)
+    tp = next(c for c in children if c.request.order_type == OrderType.LIMIT)
+    # Sized to the cumulative position (1_000 + 1_000 = 2_000), not just the
+    # first slice's 1_000.
+    assert sl.request.qty == pytest.approx(2_000.0, rel=1e-9)
+    assert tp.request.qty == pytest.approx(2_000.0, rel=1e-9)
+    # Anchored to the terminal-fill bar so bar-safety blocks same-bar fills.
+    assert sl.submitted_at == "2024-01-03"
+    assert tp.submitted_at == "2024-01-03"
+    assert sl.armed is True and tp.armed is True
+    assert portfolio.positions["AAA"].qty == pytest.approx(2_000.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Trailing-stop attachments remain gated until #390 (Codex P2)
+# ---------------------------------------------------------------------------
+
+
+def test_trailing_stop_attachment_is_gated_until_step_8() -> None:
+    """``StopAttachment(trail_offset=...)`` is a trailing stop; the
+    materializer would otherwise silently downgrade it to a fixed STOP at
+    ``stop_price``. Reject loudly until #390 ships trailing-stop runtime."""
+    req = OrderRequest(
+        client_order_id="entry-1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10.0,
+        order_type=OrderType.MARKET,
+        attached_stop_loss=StopAttachment(stop_price=95.0, trail_offset=2.0),
+    )
+    with pytest.raises(UnsupportedOrderFeatureError, match="#390"):
+        req.validate_prices()
+
+    # ``trail_offset_kind="bps"`` variant is also blocked.
+    req_bps = OrderRequest(
+        client_order_id="entry-1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10.0,
+        order_type=OrderType.MARKET,
+        attached_stop_loss=StopAttachment(
+            stop_price=95.0, trail_offset=20.0, trail_offset_kind="bps"
+        ),
+    )
+    with pytest.raises(UnsupportedOrderFeatureError, match="#390"):
+        req_bps.validate_prices()
+
+    # Plain fixed-stop attachment (no trail_offset) still validates.
+    OrderRequest(
+        client_order_id="entry-1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10.0,
+        order_type=OrderType.MARKET,
+        attached_stop_loss=StopAttachment(stop_price=95.0),
+    ).validate_prices()

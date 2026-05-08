@@ -550,15 +550,14 @@ class FillSimulator:
         # stale-continuation guard in ``process_bar``.
         po.working_against_entry_order_id = po.order_id
         self._handle_entry_remainder(po, bar, unfilled)
-        # Bracket / OCO materialization (#389): once the parent's first slice
-        # has opened a position *and* has been terminally filled, submit the
-        # linked protective legs so they can fire on subsequent bars. Must run
-        # AFTER ``_handle_entry_remainder`` so the membership check below
-        # reflects whether the parent is still pending — full fills remove
-        # the parent (``submit_attached`` returns ``armed=True``); partial
-        # fills (REQUEUE / TWAP) leave the parent pending and Step 7 skips
-        # materialization (REQUEUE-grown brackets are deferred — a known
-        # limitation; ``test_bracket_orders.py`` covers the full-fill path).
+        # Bracket / OCO materialization (#389): when the parent's first slice
+        # is also its terminal slice (full fill), submit the protective legs.
+        # Must run AFTER ``_handle_entry_remainder`` so the membership check
+        # below reflects whether the parent is still pending — full fills
+        # remove the parent (``submit_attached`` returns ``armed=True``).
+        # Partial-fill entries (REQUEUE / TWAP) defer materialization to the
+        # mirrored block in ``_continue_entry`` so the children are sized to
+        # the *cumulative* position rather than just the first slice.
         if (
             req.attached_stop_loss is not None or req.attached_take_profit is not None
         ) and po.order_id not in self.order_book:
@@ -710,6 +709,19 @@ class FillSimulator:
         # + filled_qty`` after the requeue would double-count this slice.
         fill_cumulative_qty = po.cumulative_filled_qty + filled_qty
         self._handle_entry_remainder(po, bar, unfilled)
+        # Bracket / OCO materialization (#389) for the terminal slice of a
+        # partial-fill entry: if the parent had attachments and is now fully
+        # done (``_handle_entry_remainder`` removed it from the book on this
+        # slice), submit the protective legs sized to the cumulative position
+        # — ``pos.original_qty`` was just bumped to reflect the full opened
+        # qty across all prior continuations. Default backtest policy is
+        # ``REQUEUE_NEXT_BAR``, so without this any participation-capped
+        # bracket entry would silently run unprotected once the parent
+        # eventually completes.
+        if (
+            req.attached_stop_loss is not None or req.attached_take_profit is not None
+        ) and po.order_id not in self.order_book:
+            self._materialize_bracket_children(po=po, bar=bar, filled_qty=pos.original_qty)
 
         return (
             Fill(
