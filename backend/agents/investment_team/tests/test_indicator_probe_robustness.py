@@ -1893,6 +1893,124 @@ def test_or_allowlist_propagates_to_and_group() -> None:
     assert "conjunction_never_true" not in blocker_reasons
 
 
+def test_helper_class_does_not_shadow_strategy_period_constant() -> None:
+    """A sibling helper class with the same attribute name must not
+    pre-empt the strategy class's bare-name period binding.
+
+    Strategy code::
+
+        class Helper:
+            PERIOD = 2
+
+        class Strategy:
+            PERIOD = 200
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.PERIOD):
+                    pass
+
+    On a 30-bar fixture, ``sma(close, 200)`` has no warmup-complete
+    bars so ``close > sma(...)`` has zero hits and the probe
+    classifies ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With the bug the
+    global ``setdefault`` walk picks up ``Helper.PERIOD = 2`` first
+    (BFS source order) and ``self.PERIOD`` resolves to 2; ``sma(close,
+    2)`` is defined after 2 bars and fires roughly half the bars,
+    flipping the report to ``COVERAGE_OK``.
+
+    With the fix, ``_find_strategy_class`` identifies the class
+    containing ``on_bar`` and ``_collect_name_periods`` skips
+    ``Helper``, so ``self.PERIOD`` correctly resolves to 200.
+    """
+    code = textwrap.dedent(
+        """
+        class Helper:
+            PERIOD = 2
+
+        class Strategy:
+            PERIOD = 200
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.PERIOD):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # PERIOD=200 on 30 bars → all NaN → zero hits.
+    # PERIOD=2 (the helper's value, used pre-fix) → many hits.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_helper_class_period_does_not_apply_when_strategy_constant_missing() -> None:
+    """Sanity: when the strategy class has no constant of its own and
+    a helper class has one, the strategy still cannot pull from the
+    helper. Module-level constants remain accessible.
+
+    Strategy code::
+
+        WINDOW = 5
+
+        class Helper:
+            PERIOD = 999
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, WINDOW):
+                    pass
+
+    Module-level ``WINDOW = 5`` is still visible (it's outside any
+    class), but Helper's ``PERIOD = 999`` is not used because the
+    strategy never references ``self.PERIOD`` anyway.
+    """
+    code = textwrap.dedent(
+        """
+        WINDOW = 5
+
+        class Helper:
+            PERIOD = 999
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, WINDOW):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert report.subconditions[0].hit_count > 0
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so

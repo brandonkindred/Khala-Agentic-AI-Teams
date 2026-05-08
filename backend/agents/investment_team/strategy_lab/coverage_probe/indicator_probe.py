@@ -587,12 +587,16 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
     on_bar = _find_on_bar(tree)
     if on_bar is None:
         return []
-    # Outer-scope (module / class / __init__) period bindings only.
-    # Function-local ``WINDOW = 5`` shadowing (and all
+    # Outer-scope (module / strategy class / __init__) period bindings
+    # only. Function-local ``WINDOW = 5`` shadowing (and all
     # ``Name = <indicator>`` bindings inside on_bar) are now applied
     # **flow-sensitively** in :func:`_visit` so a later reassignment
     # can't shadow a predicate that lexically precedes it.
-    name_periods = _collect_name_periods(tree, function_node=None)
+    # ``strategy_class`` confines the outer-scope walk to the strategy's
+    # own ``ClassDef`` so a sibling helper class can't pre-empt the
+    # strategy's bare-name attribute bindings.
+    strategy_class = _find_strategy_class(tree, on_bar)
+    name_periods = _collect_name_periods(tree, function_node=None, strategy_class=strategy_class)
     # Local name → indicator evaluator bindings start empty. The
     # walker fills them as it encounters assignments in source order
     # and only the bindings established before a given predicate are
@@ -1285,9 +1289,30 @@ def _flatten_top_terms(test: ast.expr) -> List[ast.expr]:
     return [test]
 
 
+def _find_strategy_class(tree: ast.AST, on_bar: ast.AST) -> Optional[ast.ClassDef]:
+    """Return the ``ClassDef`` that lexically contains ``on_bar``, if any.
+
+    Used by :func:`_collect_name_periods` to skip unrelated helper
+    classes when collecting attribute / class-variable bindings. Without
+    this, ``Helper.PERIOD = 2`` declared before ``class Strategy:
+    PERIOD = 20`` would seed ``setdefault("PERIOD", 2)`` and Strategy's
+    own constant would never bind — flipping zero-hit / NaN-window
+    diagnostics into ``COVERAGE_OK`` or vice versa for valid
+    multi-class strategy code.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for child in ast.walk(node):
+            if child is on_bar:
+                return node
+    return None
+
+
 def _collect_name_periods(
     tree: ast.AST,
     function_node: Optional[ast.AST] = None,
+    strategy_class: Optional[ast.ClassDef] = None,
 ) -> Dict[str, int]:
     """Bind ``NAME = <int>`` for later ``Name`` / ``self.NAME`` resolution.
 
@@ -1301,6 +1326,13 @@ def _collect_name_periods(
     Strategies generated from the standard ideation prompt encourage
     class tuning knobs and ``self.WINDOW`` access; without this both the
     AST walk and downstream lookup would miss the binding entirely.
+
+    When ``strategy_class`` is provided, the walker skips the bodies
+    of any sibling ``ClassDef`` so a helper class's same-named
+    attribute can't pre-empt the strategy's own constant via the bare-
+    attribute keying. ``Helper.PERIOD = 2`` declared before
+    ``class Strategy: PERIOD = 20`` would otherwise leave the probe
+    resolving ``self.PERIOD`` to 2 instead of 20.
 
     When ``function_node`` is provided, a second pass walks just that
     function's body and **overwrites** any outer-scope binding that
@@ -1334,9 +1366,28 @@ def _collect_name_periods(
             else:
                 bindings.setdefault(target.attr, ivalue)
 
-    # Pass 1: outer-scope assignments (module / class / __init__) using
-    # ``setdefault`` so cross-scope class constants stay isolated.
-    for node in ast.walk(tree):
+    def _iter_outer_assigns(node: ast.AST):
+        """Yield Assign / AnnAssign nodes lexically in scope for the strategy.
+
+        When ``strategy_class`` is set, descend into module / function
+        bodies as usual but only into the strategy's own ``ClassDef``.
+        Sibling helper classes are skipped so their same-named
+        attributes can't pre-empt the strategy's bare-attr bindings.
+        When ``strategy_class`` is None, behaves like ``ast.walk``
+        (the previous behaviour).
+        """
+        if strategy_class is not None and isinstance(node, ast.ClassDef):
+            if node is not strategy_class:
+                return
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            yield node
+        for child in ast.iter_child_nodes(node):
+            yield from _iter_outer_assigns(child)
+
+    # Pass 1: outer-scope assignments (module / strategy class /
+    # __init__) using ``setdefault`` so cross-scope class constants
+    # stay isolated. Sibling helper classes are skipped.
+    for node in _iter_outer_assigns(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 _record(target, node.value, overwrite=False)
