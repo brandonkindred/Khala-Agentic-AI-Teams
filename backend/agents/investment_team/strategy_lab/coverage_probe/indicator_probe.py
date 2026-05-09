@@ -875,9 +875,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     # bar.symbol == "MSFT"`` collapses to an empty filter,
                     # which downstream drops as unreachable.
                     if own_symbols is None:
-                        own_symbols = {sym}
+                        own_symbols = set(sym)
                     else:
-                        own_symbols &= {sym}
+                        own_symbols &= sym
                     continue
                 sub = _build_subcond(term, name_periods, name_evaluators)
                 if sub is not None:
@@ -994,7 +994,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         _Subcond(
                             label=_format_label(leg),
                             evaluate=_always_true,
-                            target_symbols=frozenset({sym}),
+                            target_symbols=frozenset(sym),
                         )
                     )
                     continue
@@ -1400,23 +1400,32 @@ def _early_return_symbol_guard(
 def _symbol_gate(
     node: ast.Compare,
     name_strings: Optional[Dict[str, str]] = None,
-) -> Optional[str]:
-    """Detect ``bar.symbol == "X"`` (or ``"X" == bar.symbol``).
+) -> Optional[set]:
+    """Detect a symbol gate on ``bar.symbol``.
 
-    Returns the literal symbol when matched; ``None`` otherwise. Used to
-    constrain a group's evaluation to the matching symbol's DataFrame
-    rather than evaluating against every symbol in the universe.
+    Returns the set of allowed symbols when the comparison constrains
+    the live symbol; ``None`` otherwise. Used to scope a group's
+    evaluation to the matching DataFrames rather than evaluating
+    against every symbol in the universe.
 
-    When ``name_strings`` is supplied, also resolves ``Name`` /
-    ``self.X`` / ``cls.X`` references to their bound string constant
-    (e.g. ``TARGET_SYMBOL = "BBB"`` followed by ``bar.symbol ==
-    TARGET_SYMBOL``). Without this, a strategy that hoists the target
-    symbol into a tuning constant would have its gate dropped, and a
-    sibling indicator condition would silently evaluate against every
-    fetched DataFrame.
+    Recognised shapes:
+
+    - ``bar.symbol == "X"`` / ``"X" == bar.symbol`` → ``{"X"}``
+    - ``bar.symbol == TARGET`` (with a string-constant binding via
+      ``name_strings``) → ``{<resolved value>}``
+    - ``bar.symbol in ("X", "Y")`` (positive allow-list) →
+      ``{"X", "Y"}``. Without this, a strategy that allow-lists with
+      ``in`` had the gate dropped and a sibling indicator condition
+      silently evaluated against every fetched DataFrame.
+
+    Inline string constants and named-string-constant references both
+    resolve in the ``in`` form. An ``in`` operator with any
+    unresolvable element returns ``None`` (don't constrain on a
+    partially-known list).
     """
-    if len(node.ops) != 1 or not isinstance(node.ops[0], (ast.Eq, ast.Is)):
+    if len(node.ops) != 1:
         return None
+    op = node.ops[0]
     left, right = node.left, node.comparators[0]
 
     def _is_bar_symbol(n: ast.expr) -> bool:
@@ -1442,12 +1451,30 @@ def _symbol_gate(
             return name_strings.get(n.attr)
         return None
 
-    if _is_bar_symbol(left):
-        sym = _string_const(right)
-        return sym
-    if _is_bar_symbol(right):
-        sym = _string_const(left)
-        return sym
+    if isinstance(op, (ast.Eq, ast.Is)):
+        if _is_bar_symbol(left):
+            sym = _string_const(right)
+            return {sym} if sym is not None else None
+        if _is_bar_symbol(right):
+            sym = _string_const(left)
+            return {sym} if sym is not None else None
+        return None
+
+    if isinstance(op, ast.In):
+        if not _is_bar_symbol(left):
+            return None
+        if not isinstance(right, (ast.Tuple, ast.List, ast.Set)):
+            return None
+        syms: set = set()
+        for elt in right.elts:
+            s = _string_const(elt)
+            if s is None:
+                # Partial allow-list: refuse to gate. Better to leave
+                # the predicate unconstrained than apply a wrong filter.
+                return None
+            syms.add(s)
+        return syms if syms else None
+
     return None
 
 
@@ -2033,12 +2060,12 @@ def _build_compound_and_subcond(
             sym = _symbol_gate(term, name_strings)
             if sym is not None:
                 if leg_symbols is None:
-                    leg_symbols = {sym}
+                    leg_symbols = set(sym)
                 else:
                     # Same intra-predicate intersection rule as the
                     # AND path: ``bar.symbol == "X" and bar.symbol == "Y"``
                     # is unreachable.
-                    leg_symbols &= {sym}
+                    leg_symbols &= sym
                 continue
             sub = _build_subcond(term, name_periods, name_evaluators)
         else:
@@ -2127,7 +2154,7 @@ def _build_compound_or_subcond(
                     _Subcond(
                         label=_format_label(term),
                         evaluate=_always_true,
-                        target_symbols=frozenset({sym}),
+                        target_symbols=frozenset(sym),
                     )
                 )
                 continue

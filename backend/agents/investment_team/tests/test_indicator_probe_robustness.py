@@ -3615,6 +3615,83 @@ def test_stochastic_unpack_with_recognised_columns_still_works() -> None:
     assert len(report.subconditions) == 1
 
 
+def test_positive_symbol_in_allowlist_gates_predicate() -> None:
+    """A positive ``bar.symbol in (...)`` allow-list must constrain the
+    predicate to the allowed symbols. ``_symbol_gate`` previously only
+    handled ``==`` so the gate was dropped and a sibling indicator
+    condition was evaluated against every fetched DataFrame.
+
+    Strategy::
+
+        if bar.symbol in ("AAPL", "MSFT") and close > 100:
+            pass
+
+    Universe: AAPL/MSFT close=50 (never > 100), GOOG close=200 (would
+    satisfy the price leg if the gate is dropped). With the fix the
+    AND group is restricted to ``{AAPL, MSFT}``, GOOG bars contribute
+    False to the price subcond, and the predicate is unreachable →
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol in ("AAPL", "MSFT") and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(50.0), "GOOG": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_partial_symbol_in_allowlist_does_not_gate() -> None:
+    """An ``in`` allow-list with an unresolvable element refuses to
+    gate (better unconstrained than wrongly constrained)."""
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol in ("AAPL", dynamic_lookup) and close > 100:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 200.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 199.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"GOOG": df})
+    # Gate refused → ``close > 100`` runs against every symbol; GOOG
+    # close=200 satisfies → COVERAGE_OK. (The conservative refuse-to-gate
+    # is the test point; the resulting category isn't the bug.)
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
