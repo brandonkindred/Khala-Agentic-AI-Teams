@@ -1777,6 +1777,59 @@ def _find_strategy_class(tree: ast.AST, on_bar: ast.AST) -> Optional[ast.ClassDe
     return None
 
 
+def _iter_unconditional_constructor_assigns(
+    stmts: List[ast.stmt],
+) -> List[Union[ast.Assign, ast.AnnAssign]]:
+    """Yield ``Assign`` / ``AnnAssign`` nodes guaranteed to execute on
+    every constructor invocation.
+
+    A blanket ``ast.walk(child)`` over ``__init__`` records nested
+    assignments unconditionally — including dead branches like
+    ``if False: self.TARGET = "MSFT"`` — and those overwrite the
+    class attribute with a value the runtime never sets. A blanket
+    "top-level statements only" rule is too conservative the other
+    way: ``if True: self.TARGET = "AAPL"`` IS unconditionally
+    executed, and skipping it lets the probe lose a real symbol
+    gate.
+
+    This walker descends into branches that are statically guaranteed
+    to run while still skipping branches whose predicate isn't a
+    constant we can resolve:
+
+    - ``Assign`` / ``AnnAssign`` at the current level → yield
+    - ``if <Constant>: body else: orelse`` → yield from the branch
+      Python's truthiness on ``Constant.value`` selects (the other is
+      dead code at runtime)
+    - ``if <unknown>: ...`` → skip both branches conservatively
+    - ``with <ctx>: body`` / ``async with`` → yield from ``body``
+      (the context manager unconditionally executes the body unless
+      ``__enter__`` raises, which we treat as a runtime error path
+      not relevant to static binding)
+    - ``for`` / ``while`` / ``try`` / nested function defs → skip
+      conservatively (``for`` may iterate zero times; ``try``'s body
+      may be interrupted; nested defs aren't constructor logic)
+    """
+    out: List[Union[ast.Assign, ast.AnnAssign]] = []
+    for stmt in stmts:
+        if isinstance(stmt, ast.Assign):
+            out.append(stmt)
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            out.append(stmt)
+        elif isinstance(stmt, ast.If):
+            test = stmt.test
+            if isinstance(test, ast.Constant):
+                # Literal predicate — only the live branch contributes.
+                branch = stmt.body if test.value else stmt.orelse
+                out.extend(_iter_unconditional_constructor_assigns(branch))
+            # Unknown predicate — skip both branches; the class-body
+            # binding (already recorded) acts as the runtime fallback.
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            out.extend(_iter_unconditional_constructor_assigns(stmt.body))
+        # For / While / Try / etc.: conservatively skip — execution
+        # isn't statically guaranteed.
+    return out
+
+
 @dataclass
 class _NameStrings:
     """Two-namespace string-constant table for symbol-gate resolution.
@@ -1957,18 +2010,15 @@ def _collect_name_strings(
                     _record_attr(child.target, child.value, in_method=False)
                 elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
-                        # Only top-level statements in the constructor body
-                        # are unconditional — descending via ``ast.walk``
-                        # would treat ``if False: self.TARGET = "MSFT"``
-                        # (or any guarded assignment) as if it always
-                        # ran, overriding the class attribute with a
-                        # value the runtime never sets. Skipping nested
-                        # statements is conservative: the class-level
-                        # binding (already recorded above) acts as the
-                        # fallback, which matches Python's runtime
-                        # attribute lookup when the constructor branch
-                        # doesn't execute.
-                        for sub in child.body:
+                        # Descend into branches that are statically
+                        # guaranteed to execute (``if True: ...``,
+                        # ``with ...``) while skipping unknown-predicate
+                        # branches (whose dead-branch values would
+                        # otherwise overwrite the class attribute) and
+                        # loops / try (whose execution isn't statically
+                        # guaranteed). See
+                        # :func:`_iter_unconditional_constructor_assigns`.
+                        for sub in _iter_unconditional_constructor_assigns(child.body):
                             if isinstance(sub, ast.Assign):
                                 for t in sub.targets:
                                     _record_attr(t, sub.value, in_method=True)

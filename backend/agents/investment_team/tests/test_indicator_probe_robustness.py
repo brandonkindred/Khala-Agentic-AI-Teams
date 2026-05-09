@@ -3429,6 +3429,160 @@ def test_constructor_conditional_assignment_does_not_override_class_attr() -> No
     assert report.subconditions[0].hit_count > 0
 
 
+def test_constructor_literal_true_guard_records_assignment() -> None:
+    """``if True: self.TARGET = "AAPL"`` inside ``__init__`` IS
+    unconditionally executed at runtime, so the assignment must be
+    recorded. The conservative "top-level statements only" walk that
+    fixed the ``if False:`` regression went too far and silently
+    skipped this guaranteed assignment, dropping the symbol gate.
+    The walker now descends into literal-true ``if`` bodies (and
+    ``with`` blocks) while still skipping unknown predicates and
+    loops.
+
+    Strategy::
+
+        class Strategy:
+            def __init__(self):
+                if True:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the gate is dropped). With the
+    bug, the gate is dropped and the report flips to ``COVERAGE_OK``;
+    with the fix, ``self.TARGET`` resolves to ``"AAPL"``, the gate
+    scopes to AAPL, and the report classifies
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self):
+                if True:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_constructor_with_block_records_assignment() -> None:
+    """``with ctx: self.TARGET = "AAPL"`` is unconditionally executed
+    (the context manager's ``__enter__`` runs and the body follows).
+    The walker must descend into ``with`` bodies the same way it
+    descends into literal-true ``if`` bodies.
+    """
+    code = textwrap.dedent(
+        """
+        from contextlib import nullcontext
+
+        class Strategy:
+            def __init__(self):
+                with nullcontext():
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_constructor_unknown_guard_does_not_override_class_attr() -> None:
+    """Companion to ``..._literal_true_guard_records_assignment``:
+    when the predicate isn't a literal we can resolve, the walker
+    must skip both branches conservatively so an unreachable runtime
+    path can't override the class attribute. ``if some_flag:
+    self.TARGET = "AAPL"`` should leave ``self.TARGET`` resolving to
+    the class default ``"MSFT"`` — matching the runtime fallback when
+    the guard is false.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self, some_flag=False):
+                if some_flag:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert "[MSFT]" in report.subconditions[0].label
+
+
 def test_early_return_symbol_neq_guard_propagates_filter() -> None:
     """``if bar.symbol != "BBB": return`` followed by an entry
     predicate must propagate the implicit ``{BBB}`` filter to the
