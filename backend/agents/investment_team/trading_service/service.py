@@ -491,11 +491,14 @@ class TradingService:
                         # Skip non-bar events but keep looking.
 
                     if not is_warmup:
-                        # 1) Expire day orders on date change.
+                        # 1) Expire day orders on date change. Routes through
+                        #    ``FillSimulator.expire_day_orders`` so partially-
+                        #    filled bracket parents get protective legs before
+                        #    the parent is dropped (#389).
                         if prev_bar is not None and (
                             cur_bar.timestamp[:10] != prev_bar.timestamp[:10]
                         ):
-                            expired = order_book.expire_day_orders(cur_bar.timestamp)
+                            expired = fill_sim.expire_day_orders(cur_bar)
                             if expired:
                                 result.execution_diagnostics.orders_unfilled += len(expired)
                                 for ex in expired:
@@ -529,6 +532,16 @@ class TradingService:
                                     req,
                                     submitted_at=prev_bar.timestamp,
                                     submitted_equity=equity,
+                                    # #389: register the parent as eligible to
+                                    # carry bracket children when the strategy
+                                    # attached protective legs. ``submit_attached``
+                                    # rejects children whose parent isn't in the
+                                    # eligible-parent set; non-bracket entries
+                                    # pay zero overhead (flag is False).
+                                    expect_brackets=(
+                                        req.attached_stop_loss is not None
+                                        or req.attached_take_profit is not None
+                                    ),
                                 )
                                 result.execution_diagnostics.orders_accepted += 1
                                 _record_event(
@@ -809,9 +822,11 @@ class TradingService:
                 bar_cancels = cancels_by_bar.get(i, [])
 
                 if not is_warmup:
-                    # 1) Expire day orders on date change.
+                    # 1) Expire day orders on date change. See chunked path
+                    #    above — routes through the simulator so brackets on
+                    #    partially-filled parents survive expiry (#389).
                     if prev_bar is not None and (cur_bar.timestamp[:10] != prev_bar.timestamp[:10]):
-                        expired = order_book.expire_day_orders(cur_bar.timestamp)
+                        expired = fill_sim.expire_day_orders(cur_bar)
                         if expired:
                             result.execution_diagnostics.orders_unfilled += len(expired)
                             for ex in expired:
@@ -836,6 +851,13 @@ class TradingService:
                                 req,
                                 submitted_at=prev_bar.timestamp,
                                 submitted_equity=equity,
+                                # #389: register the parent as eligible to
+                                # carry bracket children when the strategy
+                                # attached protective legs.
+                                expect_brackets=(
+                                    req.attached_stop_loss is not None
+                                    or req.attached_take_profit is not None
+                                ),
                             )
                             result.execution_diagnostics.orders_accepted += 1
                             _record_event(

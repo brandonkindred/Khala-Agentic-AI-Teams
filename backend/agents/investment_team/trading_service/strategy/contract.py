@@ -151,30 +151,51 @@ class OrderRequest(BaseModel):
         ``unsupported_feature`` failure), not a generic ``ValueError`` that
         the broad ``except`` in ``TradingService`` would silently log-and-drop.
         """
-        # Runtime-support gates. The schema fields below land in this PR (#383)
-        # so callers and Pydantic models compile, but the execution engine does
-        # not yet honor them — that lands in later steps of #379. Until those
-        # steps ship, fail loudly at submission time rather than silently
-        # producing never-filled orders or IOC/FOK that behave like GTC.
+        # Runtime-support gates. The schema fields below land in #383 so
+        # callers and Pydantic models compile, but the execution engine
+        # honors them only as their respective steps of #379 ship. Until
+        # those steps land, fail loudly at submission time rather than
+        # silently producing never-filled orders.
         if self.order_type == OrderType.TRAILING_STOP:
             raise UnsupportedOrderFeatureError(
                 "trailing_stop is not yet supported by the execution engine; "
                 "see #390 (Trading 5/5 Step 8) for runtime support"
             )
-        if self.attached_stop_loss is not None or self.attached_take_profit is not None:
+        # Bracket attachments are runtime-supported as of #389, but the
+        # trailing-stop variant of ``StopAttachment`` is still gated until
+        # #390. Reject at submit time rather than silently materializing as
+        # a fixed STOP — that would backtest a different strategy than the
+        # one the author wrote.
+        if self.attached_stop_loss is not None and self.attached_stop_loss.trail_offset is not None:
             raise UnsupportedOrderFeatureError(
-                "attached_stop_loss / attached_take_profit are not yet materialized "
-                "as bracket children; see #389 (Trading 5/5 Step 7) for runtime support"
+                "attached_stop_loss.trail_offset is not yet supported by the "
+                "execution engine; see #390 (Trading 5/5 Step 8) for trailing-stop "
+                "runtime support"
             )
+        # ``parent_order_id`` / ``oco_group_id`` are engine-internal: the
+        # bracket materializer in ``FillSimulator`` calls
+        # ``OrderBook.submit_attached`` which clones the request with these
+        # fields cleared before re-running ``validate_prices``, so this
+        # gate doesn't block the engine path. It DOES block strategy code
+        # that tries to set them via ``StrategyContext.submit_order`` — a
+        # bracket child must be created via the engine, not by the strategy
+        # itself, so trapping here keeps the request stream well-formed
+        # and routes a programming error through the structured
+        # ``unsupported_feature`` rejection rather than crashing the run
+        # at ``OrderBook.submit``'s defense-in-depth ``ValueError``.
         if self.parent_order_id is not None:
             raise UnsupportedOrderFeatureError(
-                "parent_order_id is not yet honored; see #389 (Trading 5/5 Step 7) "
-                "for bracket-child materialization"
+                "parent_order_id is engine-internal; bracket children are "
+                "created by the engine via OrderBook.submit_attached. Strategies "
+                "must leave parent_order_id unset and rely on attached_stop_loss "
+                "/ attached_take_profit instead."
             )
         if self.oco_group_id is not None:
             raise UnsupportedOrderFeatureError(
-                "oco_group_id is not yet honored; see #389 (Trading 5/5 Step 7) "
-                "for OCO sibling cancellation"
+                "oco_group_id is engine-internal; bracket children are "
+                "created by the engine via OrderBook.submit_attached. Strategies "
+                "must leave oco_group_id unset and rely on attached_stop_loss "
+                "/ attached_take_profit instead."
             )
         # Shape-consistency checks. Most are currently unreachable because
         # the gates above fire first, but they remain in place so that when
@@ -340,12 +361,12 @@ class StrategyContext:
     ) -> str:
         """Submit an order. Returns the strategy-side ``client_order_id``.
 
-        The trailing keyword arguments (``unfilled_policy``,
-        ``attached_stop_loss``, ``attached_take_profit``,
-        ``parent_order_id``, ``oco_group_id``) belong to the partial-fill /
-        bracket / OCO surface introduced in #383. They are accepted by the
-        API but currently raise ``NotImplementedError`` from
-        ``validate_prices`` until the relevant runtime step of #379 lands.
+        The trailing keyword arguments belong to the partial-fill / bracket
+        / OCO surface introduced in #383. ``unfilled_policy`` /
+        ``attached_stop_loss`` / ``attached_take_profit`` are runtime-
+        supported as of #389; ``parent_order_id`` / ``oco_group_id`` are
+        engine-internal (set on bracket children by ``OrderBook.submit_attached``
+        — strategies do not pass them).
         """
         self._next_client_order_id += 1
         cid = f"c{self._next_client_order_id}"

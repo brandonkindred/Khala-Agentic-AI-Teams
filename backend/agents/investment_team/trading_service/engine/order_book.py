@@ -63,17 +63,25 @@ class PendingOrder:
     effective_stop_price: Optional[float] = None  # live trailing stop (Step 8 / #390)
     trailing_water: Optional[float] = None  # running high (LONG) / low (SHORT); Step 8
     armed: bool = True
-    # Identity of the position this order is committed to act against, set
-    # on the *first* fill: for entries it's ``po.order_id`` itself (the id
-    # of the position they just opened); for exits it's the existing
-    # position's ``entry_order_id`` (the entry that originally opened the
-    # position being closed). Used by ``process_bar``'s stale-continuation
-    # guard to drop pre-filled remainders whose original target position
-    # has been closed *and* replaced by an unrelated position on the same
-    # symbol — without this, a stale TWAP/REQUEUE remainder could fire
-    # against a brand-new position via ``_fill_exit`` (#387 review note).
-    # ``None`` for orders that haven't filled yet (cumulative_filled_qty
-    # == 0); the guard short-circuits in that case.
+    # Identity of the position this order is committed to act against,
+    # bound at one of three points:
+    #   - First entry fill: set to ``po.order_id`` itself (the id of the
+    #     position they just opened).
+    #   - First exit fill: set to the existing position's
+    #     ``entry_order_id`` (the entry that originally opened the
+    #     position being closed).
+    #   - Bracket child materialization (#389): set to the parent entry's
+    #     id at submit time (before the child has filled), so the
+    #     stale-continuation guard catches a child whose target position
+    #     was closed by a separate exit before either OCO leg fired.
+    # Used by ``process_bar``'s stale-continuation guard to drop orders
+    # whose original target position has been closed *or* replaced by an
+    # unrelated position on the same symbol — without this, a stale
+    # TWAP/REQUEUE remainder could fire against a brand-new position via
+    # ``_fill_exit`` (#387 review note), or a stale bracket child could
+    # open a new opposite-side position via ``_fill_entry`` (#389 review
+    # note). The guard fires whenever this field is set OR
+    # ``cumulative_filled_qty > 0``.
     working_against_entry_order_id: Optional[str] = None
 
 
@@ -688,6 +696,15 @@ class OrderBook:
         any pending attached children via ``remove()``'s default
         (``was_filled=False``) lifecycle path so we don't leave orphan
         protective legs in the book.
+
+        For partially-filled bracket parents (``cumulative_filled_qty > 0``)
+        the removal uses ``was_filled=True`` instead, preserving the
+        eligible-parent registration so the simulator can materialize
+        protective legs against the position that the first slice actually
+        opened — see ``FillSimulator.expire_day_orders`` (#389). Without
+        this exception, the position would survive the expiry while the
+        parent's id was already evicted, leaving ``submit_attached``
+        unable to spawn the bracket.
         """
         expired: List[PendingOrder] = []
         for oid in list(self._pending.keys()):
@@ -706,9 +723,15 @@ class OrderBook:
             # Compare date prefix only so intraday timestamps also work.
             if _date_only(anchor) < _date_only(current_date):
                 expired.append(po)
-                # ``remove(was_filled=False)`` evicts the parent from the
-                # eligible-parent set *and* cascades to any pending children.
-                self.remove(oid)
+                # ``was_filled=True`` for partially-filled parents keeps the
+                # eligible-parent registration alive long enough for the
+                # simulator's expiry hook to spawn protective bracket legs;
+                # for un-filled parents the default ``False`` path evicts
+                # the registration and cascade-cancels any pending children
+                # (relevant only when a fully-filled parent's children are
+                # themselves DAY orders, which today's materializer overrides
+                # to ``GTC``).
+                self.remove(oid, was_filled=po.cumulative_filled_qty > 0)
         return expired
 
 

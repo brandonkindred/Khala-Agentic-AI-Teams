@@ -53,32 +53,43 @@ def test_gates_raise_unsupported_order_feature_subclass():
         req.validate_prices()
 
 
-def test_attached_stop_loss_is_gated_until_step_7():
-    req = _base(attached_stop_loss=StopAttachment(stop_price=10.0))
-    with pytest.raises(NotImplementedError, match="#389"):
-        req.validate_prices()
+def test_attachments_validate_post_step_7():
+    """Bracket attachments (``attached_stop_loss`` / ``attached_take_profit``)
+    are runtime-supported as of #389; ``validate_prices`` must accept them
+    without raising. (``parent_order_id`` / ``oco_group_id`` remain rejected
+    on the strategy path — see ``test_parent_order_id_is_engine_internal``.)
+    """
+    _base(attached_stop_loss=StopAttachment(stop_price=95.0)).validate_prices()
+    _base(attached_take_profit=LimitAttachment(limit_price=110.0)).validate_prices()
+    _base(
+        attached_stop_loss=StopAttachment(stop_price=95.0),
+        attached_take_profit=LimitAttachment(limit_price=110.0),
+    ).validate_prices()
 
 
-def test_attached_take_profit_is_gated_until_step_7():
-    req = _base(attached_take_profit=LimitAttachment(limit_price=120.0))
-    with pytest.raises(NotImplementedError, match="#389"):
-        req.validate_prices()
-
-
-def test_parent_order_id_is_gated_until_step_7():
+def test_parent_order_id_is_engine_internal():
+    """``parent_order_id`` is set by ``OrderBook.submit_attached`` when the
+    engine materializes a bracket child; strategies must NOT supply it.
+    ``submit_attached`` re-runs ``validate_prices`` on a clone with the
+    field cleared, so this gate doesn't block the engine path while
+    keeping strategy-side requests well-formed (otherwise a strategy
+    that passed it would crash the run at ``OrderBook.submit``'s
+    defense-in-depth ``ValueError`` rather than producing a structured
+    ``unsupported_feature`` rejection)."""
     req = _base(parent_order_id="parent-123")
-    with pytest.raises(NotImplementedError, match="#389"):
+    with pytest.raises(UnsupportedOrderFeatureError, match="engine-internal"):
         req.validate_prices()
 
 
-def test_oco_group_id_is_gated_until_step_7():
+def test_oco_group_id_is_engine_internal():
+    """Same as ``parent_order_id`` — set by ``OrderBook.submit_attached``."""
     req = _base(oco_group_id="oco-1")
-    with pytest.raises(NotImplementedError, match="#389"):
+    with pytest.raises(UnsupportedOrderFeatureError, match="engine-internal"):
         req.validate_prices()
 
 
 def test_default_market_order_still_validates():
-    """Sanity: the gates only fire on the new feature flags."""
+    """Sanity: the remaining gates only fire on still-deferred features."""
     _base().validate_prices()
     _base(order_type=OrderType.LIMIT, limit_price=100.0).validate_prices()
     _base(order_type=OrderType.STOP, stop_price=105.0).validate_prices()

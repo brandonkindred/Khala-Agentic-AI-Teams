@@ -394,8 +394,8 @@ def test_execution_diagnostic_helpers_cap_events_and_count_rejections() -> None:
 _UNSUPPORTED_FEATURE_STRATEGY_CODE = textwrap.dedent('''\
     """Strategy that bypasses ``submit_order``'s subprocess-side validation
     to exercise the parent's ``UnsupportedOrderFeatureError`` rejection
-    path. Sets ``parent_order_id``, which still raises in the parent's
-    ``OrderRequest.validate_prices`` until #389 lands.
+    path. Sets ``order_type=trailing_stop`` — still gated in
+    ``OrderRequest.validate_prices`` until #390 (Trading 5/5 Step 8).
     """
     from contract import Strategy
 
@@ -416,9 +416,9 @@ _UNSUPPORTED_FEATURE_STRATEGY_CODE = textwrap.dedent('''\
                     "symbol": bar.symbol,
                     "side": "long",
                     "qty": 1.0,
-                    "order_type": "market",
+                    "order_type": "trailing_stop",
+                    "stop_price": 100.0,
                     "tif": "day",
-                    "parent_order_id": "fake-parent",
                 },
             })
 ''')
@@ -599,7 +599,7 @@ def test_diagnostics_emitted_and_accepted_counts_round_trip() -> None:
 
 
 def test_diagnostics_unsupported_feature_records_rejection() -> None:
-    """``parent_order_id`` is gated until #389; counts as unsupported_feature."""
+    """``trailing_stop`` is gated until #390; counts as unsupported_feature."""
     market_data: Dict[str, List[OHLCVBar]] = {}
     _uptrend_then_down_bars(market_data)
 
