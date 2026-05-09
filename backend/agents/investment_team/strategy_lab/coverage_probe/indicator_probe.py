@@ -806,6 +806,18 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     # as unmodelled rather than evaluating against the
                     # stale literal that the previous assignment set.
                     name_periods.pop(target.id, None)
+                # String-scalar side: a function-local
+                # ``target = "BBB"`` immediately before
+                # ``if bar.symbol == target:`` must be visible to
+                # ``_symbol_gate``. The outer-scope ``name_strings``
+                # collector only walks module / class / __init__, so
+                # without this in-place update the gate is dropped
+                # and a sibling indicator condition silently
+                # evaluates against every fetched DataFrame.
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    name_strings[target.id] = value.value
+                else:
+                    name_strings.pop(target.id, None)
             elif isinstance(target, ast.Attribute):
                 # ``self.WINDOW = N`` — record by attribute name.
                 v = _numeric_literal(value, name_periods)
@@ -814,6 +826,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 else:
                     # Same drop-stale rule for ``self.X = <non-literal>``.
                     name_periods.pop(target.attr, None)
+                # ``self.TARGET = "BBB"`` — flow-sensitive string
+                # binding for symbol-gate resolution.
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    name_strings[target.attr] = value.value
+                else:
+                    name_strings.pop(target.attr, None)
 
     def _budgeted_extend(group_subs: List[_Subcond], extras: List[_Subcond]) -> bool:
         """Append extras into group within the global subcond budget.
@@ -1077,6 +1095,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # internal reassignments to siblings or parents.
         saved_evals = dict(name_evaluators)
         saved_periods = dict(name_periods)
+        saved_strings = dict(name_strings)
         # Implicit symbol filter accumulated from early-return guards
         # at this scope. ``if bar.symbol != "BBB": return`` excludes
         # all symbols other than BBB for any statement that follows in
@@ -1173,6 +1192,8 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             name_evaluators.update(saved_evals)
             name_periods.clear()
             name_periods.update(saved_periods)
+            name_strings.clear()
+            name_strings.update(saved_strings)
 
     body = getattr(on_bar, "body", None)
     if isinstance(body, list):
@@ -2721,23 +2742,35 @@ def _bind_tuple_unpack(
             bindings[elem.id] = _make()
         return
 
-    # sig_kind == "hlc"
+    # sig_kind == "hlc": resolve the call's explicit positional
+    # series args (or decline) the same way the non-tuple HLC path
+    # does. Without this ``k, d = stochastic(low, low, close, 3)``
+    # was probed against the default high/low/close columns, computing
+    # coverage for a different indicator from the runtime.
+    high_in = _positional_series_input(value, 0, "high", bindings)
+    low_in = _positional_series_input(value, 1, "low", bindings)
+    close_in = _positional_series_input(value, 2, "close", bindings)
+    if high_in is None or low_in is None or close_in is None:
+        # Explicit but unrecognised input — don't bind any of the
+        # unpacked names; downstream lookups fall through and the
+        # comparison gets dropped rather than evaluating against a
+        # different indicator than the runtime.
+        return
     for idx, elem in enumerate(elements):
         if not isinstance(elem, ast.Name):
             continue
 
-        def _make(idx=idx, helper=helper, ep=extra_pos, ek=extra_kwargs):
+        def _make(
+            idx=idx,
+            helper=helper,
+            hi=high_in,
+            lo=low_in,
+            cl=close_in,
+            ep=extra_pos,
+            ek=extra_kwargs,
+        ):
             def _eval(df: pd.DataFrame) -> pd.Series:
-                for col in ("high", "low", "close"):
-                    if col not in df.columns:
-                        return pd.Series(float("nan"), index=df.index)
-                return helper(
-                    df["high"].astype(float),
-                    df["low"].astype(float),
-                    df["close"].astype(float),
-                    *ep,
-                    **ek,
-                )[idx]
+                return helper(hi(df), lo(df), cl(df), *ep, **ek)[idx]
 
             return _eval
 

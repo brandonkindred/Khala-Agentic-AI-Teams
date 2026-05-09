@@ -3482,6 +3482,139 @@ def test_stochastic_with_recognised_explicit_columns_still_works() -> None:
     assert len(report.subconditions) == 1
 
 
+def test_local_string_constant_resolves_in_symbol_gate() -> None:
+    """A function-local ``target = "BBB"`` immediately before a
+    symbol gate must be visible to ``_symbol_gate``. The outer-scope
+    ``name_strings`` collector only sees module / class / __init__
+    bindings; a local constant has to flow through
+    ``_apply_assign_inplace``.
+
+    Strategy::
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                target = "BBB"
+                if bar.symbol == target and close > 100:
+                    pass
+
+    Universe: BBB with close=50 (never > 100), AAA with close=200
+    (would satisfy the price leg if the symbol gate is dropped).
+    Without the fix the local ``target`` isn't tracked, the gate is
+    dropped, AAA satisfies, and the probe wrongly reports
+    ``COVERAGE_OK``. With the flow-sensitive update the gate
+    restricts to ``{BBB}`` and the predicate is unreachable.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                target = "BBB"
+                if bar.symbol == target and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_local_string_reassignment_clears_stale_symbol_binding() -> None:
+    """Reassigning a previously-string local to a non-literal must
+    drop the stale symbol binding so subsequent gates don't resolve
+    to the old value.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                target = "BBB"
+                target = self.lookup()
+                if bar.symbol == target and close > 100:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``target`` no longer resolves to "BBB"; the gate is dropped
+    # and ``close > 100`` runs against AAPL's close=100 → zero hits
+    # (close is NOT strictly greater). Either way the predicate
+    # doesn't resolve to a gated COVERAGE_OK.
+    assert report.coverage_category is not CoverageCategory.COVERAGE_OK
+
+
+def test_stochastic_unpack_explicit_unrecognised_input_skips_binding() -> None:
+    """A tuple-unpacked ``stochastic`` call with an explicit
+    unrecognised positional series arg must NOT bind the unpacked
+    names — downstream comparisons should fall through to UNKNOWN
+    rather than evaluating against the default high/low/close.
+
+    Strategy::
+
+        synth = self.compute_synth_high()
+        k, d = stochastic(synth, low, close, 3)
+        if k > 50:
+            pass
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                synth = self.compute_synth_high()
+                k, d = stochastic(synth, low, close, 3)
+                if k > 50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``synth`` doesn't bind to a recognised series → stochastic
+    # unpack declines → ``k`` doesn't bind → the comparison drops.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_stochastic_unpack_with_recognised_columns_still_works() -> None:
+    """Sanity: ``k, d = stochastic(high, low, close, 3); if k > 50:``
+    still resolves cleanly — the new declining behaviour must not
+    over-fire on legitimate calls.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                k, d = stochastic(high, low, close, 3)
+                if k > 50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
