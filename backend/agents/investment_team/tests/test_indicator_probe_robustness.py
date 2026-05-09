@@ -4415,7 +4415,16 @@ def test_positive_symbol_in_allowlist_gates_predicate() -> None:
 
 def test_partial_symbol_in_allowlist_does_not_gate() -> None:
     """An ``in`` allow-list with an unresolvable element refuses to
-    gate (better unconstrained than wrongly constrained)."""
+    gate (better unconstrained than wrongly constrained).
+
+    Because the partial allow-list is dropped from the group as an
+    un-modellable Compare conjunct, the surviving ``close > 100``
+    sub-condition is a SUPERSET of the real predicate. The probe must
+    not flip to ``COVERAGE_OK`` from that recognised leg alone — the
+    dropped allow-list could be narrowing the real predicate to zero.
+    The conservative refuse-to-gate is still the test point; the
+    aggregator now correctly classifies as ``UNKNOWN_LOW_COVERAGE``.
+    """
     code = textwrap.dedent(
         """
         class S:
@@ -4437,10 +4446,7 @@ def test_partial_symbol_in_allowlist_does_not_gate() -> None:
         index=idx,
     )
     report = run_indicator_probe(strategy_code=code, market_data={"GOOG": df})
-    # Gate refused → ``close > 100`` runs against every symbol; GOOG
-    # close=200 satisfies → COVERAGE_OK. (The conservative refuse-to-gate
-    # is the test point; the resulting category isn't the bug.)
-    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
 
 
 def test_renamed_bar_param_preserves_symbol_gate() -> None:
@@ -4549,3 +4555,150 @@ def test_bool_call_on_unbound_name_remains_unknown() -> None:
     )
     assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
     assert report.subconditions == []
+
+
+def test_unmodelled_and_conjunct_demotes_coverage_ok_to_unknown() -> None:
+    """An entry predicate that mixes a recognised indicator/column check
+    with an un-modellable AND conjunct (``self.custom_ok(bar)``) is only
+    bounded from above by the recognised legs: the unknown conjunct may
+    still narrow the predicate to zero. The probe must surface this as
+    ``UNKNOWN_LOW_COVERAGE`` rather than letting ``close > 0`` carry
+    the report to ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unmodelled_and_conjunct_with_zero_recognised_leg_still_flags() -> None:
+    """An AND group with a never-firing recognised leg AND an unknown
+    conjunct must still flag ``INDICATOR_FILTER_TOO_RESTRICTIVE``: the
+    recognised mask is a superset of the real predicate, so an empty
+    superset proves the real predicate is also empty (subset of
+    empty = empty).
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close < -50 and self.custom_ok(bar):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_unmodelled_and_conjunct_alongside_clean_predicate_stays_ok() -> None:
+    """A separate clean predicate elsewhere in ``on_bar`` provides
+    independent positive evidence. The probe must not over-flag: the
+    presence of *one* group with an unknown AND conjunct should not
+    veto ``COVERAGE_OK`` when another sibling group fires unaided.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    pass
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_nested_function_in_on_bar_is_skipped() -> None:
+    """A locally-defined helper inside ``on_bar`` must not have its
+    ``if`` predicates analysed as if they ran on the entry path: the
+    helper executes only when explicitly invoked, and the probe doesn't
+    model arbitrary calls. Without this guard a dead-code helper such
+    as ``def debug_helper(): if close < -50: ...`` produced a spurious
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` blocker even when the real
+    entry predicate (``if close > 0:``) is satisfied on every bar.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                def debug_helper():
+                    if close < -50:
+                        return False
+                    return True
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "close > 0"
+
+
+def test_async_nested_function_in_on_bar_is_skipped() -> None:
+    """``AsyncFunctionDef`` shape (``async def`` helpers) must be
+    skipped for the same reason as plain ``FunctionDef``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                async def fetch_helper():
+                    if close < -50:
+                        return False
+                    return True
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+
+
+def test_nested_class_in_on_bar_is_skipped() -> None:
+    """A class defined inside ``on_bar`` should not have its method
+    bodies analysed as entry-path predicates either.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                class Inner:
+                    def helper(self):
+                        if close < -50:
+                            return False
+                        return True
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1

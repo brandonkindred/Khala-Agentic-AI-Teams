@@ -165,6 +165,17 @@ class _Group:
     # group: with an unmodelled alternative present we can't prove
     # the OR is unreachable, so flagging would be a false positive.
     has_unknown_or_leg: bool = False
+    # True when at least one top-level AND-conjunct in this group's
+    # source predicate could not be statically modelled (e.g.
+    # ``if close > 0 and self.custom_ok(bar):`` — the second conjunct
+    # is dropped). The recognised legs' mask is then only a SUPERSET
+    # of the real predicate, so the aggregator must not conclude
+    # ``COVERAGE_OK`` from the recognised legs firing alone — the
+    # un-modelled conjunct may still narrow the actual predicate to
+    # zero. Mirrors ``has_unknown_or_leg`` but with the opposite
+    # polarity: AND with an unknown conjunct widens the recognised
+    # mask, OR with an unknown alternative also widens it.
+    has_unknown_and_conjunct: bool = False
 
 
 def run_indicator_probe(
@@ -626,13 +637,25 @@ def _aggregate(
             **base_kwargs,
         )
 
-    # Final fallthrough check: if every group with an unknown OR leg
-    # has zero recognised firing legs and zero conjunction hits, we
-    # have no positive evidence the predicate fires — only an
-    # un-modellable alternative that *might*. Return
-    # ``UNKNOWN_LOW_COVERAGE`` rather than ``COVERAGE_OK`` so a sparse
-    # / zero-trade backtest isn't mislabelled "healthy" when the
-    # probe genuinely doesn't know.
+    # Final fallthrough check: if every group with an unknown leg /
+    # alternative / conjunct has produced no positive recognised
+    # evidence, we have no positive evidence the predicate fires —
+    # only an un-modellable component that *might* (OR-unknown) or
+    # *might not* (AND-unknown). Return ``UNKNOWN_LOW_COVERAGE``
+    # rather than ``COVERAGE_OK`` so a sparse / zero-trade backtest
+    # isn't mislabelled "healthy" when the probe genuinely doesn't
+    # know.
+    #
+    # Polarity differs by unknown kind:
+    #   - OR-leg / nested-OR unknown: an unknown alternative widens
+    #     the recognised mask. Recognised conjunction firing is
+    #     still sound positive evidence — the predicate fires at
+    #     least at those bars, possibly more.
+    #   - AND-conjunct unknown: an unknown conjunct narrows the
+    #     recognised mask. The recognised AND is only a SUPERSET of
+    #     the real predicate, so its conjunction firing does NOT
+    #     prove the real predicate fires. Such a group cannot
+    #     contribute positive evidence on its own.
     base = 0
     has_unknown_evidence = False
     has_recognised_evidence = False
@@ -642,16 +665,23 @@ def _aggregate(
             base += legs
             continue
         leg_hits = [sub_hit_counts[base + k] for k in range(legs)]
-        group_unknown = group.has_unknown_or_leg or any(
+        group_or_unknown = group.has_unknown_or_leg or any(
             group.subconds[k].has_unknown_leg for k in range(legs)
         )
+        group_and_unknown = group.has_unknown_and_conjunct
+        group_unknown = group_or_unknown or group_and_unknown
         if group_unknown:
             has_unknown_evidence = True
-            # Did any recognised leg fire AND the group's overall
-            # conjunction land on at least one bar? If so we have
-            # positive coverage signal even with the unknown
-            # alternative, so the report can stay COVERAGE_OK.
-            if group_conjunction_hits[group_idx] > 0 and any(h > 0 for h in leg_hits):
+            if group_and_unknown:
+                # AND-conjunct unknown: recognised mask is a superset
+                # of the real predicate. Conjunction hits only bound
+                # the real predicate from above and cannot supply
+                # positive evidence — skip without contributing.
+                pass
+            elif group_conjunction_hits[group_idx] > 0 and any(h > 0 for h in leg_hits):
+                # OR-side unknown only: a recognised alternative
+                # firing is sufficient positive evidence because the
+                # unknown alternative can only widen the disjunction.
                 has_recognised_evidence = True
         else:
             # Group has no unknown legs and got past the blocker
@@ -880,6 +910,11 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
 
         own_subs: List[_Subcond] = []
         own_symbols: Optional[set] = None
+        # Track whether any AND-conjunct could not be statically modelled.
+        # When set, the recognised mask is a SUPERSET of the real
+        # predicate so the aggregator must not conclude ``COVERAGE_OK``
+        # from the recognised legs alone — see ``_Group.has_unknown_and_conjunct``.
+        has_unknown_conjunct = False
         for term in _flatten_top_terms(test):
             if isinstance(term, ast.Compare):
                 sym = _symbol_gate(term, name_strings, bar_name)
@@ -898,6 +933,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 sub = _build_subcond(term, name_periods, name_evaluators)
                 if sub is not None:
                     own_subs.append(sub)
+                else:
+                    # Compare term we couldn't model (e.g. ``self.flag ==
+                    # True`` on an opaque attribute). Mark the group as
+                    # carrying an unknown conjunct so the aggregator
+                    # treats recognised hits as upper-bound only.
+                    has_unknown_conjunct = True
                 continue
             # A nested OR inside the top-level AND, e.g.
             # ``if close > 0 and (volume < 0 or close < -1):`` — flatten
@@ -931,6 +972,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                             own_symbols = set(or_compound.target_symbols)
                         else:
                             own_symbols &= or_compound.target_symbols
+                else:
+                    # Couldn't model any leg of the inner OR — the whole
+                    # disjunction is opaque. Treat it as an unknown
+                    # conjunct so a sibling ``close > 0`` doesn't carry
+                    # the group to ``COVERAGE_OK`` on its own.
+                    has_unknown_conjunct = True
                 continue
             # Truthiness term — ``bool(x)`` or a bare ``Name`` referencing
             # a precomputed indicator. Required for the ideation/codegen
@@ -942,20 +989,45 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             truthy = _build_truthy_subcond(term, name_periods, name_evaluators)
             if truthy is not None:
                 own_subs.append(truthy)
+            else:
+                # Un-modellable term (e.g. ``self.custom_ok(bar)``,
+                # ``some_function()``, attribute lookup that isn't a
+                # known indicator series). Tag the group so the
+                # aggregator knows the recognised mask is only a
+                # superset of the real predicate.
+                has_unknown_conjunct = True
 
         effective_symbols = _intersect_symbols(ancestor_symbols, own_symbols)
 
         group_subs: List[_Subcond] = []
         if not _budgeted_extend(group_subs, ancestors):
             if group_subs:
-                groups.append(_Group(subconds=group_subs, target_symbols=effective_symbols))
+                groups.append(
+                    _Group(
+                        subconds=group_subs,
+                        target_symbols=effective_symbols,
+                        has_unknown_and_conjunct=has_unknown_conjunct,
+                    )
+                )
             return False
         if not _budgeted_extend(group_subs, own_subs):
             if group_subs:
-                groups.append(_Group(subconds=group_subs, target_symbols=effective_symbols))
+                groups.append(
+                    _Group(
+                        subconds=group_subs,
+                        target_symbols=effective_symbols,
+                        has_unknown_and_conjunct=has_unknown_conjunct,
+                    )
+                )
             return False
         if group_subs and not (effective_symbols is not None and not effective_symbols):
-            groups.append(_Group(subconds=group_subs, target_symbols=effective_symbols))
+            groups.append(
+                _Group(
+                    subconds=group_subs,
+                    target_symbols=effective_symbols,
+                    has_unknown_and_conjunct=has_unknown_conjunct,
+                )
+            )
         if not _visit(body, ancestors + own_subs, effective_symbols):
             return False
         if not _visit(orelse, ancestors, ancestor_symbols):
@@ -1185,8 +1257,24 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     ):
                         return False
                 else:
+                    # Skip nested function / class bodies — they only
+                    # execute if explicitly invoked, and we don't model
+                    # arbitrary calls. Without this guard a local
+                    # helper such as ``def debug_helper(): if close <
+                    # 0: ...`` defined inside ``on_bar`` would have its
+                    # ``if`` predicates analysed as if they were on the
+                    # entry path, producing spurious
+                    # ``INDICATOR_FILTER_TOO_RESTRICTIVE`` blockers
+                    # from dead helper code. ``ClassDef`` is included
+                    # for symmetry — a strategy-defined inner class's
+                    # methods don't run on the entry path either.
+                    if isinstance(
+                        stmt,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                    ):
+                        continue
                     # Descend into compound statements (For, While, With,
-                    # Try, FunctionDef body) but pass through ancestors so
+                    # Try) but pass through ancestors so
                     # ``for x in ...: if close > 100: ...`` still inherits
                     # nothing, which is correct.
                     for field in _BLOCK_FIELDS:
