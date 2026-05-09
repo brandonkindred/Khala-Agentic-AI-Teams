@@ -165,6 +165,17 @@ class _Group:
     # group: with an unmodelled alternative present we can't prove
     # the OR is unreachable, so flagging would be a false positive.
     has_unknown_or_leg: bool = False
+    # True when at least one top-level AND-conjunct in this group's
+    # source predicate could not be statically modelled (e.g.
+    # ``if close > 0 and self.custom_ok(bar):`` — the second conjunct
+    # is dropped). The recognised legs' mask is then only a SUPERSET
+    # of the real predicate, so the aggregator must not conclude
+    # ``COVERAGE_OK`` from the recognised legs firing alone — the
+    # un-modelled conjunct may still narrow the actual predicate to
+    # zero. Mirrors ``has_unknown_or_leg`` but with the opposite
+    # polarity: AND with an unknown conjunct widens the recognised
+    # mask, OR with an unknown alternative also widens it.
+    has_unknown_and_conjunct: bool = False
 
 
 def run_indicator_probe(
@@ -626,13 +637,25 @@ def _aggregate(
             **base_kwargs,
         )
 
-    # Final fallthrough check: if every group with an unknown OR leg
-    # has zero recognised firing legs and zero conjunction hits, we
-    # have no positive evidence the predicate fires — only an
-    # un-modellable alternative that *might*. Return
-    # ``UNKNOWN_LOW_COVERAGE`` rather than ``COVERAGE_OK`` so a sparse
-    # / zero-trade backtest isn't mislabelled "healthy" when the
-    # probe genuinely doesn't know.
+    # Final fallthrough check: if every group with an unknown leg /
+    # alternative / conjunct has produced no positive recognised
+    # evidence, we have no positive evidence the predicate fires —
+    # only an un-modellable component that *might* (OR-unknown) or
+    # *might not* (AND-unknown). Return ``UNKNOWN_LOW_COVERAGE``
+    # rather than ``COVERAGE_OK`` so a sparse / zero-trade backtest
+    # isn't mislabelled "healthy" when the probe genuinely doesn't
+    # know.
+    #
+    # Polarity differs by unknown kind:
+    #   - OR-leg / nested-OR unknown: an unknown alternative widens
+    #     the recognised mask. Recognised conjunction firing is
+    #     still sound positive evidence — the predicate fires at
+    #     least at those bars, possibly more.
+    #   - AND-conjunct unknown: an unknown conjunct narrows the
+    #     recognised mask. The recognised AND is only a SUPERSET of
+    #     the real predicate, so its conjunction firing does NOT
+    #     prove the real predicate fires. Such a group cannot
+    #     contribute positive evidence on its own.
     base = 0
     has_unknown_evidence = False
     has_recognised_evidence = False
@@ -642,16 +665,23 @@ def _aggregate(
             base += legs
             continue
         leg_hits = [sub_hit_counts[base + k] for k in range(legs)]
-        group_unknown = group.has_unknown_or_leg or any(
+        group_or_unknown = group.has_unknown_or_leg or any(
             group.subconds[k].has_unknown_leg for k in range(legs)
         )
+        group_and_unknown = group.has_unknown_and_conjunct
+        group_unknown = group_or_unknown or group_and_unknown
         if group_unknown:
             has_unknown_evidence = True
-            # Did any recognised leg fire AND the group's overall
-            # conjunction land on at least one bar? If so we have
-            # positive coverage signal even with the unknown
-            # alternative, so the report can stay COVERAGE_OK.
-            if group_conjunction_hits[group_idx] > 0 and any(h > 0 for h in leg_hits):
+            if group_and_unknown:
+                # AND-conjunct unknown: recognised mask is a superset
+                # of the real predicate. Conjunction hits only bound
+                # the real predicate from above and cannot supply
+                # positive evidence — skip without contributing.
+                pass
+            elif group_conjunction_hits[group_idx] > 0 and any(h > 0 for h in leg_hits):
+                # OR-side unknown only: a recognised alternative
+                # firing is sufficient positive evidence because the
+                # unknown alternative can only widen the disjunction.
                 has_recognised_evidence = True
         else:
             # Group has no unknown legs and got past the blocker
@@ -867,20 +897,78 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         orelse: List[ast.stmt],
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
+        ancestor_unknown: bool,
     ) -> bool:
         """Process a single if-shape (test + body + orelse) given an
         ancestor stack. Used both for real ``ast.If`` statements and for
         synthesised ifs after stripping a position-gate conjunct.
+
+        ``ancestor_unknown`` is True when any enclosing ``if`` test had
+        an un-modellable AND conjunct. Body recursion inherits the flag
+        because the descendant predicate only fires when the unknown
+        ancestor conjunct is also true; the descendant group's
+        recognised mask is therefore still only an upper bound. Without
+        this, ``if close > 0 and self.custom_ok(bar): if volume > 0:
+        ...`` would emit a clean nested group whose recognised legs
+        carried the report to ``COVERAGE_OK`` even though the unknown
+        ancestor could narrow it to zero.
         """
         # Top-level OR predicate: each leg becomes an independent
         # subcondition row but the group's blocker classification uses
         # disjunction (only too-restrictive when ALL legs are zero).
         if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
-            return _process_or_if(test, body, orelse, ancestors, ancestor_symbols)
+            return _process_or_if(test, body, orelse, ancestors, ancestor_symbols, ancestor_unknown)
+
+        # Statically-unreachable AND short-circuit. If any conjunct is
+        # a literal-falsy ``Constant`` (``False`` / ``0`` / ``None`` /
+        # ``""``) or a statically-false ``Compare`` (e.g. ``1 < 0``,
+        # ``LIMIT == 0`` after ``LIMIT = 1``), the whole predicate is
+        # unreachable. Emitting a group from the surviving recognised
+        # siblings would let them carry the report to ``COVERAGE_OK``
+        # even though no bar can satisfy the real entry path. Skip
+        # body recursion entirely; ``orelse`` runs unconditionally so
+        # we still recurse into it.
+        for term in _flatten_top_terms(test):
+            truth = _evaluate_static_predicate(term, name_periods, name_evaluators)
+            if truth is False:
+                if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
+                    return False
+                return True
 
         own_subs: List[_Subcond] = []
         own_symbols: Optional[set] = None
+        # Track whether any AND-conjunct could not be statically modelled.
+        # When set, the recognised mask is a SUPERSET of the real
+        # predicate so the aggregator must not conclude ``COVERAGE_OK``
+        # from the recognised legs alone — see ``_Group.has_unknown_and_conjunct``.
+        has_unknown_conjunct = False
         for term in _flatten_top_terms(test):
+            # Statically-true literal conjunct (``True``, non-zero
+            # number, non-empty string, etc.) is a no-op AND-gate. The
+            # recognised siblings' mask is exact in its presence, so
+            # don't taint the group as unknown. Statically-false
+            # literals make the predicate dead — also not "unknown
+            # narrowing" in the sense the aggregator needs to suppress
+            # COVERAGE_OK; the surviving recognised legs simply don't
+            # describe a reachable path.
+            #
+            # Unified static-evaluation skip. ``True`` means the term
+            # is a statically-decidable no-op (literal ``True``,
+            # ``1 < 2``, ``1 + 1 == 2``, ...) — drop it from the
+            # group's recognised set without tagging the group as
+            # unknown. ``False`` was already short-circuited by the
+            # pre-scan above so we don't expect to see it here, but
+            # treating it like ``True`` is safe (the surviving
+            # recognised siblings can't carry the report; the group
+            # will still be empty). ``None`` (un-decidable) falls
+            # through to the regular type dispatch so an
+            # almost-static-but-unevaluable Compare (e.g.
+            # ``(5 % 2 == 0)`` whose ``Mod`` operand isn't in the
+            # constant-folding scope) lands in the unknown-conjunct
+            # path rather than slipping through as a silent no-op.
+            truth = _evaluate_static_predicate(term, name_periods, name_evaluators)
+            if truth is not None:
+                continue
             if isinstance(term, ast.Compare):
                 sym = _symbol_gate(term, name_strings, bar_name)
                 if sym is not None:
@@ -898,6 +986,17 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 sub = _build_subcond(term, name_periods, name_evaluators)
                 if sub is not None:
                     own_subs.append(sub)
+                else:
+                    # Compare term we couldn't model. Either an opaque
+                    # comparison (``self.flag == True``) or a static-
+                    # constant compare we couldn't actually fold
+                    # (``_build_operand`` accepted both BinOp operands
+                    # but ``_evaluate_static_predicate`` returned None
+                    # — see its docstring). In both cases the
+                    # recognised siblings' mask is at best an upper
+                    # bound on the real predicate, so tag the group
+                    # as unknown.
+                    has_unknown_conjunct = True
                 continue
             # A nested OR inside the top-level AND, e.g.
             # ``if close > 0 and (volume < 0 or close < -1):`` — flatten
@@ -931,6 +1030,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                             own_symbols = set(or_compound.target_symbols)
                         else:
                             own_symbols &= or_compound.target_symbols
+                else:
+                    # Couldn't model any leg of the inner OR — the whole
+                    # disjunction is opaque. Treat it as an unknown
+                    # conjunct so a sibling ``close > 0`` doesn't carry
+                    # the group to ``COVERAGE_OK`` on its own.
+                    has_unknown_conjunct = True
                 continue
             # Truthiness term — ``bool(x)`` or a bare ``Name`` referencing
             # a precomputed indicator. Required for the ideation/codegen
@@ -942,23 +1047,55 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             truthy = _build_truthy_subcond(term, name_periods, name_evaluators)
             if truthy is not None:
                 own_subs.append(truthy)
+            else:
+                # Un-modellable term (e.g. ``self.custom_ok(bar)``,
+                # ``some_function()``, attribute lookup that isn't a
+                # known indicator series). Tag the group so the
+                # aggregator knows the recognised mask is only a
+                # superset of the real predicate.
+                has_unknown_conjunct = True
 
         effective_symbols = _intersect_symbols(ancestor_symbols, own_symbols)
+        # Effective unknown narrowing for groups emitted at this level:
+        # the union of any inherited unknown ancestor and a locally-
+        # detected unknown conjunct. Body recursion uses the same flag
+        # so descendants remain tainted; orelse uses the bare inherited
+        # value because the negation of an unknown isn't an unknown
+        # gate on the orelse path.
+        effective_unknown = ancestor_unknown or has_unknown_conjunct
 
         group_subs: List[_Subcond] = []
         if not _budgeted_extend(group_subs, ancestors):
             if group_subs:
-                groups.append(_Group(subconds=group_subs, target_symbols=effective_symbols))
+                groups.append(
+                    _Group(
+                        subconds=group_subs,
+                        target_symbols=effective_symbols,
+                        has_unknown_and_conjunct=effective_unknown,
+                    )
+                )
             return False
         if not _budgeted_extend(group_subs, own_subs):
             if group_subs:
-                groups.append(_Group(subconds=group_subs, target_symbols=effective_symbols))
+                groups.append(
+                    _Group(
+                        subconds=group_subs,
+                        target_symbols=effective_symbols,
+                        has_unknown_and_conjunct=effective_unknown,
+                    )
+                )
             return False
         if group_subs and not (effective_symbols is not None and not effective_symbols):
-            groups.append(_Group(subconds=group_subs, target_symbols=effective_symbols))
-        if not _visit(body, ancestors + own_subs, effective_symbols):
+            groups.append(
+                _Group(
+                    subconds=group_subs,
+                    target_symbols=effective_symbols,
+                    has_unknown_and_conjunct=effective_unknown,
+                )
+            )
+        if not _visit(body, ancestors + own_subs, effective_symbols, effective_unknown):
             return False
-        if not _visit(orelse, ancestors, ancestor_symbols):
+        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
             return False
         return True
 
@@ -968,6 +1105,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         orelse: List[ast.stmt],
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
+        ancestor_unknown: bool,
     ) -> bool:
         """Process ``if A or B or C:`` — each leg becomes an independent
         subcondition row, classified disjunctively at aggregation time.
@@ -982,6 +1120,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
 
         ``orelse`` recursion remains bare-ancestor (consistent with the
         AND path).
+
+        ``ancestor_unknown`` (an inherited AND-side unknown narrowing,
+        not the OR-side leg uncertainty) is propagated unchanged to
+        body and orelse: an OR test does not introduce its own AND
+        narrowing, so descendants only inherit what was already in
+        place at this node's entry.
         """
         own_subs: List[_Subcond] = []
         # Track legs we couldn't statically model (e.g. an unrecognised
@@ -1044,9 +1188,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         if not own_subs:
             # No recognised legs — fall through to body / orelse without
             # emitting a group, so nested ``if`` analysis still runs.
-            if not _visit(body, ancestors, ancestor_symbols):
+            if not _visit(body, ancestors, ancestor_symbols, ancestor_unknown):
                 return False
-            if not _visit(orelse, ancestors, ancestor_symbols):
+            if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
                 return False
             return True
 
@@ -1064,6 +1208,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         target_symbols=ancestor_symbols,
                         combinator="and",
                         ancestor_count=len(group_subs),
+                        has_unknown_and_conjunct=ancestor_unknown,
                     )
                 )
             return False
@@ -1077,6 +1222,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         combinator="or",
                         ancestor_count=ancestor_count,
                         has_unknown_or_leg=has_unknown_leg,
+                        has_unknown_and_conjunct=ancestor_unknown,
                     )
                 )
             return False
@@ -1088,12 +1234,13 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     combinator="or",
                     ancestor_count=ancestor_count,
                     has_unknown_or_leg=has_unknown_leg,
+                    has_unknown_and_conjunct=ancestor_unknown,
                 )
             )
         # Body sees no extra ancestors — see docstring.
-        if not _visit(body, ancestors, ancestor_symbols):
+        if not _visit(body, ancestors, ancestor_symbols, ancestor_unknown):
             return False
-        if not _visit(orelse, ancestors, ancestor_symbols):
+        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
             return False
         return True
 
@@ -1101,6 +1248,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         stmts: List[ast.stmt],
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
+        ancestor_unknown: bool = False,
     ) -> bool:
         # Transactional: snapshot at entry, restore at exit. Each call
         # to _visit (including the recursive descents from _process_if /
@@ -1154,7 +1302,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     position_check, gate_residual = _strip_position_gate(stmt.test)
                     if position_check == "vacant":  # pos is None — body is entry
                         if gate_residual is None:
-                            if not _visit(stmt.body, ancestors, current_symbols):
+                            if not _visit(stmt.body, ancestors, current_symbols, ancestor_unknown):
                                 return False
                             # Vacant guard-clause: ``if pos is None:
                             # return`` (or any single ``return``).
@@ -1172,27 +1320,49 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                                 [],
                                 ancestors,
                                 current_symbols,
+                                ancestor_unknown,
                             ):
                                 return False
                         continue
                     if position_check == "occupied":  # pos is not None — orelse is entry
-                        if not _visit(stmt.orelse, ancestors, current_symbols):
+                        if not _visit(stmt.orelse, ancestors, current_symbols, ancestor_unknown):
                             return False
                         continue
 
                     if not _process_if(
-                        stmt.test, stmt.body, stmt.orelse, ancestors, current_symbols
+                        stmt.test,
+                        stmt.body,
+                        stmt.orelse,
+                        ancestors,
+                        current_symbols,
+                        ancestor_unknown,
                     ):
                         return False
                 else:
+                    # Skip nested function / class bodies — they only
+                    # execute if explicitly invoked, and we don't model
+                    # arbitrary calls. Without this guard a local
+                    # helper such as ``def debug_helper(): if close <
+                    # 0: ...`` defined inside ``on_bar`` would have its
+                    # ``if`` predicates analysed as if they were on the
+                    # entry path, producing spurious
+                    # ``INDICATOR_FILTER_TOO_RESTRICTIVE`` blockers
+                    # from dead helper code. ``ClassDef`` is included
+                    # for symmetry — a strategy-defined inner class's
+                    # methods don't run on the entry path either.
+                    if isinstance(
+                        stmt,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                    ):
+                        continue
                     # Descend into compound statements (For, While, With,
-                    # Try, FunctionDef body) but pass through ancestors so
+                    # Try) but pass through ancestors so
                     # ``for x in ...: if close > 100: ...`` still inherits
                     # nothing, which is correct.
                     for field in _BLOCK_FIELDS:
                         inner = getattr(stmt, field, None)
                         if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
-                            if not _visit(inner, ancestors, current_symbols):
+                            if not _visit(inner, ancestors, current_symbols, ancestor_unknown):
                                 return False
                     # ast.Try has handlers; each handler.body is a stmt list.
                     handlers = getattr(stmt, "handlers", None)
@@ -1200,7 +1370,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         for h in handlers:
                             h_body = getattr(h, "body", None)
                             if isinstance(h_body, list) and h_body:
-                                if not _visit(h_body, ancestors, current_symbols):
+                                if not _visit(h_body, ancestors, current_symbols, ancestor_unknown):
                                     return False
             return True
         finally:
@@ -1755,6 +1925,109 @@ def _flatten_top_terms(test: ast.expr) -> List[ast.expr]:
             out.extend(_flatten_top_terms(value))
         return out
     return [test]
+
+
+_BINOP_FOLDERS: Dict[type, Callable[[float, float], float]] = {
+    ast.Mult: lambda a, b: a * b,
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+}
+
+
+def _static_scalar_value(
+    node: ast.expr,
+    name_periods: Dict[str, int],
+) -> Optional[float]:
+    """Resolve ``node`` to a scalar ``float`` when it's a constant
+    expression, or ``None`` otherwise.
+
+    Mirrors the non-data-dependent scope of :func:`_build_operand`
+    (literals, ``USub``, named numeric bindings, and
+    ``Mult``/``Add``/``Sub`` ``BinOp`` chains over the same), so
+    :func:`_evaluate_static_predicate` can actually fold every
+    constant-only comparison that ``_build_operand`` would accept.
+    Without arithmetic ``BinOp`` folding, ``(1 + 1 == 3)`` was
+    rejected by :func:`_numeric_literal` and slipped through as an
+    "accepted but unevaluable" no-op skip even though the real
+    comparison is statically false.
+    """
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _static_scalar_value(node.operand, name_periods)
+        if inner is None:
+            return None
+        return -inner
+    if isinstance(node, ast.BinOp):
+        folder = _BINOP_FOLDERS.get(type(node.op))
+        if folder is None:
+            return None
+        left = _static_scalar_value(node.left, name_periods)
+        right = _static_scalar_value(node.right, name_periods)
+        if left is None or right is None:
+            return None
+        try:
+            return float(folder(left, right))
+        except Exception:  # noqa: BLE001
+            return None
+    return _numeric_literal(node, name_periods)
+
+
+_STATIC_CMP_OPS: Dict[type, Callable[[float, float], bool]] = {
+    ast.Lt: lambda a, b: a < b,
+    ast.LtE: lambda a, b: a <= b,
+    ast.Gt: lambda a, b: a > b,
+    ast.GtE: lambda a, b: a >= b,
+    ast.Eq: lambda a, b: a == b,
+    ast.NotEq: lambda a, b: a != b,
+}
+
+
+def _evaluate_static_predicate(
+    node: ast.expr,
+    name_periods: Dict[str, int],
+    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]],
+) -> Optional[bool]:
+    """Return ``True`` / ``False`` when ``node`` is a statically-decidable
+    boolean term, ``None`` otherwise.
+
+    Recognised shapes:
+      - bare ``ast.Constant`` — Python's truthiness on the literal
+        value (``False``/``None``/``0``/``""`` → False, everything
+        else → True).
+      - 1-op ``Compare`` whose both operands resolve via
+        :func:`_static_scalar_value` (literals, ``USub``, named
+        numeric bindings, and arithmetic ``BinOp`` chains over the
+        same). The op is then applied directly on the folded scalars.
+
+    Used by ``_process_if`` to (a) short-circuit the AND chain when
+    any term evaluates to ``False`` (predicate unreachable, recurse
+    into ``orelse`` only), and (b) silently skip ``True`` terms as
+    no-op gates. Returning ``None`` for any other shape — including a
+    constant-only Compare we couldn't actually fold (e.g. one whose
+    operands escape :func:`_static_scalar_value`'s constant-folding
+    scope) — sends the term through the unknown-conjunct path so the
+    aggregator treats recognised siblings' hits as upper-bound only,
+    rather than silently dropping the term as if it were a no-op.
+    """
+    if isinstance(node, ast.Constant):
+        try:
+            return bool(node.value)
+        except Exception:  # noqa: BLE001
+            return None
+    if not isinstance(node, ast.Compare):
+        return None
+    if len(node.ops) != 1 or len(node.comparators) != 1:
+        return None
+    left_val = _static_scalar_value(node.left, name_periods)
+    right_val = _static_scalar_value(node.comparators[0], name_periods)
+    if left_val is None or right_val is None:
+        return None
+    op_fn = _STATIC_CMP_OPS.get(type(node.ops[0]))
+    if op_fn is None:
+        return None
+    try:
+        return bool(op_fn(left_val, right_val))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _find_strategy_class(tree: ast.AST, on_bar: ast.AST) -> Optional[ast.ClassDef]:

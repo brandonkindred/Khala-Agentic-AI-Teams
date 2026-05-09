@@ -4415,7 +4415,16 @@ def test_positive_symbol_in_allowlist_gates_predicate() -> None:
 
 def test_partial_symbol_in_allowlist_does_not_gate() -> None:
     """An ``in`` allow-list with an unresolvable element refuses to
-    gate (better unconstrained than wrongly constrained)."""
+    gate (better unconstrained than wrongly constrained).
+
+    Because the partial allow-list is dropped from the group as an
+    un-modellable Compare conjunct, the surviving ``close > 100``
+    sub-condition is a SUPERSET of the real predicate. The probe must
+    not flip to ``COVERAGE_OK`` from that recognised leg alone — the
+    dropped allow-list could be narrowing the real predicate to zero.
+    The conservative refuse-to-gate is still the test point; the
+    aggregator now correctly classifies as ``UNKNOWN_LOW_COVERAGE``.
+    """
     code = textwrap.dedent(
         """
         class S:
@@ -4437,10 +4446,7 @@ def test_partial_symbol_in_allowlist_does_not_gate() -> None:
         index=idx,
     )
     report = run_indicator_probe(strategy_code=code, market_data={"GOOG": df})
-    # Gate refused → ``close > 100`` runs against every symbol; GOOG
-    # close=200 satisfies → COVERAGE_OK. (The conservative refuse-to-gate
-    # is the test point; the resulting category isn't the bug.)
-    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
 
 
 def test_renamed_bar_param_preserves_symbol_gate() -> None:
@@ -4549,3 +4555,469 @@ def test_bool_call_on_unbound_name_remains_unknown() -> None:
     )
     assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
     assert report.subconditions == []
+
+
+def test_unmodelled_and_conjunct_demotes_coverage_ok_to_unknown() -> None:
+    """An entry predicate that mixes a recognised indicator/column check
+    with an un-modellable AND conjunct (``self.custom_ok(bar)``) is only
+    bounded from above by the recognised legs: the unknown conjunct may
+    still narrow the predicate to zero. The probe must surface this as
+    ``UNKNOWN_LOW_COVERAGE`` rather than letting ``close > 0`` carry
+    the report to ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unmodelled_and_conjunct_with_zero_recognised_leg_still_flags() -> None:
+    """An AND group with a never-firing recognised leg AND an unknown
+    conjunct must still flag ``INDICATOR_FILTER_TOO_RESTRICTIVE``: the
+    recognised mask is a superset of the real predicate, so an empty
+    superset proves the real predicate is also empty (subset of
+    empty = empty).
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close < -50 and self.custom_ok(bar):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_unmodelled_and_conjunct_alongside_clean_predicate_stays_ok() -> None:
+    """A separate clean predicate elsewhere in ``on_bar`` provides
+    independent positive evidence. The probe must not over-flag: the
+    presence of *one* group with an unknown AND conjunct should not
+    veto ``COVERAGE_OK`` when another sibling group fires unaided.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    pass
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_nested_function_in_on_bar_is_skipped() -> None:
+    """A locally-defined helper inside ``on_bar`` must not have its
+    ``if`` predicates analysed as if they ran on the entry path: the
+    helper executes only when explicitly invoked, and the probe doesn't
+    model arbitrary calls. Without this guard a dead-code helper such
+    as ``def debug_helper(): if close < -50: ...`` produced a spurious
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` blocker even when the real
+    entry predicate (``if close > 0:``) is satisfied on every bar.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                def debug_helper():
+                    if close < -50:
+                        return False
+                    return True
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "close > 0"
+
+
+def test_async_nested_function_in_on_bar_is_skipped() -> None:
+    """``AsyncFunctionDef`` shape (``async def`` helpers) must be
+    skipped for the same reason as plain ``FunctionDef``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                async def fetch_helper():
+                    if close < -50:
+                        return False
+                    return True
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+
+
+def test_nested_class_in_on_bar_is_skipped() -> None:
+    """A class defined inside ``on_bar`` should not have its method
+    bodies analysed as entry-path predicates either.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                class Inner:
+                    def helper(self):
+                        if close < -50:
+                            return False
+                        return True
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+
+
+def test_unknown_and_conjunct_propagates_to_nested_body() -> None:
+    """An unknown AND conjunct on an outer ``if`` test must taint
+    nested groups — those nested groups only fire when the unknown
+    ancestor conjunct is also true, so their recognised mask is still
+    only an upper bound on the real predicate.
+
+    Without propagation, ``if close > 0 and self.custom_ok(bar):``
+    /``if volume > 0:`` emitted a clean nested group whose
+    ``volume > 0`` + ``close > 0`` ancestor carried the report to
+    ``COVERAGE_OK`` even though ``self.custom_ok`` could narrow the
+    real entry path to zero.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    if volume > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unknown_and_conjunct_propagates_through_or_into_nested_body() -> None:
+    """The OR-wrapped variant: an unknown AND ancestor must still
+    propagate even when an intermediate ``if`` test is an OR, so the
+    deepest nested group inherits the unknown narrowing.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    if volume > 0 or close > 50:
+                        if close > 25:
+                            pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_literal_true_and_conjunct_does_not_taint_group() -> None:
+    """A statically-true literal AND-conjunct (``and True``) is a
+    no-op gate. The recognised siblings' mask is exact, so the
+    aggregator must keep ``COVERAGE_OK`` rather than refusing to use
+    a recognised firing leg as positive evidence.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and True:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_literal_truthy_constants_do_not_taint_group() -> None:
+    """Other statically-decidable literal constants (non-zero ints,
+    non-empty strings) follow the same rule as ``True``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and 1 and "enabled":
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_constant_compare_does_not_taint_group() -> None:
+    """A statically-decidable AND-conjunct comparison (e.g. ``1 < 2``)
+    has no data-dependent operand, so ``_build_subcond`` returns
+    ``None``. That ``None`` previously tainted the group as having an
+    unknown conjunct and demoted the report from ``COVERAGE_OK`` to
+    ``UNKNOWN_LOW_COVERAGE``. The aggregator should keep
+    ``COVERAGE_OK`` because the recognised siblings' mask is still
+    exact.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and 1 < 2:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_named_constant_compare_does_not_taint_group() -> None:
+    """The named-constant variant of the above: a module-level
+    ``LIMIT = 1`` resolves through ``name_periods`` so both operands
+    of ``LIMIT == 1`` are constants; the group must stay
+    ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        LIMIT = 1
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and LIMIT == 1:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_literal_false_and_conjunct_makes_predicate_unreachable() -> None:
+    """A statically-false literal AND-conjunct (``and False``) makes
+    the entire predicate unreachable. The recognised siblings'
+    ``close > 0`` mask must NOT be allowed to carry the report to
+    ``COVERAGE_OK`` — the real entry path is dead.
+
+    With no live ``if`` predicates anywhere in ``on_bar``, the probe
+    has no recognised indicator subconditions to score and must
+    classify as ``UNKNOWN_LOW_COVERAGE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and False:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_false_compare_makes_predicate_unreachable() -> None:
+    """A statically-false constant comparison (``1 < 0``) is the
+    Compare-shaped analogue of ``and False`` — same short-circuit
+    rule applies.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and 1 < 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_false_named_constant_compare_makes_predicate_unreachable() -> None:
+    """The named-constant variant: a module-level ``LIMIT = 1``
+    paired with ``LIMIT == 0`` is statically false and must take the
+    unreachable short-circuit path.
+    """
+    code = textwrap.dedent(
+        """
+        LIMIT = 1
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and LIMIT == 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_false_conjunct_does_not_block_sibling_predicate() -> None:
+    """A dead ``if close > 0 and False:`` next to a live
+    ``if close > 0:`` must not poison the live predicate's report.
+    The live entry path still produces ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and False:
+                    pass
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_static_false_conjunct_routes_to_orelse() -> None:
+    """An ``if X and False: ... else: <live entry>`` must still pick
+    up the live entry from the orelse branch — it's the always-taken
+    path.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and False:
+                    pass
+                else:
+                    if close > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_static_false_arithmetic_compare_is_unreachable() -> None:
+    """A constant-only ``Compare`` whose operands are arithmetic
+    ``BinOp`` expressions (e.g. ``1 + 1 == 3``) must be evaluated, not
+    silently dropped. Previously ``_compare_is_static_constant``
+    accepted it (``_build_operand`` folds ``BinOp`` of constants) but
+    ``_evaluate_static_predicate`` couldn't fold the ``BinOp`` and
+    returned ``None``, so the term slipped through as a no-op skip
+    and the surviving ``close > 0`` reported ``COVERAGE_OK``. The
+    arithmetic-folding scalar resolver now sees ``1 + 1 == 3`` as
+    statically false, the AND short-circuits, and the predicate is
+    reported unreachable.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (1 + 1 == 3):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_true_arithmetic_compare_is_no_op() -> None:
+    """The matching truthy polarity: ``1 + 1 == 2`` is statically
+    true, so the AND-conjunct is a no-op gate and the recognised
+    sibling's mask remains exact — ``COVERAGE_OK`` is correct.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (1 + 1 == 2):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_unfoldable_static_constant_compare_is_unknown() -> None:
+    """A constant-only Compare we genuinely cannot fold (e.g. an
+    ``ast.Mod`` ``BinOp`` operand the static-scalar resolver does not
+    handle) must NOT silently be skipped. The recognised siblings'
+    mask is at best an upper bound on the real predicate, so the
+    aggregator sees the group as unknown-tainted and refuses to use
+    the recognised firing leg as positive evidence.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (5 % 2 == 0):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
