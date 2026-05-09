@@ -731,6 +731,11 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
     # own ``ClassDef`` so a sibling helper class can't pre-empt the
     # strategy's bare-name attribute bindings.
     strategy_class = _find_strategy_class(tree, on_bar)
+    # ``bar_name`` is the actual third positional parameter name on
+    # ``on_bar``. The symbol recognisers historically hard-coded
+    # ``"bar"`` and silently dropped the gate when the strategy named
+    # it ``candle`` / ``b`` — see :func:`_bar_param_name`.
+    bar_name = _bar_param_name(on_bar)
     name_periods = _collect_name_periods(tree, function_node=None, strategy_class=strategy_class)
     # String-constant bindings (``TARGET_SYMBOL = "BBB"``) — used by
     # ``_symbol_gate`` so ``bar.symbol == TARGET_SYMBOL`` resolves to
@@ -866,7 +871,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         own_symbols: Optional[set] = None
         for term in _flatten_top_terms(test):
             if isinstance(term, ast.Compare):
-                sym = _symbol_gate(term, name_strings)
+                sym = _symbol_gate(term, name_strings, bar_name)
                 if sym is not None:
                     # Multiple ``bar.symbol == X`` gates within a single
                     # ``and`` are conjoined, so a second different literal
@@ -893,7 +898,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             # only the surviving Compare conjuncts.
             if isinstance(term, ast.BoolOp) and isinstance(term.op, ast.Or):
                 or_compound = _build_compound_or_subcond(
-                    term, name_periods, name_evaluators, name_strings
+                    term, name_periods, name_evaluators, name_strings, bar_name
                 )
                 if or_compound is not None:
                     own_subs.append(or_compound)
@@ -988,7 +993,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # the nested-OR helper: emit an always-true mask scoped
                 # by the leg's symbol so the aggregator counts AAPL bars
                 # as a firing leg.
-                sym = _symbol_gate(leg, name_strings)
+                sym = _symbol_gate(leg, name_strings, bar_name)
                 if sym is not None:
                     own_subs.append(
                         _Subcond(
@@ -1012,7 +1017,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # the disjunction needs to test. Drops cleanly to None
                 # when no inner term is recognisable.
                 compound = _build_compound_and_subcond(
-                    leg, name_periods, name_evaluators, name_strings
+                    leg, name_periods, name_evaluators, name_strings, bar_name
                 )
                 if compound is not None:
                     own_subs.append(compound)
@@ -1122,7 +1127,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     # implicit symbol filter for subsequent siblings
                     # rather than emitting a coverage row for the
                     # guard itself.
-                    guard_syms = _early_return_symbol_guard(stmt, name_strings)
+                    guard_syms = _early_return_symbol_guard(stmt, name_strings, bar_name)
                     if guard_syms is not None:
                         current_symbols = _intersect_symbols(current_symbols, guard_syms)
                         continue
@@ -1303,8 +1308,9 @@ def _is_return_only_body(stmts: List[ast.stmt]) -> bool:
 def _early_return_symbol_guard(
     stmt: ast.If,
     name_strings: Optional[Dict[str, str]] = None,
+    bar_name: str = "bar",
 ) -> Optional[set]:
-    """Detect ``if bar.symbol != "X": return`` (or ``not in (...)``).
+    """Detect ``if <bar>.symbol != "X": return`` (or ``not in (...)``).
 
     Returns the set of symbols the strategy is implicitly restricted to
     AFTER the guard has run — i.e. the symbols whose code path
@@ -1316,7 +1322,12 @@ def _early_return_symbol_guard(
     side-effecting bodies aren't recognised because the implication
     isn't unambiguously "skip all but X".
 
-    Recognised shapes:
+    ``bar_name`` is the actual third positional parameter name of the
+    strategy's ``on_bar``. The safety gate only enforces arity, so
+    valid strategies may name it ``candle`` or ``b``; hard-coding
+    ``"bar"`` would silently drop the guard for those.
+
+    Recognised shapes (with ``bar_name='bar'`` shown for brevity):
 
     - ``if bar.symbol != "X": return`` → ``{"X"}``
     - ``if bar.symbol != TARGET_SYMBOL: return`` (with
@@ -1350,7 +1361,7 @@ def _early_return_symbol_guard(
         return (
             isinstance(n, ast.Attribute)
             and isinstance(n.value, ast.Name)
-            and n.value.id == "bar"
+            and n.value.id == bar_name
             and n.attr == "symbol"
         )
 
@@ -1400,15 +1411,24 @@ def _early_return_symbol_guard(
 def _symbol_gate(
     node: ast.Compare,
     name_strings: Optional[Dict[str, str]] = None,
+    bar_name: str = "bar",
 ) -> Optional[set]:
-    """Detect a symbol gate on ``bar.symbol``.
+    """Detect a symbol gate on ``<bar>.symbol``.
 
     Returns the set of allowed symbols when the comparison constrains
     the live symbol; ``None`` otherwise. Used to scope a group's
     evaluation to the matching DataFrames rather than evaluating
     against every symbol in the universe.
 
-    Recognised shapes:
+    ``bar_name`` is the actual third positional parameter name of the
+    strategy's ``on_bar`` (the safety gate only enforces arity, so
+    valid strategies may name it ``candle`` or ``b``). Hard-coding
+    ``"bar"`` here silently dropped the gate for those strategies and
+    a sibling price predicate would then evaluate against every
+    fetched DataFrame, letting an unrelated symbol satisfy the
+    predicate and falsely flag ``COVERAGE_OK``.
+
+    Recognised shapes (with ``bar_name='bar'`` shown for brevity):
 
     - ``bar.symbol == "X"`` / ``"X" == bar.symbol`` → ``{"X"}``
     - ``bar.symbol == TARGET`` (with a string-constant binding via
@@ -1432,7 +1452,7 @@ def _symbol_gate(
         return (
             isinstance(n, ast.Attribute)
             and isinstance(n.value, ast.Name)
-            and n.value.id == "bar"
+            and n.value.id == bar_name
             and n.attr == "symbol"
         )
 
@@ -1576,6 +1596,42 @@ def _intersect_symbols(a: Optional[set], b: Optional[set]) -> Optional[set]:
     if b is None:
         return a
     return a & b
+
+
+def _bar_param_name(on_bar: ast.AST) -> str:
+    """Return the parameter name the strategy uses for the bar argument.
+
+    The safety gate only enforces ``on_bar`` arity (self/cls + ctx +
+    bar) and the harness calls positionally, so a valid strategy may
+    write ``def on_bar(self, ctx, candle)`` and reference
+    ``candle.symbol`` / ``candle.close`` throughout. The symbol
+    recognisers (:func:`_symbol_gate`,
+    :func:`_early_return_symbol_guard`) match the receiver's ``Name``
+    id and historically hard-coded ``"bar"`` — for a strategy that
+    renamed it, the symbol gate was silently dropped while
+    :func:`_column_from` (which only checks the attribute) still
+    treated ``candle.close`` as data, so an unrelated DataFrame could
+    satisfy a price predicate and the report falsely flipped to
+    ``COVERAGE_OK``.
+
+    Returns the third positional parameter name when present (after
+    ``self``/``cls`` and ``ctx``). Falls back to ``"bar"`` for module-
+    level helper functions (which have no ``self``) where the bar
+    parameter is the second positional argument, and ultimately for
+    free functions / fewer-args shapes the gate doesn't recognise as
+    canonical entry points anyway.
+    """
+    args = getattr(on_bar, "args", None)
+    if args is None:
+        return "bar"
+    posargs = list(getattr(args, "args", []) or [])
+    if len(posargs) >= 3:
+        # Method form ``def on_bar(self, ctx, bar):``
+        return posargs[2].arg
+    if len(posargs) == 2:
+        # Free-function form ``def on_bar(ctx, bar):``
+        return posargs[1].arg
+    return "bar"
 
 
 def _find_on_bar(tree: ast.AST) -> Optional[ast.AST]:
@@ -2026,6 +2082,7 @@ def _build_compound_and_subcond(
     name_periods: Dict[str, int],
     name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
     name_strings: Optional[Dict[str, str]] = None,
+    bar_name: str = "bar",
 ) -> Optional[_Subcond]:
     """Build a single subcond for an ``and``-conjunction inside an OR leg.
 
@@ -2057,7 +2114,7 @@ def _build_compound_and_subcond(
             # subcond carries a per-leg filter; otherwise the price/
             # indicator mask would evaluate against every DataFrame and
             # an unrelated symbol could appear to satisfy the leg.
-            sym = _symbol_gate(term, name_strings)
+            sym = _symbol_gate(term, name_strings, bar_name)
             if sym is not None:
                 if leg_symbols is None:
                     leg_symbols = set(sym)
@@ -2120,6 +2177,7 @@ def _build_compound_or_subcond(
     name_periods: Dict[str, int],
     name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
     name_strings: Optional[Dict[str, str]] = None,
+    bar_name: str = "bar",
 ) -> Optional[_Subcond]:
     """Build a single subcond for an ``or``-disjunction inside a larger
     AND predicate.
@@ -2148,7 +2206,7 @@ def _build_compound_or_subcond(
             # collapses to just ``close > 100`` evaluated against every
             # symbol — an unrelated symbol then satisfies the predicate
             # and the probe falsely reports COVERAGE_OK.
-            sym = _symbol_gate(term, name_strings)
+            sym = _symbol_gate(term, name_strings, bar_name)
             if sym is not None:
                 inner.append(
                     _Subcond(
@@ -2160,7 +2218,9 @@ def _build_compound_or_subcond(
                 continue
             sub = _build_subcond(term, name_periods, name_evaluators)
         elif isinstance(term, ast.BoolOp) and isinstance(term.op, ast.And):
-            sub = _build_compound_and_subcond(term, name_periods, name_evaluators, name_strings)
+            sub = _build_compound_and_subcond(
+                term, name_periods, name_evaluators, name_strings, bar_name
+            )
         else:
             sub = _build_truthy_subcond(term, name_periods, name_evaluators)
         if sub is not None:
