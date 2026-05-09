@@ -193,13 +193,37 @@ def sandbox_image() -> str:
     return os.environ.get("AGENT_PROVISIONING_SANDBOX_IMAGE", "khala-agent-sandbox:latest")
 
 
-def sandbox_network() -> str:
-    """Docker bridge network for sandbox containers.
+def sandbox_stack_template_path() -> Path:
+    """Path to the per-sandbox compose template (rendered at provision time).
 
-    Created on demand by :func:`provisioner.ensure_network` the first time a
-    sandbox is provisioned; override with ``AGENT_PROVISIONING_SANDBOX_NETWORK``.
+    Override with ``AGENT_PROVISIONING_SANDBOX_STACK_TEMPLATE`` to point at a
+    different template (e.g. for tests). Defaults to the
+    ``backend/agent_sandbox_image/sandbox-stack.yml`` shipped in-tree.
     """
-    return os.environ.get("AGENT_PROVISIONING_SANDBOX_NETWORK", "khala-sandbox")
+    override = os.environ.get("AGENT_PROVISIONING_SANDBOX_STACK_TEMPLATE")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[3] / "agent_sandbox_image" / "sandbox-stack.yml"
+
+
+def sandbox_stack_assets_dir() -> Path:
+    """Directory holding sandbox-stack support files (postgres-init.sql,
+    prometheus.yml, grafana-provisioning/) referenced by the compose template
+    via relative paths.
+    """
+    return sandbox_stack_template_path().parent
+
+
+def sandbox_project_dir(project_name: str) -> Path:
+    """Per-sandbox working directory under AGENT_CACHE.
+
+    The provisioner writes the rendered compose file plus copies of the
+    support assets (postgres-init.sql, prometheus.yml, grafana-provisioning/)
+    here so each sandbox is fully self-contained on disk and ``docker compose
+    -p <name> down -v`` can clean up everything by removing this directory
+    after the stack is torn down.
+    """
+    return resolve_cache_path("agent_provisioning", "sandboxes", "stacks", project_name)
 
 
 def load(path: Path) -> dict[str, SandboxState]:

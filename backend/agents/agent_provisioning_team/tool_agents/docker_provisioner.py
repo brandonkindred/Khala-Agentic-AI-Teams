@@ -8,15 +8,25 @@ import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..models import (
-    AccessTier,
     AccessVerification,
     DeprovisionResult,
     GeneratedCredentials,
     ToolProvisionResult,
 )
-from ..shared.access_policy import get_permissions
 from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner
+
+# Every sandbox is provisioned with full access — there is no permission
+# tier ladder (#456). Tool provisioners record their canonical full set
+# here so onboarding docs / audit reports keep listing what the agent has.
+_FULL_DOCKER_PERMISSIONS: list[str] = [
+    "inspect",
+    "logs",
+    "exec",
+    "start",
+    "stop",
+    "restart",
+]
 
 
 class DockerProvisionerTool(BaseToolProvisioner):
@@ -34,16 +44,13 @@ class DockerProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> ToolProvisionResult:
         """Create and start a Docker container for the agent (idempotent)."""
         return self.run_idempotent(
             agent_id,
             credentials=credentials,
-            create=lambda _register: self._do_provision(
-                agent_id, config, credentials, access_tier
-            ),
-            reuse=lambda existing: self._on_reuse(existing, credentials, access_tier),
+            create=lambda _register: self._do_provision(agent_id, config, credentials),
+            reuse=lambda existing: self._on_reuse(existing, credentials),
         )
 
     def _do_provision(
@@ -51,7 +58,6 @@ class DockerProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> Tuple[List[str], Dict[str, Any]]:
         container_name = f"agent-{agent_id}"
         base_image = config.get("base_image", "python:3.11-slim")
@@ -97,7 +103,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
             raise RuntimeError(f"Docker run failed: {result.stderr}")
 
         container_id = result.stdout.strip()[:12]
-        permissions = get_permissions("docker", access_tier)
+        permissions = list(_FULL_DOCKER_PERMISSIONS)
 
         credentials.extra["container_id"] = container_id
         credentials.extra["container_name"] = container_name
@@ -116,25 +122,19 @@ class DockerProvisionerTool(BaseToolProvisioner):
         self,
         existing: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> List[str]:
         credentials.extra["container_id"] = existing.get("container_id", "")
         credentials.extra["container_name"] = existing.get("container_name", "")
         credentials.extra["workspace_path"] = existing.get("workspace_path", "")
-        return get_permissions("docker", access_tier)
+        return list(_FULL_DOCKER_PERMISSIONS)
 
-    def verify_access(
-        self,
-        agent_id: str,
-        expected_tier: AccessTier,
-    ) -> AccessVerification:
-        """Verify Docker container access."""
+    def verify_access(self, agent_id: str) -> AccessVerification:
+        """Verify the Docker container is reachable."""
         container_info = self._state.get(agent_id)
 
         if not container_info:
             return self._make_verification(
                 passed=False,
-                expected_tier=expected_tier,
                 actual_permissions=[],
                 errors=[f"No container found for agent {agent_id}"],
             )
@@ -150,23 +150,18 @@ class DockerProvisionerTool(BaseToolProvisioner):
             if result.returncode != 0:
                 return self._make_verification(
                     passed=False,
-                    expected_tier=expected_tier,
                     actual_permissions=[],
                     errors=["Container not accessible"],
                 )
 
-            actual_permissions = get_permissions("docker", expected_tier)
-
             return self._make_verification(
                 passed=True,
-                expected_tier=expected_tier,
-                actual_permissions=actual_permissions,
+                actual_permissions=list(_FULL_DOCKER_PERMISSIONS),
             )
 
         except Exception as e:
             return self._make_verification(
                 passed=False,
-                expected_tier=expected_tier,
                 actual_permissions=[],
                 errors=[str(e)],
             )

@@ -9,7 +9,6 @@ import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from .models import (
-    AccessTier,
     DeprovisionResponse,
     Phase,
     ProvisioningResult,
@@ -81,7 +80,6 @@ class ProvisioningOrchestrator:
         self,
         agent_id: str,
         manifest_path: str,
-        access_tier: AccessTier = AccessTier.STANDARD,
         job_updater: Optional[JobUpdater] = None,
         skip_phases: Optional[set] = None,
         prior_results: Optional[Dict[str, Any]] = None,
@@ -93,7 +91,6 @@ class ProvisioningOrchestrator:
         Args:
             agent_id: Unique identifier for the agent being provisioned
             manifest_path: Path to the tool manifest YAML
-            access_tier: Requested access tier (default: STANDARD)
             job_updater: Optional callback for progress updates.
             skip_phases: Set of Phase values to skip (already completed on a prior run).
             prior_results: Dict of phase results from a prior run keyed by phase value string.
@@ -111,10 +108,13 @@ class ProvisioningOrchestrator:
         # The orchestrator is typically invoked inside its own background
         # thread, so the contextvar binding is isolated per-run.
         from .shared.logging_context import _agent_id_var, _phase_var
+
         _agent_id_var.set(agent_id)
         _phase_var.set("init")
         if skip_phases:
-            logger.info("Resuming workflow — skipping completed phases: %s", [p.value for p in skip_phases])
+            logger.info(
+                "Resuming workflow — skipping completed phases: %s", [p.value for p in skip_phases]
+            )
 
         # Tracks the latest tool_results the orchestrator has produced, so a
         # shutdown check mid-workflow can pass them to `_compensate()` to
@@ -128,7 +128,8 @@ class ProvisioningOrchestrator:
             if shutdown_event is not None and shutdown_event.is_set():
                 logger.warning(
                     "Shutdown signalled for agent=%s during %s; compensating",
-                    agent_id, phase_name,
+                    agent_id,
+                    phase_name,
                 )
                 self._compensate(agent_id, tool_results_ref)
                 raise ProvisioningShutdownError(agent_id=agent_id, phase=phase_name)
@@ -168,44 +169,61 @@ class ProvisioningOrchestrator:
             setup_result = restore_setup(prior_results["setup"])
             logger.info("Skipping SETUP (already completed)")
         else:
-            _update(current_phase=Phase.SETUP.value, progress=5, status_text="Creating Docker environment...")
+            _update(
+                current_phase=Phase.SETUP.value,
+                progress=5,
+                status_text="Creating Docker environment...",
+            )
             setup_result = run_setup(
                 agent_id=agent_id,
                 manifest=manifest,
-                access_tier=access_tier,
                 environment_store=self.environment_store,
                 docker_provisioner=self.tool_agents.get("docker_provisioner"),
                 progress_callback=lambda msg: _update(status_text=msg),
             )
             if not setup_result.success:
                 return ProvisioningResult(
-                    agent_id=agent_id, current_phase=Phase.SETUP, completed_phases=[],
-                    success=False, error=setup_result.error or "Setup failed",
+                    agent_id=agent_id,
+                    current_phase=Phase.SETUP,
+                    completed_phases=[],
+                    success=False,
+                    error=setup_result.error or "Setup failed",
                 )
 
         # -- CREDENTIAL_GENERATION --
         _set_phase(Phase.CREDENTIAL_GENERATION.value)
         _check_shutdown(Phase.CREDENTIAL_GENERATION.value)
-        if Phase.CREDENTIAL_GENERATION in skip_phases and prior_results.get("credential_generation"):
+        if Phase.CREDENTIAL_GENERATION in skip_phases and prior_results.get(
+            "credential_generation"
+        ):
             cred_result = restore_credentials(prior_results["credential_generation"])
             logger.info("Skipping CREDENTIAL_GENERATION (already completed)")
         else:
-            _update(current_phase=Phase.CREDENTIAL_GENERATION.value, progress=20, status_text="Generating credentials...")
+            _update(
+                current_phase=Phase.CREDENTIAL_GENERATION.value,
+                progress=20,
+                status_text="Generating credentials...",
+            )
             cred_result = run_credential_generation(
                 agent_id=agent_id,
                 manifest=manifest,
                 credential_store=self.credential_store,
                 progress_callback=lambda tool, done, total: _update(
-                    current_tool=tool, tools_completed=done, tools_total=total,
+                    current_tool=tool,
+                    tools_completed=done,
+                    tools_total=total,
                     status_text=f"Generating credentials for {tool}...",
                 ),
             )
             if not cred_result.success:
                 cleanup_setup(agent_id, self.environment_store)
                 return ProvisioningResult(
-                    agent_id=agent_id, current_phase=Phase.CREDENTIAL_GENERATION,
-                    completed_phases=[Phase.SETUP], environment=setup_result.environment,
-                    success=False, error=cred_result.error or "Credential generation failed",
+                    agent_id=agent_id,
+                    current_phase=Phase.CREDENTIAL_GENERATION,
+                    completed_phases=[Phase.SETUP],
+                    environment=setup_result.environment,
+                    success=False,
+                    error=cred_result.error or "Credential generation failed",
                 )
 
         # -- ACCOUNT_PROVISIONING --
@@ -216,16 +234,23 @@ class ProvisioningOrchestrator:
             logger.info("Skipping ACCOUNT_PROVISIONING (already completed)")
         else:
             _update(
-                current_phase=Phase.ACCOUNT_PROVISIONING.value, progress=35,
-                tools_total=len(manifest.tools), status_text="Provisioning tool accounts...",
+                current_phase=Phase.ACCOUNT_PROVISIONING.value,
+                progress=35,
+                tools_total=len(manifest.tools),
+                status_text="Provisioning tool accounts...",
             )
             account_result = run_account_provisioning(
-                agent_id=agent_id, manifest=manifest, credentials=cred_result.credentials,
-                access_tier=access_tier, provisioners=self.tool_agents,
+                agent_id=agent_id,
+                manifest=manifest,
+                credentials=cred_result.credentials,
+                provisioners=self.tool_agents,
                 environment_store=self.environment_store,
                 progress_callback=lambda done, total, tool: _update(
-                    current_tool=tool, tools_completed=done, tools_total=total,
-                    progress=35 + int((done / max(total, 1)) * 30), status_text=f"Provisioning {tool}...",
+                    current_tool=tool,
+                    tools_completed=done,
+                    tools_total=total,
+                    progress=35 + int((done / max(total, 1)) * 30),
+                    status_text=f"Provisioning {tool}...",
                 ),
             )
 
@@ -235,7 +260,8 @@ class ProvisioningOrchestrator:
             if not account_result.success:
                 logger.error(
                     "ACCOUNT_PROVISIONING failed for agent=%s: %s — rolling back",
-                    agent_id, account_result.error,
+                    agent_id,
+                    account_result.error,
                 )
                 self._compensate(agent_id, account_result.tool_results)
                 return ProvisioningResult(
@@ -256,10 +282,16 @@ class ProvisioningOrchestrator:
             audit_result = prior_results["access_audit"]
             logger.info("Skipping ACCESS_AUDIT (already completed)")
         else:
-            _update(current_phase=Phase.ACCESS_AUDIT.value, progress=70, status_text="Auditing access permissions...")
+            _update(
+                current_phase=Phase.ACCESS_AUDIT.value,
+                progress=70,
+                status_text="Auditing access permissions...",
+            )
             audit_result = run_access_audit(
-                agent_id=agent_id, tool_results=account_result.tool_results,
-                access_tier=access_tier, manifest=manifest, provisioners=self.tool_agents,
+                agent_id=agent_id,
+                tool_results=account_result.tool_results,
+                manifest=manifest,
+                provisioners=self.tool_agents,
                 progress_callback=lambda msg: _update(status_text=msg),
             )
 
@@ -270,13 +302,21 @@ class ProvisioningOrchestrator:
             doc_result = restore_documentation(prior_results["documentation"])
             logger.info("Skipping DOCUMENTATION (already completed)")
         else:
-            _update(current_phase=Phase.DOCUMENTATION.value, progress=85, status_text="Generating onboarding documentation...")
+            _update(
+                current_phase=Phase.DOCUMENTATION.value,
+                progress=85,
+                status_text="Generating onboarding documentation...",
+            )
             workspace_path = (
-                setup_result.environment.workspace_path if hasattr(setup_result, "environment") and setup_result.environment else "/workspace"
+                setup_result.environment.workspace_path
+                if hasattr(setup_result, "environment") and setup_result.environment
+                else "/workspace"
             )
             doc_result = run_documentation(
-                agent_id=agent_id, manifest=manifest, credentials=cred_result.credentials,
-                tool_results=account_result.tool_results, access_tier=access_tier,
+                agent_id=agent_id,
+                manifest=manifest,
+                credentials=cred_result.credentials,
+                tool_results=account_result.tool_results,
                 workspace_path=workspace_path,
                 progress_callback=lambda msg: _update(status_text=msg),
             )
@@ -284,23 +324,33 @@ class ProvisioningOrchestrator:
         # -- DELIVER --
         _set_phase(Phase.DELIVER.value)
         _check_shutdown(Phase.DELIVER.value)
-        _update(current_phase=Phase.DELIVER.value, progress=95, status_text="Finalizing provisioning...")
+        _update(
+            current_phase=Phase.DELIVER.value, progress=95, status_text="Finalizing provisioning..."
+        )
         deliver_result = run_deliver(
-            agent_id=agent_id, environment=setup_result.environment,
-            credentials=cred_result.credentials, tool_results=account_result.tool_results,
-            access_audit=audit_result, onboarding=doc_result.onboarding,
+            agent_id=agent_id,
+            environment=setup_result.environment,
+            credentials=cred_result.credentials,
+            tool_results=account_result.tool_results,
+            access_audit=audit_result,
+            onboarding=doc_result.onboarding,
             environment_store=self.environment_store,
             progress_callback=lambda msg: _update(status_text=msg),
         )
 
         final_result = build_final_result(
-            agent_id=agent_id, environment=setup_result.environment,
-            credentials=cred_result.credentials, tool_results=account_result.tool_results,
-            access_audit=audit_result, onboarding=doc_result.onboarding,
+            agent_id=agent_id,
+            environment=setup_result.environment,
+            credentials=cred_result.credentials,
+            tool_results=account_result.tool_results,
+            access_audit=audit_result,
+            onboarding=doc_result.onboarding,
             deliver_result=deliver_result,
         )
 
-        _update(current_phase=Phase.DELIVER.value, progress=100, status_text="Provisioning complete")
+        _update(
+            current_phase=Phase.DELIVER.value, progress=100, status_text="Provisioning complete"
+        )
         return final_result
 
     def _compensate(
@@ -333,9 +383,7 @@ class ProvisioningOrchestrator:
                 continue
             provisioner = self.tool_agents.get(key)
             if provisioner is None:
-                logger.warning(
-                    "Compensation: no provisioner registered for key=%s", key
-                )
+                logger.warning("Compensation: no provisioner registered for key=%s", key)
                 continue
             # Prefer persisted per-step compensations when the provisioner
             # registered any during `_do_provision`: replay in LIFO order,
@@ -361,9 +409,7 @@ class ProvisioningOrchestrator:
                     provisioner.clear_compensations(agent_id)
                     provisioner._state.delete(agent_id)
                 except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "Compensation: post-replay state cleanup failed for %s", key
-                    )
+                    logger.exception("Compensation: post-replay state cleanup failed for %s", key)
             else:
                 try:
                     provisioner.deprovision(agent_id)

@@ -21,7 +21,6 @@ from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validat
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 from ..models import (
-    AccessTier,
     DeprovisionResponse,
     ProvisioningResult,
     ProvisionJobResponse,
@@ -236,7 +235,6 @@ def _run_provisioning_background(
     job_id: str,
     agent_id: str,
     manifest_path: str,
-    access_tier: AccessTier,
     skip_phases: Optional[set] = None,
     prior_results: Optional[Dict[str, Any]] = None,
     shutdown_event: Optional[threading.Event] = None,
@@ -275,7 +273,6 @@ def _run_provisioning_background(
         result = orchestrator.run_workflow(
             agent_id=agent_id,
             manifest_path=manifest_path,
-            access_tier=access_tier,
             job_updater=job_updater,
             skip_phases=skip_phases,
             prior_results=prior_results,
@@ -314,7 +311,6 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
         job_id=job_id,
         agent_id=request.agent_id,
         manifest_path=request.manifest_path,
-        access_tier=request.access_tier.value,
     )
 
     if starter is not None:
@@ -322,7 +318,6 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
             job_id,
             request.agent_id,
             request.manifest_path,
-            request.access_tier.value,
             skip_phases=None,
             prior_results=None,
         )
@@ -336,7 +331,6 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
         job_id,
         request.agent_id,
         request.manifest_path,
-        request.access_tier,
     )
 
     return ProvisionJobResponse(
@@ -479,7 +473,6 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
 
     phase_values = {ph.value for ph in Phase}
     completed_values = [p for p in completed if p in phase_values]
-    access_tier_str = data.get("access_tier", "standard")
 
     starter = _temporal_starter()
     update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
@@ -489,7 +482,6 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
             job_id,
             agent_id,
             manifest_path,
-            access_tier_str,
             skip_phases=completed_values,
             prior_results=phase_results,
         )
@@ -505,7 +497,6 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
         job_id,
         agent_id,
         manifest_path,
-        access_tier_str,
         skip_phases=skip,
         prior_results=phase_results,
     )
@@ -534,7 +525,6 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
     if not agent_id or not manifest_path:
         raise HTTPException(status_code=400, detail="Job is missing agent_id or manifest_path.")
 
-    access_tier_str = data.get("access_tier", "standard")
     starter = _temporal_starter()
     store_reset_job(job_id)
 
@@ -543,7 +533,6 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
             job_id,
             agent_id,
             manifest_path,
-            access_tier_str,
             skip_phases=None,
             prior_results=None,
         )
@@ -558,7 +547,6 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
         job_id,
         agent_id,
         manifest_path,
-        access_tier_str,
     )
 
     return ProvisionJobResponse(

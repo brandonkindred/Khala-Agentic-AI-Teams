@@ -30,7 +30,6 @@ def start_provisioning_workflow(
     job_id: str,
     agent_id: str,
     manifest_path: str,
-    access_tier_str: str,
     skip_phases: Optional[list[str]] = None,
     prior_results: Optional[dict[str, Any]] = None,
 ) -> None:
@@ -51,7 +50,6 @@ def start_provisioning_workflow(
                 job_id,
                 agent_id,
                 manifest_path,
-                access_tier_str,
                 list(skip_phases) if skip_phases else None,
                 dict(prior_results) if prior_results else None,
             ],

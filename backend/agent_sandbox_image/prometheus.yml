@@ -1,0 +1,16 @@
+# Per-sandbox Prometheus config. Scrapes the agent shim's /metrics
+# endpoint plus Prometheus itself. Hosts resolve via the sandbox's
+# private docker compose network.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: agent
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["agent:8090"]

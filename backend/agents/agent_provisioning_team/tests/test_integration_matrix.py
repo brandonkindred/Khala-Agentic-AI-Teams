@@ -24,7 +24,6 @@ from typing import Any, Dict, List, Tuple
 import pytest
 
 from agent_provisioning_team.models import (
-    AccessTier,
     DeprovisionResult,
     EnvironmentInfo,
     GeneratedCredentials,
@@ -86,7 +85,7 @@ class _FakeProvisioner(BaseToolProvisioner):
         self._seeded_comps: Dict[str, List[CompensationRecord]] = {}
         self._state = _FakeState()
 
-    def provision(self, agent_id, config, credentials, access_tier):
+    def provision(self, agent_id, config, credentials):
         if self.fail:
             return self._make_error_result(f"{self.tool_name} exploded")
         self.provisioned.append(agent_id)
@@ -96,10 +95,9 @@ class _FakeProvisioner(BaseToolProvisioner):
             details={"name": f"{self.tool_name}-{agent_id}"},
         )
 
-    def verify_access(self, agent_id, expected_tier):
+    def verify_access(self, agent_id):
         return self._make_verification(
             passed=True,
-            expected_tier=expected_tier,
             actual_permissions=["read", "write"],
         )
 
@@ -268,7 +266,6 @@ class TestProvisionerScaffolding:
             agent_id="agent-timeout",
             config={"workspace_path": str(tmp_path / "ws"), "generate_ssh_key": True},
             credentials=creds,
-            access_tier=AccessTier.STANDARD,
         )
         assert result.success is False
         assert result.error is not None
@@ -296,7 +293,6 @@ class TestProvisionerScaffolding:
             agent_id="agent-1",
             config={"permissions": ["read"]},
             credentials=GeneratedCredentials(tool_name="myservice"),
-            access_tier=AccessTier.STANDARD,
         )
         assert first.success is True
         assert first.details.get("reused") is not True
@@ -310,7 +306,6 @@ class TestProvisionerScaffolding:
             agent_id="agent-1",
             config={"permissions": ["read"]},
             credentials=GeneratedCredentials(tool_name="myservice"),
-            access_tier=AccessTier.STANDARD,
         )
         assert second.success is True
         assert second.details.get("reused") is True
@@ -452,12 +447,10 @@ version: "1.0"
 tools:
   - name: toola
     provisioner: postgres_provisioner
-    access_level: standard
     config: {database_prefix: "a_"}
     onboarding: {description: "a"}
   - name: toolb
     provisioner: redis_provisioner
-    access_level: standard
     config: {key_prefix: "b:"}
     onboarding: {description: "b"}
 """
@@ -501,7 +494,6 @@ class TestOrchestratorCompensation:
         result = orch.run_workflow(
             agent_id="agent-1",
             manifest_path=manifest,
-            access_tier=AccessTier.STANDARD,
         )
 
         assert result.success is False
@@ -556,7 +548,6 @@ class TestOrchestratorCompensation:
         result = orch.run_workflow(
             agent_id="agent-2",
             manifest_path=manifest,
-            access_tier=AccessTier.STANDARD,
         )
 
         assert result.success is False
@@ -617,7 +608,6 @@ class TestOrchestratorCompensation:
         result = orch.run_workflow(
             agent_id="agent-r1",
             manifest_path=manifest,
-            access_tier=AccessTier.STANDARD,
         )
         assert result.success is False
 
@@ -705,7 +695,7 @@ class _RegisteringProvisioner(BaseToolProvisioner):
         self.fail_at_end = fail_at_end
         self.replayed: List[Tuple[str, Dict[str, Any]]] = []
 
-    def provision(self, agent_id, config, credentials, access_tier):
+    def provision(self, agent_id, config, credentials):
         def _create(register):
             for i, kind in enumerate(self.kinds):
                 register(kind, {"i": i, "name": kind})
@@ -715,10 +705,8 @@ class _RegisteringProvisioner(BaseToolProvisioner):
 
         return self.run_idempotent(agent_id, credentials=credentials, create=_create)
 
-    def verify_access(self, agent_id, expected_tier):
-        return self._make_verification(
-            passed=True, expected_tier=expected_tier, actual_permissions=[]
-        )
+    def verify_access(self, agent_id):
+        return self._make_verification(passed=True, actual_permissions=[])
 
     def deprovision(self, agent_id):
         return DeprovisionResult(tool_name=self.tool_name, success=True)
@@ -741,7 +729,6 @@ class TestCompensationRegistration:
             agent_id="agent-1",
             config={},
             credentials=GeneratedCredentials(tool_name="demo"),
-            access_tier=AccessTier.STANDARD,
         )
         assert result.success is False
         assert result.error is not None and "boom" in result.error
@@ -772,7 +759,6 @@ class TestCompensationRegistration:
             agent_id="agent-cold",
             config={},
             credentials=GeneratedCredentials(tool_name="demo"),
-            access_tier=AccessTier.STANDARD,
         )
 
         # Fresh instance — reads from the same storage dir.

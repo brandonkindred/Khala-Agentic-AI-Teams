@@ -22,7 +22,6 @@ import type {
   ProvisionStatusResponse,
   ProvisionJobSummary,
   AgentStatusResponse,
-  AccessTier,
 } from '../../models';
 import { PROVISIONING_PHASES } from '../../models';
 
@@ -79,7 +78,6 @@ export class AgentProvisioningDashboardComponent implements OnInit, OnDestroy {
   agentsLoading = false;
 
   readonly phases = PROVISIONING_PHASES;
-  readonly accessTiers: AccessTier[] = ['minimal', 'standard', 'elevated', 'full'];
 
   readonly jobColumns = ['job_id', 'agent_id', 'status', 'current_phase', 'progress'];
   readonly agentColumns = ['agent_id', 'status', 'tools', 'actions'];
@@ -88,7 +86,6 @@ export class AgentProvisioningDashboardComponent implements OnInit, OnDestroy {
     this.provisionForm = this.fb.group({
       agent_id: ['', Validators.required],
       manifest_path: ['default.yaml'],
-      access_tier: ['standard' as AccessTier],
       workspace_path: [''],
     });
   }
@@ -128,7 +125,6 @@ export class AgentProvisioningDashboardComponent implements OnInit, OnDestroy {
     const request: ProvisionRequest = {
       agent_id: this.provisionForm.value.agent_id,
       manifest_path: this.provisionForm.value.manifest_path || 'default.yaml',
-      access_tier: this.provisionForm.value.access_tier || 'standard',
       workspace_path: this.provisionForm.value.workspace_path || undefined,
     };
 
@@ -240,7 +236,6 @@ export class AgentProvisioningDashboardComponent implements OnInit, OnDestroy {
     this.provisionForm.reset({
       agent_id: '',
       manifest_path: 'default.yaml',
-      access_tier: 'standard',
       workspace_path: '',
     });
   }

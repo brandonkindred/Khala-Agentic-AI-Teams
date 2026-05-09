@@ -7,7 +7,6 @@ This is phase 3 of the provisioning workflow.
 from typing import Callable, Dict, List, Optional
 
 from ..models import (
-    AccessTier,
     AccountProvisioningResult,
     GeneratedCredentials,
     ToolProvisionResult,
@@ -27,7 +26,6 @@ def run_account_provisioning(
     agent_id: str,
     manifest: ToolManifest,
     credentials: Dict[str, GeneratedCredentials],
-    access_tier: AccessTier,
     provisioners: Optional[Dict[str, ToolProvisionerInterface]] = None,
     environment_store: Optional[EnvironmentStore] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
@@ -36,12 +34,13 @@ def run_account_provisioning(
     Execute the account provisioning phase.
 
     Creates accounts/resources in each tool defined in the manifest.
+    Every tool is provisioned with full access; the per-tier permission
+    ladder was removed because Khala is a personal-use project (#456).
 
     Args:
         agent_id: Unique identifier for the agent
         manifest: Loaded tool manifest
         credentials: Pre-generated credentials per tool
-        access_tier: Requested access tier
         provisioners: Dict of provisioner instances (keyed by provisioner name)
         environment_store: Store for tracking tool provisioning
         progress_callback: Callback(done, total, tool_name) for progress updates
@@ -88,15 +87,11 @@ def run_account_provisioning(
             )
             continue
 
-        tool_access_level = tool.access_level
-        tool_tier = _map_access_level_to_tier(tool_access_level, access_tier)
-
         try:
             result = provisioner.provision(
                 agent_id=agent_id,
                 config=tool.config,
                 credentials=tool_creds,
-                access_tier=tool_tier,
             )
 
             # Stamp the registry key so _compensate() can look the provisioner
@@ -131,24 +126,6 @@ def run_account_provisioning(
         tools_total=total,
         error=None if all_success else "One or more tools failed to provision",
     )
-
-
-def _map_access_level_to_tier(
-    tool_access_level: str,
-    default_tier: AccessTier,
-) -> AccessTier:
-    """Map a tool's access_level string to an AccessTier enum."""
-    level_map = {
-        "read_only": AccessTier.MINIMAL,
-        "minimal": AccessTier.MINIMAL,
-        "read_write": AccessTier.STANDARD,
-        "standard": AccessTier.STANDARD,
-        "contributor": AccessTier.STANDARD,
-        "admin": AccessTier.ELEVATED,
-        "elevated": AccessTier.ELEVATED,
-        "full": AccessTier.FULL,
-    }
-    return level_map.get(tool_access_level.lower(), default_tier)
 
 
 def deprovision_tools(

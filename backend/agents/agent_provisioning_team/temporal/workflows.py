@@ -60,11 +60,10 @@ class AgentProvisioningWorkflow:
         job_id: str,
         agent_id: str,
         manifest_path: str,
-        access_tier_str: str,
     ) -> None:
         await workflow.execute_activity(
             _activities.run_provisioning_activity,
-            args=[job_id, agent_id, manifest_path, access_tier_str],
+            args=[job_id, agent_id, manifest_path],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PROVISIONING_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -81,7 +80,6 @@ class AgentProvisioningWorkflowV2:
         job_id: str,
         agent_id: str,
         manifest_path: str,
-        access_tier_str: str,
         skip_phases: list[str] | None = None,
         prior_results: dict[str, Any] | None = None,
     ) -> None:
@@ -92,7 +90,7 @@ class AgentProvisioningWorkflowV2:
         setup_prior = prior.get("setup") if "setup" in skip else None
         setup_result = await workflow.execute_activity(
             _activities.setup_activity_v2,
-            args=[job_id, agent_id, manifest_path, access_tier_str, setup_prior],
+            args=[job_id, agent_id, manifest_path, setup_prior],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -145,7 +143,6 @@ class AgentProvisioningWorkflowV2:
                         agent_id,
                         tool_name,
                         manifest_path,
-                        access_tier_str,
                         creds_dump,
                         idx,
                         tools_total,
@@ -206,7 +203,7 @@ class AgentProvisioningWorkflowV2:
         audit_prior = prior.get("access_audit") if "access_audit" in skip else None
         audit_dump = await workflow.execute_activity(
             _activities.audit_activity_v2,
-            args=[job_id, agent_id, manifest_path, access_tier_str, tool_results_dump, audit_prior],
+            args=[job_id, agent_id, manifest_path, tool_results_dump, audit_prior],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -223,7 +220,6 @@ class AgentProvisioningWorkflowV2:
                 job_id,
                 agent_id,
                 manifest_path,
-                access_tier_str,
                 credentials_by_tool,
                 tool_results_dump,
                 workspace_path,

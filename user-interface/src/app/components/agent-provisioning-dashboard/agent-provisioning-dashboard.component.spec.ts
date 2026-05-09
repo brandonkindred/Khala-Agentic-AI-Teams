@@ -50,7 +50,7 @@ describe('AgentProvisioningDashboardComponent', () => {
   });
 
   it('onSubmitProvision should call startProvisioning when form valid', () => {
-    component.provisionForm.patchValue({ agent_id: 'agent1', manifest_path: 'default.yaml', access_tier: 'standard' });
+    component.provisionForm.patchValue({ agent_id: 'agent1', manifest_path: 'default.yaml' });
     component.onSubmitProvision();
     expect(apiSpy.startProvisioning).toHaveBeenCalled();
     expect(component.currentJobId).toBe('j1');

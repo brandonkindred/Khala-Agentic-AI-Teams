@@ -1,13 +1,24 @@
-"""Thin asyncio wrapper around ``docker run``/``docker inspect``/``docker rm``.
+"""Per-sandbox docker-compose stack lifecycle.
 
-Module-level coroutines (not a class) so tests can patch them cleanly via
-``patch("agent_provisioning_team.sandbox.provisioner.run_container", ...)``.
-Runs one ephemeral container per agent.
+Each agent run gets its own self-contained compose project: the agent
+container plus a sandbox-internal Postgres, Temporal, Prometheus, and
+Grafana. No service in this stack joins the long-lived ``khala-stack``
+compose network — every supporting service runs *inside* the sandbox so
+the agent can be tested as if it were in a live environment without
+touching anything outside.
 
-The hardening flags from issue #255 (cap-drop, read-only, security-opt,
-resource caps, loopback-bound ports) are assembled here rather than in the
-shared ``tool_agents/docker_provisioner.py`` so the existing tool stays
-unchanged for the non-sandbox provisioning path.
+The lifecycle layer (``sandbox/lifecycle.py``) calls these helpers via
+the same public surface that the previous single-container provisioner
+exposed: ``run_container`` brings a stack up, ``inspect_host_port``
+resolves the agent's exposed port, ``stop_container`` tears the stack
+down. ``container_id`` is reused as the *agent* container's id so the
+existing state schema (``SandboxState.container_id``) survives.
+
+History: this module previously launched a single hardened container on
+the shared ``khala-sandbox`` bridge and forwarded credentials to whatever
+Postgres/Temporal happened to be running on the host. That model was
+replaced (#456) when the project moved to single-operator personal use:
+"one environment per sandbox, fully isolated, fully equipped."
 """
 
 from __future__ import annotations
@@ -17,98 +28,71 @@ import hashlib
 import logging
 import os
 import re
+import secrets
+import shutil
 from pathlib import Path
 
-from .state import sandbox_image, sandbox_network
+from .state import (
+    sandbox_image,
+    sandbox_project_dir,
+    sandbox_stack_assets_dir,
+    sandbox_stack_template_path,
+)
 
 logger = logging.getLogger(__name__)
 
-# Non-sensitive host env vars forwarded into the sandbox via `-e KEY=VALUE`.
-# Secrets (POSTGRES_USER/PASSWORD/DB, *_API_KEY) are NEVER on this path — they
-# flow through a 0400 bind-mounted file the in-sandbox loader reads once at
-# startup. See `_write_sandbox_secrets_file` and issue #257.
+# Non-sensitive host env vars forwarded into the *agent* container. The
+# stack itself is parameterised via the rendered compose file; everything
+# secret (Postgres password, *_API_KEY) flows through the 0400 secrets
+# file bind-mounted into the agent service only.
 _FORWARDED_ENV = (
-    "POSTGRES_HOST",
-    "POSTGRES_PORT",
     "LLM_PROVIDER",
     "LLM_BASE_URL",
     "LLM_MODEL",
 )
 
-# In-sandbox path where the per-sandbox secrets file is bind-mounted read-only.
-_SANDBOX_SECRETS_TARGET = "/run/secrets/sandbox-env"
-
 _CONTAINER_NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 
 class DockerError(RuntimeError):
-    """Raised when a docker CLI invocation exits non-zero."""
+    """Raised when a docker / docker-compose CLI invocation exits non-zero."""
 
 
 def _fail(argv: list[str], rc: int, stderr: str) -> DockerError:
     return DockerError(f"docker failed (exit {rc}): {' '.join(argv)}\n{stderr[:500]}")
 
 
-def _secrets_host_path(container_name: str) -> Path:
-    """Deterministic host path for a sandbox's 0400 secrets file.
+def _secrets_host_path(project_name: str) -> Path:
+    """Deterministic 0400 secrets file path for ``project_name``.
 
-    Keyed off ``container_name`` so teardown can clean it up without needing to
-    remember the path separately. Lives under ``AGENT_CACHE`` for parity with
-    the rest of the provisioning state.
+    Lives next to the per-sandbox compose project directory so a single
+    ``shutil.rmtree`` of that directory cleans up the whole stack's host
+    footprint at teardown.
     """
-    cache = os.environ.get("AGENT_CACHE", "/tmp/agents")
-    return Path(cache) / "agent_provisioning" / "sandboxes" / "secrets" / f"{container_name}.env"
+    return sandbox_project_dir(project_name) / "agent.env"
 
 
-def _team_postgres_credentials(team: str) -> tuple[str | None, str | None, str | None]:
-    """Resolve team-scoped ``(user, password, db)`` for a sandbox's Postgres creds.
+def _write_sandbox_secrets_file(project_name: str, *, postgres_password: str) -> Path:
+    """Atomically write the 0400 ``KEY=VALUE`` secrets file for the agent.
 
-    Reads ``POSTGRES_PASSWORD_SANDBOX_<TEAM>`` and uses the convention
-    ``sandbox_<team>`` for both role and database. If the team-scoped password
-    is unset, falls back to the global ``POSTGRES_USER`` / ``POSTGRES_PASSWORD``
-    / ``POSTGRES_DB`` with a warning so local dev keeps working when per-team
-    roles haven't been provisioned yet.
+    Picks up host-side ``OLLAMA_API_KEY`` / ``ANTHROPIC_API_KEY`` so the
+    agent can still call the cloud LLM provider — those are external APIs,
+    not part of the "no shared services" rule. The freshly minted Postgres
+    password is the only sandbox-internal secret on this path.
     """
-    env_key = f"POSTGRES_PASSWORD_SANDBOX_{team.upper()}"
-    password = os.environ.get(env_key)
-    if password:
-        return (f"sandbox_{team}", password, f"sandbox_{team}")
-    logger.warning(
-        "No %s set; sandbox for team %r will fall back to the global "
-        "POSTGRES_USER/PASSWORD/DB. See docker/README.md § Per-team Postgres "
-        "isolation.",
-        env_key,
-        team,
-    )
-    return (
-        os.environ.get("POSTGRES_USER"),
-        os.environ.get("POSTGRES_PASSWORD"),
-        os.environ.get("POSTGRES_DB"),
-    )
-
-
-def _write_sandbox_secrets_file(container_name: str, team: str) -> Path:
-    """Atomically write a 0400 ``KEY=VALUE`` file with the sandbox's secrets.
-
-    The file is bind-mounted read-only at :data:`_SANDBOX_SECRETS_TARGET` in
-    the sandbox, where the entrypoint loader reads it into ``os.environ`` and
-    unlinks the in-sandbox view. Values absent from the host environment are
-    simply omitted — the loader treats missing keys as no-ops.
-    """
-    pg_user, pg_pass, pg_db = _team_postgres_credentials(team)
-    values: dict[str, str] = {}
-    if pg_user is not None:
-        values["POSTGRES_USER"] = pg_user
-    if pg_pass is not None:
-        values["POSTGRES_PASSWORD"] = pg_pass
-    if pg_db is not None:
-        values["POSTGRES_DB"] = pg_db
+    values: dict[str, str] = {
+        "POSTGRES_PASSWORD": postgres_password,
+    }
     for key in ("OLLAMA_API_KEY", "ANTHROPIC_API_KEY"):
         v = os.environ.get(key)
         if v is not None:
             values[key] = v
+    for key in _FORWARDED_ENV:
+        v = os.environ.get(key)
+        if v is not None:
+            values[key] = v
 
-    path = _secrets_host_path(container_name)
+    path = _secrets_host_path(project_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     body = "".join(f"{k}={v}\n" for k, v in values.items())
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -118,31 +102,28 @@ def _write_sandbox_secrets_file(container_name: str, team: str) -> Path:
     return path
 
 
-def cleanup_secrets_file(container_name: str) -> None:
-    """Remove the host-side sandbox secrets file for ``container_name``.
+def cleanup_secrets_file(project_name: str) -> None:
+    """Idempotently remove the per-sandbox project directory + secrets.
 
-    Idempotent: missing-file is treated as success. Called from the lifecycle
-    after ``docker rm -f`` succeeds and before provisioning a fresh sandbox
-    so stale creds don't linger if the host process was killed between
-    sandbox teardowns.
+    Kept under the historical name so callers (lifecycle, tests) don't need
+    to change. Removes the entire on-disk footprint for ``project_name``.
     """
-    try:
-        _secrets_host_path(container_name).unlink()
-    except FileNotFoundError:
+    path = sandbox_project_dir(project_name)
+    if not path.exists():
         return
+    try:
+        shutil.rmtree(path)
     except OSError as exc:
-        logger.warning("Could not remove sandbox secrets file for %s: %s", container_name, exc)
+        logger.warning("Could not remove sandbox project directory for %s: %s", project_name, exc)
 
 
 def container_name_for(agent_id: str) -> str:
-    """Deterministic, DNS-safe, collision-resistant container name for ``agent_id``.
+    """Deterministic, DNS-safe, collision-resistant compose-project name.
 
-    Docker requires ``[a-zA-Z0-9][a-zA-Z0-9_.-]*``. The readable prefix is the
-    sanitised agent id (truncated); the 8-char sha1 suffix keeps the mapping
-    one-to-one so two ids that happen to sanitise the same way (e.g.
-    ``agent/1`` vs ``agent-1``) still get distinct container names — the
-    acquire-time zombie reap would otherwise tear down a sibling's live
-    container.
+    Reused as both the compose project name (passed to ``docker compose -p``)
+    and the agent container's ``container_name`` (suffixed with ``-agent`` by
+    the compose template). The 8-char sha1 suffix keeps the mapping
+    one-to-one even when two ids would otherwise sanitise the same way.
     """
     safe = (_CONTAINER_NAME_RE.sub("-", agent_id).strip("-") or "agent")[:40]
     digest = hashlib.sha1(agent_id.encode("utf-8")).hexdigest()[:8]
@@ -169,121 +150,132 @@ async def _exec(cmd: list[str], *, timeout_s: int = 30) -> tuple[int, str, str]:
     )
 
 
-def _build_run_argv(
-    *,
-    agent_id: str,
-    container_name: str,
-    secrets_host_path: Path | None = None,
-) -> list[str]:
-    """Assemble the hardened ``docker run`` argument vector for a sandbox.
+def _allocate_host_port() -> int:
+    """Pick an unused loopback port for the agent's published 8090/tcp.
 
-    Kept as a pure function so tests can assert on the exact flags without
-    invoking subprocess. When ``secrets_host_path`` is provided, the file is
-    bind-mounted read-only at :data:`_SANDBOX_SECRETS_TARGET` and the sandbox
-    is told where to find it via ``SANDBOX_SECRETS_FILE``.
+    The compose ``ports`` mapping treats this as a request — the kernel
+    rebinds it via the bound socket, so a brief race window where two
+    sandboxes pick the same port is harmless (compose-up will simply fail
+    and retry). For first-cut simplicity we use ``socket.bind`` to ask the
+    OS for a free port instead.
     """
-    argv: list[str] = [
-        "docker",
-        "run",
-        "-d",
-        "--rm",
-        "--name",
-        container_name,
-        "--hostname",
-        container_name,
-        "--network",
-        sandbox_network(),
-        # `127.0.0.1::8090` binds to loopback only; Docker picks a free host port.
-        "-p",
-        "127.0.0.1::8090",
-        "--cpus=1.0",
-        "--memory=1g",
-        "--pids-limit=512",
-        "--ulimit",
-        "nproc=1024",
-        "--ulimit",
-        "nofile=4096",
-        "--security-opt=no-new-privileges:true",
-        "--security-opt=seccomp=default",
-        "--cap-drop=ALL",
-        "--read-only",
-        "--tmpfs",
-        "/tmp",
-        "--tmpfs",
-        "/run",
-        # Phase 1 entrypoint binds the sandbox to exactly this agent id.
-        "-e",
-        f"SANDBOX_AGENT_ID={agent_id}",
-    ]
-    for key in _FORWARDED_ENV:
-        value = os.environ.get(key)
-        if value is not None:
-            argv.extend(["-e", f"{key}={value}"])
-    if secrets_host_path is not None:
-        argv.extend(
-            [
-                "--mount",
-                f"type=bind,source={secrets_host_path},target={_SANDBOX_SECRETS_TARGET},readonly",
-                "-e",
-                f"SANDBOX_SECRETS_FILE={_SANDBOX_SECRETS_TARGET}",
-            ]
-        )
-    argv.append(sandbox_image())
-    return argv
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+    finally:
+        s.close()
 
 
-async def ensure_network() -> None:
-    """Idempotently ensure the sandbox bridge network exists.
+def _materialise_project_dir(project_name: str, *, host_port: int, postgres_password: str) -> Path:
+    """Render the compose template into a fresh per-project directory.
 
-    The per-agent lifecycle runs ``docker run`` directly rather than
-    ``docker compose``, so nothing creates the bridge implicitly — we do it
-    here on demand. No-op when the network already exists.
+    Copies the support assets (postgres-init.sql, prometheus.yml,
+    grafana-provisioning/) alongside so the rendered compose file's
+    relative volume paths resolve. Returns the project directory.
     """
-    name = sandbox_network()
-    rc, _, _ = await _exec(["docker", "network", "inspect", name], timeout_s=15)
-    if rc == 0:
-        return
-    argv = ["docker", "network", "create", "--driver", "bridge", name]
-    rc2, stdout, stderr = await _exec(argv, timeout_s=30)
-    if rc2 != 0 and "already exists" not in (stderr + stdout).lower():
-        raise _fail(argv, rc2, stderr or stdout)
+    project_dir = sandbox_project_dir(project_name)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    assets = sandbox_stack_assets_dir()
+    for asset in ("postgres-init.sql", "prometheus.yml"):
+        src = assets / asset
+        if src.exists():
+            shutil.copy2(src, project_dir / asset)
+
+    # Grafana provisioning is a directory tree.
+    grafana_src = assets / "grafana-provisioning"
+    grafana_dst = project_dir / "grafana-provisioning"
+    if grafana_dst.exists():
+        shutil.rmtree(grafana_dst)
+    if grafana_src.exists():
+        shutil.copytree(grafana_src, grafana_dst)
+
+    secrets_path = _write_sandbox_secrets_file(project_name, postgres_password=postgres_password)
+
+    template = sandbox_stack_template_path().read_text(encoding="utf-8")
+    rendered = template.format(
+        sandbox_id=project_name,
+        agent_id=os.environ.get("_RENDER_AGENT_ID", "<agent-id-placeholder>"),
+        agent_image=sandbox_image(),
+        pg_password=postgres_password,
+        agent_secrets_file=str(secrets_path),
+        agent_host_port=host_port,
+    )
+    (project_dir / "docker-compose.yml").write_text(rendered, encoding="utf-8")
+    return project_dir
 
 
 async def run_container(agent_id: str, container_name: str, team: str) -> str:
-    """Start a hardened sandbox for ``agent_id`` and return its container id.
+    """Bring up the per-sandbox compose stack for ``agent_id``.
 
-    Writes a per-sandbox 0400 secrets file (team-scoped Postgres creds +
-    any ``*_API_KEY`` values present on the host) and bind-mounts it read-only
-    into the container — secrets are never passed via ``-e`` flags.
-
-    Caller is responsible for polling ``/health`` before treating the sandbox
-    as ready — this coroutine returns as soon as the Docker daemon accepts
-    the container, not when uvicorn is listening.
+    ``container_name`` doubles as the compose project name. Returns the
+    agent container's id so :class:`SandboxState.container_id` keeps the
+    same shape as in the single-container era. ``team`` is unused now (we
+    used to look up team-scoped Postgres credentials there) but kept on
+    the signature so the lifecycle's call site doesn't change.
     """
-    await ensure_network()
-    secrets_host_path = _write_sandbox_secrets_file(container_name, team)
-    argv = _build_run_argv(
-        agent_id=agent_id,
-        container_name=container_name,
-        secrets_host_path=secrets_host_path,
-    )
+    project_name = container_name
+    postgres_password = secrets.token_urlsafe(24)
+    host_port = _allocate_host_port()
+
+    # Render the project dir with the resolved agent_id so the agent
+    # container's SANDBOX_AGENT_ID env var is correct.
+    os.environ["_RENDER_AGENT_ID"] = agent_id
     try:
-        rc, stdout, stderr = await _exec(argv, timeout_s=60)
+        project_dir = _materialise_project_dir(
+            project_name, host_port=host_port, postgres_password=postgres_password
+        )
+    finally:
+        os.environ.pop("_RENDER_AGENT_ID", None)
+
+    compose_file = project_dir / "docker-compose.yml"
+    argv = [
+        "docker",
+        "compose",
+        "-p",
+        project_name,
+        "-f",
+        str(compose_file),
+        "up",
+        "-d",
+        "--remove-orphans",
+    ]
+    try:
+        # Compose pulls images + waits for service-healthy depends_on. Allow
+        # plenty of time for the cold path on first use.
+        rc, stdout, stderr = await _exec(argv, timeout_s=180)
     except DockerError:
-        cleanup_secrets_file(container_name)
+        cleanup_secrets_file(project_name)
         raise
     if rc != 0:
-        cleanup_secrets_file(container_name)
+        cleanup_secrets_file(project_name)
         raise _fail(argv, rc, stderr or stdout)
-    container_id = stdout.strip()
-    if not container_id:
-        cleanup_secrets_file(container_name)
-        raise _fail(argv, rc, "docker run printed no container id")
-    return container_id
+
+    agent_container = f"{project_name}-agent"
+    inspect_argv = [
+        "docker",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        agent_container,
+    ]
+    rc2, container_id, err = await _exec(inspect_argv)
+    if rc2 != 0 or not container_id.strip():
+        cleanup_secrets_file(project_name)
+        raise _fail(inspect_argv, rc2, err or container_id)
+    return container_id.strip()
 
 
 async def inspect_host_port(container_id: str) -> int:
-    """Resolve the host-side loopback port that maps to the sandbox's ``8090/tcp``."""
+    """Resolve the host-side loopback port that maps to the agent's ``8090/tcp``.
+
+    Looks up the agent container directly (compose's ``-p`` project name
+    propagates through to the container name suffix, but ``container_id``
+    is opaque to compose so we just inspect by id).
+    """
     argv = [
         "docker",
         "inspect",
@@ -301,7 +293,7 @@ async def inspect_host_port(container_id: str) -> int:
 
 
 async def is_running(container_id: str) -> bool:
-    """Return True iff ``docker inspect`` reports the container as running.
+    """Return True iff ``docker inspect`` reports the agent container as running.
 
     Missing / removed containers return False (not an error).
     """
@@ -311,19 +303,68 @@ async def is_running(container_id: str) -> bool:
     return rc == 0 and stdout.strip().lower() == "true"
 
 
-async def stop_container(container_id: str) -> None:
-    """Stop and remove ``container_id``.
+async def stop_container(container_or_project: str) -> None:
+    """Tear down the entire compose project for ``container_or_project``.
 
-    ``docker rm -f`` stops running containers before removing them, so a single
-    call covers both the happy path and the zombie-container case. Missing
-    containers are treated as idempotent success; any other non-zero exit
-    (daemon unreachable, permissions, etc.) raises :class:`DockerError` so
-    callers don't silently evict state while the container is still alive.
+    The lifecycle calls this in two shapes:
+
+    * With an **agent container id** during explicit teardown — mirrors
+      the pre-compose API. We resolve the container id back to its compose
+      project label and tear down by project name.
+    * With a **compose project name** during the acquire-time zombie
+      reap, before any container exists. We treat the argument as a
+      project name directly.
+
+    Either way, the result is ``docker compose -p <project> down -v``,
+    which removes the entire stack including named volumes. Missing
+    containers / projects are idempotent successes.
     """
-    argv = ["docker", "rm", "-f", container_id]
-    rc, _, stderr = await _exec(argv)
-    if rc == 0:
-        return
-    if "no such container" in stderr.lower():
-        return
-    raise _fail(argv, rc, stderr)
+    project: str | None = None
+
+    # Try id-shaped lookup first; the compose-label query returns rc=0 with
+    # an empty label for non-compose containers (none in our world) and
+    # rc!=0 for "no such container", so we fall back to treating the arg
+    # as a project name.
+    rc, project_label, _ = await _exec(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            '{{ index .Config.Labels "com.docker.compose.project" }}',
+            container_or_project,
+        ]
+    )
+    if rc == 0 and project_label.strip():
+        project = project_label.strip()
+    else:
+        # Treat the input as a compose project name directly. If the
+        # project doesn't exist, ``compose down`` reports nothing to remove
+        # and exits 0 — same idempotent semantic as the id path.
+        project = container_or_project
+
+    project_dir = sandbox_project_dir(project)
+    compose_file = project_dir / "docker-compose.yml"
+
+    argv = [
+        "docker",
+        "compose",
+        "-p",
+        project,
+    ]
+    if compose_file.exists():
+        argv += ["-f", str(compose_file)]
+    argv += ["down", "-v", "--remove-orphans"]
+
+    rc2, _, stderr = await _exec(argv, timeout_s=120)
+    if rc2 != 0 and "no such" not in stderr.lower():
+        raise _fail(argv, rc2, stderr)
+
+    cleanup_secrets_file(project)
+
+
+# Backwards-compat shim: the previous module exposed ``ensure_network`` so the
+# lifecycle could create the shared ``khala-sandbox`` bridge on demand. Each
+# compose project now owns its own bridge, so this is a no-op kept around so
+# imports that haven't been updated yet don't break.
+async def ensure_network() -> None:  # pragma: no cover — trivial shim
+    return None

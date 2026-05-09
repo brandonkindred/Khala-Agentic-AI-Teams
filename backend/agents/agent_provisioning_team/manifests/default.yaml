@@ -13,7 +13,6 @@ tools:
   # PostgreSQL Database
   - name: postgresql
     provisioner: postgres_provisioner
-    access_level: read_write
     config:
       database_prefix: "agent_"
       max_connections: 10
@@ -23,10 +22,10 @@ tools:
       getting_started: |
         Connect to your database using the connection string:
           psql $POSTGRES_URL
-        
+
         Your database '{database}' is pre-created and ready to use.
-        You have SELECT, INSERT, UPDATE, DELETE permissions.
-        
+        You have full administrative access on this database.
+
         Example usage:
           import psycopg2
           conn = psycopg2.connect(os.environ['POSTGRES_URL'])
@@ -34,7 +33,6 @@ tools:
   # Redis Cache
   - name: redis
     provisioner: redis_provisioner
-    access_level: read_write
     config:
       key_prefix: "agent:{agent_id}:"
     onboarding:
@@ -43,10 +41,10 @@ tools:
       getting_started: |
         Connect to Redis using the connection URL:
           redis-cli -u $REDIS_URL
-        
+
         Your keys are prefixed with '{key_prefix}' for isolation.
-        You have GET, SET, DEL, KEYS, EXISTS, EXPIRE, TTL permissions.
-        
+        Every Redis command is allowed.
+
         Example usage:
           import redis
           r = redis.from_url(os.environ['REDIS_URL'])
@@ -55,7 +53,6 @@ tools:
   # Git Version Control
   - name: git
     provisioner: git_provisioner
-    access_level: contributor
     config:
       init_repos:
         - workspace
@@ -65,11 +62,11 @@ tools:
       getting_started: |
         Your workspace repository is initialized at /workspace.
         An SSH keypair has been generated for remote operations.
-        
+
         Git is configured with:
           User: Agent {agent_id}
           Email: agent-{agent_id}@provisioning.local
-        
+
         To push to a remote:
           1. Add your public key (~/.ssh/id_ed25519.pub) to the remote
           2. git remote add origin <remote-url>

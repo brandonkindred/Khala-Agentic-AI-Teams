@@ -1,0 +1,166 @@
+# Per-sandbox Docker Compose stack template.
+#
+# Each provision request renders this file with the sandbox-specific
+# substitutions below and runs ``docker compose -p <project> -f <rendered>
+# up -d``. Every sandbox gets its own compose project name (and therefore
+# its own bridge network and named volumes), so the agent only sees the
+# Postgres / Temporal / Prometheus / Grafana running INSIDE its sandbox.
+# Nothing in this stack joins the long-lived khala-stack compose network.
+#
+# Substitution variables (Python str.format-style):
+#   {sandbox_id}        — compose project name (e.g. "khala-sbx-blogging-research-aabb1122")
+#   {agent_id}          — the agent the sandbox is pinned to (SANDBOX_AGENT_ID)
+#   {agent_image}       — fully qualified khala-agent-sandbox image tag
+#   {pg_password}       — randomly generated per-sandbox Postgres password
+#   {agent_secrets_file}— host path of the 0400 sandbox secrets bind-mount
+#   {agent_host_port}   — host port (loopback) the agent shim binds to
+#
+# Resource caps are intentionally modest; the agent service keeps the
+# hardened flags (cap-drop ALL, read-only rootfs, no-new-privileges,
+# memory + pids cap) from the previous single-container provisioner.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: "{sandbox_id}-postgres"
+    environment:
+      POSTGRES_USER: sandbox
+      POSTGRES_PASSWORD: "{pg_password}"
+      POSTGRES_DB: khala_sandbox
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/00-temporal-dbs.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sandbox -d khala_sandbox"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    container_name: "{sandbox_id}-temporal"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: sandbox
+      POSTGRES_PWD: "{pg_password}"
+      POSTGRES_SEEDS: postgres
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/development-sql.yaml
+    healthcheck:
+      test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: "{sandbox_id}-prometheus"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  grafana:
+    image: grafana/grafana:10.4.7
+    container_name: "{sandbox_id}-grafana"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana-provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  agent:
+    image: "{agent_image}"
+    container_name: "{sandbox_id}-agent"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+      grafana:
+        condition: service_healthy
+    environment:
+      SANDBOX_AGENT_ID: "{agent_id}"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: sandbox
+      POSTGRES_DB: khala_sandbox
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      PROMETHEUS_URL: http://prometheus:9090
+      GRAFANA_URL: http://grafana:3000
+      SANDBOX_SECRETS_FILE: /run/secrets/sandbox-env
+    ports:
+      - "127.0.0.1:{agent_host_port}:8090"
+    volumes:
+      - type: bind
+        source: "{agent_secrets_file}"
+        target: /run/secrets/sandbox-env
+        read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=default
+    pids_limit: 512
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

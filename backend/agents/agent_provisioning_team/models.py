@@ -1,8 +1,9 @@
 """
 Domain models for the Agent Provisioning Team.
 
-Defines phases, access tiers, request/response models, and result types
-for the provisioning workflow.
+Defines phases, request/response models, and result types for the
+provisioning workflow. There is no permission tiering: every sandbox is
+provisioned with full access on every backing service.
 """
 
 from datetime import datetime
@@ -23,21 +24,11 @@ class Phase(str, Enum):
     DELIVER = "deliver"
 
 
-class AccessTier(str, Enum):
-    """Access permission tiers following least-privilege principle."""
-
-    MINIMAL = "minimal"
-    STANDARD = "standard"
-    ELEVATED = "elevated"
-    FULL = "full"
-
-
 class ToolConfig(BaseModel):
     """Configuration for a single tool from the manifest."""
 
     name: str = Field(..., description="Tool name (e.g., postgresql, git)")
     provisioner: str = Field(..., description="Name of the provisioner to use")
-    access_level: str = Field(default="standard", description="Access level for this tool")
     config: Dict[str, Any] = Field(default_factory=dict, description="Tool-specific config")
     onboarding: Dict[str, Any] = Field(default_factory=dict, description="Onboarding documentation")
 
@@ -95,7 +86,6 @@ class AccessVerification(BaseModel):
 
     tool_name: str
     passed: bool
-    expected_tier: str
     actual_permissions: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     errors: List[str] = Field(default_factory=list)
@@ -140,7 +130,6 @@ class AccessAuditResult(BaseModel):
     """Result of the access audit phase."""
 
     passed: bool
-    tier_requested: str
     verifications: List[AccessVerification] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     errors: List[str] = Field(default_factory=list)
@@ -161,7 +150,6 @@ class OnboardingPacket(BaseModel):
 
     summary: str
     tools: List[ToolOnboardingInfo] = Field(default_factory=list)
-    access_tier: str
     environment_variables: Dict[str, str] = Field(default_factory=dict)
     anatomy_bundle_path: Optional[str] = Field(
         default=None,
@@ -207,10 +195,6 @@ class ProvisionRequest(BaseModel):
     manifest_path: str = Field(
         default="default.yaml",
         description="Path to the tool manifest (relative to manifests/)",
-    )
-    access_tier: AccessTier = Field(
-        default=AccessTier.STANDARD,
-        description="Requested access tier",
     )
     workspace_path: Optional[str] = Field(
         default=None,

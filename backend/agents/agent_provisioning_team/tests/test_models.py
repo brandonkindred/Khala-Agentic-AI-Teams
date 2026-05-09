@@ -1,7 +1,6 @@
 """Tests for agent_provisioning_team models."""
 
 from agent_provisioning_team.models import (
-    AccessTier,
     DeprovisionRequest,
     DeprovisionResponse,
     EnvironmentInfo,
@@ -26,17 +25,9 @@ def test_phase_enum_values():
     assert Phase.DELIVER == "deliver"
 
 
-def test_access_tier_enum_ordering():
-    tiers = [AccessTier.MINIMAL, AccessTier.STANDARD, AccessTier.ELEVATED, AccessTier.FULL]
-    assert len(tiers) == 4
-    assert AccessTier.MINIMAL == "minimal"
-    assert AccessTier.FULL == "full"
-
-
 def test_tool_config_defaults():
     tc = ToolConfig(name="postgresql", provisioner="postgres_provisioner")
     assert tc.name == "postgresql"
-    assert tc.access_level == "standard"
     assert tc.config == {}
     assert tc.onboarding == {}
 
@@ -105,12 +96,6 @@ def test_provision_request_defaults():
     req = ProvisionRequest(agent_id="agent-002")
     assert req.agent_id == "agent-002"
     assert req.manifest_path == "default.yaml"
-    assert req.access_tier == AccessTier.STANDARD
-
-
-def test_provision_request_custom_tier():
-    req = ProvisionRequest(agent_id="agent-003", access_tier=AccessTier.ELEVATED)
-    assert req.access_tier == AccessTier.ELEVATED
 
 
 def test_provision_job_response():

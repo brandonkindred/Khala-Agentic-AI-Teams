@@ -257,11 +257,18 @@ class ToolOnboardingConfig(BaseModel):
 
 
 class ToolDefinition(BaseModel):
-    """Definition of a single tool in the manifest."""
+    """Definition of a single tool in the manifest.
+
+    The ``access_level`` field present on older manifests is now ignored
+    (#456): every sandbox is provisioned with full access. We accept it
+    on read so existing manifests parse without churn, but we don't
+    surface it on the model and don't act on it.
+    """
+
+    model_config = {"extra": "ignore"}
 
     name: str = Field(..., description="Tool name")
     provisioner: str = Field(..., description="Provisioner to use")
-    access_level: str = Field(default="standard", description="Access level")
     config: Dict[str, Any] = Field(default_factory=dict, description="Tool-specific config")
     onboarding: ToolOnboardingConfig = Field(
         default_factory=ToolOnboardingConfig,

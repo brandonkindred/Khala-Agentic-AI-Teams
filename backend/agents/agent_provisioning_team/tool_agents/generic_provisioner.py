@@ -7,7 +7,6 @@ Base implementation that can be extended for custom tools.
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..models import (
-    AccessTier,
     AccessVerification,
     DeprovisionResult,
     GeneratedCredentials,
@@ -43,7 +42,6 @@ class GenericProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> ToolProvisionResult:
         """Provision access for the agent (generic implementation).
 
@@ -53,7 +51,7 @@ class GenericProvisionerTool(BaseToolProvisioner):
         return self.run_idempotent(
             agent_id,
             credentials=credentials,
-            create=lambda _register: self._do_provision(config, credentials, access_tier),
+            create=lambda _register: self._do_provision(config, credentials),
             hydrate_extras=("tool_name", "config"),
         )
 
@@ -61,54 +59,38 @@ class GenericProvisionerTool(BaseToolProvisioner):
         self,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> Tuple[List[str], Dict[str, Any]]:
-        permissions = config.get("permissions", [access_tier.value])
+        # Generic tool grants whatever the manifest declares; with tiers
+        # gone (#456), anything in ``config["permissions"]`` is honoured
+        # verbatim and an empty default means "everything the integration
+        # exposes".
+        permissions = list(config.get("permissions", ["all"]))
 
         credentials.extra["tool_name"] = self.tool_name
         credentials.extra["config"] = config
 
         details = {
             "tool_name": self.tool_name,
-            "access_tier": access_tier.value,
             "config": config,
             "config_applied": True,
             "permissions": permissions,
         }
         return permissions, details
 
-    def verify_access(
-        self,
-        agent_id: str,
-        expected_tier: AccessTier,
-    ) -> AccessVerification:
-        """Verify access for the agent (generic implementation)."""
+    def verify_access(self, agent_id: str) -> AccessVerification:
+        """Surface the recorded permissions for the agent."""
         prov_info = self._state.get(agent_id)
 
         if not prov_info:
             return self._make_verification(
                 passed=False,
-                expected_tier=expected_tier,
                 actual_permissions=[],
                 errors=[f"No provisioning found for agent {agent_id}"],
             )
 
-        actual_tier = prov_info.get("access_tier", "standard")
-        actual_permissions = prov_info.get("permissions", [])
-
-        passed = actual_tier == expected_tier.value
-        warnings = []
-
-        if not passed:
-            warnings.append(
-                f"Access tier mismatch: expected {expected_tier.value}, got {actual_tier}"
-            )
-
         return self._make_verification(
-            passed=passed,
-            expected_tier=expected_tier,
-            actual_permissions=actual_permissions,
-            warnings=warnings,
+            passed=True,
+            actual_permissions=prov_info.get("permissions", []),
         )
 
     def deprovision(self, agent_id: str) -> DeprovisionResult:
