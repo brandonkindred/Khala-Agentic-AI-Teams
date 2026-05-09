@@ -23,7 +23,10 @@ on the no-attachment path and two follow-ups from the PR review:
     materializes protective legs for the partially-filled position.
 12. DAY-TIF bracket parent that expires after a partial fill still
     materializes protective legs for the open position.
-13. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
+13. Bracket children materialized at expiry time defer past the bar that
+    triggered the expiry — a gap-through opening must not abort the
+    backtest via ``LookAheadError``.
+14. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
     gated until #390 — runtime materialization lands with Step 8.
 """
 
@@ -762,6 +765,80 @@ def test_day_expiry_partial_bracket_parent_materializes_brackets() -> None:
     assert tp.submitted_at == "2024-01-03"
     # Position untouched by the expiry; the bracket now covers it.
     assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Expiry-created bracket children defer past the bar that triggered the
+# expiry — a gap-through opening on that same bar must not abort the run
+# via LookAheadError (Codex P1 follow-up on commit f5d535e)
+# ---------------------------------------------------------------------------
+
+
+def test_expiry_bar_gap_through_does_not_abort_via_lookahead() -> None:
+    """``FillSimulator.expire_day_orders(cur_bar)`` materializes bracket
+    children with ``submitted_at=cur_bar.timestamp`` BEFORE the service
+    calls ``process_bar(cur_bar)``, so the children land in this bar's
+    pending snapshot. If that bar's range crosses a child's stop or
+    limit price, the engine-internal soft-skip in ``process_bar``
+    must defer the child to the next bar instead of triggering
+    ``bar_safety.check_fill``'s ``LookAheadError``. Without the skip,
+    a normal overnight gap would abort the backtest."""
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=200.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            attached_stop_loss=StopAttachment(stop_price=95.0),
+            attached_take_profit=LimitAttachment(limit_price=110.0),
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    # Day D (2024-01-02): partial fill (100 shares), remainder requeued.
+    sim.process_bar(_bar("2024-01-02", open_price=100.0, volume=1_000.0))
+    assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
+
+    # Day D+1 (2024-01-03) opens with a gap-down through the stop level
+    # (low=92 < stop_price=95). The service calls expire_day_orders FIRST
+    # (with cur_bar=2024-01-03), then process_bar(cur_bar). Without the
+    # soft-skip the SHORT STOP child — submitted at 2024-01-03 — would
+    # trip ``bar_safety.check_fill`` and raise ``LookAheadError``.
+    next_session_bar = _bar("2024-01-03", open_price=93.0, high=94.0, low=92.0, close=93.0)
+    sim.expire_day_orders(next_session_bar)
+
+    # Children materialized on the expiry bar.
+    children_after_expire = order_book.children_of(parent.order_id)
+    assert len(children_after_expire) == 2
+    for child in children_after_expire:
+        assert child.submitted_at == "2024-01-03"
+
+    # process_bar on the same bar must NOT raise LookAheadError despite the
+    # gap-through — the soft-skip defers the children to the next bar.
+    outcome = sim.process_bar(next_session_bar)
+    assert outcome.entry_fills == []
+    assert outcome.exit_fills == []
+    assert outcome.closed_trades == []
+
+    # Children still pending and bound, ready to fire on the next bar.
+    children_after_process = order_book.children_of(parent.order_id)
+    assert len(children_after_process) == 2
+
+    # Day D+2 (2024-01-04): another bar with low ≤ stop. Now bar.timestamp
+    # > children's submitted_at → soft-skip doesn't fire → SHORT STOP
+    # fires as a normal exit, OCO cancels the take-profit.
+    bar_after = _bar("2024-01-04", open_price=94.0, high=95.0, low=93.0, close=94.0)
+    final_outcome = sim.process_bar(bar_after)
+    assert len(final_outcome.exit_fills) == 1
+    assert final_outcome.exit_fills[0].fill_kind == FillKind.FULL
+    assert "AAA" not in portfolio.positions
+    assert order_book.children_of(parent.order_id) == []
 
 
 # ---------------------------------------------------------------------------

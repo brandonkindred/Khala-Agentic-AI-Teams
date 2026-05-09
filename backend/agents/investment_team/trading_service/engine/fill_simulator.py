@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from ...execution.bar_safety import BarSafetyAssertion
+from ...execution.bar_safety import BarSafetyAssertion, _ts_le
 from ...execution.risk_filter import RiskFilter
 from ...models import TradeRecord
 from ..strategy.contract import (
@@ -137,6 +137,25 @@ class FillSimulator:
             # Skipping them here keeps protective legs from firing as
             # standalone orders before the entry has actually opened.
             if not po.armed:
+                continue
+            # Defer engine-internal orders (those bound to a position via
+            # ``working_against_entry_order_id``) whose submission bar isn't
+            # strictly earlier than this one. The canonical case is bracket
+            # children materialized by ``FillSimulator.expire_day_orders``
+            # (#389) on a date change: the service calls that hook *before*
+            # ``process_bar(cur_bar)``, so the children land in this bar's
+            # pending snapshot with ``submitted_at=cur_bar.timestamp``.
+            # Without this skip, ``bar_safety.check_fill`` below would raise
+            # ``LookAheadError`` on a bar whose range crosses the child's
+            # stop or limit price — aborting the run on a normal overnight
+            # gap rather than waiting until the next eligible bar. The skip
+            # is intentionally narrow (only orders bound by the engine, not
+            # strategy-side requests) so a strategy that emits an order
+            # tagged with the current bar's timestamp still trips
+            # ``bar_safety`` below as a programmer-error guard.
+            if po.working_against_entry_order_id is not None and _ts_le(
+                bar.timestamp, po.submitted_at
+            ):
                 continue
             req = po.request
 
