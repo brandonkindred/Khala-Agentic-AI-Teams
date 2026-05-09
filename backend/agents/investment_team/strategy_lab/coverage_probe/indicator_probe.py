@@ -1771,52 +1771,66 @@ def _collect_name_strings(
 
     Honours the same scoping rules as the period collector: skips
     sibling helper classes, descends only into the strategy class's
-    constructor for ``self.<NAME>`` bindings, and skips function
-    bodies (their locals aren't class/module constants).
+    constructor for ``self.<NAME>`` bindings, skips function bodies
+    (their locals aren't class/module constants), and — critically —
+    distinguishes module vs class scope so a class-body
+    ``TARGET = "MSFT"`` overrides a module-level ``TARGET = "AAPL"``.
+    Without the override, ``self.TARGET`` resolved to the module
+    binding even though Python's runtime attribute lookup goes
+    through the class, so the symbol gate scoped the indicator leg
+    to the wrong DataFrame and the report could flip
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` even when the actual target
+    symbol's bars satisfied the entry.
     """
     bindings: Dict[str, str] = {}
     _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
 
-    def _record(target: ast.expr, value: ast.expr) -> None:
+    def _record(target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
         if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
             return
         if isinstance(target, ast.Name):
-            bindings.setdefault(target.id, value.value)
+            if overwrite:
+                bindings[target.id] = value.value
+            else:
+                bindings.setdefault(target.id, value.value)
         elif isinstance(target, ast.Attribute):
-            bindings.setdefault(target.attr, value.value)
+            if overwrite:
+                bindings[target.attr] = value.value
+            else:
+                bindings.setdefault(target.attr, value.value)
 
-    def _walk(node: ast.AST):
+    def _walk(node: ast.AST, *, scope: str):
         if strategy_class is not None and isinstance(node, ast.ClassDef):
             if node is not strategy_class:
                 return
             for child in node.body:
                 if isinstance(child, ast.Assign):
                     for t in child.targets:
-                        _record(t, child.value)
+                        _record(t, child.value, overwrite=True)
                 elif isinstance(child, ast.AnnAssign) and child.value is not None:
-                    _record(child.target, child.value)
+                    _record(child.target, child.value, overwrite=True)
                 elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
                         for sub in ast.walk(child):
                             if isinstance(sub, ast.Assign):
                                 for t in sub.targets:
-                                    _record(t, sub.value)
+                                    _record(t, sub.value, overwrite=True)
                             elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
-                                _record(sub.target, sub.value)
+                                _record(sub.target, sub.value, overwrite=True)
                 else:
-                    _walk(child)
+                    _walk(child, scope="class")
             return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             return
         if isinstance(node, ast.Assign):
             for t in node.targets:
-                _record(t, node.value)
+                _record(t, node.value, overwrite=(scope == "class"))
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            _record(node.target, node.value)
+            _record(node.target, node.value, overwrite=(scope == "class"))
         for child in ast.iter_child_nodes(node):
-            _walk(child)
+            _walk(child, scope=scope)
 
-    _walk(tree)
+    _walk(tree, scope="module")
     return bindings
 
 

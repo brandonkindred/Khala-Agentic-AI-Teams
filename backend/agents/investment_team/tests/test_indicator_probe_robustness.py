@@ -3102,6 +3102,74 @@ def test_symbol_gate_resolves_self_attribute_string_constant() -> None:
     assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
 
 
+def test_strategy_class_string_constant_overrides_module_constant() -> None:
+    """A class-level string constant must override a same-named
+    module-level string constant. At runtime, ``self.TARGET`` resolves
+    through the class — the module binding is irrelevant. With the
+    bug, ``_collect_name_strings`` recorded the module value first via
+    ``setdefault`` and the class binding was ignored, so a symbol gate
+    on ``bar.symbol == self.TARGET`` scoped the indicator to the wrong
+    DataFrame and the report could flip to ``COVERAGE_OK`` (or to
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` for the wrong reason) when
+    the actual target's bars satisfied the entry.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: MSFT with close=200 (always > 100 — the actual target
+    fires), AAPL with close=50 (never > 100). With the bug,
+    ``self.TARGET`` resolves to ``"AAPL"``; the gate scopes to AAPL,
+    AAPL never satisfies, and the probe reports
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With the fix,
+    ``self.TARGET`` resolves to ``"MSFT"`` (the class override wins),
+    MSFT satisfies, and the probe reports ``COVERAGE_OK`` with
+    ``[MSFT]`` in the row label.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert "[MSFT]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count > 0
+
+
 def test_early_return_symbol_neq_guard_propagates_filter() -> None:
     """``if bar.symbol != "BBB": return`` followed by an entry
     predicate must propagate the implicit ``{BBB}`` filter to the
