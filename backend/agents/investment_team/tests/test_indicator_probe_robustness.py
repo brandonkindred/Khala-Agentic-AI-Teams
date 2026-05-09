@@ -4792,3 +4792,50 @@ def test_literal_truthy_constants_do_not_taint_group() -> None:
         market_data={"AAPL": _flat_ohlcv()},
     )
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_constant_compare_does_not_taint_group() -> None:
+    """A statically-decidable AND-conjunct comparison (e.g. ``1 < 2``)
+    has no data-dependent operand, so ``_build_subcond`` returns
+    ``None``. That ``None`` previously tainted the group as having an
+    unknown conjunct and demoted the report from ``COVERAGE_OK`` to
+    ``UNKNOWN_LOW_COVERAGE``. The aggregator should keep
+    ``COVERAGE_OK`` because the recognised siblings' mask is still
+    exact.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and 1 < 2:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_named_constant_compare_does_not_taint_group() -> None:
+    """The named-constant variant of the above: a module-level
+    ``LIMIT = 1`` resolves through ``name_periods`` so both operands
+    of ``LIMIT == 1`` are constants; the group must stay
+    ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        LIMIT = 1
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and LIMIT == 1:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK

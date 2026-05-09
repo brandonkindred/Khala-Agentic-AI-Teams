@@ -956,6 +956,18 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 sub = _build_subcond(term, name_periods, name_evaluators)
                 if sub is not None:
                     own_subs.append(sub)
+                elif _compare_is_static_constant(term, name_periods, name_evaluators):
+                    # Statically-decidable comparison whose both
+                    # operands resolved as constants (e.g. ``1 < 2``,
+                    # ``LIMIT == 1`` after ``LIMIT = 1``).
+                    # ``_build_subcond`` returned None because there's
+                    # no data-dependent operand, but the gate is still
+                    # exact — either always-true (no-op) or always-
+                    # false (statically dead). Neither shape narrows
+                    # the recognised mask in a way that would
+                    # invalidate ``COVERAGE_OK``, so don't tag the
+                    # group as unknown.
+                    pass
                 else:
                     # Compare term we couldn't model (e.g. ``self.flag ==
                     # True`` on an opaque attribute). Mark the group as
@@ -1905,6 +1917,34 @@ def _is_constant_literal(node: ast.expr) -> bool:
     don't tag the group as unknown for them.
     """
     return isinstance(node, ast.Constant)
+
+
+def _compare_is_static_constant(
+    node: ast.expr,
+    name_periods: Dict[str, int],
+    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]],
+) -> bool:
+    """True iff ``node`` is a 1-op ``Compare`` whose both operands
+    resolve via :func:`_build_operand` and neither is data-dependent.
+
+    Such comparisons are statically decidable (e.g. ``1 < 2``,
+    ``LIMIT == 1`` after ``LIMIT = 1``) and ``_build_subcond`` returns
+    ``None`` for them precisely because no operand reads the DataFrame.
+    They're not opaque — just constant — so ``_process_if`` should
+    skip them without tagging the group as
+    ``has_unknown_and_conjunct``: the recognised siblings' mask is
+    still exact whether the constant compare is true (no-op gate) or
+    false (predicate is statically dead).
+    """
+    if not isinstance(node, ast.Compare):
+        return False
+    if len(node.ops) != 1 or len(node.comparators) != 1:
+        return False
+    left = _build_operand(node.left, name_periods, name_evaluators)
+    right = _build_operand(node.comparators[0], name_periods, name_evaluators)
+    if left is None or right is None:
+        return False
+    return not (left.data_dependent or right.data_dependent)
 
 
 def _find_strategy_class(tree: ast.AST, on_bar: ast.AST) -> Optional[ast.ClassDef]:
