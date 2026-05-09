@@ -3583,6 +3583,152 @@ def test_constructor_unknown_guard_does_not_override_class_attr() -> None:
     assert "[MSFT]" in report.subconditions[0].label
 
 
+def test_constructor_default_true_param_guard_records_assignment() -> None:
+    """``def __init__(self, enabled=True): if enabled: ...`` — the
+    default-construction path always takes the True branch, so the
+    assignment is guaranteed for the standard strategy invocation.
+    The constructor walker now resolves a bare-``Name`` predicate by
+    looking up the parameter's constant default, the same way it
+    resolves a literal ``if True:``.
+
+    Strategy::
+
+        class Strategy:
+            def __init__(self, enabled=True):
+                if enabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the gate is dropped). Without the
+    fix, ``if enabled:`` is treated as unknown, the binding is
+    skipped, the gate is dropped, and the report flips to
+    ``COVERAGE_OK``. With the fix, ``self.TARGET`` resolves to
+    ``"AAPL"``, the gate scopes to AAPL, and the report classifies
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self, enabled=True):
+                if enabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_constructor_default_false_param_guard_does_not_record_assignment() -> None:
+    """Companion: ``def __init__(self, enabled=False): if enabled:
+    self.TARGET = "AAPL"``. The default path takes the False branch,
+    so the assignment is NOT guaranteed and the class attribute
+    must remain the resolved value.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self, enabled=False):
+                if enabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert "[MSFT]" in report.subconditions[0].label
+
+
+def test_constructor_negated_default_param_guard_resolves() -> None:
+    """``if not disabled:`` with ``disabled=False`` default → True
+    branch is guaranteed. The predicate resolver handles
+    ``UnaryOp(Not, ...)`` over a parameter default.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self, disabled=False):
+                if not disabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
 def test_early_return_symbol_neq_guard_propagates_filter() -> None:
     """``if bar.symbol != "BBB": return`` followed by an entry
     predicate must propagate the implicit ``{BBB}`` filter to the
