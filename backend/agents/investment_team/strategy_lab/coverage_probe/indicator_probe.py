@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import logging
 from dataclasses import dataclass
+from dataclasses import field as _field
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
@@ -811,18 +812,18 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     # as unmodelled rather than evaluating against the
                     # stale literal that the previous assignment set.
                     name_periods.pop(target.id, None)
-                # String-scalar side: a function-local
-                # ``target = "BBB"`` immediately before
-                # ``if bar.symbol == target:`` must be visible to
-                # ``_symbol_gate``. The outer-scope ``name_strings``
-                # collector only walks module / class / __init__, so
-                # without this in-place update the gate is dropped
-                # and a sibling indicator condition silently
-                # evaluates against every fetched DataFrame.
+                # String-scalar side: a function-local ``target = "BBB"``
+                # is a bare-name binding inside ``on_bar`` and must be
+                # visible to bare-``Name`` resolution in ``_symbol_gate``
+                # (e.g. ``if bar.symbol == target:``). Function-local
+                # names take precedence over module-level globals via
+                # overwrite — Python's lexical scope chain. Writes to
+                # ``globals_`` rather than ``attrs`` because a bare name
+                # never resolves through the class.
                 if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    name_strings[target.id] = value.value
+                    name_strings.globals_[target.id] = value.value
                 else:
-                    name_strings.pop(target.id, None)
+                    name_strings.globals_.pop(target.id, None)
             elif isinstance(target, ast.Attribute):
                 # ``self.WINDOW = N`` — record by attribute name.
                 v = _numeric_literal(value, name_periods)
@@ -831,12 +832,14 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 else:
                     # Same drop-stale rule for ``self.X = <non-literal>``.
                     name_periods.pop(target.attr, None)
-                # ``self.TARGET = "BBB"`` — flow-sensitive string
-                # binding for symbol-gate resolution.
+                # ``self.TARGET = "BBB"`` — flow-sensitive instance-attr
+                # binding routed through ``attrs`` so ``self.TARGET`` /
+                # ``cls.TARGET`` resolution sees it without leaking into
+                # bare-name lookups.
                 if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    name_strings[target.attr] = value.value
+                    name_strings.attrs[target.attr] = value.value
                 else:
-                    name_strings.pop(target.attr, None)
+                    name_strings.attrs.pop(target.attr, None)
 
     def _budgeted_extend(group_subs: List[_Subcond], extras: List[_Subcond]) -> bool:
         """Append extras into group within the global subcond budget.
@@ -1100,7 +1103,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # internal reassignments to siblings or parents.
         saved_evals = dict(name_evaluators)
         saved_periods = dict(name_periods)
-        saved_strings = dict(name_strings)
+        saved_strings = name_strings.copy()
         # Implicit symbol filter accumulated from early-return guards
         # at this scope. ``if bar.symbol != "BBB": return`` excludes
         # all symbols other than BBB for any statement that follows in
@@ -1197,8 +1200,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             name_evaluators.update(saved_evals)
             name_periods.clear()
             name_periods.update(saved_periods)
-            name_strings.clear()
-            name_strings.update(saved_strings)
+            name_strings.restore_from(saved_strings)
 
     body = getattr(on_bar, "body", None)
     if isinstance(body, list):
@@ -1307,7 +1309,7 @@ def _is_return_only_body(stmts: List[ast.stmt]) -> bool:
 
 def _early_return_symbol_guard(
     stmt: ast.If,
-    name_strings: Optional[Dict[str, str]] = None,
+    name_strings: Optional["_NameStrings"] = None,
     bar_name: str = "bar",
 ) -> Optional[set]:
     """Detect ``if <bar>.symbol != "X": return`` (or ``not in (...)``).
@@ -1370,14 +1372,19 @@ def _early_return_symbol_guard(
             return n.value
         if name_strings is None:
             return None
+        # Bare ``Name`` resolves through the module/global scope only —
+        # class-body bare names are NOT in lexical scope for methods.
         if isinstance(n, ast.Name):
-            return name_strings.get(n.id)
+            return name_strings.globals_.get(n.id)
+        # ``self.X`` / ``cls.X`` resolves through the class chain
+        # (instance dict via ``__init__`` shadowing class body), never
+        # through module scope.
         if (
             isinstance(n, ast.Attribute)
             and isinstance(n.value, ast.Name)
             and n.value.id in {"self", "cls"}
         ):
-            return name_strings.get(n.attr)
+            return name_strings.attrs.get(n.attr)
         return None
 
     # ``bar.symbol != X`` / ``X != bar.symbol`` → allow {X}
@@ -1410,7 +1417,7 @@ def _early_return_symbol_guard(
 
 def _symbol_gate(
     node: ast.Compare,
-    name_strings: Optional[Dict[str, str]] = None,
+    name_strings: Optional["_NameStrings"] = None,
     bar_name: str = "bar",
 ) -> Optional[set]:
     """Detect a symbol gate on ``<bar>.symbol``.
@@ -1461,14 +1468,19 @@ def _symbol_gate(
             return n.value
         if name_strings is None:
             return None
+        # Bare ``Name`` resolves through the module/global scope only —
+        # class-body bare names are NOT in lexical scope for methods.
         if isinstance(n, ast.Name):
-            return name_strings.get(n.id)
+            return name_strings.globals_.get(n.id)
+        # ``self.X`` / ``cls.X`` resolves through the class chain
+        # (instance dict via ``__init__`` shadowing class body), never
+        # through module scope.
         if (
             isinstance(n, ast.Attribute)
             and isinstance(n.value, ast.Name)
             and n.value.id in {"self", "cls"}
         ):
-            return name_strings.get(n.attr)
+            return name_strings.attrs.get(n.attr)
         return None
 
     if isinstance(op, (ast.Eq, ast.Is)):
@@ -1757,80 +1769,136 @@ def _find_strategy_class(tree: ast.AST, on_bar: ast.AST) -> Optional[ast.ClassDe
     return None
 
 
+@dataclass
+class _NameStrings:
+    """Two-namespace string-constant table for symbol-gate resolution.
+
+    Python's name resolution treats class-body bare names as class
+    attributes — they are NOT in lexical scope for methods. So a
+    module-level ``TARGET = "X"`` and a class-body ``TARGET = "Y"``
+    resolve to different values inside ``on_bar``: bare ``TARGET``
+    sees ``"X"`` (the module/global binding), while ``self.TARGET``
+    sees ``"Y"`` (the class attribute, with instance dict shadowing
+    via ``__init__`` taking precedence). The probe needs separate
+    dicts so a single ``_collect_name_strings`` call can serve both
+    lookup paths without one overwriting the other.
+
+    - ``globals_`` — bare-``Name`` lookups: module-level ``Name``
+      targets (``setdefault`` so cross-scope module constants stay
+      isolated) plus function-local ``Name`` targets from inside
+      ``on_bar`` (overwrite, applied flow-sensitively in
+      :func:`_apply_assign_inplace`).
+    - ``attrs`` — ``self.X`` / ``cls.X`` lookups: class-body
+      ``Name`` targets (overwrite, source order — last wins) plus
+      class ``__init__`` / ``__post_init__`` ``self.X = "..."``
+      assignments (overwrite). Module-level bare names do **not**
+      contribute here because ``self.X`` doesn't fall through to
+      module scope at runtime.
+    """
+
+    globals_: Dict[str, str] = _field(default_factory=dict)
+    attrs: Dict[str, str] = _field(default_factory=dict)
+
+    def copy(self) -> "_NameStrings":
+        return _NameStrings(globals_=dict(self.globals_), attrs=dict(self.attrs))
+
+    def restore_from(self, other: "_NameStrings") -> None:
+        """In-place reset to ``other``'s contents — used by the
+        flow-sensitive walker's transactional snapshot/restore.
+        """
+        self.globals_.clear()
+        self.globals_.update(other.globals_)
+        self.attrs.clear()
+        self.attrs.update(other.attrs)
+
+
 def _collect_name_strings(
     tree: ast.AST,
     strategy_class: Optional[ast.ClassDef] = None,
-) -> Dict[str, str]:
+) -> _NameStrings:
     """Bind ``NAME = "<string>"`` for string-constant resolution.
 
     Mirrors :func:`_collect_name_periods` but for string-valued
     assignments. Used by :func:`_symbol_gate` so a target-symbol
     constant like ``TARGET_SYMBOL = "BBB"`` resolves
-    ``bar.symbol == TARGET_SYMBOL`` to the same gate as the
-    string-literal form.
+    ``bar.symbol == TARGET_SYMBOL`` (bare name) and
+    ``bar.symbol == self.TARGET`` (attribute) without one overwriting
+    the other.
 
-    Honours the same scoping rules as the period collector: skips
-    sibling helper classes, descends only into the strategy class's
-    constructor for ``self.<NAME>`` bindings, skips function bodies
-    (their locals aren't class/module constants), and — critically —
-    distinguishes module vs class scope so a class-body
-    ``TARGET = "MSFT"`` overrides a module-level ``TARGET = "AAPL"``.
-    Without the override, ``self.TARGET`` resolved to the module
-    binding even though Python's runtime attribute lookup goes
-    through the class, so the symbol gate scoped the indicator leg
-    to the wrong DataFrame and the report could flip
-    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` even when the actual target
-    symbol's bars satisfied the entry.
+    Returns a :class:`_NameStrings` with two dicts:
+
+    - ``globals_`` (bare-name lookups) — module-level ``Name``
+      targets only. Class-body ``Name`` targets do NOT contribute
+      because Python's class body is not in lexical scope for
+      methods, so a bare ``TARGET`` reference inside ``on_bar``
+      resolves through the module/global scope, not the class.
+    - ``attrs`` (``self.X`` / ``cls.X`` lookups) — class-body
+      ``Name`` targets (which become class attributes accessible
+      via ``self.X`` / ``Class.X``) and class ``__init__`` /
+      ``__post_init__`` ``self.X = ...`` instance assignments.
+      Module-level bare names do NOT contribute because
+      ``self.X`` resolution stops at the class chain — it does not
+      fall through to module scope.
     """
-    bindings: Dict[str, str] = {}
+    bindings = _NameStrings()
     _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
 
-    def _record(target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
+    def _record_global(target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
         if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
             return
         if isinstance(target, ast.Name):
             if overwrite:
-                bindings[target.id] = value.value
+                bindings.globals_[target.id] = value.value
             else:
-                bindings.setdefault(target.id, value.value)
-        elif isinstance(target, ast.Attribute):
-            if overwrite:
-                bindings[target.attr] = value.value
-            else:
-                bindings.setdefault(target.attr, value.value)
+                bindings.globals_.setdefault(target.id, value.value)
+        # Module-level ``self.X = ...`` would be a syntax/semantic oddity;
+        # ignore — module scope doesn't contribute to attr lookups.
 
-    def _walk(node: ast.AST, *, scope: str):
+    def _record_attr(target: ast.expr, value: ast.expr) -> None:
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            return
+        # Class-body bare ``Name`` targets and ``self.X`` assignments inside
+        # ``__init__`` both contribute under the same attribute key, with
+        # source-order overwrite (later reassignment wins, mirroring
+        # Python's runtime where the constructor body executes after the
+        # class body).
+        if isinstance(target, ast.Name):
+            bindings.attrs[target.id] = value.value
+        elif isinstance(target, ast.Attribute):
+            bindings.attrs[target.attr] = value.value
+
+    def _walk(node: ast.AST):
         if strategy_class is not None and isinstance(node, ast.ClassDef):
             if node is not strategy_class:
                 return
             for child in node.body:
                 if isinstance(child, ast.Assign):
                     for t in child.targets:
-                        _record(t, child.value, overwrite=True)
+                        _record_attr(t, child.value)
                 elif isinstance(child, ast.AnnAssign) and child.value is not None:
-                    _record(child.target, child.value, overwrite=True)
+                    _record_attr(child.target, child.value)
                 elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
                         for sub in ast.walk(child):
                             if isinstance(sub, ast.Assign):
                                 for t in sub.targets:
-                                    _record(t, sub.value, overwrite=True)
+                                    _record_attr(t, sub.value)
                             elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
-                                _record(sub.target, sub.value, overwrite=True)
+                                _record_attr(sub.target, sub.value)
                 else:
-                    _walk(child, scope="class")
+                    _walk(child)
             return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             return
         if isinstance(node, ast.Assign):
             for t in node.targets:
-                _record(t, node.value, overwrite=(scope == "class"))
+                _record_global(t, node.value, overwrite=False)
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            _record(node.target, node.value, overwrite=(scope == "class"))
+            _record_global(node.target, node.value, overwrite=False)
         for child in ast.iter_child_nodes(node):
-            _walk(child, scope=scope)
+            _walk(child)
 
-    _walk(tree, scope="module")
+    _walk(tree)
     return bindings
 
 
@@ -2095,7 +2163,7 @@ def _build_compound_and_subcond(
     leg: ast.BoolOp,
     name_periods: Dict[str, int],
     name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
-    name_strings: Optional[Dict[str, str]] = None,
+    name_strings: Optional["_NameStrings"] = None,
     bar_name: str = "bar",
 ) -> Optional[_Subcond]:
     """Build a single subcond for an ``and``-conjunction inside an OR leg.
@@ -2190,7 +2258,7 @@ def _build_compound_or_subcond(
     leg: ast.BoolOp,
     name_periods: Dict[str, int],
     name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
-    name_strings: Optional[Dict[str, str]] = None,
+    name_strings: Optional["_NameStrings"] = None,
     bar_name: str = "bar",
 ) -> Optional[_Subcond]:
     """Build a single subcond for an ``or``-disjunction inside a larger

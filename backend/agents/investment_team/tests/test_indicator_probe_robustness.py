@@ -3170,6 +3170,73 @@ def test_strategy_class_string_constant_overrides_module_constant() -> None:
     assert report.subconditions[0].hit_count > 0
 
 
+def test_bare_name_symbol_gate_resolves_through_module_not_class() -> None:
+    """Companion to ``test_strategy_class_string_constant_overrides_module_constant``:
+    bare-``Name`` symbol-gate references must resolve through the
+    module/global scope, not the class. Python's class body is NOT in
+    lexical scope for methods, so a bare ``TARGET`` reference inside
+    ``on_bar`` resolves to the module's ``TARGET = "AAPL"`` even when
+    the class also defines ``TARGET = "MSFT"``. The previous version
+    of this fix recorded class-body bare-``Name`` targets under the
+    same key the bare-name lookup uses, so the gate scoped to the
+    class value and the report could falsely flip to ``COVERAGE_OK``.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET and close > 100:
+                    pass
+
+    Universe: AAPL with close=50 (the runtime gate scopes here, never
+    > 100), MSFT with close=200 (would satisfy ``close > 100`` if the
+    bare-name gate is dropped or scoped to the class). Without the
+    fix the probe scoped to MSFT; with the fix it scopes to AAPL,
+    AAPL never satisfies, and the report classifies
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]`` in the row
+    label.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
 def test_early_return_symbol_neq_guard_propagates_filter() -> None:
     """``if bar.symbol != "BBB": return`` followed by an entry
     predicate must propagate the implicit ``{BBB}`` filter to the
