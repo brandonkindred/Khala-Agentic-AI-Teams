@@ -4951,3 +4951,73 @@ def test_static_false_conjunct_routes_to_orelse() -> None:
         market_data={"AAPL": _flat_ohlcv()},
     )
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_static_false_arithmetic_compare_is_unreachable() -> None:
+    """A constant-only ``Compare`` whose operands are arithmetic
+    ``BinOp`` expressions (e.g. ``1 + 1 == 3``) must be evaluated, not
+    silently dropped. Previously ``_compare_is_static_constant``
+    accepted it (``_build_operand`` folds ``BinOp`` of constants) but
+    ``_evaluate_static_predicate`` couldn't fold the ``BinOp`` and
+    returned ``None``, so the term slipped through as a no-op skip
+    and the surviving ``close > 0`` reported ``COVERAGE_OK``. The
+    arithmetic-folding scalar resolver now sees ``1 + 1 == 3`` as
+    statically false, the AND short-circuits, and the predicate is
+    reported unreachable.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (1 + 1 == 3):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_true_arithmetic_compare_is_no_op() -> None:
+    """The matching truthy polarity: ``1 + 1 == 2`` is statically
+    true, so the AND-conjunct is a no-op gate and the recognised
+    sibling's mask remains exact — ``COVERAGE_OK`` is correct.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (1 + 1 == 2):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_unfoldable_static_constant_compare_is_unknown() -> None:
+    """A constant-only Compare we genuinely cannot fold (e.g. an
+    ``ast.Mod`` ``BinOp`` operand the static-scalar resolver does not
+    handle) must NOT silently be skipped. The recognised siblings'
+    mask is at best an upper bound on the real predicate, so the
+    aggregator sees the group as unknown-tainted and refuses to use
+    the recognised firing leg as positive evidence.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (5 % 2 == 0):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE

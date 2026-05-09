@@ -950,10 +950,24 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             # literals make the predicate dead — also not "unknown
             # narrowing" in the sense the aggregator needs to suppress
             # COVERAGE_OK; the surviving recognised legs simply don't
-            # describe a reachable path. Conservatively skip both:
-            # _build_subcond rejects bare literals (no data-dependent
-            # operand), and we don't want to tag them as unknown.
-            if _is_constant_literal(term):
+            # describe a reachable path.
+            #
+            # Unified static-evaluation skip. ``True`` means the term
+            # is a statically-decidable no-op (literal ``True``,
+            # ``1 < 2``, ``1 + 1 == 2``, ...) — drop it from the
+            # group's recognised set without tagging the group as
+            # unknown. ``False`` was already short-circuited by the
+            # pre-scan above so we don't expect to see it here, but
+            # treating it like ``True`` is safe (the surviving
+            # recognised siblings can't carry the report; the group
+            # will still be empty). ``None`` (un-decidable) falls
+            # through to the regular type dispatch so an
+            # almost-static-but-unevaluable Compare (e.g.
+            # ``(5 % 2 == 0)`` whose ``Mod`` operand isn't in the
+            # constant-folding scope) lands in the unknown-conjunct
+            # path rather than slipping through as a silent no-op.
+            truth = _evaluate_static_predicate(term, name_periods, name_evaluators)
+            if truth is not None:
                 continue
             if isinstance(term, ast.Compare):
                 sym = _symbol_gate(term, name_strings, bar_name)
@@ -972,23 +986,16 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 sub = _build_subcond(term, name_periods, name_evaluators)
                 if sub is not None:
                     own_subs.append(sub)
-                elif _compare_is_static_constant(term, name_periods, name_evaluators):
-                    # Statically-decidable comparison whose both
-                    # operands resolved as constants (e.g. ``1 < 2``,
-                    # ``LIMIT == 1`` after ``LIMIT = 1``).
-                    # ``_build_subcond`` returned None because there's
-                    # no data-dependent operand, but the gate is still
-                    # exact — either always-true (no-op) or always-
-                    # false (statically dead). Neither shape narrows
-                    # the recognised mask in a way that would
-                    # invalidate ``COVERAGE_OK``, so don't tag the
-                    # group as unknown.
-                    pass
                 else:
-                    # Compare term we couldn't model (e.g. ``self.flag ==
-                    # True`` on an opaque attribute). Mark the group as
-                    # carrying an unknown conjunct so the aggregator
-                    # treats recognised hits as upper-bound only.
+                    # Compare term we couldn't model. Either an opaque
+                    # comparison (``self.flag == True``) or a static-
+                    # constant compare we couldn't actually fold
+                    # (``_build_operand`` accepted both BinOp operands
+                    # but ``_evaluate_static_predicate`` returned None
+                    # — see its docstring). In both cases the
+                    # recognised siblings' mask is at best an upper
+                    # bound on the real predicate, so tag the group
+                    # as unknown.
                     has_unknown_conjunct = True
                 continue
             # A nested OR inside the top-level AND, e.g.
@@ -1920,47 +1927,48 @@ def _flatten_top_terms(test: ast.expr) -> List[ast.expr]:
     return [test]
 
 
-def _is_constant_literal(node: ast.expr) -> bool:
-    """True iff ``node`` is a bare Python literal whose truthiness is
-    statically decidable (``True``, ``False``, ``None``, numbers,
-    strings, etc.).
-
-    Used by ``_process_if`` to skip statically-decidable AND conjuncts:
-    a literal ``True`` is a no-op gate (recognised siblings' mask is
-    exact in its presence) and a literal ``False`` makes the predicate
-    dead — neither narrows the recognised mask in a way that would
-    invalidate ``COVERAGE_OK`` from the recognised legs alone, so we
-    don't tag the group as unknown for them.
-    """
-    return isinstance(node, ast.Constant)
+_BINOP_FOLDERS: Dict[type, Callable[[float, float], float]] = {
+    ast.Mult: lambda a, b: a * b,
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+}
 
 
-def _compare_is_static_constant(
+def _static_scalar_value(
     node: ast.expr,
     name_periods: Dict[str, int],
-    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]],
-) -> bool:
-    """True iff ``node`` is a 1-op ``Compare`` whose both operands
-    resolve via :func:`_build_operand` and neither is data-dependent.
+) -> Optional[float]:
+    """Resolve ``node`` to a scalar ``float`` when it's a constant
+    expression, or ``None`` otherwise.
 
-    Such comparisons are statically decidable (e.g. ``1 < 2``,
-    ``LIMIT == 1`` after ``LIMIT = 1``) and ``_build_subcond`` returns
-    ``None`` for them precisely because no operand reads the DataFrame.
-    They're not opaque — just constant — so ``_process_if`` should
-    skip them without tagging the group as
-    ``has_unknown_and_conjunct``: the recognised siblings' mask is
-    still exact whether the constant compare is true (no-op gate) or
-    false (predicate is statically dead).
+    Mirrors the non-data-dependent scope of :func:`_build_operand`
+    (literals, ``USub``, named numeric bindings, and
+    ``Mult``/``Add``/``Sub`` ``BinOp`` chains over the same), so
+    :func:`_evaluate_static_predicate` can actually fold every
+    constant-only comparison that ``_build_operand`` would accept.
+    Without arithmetic ``BinOp`` folding, ``(1 + 1 == 3)`` was
+    rejected by :func:`_numeric_literal` and slipped through as an
+    "accepted but unevaluable" no-op skip even though the real
+    comparison is statically false.
     """
-    if not isinstance(node, ast.Compare):
-        return False
-    if len(node.ops) != 1 or len(node.comparators) != 1:
-        return False
-    left = _build_operand(node.left, name_periods, name_evaluators)
-    right = _build_operand(node.comparators[0], name_periods, name_evaluators)
-    if left is None or right is None:
-        return False
-    return not (left.data_dependent or right.data_dependent)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _static_scalar_value(node.operand, name_periods)
+        if inner is None:
+            return None
+        return -inner
+    if isinstance(node, ast.BinOp):
+        folder = _BINOP_FOLDERS.get(type(node.op))
+        if folder is None:
+            return None
+        left = _static_scalar_value(node.left, name_periods)
+        right = _static_scalar_value(node.right, name_periods)
+        if left is None or right is None:
+            return None
+        try:
+            return float(folder(left, right))
+        except Exception:  # noqa: BLE001
+            return None
+    return _numeric_literal(node, name_periods)
 
 
 _STATIC_CMP_OPS: Dict[type, Callable[[float, float], bool]] = {
@@ -1984,26 +1992,33 @@ def _evaluate_static_predicate(
     Recognised shapes:
       - bare ``ast.Constant`` — Python's truthiness on the literal
         value (``False``/``None``/``0``/``""`` → False, everything
-        else → True)
-      - 1-op static-constant ``Compare`` (e.g. ``1 < 2``,
-        ``LIMIT == 1``) — both operands resolve via
-        :func:`_numeric_literal` and the op is applied directly.
+        else → True).
+      - 1-op ``Compare`` whose both operands resolve via
+        :func:`_static_scalar_value` (literals, ``USub``, named
+        numeric bindings, and arithmetic ``BinOp`` chains over the
+        same). The op is then applied directly on the folded scalars.
 
-    Used by ``_process_if`` to short-circuit the AND chain when any
-    term evaluates to ``False`` — the predicate is then unreachable
-    and must not be allowed to emit positive-evidence groups built
-    from the surviving recognised siblings.
+    Used by ``_process_if`` to (a) short-circuit the AND chain when
+    any term evaluates to ``False`` (predicate unreachable, recurse
+    into ``orelse`` only), and (b) silently skip ``True`` terms as
+    no-op gates. Returning ``None`` for any other shape — including a
+    constant-only Compare we couldn't actually fold (e.g. one whose
+    operands escape :func:`_static_scalar_value`'s constant-folding
+    scope) — sends the term through the unknown-conjunct path so the
+    aggregator treats recognised siblings' hits as upper-bound only,
+    rather than silently dropping the term as if it were a no-op.
     """
     if isinstance(node, ast.Constant):
         try:
             return bool(node.value)
         except Exception:  # noqa: BLE001
             return None
-    if not _compare_is_static_constant(node, name_periods, name_evaluators):
+    if not isinstance(node, ast.Compare):
         return None
-    # Both operands resolve to numeric literals; apply the op directly.
-    left_val = _numeric_literal(node.left, name_periods)
-    right_val = _numeric_literal(node.comparators[0], name_periods)
+    if len(node.ops) != 1 or len(node.comparators) != 1:
+        return None
+    left_val = _static_scalar_value(node.left, name_periods)
+    right_val = _static_scalar_value(node.comparators[0], name_periods)
     if left_val is None or right_val is None:
         return None
     op_fn = _STATIC_CMP_OPS.get(type(node.ops[0]))
