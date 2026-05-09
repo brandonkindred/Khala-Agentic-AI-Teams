@@ -820,8 +820,14 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # overwrite — Python's lexical scope chain. Writes to
                 # ``globals_`` rather than ``attrs`` because a bare name
                 # never resolves through the class.
-                if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    name_strings.globals_[target.id] = value.value
+                #
+                # RHS aliases (``target = OTHER`` / ``target = self.X``)
+                # resolve through the current bindings — bare ``Name``
+                # via ``globals_`` (method scope = module scope),
+                # ``self.X`` via ``attrs``.
+                str_value = _resolve_string_in_method(value, name_strings)
+                if str_value is not None:
+                    name_strings.globals_[target.id] = str_value
                 else:
                     name_strings.globals_.pop(target.id, None)
             elif isinstance(target, ast.Attribute):
@@ -832,12 +838,14 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 else:
                     # Same drop-stale rule for ``self.X = <non-literal>``.
                     name_periods.pop(target.attr, None)
-                # ``self.TARGET = "BBB"`` — flow-sensitive instance-attr
-                # binding routed through ``attrs`` so ``self.TARGET`` /
+                # ``self.TARGET = "BBB"`` (or alias from a module/global
+                # constant) — flow-sensitive instance-attr binding
+                # routed through ``attrs`` so ``self.TARGET`` /
                 # ``cls.TARGET`` resolution sees it without leaking into
                 # bare-name lookups.
-                if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    name_strings.attrs[target.attr] = value.value
+                str_value = _resolve_string_in_method(value, name_strings)
+                if str_value is not None:
+                    name_strings.attrs[target.attr] = str_value
                 else:
                     name_strings.attrs.pop(target.attr, None)
 
@@ -1812,6 +1820,29 @@ class _NameStrings:
         self.attrs.update(other.attrs)
 
 
+def _resolve_string_in_method(value: ast.expr, name_strings: "_NameStrings") -> Optional[str]:
+    """Resolve an assignment RHS to a string from inside a method body.
+
+    Used by :func:`_apply_assign_inplace` so flow-sensitive
+    function-local writes can honour aliases like ``target = OTHER``
+    or ``self.TARGET = SOME_NAME`` (where ``SOME_NAME`` is a module
+    constant). Method-scope bare-``Name`` references resolve through
+    the module/global dict only — Python's class body is not in scope
+    for methods. ``self.X`` / ``cls.X`` resolves through ``attrs``.
+    """
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    if isinstance(value, ast.Name):
+        return name_strings.globals_.get(value.id)
+    if (
+        isinstance(value, ast.Attribute)
+        and isinstance(value.value, ast.Name)
+        and value.value.id in {"self", "cls"}
+    ):
+        return name_strings.attrs.get(value.attr)
+    return None
+
+
 def _collect_name_strings(
     tree: ast.AST,
     strategy_class: Optional[ast.ClassDef] = None,
@@ -1843,19 +1874,66 @@ def _collect_name_strings(
     bindings = _NameStrings()
     _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
 
+    def _resolve_string_value(value: ast.expr, *, in_method: bool) -> Optional[str]:
+        """Resolve an assignment RHS to a string at write time.
+
+        Strategies routinely alias module constants into class
+        attributes — ``self.TARGET = TARGET`` inside ``__init__`` or
+        a class-body ``TARGET = TARGET`` line. Without resolving the
+        RHS, the alias was silently dropped (RHS isn't a Constant)
+        and ``bar.symbol == self.TARGET`` lost its gate, so a sibling
+        indicator condition silently evaluated against every fetched
+        DataFrame and the report could falsely flip to
+        ``COVERAGE_OK``.
+
+        ``in_method=True`` for assignments inside ``__init__`` (and
+        any method body): bare ``Name`` references resolve through
+        the module scope only, matching Python's runtime — class-body
+        names are not in scope inside methods.
+        ``in_method=False`` for assignments lexically in the class
+        body: bare ``Name`` references resolve class-local first
+        (earlier class-body bindings already recorded into ``attrs``),
+        then module/global scope, matching Python's class-namespace
+        lookup at class-body execution time.
+
+        ``self.X`` / ``cls.X`` always resolve through ``attrs``.
+        """
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value.value
+        if isinstance(value, ast.Name):
+            if in_method:
+                return bindings.globals_.get(value.id)
+            cls_local = bindings.attrs.get(value.id)
+            if cls_local is not None:
+                return cls_local
+            return bindings.globals_.get(value.id)
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id in {"self", "cls"}
+        ):
+            return bindings.attrs.get(value.attr)
+        return None
+
     def _record_global(target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
-        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+        # Module scope: bare ``Name`` RHS resolution can only consult
+        # the module's own dict (``globals_``); ``attrs`` is empty
+        # before we enter the class. ``in_method`` is irrelevant here
+        # — pass ``True`` so we never fall through to ``attrs`` (which
+        # would also be empty, but the explicit choice documents the
+        # intent).
+        resolved = _resolve_string_value(value, in_method=True)
+        if resolved is None:
             return
         if isinstance(target, ast.Name):
             if overwrite:
-                bindings.globals_[target.id] = value.value
+                bindings.globals_[target.id] = resolved
             else:
-                bindings.globals_.setdefault(target.id, value.value)
-        # Module-level ``self.X = ...`` would be a syntax/semantic oddity;
-        # ignore — module scope doesn't contribute to attr lookups.
+                bindings.globals_.setdefault(target.id, resolved)
 
-    def _record_attr(target: ast.expr, value: ast.expr) -> None:
-        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+    def _record_attr(target: ast.expr, value: ast.expr, *, in_method: bool) -> None:
+        resolved = _resolve_string_value(value, in_method=in_method)
+        if resolved is None:
             return
         # Class-body bare ``Name`` targets and ``self.X`` assignments inside
         # ``__init__`` both contribute under the same attribute key, with
@@ -1863,9 +1941,9 @@ def _collect_name_strings(
         # Python's runtime where the constructor body executes after the
         # class body).
         if isinstance(target, ast.Name):
-            bindings.attrs[target.id] = value.value
+            bindings.attrs[target.id] = resolved
         elif isinstance(target, ast.Attribute):
-            bindings.attrs[target.attr] = value.value
+            bindings.attrs[target.attr] = resolved
 
     def _walk(node: ast.AST):
         if strategy_class is not None and isinstance(node, ast.ClassDef):
@@ -1874,17 +1952,17 @@ def _collect_name_strings(
             for child in node.body:
                 if isinstance(child, ast.Assign):
                     for t in child.targets:
-                        _record_attr(t, child.value)
+                        _record_attr(t, child.value, in_method=False)
                 elif isinstance(child, ast.AnnAssign) and child.value is not None:
-                    _record_attr(child.target, child.value)
+                    _record_attr(child.target, child.value, in_method=False)
                 elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
                         for sub in ast.walk(child):
                             if isinstance(sub, ast.Assign):
                                 for t in sub.targets:
-                                    _record_attr(t, sub.value)
+                                    _record_attr(t, sub.value, in_method=True)
                             elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
-                                _record_attr(sub.target, sub.value)
+                                _record_attr(sub.target, sub.value, in_method=True)
                 else:
                     _walk(child)
             return

@@ -3237,6 +3237,126 @@ def test_bare_name_symbol_gate_resolves_through_module_not_class() -> None:
     assert report.subconditions[0].hit_count == 0
 
 
+def test_self_attr_alias_to_module_string_constant_resolves() -> None:
+    """``self.TARGET = TARGET`` inside ``__init__`` aliases a module
+    string constant to a class attribute. The RHS is ``ast.Name``,
+    not ``Constant``, so without RHS resolution at write time the
+    attribute binding was silently dropped, ``bar.symbol == self.TARGET``
+    lost its gate, and the sibling indicator condition evaluated
+    against every fetched DataFrame — letting an unrelated symbol
+    falsely flip the report to ``COVERAGE_OK``.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            def __init__(self):
+                self.TARGET = TARGET  # alias module → instance attr
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the attr alias is dropped).
+    Without the fix, the gate is dropped, MSFT satisfies, COVERAGE_OK.
+    With the fix, ``self.TARGET`` resolves to ``"AAPL"`` (via the
+    module global), the gate scopes to AAPL, and the report
+    classifies ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            def __init__(self):
+                self.TARGET = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_class_body_alias_to_module_string_constant_resolves() -> None:
+    """Same alias bug, applied to a class-body ``TARGET = TARGET`` line.
+    At class-body execution time the bare ``TARGET`` RHS resolves
+    through the module scope (the class namespace doesn't yet contain
+    ``TARGET``), so ``Strategy.TARGET`` becomes ``"AAPL"``. Without
+    RHS resolution the binding was dropped and ``bar.symbol ==
+    self.TARGET`` lost its gate.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = TARGET  # class-body alias
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
 def test_early_return_symbol_neq_guard_propagates_filter() -> None:
     """``if bar.symbol != "BBB": return`` followed by an entry
     predicate must propagate the implicit ``{BBB}`` filter to the
