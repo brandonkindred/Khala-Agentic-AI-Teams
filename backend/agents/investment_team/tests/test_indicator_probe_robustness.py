@@ -3102,6 +3102,757 @@ def test_symbol_gate_resolves_self_attribute_string_constant() -> None:
     assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
 
 
+def test_strategy_class_string_constant_overrides_module_constant() -> None:
+    """A class-level string constant must override a same-named
+    module-level string constant. At runtime, ``self.TARGET`` resolves
+    through the class — the module binding is irrelevant. With the
+    bug, ``_collect_name_strings`` recorded the module value first via
+    ``setdefault`` and the class binding was ignored, so a symbol gate
+    on ``bar.symbol == self.TARGET`` scoped the indicator to the wrong
+    DataFrame and the report could flip to ``COVERAGE_OK`` (or to
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` for the wrong reason) when
+    the actual target's bars satisfied the entry.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: MSFT with close=200 (always > 100 — the actual target
+    fires), AAPL with close=50 (never > 100). With the bug,
+    ``self.TARGET`` resolves to ``"AAPL"``; the gate scopes to AAPL,
+    AAPL never satisfies, and the probe reports
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With the fix,
+    ``self.TARGET`` resolves to ``"MSFT"`` (the class override wins),
+    MSFT satisfies, and the probe reports ``COVERAGE_OK`` with
+    ``[MSFT]`` in the row label.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert "[MSFT]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_bare_name_symbol_gate_resolves_through_module_not_class() -> None:
+    """Companion to ``test_strategy_class_string_constant_overrides_module_constant``:
+    bare-``Name`` symbol-gate references must resolve through the
+    module/global scope, not the class. Python's class body is NOT in
+    lexical scope for methods, so a bare ``TARGET`` reference inside
+    ``on_bar`` resolves to the module's ``TARGET = "AAPL"`` even when
+    the class also defines ``TARGET = "MSFT"``. The previous version
+    of this fix recorded class-body bare-``Name`` targets under the
+    same key the bare-name lookup uses, so the gate scoped to the
+    class value and the report could falsely flip to ``COVERAGE_OK``.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET and close > 100:
+                    pass
+
+    Universe: AAPL with close=50 (the runtime gate scopes here, never
+    > 100), MSFT with close=200 (would satisfy ``close > 100`` if the
+    bare-name gate is dropped or scoped to the class). Without the
+    fix the probe scoped to MSFT; with the fix it scopes to AAPL,
+    AAPL never satisfies, and the report classifies
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]`` in the row
+    label.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_self_attr_alias_to_module_string_constant_resolves() -> None:
+    """``self.TARGET = TARGET`` inside ``__init__`` aliases a module
+    string constant to a class attribute. The RHS is ``ast.Name``,
+    not ``Constant``, so without RHS resolution at write time the
+    attribute binding was silently dropped, ``bar.symbol == self.TARGET``
+    lost its gate, and the sibling indicator condition evaluated
+    against every fetched DataFrame — letting an unrelated symbol
+    falsely flip the report to ``COVERAGE_OK``.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            def __init__(self):
+                self.TARGET = TARGET  # alias module → instance attr
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the attr alias is dropped).
+    Without the fix, the gate is dropped, MSFT satisfies, COVERAGE_OK.
+    With the fix, ``self.TARGET`` resolves to ``"AAPL"`` (via the
+    module global), the gate scopes to AAPL, and the report
+    classifies ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            def __init__(self):
+                self.TARGET = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_class_body_alias_to_module_string_constant_resolves() -> None:
+    """Same alias bug, applied to a class-body ``TARGET = TARGET`` line.
+    At class-body execution time the bare ``TARGET`` RHS resolves
+    through the module scope (the class namespace doesn't yet contain
+    ``TARGET``), so ``Strategy.TARGET`` becomes ``"AAPL"``. Without
+    RHS resolution the binding was dropped and ``bar.symbol ==
+    self.TARGET`` lost its gate.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = TARGET  # class-body alias
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_constructor_conditional_assignment_does_not_override_class_attr() -> None:
+    """A guarded ``self.X = ...`` inside ``__init__`` must NOT be
+    treated as unconditional. Walking the constructor body via
+    ``ast.walk`` would have descended into ``if False: self.TARGET =
+    "AAPL"`` and overwritten the class attribute with a value the
+    runtime never sets — the probe would scope the symbol gate to
+    the dead branch and report the wrong coverage.
+
+    The conservative fix walks only the constructor's top-level
+    statements; the class-body binding stays as the fallback,
+    matching Python's runtime attribute lookup when the constructor
+    branch doesn't execute.
+
+    Strategy::
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                if False:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: MSFT close=200 (the runtime gate scopes here, > 100
+    always), AAPL close=50. With the bug, the probe scopes to AAPL
+    and reports ``INDICATOR_FILTER_TOO_RESTRICTIVE``; with the fix,
+    the dead-branch assignment is skipped, the class attribute
+    ``"MSFT"`` wins, and the report classifies ``COVERAGE_OK`` with
+    ``[MSFT]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                if False:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert "[MSFT]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_constructor_literal_true_guard_records_assignment() -> None:
+    """``if True: self.TARGET = "AAPL"`` inside ``__init__`` IS
+    unconditionally executed at runtime, so the assignment must be
+    recorded. The conservative "top-level statements only" walk that
+    fixed the ``if False:`` regression went too far and silently
+    skipped this guaranteed assignment, dropping the symbol gate.
+    The walker now descends into literal-true ``if`` bodies (and
+    ``with`` blocks) while still skipping unknown predicates and
+    loops.
+
+    Strategy::
+
+        class Strategy:
+            def __init__(self):
+                if True:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the gate is dropped). With the
+    bug, the gate is dropped and the report flips to ``COVERAGE_OK``;
+    with the fix, ``self.TARGET`` resolves to ``"AAPL"``, the gate
+    scopes to AAPL, and the report classifies
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self):
+                if True:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_constructor_with_block_records_assignment() -> None:
+    """``with ctx: self.TARGET = "AAPL"`` is unconditionally executed
+    (the context manager's ``__enter__`` runs and the body follows).
+    The walker must descend into ``with`` bodies the same way it
+    descends into literal-true ``if`` bodies.
+    """
+    code = textwrap.dedent(
+        """
+        from contextlib import nullcontext
+
+        class Strategy:
+            def __init__(self):
+                with nullcontext():
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_constructor_unknown_guard_does_not_override_class_attr() -> None:
+    """Companion to ``..._literal_true_guard_records_assignment``:
+    when the predicate isn't a literal we can resolve, the walker
+    must skip both branches conservatively so an unreachable runtime
+    path can't override the class attribute. ``if some_flag:
+    self.TARGET = "AAPL"`` should leave ``self.TARGET`` resolving to
+    the class default ``"MSFT"`` — matching the runtime fallback when
+    the guard is false.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self, some_flag=False):
+                if some_flag:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert "[MSFT]" in report.subconditions[0].label
+
+
+def test_constructor_default_true_param_guard_records_assignment() -> None:
+    """``def __init__(self, enabled=True): if enabled: ...`` — the
+    default-construction path always takes the True branch, so the
+    assignment is guaranteed for the standard strategy invocation.
+    The constructor walker now resolves a bare-``Name`` predicate by
+    looking up the parameter's constant default, the same way it
+    resolves a literal ``if True:``.
+
+    Strategy::
+
+        class Strategy:
+            def __init__(self, enabled=True):
+                if enabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the gate is dropped). Without the
+    fix, ``if enabled:`` is treated as unknown, the binding is
+    skipped, the gate is dropped, and the report flips to
+    ``COVERAGE_OK``. With the fix, ``self.TARGET`` resolves to
+    ``"AAPL"``, the gate scopes to AAPL, and the report classifies
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self, enabled=True):
+                if enabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_constructor_default_false_param_guard_does_not_record_assignment() -> None:
+    """Companion: ``def __init__(self, enabled=False): if enabled:
+    self.TARGET = "AAPL"``. The default path takes the False branch,
+    so the assignment is NOT guaranteed and the class attribute
+    must remain the resolved value.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self, enabled=False):
+                if enabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert "[MSFT]" in report.subconditions[0].label
+
+
+def test_constructor_negated_default_param_guard_resolves() -> None:
+    """``if not disabled:`` with ``disabled=False`` default → True
+    branch is guaranteed. The predicate resolver handles
+    ``UnaryOp(Not, ...)`` over a parameter default.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self, disabled=False):
+                if not disabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_constructor_local_bare_name_is_not_an_instance_attribute() -> None:
+    """A bare-``Name`` assignment inside ``__init__`` is a function
+    local, not an instance attribute. ``class Strategy: TARGET =
+    "MSFT"; def __init__(self): TARGET = "AAPL"`` leaves the runtime
+    ``self.TARGET`` resolving through the class to ``"MSFT"`` — the
+    constructor local is shadowed for the method body but invisible
+    to outside lookups. The probe must NOT record the local under
+    ``attrs``, otherwise the symbol gate scopes to the wrong value.
+
+    Strategy::
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                TARGET = "AAPL"  # local — does not change ``self.TARGET``
+                _ = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: MSFT close=200 (the runtime gate scopes here, > 100
+    always), AAPL close=50. With the bug, the probe records
+    ``attrs["TARGET"] = "AAPL"`` and reports
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``; with the fix, only the
+    class attribute ``"MSFT"`` lands in ``attrs`` and the report
+    classifies ``COVERAGE_OK`` with ``[MSFT]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                TARGET = "AAPL"
+                _ = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert "[MSFT]" in report.subconditions[0].label
+
+
+def test_class_body_compound_statement_records_under_attrs() -> None:
+    """A class-body compound like ``if True: TARGET = "AAPL"`` creates
+    a class attribute at runtime — same as ``TARGET = "AAPL"`` at
+    class top level. The walker must route nested class-body
+    assignments through ``_record_attr`` (``in_method=False``), not
+    through the module-scope recorder. With the bug, the recursion
+    fell through to ``_record_global`` and the attribute landed in
+    ``globals_``, invisible to ``self.TARGET`` lookups.
+
+    Strategy::
+
+        class Strategy:
+            if True:
+                TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the gate is dropped). With the
+    fix, ``self.TARGET`` resolves to ``"AAPL"`` and the report
+    classifies ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            if True:
+                TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
 def test_early_return_symbol_neq_guard_propagates_filter() -> None:
     """``if bar.symbol != "BBB": return`` followed by an entry
     predicate must propagate the implicit ``{BBB}`` filter to the
