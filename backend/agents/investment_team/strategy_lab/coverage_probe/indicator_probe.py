@@ -919,6 +919,22 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
             return _process_or_if(test, body, orelse, ancestors, ancestor_symbols, ancestor_unknown)
 
+        # Statically-unreachable AND short-circuit. If any conjunct is
+        # a literal-falsy ``Constant`` (``False`` / ``0`` / ``None`` /
+        # ``""``) or a statically-false ``Compare`` (e.g. ``1 < 0``,
+        # ``LIMIT == 0`` after ``LIMIT = 1``), the whole predicate is
+        # unreachable. Emitting a group from the surviving recognised
+        # siblings would let them carry the report to ``COVERAGE_OK``
+        # even though no bar can satisfy the real entry path. Skip
+        # body recursion entirely; ``orelse`` runs unconditionally so
+        # we still recurse into it.
+        for term in _flatten_top_terms(test):
+            truth = _evaluate_static_predicate(term, name_periods, name_evaluators)
+            if truth is False:
+                if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
+                    return False
+                return True
+
         own_subs: List[_Subcond] = []
         own_symbols: Optional[set] = None
         # Track whether any AND-conjunct could not be statically modelled.
@@ -1945,6 +1961,58 @@ def _compare_is_static_constant(
     if left is None or right is None:
         return False
     return not (left.data_dependent or right.data_dependent)
+
+
+_STATIC_CMP_OPS: Dict[type, Callable[[float, float], bool]] = {
+    ast.Lt: lambda a, b: a < b,
+    ast.LtE: lambda a, b: a <= b,
+    ast.Gt: lambda a, b: a > b,
+    ast.GtE: lambda a, b: a >= b,
+    ast.Eq: lambda a, b: a == b,
+    ast.NotEq: lambda a, b: a != b,
+}
+
+
+def _evaluate_static_predicate(
+    node: ast.expr,
+    name_periods: Dict[str, int],
+    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]],
+) -> Optional[bool]:
+    """Return ``True`` / ``False`` when ``node`` is a statically-decidable
+    boolean term, ``None`` otherwise.
+
+    Recognised shapes:
+      - bare ``ast.Constant`` — Python's truthiness on the literal
+        value (``False``/``None``/``0``/``""`` → False, everything
+        else → True)
+      - 1-op static-constant ``Compare`` (e.g. ``1 < 2``,
+        ``LIMIT == 1``) — both operands resolve via
+        :func:`_numeric_literal` and the op is applied directly.
+
+    Used by ``_process_if`` to short-circuit the AND chain when any
+    term evaluates to ``False`` — the predicate is then unreachable
+    and must not be allowed to emit positive-evidence groups built
+    from the surviving recognised siblings.
+    """
+    if isinstance(node, ast.Constant):
+        try:
+            return bool(node.value)
+        except Exception:  # noqa: BLE001
+            return None
+    if not _compare_is_static_constant(node, name_periods, name_evaluators):
+        return None
+    # Both operands resolve to numeric literals; apply the op directly.
+    left_val = _numeric_literal(node.left, name_periods)
+    right_val = _numeric_literal(node.comparators[0], name_periods)
+    if left_val is None or right_val is None:
+        return None
+    op_fn = _STATIC_CMP_OPS.get(type(node.ops[0]))
+    if op_fn is None:
+        return None
+    try:
+        return bool(op_fn(left_val, right_val))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _find_strategy_class(tree: ast.AST, on_bar: ast.AST) -> Optional[ast.ClassDef]:

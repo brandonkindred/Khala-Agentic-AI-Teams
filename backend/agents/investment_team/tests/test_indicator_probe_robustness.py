@@ -4839,3 +4839,115 @@ def test_named_constant_compare_does_not_taint_group() -> None:
         market_data={"AAPL": _flat_ohlcv()},
     )
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_literal_false_and_conjunct_makes_predicate_unreachable() -> None:
+    """A statically-false literal AND-conjunct (``and False``) makes
+    the entire predicate unreachable. The recognised siblings'
+    ``close > 0`` mask must NOT be allowed to carry the report to
+    ``COVERAGE_OK`` — the real entry path is dead.
+
+    With no live ``if`` predicates anywhere in ``on_bar``, the probe
+    has no recognised indicator subconditions to score and must
+    classify as ``UNKNOWN_LOW_COVERAGE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and False:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_false_compare_makes_predicate_unreachable() -> None:
+    """A statically-false constant comparison (``1 < 0``) is the
+    Compare-shaped analogue of ``and False`` — same short-circuit
+    rule applies.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and 1 < 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_false_named_constant_compare_makes_predicate_unreachable() -> None:
+    """The named-constant variant: a module-level ``LIMIT = 1``
+    paired with ``LIMIT == 0`` is statically false and must take the
+    unreachable short-circuit path.
+    """
+    code = textwrap.dedent(
+        """
+        LIMIT = 1
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and LIMIT == 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_false_conjunct_does_not_block_sibling_predicate() -> None:
+    """A dead ``if close > 0 and False:`` next to a live
+    ``if close > 0:`` must not poison the live predicate's report.
+    The live entry path still produces ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and False:
+                    pass
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_static_false_conjunct_routes_to_orelse() -> None:
+    """An ``if X and False: ... else: <live entry>`` must still pick
+    up the live entry from the orelse branch — it's the always-taken
+    path.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and False:
+                    pass
+                else:
+                    if close > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
