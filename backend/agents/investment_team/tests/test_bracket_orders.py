@@ -21,7 +21,9 @@ on the no-attachment path and two follow-ups from the PR review:
     instead of letting a later trigger open a new opposite-side position.
 11. TWAP_N bracket parent that ages out via the no-trigger counter still
     materializes protective legs for the partially-filled position.
-12. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
+12. DAY-TIF bracket parent that expires after a partial fill still
+    materializes protective legs for the open position.
+13. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
     gated until #390 — runtime materialization lands with Step 8.
 """
 
@@ -694,6 +696,71 @@ def test_twap_age_out_bracket_parent_materializes_brackets_for_open_position() -
     assert sl.armed is True and tp.armed is True
     assert sl.submitted_at == "2024-01-03"
     assert tp.submitted_at == "2024-01-03"
+    assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# DAY-TIF bracket parent that expires after a partial fill must still
+# materialize protective legs for the open position (Codex P1 follow-up on
+# commit 90b5753)
+# ---------------------------------------------------------------------------
+
+
+def test_day_expiry_partial_bracket_parent_materializes_brackets() -> None:
+    """A DAY-TIF bracket entry that fills its first slice on day D and is
+    requeued must still get protective legs when the parent expires on
+    day D+1's session boundary. The expiry routes through
+    ``FillSimulator.expire_day_orders``, which calls
+    ``_maybe_materialize_brackets_on_abandon`` for partial bracket
+    parents — the order_book uses ``was_filled=True`` for those so the
+    eligible-parent registration survives long enough for
+    ``submit_attached`` to succeed."""
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=200.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            attached_stop_loss=StopAttachment(stop_price=95.0),
+            attached_take_profit=LimitAttachment(limit_price=110.0),
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    # Bar on day D (the day after submission): low ADV → 50% partial fill
+    # (100 shares), remainder requeued with ``submitted_at`` advanced to
+    # the fill bar; ``original_submitted_at`` stays at "2024-01-01".
+    sim.process_bar(_bar("2024-01-02", open_price=100.0, volume=1_000.0))
+    assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
+    assert parent.order_id in order_book
+    assert order_book.children_of(parent.order_id) == []
+
+    # Day boundary: simulate the date-change expiry hook the service
+    # invokes before processing day D+1's first bar.
+    next_session_bar = _bar("2024-01-03", open_price=100.0)
+    expired = sim.expire_day_orders(next_session_bar)
+
+    assert len(expired) == 1
+    assert expired[0].order_id == parent.order_id
+    assert parent.order_id not in order_book
+
+    # Brackets materialized for the still-open 100-share position.
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 2, "expired partial bracket parent must spawn protective legs"
+    sl = next(c for c in children if c.request.order_type == OrderType.STOP)
+    tp = next(c for c in children if c.request.order_type == OrderType.LIMIT)
+    assert sl.request.qty == pytest.approx(100.0, rel=1e-9)
+    assert tp.request.qty == pytest.approx(100.0, rel=1e-9)
+    assert sl.armed is True and tp.armed is True
+    assert sl.submitted_at == "2024-01-03"
+    assert tp.submitted_at == "2024-01-03"
+    # Position untouched by the expiry; the bracket now covers it.
     assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
 
 

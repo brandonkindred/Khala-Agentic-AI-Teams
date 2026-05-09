@@ -1178,6 +1178,27 @@ class FillSimulator:
         self.order_book.remove(po.order_id)
 
     # ------------------------------------------------------------------
+    # TIF expiry hook (#389)
+    # ------------------------------------------------------------------
+
+    def expire_day_orders(self, bar: Bar) -> List[PendingOrder]:
+        """Expire DAY-TIF orders against ``bar``'s session boundary.
+
+        Wraps ``OrderBook.expire_day_orders`` to materialize protective
+        bracket legs for *partially-filled* bracket parents before the
+        bracket is fully abandoned (#389). Without this hook, the
+        previously-opened position would silently run unprotected after
+        TIF expiry — the order-book level uses ``was_filled=True`` for
+        partial bracket parents specifically so this hook can still
+        ``submit_attached`` against their (still-registered) id here.
+        """
+        expired = self.order_book.expire_day_orders(bar.timestamp)
+        for po in expired:
+            if po.cumulative_filled_qty > 0:
+                self._maybe_materialize_brackets_on_abandon(po=po, bar=bar)
+        return expired
+
+    # ------------------------------------------------------------------
     # Bracket / OCO materialization (#389)
     # ------------------------------------------------------------------
 

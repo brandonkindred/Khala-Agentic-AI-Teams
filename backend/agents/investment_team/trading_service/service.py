@@ -491,11 +491,14 @@ class TradingService:
                         # Skip non-bar events but keep looking.
 
                     if not is_warmup:
-                        # 1) Expire day orders on date change.
+                        # 1) Expire day orders on date change. Routes through
+                        #    ``FillSimulator.expire_day_orders`` so partially-
+                        #    filled bracket parents get protective legs before
+                        #    the parent is dropped (#389).
                         if prev_bar is not None and (
                             cur_bar.timestamp[:10] != prev_bar.timestamp[:10]
                         ):
-                            expired = order_book.expire_day_orders(cur_bar.timestamp)
+                            expired = fill_sim.expire_day_orders(cur_bar)
                             if expired:
                                 result.execution_diagnostics.orders_unfilled += len(expired)
                                 for ex in expired:
@@ -819,9 +822,11 @@ class TradingService:
                 bar_cancels = cancels_by_bar.get(i, [])
 
                 if not is_warmup:
-                    # 1) Expire day orders on date change.
+                    # 1) Expire day orders on date change. See chunked path
+                    #    above — routes through the simulator so brackets on
+                    #    partially-filled parents survive expiry (#389).
                     if prev_bar is not None and (cur_bar.timestamp[:10] != prev_bar.timestamp[:10]):
-                        expired = order_book.expire_day_orders(cur_bar.timestamp)
+                        expired = fill_sim.expire_day_orders(cur_bar)
                         if expired:
                             result.execution_diagnostics.orders_unfilled += len(expired)
                             for ex in expired:

@@ -696,6 +696,15 @@ class OrderBook:
         any pending attached children via ``remove()``'s default
         (``was_filled=False``) lifecycle path so we don't leave orphan
         protective legs in the book.
+
+        For partially-filled bracket parents (``cumulative_filled_qty > 0``)
+        the removal uses ``was_filled=True`` instead, preserving the
+        eligible-parent registration so the simulator can materialize
+        protective legs against the position that the first slice actually
+        opened — see ``FillSimulator.expire_day_orders`` (#389). Without
+        this exception, the position would survive the expiry while the
+        parent's id was already evicted, leaving ``submit_attached``
+        unable to spawn the bracket.
         """
         expired: List[PendingOrder] = []
         for oid in list(self._pending.keys()):
@@ -714,9 +723,15 @@ class OrderBook:
             # Compare date prefix only so intraday timestamps also work.
             if _date_only(anchor) < _date_only(current_date):
                 expired.append(po)
-                # ``remove(was_filled=False)`` evicts the parent from the
-                # eligible-parent set *and* cascades to any pending children.
-                self.remove(oid)
+                # ``was_filled=True`` for partially-filled parents keeps the
+                # eligible-parent registration alive long enough for the
+                # simulator's expiry hook to spawn protective bracket legs;
+                # for un-filled parents the default ``False`` path evicts
+                # the registration and cascade-cancels any pending children
+                # (relevant only when a fully-filled parent's children are
+                # themselves DAY orders, which today's materializer overrides
+                # to ``GTC``).
+                self.remove(oid, was_filled=po.cumulative_filled_qty > 0)
         return expired
 
 
