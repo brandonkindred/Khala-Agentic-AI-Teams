@@ -897,16 +897,27 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         orelse: List[ast.stmt],
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
+        ancestor_unknown: bool,
     ) -> bool:
         """Process a single if-shape (test + body + orelse) given an
         ancestor stack. Used both for real ``ast.If`` statements and for
         synthesised ifs after stripping a position-gate conjunct.
+
+        ``ancestor_unknown`` is True when any enclosing ``if`` test had
+        an un-modellable AND conjunct. Body recursion inherits the flag
+        because the descendant predicate only fires when the unknown
+        ancestor conjunct is also true; the descendant group's
+        recognised mask is therefore still only an upper bound. Without
+        this, ``if close > 0 and self.custom_ok(bar): if volume > 0:
+        ...`` would emit a clean nested group whose recognised legs
+        carried the report to ``COVERAGE_OK`` even though the unknown
+        ancestor could narrow it to zero.
         """
         # Top-level OR predicate: each leg becomes an independent
         # subcondition row but the group's blocker classification uses
         # disjunction (only too-restrictive when ALL legs are zero).
         if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
-            return _process_or_if(test, body, orelse, ancestors, ancestor_symbols)
+            return _process_or_if(test, body, orelse, ancestors, ancestor_symbols, ancestor_unknown)
 
         own_subs: List[_Subcond] = []
         own_symbols: Optional[set] = None
@@ -916,6 +927,18 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # from the recognised legs alone — see ``_Group.has_unknown_and_conjunct``.
         has_unknown_conjunct = False
         for term in _flatten_top_terms(test):
+            # Statically-true literal conjunct (``True``, non-zero
+            # number, non-empty string, etc.) is a no-op AND-gate. The
+            # recognised siblings' mask is exact in its presence, so
+            # don't taint the group as unknown. Statically-false
+            # literals make the predicate dead — also not "unknown
+            # narrowing" in the sense the aggregator needs to suppress
+            # COVERAGE_OK; the surviving recognised legs simply don't
+            # describe a reachable path. Conservatively skip both:
+            # _build_subcond rejects bare literals (no data-dependent
+            # operand), and we don't want to tag them as unknown.
+            if _is_constant_literal(term):
+                continue
             if isinstance(term, ast.Compare):
                 sym = _symbol_gate(term, name_strings, bar_name)
                 if sym is not None:
@@ -998,6 +1021,13 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 has_unknown_conjunct = True
 
         effective_symbols = _intersect_symbols(ancestor_symbols, own_symbols)
+        # Effective unknown narrowing for groups emitted at this level:
+        # the union of any inherited unknown ancestor and a locally-
+        # detected unknown conjunct. Body recursion uses the same flag
+        # so descendants remain tainted; orelse uses the bare inherited
+        # value because the negation of an unknown isn't an unknown
+        # gate on the orelse path.
+        effective_unknown = ancestor_unknown or has_unknown_conjunct
 
         group_subs: List[_Subcond] = []
         if not _budgeted_extend(group_subs, ancestors):
@@ -1006,7 +1036,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     _Group(
                         subconds=group_subs,
                         target_symbols=effective_symbols,
-                        has_unknown_and_conjunct=has_unknown_conjunct,
+                        has_unknown_and_conjunct=effective_unknown,
                     )
                 )
             return False
@@ -1016,7 +1046,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     _Group(
                         subconds=group_subs,
                         target_symbols=effective_symbols,
-                        has_unknown_and_conjunct=has_unknown_conjunct,
+                        has_unknown_and_conjunct=effective_unknown,
                     )
                 )
             return False
@@ -1025,12 +1055,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 _Group(
                     subconds=group_subs,
                     target_symbols=effective_symbols,
-                    has_unknown_and_conjunct=has_unknown_conjunct,
+                    has_unknown_and_conjunct=effective_unknown,
                 )
             )
-        if not _visit(body, ancestors + own_subs, effective_symbols):
+        if not _visit(body, ancestors + own_subs, effective_symbols, effective_unknown):
             return False
-        if not _visit(orelse, ancestors, ancestor_symbols):
+        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
             return False
         return True
 
@@ -1040,6 +1070,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         orelse: List[ast.stmt],
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
+        ancestor_unknown: bool,
     ) -> bool:
         """Process ``if A or B or C:`` — each leg becomes an independent
         subcondition row, classified disjunctively at aggregation time.
@@ -1054,6 +1085,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
 
         ``orelse`` recursion remains bare-ancestor (consistent with the
         AND path).
+
+        ``ancestor_unknown`` (an inherited AND-side unknown narrowing,
+        not the OR-side leg uncertainty) is propagated unchanged to
+        body and orelse: an OR test does not introduce its own AND
+        narrowing, so descendants only inherit what was already in
+        place at this node's entry.
         """
         own_subs: List[_Subcond] = []
         # Track legs we couldn't statically model (e.g. an unrecognised
@@ -1116,9 +1153,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         if not own_subs:
             # No recognised legs — fall through to body / orelse without
             # emitting a group, so nested ``if`` analysis still runs.
-            if not _visit(body, ancestors, ancestor_symbols):
+            if not _visit(body, ancestors, ancestor_symbols, ancestor_unknown):
                 return False
-            if not _visit(orelse, ancestors, ancestor_symbols):
+            if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
                 return False
             return True
 
@@ -1136,6 +1173,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         target_symbols=ancestor_symbols,
                         combinator="and",
                         ancestor_count=len(group_subs),
+                        has_unknown_and_conjunct=ancestor_unknown,
                     )
                 )
             return False
@@ -1149,6 +1187,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         combinator="or",
                         ancestor_count=ancestor_count,
                         has_unknown_or_leg=has_unknown_leg,
+                        has_unknown_and_conjunct=ancestor_unknown,
                     )
                 )
             return False
@@ -1160,12 +1199,13 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     combinator="or",
                     ancestor_count=ancestor_count,
                     has_unknown_or_leg=has_unknown_leg,
+                    has_unknown_and_conjunct=ancestor_unknown,
                 )
             )
         # Body sees no extra ancestors — see docstring.
-        if not _visit(body, ancestors, ancestor_symbols):
+        if not _visit(body, ancestors, ancestor_symbols, ancestor_unknown):
             return False
-        if not _visit(orelse, ancestors, ancestor_symbols):
+        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
             return False
         return True
 
@@ -1173,6 +1213,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         stmts: List[ast.stmt],
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
+        ancestor_unknown: bool = False,
     ) -> bool:
         # Transactional: snapshot at entry, restore at exit. Each call
         # to _visit (including the recursive descents from _process_if /
@@ -1226,7 +1267,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     position_check, gate_residual = _strip_position_gate(stmt.test)
                     if position_check == "vacant":  # pos is None — body is entry
                         if gate_residual is None:
-                            if not _visit(stmt.body, ancestors, current_symbols):
+                            if not _visit(stmt.body, ancestors, current_symbols, ancestor_unknown):
                                 return False
                             # Vacant guard-clause: ``if pos is None:
                             # return`` (or any single ``return``).
@@ -1244,16 +1285,22 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                                 [],
                                 ancestors,
                                 current_symbols,
+                                ancestor_unknown,
                             ):
                                 return False
                         continue
                     if position_check == "occupied":  # pos is not None — orelse is entry
-                        if not _visit(stmt.orelse, ancestors, current_symbols):
+                        if not _visit(stmt.orelse, ancestors, current_symbols, ancestor_unknown):
                             return False
                         continue
 
                     if not _process_if(
-                        stmt.test, stmt.body, stmt.orelse, ancestors, current_symbols
+                        stmt.test,
+                        stmt.body,
+                        stmt.orelse,
+                        ancestors,
+                        current_symbols,
+                        ancestor_unknown,
                     ):
                         return False
                 else:
@@ -1280,7 +1327,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     for field in _BLOCK_FIELDS:
                         inner = getattr(stmt, field, None)
                         if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
-                            if not _visit(inner, ancestors, current_symbols):
+                            if not _visit(inner, ancestors, current_symbols, ancestor_unknown):
                                 return False
                     # ast.Try has handlers; each handler.body is a stmt list.
                     handlers = getattr(stmt, "handlers", None)
@@ -1288,7 +1335,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         for h in handlers:
                             h_body = getattr(h, "body", None)
                             if isinstance(h_body, list) and h_body:
-                                if not _visit(h_body, ancestors, current_symbols):
+                                if not _visit(h_body, ancestors, current_symbols, ancestor_unknown):
                                     return False
             return True
         finally:
@@ -1843,6 +1890,21 @@ def _flatten_top_terms(test: ast.expr) -> List[ast.expr]:
             out.extend(_flatten_top_terms(value))
         return out
     return [test]
+
+
+def _is_constant_literal(node: ast.expr) -> bool:
+    """True iff ``node`` is a bare Python literal whose truthiness is
+    statically decidable (``True``, ``False``, ``None``, numbers,
+    strings, etc.).
+
+    Used by ``_process_if`` to skip statically-decidable AND conjuncts:
+    a literal ``True`` is a no-op gate (recognised siblings' mask is
+    exact in its presence) and a literal ``False`` makes the predicate
+    dead — neither narrows the recognised mask in a way that would
+    invalidate ``COVERAGE_OK`` from the recognised legs alone, so we
+    don't tag the group as unknown for them.
+    """
+    return isinstance(node, ast.Constant)
 
 
 def _find_strategy_class(tree: ast.AST, on_bar: ast.AST) -> Optional[ast.ClassDef]:

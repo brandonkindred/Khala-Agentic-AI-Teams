@@ -4702,3 +4702,93 @@ def test_nested_class_in_on_bar_is_skipped() -> None:
     )
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
     assert len(report.subconditions) == 1
+
+
+def test_unknown_and_conjunct_propagates_to_nested_body() -> None:
+    """An unknown AND conjunct on an outer ``if`` test must taint
+    nested groups — those nested groups only fire when the unknown
+    ancestor conjunct is also true, so their recognised mask is still
+    only an upper bound on the real predicate.
+
+    Without propagation, ``if close > 0 and self.custom_ok(bar):``
+    /``if volume > 0:`` emitted a clean nested group whose
+    ``volume > 0`` + ``close > 0`` ancestor carried the report to
+    ``COVERAGE_OK`` even though ``self.custom_ok`` could narrow the
+    real entry path to zero.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    if volume > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unknown_and_conjunct_propagates_through_or_into_nested_body() -> None:
+    """The OR-wrapped variant: an unknown AND ancestor must still
+    propagate even when an intermediate ``if`` test is an OR, so the
+    deepest nested group inherits the unknown narrowing.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    if volume > 0 or close > 50:
+                        if close > 25:
+                            pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_literal_true_and_conjunct_does_not_taint_group() -> None:
+    """A statically-true literal AND-conjunct (``and True``) is a
+    no-op gate. The recognised siblings' mask is exact, so the
+    aggregator must keep ``COVERAGE_OK`` rather than refusing to use
+    a recognised firing leg as positive evidence.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and True:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_literal_truthy_constants_do_not_taint_group() -> None:
+    """Other statically-decidable literal constants (non-zero ints,
+    non-empty strings) follow the same rule as ``True``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and 1 and "enabled":
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
