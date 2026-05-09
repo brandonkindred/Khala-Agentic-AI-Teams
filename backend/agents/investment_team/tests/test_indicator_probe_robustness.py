@@ -3729,6 +3729,130 @@ def test_constructor_negated_default_param_guard_resolves() -> None:
     assert "[AAPL]" in report.subconditions[0].label
 
 
+def test_constructor_local_bare_name_is_not_an_instance_attribute() -> None:
+    """A bare-``Name`` assignment inside ``__init__`` is a function
+    local, not an instance attribute. ``class Strategy: TARGET =
+    "MSFT"; def __init__(self): TARGET = "AAPL"`` leaves the runtime
+    ``self.TARGET`` resolving through the class to ``"MSFT"`` — the
+    constructor local is shadowed for the method body but invisible
+    to outside lookups. The probe must NOT record the local under
+    ``attrs``, otherwise the symbol gate scopes to the wrong value.
+
+    Strategy::
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                TARGET = "AAPL"  # local — does not change ``self.TARGET``
+                _ = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: MSFT close=200 (the runtime gate scopes here, > 100
+    always), AAPL close=50. With the bug, the probe records
+    ``attrs["TARGET"] = "AAPL"`` and reports
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``; with the fix, only the
+    class attribute ``"MSFT"`` lands in ``attrs`` and the report
+    classifies ``COVERAGE_OK`` with ``[MSFT]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                TARGET = "AAPL"
+                _ = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert "[MSFT]" in report.subconditions[0].label
+
+
+def test_class_body_compound_statement_records_under_attrs() -> None:
+    """A class-body compound like ``if True: TARGET = "AAPL"`` creates
+    a class attribute at runtime — same as ``TARGET = "AAPL"`` at
+    class top level. The walker must route nested class-body
+    assignments through ``_record_attr`` (``in_method=False``), not
+    through the module-scope recorder. With the bug, the recursion
+    fell through to ``_record_global`` and the attribute landed in
+    ``globals_``, invisible to ``self.TARGET`` lookups.
+
+    Strategy::
+
+        class Strategy:
+            if True:
+                TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the gate is dropped). With the
+    fix, ``self.TARGET`` resolves to ``"AAPL"`` and the report
+    classifies ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            if True:
+                TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
 def test_early_return_symbol_neq_guard_propagates_filter() -> None:
     """``if bar.symbol != "BBB": return`` followed by an entry
     predicate must propagate the implicit ``{BBB}`` filter to the

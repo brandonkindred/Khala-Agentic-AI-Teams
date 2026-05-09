@@ -2070,12 +2070,16 @@ def _collect_name_strings(
         resolved = _resolve_string_value(value, in_method=in_method)
         if resolved is None:
             return
-        # Class-body bare ``Name`` targets and ``self.X`` assignments inside
-        # ``__init__`` both contribute under the same attribute key, with
-        # source-order overwrite (later reassignment wins, mirroring
-        # Python's runtime where the constructor body executes after the
-        # class body).
         if isinstance(target, ast.Name):
+            # In a class body, a bare ``Name`` target creates a class
+            # attribute (``class S: TARGET = "MSFT"`` → ``S.TARGET``).
+            # Inside a method body (``__init__``), a bare ``Name``
+            # target is a function local — it does NOT create an
+            # instance attribute, so ``self.TARGET`` would still
+            # resolve through the class chain at runtime. Skip the
+            # local entirely so it doesn't pollute ``attrs``.
+            if in_method:
+                return
             bindings.attrs[target.id] = resolved
         elif isinstance(target, ast.Attribute):
             bindings.attrs[target.attr] = resolved
@@ -2084,13 +2088,16 @@ def _collect_name_strings(
         if strategy_class is not None and isinstance(node, ast.ClassDef):
             if node is not strategy_class:
                 return
+            # Class body: walk all top-level statements through the
+            # unconditional-walker so a class-scope ``if True: TARGET =
+            # "AAPL"`` (or ``with ...``) lands in ``attrs`` like its
+            # plain-top-level counterpart. Without this, the recursive
+            # ``_walk(child)`` fallthrough hit the module-scope path and
+            # stored the class attribute in ``globals_`` — invisible to
+            # ``self.TARGET`` lookups.
+            class_param_defaults: Dict[str, ast.Constant] = {}
             for child in node.body:
-                if isinstance(child, ast.Assign):
-                    for t in child.targets:
-                        _record_attr(t, child.value, in_method=False)
-                elif isinstance(child, ast.AnnAssign) and child.value is not None:
-                    _record_attr(child.target, child.value, in_method=False)
-                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
                         # Descend into branches that are statically
                         # guaranteed to execute (``if True: ...``,
@@ -2110,8 +2117,18 @@ def _collect_name_strings(
                                     _record_attr(t, sub.value, in_method=True)
                             elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
                                 _record_attr(sub.target, sub.value, in_method=True)
-                else:
-                    _walk(child)
+                    continue
+                # Class body assignment (top-level or nested under a
+                # statically-guaranteed ``if True:`` / ``with`` /
+                # default-true param guard). Class bodies don't have
+                # their own parameters, so we pass an empty defaults
+                # table — only literal-Constant predicates resolve.
+                for sub in _iter_unconditional_constructor_assigns([child], class_param_defaults):
+                    if isinstance(sub, ast.Assign):
+                        for t in sub.targets:
+                            _record_attr(t, sub.value, in_method=False)
+                    elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
+                        _record_attr(sub.target, sub.value, in_method=False)
             return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             return
