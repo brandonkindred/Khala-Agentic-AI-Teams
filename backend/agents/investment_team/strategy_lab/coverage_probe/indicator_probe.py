@@ -1957,7 +1957,18 @@ def _collect_name_strings(
                     _record_attr(child.target, child.value, in_method=False)
                 elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
-                        for sub in ast.walk(child):
+                        # Only top-level statements in the constructor body
+                        # are unconditional — descending via ``ast.walk``
+                        # would treat ``if False: self.TARGET = "MSFT"``
+                        # (or any guarded assignment) as if it always
+                        # ran, overriding the class attribute with a
+                        # value the runtime never sets. Skipping nested
+                        # statements is conservative: the class-level
+                        # binding (already recorded above) acts as the
+                        # fallback, which matches Python's runtime
+                        # attribute lookup when the constructor branch
+                        # doesn't execute.
+                        for sub in child.body:
                             if isinstance(sub, ast.Assign):
                                 for t in sub.targets:
                                     _record_attr(t, sub.value, in_method=True)

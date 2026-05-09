@@ -3357,6 +3357,78 @@ def test_class_body_alias_to_module_string_constant_resolves() -> None:
     assert "[AAPL]" in report.subconditions[0].label
 
 
+def test_constructor_conditional_assignment_does_not_override_class_attr() -> None:
+    """A guarded ``self.X = ...`` inside ``__init__`` must NOT be
+    treated as unconditional. Walking the constructor body via
+    ``ast.walk`` would have descended into ``if False: self.TARGET =
+    "AAPL"`` and overwritten the class attribute with a value the
+    runtime never sets — the probe would scope the symbol gate to
+    the dead branch and report the wrong coverage.
+
+    The conservative fix walks only the constructor's top-level
+    statements; the class-body binding stays as the fallback,
+    matching Python's runtime attribute lookup when the constructor
+    branch doesn't execute.
+
+    Strategy::
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                if False:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: MSFT close=200 (the runtime gate scopes here, > 100
+    always), AAPL close=50. With the bug, the probe scopes to AAPL
+    and reports ``INDICATOR_FILTER_TOO_RESTRICTIVE``; with the fix,
+    the dead-branch assignment is skipped, the class attribute
+    ``"MSFT"`` wins, and the report classifies ``COVERAGE_OK`` with
+    ``[MSFT]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                if False:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert "[MSFT]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count > 0
+
+
 def test_early_return_symbol_neq_guard_propagates_filter() -> None:
     """``if bar.symbol != "BBB": return`` followed by an entry
     predicate must propagate the implicit ``{BBB}`` filter to the
