@@ -3692,6 +3692,89 @@ def test_partial_symbol_in_allowlist_does_not_gate() -> None:
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
 
 
+def test_renamed_bar_param_preserves_symbol_gate() -> None:
+    """``def on_bar(self, ctx, candle)`` is a valid strategy shape (the
+    safety gate only enforces arity and the harness calls positionally),
+    so the symbol recogniser must use the actual third positional
+    parameter name. With ``"bar"`` hard-coded the ``candle.symbol ==
+    "AAPL"`` gate is silently dropped while ``_column_from`` still
+    treats ``candle.close`` as data, so an unrelated MSFT DataFrame
+    can satisfy ``close > 150`` and the probe falsely reports
+    COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, candle):
+                if candle.symbol == "AAPL" and candle.close > 150:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=50)  # close = 100 — never > 150
+    msft = pd.DataFrame(
+        {
+            "open": np.full(50, 200.0),
+            "high": np.full(50, 201.0),
+            "low": np.full(50, 199.0),
+            "close": np.full(50, 200.0),  # close > 150 always
+            "volume": np.full(50, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=50, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+
+    # AAPL never satisfies close > 150 — that's the real coverage gap.
+    # If the symbol gate were dropped because of the renamed param,
+    # MSFT's 200 close would mask the AAPL miss and flip the report
+    # to COVERAGE_OK.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_renamed_bar_param_preserves_early_return_symbol_guard() -> None:
+    """Same parametrised-bar-name issue, applied to the early-return
+    symbol guard. ``if candle.symbol != "AAPL": return`` must restrict
+    subsequent siblings to the AAPL DataFrame; with ``"bar"`` hard-coded
+    the guard is dropped, ``close > 150`` evaluates against MSFT too,
+    and the report flips to COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, candle):
+                if candle.symbol != "AAPL":
+                    return
+                if close > 150:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=50)  # close = 100 — never > 150
+    msft = pd.DataFrame(
+        {
+            "open": np.full(50, 200.0),
+            "high": np.full(50, 201.0),
+            "low": np.full(50, 199.0),
+            "close": np.full(50, 200.0),  # close > 150 always
+            "volume": np.full(50, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=50, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+    assert "[AAPL]" in report.subconditions[0].label
+
+
 def test_bool_call_on_unbound_name_remains_unknown() -> None:
     """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
     binds `_entry` to a method call we cannot statically introspect, so
