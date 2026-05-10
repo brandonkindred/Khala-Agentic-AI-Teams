@@ -230,6 +230,13 @@ _BUSINESS_DAY_ASSET_CLASSES = frozenset(
 )
 
 
+# Asset classes that structurally lack a published volume series. FX is
+# decentralized OTC — providers (Yahoo Finance, Alpha Vantage FX_DAILY,
+# etc.) report zero/missing volume for every bar by design, so
+# ``zero_volume_bars`` is not a signal here.
+_VOLUMELESS_ASSET_CLASSES = frozenset({"forex"})
+
+
 # Lightweight synonyms for the asset-class label.  Differs from
 # :func:`investment_team.strategy_lab_context.normalize_asset_class` in
 # one important way: unknown classes are returned unchanged (rather than
@@ -436,6 +443,7 @@ def _validate_symbol(
     # Price / OHLC / volume rules — single pass over bars.
     seen_ts: set[str] = set()
     volumes: List[float] = []
+    volumeless = asset_class in _VOLUMELESS_ASSET_CLASSES
     for bar in bars:
         if bar.date in seen_ts:
             report.duplicate_timestamps += 1
@@ -445,7 +453,7 @@ def _validate_symbol(
             report.nan_or_negative_prices += 1
         if _ohlc_violation(bar):
             report.ohlc_violations += 1
-        if bar.volume == 0:
+        if not volumeless and bar.volume == 0:
             report.zero_volume_bars += 1
         if math.isfinite(bar.volume):
             volumes.append(bar.volume)
@@ -516,11 +524,15 @@ def _ohlc_violation(bar: OHLCVBar) -> bool:
         # Already counted by the NaN check; do not double-count.
         return False
 
-    # Vendors can emit tiny floating-point drift (e.g., high a few ULPs below
-    # open/close). Treat invariants with a relative tolerance so we only flag
-    # materially broken bars.
+    # Vendor feeds commonly round OHLC independently to a fixed number of
+    # decimals (e.g. market_data_service rounds Yahoo Finance bars to 4
+    # decimals), which can flip invariants by up to one rounding step per
+    # value even when the underlying data was internally consistent. Use
+    # an absolute noise floor of 2e-4 (≈ twice the worst-case error of a
+    # 4-decimal vendor) plus a relative term for very-high-priced assets
+    # where the noise floor is ULP-bound rather than rounding-bound.
     scale = max(1.0, abs(o), abs(h), abs(ll), abs(c))
-    eps = 1e-9 * scale
+    eps = max(2e-4, 1e-9 * scale)
 
     if h + eps < ll:
         return True

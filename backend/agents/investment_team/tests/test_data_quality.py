@@ -542,3 +542,102 @@ def test_intraday_bars_clean_series() -> None:
     )
     assert report.severity == "ok"
     assert report.per_symbol["BTC"].inferred_frequency == "1m"
+
+
+# ---------------------------------------------------------------------------
+# Forex / vendor-rounded data — issues observed in production strategy lab
+# ---------------------------------------------------------------------------
+
+
+def test_forex_zero_volume_not_flagged() -> None:
+    """FX bars structurally have zero volume (decentralized OTC).
+
+    market_data_service emits ``volume=0`` for every Alpha Vantage FX bar
+    and Yahoo Finance returns 0 for ``=X`` pairs. Flagging this as a
+    quality issue produces noise on every forex backtest. Volume rules
+    must skip the forex asset class entirely.
+    """
+    bars: List[OHLCVBar] = []
+    cur = datetime.fromisoformat("2024-01-02")  # Tue
+    while len(bars) < 20:
+        while cur.weekday() >= 5:
+            cur += timedelta(days=1)
+        bars.append(
+            OHLCVBar(
+                date=cur.date().isoformat(),
+                open=1.0512,
+                high=1.0514,
+                low=1.0510,
+                close=1.0513,
+                volume=0.0,
+            )
+        )
+        cur += timedelta(days=1)
+    report = validate_market_data(
+        bars_by_symbol={"EURUSD=X": bars},
+        expected_frequency="1d",
+        asset_class="forex",
+        mode="strict",
+    )
+    assert report.severity == "ok"
+    assert report.per_symbol["EURUSD=X"].zero_volume_bars == 0
+    assert "zero_volume_bars" not in report.per_symbol["EURUSD=X"].issues
+
+
+def test_ohlc_tolerance_absorbs_vendor_rounding_noise() -> None:
+    """4-decimal vendor rounding can flip H/C by up to ~1e-4 absolute.
+
+    Reviewer (production): the Strategy Lab forex run failed with
+    ``ohlc_violations`` because the legacy ``eps = 1e-9 * scale``
+    tolerance was orders of magnitude tighter than the rounding noise
+    floor (~1e-4) introduced by market_data_service when it rounds
+    Yahoo Finance bars to 4 decimals. A bar like H=1.0512 with C=1.0513
+    must pass — the underlying market data is internally consistent;
+    only independent rounding made high a tick below close.
+    """
+    bars = [
+        OHLCVBar(
+            date="2024-01-02",
+            open=1.0512,
+            high=1.0512,   # one tick below close, but within rounding-noise floor
+            low=1.0510,
+            close=1.0513,
+            volume=0.0,
+        ),
+        OHLCVBar(
+            date="2024-01-03",
+            open=1.0513,
+            high=1.0515,
+            low=1.0511,
+            close=1.0514,
+            volume=0.0,
+        ),
+    ]
+    report = validate_market_data(
+        bars_by_symbol={"EURUSD=X": bars},
+        expected_frequency="1d",
+        asset_class="forex",
+        mode="strict",
+    )
+    assert report.per_symbol["EURUSD=X"].ohlc_violations == 0
+
+
+def test_ohlc_tolerance_still_catches_material_violation_at_stock_prices() -> None:
+    """Loosening the OHLC tolerance must not mask real corruption.
+
+    A 1-cent OHLC violation at a $100 stock (1e-4 relative) is the
+    borderline; anything materially larger must still flag. Use a $1
+    violation to confirm — the legacy test exercised the same
+    construction so this lives alongside as the regression guard for the
+    new tolerance.
+    """
+    bars = _daily_bars(n=10)
+    bars[3] = bars[3].model_copy(update={"high": bars[3].open - 1.0})
+    with pytest.raises(DataIntegrityError) as excinfo:
+        validate_market_data(
+            bars_by_symbol={"AAPL": bars},
+            expected_frequency="1d",
+            asset_class="stocks",
+            mode="strict",
+        )
+    assert excinfo.value.report.per_symbol["AAPL"].ohlc_violations == 1
