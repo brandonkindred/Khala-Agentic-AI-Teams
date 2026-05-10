@@ -25,10 +25,13 @@ from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
     GitHubClient,
     Issue,
+    NotAnIssueError,
     is_ready,
     issue_to_plan_input,
     pick_ready_issue,
+    scrub_token_from_text,
 )
+from coding_team.github_source.client import _is_safe_ref  # noqa: E402
 from coding_team.job_store import (  # noqa: E402
     DEFAULT_CACHE_DIR,
     create_job,
@@ -234,24 +237,28 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
     if not Path(request.repo_path).is_dir():
         raise HTTPException(status_code=400, detail=f"repo_path not found: {request.repo_path}")
 
-    client = GitHubClient(token=token)
-
-    try:
-        if request.issue_number is not None:
-            issue = client.get_issue(request.owner, request.repo, request.issue_number)
-            ready = is_ready(client, request.owner, request.repo, issue)
-            if not ready.ready:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(f"issue #{issue.number} blocked by sub-issues {list(ready.blocking)}"),
-                )
-        else:
-            picked = pick_ready_issue(client, request.owner, request.repo, label=request.label)
-            if picked is None:
-                raise HTTPException(status_code=404, detail="no ready issues")
-            issue, ready = picked
-    except GitHubAPIError as e:
-        raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
+    with GitHubClient(token=token) as client:
+        try:
+            if request.issue_number is not None:
+                issue = client.get_issue(request.owner, request.repo, request.issue_number)
+                ready = is_ready(client, request.owner, request.repo, issue)
+                if not ready.ready:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"issue #{issue.number} blocked by sub-issues {list(ready.blocking)}"
+                        ),
+                    )
+            else:
+                picked = pick_ready_issue(client, request.owner, request.repo, label=request.label)
+                if picked is None:
+                    raise HTTPException(status_code=404, detail="no ready issues")
+                issue, ready = picked
+        except NotAnIssueError as e:
+            # Operator passed a PR number — that's a 400, not an upstream error.
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except GitHubAPIError as e:
+            raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
 
     running = _running_job_for_issue(request.owner, request.repo, issue.number)
     if running:
@@ -294,11 +301,27 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
 
 
 def _safe_comment(client: GitHubClient, owner: str, repo: str, number: int, body: str) -> None:
-    """Best-effort issue comment; never blocks the job on a failed comment."""
+    """Best-effort issue comment; never blocks the job on a failed comment.
+
+    Body is scrubbed to redact tokens that might have leaked from git stderr.
+    """
     try:
-        client.add_issue_comment(owner, repo, number, body)
+        client.add_issue_comment(owner, repo, number, scrub_token_from_text(body))
     except GitHubAPIError as e:
         logger.warning("Failed to comment on issue #%s: %s", number, e)
+
+
+def _record_failure(
+    client: GitHubClient, owner: str, repo: str, num: int, job_id: str, error: str
+) -> None:
+    """Mark the job failed, capture the error, and post a (scrubbed) comment.
+
+    Used for every post-orchestrator failure so callers polling /status see a
+    consistent ``status="failed"`` instead of stale ``status="completed"``.
+    """
+    safe = scrub_token_from_text(error)
+    update_job(job_id, status="failed", error=safe)
+    _safe_comment(client, owner, repo, num, f"Coding team job `{job_id}` failed: {safe}")
 
 
 def _has_merged_tasks(job: Dict[str, Any]) -> bool:
@@ -307,8 +330,8 @@ def _has_merged_tasks(job: Dict[str, Any]) -> bool:
 
 def _truncate_title(title: str, issue_num: int, limit: int = 256) -> str:
     suffix = f" (closes #{issue_num})"
-    head = title[: max(0, limit - len(suffix))]
-    return f"{head}{suffix}"
+    head = title[: max(0, limit - len(suffix))].rstrip()
+    return f"{head}{suffix}" if head else f"Issue #{issue_num}{suffix}"
 
 
 def _git(repo_path: str, *args: str, timeout: float = 120.0) -> Tuple[int, str]:
@@ -320,17 +343,44 @@ def _git(repo_path: str, *args: str, timeout: float = 120.0) -> Tuple[int, str]:
             text=True,
             timeout=timeout,
         )
-        return r.returncode, (r.stderr or r.stdout).strip()[:500]
+        msg = (r.stderr or r.stdout).strip()[:500]
+        return r.returncode, scrub_token_from_text(msg)
     except subprocess.TimeoutExpired:
         return 124, f"git {' '.join(args)} timed out after {timeout}s"
     except Exception as e:  # noqa: BLE001
-        return 1, str(e)
+        return 1, scrub_token_from_text(str(e))
+
+
+def _working_tree_dirty(repo_path: str) -> Tuple[bool, Optional[str]]:
+    """Return (True, listing) if the working tree has uncommitted changes.
+
+    The listing is bounded (up to 500 chars of porcelain output) so we can
+    surface the conflicting paths in the failure comment without dumping
+    arbitrary file contents.
+    """
+    rc, msg = _git(repo_path, "status", "--porcelain")
+    if rc != 0:
+        return True, msg or "git status failed"
+    return (bool(msg.strip()), msg if msg.strip() else None)
 
 
 def _prepare_issue_branch(
     repo_path: str, remote: str, default_branch: str, integration_branch: str
 ) -> Tuple[bool, Optional[str]]:
-    rc, msg = _git(repo_path, "fetch", remote, default_branch)
+    # Refuse to overwrite the operator's in-flight work. Without this check,
+    # `git checkout -B` happily carries unrelated dirty files across the
+    # branch switch and they leak into the issue's PR.
+    dirty, listing = _working_tree_dirty(repo_path)
+    if dirty:
+        return False, f"working tree has uncommitted changes; clean it before retrying:\n{listing}"
+
+    # Defense-in-depth: reject ref names that could be parsed as git options.
+    if not _is_safe_ref(default_branch):
+        return False, f"unsafe default_branch ref: {default_branch!r}"
+    if not _is_safe_ref(integration_branch):
+        return False, f"unsafe integration_branch ref: {integration_branch!r}"
+
+    rc, msg = _git(repo_path, "fetch", "--", remote, default_branch)
     if rc != 0:
         return False, msg
     rc, msg = _git(
@@ -339,21 +389,26 @@ def _prepare_issue_branch(
         "-B",
         DEVELOPMENT_BRANCH,
         f"{remote}/{default_branch}",
+        "--",
     )
     if rc != 0:
         return False, msg
-    rc, msg = _git(repo_path, "checkout", "-B", integration_branch)
+    rc, msg = _git(repo_path, "checkout", "-B", integration_branch, "--")
     if rc != 0:
         return False, msg
     return True, None
 
 
 def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, Optional[str]]:
-    rc, msg = _git(repo_path, "branch", "-f", branch, source_ref)
+    if not _is_safe_ref(branch) or not _is_safe_ref(source_ref):
+        return False, f"unsafe ref: {branch!r} <- {source_ref!r}"
+    rc, msg = _git(repo_path, "branch", "-f", "--", branch, source_ref)
     return (rc == 0), (None if rc == 0 else msg)
 
 
 def _push_branch(repo_path: str, remote: str, branch: str) -> Tuple[bool, Optional[str]]:
+    if not _is_safe_ref(branch):
+        return False, f"unsafe branch name: {branch!r}"
     rc, msg = _git(
         repo_path,
         "push",
@@ -374,123 +429,96 @@ def _run_with_github_hooks(
     token: str,
 ) -> None:
     """Wrap the orchestrator with GitHub-side actions: comments, branch prep, push, PR."""
-    client = GitHubClient(token=token)
     owner, repo, num = request.owner, request.repo, issue.number
     integration_branch = f"khala/issue-{num}"
 
-    _safe_comment(client, owner, repo, num, f"Coding team started job `{job_id}`.")
-
-    try:
-        default_branch = client.get_repo(owner, repo).default_branch
-    except GitHubAPIError as e:
-        update_job(job_id, status="failed", error=f"github get_repo: {e}")
-        _safe_comment(client, owner, repo, num, f"Coding team job `{job_id}` failed: {e}")
-        return
-    base = request.base_branch or default_branch
-
-    prep_ok, prep_err = _prepare_issue_branch(
-        request.repo_path, request.remote, base, integration_branch
-    )
-    if not prep_ok:
-        update_job(job_id, status="failed", error=f"branch prep failed: {prep_err}")
-        _safe_comment(
-            client,
-            owner,
-            repo,
-            num,
-            f"Coding team job `{job_id}` failed during branch prep: {prep_err}",
-        )
-        return
-
-    try:
-        run_coding_team_orchestrator(
-            job_id,
-            request.repo_path,
-            plan,
-            update_job_fn=lambda **kw: update_job(job_id, **kw),
-            get_job_fn=lambda jid: get_job(jid),
-            cache_dir=DEFAULT_CACHE_DIR,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Coding team orchestrator failed: %s", e)
-        update_job(job_id, status="failed", error=str(e))
-        _safe_comment(client, owner, repo, num, f"Coding team job `{job_id}` failed: {e}")
-        return
-
-    if not _has_merged_tasks(get_job(job_id) or {}):
-        _safe_comment(
-            client,
-            owner,
-            repo,
-            num,
-            f"Coding team job `{job_id}` finished but produced no merged tasks.",
-        )
-        return
-
-    ff_ok, ff_err = _fast_forward(request.repo_path, integration_branch, DEVELOPMENT_BRANCH)
-    if not ff_ok:
-        update_job(job_id, error=f"fast-forward failed: {ff_err}")
-        _safe_comment(
-            client,
-            owner,
-            repo,
-            num,
-            f"Coding team job `{job_id}` finished but integration branch update failed: {ff_err}",
-        )
-        return
-
-    push_ok, push_err = _push_branch(request.repo_path, request.remote, integration_branch)
-    if not push_ok:
-        update_job(job_id, error=f"git push failed: {push_err}")
-        _safe_comment(
-            client,
-            owner,
-            repo,
-            num,
-            f"Coding team job `{job_id}` finished locally but `git push` failed: {push_err}",
-        )
-        return
-
-    try:
-        existing = client.find_existing_pr(owner, repo, integration_branch)
-    except GitHubAPIError as e:
-        update_job(job_id, error=f"github find_existing_pr: {e}")
-        _safe_comment(
-            client,
-            owner,
-            repo,
-            num,
-            f"Coding team job `{job_id}` pushed but PR lookup failed: {e}",
-        )
-        return
-
-    if existing is not None:
-        pr_url, created = existing.html_url, False
-    else:
+    with GitHubClient(token=token) as client:
+        # Validate the token via get_repo *before* posting the start-comment
+        # so a bad token surfaces a single failure event on the issue rather
+        # than a silently-dropped comment + a separate failure later.
         try:
-            pr = client.create_pull_request(
-                owner=owner,
-                repo=repo,
-                title=_truncate_title(issue.title, num),
-                head=integration_branch,
-                base=base,
-                body=(f"Closes #{num}\n\nGenerated by Khala coding team job `{job_id}`."),
-                draft=True,
-            )
+            default_branch = client.get_repo(owner, repo).default_branch
         except GitHubAPIError as e:
-            update_job(job_id, error=f"github create_pull_request: {e}")
+            _record_failure(client, owner, repo, num, job_id, f"github get_repo: {e}")
+            return
+        base = request.base_branch or default_branch
+
+        _safe_comment(client, owner, repo, num, f"Coding team started job `{job_id}`.")
+
+        prep_ok, prep_err = _prepare_issue_branch(
+            request.repo_path, request.remote, base, integration_branch
+        )
+        if not prep_ok:
+            _record_failure(client, owner, repo, num, job_id, f"branch prep failed: {prep_err}")
+            return
+
+        try:
+            run_coding_team_orchestrator(
+                job_id,
+                request.repo_path,
+                plan,
+                update_job_fn=lambda **kw: update_job(job_id, **kw),
+                get_job_fn=lambda jid: get_job(jid),
+                cache_dir=DEFAULT_CACHE_DIR,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Coding team orchestrator failed: %s", e)
+            _record_failure(client, owner, repo, num, job_id, str(e))
+            return
+
+        if not _has_merged_tasks(get_job(job_id) or {}):
+            update_job(
+                job_id,
+                status="failed",
+                error="orchestrator produced no merged tasks",
+            )
             _safe_comment(
                 client,
                 owner,
                 repo,
                 num,
-                f"Coding team job `{job_id}` pushed but PR creation failed: {e}",
+                f"Coding team job `{job_id}` finished but produced no merged tasks.",
             )
             return
-        pr_url, created = pr.html_url, True
 
-    update_job(job_id, github_pr_url=pr_url, integration_branch=integration_branch)
-    if created:
-        _safe_comment(client, owner, repo, num, f"Draft PR opened: {pr_url}")
-    else:
-        _safe_comment(client, owner, repo, num, f"Reusing existing draft PR: {pr_url}")
+        ff_ok, ff_err = _fast_forward(request.repo_path, integration_branch, DEVELOPMENT_BRANCH)
+        if not ff_ok:
+            _record_failure(client, owner, repo, num, job_id, f"fast-forward failed: {ff_err}")
+            return
+
+        push_ok, push_err = _push_branch(request.repo_path, request.remote, integration_branch)
+        if not push_ok:
+            _record_failure(client, owner, repo, num, job_id, f"git push failed: {push_err}")
+            return
+
+        try:
+            existing = client.find_existing_pr(owner, repo, integration_branch)
+        except GitHubAPIError as e:
+            _record_failure(client, owner, repo, num, job_id, f"github find_existing_pr: {e}")
+            return
+
+        if existing is not None:
+            pr_url, created = existing.html_url, False
+        else:
+            try:
+                pr = client.create_pull_request(
+                    owner=owner,
+                    repo=repo,
+                    title=_truncate_title(issue.title, num),
+                    head=integration_branch,
+                    base=base,
+                    body=(f"Closes #{num}\n\nGenerated by Khala coding team job `{job_id}`."),
+                    draft=True,
+                )
+            except GitHubAPIError as e:
+                _record_failure(
+                    client, owner, repo, num, job_id, f"github create_pull_request: {e}"
+                )
+                return
+            pr_url, created = pr.html_url, True
+
+        update_job(job_id, github_pr_url=pr_url, integration_branch=integration_branch)
+        if created:
+            _safe_comment(client, owner, repo, num, f"Draft PR opened: {pr_url}")
+        else:
+            _safe_comment(client, owner, repo, num, f"Reusing existing draft PR: {pr_url}")

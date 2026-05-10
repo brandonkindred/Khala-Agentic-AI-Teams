@@ -27,7 +27,9 @@ def issue_to_plan_input(
     )
     return CodingTeamPlanInput(
         requirements_title=issue.title,
-        requirements_description=issue.body or "",
+        # ``issue.body`` is already coerced to "" in the client when GitHub
+        # returns null, so no fallback needed here.
+        requirements_description=issue.body,
         project_overview={
             "github_issue": {
                 "owner": owner,

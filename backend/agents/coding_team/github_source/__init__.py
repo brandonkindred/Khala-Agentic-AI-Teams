@@ -7,20 +7,25 @@ the existing orchestrator handle the work.
 """
 
 from .client import (
+    MAX_ISSUES_TRAVERSED,
     GitHubAPIError,
     GitHubClient,
     Issue,
+    NotAnIssueError,
     PullRequest,
     Repo,
     SubIssue,
+    scrub_token_from_text,
 )
 from .dependency_resolver import ReadyCheckResult, is_ready, pick_ready_issue
 from .issue_to_plan import issue_to_plan_input
 
 __all__ = [
+    "MAX_ISSUES_TRAVERSED",
     "GitHubAPIError",
     "GitHubClient",
     "Issue",
+    "NotAnIssueError",
     "PullRequest",
     "ReadyCheckResult",
     "Repo",
@@ -28,4 +33,5 @@ __all__ = [
     "is_ready",
     "issue_to_plan_input",
     "pick_ready_issue",
+    "scrub_token_from_text",
 ]

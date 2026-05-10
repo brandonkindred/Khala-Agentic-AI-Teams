@@ -18,14 +18,16 @@ from coding_team.github_source import (
     GitHubAPIError,
     GitHubClient,
     Issue,
+    NotAnIssueError,
     PullRequest,
     Repo,
     SubIssue,
     is_ready,
     issue_to_plan_input,
     pick_ready_issue,
+    scrub_token_from_text,
 )
-from coding_team.github_source.client import _parse_next_link
+from coding_team.github_source.client import _is_safe_ref, _parse_next_link
 from coding_team.models import CodingTeamPlanInput
 
 # ---------------------------------------------------------------------------
@@ -141,8 +143,11 @@ class TestClientGetIssue:
             return httpx.Response(200, json=_issue_payload(5, is_pr=True))
 
         client = _client_with(handler)
-        with pytest.raises(GitHubAPIError):
+        with pytest.raises(NotAnIssueError) as exc_info:
             client.get_issue("o", "r", 5)
+        # NotAnIssueError remains a GitHubAPIError so existing handlers catch it.
+        assert isinstance(exc_info.value, GitHubAPIError)
+        assert exc_info.value.number == 5
 
     def test_coerces_null_body(self) -> None:
         def handler(_req: httpx.Request) -> httpx.Response:
@@ -189,6 +194,38 @@ class TestClientRetries:
         repo = client.get_repo("o", "r")
         assert repo.default_branch == "main"
         assert len(slept) == 1
+
+
+class TestScrubTokenFromText:
+    def test_redacts_user_at_url(self) -> None:
+        msg = "fatal: unable to push to https://x-access-token:ghp_secretSECRET@github.com/o/r.git"
+        out = scrub_token_from_text(msg)
+        assert "ghp_secretSECRET" not in out
+        assert "https://***@github.com/o/r.git" in out
+
+    def test_idempotent_on_clean_text(self) -> None:
+        assert scrub_token_from_text("nothing sensitive here") == "nothing sensitive here"
+
+    def test_handles_empty(self) -> None:
+        assert scrub_token_from_text("") == ""
+
+
+class TestIsSafeRef:
+    def test_accepts_normal_branch_names(self) -> None:
+        assert _is_safe_ref("main")
+        assert _is_safe_ref("feature/foo-bar")
+        assert _is_safe_ref("release_2.1.0")
+
+    def test_rejects_leading_dash(self) -> None:
+        assert not _is_safe_ref("-evil")
+
+    def test_rejects_shell_metacharacters(self) -> None:
+        assert not _is_safe_ref("foo;rm -rf /")
+        assert not _is_safe_ref("foo bar")
+        assert not _is_safe_ref("$(echo)")
+
+    def test_rejects_empty(self) -> None:
+        assert not _is_safe_ref("")
 
 
 class TestParseNextLink:
@@ -255,6 +292,13 @@ class _FakeClient:
 
     def find_existing_pr(self, _o: str, _r: str, _h: str):
         return self._existing_pr
+
+    # Context-manager protocol so the production code's `with` blocks work.
+    def __enter__(self) -> "_FakeClient":
+        return self
+
+    def __exit__(self, *_a: Any) -> None:
+        return None
 
     def create_pull_request(self, **kwargs: Any) -> PullRequest:
         self.created_pulls.append(kwargs)
@@ -614,6 +658,10 @@ class TestEndpointFailures:
         assert job["status"] == "failed"
         assert "get_repo" in job["error"]
         assert gh.created_pulls == []
+        # Token is validated *before* the start-comment fires, so when get_repo
+        # fails we should see exactly the failure comment.
+        assert any("failed: " in body for _, body in gh.comments)
+        assert not any("started job" in body for _, body in gh.comments)
 
     def test_orchestrator_raises(self, patched_app, monkeypatch) -> None:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
@@ -632,6 +680,106 @@ class TestEndpointFailures:
         assert job["status"] == "failed"
         assert "orchestrator exploded" in job["error"]
         assert gh.created_pulls == []
+        # Two comments expected: "started" + failure.
+        bodies = [b for _, b in gh.comments]
+        assert any("started job" in b for b in bodies)
+        assert any("orchestrator exploded" in b for b in bodies)
+
+    def test_no_merged_tasks_marks_failed(self, patched_app, monkeypatch) -> None:
+        """Orchestrator returns successfully but with no merged task."""
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+        patched_app["set_github"](gh)
+
+        def _no_merge(job_id: str, _rp, _plan, **kw):
+            kw["update_job_fn"](
+                status="completed",
+                phase="completed",
+                task_graph_snapshot=[{"id": "t1", "status": "to_do", "feature_branch": None}],
+            )
+
+        monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _no_merge)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "no merged tasks" in job["error"]
+        assert gh.created_pulls == []
+        assert any("produced no merged tasks" in b for _, b in gh.comments)
+
+    def test_fast_forward_failure_sets_status_failed(self, patched_app, monkeypatch) -> None:
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+        patched_app["set_github"](gh)
+        monkeypatch.setattr(patched_app["api"], "_fast_forward", lambda *a, **kw: (False, "ff err"))
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        # Regression: previously left status="completed" with an error field.
+        assert job["status"] == "failed"
+        assert "fast-forward failed" in job["error"]
+
+    def test_push_failure_sets_status_failed(self, patched_app, monkeypatch) -> None:
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+        patched_app["set_github"](gh)
+        monkeypatch.setattr(patched_app["api"], "_push_branch", lambda *a, **kw: (False, "auth"))
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+
+    def test_pr_lookup_failure_sets_status_failed(self, patched_app, monkeypatch) -> None:
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+
+        def _raise_lookup(*_a, **_kw):
+            raise GitHubAPIError(500, "lookup boom")
+
+        gh.find_existing_pr = _raise_lookup  # type: ignore[assignment]
+        patched_app["set_github"](gh)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "find_existing_pr" in job["error"]
+
+    def test_pr_creation_failure_sets_status_failed(self, patched_app) -> None:
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+
+        def _raise_create(**_kw):
+            raise GitHubAPIError(422, "validation")
+
+        gh.create_pull_request = _raise_create  # type: ignore[assignment]
+        patched_app["set_github"](gh)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "create_pull_request" in job["error"]
+
+    def test_pr_number_pointing_at_pr_returns_400(self, patched_app) -> None:
+        """Operator passed a PR number, not an issue number → 400, not 502."""
+        gh = _FakeClient()
+
+        def _raise(_o, _r, _n):
+            raise NotAnIssueError(7)
+
+        gh.get_issue = _raise  # type: ignore[assignment]
+        patched_app["set_github"](gh)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(7, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 400
+        assert "pull request" in resp.json()["detail"]
 
     def test_branch_prep_failure(self, patched_app, monkeypatch) -> None:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
@@ -649,32 +797,6 @@ class TestEndpointFailures:
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
         assert "branch prep failed" in job["error"]
-        assert gh.created_pulls == []
-
-    def test_fast_forward_failure(self, patched_app, monkeypatch) -> None:
-        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
-        patched_app["set_github"](gh)
-        monkeypatch.setattr(patched_app["api"], "_fast_forward", lambda *a, **kw: (False, "ff err"))
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
-        )
-        assert resp.status_code == 200
-        job = patched_app["jobs"].get_job(resp.json()["job_id"])
-        assert "fast-forward failed" in job["error"]
-        assert gh.created_pulls == []
-
-    def test_push_failure(self, patched_app, monkeypatch) -> None:
-        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
-        patched_app["set_github"](gh)
-        monkeypatch.setattr(patched_app["api"], "_push_branch", lambda *a, **kw: (False, "auth"))
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
-        )
-        assert resp.status_code == 200
-        job = patched_app["jobs"].get_job(resp.json()["job_id"])
-        assert "git push failed" in job["error"]
         assert gh.created_pulls == []
 
 
@@ -725,6 +847,28 @@ class TestEndpointDuplicateGuard:
         assert resp.status_code == 409
         assert "already running" in resp.json()["detail"]
 
+    def test_terminal_job_for_same_issue_does_not_block(self, patched_app) -> None:
+        """A previously-failed job must not block a retry on the same issue."""
+        patched_app["jobs"].create_job(
+            "old-failed-job",
+            status="failed",
+            github_context={
+                "owner": "o",
+                "repo": "r",
+                "issue_number": 5,
+                "issue_url": "x",
+            },
+            error="prior push failed",
+        )
+        gh = _FakeClient(issues=[_issue(5)], sub_map={5: []})
+        patched_app["set_github"](gh)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(5, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["job_id"] != "old-failed-job"
+
 
 class TestTruncateTitle:
     def test_unicode_long_title_caps_at_256(self, patched_app) -> None:
@@ -738,6 +882,104 @@ class TestTruncateTitle:
         api = patched_app["api"]
         out = api._truncate_title("Add login", 7)
         assert out == "Add login (closes #7)"
+
+    def test_strips_trailing_whitespace_in_head(self, patched_app) -> None:
+        api = patched_app["api"]
+        # Title that hits the boundary exactly with a trailing space.
+        out = api._truncate_title("a " * 130, 7)  # 260 chars, trims to fit
+        assert " (closes #7)" in out
+        assert "  (closes" not in out  # no double-space at the boundary
+
+    def test_empty_title_falls_back_to_issue_number(self, patched_app) -> None:
+        api = patched_app["api"]
+        # No leading-space-only PR title; we substitute a placeholder instead.
+        assert api._truncate_title("", 42) == "Issue #42 (closes #42)"
+
+
+class TestPrepareIssueBranch:
+    """Exercise _prepare_issue_branch against a real on-disk git repo.
+
+    These tests deliberately avoid the ``patched_app`` fixture because that
+    fixture monkey-patches the git helpers to no-op stubs for the endpoint
+    tests; we want the real implementations here.
+    """
+
+    @staticmethod
+    def _git(repo: str, *args: str) -> None:
+        import subprocess
+
+        subprocess.run(
+            ["git", "-C", repo, *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _init_repo(self, path) -> str:
+        repo = str(path / "repo")
+        import os
+
+        os.makedirs(repo, exist_ok=True)
+        self._git(repo, "init", "-q")
+        # Disable commit signing in case the host environment forces it.
+        self._git(repo, "config", "commit.gpgsign", "false")
+        self._git(repo, "config", "tag.gpgsign", "false")
+        self._git(repo, "config", "user.email", "test@example.com")
+        self._git(repo, "config", "user.name", "test")
+        # Older git defaults to "master"; rename to "main" explicitly.
+        self._git(repo, "checkout", "-q", "-b", "main")
+        with open(f"{repo}/README.md", "w") as fh:
+            fh.write("seed\n")
+        self._git(repo, "add", "README.md")
+        self._git(repo, "commit", "-q", "--no-gpg-sign", "-m", "seed")
+        # Self-alias as origin so fetch works without a real remote.
+        self._git(repo, "remote", "add", "origin", repo)
+        return repo
+
+    @pytest.fixture
+    def api(self):
+        """Import the api module fresh, without the patched_app fixture's stubs."""
+        _stub_heavy_modules()
+        from coding_team.api import main as api_main
+
+        return api_main
+
+    def test_dirty_tree_aborts(self, api, tmp_path) -> None:
+        """Uncommitted changes must prevent the branch reset."""
+        repo = self._init_repo(tmp_path)
+        with open(f"{repo}/README.md", "a") as fh:
+            fh.write("dirty\n")
+
+        ok, msg = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        assert ok is False
+        assert "uncommitted changes" in (msg or "")
+
+    def test_clean_tree_succeeds(self, api, tmp_path) -> None:
+        repo = self._init_repo(tmp_path)
+        self._git(repo, "fetch", "origin", "main")
+        ok, msg = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        assert ok is True, msg
+        import subprocess
+
+        head = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "khala/issue-9"
+
+    def test_unsafe_default_branch_rejected(self, api, tmp_path) -> None:
+        repo = self._init_repo(tmp_path)
+        ok, msg = api._prepare_issue_branch(repo, "origin", "--exec=evil", "khala/issue-9")
+        assert ok is False
+        assert "unsafe" in (msg or "")
+
+    def test_unsafe_integration_branch_rejected(self, api, tmp_path) -> None:
+        repo = self._init_repo(tmp_path)
+        ok, msg = api._prepare_issue_branch(repo, "origin", "main", "-evil-name")
+        assert ok is False
+        assert "unsafe" in (msg or "")
 
 
 class TestStatusResponseSurfacing:

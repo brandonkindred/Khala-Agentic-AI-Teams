@@ -14,7 +14,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Iterator, Optional
 
 import httpx
 
@@ -69,6 +69,42 @@ class GitHubAPIError(RuntimeError):
         self.status = status
         self.body = body
         super().__init__(f"GitHub API {status}: {body[:200]}")
+
+
+class NotAnIssueError(GitHubAPIError):
+    """`get_issue` was called for a number that points at a pull request.
+
+    Carried as a `GitHubAPIError` subclass so the existing single
+    ``try/except GitHubAPIError`` blocks still catch it, while letting the
+    route handler distinguish operator error (400) from upstream failure (502).
+    """
+
+    def __init__(self, number: int) -> None:
+        self.number = number
+        super().__init__(0, f"#{number} is a pull request, not an issue")
+
+
+# Pattern of refnames git considers safe-ish to pass on a command line.
+_SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/\-]+$")
+
+
+def _is_safe_ref(ref: str) -> bool:
+    """Reject refnames that could be parsed as git options (leading `-`) or
+    contain shell-suspect characters. Used as defense-in-depth before we hand
+    a GitHub-supplied default-branch name to subprocess git."""
+    return bool(ref) and not ref.startswith("-") and bool(_SAFE_REF_RE.match(ref))
+
+
+_TOKEN_URL_RE = re.compile(r"https?://[^/\s@]+@", re.IGNORECASE)
+
+
+def scrub_token_from_text(msg: str) -> str:
+    """Best-effort redact ``https://user:token@host/...`` style remote URLs
+    that git can echo to stderr, before we put the message into a public
+    issue comment or job error field."""
+    if not msg:
+        return msg
+    return _TOKEN_URL_RE.sub("https://***@", msg)
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +306,7 @@ class GitHubClient:
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}/issues/{number}"))
         payload = r.json()
         if "pull_request" in payload:
-            raise GitHubAPIError(400, f"#{number} is a pull request, not an issue")
+            raise NotAnIssueError(number)
         return _issue_from_payload(payload)
 
     def list_sub_issues(self, owner: str, repo: str, number: int) -> list[SubIssue]:
@@ -350,13 +386,9 @@ __all__ = [
     "GitHubClient",
     "Issue",
     "MAX_ISSUES_TRAVERSED",
+    "NotAnIssueError",
     "PullRequest",
     "Repo",
     "SubIssue",
+    "scrub_token_from_text",
 ]
-
-
-# Allow `from .client import _parse_next_link` in tests; not part of the
-# public API, but small enough to be worth covering.
-def _exported_for_tests() -> Iterable[Any]:
-    return (_parse_next_link, _issue_from_payload, _sub_issue_from_payload, _pr_from_payload)
