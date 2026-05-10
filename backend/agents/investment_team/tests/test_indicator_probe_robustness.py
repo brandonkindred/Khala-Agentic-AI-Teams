@@ -5231,6 +5231,97 @@ def test_negative_symbol_return_guard_unchanged() -> None:
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
 
 
+def test_zero_period_is_declined_not_flagged_as_zero_hits() -> None:
+    """``sma(close, 0)`` is a runtime-config error: pandas raises
+    ``window must be greater than 0``. The probe must DECLINE the
+    indicator at recognition time so the predicate falls through to
+    ``UNKNOWN_LOW_COVERAGE`` rather than letting the helper raise at
+    evaluation (which the aggregator catches as an all-False mask and
+    misclassifies as ``INDICATOR_FILTER_TOO_RESTRICTIVE``).
+
+    Reviewer comment on PR #472 (discussion_r3214656144) — the old
+    ``_resolve_period_arg`` ``> 0 and is_integer()`` check protected
+    against this; the registry refactor removed the call site and
+    must restore the check via ``IndicatorSpec.float_kwargs``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 0):
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": _flat_ohlcv()})
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_non_integer_period_is_declined() -> None:
+    """``sma(close, 2.5)`` — pandas rolling requires integer windows.
+    Same decline-rather-than-substitute rule as the zero-period case.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 2.5):
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": _flat_ohlcv()})
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_negative_period_kwarg_is_declined() -> None:
+    """The same validation applies to kwarg form: ``sma(close,
+    period=-5)`` must decline rather than flow into pandas.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, period=-5):
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": _flat_ohlcv()})
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_bollinger_num_std_float_is_accepted() -> None:
+    """Regression check: the float-kwarg opt-out works — ``num_std=0.1``
+    on ``bollinger_bands`` (a positive non-integer float, allowed by
+    the helper) must STILL resolve cleanly. Without
+    ``IndicatorSpec.float_kwargs={'num_std'}`` the new validator
+    would reject it as non-integer.
+    """
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 100.0),
+            "high": np.full(n, 101.0),
+            "low": np.full(n, 99.0),
+            "close": np.full(n, 100.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > bollinger_bands(close, 20, num_std=0.1)[0]:
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    # Predicate is recognised (not declined); whatever category it
+    # produces is fine as long as it isn't UNKNOWN_LOW_COVERAGE
+    # (which would mean the float kwarg got rejected).
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
 def test_denylist_excludes_symbol_from_warmup_scoping() -> None:
     """A denylisted symbol whose history would otherwise satisfy the
     warmup must NOT rescue the warmup check.

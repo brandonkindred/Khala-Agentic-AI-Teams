@@ -3304,6 +3304,16 @@ def _indicator_call(
         # Same guard for unresolvable known kwargs, e.g.
         # ``bollinger_bands(close, 20, num_std=self.band_width)``.
         return None
+    if not _validate_scalar_args(spec, extra_pos, extra_kwargs):
+        # An explicit but invalid scalar like ``sma(close, 0)`` or
+        # ``sma(close, 2.5)`` would TypeError inside pandas. Decline
+        # the indicator so the predicate becomes UNMODELABLE rather
+        # than letting the helper raise (which the aggregator turns
+        # into an all-False mask and the report misclassifies as
+        # ``INDICATOR_FILTER_TOO_RESTRICTIVE`` — same bug the old
+        # ``_resolve_period_arg`` ``> 0 and is_integer()`` check
+        # protected against).
+        return None
 
     helper = spec.helper
     inputs = tuple(resolved_inputs)
@@ -3384,6 +3394,57 @@ def _resolve_known_kwargs(
             return None
         out[kw.arg] = int(v) if float(v).is_integer() else v
     return out
+
+
+def _validate_scalar_args(
+    spec,
+    extra_pos: List[Union[int, float]],
+    extra_kwargs: Dict[str, Union[int, float]],
+) -> bool:
+    """Reject zero / negative / non-integer scalars unless the helper
+    declares the slot as float-allowed.
+
+    Restores the ``> 0 and is_integer()`` check the old
+    ``_resolve_period_arg`` performed before the registry refactor —
+    without it ``sma(close, 0)`` and ``sma(close, 2.5)`` flow into the
+    helper, pandas raises during evaluation, the aggregator forces an
+    all-False mask, and the report misclassifies a runtime-config
+    error as ``INDICATOR_FILTER_TOO_RESTRICTIVE``. Declining here
+    drops the indicator instead, so the predicate is removed from the
+    recognised set and the report falls through to
+    ``UNKNOWN_LOW_COVERAGE``.
+
+    ``spec.float_kwargs`` opts specific slots out of the integer
+    requirement (currently only ``bollinger_bands.num_std``). Every
+    other scalar must be a positive integer; positional args at
+    indexes ``len(spec.kwarg_names) ..`` are treated as overflow and
+    decline the call (the helper would TypeError on them anyway).
+    """
+    float_slots = spec.float_kwargs
+    for i, value in enumerate(extra_pos):
+        if i >= len(spec.kwarg_names):
+            return False
+        slot_name = spec.kwarg_names[i]
+        if not _is_valid_scalar(value, slot_name in float_slots):
+            return False
+    for name, value in extra_kwargs.items():
+        if not _is_valid_scalar(value, name in float_slots):
+            return False
+    return True
+
+
+def _is_valid_scalar(value: Union[int, float], allow_float: bool) -> bool:
+    if value is None:
+        return False
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    if v <= 0:
+        return False
+    if allow_float:
+        return True
+    return v.is_integer()
 
 
 def _collect_name_evaluators(
@@ -3535,6 +3596,12 @@ def _bind_tuple_unpack(
     extra_kwargs = _resolve_known_kwargs(value, name_periods, spec.kwarg_names)
     if extra_kwargs is None:
         # Same guard for unresolvable known kwargs in the unpack form.
+        return
+    if not _validate_scalar_args(spec, extra_pos, extra_kwargs):
+        # ``upper, _, _ = bollinger_bands(close, 0)`` — same decline
+        # rule as the indicator-call dispatcher; without it the bound
+        # name would later evaluate to all-NaN and the comparison
+        # would be misclassified as a zero-hit filter.
         return
 
     resolved_inputs: List[Callable[[pd.DataFrame], pd.Series]] = []

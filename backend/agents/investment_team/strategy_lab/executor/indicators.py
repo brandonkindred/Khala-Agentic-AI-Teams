@@ -180,10 +180,14 @@ def vwap(
 #   Helpers with a positional ``period`` slot still register
 #   ``("period",)`` so strategies that write ``sma(close, period=20)``
 #   resolve the same way as ``sma(close, 20)``.
-# - ``tuple_arity`` is ``None`` for single-Series helpers and the tuple
-#   length for tuple-returning helpers (macd=3, bollinger_bands=3,
-#   stochastic=2). The probe only recognises tuple helpers inside a
-#   ``Subscript`` with a constant non-negative int slice.
+# - ``float_kwargs`` lists the names in ``kwarg_names`` that accept a
+#   non-integer positive float (e.g. bollinger_bands' ``num_std``);
+#   every other scalar slot must resolve to a positive integer.
+#   Strategies that supply ``sma(close, 0)`` / ``sma(close, 2.5)``
+#   would TypeError at runtime, so the probe declines them rather
+#   than letting the helper raise (which would otherwise misclassify
+#   the report as ``INDICATOR_FILTER_TOO_RESTRICTIVE`` instead of
+#   ``UNKNOWN_LOW_COVERAGE``).
 # ---------------------------------------------------------------------------
 
 _DataInputKind = Literal["series", "high", "low", "close", "volume"]
@@ -203,6 +207,11 @@ class IndicatorSpec:
     data_inputs: Tuple[_DataInputKind, ...]
     kwarg_names: Tuple[str, ...]
     tuple_arity: Optional[int]
+    # Names in ``kwarg_names`` whose value the helper accepts as a
+    # non-integer positive float (e.g. bollinger_bands' ``num_std``).
+    # Every other scalar must resolve to a positive integer or the
+    # dispatcher declines the indicator.
+    float_kwargs: frozenset = frozenset()
 
 
 INDICATORS: Mapping[str, IndicatorSpec] = MappingProxyType(
@@ -245,6 +254,7 @@ INDICATORS: Mapping[str, IndicatorSpec] = MappingProxyType(
             data_inputs=("series",),
             kwarg_names=("period", "num_std"),
             tuple_arity=3,
+            float_kwargs=frozenset({"num_std"}),
         ),
         "stochastic": IndicatorSpec(
             helper=stochastic,
