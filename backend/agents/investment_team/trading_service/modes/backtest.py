@@ -57,6 +57,7 @@ def run_backtest(
     provider_id: Optional[str] = None,
     registry: Optional[ProviderRegistry] = None,
     as_of: Optional[str] = None,
+    coverage_probe_mode: bool = False,
 ) -> BacktestRunResult:
     """Run a backtest for ``strategy``.
 
@@ -169,6 +170,13 @@ def run_backtest(
             # TRADING_PARTIAL_FILL_DEFAULTS_ENABLED until #386 wires
             # consumption.
             default_unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            # #450: opt-in coverage-probe mode threaded from the caller
+            # (typically ``run_strategy_code``). Cost-stress replays
+            # below also pick this up so a single backtest call can
+            # produce both baseline + stress probe data; the events
+            # land only on the baseline ``service_result`` via the
+            # capture_fingerprint code path.
+            coverage_probe_mode=coverage_probe_mode,
         )
         outcome = service.run(stream)
         run_metrics = compute_metrics(

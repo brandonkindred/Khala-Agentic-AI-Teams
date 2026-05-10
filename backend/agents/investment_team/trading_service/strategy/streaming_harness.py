@@ -44,6 +44,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOTAL_TIMEOUT_SEC = 600  # hard ceiling for a full session
 DEFAULT_EVENT_TIMEOUT_SEC = 30  # per-event watchdog
 
+# Hard cap on distinct ``rule_id`` aggregates the child tracks under
+# coverage-probe mode (#450). Past this point new ``rule_id``s are
+# dropped and ``probe_events["truncated"]`` flips to True so the parent
+# can surface "we lost some signal" without silently discarding.
+COVERAGE_PROBE_RULE_CAP = 5000
+
 
 class StrategyRuntimeError(RuntimeError):
     """Raised when the strategy subprocess misbehaves (crash, timeout, protocol)."""
@@ -92,10 +98,12 @@ class StreamingHarness:
         *,
         total_timeout_sec: int = DEFAULT_TOTAL_TIMEOUT_SEC,
         event_timeout_sec: int = DEFAULT_EVENT_TIMEOUT_SEC,
+        coverage_probe_mode: bool = False,
     ) -> None:
         self._strategy_code = strategy_code
         self._total_timeout = total_timeout_sec
         self._event_timeout = event_timeout_sec
+        self._coverage_probe_mode = coverage_probe_mode
         self._tmpdir: Optional[tempfile.TemporaryDirectory] = None
         self._proc: Optional[subprocess.Popen] = None
         self._started_at: float = 0.0
@@ -103,6 +111,10 @@ class StreamingHarness:
         # the child predates capability negotiation — treat as per-bar
         # only (no ``chunked_bars``).
         self._capabilities: Dict[str, Any] = {}
+        # Aggregated coverage-probe events from the child (issue #450).
+        # ``None`` when probe mode was off or the run never emitted a
+        # frame; otherwise a dict ``{"events": [...], "truncated": bool}``.
+        self._probe_events: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -141,6 +153,12 @@ class StreamingHarness:
         venv = os.environ.get("VIRTUAL_ENV")
         if venv:
             env["VIRTUAL_ENV"] = venv
+        # #450: probe mode is opt-in via env var so the child can skip
+        # the collector install and the parent can keep the off-path
+        # zero-overhead.
+        if self._coverage_probe_mode:
+            env["STRATLAB_COVERAGE_PROBE"] = "1"
+            env["STRATLAB_COVERAGE_PROBE_CAP"] = str(COVERAGE_PROBE_RULE_CAP)
 
         self._proc = subprocess.Popen(
             [sys.executable, "_harness.py"],
@@ -219,6 +237,17 @@ class StreamingHarness:
         """
         return bool(self._capabilities.get("chunked_bars"))
 
+    @property
+    def probe_events(self) -> Optional[Dict[str, Any]]:
+        """Aggregated coverage-probe events from the child (#450).
+
+        ``None`` when ``coverage_probe_mode`` was off or the subprocess
+        never flushed a ``probe_event`` frame (e.g. crash before ``end``).
+        Otherwise: ``{"events": [{rule_id, hit_count, first_true_bar,
+        last_true_bar}, ...], "truncated": bool}``.
+        """
+        return self._probe_events
+
     # ------------------------------------------------------------------
     # Internal: protocol round-trip
     # ------------------------------------------------------------------
@@ -278,6 +307,14 @@ class StreamingHarness:
                 resp.cancel_bar_indices.append(record.get("bar_index"))
             elif kind == "log":
                 resp.logs.append(record)
+            elif kind == "probe_event":
+                # #450: child flushes aggregated coverage probe state.
+                # Latest flush wins so a periodic flusher could overwrite
+                # without loss; the v1 child only emits once on ``end``.
+                payload = record.get("payload")
+                if isinstance(payload, dict):
+                    self._probe_events = payload
+                continue
             elif kind == "ready":
                 # Capability handshake (issue #377): the child advertises
                 # ``chunked_bars`` in its first ready after start. Update
@@ -323,6 +360,7 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
     #!/usr/bin/env python3
     """Child-side strategy harness. Auto-written; do not edit."""
     import json
+    import os
     import sys
     import traceback
 
@@ -343,6 +381,92 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
     def _emit(record):
         sys.stdout.write(json.dumps(record) + "\\n")
         sys.stdout.flush()
+
+
+    # ------------------------------------------------------------------
+    # Coverage probe mode (#450)
+    # ------------------------------------------------------------------
+    # When STRATLAB_COVERAGE_PROBE is set, install a real
+    # ``__probe_record__`` collector on the imported strategy module so
+    # the AST-instrumented (#449) ``if`` predicates record per-bar
+    # subcondition truth. The instrumented prelude defines a no-op
+    # default at import time; rebinding the module attribute after
+    # import is safe because the wrapped calls do a free-name lookup at
+    # call time (Python resolves ``__probe_record__`` against the
+    # strategy module's globals on every invocation). ``_chunk_state``-
+    # style attribute access from the strategy can still reach
+    # ``strategy.__probe_record__``, but that's a known cooperative
+    # interface, not a security boundary — same threat model as the
+    # ``_chunk_state`` documentation in ``_tagged_emit``.
+    _probe_enabled = os.environ.get("STRATLAB_COVERAGE_PROBE") == "1"
+    _probe_state = {}  # rule_id -> {hit_count, first_true_bar, last_true_bar}
+    _probe_truncated = False
+    try:
+        _probe_cap = int(os.environ.get("STRATLAB_COVERAGE_PROBE_CAP", "5000"))
+    except ValueError:
+        _probe_cap = 5000
+
+
+    def _probe_record(_rid, _bidx, _value):
+        # Behaviour-preserving: always return the original truth value
+        # so the AST-rewritten predicate evaluates identically.
+        if _value:
+            entry = _probe_state.get(_rid)
+            if entry is None:
+                global _probe_truncated
+                if len(_probe_state) >= _probe_cap:
+                    _probe_truncated = True
+                else:
+                    _probe_state[_rid] = {
+                        "hit_count": 1,
+                        "first_true_bar": _bidx,
+                        "last_true_bar": _bidx,
+                    }
+            else:
+                entry["hit_count"] += 1
+                entry["last_true_bar"] = _bidx
+        return _value
+
+
+    # Monotonic per-bar counter for the probe ``__probe_bar_index__``.
+    # Distinct from ``_chunk_state["i"]`` (which is chunk-local, used
+    # for order tagging) — the probe wants a stable, cross-chunk index
+    # so ``first_true_bar`` / ``last_true_bar`` are comparable across
+    # the whole run.
+    _probe_bar_counter = {"i": -1}
+
+
+    def _next_probe_bar_index():
+        _probe_bar_counter["i"] += 1
+        return _probe_bar_counter["i"]
+
+
+    def _set_bar_index(idx):
+        if _probe_enabled:
+            strategy.__probe_bar_index__ = idx
+
+
+    def _flush_probe_events():
+        if not _probe_enabled:
+            return
+        events = [
+            {
+                "rule_id": rid,
+                "hit_count": entry["hit_count"],
+                "first_true_bar": entry["first_true_bar"],
+                "last_true_bar": entry["last_true_bar"],
+            }
+            for rid, entry in _probe_state.items()
+        ]
+        _emit({
+            "kind": "probe_event",
+            "payload": {"events": events, "truncated": _probe_truncated},
+        })
+
+
+    if _probe_enabled:
+        strategy.__probe_record__ = _probe_record
+        strategy.__probe_bar_index__ = 0
 
 
     # Harness-private bar_index state for the chunked protocol (PR #425
@@ -439,6 +563,9 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
                     state = msg.get("state") or {}
                     _apply_state(ctx, state, is_warmup=bool(msg.get("is_warmup", False)))
                     ctx._ingest_bar(bar)
+                    # #450: bump the probe bar index so #449's wrapped
+                    # subconditions can stamp first/last_true_bar.
+                    _set_bar_index(_next_probe_bar_index())
                     instance.on_bar(ctx, bar)
                 elif kind == "bars":
                     # Chunked-bar protocol (issue #377). Each entry has its
@@ -483,6 +610,10 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
                             # Harness-managed bar_index for ``_tagged_emit``;
                             # strategy code cannot reach ``_chunk_state``.
                             _chunk_state["i"] = i
+                            # #450: also advance the probe's cross-chunk
+                            # bar counter so first/last_true_bar are
+                            # globally meaningful even under chunked mode.
+                            _set_bar_index(_next_probe_bar_index())
                             instance.on_bar(ctx, bar)
                     finally:
                         _chunk_state["i"] = None
@@ -494,6 +625,10 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
                 elif kind == "end":
                     if started:
                         instance.on_end(ctx)
+                    # #450: flush aggregated probe events before the
+                    # final ready so the parent's _exchange loop sees
+                    # them in the same round-trip.
+                    _flush_probe_events()
                     _emit({"kind": "ready", "capabilities": _CAPABILITIES})
                     return
                 else:

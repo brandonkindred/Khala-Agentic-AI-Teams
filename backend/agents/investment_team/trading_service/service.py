@@ -16,7 +16,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date as date_cls
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ..execution.bar_safety import LookAheadError
 from ..execution.metrics import EquityCurve
@@ -114,6 +114,13 @@ class TradingServiceResult:
     #: from the closed-trade ledger. ``None`` when no bars were processed
     #: (e.g. ``harness.send_start`` failure or empty stream).
     streaming_equity_curve: Optional[EquityCurve] = None
+    #: Aggregated coverage-probe events from the strategy subprocess
+    #: (#450). Populated only when the service was constructed with
+    #: ``coverage_probe_mode=True`` *and* the child flushed a
+    #: ``probe_event`` frame (currently emitted on clean ``end``).
+    #: Shape: ``{"events": [{rule_id, hit_count, first_true_bar,
+    #: last_true_bar}, ...], "truncated": bool}``.
+    probe_events: Optional[Dict[str, Any]] = None
 
 
 def _record_event(
@@ -330,9 +337,13 @@ class TradingService:
         risk_limits: Optional["RiskLimits | Dict"] = None,
         default_unfilled_policy: UnfilledPolicy = UnfilledPolicy.DROP,
         bar_chunk_size: Optional[int] = None,
+        coverage_probe_mode: bool = False,
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
+        # #450: opt-in coverage-probe mode. Off by default so all
+        # existing callers keep the zero-overhead path.
+        self._coverage_probe_mode = coverage_probe_mode
         # Phase 3: StrategySpec.risk_limits is now a validated RiskLimits
         # instance; keep accepting raw dicts for callers that haven't
         # migrated (the backtest API still carries a ``Dict[str, Any]`` at
@@ -401,7 +412,10 @@ class TradingService:
         if chunk_size is None:
             chunk_size = _resolve_bar_chunk_size()
 
-        with StreamingHarness(self.strategy_code) as harness:
+        with StreamingHarness(
+            self.strategy_code,
+            coverage_probe_mode=self._coverage_probe_mode,
+        ) as harness:
             try:
                 harness.send_start(
                     config={
@@ -414,6 +428,7 @@ class TradingService:
                 result.error = str(exc)
                 result.lookahead_violation = exc.etype == "lookahead_violation"
                 _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+                result.probe_events = harness.probe_events
                 return _finalize_diagnostics(result)
 
             # Issue #377: chunked-bar protocol. Only opt in when the env var
@@ -720,14 +735,17 @@ class TradingService:
                 result.error = str(exc)
                 result.lookahead_violation = True
                 _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+                result.probe_events = harness.probe_events
                 return _finalize_diagnostics(result)
             except StrategyRuntimeError as exc:
                 result.error = str(exc)
                 result.lookahead_violation = exc.etype == "lookahead_violation"
                 _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+                result.probe_events = harness.probe_events
                 return _finalize_diagnostics(result)
 
         _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+        result.probe_events = harness.probe_events
         return _finalize_diagnostics(result)
 
     # ------------------------------------------------------------------
@@ -1035,14 +1053,17 @@ class TradingService:
             result.error = str(exc)
             result.lookahead_violation = True
             _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+            result.probe_events = harness.probe_events
             return _finalize_diagnostics(result)
         except StrategyRuntimeError as exc:
             result.error = str(exc)
             result.lookahead_violation = exc.etype == "lookahead_violation"
             _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+            result.probe_events = harness.probe_events
             return _finalize_diagnostics(result)
 
         _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+        result.probe_events = harness.probe_events
         return _finalize_diagnostics(result)
 
     # ------------------------------------------------------------------
