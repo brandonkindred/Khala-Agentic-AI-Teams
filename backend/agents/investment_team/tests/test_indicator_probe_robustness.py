@@ -1,0 +1,5530 @@
+"""Robustness tests for the indicator-coverage probe (#448)."""
+
+from __future__ import annotations
+
+import textwrap
+
+import numpy as np
+import pandas as pd
+
+from investment_team.models import CoverageCategory
+from investment_team.strategy_lab.coverage_probe import run_indicator_probe
+
+
+def _flat_ohlcv(n: int = 60) -> pd.DataFrame:
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    return pd.DataFrame(
+        {
+            "open": np.full(n, 100.0),
+            "high": np.full(n, 101.0),
+            "low": np.full(n, 99.0),
+            "close": np.full(n, 100.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+
+
+def test_malformed_strategy_returns_unknown_low_coverage() -> None:
+    report = run_indicator_probe(
+        strategy_code="def on_bar(:::",
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert "did not parse" in report.summary
+
+
+def test_empty_strategy_code_returns_unknown_low_coverage() -> None:
+    report = run_indicator_probe(strategy_code="", market_data={"AAPL": _flat_ohlcv()})
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_no_recognized_subconditions_returns_unknown() -> None:
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if 1 < 2:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert report.subconditions == []
+
+
+def test_prefers_on_bar_over_top_level_helper() -> None:
+    """A top-level helper named ``signal`` / ``generate_signal`` must
+    not shadow the strategy's real ``on_bar`` entry path. ``on_bar`` is
+    the actual contract — the fallback names exist only for legacy /
+    free-function strategies that lack one.
+    """
+    code = textwrap.dedent(
+        """
+        def generate_signal():
+            # No ``if`` predicates here — if the probe stops here it'll
+            # report UNKNOWN_LOW_COVERAGE despite the real on_bar below.
+            return None
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "close > 0"
+
+
+def test_module_level_period_constant_resolved() -> None:
+    code = textwrap.dedent(
+        """
+        SMA_LOOKBACK = 5
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if close < sma(close, SMA_LOOKBACK) - 100:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``sma(close, SMA_LOOKBACK) - 100`` is roughly zero for our flat
+    # fixture, so ``close < 0`` is structurally false. The Name lookup
+    # must resolve so that the subcondition registers at all.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+
+
+def test_class_attribute_window_resolves_in_indicator_arg() -> None:
+    """Strategies routinely pass class tuning knobs to indicator helpers,
+    e.g. ``sma(close, self.WINDOW)``. The probe must resolve the
+    ``self.WINDOW`` Attribute through the class-attribute binding;
+    without this the helper either crashed (no default period) or
+    silently used the wrong default, producing misleading coverage.
+    """
+    # Sawtooth so close oscillates around the moving average; different
+    # window lengths produce visibly different hit counts.
+    n = 200
+    moves = np.array([+0.005, -0.005] * (n // 2))
+    close = 100.0 * np.cumprod(1.0 + moves)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=n, freq="D"),
+    )
+
+    code_short = textwrap.dedent(
+        """
+        class S:
+            WINDOW = 3
+            def on_bar(self, ctx, bar):
+                if close < sma(close, self.WINDOW):
+                    pass
+        """
+    )
+    code_long = textwrap.dedent(
+        """
+        class S:
+            WINDOW = 50
+            def on_bar(self, ctx, bar):
+                if close < sma(close, self.WINDOW):
+                    pass
+        """
+    )
+    short = run_indicator_probe(strategy_code=code_short, market_data={"AAPL": df})
+    long = run_indicator_probe(strategy_code=code_long, market_data={"AAPL": df})
+
+    # If the Attribute weren't resolved, sma's required ``period`` would
+    # be missing and the helper would raise — caught by the probe and
+    # emitted as zero hits. Resolution makes both runs evaluate cleanly
+    # with non-zero hits, and the different windows yield different counts.
+    assert len(short.subconditions) == 1
+    assert len(long.subconditions) == 1
+    assert short.subconditions[0].hit_count > 0
+    assert long.subconditions[0].hit_count > 0
+    assert short.subconditions[0].hit_count != long.subconditions[0].hit_count
+
+
+def test_init_self_assignment_window_is_resolved() -> None:
+    """``self.WINDOW = 80`` inside ``__init__`` is a different AST shape
+    (Attribute target, not Name). It must still bind so a downstream
+    ``sma(close, self.WINDOW)`` resolves the period.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def __init__(self):
+                self.WINDOW = 5
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.WINDOW):
+                    pass
+        """
+    )
+    df = _flat_ohlcv(n=100)
+    df.loc[df.index[60:], "close"] = 95.0  # below the SMA half the time
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert len(report.subconditions) == 1
+    # The subcondition must evaluate (not silently zero out due to a
+    # missing period).
+    sc = report.subconditions[0]
+    assert sc.label == "close > sma(close, self.WINDOW)"
+    assert 0 <= sc.hit_count <= report.bars_checked
+
+
+def test_position_check_else_branch_is_skipped() -> None:
+    """``if pos is None: <entry> else: <exit>`` is the documented gate.
+
+    An exit-only filter in the else branch must not be reported as an
+    entry-coverage blocker — entries aren't restricted by exit rules.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                pos = ctx.position(bar.symbol)
+                if pos is None:
+                    if close > 0:
+                        pass
+                else:
+                    if close < -50:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Entry condition ``close > 0`` always fires on the flat fixture.
+    # If the exit branch's never-true ``close < -50`` were also recorded,
+    # the report would flip to INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    labels = {sc.label for sc in report.subconditions}
+    assert "close > 0" in labels
+    assert "close < -50" not in labels
+
+
+def test_position_check_via_ctx_call_is_recognized() -> None:
+    """``if ctx.position(bar.symbol) is None:`` — same shape, different
+    test expression. Must also skip the else branch.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if ctx.position(bar.symbol) is None:
+                    if close > 0:
+                        pass
+                else:
+                    if close < -50:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    labels = {sc.label for sc in report.subconditions}
+    assert "close < -50" not in labels
+
+
+def test_symbol_gate_restricts_evaluation_to_matching_dataframe() -> None:
+    """``if bar.symbol == "AAPL" and close > 1000`` must evaluate the
+    indicator condition only against AAPL — an unrelated symbol whose
+    close already exceeds 1000 must NOT make this report COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" and close > 1000:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=50)  # close = 100 — never > 1000
+    msft = pd.DataFrame(
+        {
+            "open": np.full(50, 1500.0),
+            "high": np.full(50, 1505.0),
+            "low": np.full(50, 1495.0),
+            "close": np.full(50, 1500.0),  # close > 1000 always
+            "volume": np.full(50, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=50, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+
+    # AAPL never satisfies close > 1000 — that's the real coverage gap
+    # we want to surface. If the symbol gate weren't honoured, MSFT's
+    # 1500 close would mask the AAPL miss.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+    # The label is augmented with the symbol filter so the report
+    # surfaces which branch it came from.
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_symbol_gated_duplicates_remain_distinct() -> None:
+    """Two ``bar.symbol == "X"`` branches with the same predicate text
+    must surface as TWO coverage rows. Otherwise dedupe-by-label drops
+    the symbol-specific blocker the new ``target_symbols`` filter is
+    supposed to catch.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" and close > 50:
+                    pass
+                if bar.symbol == "MSFT" and close > 50:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=30)  # close = 100 — satisfies > 50 always
+    msft = pd.DataFrame(
+        {
+            "open": np.full(30, 25.0),
+            "high": np.full(30, 25.5),
+            "low": np.full(30, 24.5),
+            "close": np.full(30, 25.0),  # never > 50
+            "volume": np.full(30, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=30, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+
+    # The MSFT branch is a real zero-hit blocker; if we'd deduped only
+    # by predicate text it would have been hidden.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 2
+    by_label = {sc.label: sc for sc in report.subconditions}
+    assert any("[AAPL]" in lbl for lbl in by_label)
+    assert any("[MSFT]" in lbl for lbl in by_label)
+    aapl_row = next(sc for sc in report.subconditions if "[AAPL]" in sc.label)
+    msft_row = next(sc for sc in report.subconditions if "[MSFT]" in sc.label)
+    assert aapl_row.hit_count > 0
+    assert msft_row.hit_count == 0
+
+
+def test_inverted_position_check_routes_to_orelse() -> None:
+    """``if pos is not None: <exit> else: <entry>`` — the body is the
+    EXIT path and the entry path is in ``orelse``. The probe must
+    recurse into orelse for the entry-coverage analysis.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                pos = ctx.position(bar.symbol)
+                if pos is not None:
+                    if close < -50:
+                        pass
+                else:
+                    if close > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Entry condition ``close > 0`` always fires; if the probe had
+    # routed into body (the exit path) it would have flagged
+    # ``close < -50`` as an INDICATOR_FILTER_TOO_RESTRICTIVE blocker.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    labels = {sc.label for sc in report.subconditions}
+    assert "close > 0" in labels
+    assert "close < -50" not in labels
+
+
+def test_combined_position_gate_in_entry_test_routes_to_body() -> None:
+    """``if pos is None and <entry>:`` / ``elif pos is not None and <exit>:``
+    is the codegen-emitted shape (factors/compiler.py). The probe must
+    strip the position-gate conjunct, treat the body of the vacant gate
+    as the entry path (with the surviving conjunct(s) as coverage), and
+    skip the elif's exit predicate entirely.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                pos = ctx.position(bar.symbol)
+                if pos is None and close > 0:
+                    pass
+                elif pos is not None and close < -50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Entry-coverage subcond ``close > 0`` must be present; the elif's
+    # exit-coverage ``close < -50`` must not be.
+    labels = {sc.label for sc in report.subconditions}
+    assert "close > 0" in labels
+    assert "close < -50" not in labels
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_combined_position_gate_with_zero_hit_entry_flagged() -> None:
+    """The surviving entry conjunct of a combined gate is real coverage
+    — so when it never fires, the probe must still flag
+    INDICATOR_FILTER_TOO_RESTRICTIVE rather than silently passing.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if pos is None and close < -50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert any(sc.label == "close < -50" for sc in report.subconditions)
+
+
+def test_symbol_gated_hit_rate_uses_matching_symbol_bars() -> None:
+    """Symbol-gated rows must divide by the matching symbol's bars,
+    not by the global universe. Without this, two always-true gated
+    branches each report hit_rate=0.5 instead of 1.0 when the universe
+    has two equally-sized symbols.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" and close > 50:
+                    pass
+                if bar.symbol == "MSFT" and close > 50:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=30)  # close = 100 — always > 50
+    msft = pd.DataFrame(
+        {
+            "open": np.full(30, 75.0),
+            "high": np.full(30, 75.5),
+            "low": np.full(30, 74.5),
+            "close": np.full(30, 75.0),  # always > 50
+            "volume": np.full(30, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=30, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    # Both branches always fire on their respective symbols. With the
+    # matching-bars denominator each row reports hit_rate == 1.0.
+    assert len(report.subconditions) == 2
+    for sc in report.subconditions:
+        assert sc.hit_count == 30
+        assert sc.hit_rate == 1.0
+
+
+def test_contradictory_same_predicate_symbol_gates_drop_group() -> None:
+    """``bar.symbol == "AAPL" and bar.symbol == "MSFT" and close > 0``
+    is structurally unreachable — both literal symbols can't be true on
+    the same bar. The intra-predicate symbol-gate combiner must
+    intersect (not union) the two literals, leaving an empty filter,
+    and the resulting empty-set group must be dropped before evaluation.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" and bar.symbol == "MSFT" and close > 0:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=20)  # close > 0 always
+    msft = pd.DataFrame(
+        {
+            "open": np.full(20, 50.0),
+            "high": np.full(20, 51.0),
+            "low": np.full(20, 49.0),
+            "close": np.full(20, 50.0),
+            "volume": np.full(20, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=20, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+    # Without the intersection fix, the symbol filter would be
+    # {AAPL, MSFT} (union) and ``close > 0`` would evaluate against
+    # both DataFrames, reporting COVERAGE_OK. With intersection the
+    # filter is empty, the group is dropped, and the probe sees no
+    # recognised subconditions at all.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert report.subconditions == []
+
+
+def test_indicator_with_history_listcomp_input_uses_correct_column() -> None:
+    """``sma([b.volume for b in history], 5)`` must compute over the
+    volume column, not silently fall back to close. With flat
+    ``volume=1000`` and ``close=100`` the predicate
+    ``volume > vol_avg * 1.5`` is structurally false; the probe must
+    flag INDICATOR_FILTER_TOO_RESTRICTIVE rather than COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                vol_avg = sma([b.volume for b in history], 5)
+                if volume > vol_avg * 1.5:
+                    pass
+        """
+    )
+    df = _flat_ohlcv(n=30)  # flat volume=1_000_000
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    # Flat data: sma(volume) == volume, so volume > sma(volume)*1.5 is
+    # never true. If the probe had defaulted to close it would have
+    # computed sma(close)*1.5 ≈ 150 and reported COVERAGE_OK because
+    # volume (1_000_000) is greater than that.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_indicator_with_unrecognised_explicit_input_is_dropped() -> None:
+    """``rsi(self.history)`` with an opaque input must be dropped, not
+    silently substituted with close. Otherwise the probe would compute
+    coverage against the wrong series and a real blocker could become
+    COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if rsi(self.history) < 25:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # The single subcondition is unrecognised → no recognised
+    # subconditions → UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert report.subconditions == []
+
+
+def test_derived_threshold_assign_is_bound() -> None:
+    """``threshold = sma(close, 5) * 1.02`` must bind ``threshold`` to
+    the BinOp evaluator so the later comparison ``close > threshold``
+    reaches the coverage check. Without the BinOp-of-indicator binding
+    the Name lookup fails and the comparison is dropped.
+    """
+    code_named = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                threshold = sma(close, 5) * 1.02
+                if close > threshold:
+                    pass
+        """
+    )
+    code_inline = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 5) * 1.02:
+                    pass
+        """
+    )
+    df = _flat_ohlcv(n=50)
+    df.loc[df.index[25:], "close"] = 105.0  # half the bars above the 1.02 band
+
+    named = run_indicator_probe(strategy_code=code_named, market_data={"AAPL": df})
+    inline = run_indicator_probe(strategy_code=code_inline, market_data={"AAPL": df})
+
+    # The named form must produce the same coverage outcome as the
+    # inline form. Without the fix the named form would have returned
+    # UNKNOWN_LOW_COVERAGE because ``threshold`` would never have been
+    # bound.
+    assert named.coverage_category is inline.coverage_category
+    assert len(named.subconditions) == 1
+    assert len(inline.subconditions) == 1
+    assert named.subconditions[0].hit_count == inline.subconditions[0].hit_count
+    assert named.subconditions[0].hit_count > 0
+
+
+def test_or_predicate_with_one_firing_leg_is_coverage_ok() -> None:
+    """``if close > 100 or rsi(close, 14) < 30:`` — even when one leg
+    never fires, the OR is satisfied as long as the other does. Must
+    classify ``COVERAGE_OK`` and surface both legs as coverage rows.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 50 or close > 1000:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},  # close=100 — > 50 always, > 1000 never
+    )
+    # The ``> 1000`` leg never fires but the OR is still satisfied via
+    # the ``> 50`` leg. Must NOT classify INDICATOR_FILTER_TOO_RESTRICTIVE
+    # — that would wrongly suggest the entry is blocked.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 2
+    by_label = {sc.label: sc for sc in report.subconditions}
+    assert by_label["close > 50"].hit_count == 60
+    assert by_label["close > 1000"].hit_count == 0
+
+
+def test_or_predicate_with_all_legs_zero_is_too_restrictive() -> None:
+    """When every leg of the OR is zero-hit the disjunction never fires
+    and the entry is genuinely blocked. Must classify
+    INDICATOR_FILTER_TOO_RESTRICTIVE with an ``or_group_never_fires``
+    blocker that lists all legs.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close < -10 or close > 1000:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.likely_blockers) == 1
+    blocker = report.likely_blockers[0]
+    assert blocker.reason == "or_group_never_fires"
+    assert "close < -10" in blocker.evidence
+    assert "close > 1000" in blocker.evidence
+    assert " OR " in blocker.evidence
+
+
+def test_or_under_ancestor_keeps_or_semantics() -> None:
+    """``if close > 0: if close > 0 or close < 0:`` is reachable on
+    positive prices because the inner OR's first leg always fires.
+    The probe must keep OR semantics even when the OR is nested under
+    an ancestor — the dead ``close < 0`` leg should not flag a
+    blocker, since one firing leg satisfies the disjunction.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0:
+                    if close > 0 or close < 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Without the ancestor_count fix, the inner OR's ``close < 0``
+    # leg was treated as an AND-required conjunct of the outer-plus-
+    # inner group and reported as INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    labels = {sc.label for sc in report.subconditions}
+    # The dead leg still surfaces as a coverage row (so users see it),
+    # but it isn't a blocker.
+    assert "close > 0" in labels
+    assert "close < 0" in labels
+
+
+def test_or_under_ancestor_zero_hit_ancestor_still_blocks() -> None:
+    """OR-with-ancestor: a zero-hit ancestor is still an AND-required
+    blocker. ``if close > 1000: if close > 0 or close < 0:`` — the
+    outer ancestor never fires on a flat fixture, so the predicate is
+    blocked regardless of the inner OR's coverage.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 1000:
+                    if close > 0 or close < 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    # The ancestor leg gets flagged via the AND zero-hit rule even
+    # though the group's combinator is OR.
+    blocker_reasons = [b.reason for b in report.likely_blockers]
+    assert "indicator_filter_zero_hits" in blocker_reasons
+    blocker_evidence = [b.evidence for b in report.likely_blockers]
+    assert any("close > 1000" in e for e in blocker_evidence)
+
+
+def test_named_series_arg_resolves_via_binding() -> None:
+    """``closes = [b.close for b in history]; rsi(closes, 14) < 25``
+    must evaluate the indicator over the bound series rather than
+    being dropped because ``closes`` isn't directly an OHLCV column.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                closes = [b.close for b in history]
+                if rsi(closes, 14) < -50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # The indicator was previously dropped because args[0] was a
+    # ``Name`` not directly recognisable as an OHLCV column. With the
+    # name-binding resolution it's evaluated normally; rsi < -50 is
+    # never true so the predicate is correctly classified as
+    # INDICATOR_FILTER_TOO_RESTRICTIVE rather than UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+
+
+def test_warmup_uses_per_symbol_max_history() -> None:
+    """Warmup is a per-symbol time-series property. Two 100-bar
+    DataFrames with ``warmup_bars_required=150`` must classify as
+    INSUFFICIENT_BARS — no individual symbol has enough history to
+    compute a 150-period indicator. The previous aggregate-row guard
+    (sum=200 ≥ 150) wrongly let the probe through and the all-NaN
+    indicators surfaced as INDICATOR_FILTER_TOO_RESTRICTIVE.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 150):
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=100)
+    msft = _flat_ohlcv(n=100)
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=150,
+    )
+    assert report.coverage_category is CoverageCategory.INSUFFICIENT_BARS
+    assert report.bars_checked == 200  # aggregate count preserved on the model
+    assert report.warmup_bars_required == 150
+    assert report.likely_blockers
+    assert report.likely_blockers[0].reason == "insufficient_bars"
+
+
+def test_warmup_passes_when_one_symbol_has_enough_history() -> None:
+    """When at least one symbol has enough bars, the probe proceeds.
+    Underwarmed symbols' indicator NaNs flow through ``fillna(False)``
+    so they contribute zero hits but don't falsely block the report.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=200)
+    msft = _flat_ohlcv(n=50)
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=150,
+    )
+    # AAPL satisfies warmup; MSFT's 50 bars contribute too.
+    # ``close > 0`` fires on every bar, so COVERAGE_OK.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_compound_or_legs_are_recognised() -> None:
+    """``(A and B) or (C and D)`` — each OR leg is a BoolOp(And, ...),
+    not a Compare. Each compound leg must be built as a single subcond
+    whose evaluator is the bar-wise AND of its inner conjuncts.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (close > 50 and volume > 0) or (close < -10 and volume > 0):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Left leg fires on every bar (close=100 > 50, volume > 0); right
+    # leg never fires. The OR is satisfied via the left leg.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    # Both compound legs surface as coverage rows so users see the
+    # dead alternative.
+    labels = [sc.label for sc in report.subconditions]
+    assert any("close > 50" in lbl and "volume > 0" in lbl for lbl in labels)
+    assert any("close < -10" in lbl and "volume > 0" in lbl for lbl in labels)
+
+
+def test_compound_or_legs_all_zero_flag_too_restrictive() -> None:
+    """If every compound OR leg's bar-wise AND is empty, the disjunction
+    never fires and the predicate is genuinely blocked.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (close > 1000 and volume > 0) or (close < -10 and volume > 0):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    blocker_reasons = [b.reason for b in report.likely_blockers]
+    assert "or_group_never_fires" in blocker_reasons
+
+
+def test_compound_or_leg_preserves_symbol_gate() -> None:
+    """``(bar.symbol == "AAPL" and close > 1000) or
+    (bar.symbol == "MSFT" and close < 50)`` — each compound OR leg's
+    symbol gate must constrain THAT leg's evaluation. Otherwise the
+    AAPL leg's ``close > 1000`` mask runs against MSFT's data (where
+    close=1500 always), and the OR appears to fire even though
+    neither symbol-specific branch is actually true.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (bar.symbol == "AAPL" and close > 1000) or \\
+                        (bar.symbol == "MSFT" and close < 50):
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=30)  # close=100 — never > 1000
+    msft = pd.DataFrame(
+        {
+            "open": np.full(30, 1500.0),
+            "high": np.full(30, 1505.0),
+            "low": np.full(30, 1495.0),
+            "close": np.full(30, 1500.0),  # never < 50
+            "volume": np.full(30, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=30, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+    # Without the per-leg symbol filter, the AAPL leg's close-gt-1000
+    # mask would fire on MSFT (close=1500), making the OR appear
+    # satisfied. With the filter neither leg can fire on its gated
+    # symbol → INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    blocker_reasons = [b.reason for b in report.likely_blockers]
+    assert "or_group_never_fires" in blocker_reasons
+    # Leg labels in the report carry their per-leg symbol filter so
+    # users can tell the AAPL branch from the MSFT branch.
+    labels = [sc.label for sc in report.subconditions]
+    assert any("[AAPL]" in lbl for lbl in labels)
+    assert any("[MSFT]" in lbl for lbl in labels)
+
+
+def test_tuple_unpacked_indicator_outputs_bind() -> None:
+    """``upper, mid, lower = bollinger_bands(closes, 20)`` followed by
+    ``if bar.close > upper:`` must bind ``upper`` to the first output
+    of the helper so the comparison can be evaluated. Without the
+    tuple-unpack path the binding was missed and the report dropped
+    to UNKNOWN_LOW_COVERAGE.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                closes = [b.close for b in history]
+                upper, mid, lower = bollinger_bands(closes, 20)
+                if close > upper:
+                    pass
+        """
+    )
+    # Compare two fixtures: one with shocks that periodically push
+    # close above the upper band (hit_count > 0) versus a flat fixture
+    # where close == upper after warmup (hit_count = 0). If ``upper``
+    # weren't bound to the upper-band series both runs would land in
+    # the same UNKNOWN_LOW_COVERAGE bucket — distinct hit counts prove
+    # the binding flowed through.
+    n = 100
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    closes_shock = np.full(n, 100.0)
+    closes_shock[::10] = 130.0  # periodic spikes well above any 20-bar SMA + 2σ
+    df_shock = pd.DataFrame(
+        {
+            "open": closes_shock,
+            "high": closes_shock * 1.005,
+            "low": closes_shock * 0.995,
+            "close": closes_shock,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df_shock})
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "close > upper"
+    # Spikes above the band → non-zero hits, proving ``upper`` was
+    # bound to the actual upper-band series rather than dropped.
+    assert report.subconditions[0].hit_count > 0
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_tuple_unpacked_stochastic_binds_hlc_signature() -> None:
+    """Stochastic is HLC-typed (returns %K, %D from h/l/c inputs).
+    ``k, d = stochastic(high, low, close)`` followed by ``if k < 20:``
+    must bind both names to the corresponding output series.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                k, d = stochastic(high, low, close)
+                if k < 20:
+                    pass
+        """
+    )
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # Bottoming-out swing so %K dips below 20 part of the time.
+    moves = np.array([-0.005] * 30 + [+0.005] * 30)
+    closes = 100.0 * np.cumprod(1.0 + moves)
+    df = pd.DataFrame(
+        {
+            "open": closes,
+            "high": closes * 1.005,
+            "low": closes * 0.995,
+            "close": closes,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "k < 20"
+    # Whether COVERAGE_OK or INDICATOR_FILTER_TOO_RESTRICTIVE depends
+    # on the exact %K trajectory — we only assert the binding fired
+    # (the subcond was recognised and evaluated rather than dropped).
+    assert report.coverage_category in {
+        CoverageCategory.COVERAGE_OK,
+        CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE,
+    }
+
+
+def test_nested_or_under_and_is_evaluated() -> None:
+    """``if close > 0 and (volume < 0 or close < -1):`` — the inner OR
+    is one term of the outer AND. Without nested-OR handling the inner
+    disjunction was dropped and the AND classification was based only
+    on the surviving Compare conjunct (`close > 0` always fires →
+    false COVERAGE_OK). Now the inner OR is built as a compound
+    AND-conjunct whose mask is the bar-wise OR of its legs; both legs
+    fail on flat data so the AND classifies INDICATOR_FILTER_TOO_RESTRICTIVE.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (volume < 0 or close < -1):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    # Both AND conjuncts surface as coverage rows: the bare ``close > 0``
+    # and the synthetic ``volume < 0 or close < -1`` compound.
+    labels = [sc.label for sc in report.subconditions]
+    assert "close > 0" in labels
+    assert any("volume < 0" in lbl and "close < -1" in lbl for lbl in labels)
+
+
+def test_nested_or_under_and_with_one_leg_firing_is_coverage_ok() -> None:
+    """``if close > 0 and (volume > 0 or close < -1):`` — the inner OR
+    fires via ``volume > 0`` on every bar (flat fixture has volume=1M).
+    Both AND legs satisfied → COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (volume > 0 or close < -1):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_reassigned_local_uses_latest_binding() -> None:
+    """Python uses the latest local assignment. ``threshold = sma(close,
+    5) - 1; threshold = sma(close, 5) + 1000; if close > threshold:``
+    on flat data is impossible (close=100, threshold≈1100), but the
+    previous ``setdefault`` made the first stale binding stick and the
+    probe wrongly reported COVERAGE_OK from ``threshold=99``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                threshold = sma(close, 5) - 1
+                threshold = sma(close, 5) + 1000
+                if close > threshold:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # close=100, second threshold = sma(close, 5) + 1000 ≈ 1100 — never
+    # satisfied. Must classify INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_or_predicate_with_three_legs_recognised() -> None:
+    """OR predicates with more than two legs must each surface as a
+    coverage row.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 50 or close > 1000 or close < -10:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 3
+
+
+def test_atr_positional_period_is_resolved() -> None:
+    """``atr(high, low, close, N)`` puts the period at args[3], not args[1].
+
+    Regression for a bug where the generic period extractor read args[1]
+    (which is ``low`` for HLC helpers) and silently fell back to the
+    helper's default of 14.
+
+    ATR scales with the magnitude of true-range moves. A short window
+    (period=2) over the ``_swing_close`` fixture below produces a
+    substantially larger steady-state ATR than the default period=14.
+    The test asserts the probe actually USES the requested period by
+    comparing hit rates of ``atr(high, low, close, 2) > T`` against
+    a plain ``atr(high, low, close) > T`` over the same data — they
+    must differ.
+    """
+
+    def _swing_close(n: int = 100) -> pd.DataFrame:
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        # Sharp alternating moves so short-window ATR diverges from default.
+        moves = np.array([+0.02, -0.02] * (n // 2))
+        close = 100.0 * np.cumprod(1.0 + moves)
+        return pd.DataFrame(
+            {
+                "open": close,
+                "high": close * 1.01,
+                "low": close * 0.99,
+                "close": close,
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    code_short = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if atr(high, low, close, 2) > 3:
+                    pass
+        """
+    )
+    code_default = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if atr(high, low, close) > 3:
+                    pass
+        """
+    )
+
+    df = _swing_close()
+    short = run_indicator_probe(strategy_code=code_short, market_data={"SYM": df})
+    default = run_indicator_probe(strategy_code=code_default, market_data={"SYM": df})
+
+    # If the period weren't honoured, both would compute the same ATR
+    # (the default period=14) and report identical hit_count. The bug
+    # we're guarding against is exactly that silent fallback.
+    assert short.subconditions[0].hit_count != default.subconditions[0].hit_count
+
+
+def test_no_llm_calls_made() -> None:
+    """The indicator probe must not import or reference the LLM client.
+
+    A static check on the module's source code is stronger than a runtime
+    monkey-patch — the latter can leak into parallel pytest workers under
+    ``-n auto`` and flake unrelated tests.
+    """
+    import inspect
+
+    import investment_team.strategy_lab.coverage_probe.indicator_probe as mod
+
+    src = inspect.getsource(mod)
+    assert "llm_service" not in src
+    assert "LLMClient" not in src
+    assert "OllamaClient" not in src
+
+    # Module exports also must not surface any llm-named symbols.
+    for name in dir(mod):
+        assert "llm" not in name.lower(), f"unexpected llm symbol: {name}"
+
+    # Smoke-call the probe to confirm it still runs cleanly.
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_evaluator_failure_per_subcondition_does_not_raise() -> None:
+    """A subcondition referencing a column that's missing should degrade,
+    not raise. We pass a DataFrame with no ``volume`` column but a
+    ``volume``-touching subcondition; the probe should treat the leg as
+    non-firing rather than crashing."""
+    df = pd.DataFrame(
+        {
+            "open": np.full(30, 100.0),
+            "high": np.full(30, 101.0),
+            "low": np.full(30, 99.0),
+            "close": np.full(30, 100.0),
+        },
+        index=pd.date_range("2024-01-01", periods=30, freq="D"),
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if volume > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"SYM": df})
+
+    # Volume column missing → all NaN → fillna(False) → zero hits.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_empty_market_data_does_not_raise() -> None:
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={})
+    # Zero bars → no eval, but strategy parses and finds a subcondition →
+    # COVERAGE_OK with empty hit data is not meaningful; the implementation
+    # currently returns COVERAGE_OK for "no zero hits" — that is acceptable
+    # because INSUFFICIENT_BARS is gated on warmup_bars_required > 0.
+    assert report.coverage_category in {
+        CoverageCategory.COVERAGE_OK,
+        CoverageCategory.UNKNOWN_LOW_COVERAGE,
+    }
+    assert report.bars_checked == 0
+
+
+def test_bool_call_on_indicator_name_is_recognized() -> None:
+    """`bool(<Name>)` where the name resolves to an indicator binding
+    must produce a real subcondition rather than being silently dropped.
+
+    Regression for the codex finding on PR #456: stripping the position
+    gate from `if pos is None and bool(_entry):` left `bool(_entry)` as
+    the residual test, but `_flatten_test` only returned `Compare`
+    nodes, so the term was discarded and the probe reported
+    `UNKNOWN_LOW_COVERAGE`.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                _entry = sma(close, 5)
+                pos = ctx.position(bar.symbol)
+                if pos is None and bool(_entry):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "bool(_entry)"
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_bare_name_truthiness_residual_is_recognized() -> None:
+    """A bare `Name` left as the residual after stripping the position
+    gate (`if pos is None and _entry:`) must reach the coverage check
+    when the name is bound to an indicator.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                _entry = sma(close, 5)
+                pos = ctx.position(bar.symbol)
+                if pos is None and _entry:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "_entry"
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_bool_call_on_compare_delegates_to_compare_subcond() -> None:
+    """`bool(<Compare>)` should produce the same subcondition as the
+    bare comparison — useful when codegen wraps a comparison in
+    `bool(...)` for symmetry with the truthiness path.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bool(close > 50):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "close > 50"
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_cached_compare_entry_predicate_binds_through_bool() -> None:
+    """``_entry = close > sma(close, 5)`` followed by ``if pos is None
+    and bool(_entry):`` is the documented hand-written shape that caches
+    a comparison rule into a local. The probe must bind ``_entry`` to
+    the comparison's evaluator so ``bool(_entry)`` resolves and the
+    probe diagnoses the cached rule rather than reporting
+    UNKNOWN_LOW_COVERAGE.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                _entry = close > sma(close, 5)
+                pos = ctx.position(bar.symbol)
+                if pos is None and bool(_entry):
+                    pass
+        """
+    )
+    df = _flat_ohlcv(n=50)
+    df.loc[df.index[25:], "close"] = 105.0  # rising step → close > sma half the bars
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert len(report.subconditions) == 1
+    sc = report.subconditions[0]
+    # The label is the bool(_entry) wrapper; the underlying comparison
+    # evaluator must run, so hits should be > 0 on this fixture.
+    assert sc.hit_count > 0
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_nested_or_under_and_preserves_per_leg_symbol_filter() -> None:
+    """Per-leg ``bar.symbol == "X"`` gates inside an OR wrapper must
+    survive into the aggregator, otherwise an unrelated symbol's data
+    can satisfy a leg restricted to AAPL/MSFT and falsely flip the OR.
+
+    Predicate:
+        ``volume > 0 and ((bar.symbol == "AAPL" and close > 1000)
+                          or (bar.symbol == "MSFT" and close > 500))``
+
+    Data: AAPL/MSFT close=200 (never exceed their thresholds), TSLA
+    close=2000 (would satisfy ``close > 1000`` if its symbol gate is
+    dropped). Without the per-leg filter the OR wrapper folds the AAPL
+    leg's mask over every DataFrame, TSLA bars satisfy ``close > 1000``,
+    and the AND group reports ``COVERAGE_OK``. With the fix the leg's
+    ``target_symbols`` survives, TSLA contributes False to both legs,
+    and the OR is empty so the AND group flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if volume > 0 and (
+                    (bar.symbol == "AAPL" and close > 1000)
+                    or (bar.symbol == "MSFT" and close > 500)
+                ):
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={
+            "AAPL": _df(200.0),
+            "MSFT": _df(200.0),
+            "TSLA": _df(2000.0),
+        },
+    )
+
+    # Both gated legs are unreachable: AAPL never exceeds 1000, MSFT
+    # never exceeds 500, and TSLA's 2000 close must NOT satisfy either
+    # leg because its symbol isn't in the per-leg gate.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_function_local_period_shadows_outer_scope() -> None:
+    """A function-local ``WINDOW = 5`` must override a module/class-level
+    ``WINDOW = 200`` when resolving ``sma(close, WINDOW)``. Python uses
+    the local value at runtime; the probe must too. Without the fix
+    ``setdefault`` keeps the first (outer) binding and the probe
+    evaluates against ``sma(close, 200)`` over a 30-bar fixture, which
+    has no warmup-complete bars and yields zero hits — falsely flagging
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        WINDOW = 200
+
+        class S:
+            def on_bar(self, ctx, bar):
+                WINDOW = 5
+                if close > sma(close, WINDOW):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # With WINDOW=5 the SMA has plenty of warm-up-complete bars and the
+    # comparison fires partially across the swing. With the bug
+    # (WINDOW=200) every bar would be NaN → zero hits.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_exit_branch_reassignment_does_not_shadow_entry_binding() -> None:
+    """Exit-branch reassignments inside a position-check ``orelse`` must
+    not overwrite an entry-branch binding. The recent overwrite-not-
+    setdefault fix applied to all reassignments in the on_bar walk;
+    without scoping it to the entry control-flow path, the codegen
+    pattern below evaluates the entry comparison against the exit
+    branch's 200-period MA and falsely flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+
+    Strategy:
+        ma = sma(close, 5)
+        if pos is None:
+            if close > ma: enter
+        else:
+            ma = sma(close, 200)   # exit-only reassignment
+
+    On a 30-bar swing fixture the entry's 5-period MA has plenty of
+    warmup-complete bars and ``close > ma`` partially fires. With the
+    bug the exit binding (200-period) wins, every bar is NaN, and
+    hits=0 → ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                ma = sma(close, 5)
+                pos = ctx.position(bar.symbol)
+                if pos is None:
+                    if close > ma:
+                        pass
+                else:
+                    ma = sma(close, 200)
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_warmup_check_restricted_to_gated_symbols() -> None:
+    """Warmup denominator must shrink to the symbols that can satisfy a
+    symbol-gated predicate. An unrelated long DataFrame in the universe
+    must not rescue the warmup check when the gated symbol is too short.
+
+    Strategy gates entry to AAPL only:
+        if bar.symbol == "AAPL" and close > sma(close, 50): enter
+
+    Universe: AAPL with 10 bars, MSFT with 100 bars,
+    warmup_bars_required=50.
+
+    With the bug the global ``max_per_symbol_bars=100`` (from MSFT)
+    passes the warmup check; AAPL's SMA(50) is all-NaN over its 10
+    bars, hits=0, and the probe wrongly reports
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With the fix the warmup
+    denominator is restricted to AAPL → 10 bars < 50 →
+    ``INSUFFICIENT_BARS``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" and close > sma(close, 50):
+                    pass
+        """
+    )
+    aapl = pd.DataFrame(
+        {
+            "open": np.full(10, 100.0),
+            "high": np.full(10, 101.0),
+            "low": np.full(10, 99.0),
+            "close": np.full(10, 100.0),
+            "volume": np.full(10, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=10, freq="D"),
+    )
+    msft = pd.DataFrame(
+        {
+            "open": np.full(100, 200.0),
+            "high": np.full(100, 201.0),
+            "low": np.full(100, 199.0),
+            "close": np.full(100, 200.0),
+            "volume": np.full(100, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=100, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=50,
+    )
+
+    assert report.coverage_category is CoverageCategory.INSUFFICIENT_BARS
+    assert len(report.likely_blockers) == 1
+    blocker = report.likely_blockers[0]
+    assert blocker.reason == "insufficient_bars"
+    assert "AAPL" in (blocker.evidence or "")
+
+
+def test_warmup_check_unaffected_when_any_group_is_universal() -> None:
+    """If any extracted group has no symbol filter, the warmup check
+    falls back to the full universe — a universal group can satisfy
+    on any fetched symbol, so any sufficiently long DataFrame meets it.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 50):
+                    pass
+        """
+    )
+    short = pd.DataFrame(
+        {
+            "open": np.full(10, 100.0),
+            "high": np.full(10, 101.0),
+            "low": np.full(10, 99.0),
+            "close": np.full(10, 100.0),
+            "volume": np.full(10, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=10, freq="D"),
+    )
+    long = pd.DataFrame(
+        {
+            "open": np.full(100, 100.0),
+            "high": np.full(100, 101.0),
+            "low": np.full(100, 99.0),
+            "close": np.full(100, 100.0),
+            "volume": np.full(100, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=100, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": short, "MSFT": long},
+        warmup_bars_required=50,
+    )
+
+    # Predicate is unrestricted by symbol; MSFT's 100 bars satisfy
+    # warmup so we shouldn't short-circuit on INSUFFICIENT_BARS.
+    assert report.coverage_category is not CoverageCategory.INSUFFICIENT_BARS
+
+
+def test_or_symbol_allowlist_inside_and_predicate() -> None:
+    """A symbol allowlist written as an OR inside a larger AND must
+    still gate the indicator side.
+
+    Predicate:
+        ``if (bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100:``
+
+    Universe: AAPL with close=50 (never > 100), MSFT with close=50,
+    TSLA with close=200 (would satisfy ``close > 100`` if the symbol
+    allowlist is dropped).
+
+    Without the fix, each ``bar.symbol == X`` Compare leg is sent to
+    ``_build_subcond`` and rejected (no data-dependent operand), so
+    the OR collapses to nothing and the AND keeps only ``close > 100``
+    evaluated against every symbol — TSLA bars satisfy and the probe
+    falsely reports ``COVERAGE_OK``. With the fix,
+    ``_build_compound_or_subcond`` captures the symbol gates as
+    per-leg ``target_symbols``, the outer OR subcond is gated to
+    ``{AAPL, MSFT}``, and TSLA bars contribute False so the AND
+    correctly flags the predicate as unreachable
+    (``CONJUNCTION_NEVER_TRUE`` or ``INDICATOR_FILTER_TOO_RESTRICTIVE``
+    — either is correct; the bug surfaces as ``COVERAGE_OK``).
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={
+            "AAPL": _df(50.0),
+            "MSFT": _df(50.0),
+            "TSLA": _df(200.0),
+        },
+    )
+
+    # The allowlisted symbols never satisfy ``close > 100``; TSLA's
+    # close=200 must NOT be allowed to fire because TSLA isn't in the
+    # OR allowlist. The bug surfaces as COVERAGE_OK (TSLA satisfies);
+    # both CONJUNCTION_NEVER_TRUE and INDICATOR_FILTER_TOO_RESTRICTIVE
+    # correctly flag the predicate as unreachable.
+    assert report.coverage_category in {
+        CoverageCategory.CONJUNCTION_NEVER_TRUE,
+        CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE,
+    }
+    assert report.coverage_category is not CoverageCategory.COVERAGE_OK
+
+
+def test_reassignment_to_scalar_clears_stale_indicator_binding() -> None:
+    """A scalar reassignment after an indicator binding must clear the
+    indicator entry from ``name_evaluators``, so downstream predicate
+    resolution falls through to the literal value.
+
+    Strategy:
+        threshold = sma(close, 5)   # binds indicator
+        threshold = 150             # rebinds to scalar
+        if close > threshold:       # must evaluate close > 150
+
+    Without the fix, ``_resolve_assign_evaluator(150, ...)`` returns
+    None and the existing ``threshold -> sma(close, 5)`` binding stays
+    in ``name_evaluators``. ``_build_operand`` consults
+    ``name_evaluators`` before numeric literals, so the predicate
+    evaluates ``close > sma(close, 5)`` instead of ``close > 150`` —
+    on flat ``close=100`` data, that fires roughly half the bars and
+    the probe wrongly reports COVERAGE_OK. With the fix the stale
+    binding is dropped, ``threshold`` resolves through ``name_periods``
+    to 150, ``close > 150`` is unreachable on close=100, and the probe
+    flags ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                threshold = sma(close, 5)
+                threshold = 150
+                if close > threshold:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv(n=60)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_top_level_or_preserves_standalone_symbol_gate() -> None:
+    """A top-level OR predicate with a standalone ``bar.symbol == "X"``
+    leg must be treated as a firing leg on bars from X. Without this
+    fix ``_build_subcond`` drops the gate, the OR collapses to its
+    other legs, and a zero-hit price leg falsely flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` even though every AAPL bar
+    satisfies the predicate.
+
+    Strategy:
+        ``if bar.symbol == "AAPL" or close > 100:``
+
+    Universe: AAPL with close=50 (never > 100). The ``close > 100``
+    leg has zero hits but the ``bar.symbol == "AAPL"`` leg fires on
+    every AAPL bar — the OR is satisfied so the report must classify
+    as ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" or close > 100:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 50.0),
+            "high": np.full(n, 51.0),
+            "low": np.full(n, 49.0),
+            "close": np.full(n, 50.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    # Both legs should surface as coverage rows; the symbol-gate leg
+    # fires on every AAPL bar and ``close > 100`` is the zero-hit row.
+    assert len(report.subconditions) == 2
+    labels = [sc.label for sc in report.subconditions]
+    assert any("bar.symbol" in lbl for lbl in labels)
+    assert any("close > 100" in lbl for lbl in labels)
+
+
+def test_later_reassignment_does_not_shadow_earlier_predicate() -> None:
+    """A reassignment that appears AFTER a predicate must not shadow
+    the binding the predicate sees.
+
+    Strategy:
+        ma = sma(close, 5)
+        if close > ma:
+            pass
+        ma = 999          # later reassignment
+
+    Without flow-sensitive bindings, the global pre-pass walked all
+    assignments first; with the recent overwrite-on-resolved /
+    pop-on-unresolved fix, the trailing ``ma = 999`` cleared the SMA
+    binding so ``_build_operand`` resolved ``ma`` through name_periods
+    to 999. The predicate evaluated as ``close > 999`` and on flat
+    ``close=100`` data the probe wrongly reported
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With flow-sensitive
+    bindings the predicate sees the SMA binding (the only one in
+    scope at its location) and the report classifies as
+    ``COVERAGE_OK`` because ``close > sma(close, 5)`` partially fires
+    on a swing fixture.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                ma = sma(close, 5)
+                if close > ma:
+                    pass
+                ma = 999
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_or_with_unrestricted_leg_treats_warmup_as_universal() -> None:
+    """An OR predicate with one symbol-gated leg and one unrestricted
+    leg must NOT narrow the warmup denominator to the gate's symbols.
+
+    Strategy:
+        ``if bar.symbol == "AAPL" or close > 100:``
+
+    Universe: AAPL with 10 bars, MSFT with 100 bars,
+    warmup_bars_required=50.
+
+    The unrestricted ``close > 100`` leg can fire on any symbol, so a
+    long enough MSFT history satisfies the warmup check on its own —
+    we should NOT short-circuit on ``INSUFFICIENT_BARS``. Without the
+    fix the warmup denominator is restricted to AAPL (the only gated
+    symbol observed), AAPL's 10 bars < 50, and the probe wrongly
+    reports ``INSUFFICIENT_BARS``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL" or close > 100:
+                    pass
+        """
+    )
+    aapl = pd.DataFrame(
+        {
+            "open": np.full(10, 100.0),
+            "high": np.full(10, 101.0),
+            "low": np.full(10, 99.0),
+            "close": np.full(10, 100.0),
+            "volume": np.full(10, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=10, freq="D"),
+    )
+    msft = pd.DataFrame(
+        {
+            "open": np.full(100, 200.0),
+            "high": np.full(100, 201.0),
+            "low": np.full(100, 199.0),
+            "close": np.full(100, 200.0),
+            "volume": np.full(100, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=100, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=50,
+    )
+
+    # The OR has an unrestricted leg, so the predicate could fire on
+    # any symbol — the warmup check must consider every fetched
+    # DataFrame, not just AAPL.
+    assert report.coverage_category is not CoverageCategory.INSUFFICIENT_BARS
+
+
+def test_or_allowlist_propagates_to_and_group() -> None:
+    """A nested OR allowlist must restrict the entire AND group.
+
+    Predicate:
+        ``(bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100``
+
+    Universe: AAPL/MSFT close=50 (never satisfy ``close > 100``),
+    GOOG close=200 (would satisfy ``close > 100`` but is not in the
+    allowlist).
+
+    Without propagation the group's ``target_symbols`` stays ``None``
+    so the sibling ``close > 100`` subcond's hit count includes GOOG
+    bars. Both legs then have non-zero hits but their conjunction is
+    empty → the probe flags ``CONJUNCTION_NEVER_TRUE``, hiding the
+    actionable ``INDICATOR_FILTER_TOO_RESTRICTIVE`` on the gated
+    symbols. With propagation the AND group is restricted to
+    ``{AAPL, MSFT}``, ``close > 100`` evaluates only against their
+    bars (zero hits), and the probe surfaces the indicator filter as
+    a blocker.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={
+            "AAPL": _df(50.0),
+            "MSFT": _df(50.0),
+            "GOOG": _df(200.0),
+        },
+    )
+
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    # The actionable blocker is the ``close > 100`` zero-hit on the
+    # allowlisted symbols, not a conjunction issue.
+    assert report.likely_blockers
+    blocker_reasons = {b.reason for b in report.likely_blockers}
+    assert "indicator_filter_zero_hits" in blocker_reasons
+    assert "conjunction_never_true" not in blocker_reasons
+
+
+def test_helper_class_does_not_shadow_strategy_period_constant() -> None:
+    """A sibling helper class with the same attribute name must not
+    pre-empt the strategy class's bare-name period binding.
+
+    Strategy code::
+
+        class Helper:
+            PERIOD = 2
+
+        class Strategy:
+            PERIOD = 200
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.PERIOD):
+                    pass
+
+    On a 30-bar fixture, ``sma(close, 200)`` has no warmup-complete
+    bars so ``close > sma(...)`` has zero hits and the probe
+    classifies ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With the bug the
+    global ``setdefault`` walk picks up ``Helper.PERIOD = 2`` first
+    (BFS source order) and ``self.PERIOD`` resolves to 2; ``sma(close,
+    2)`` is defined after 2 bars and fires roughly half the bars,
+    flipping the report to ``COVERAGE_OK``.
+
+    With the fix, ``_find_strategy_class`` identifies the class
+    containing ``on_bar`` and ``_collect_name_periods`` skips
+    ``Helper``, so ``self.PERIOD`` correctly resolves to 200.
+    """
+    code = textwrap.dedent(
+        """
+        class Helper:
+            PERIOD = 2
+
+        class Strategy:
+            PERIOD = 200
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.PERIOD):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # PERIOD=200 on 30 bars → all NaN → zero hits.
+    # PERIOD=2 (the helper's value, used pre-fix) → many hits.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_helper_class_period_does_not_apply_when_strategy_constant_missing() -> None:
+    """Sanity: when the strategy class has no constant of its own and
+    a helper class has one, the strategy still cannot pull from the
+    helper. Module-level constants remain accessible.
+
+    Strategy code::
+
+        WINDOW = 5
+
+        class Helper:
+            PERIOD = 999
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, WINDOW):
+                    pass
+
+    Module-level ``WINDOW = 5`` is still visible (it's outside any
+    class), but Helper's ``PERIOD = 999`` is not used because the
+    strategy never references ``self.PERIOD`` anyway.
+    """
+    code = textwrap.dedent(
+        """
+        WINDOW = 5
+
+        class Helper:
+            PERIOD = 999
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, WINDOW):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_or_with_unknown_leg_suppresses_false_restrictive_blocker() -> None:
+    """When an OR predicate has an unrecognised leg (e.g. a custom
+    method call we can't model), the probe must NOT flag
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` based only on the recognised
+    legs being zero — the unknown alternative may make the entry
+    reachable.
+
+    Strategy:
+        ``if self.custom_ok(bar) or close < -50:``
+
+    Universe: flat ``close=100`` (never satisfies ``close < -50``).
+    Without the fix the un-modelled ``self.custom_ok(bar)`` leg is
+    silently dropped, the surviving ``close < -50`` leg has zero hits,
+    and the aggregator emits an ``or_group_never_fires`` blocker —
+    classifying ``INDICATOR_FILTER_TOO_RESTRICTIVE`` even though the
+    custom call may make the predicate fire. With the fix the
+    ``has_unknown_or_leg`` flag suppresses the blocker.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if self.custom_ok(bar) or close < -50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+
+    assert report.coverage_category is not CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert all(b.reason != "or_group_never_fires" for b in report.likely_blockers)
+
+
+def test_float_threshold_local_is_preserved() -> None:
+    """A non-integer threshold hoisted into a local must resolve in
+    comparisons. Period-use sites still validate ``is_integer()`` so a
+    float threshold is never misapplied as an indicator window.
+
+    Strategy:
+        limit = 100.5
+        if close > limit:
+            pass
+
+    Without the fix the binding pass only recorded positive integers,
+    so ``limit = 100.5`` was dropped, ``_build_operand`` couldn't
+    resolve the ``Name`` literal, the comparison was skipped, and the
+    probe degenerated to ``UNKNOWN_LOW_COVERAGE`` with no
+    subconditions.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                limit = 100.5
+                if close > limit:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # Half the bars above 100.5, half below.
+    close = np.array([90.0] * 15 + [110.0] * 15)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    sc = report.subconditions[0]
+    assert sc.hit_count == 15  # exactly the bars where close=110 > 100.5
+
+
+def test_nested_or_with_unknown_leg_suppresses_and_zero_hit_blocker() -> None:
+    """A nested OR inside an AND must NOT trigger an
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` blocker on its zero-hit
+    recognised leg when the OR also contains an un-modellable leg —
+    the unknown alternative may make the OR (and thus the AND) fire.
+
+    Strategy:
+        ``if close > 0 and (self.custom_ok(bar) or close < -50):``
+
+    Universe: flat ``close=100`` (never satisfies ``close < -50``).
+    Without the fix the OR-compound's mask is just ``close < -50`` (the
+    unknown leg is silently dropped), so the second AND-conjunct has
+    zero hits and the aggregator emits ``indicator_filter_zero_hits``
+    — falsely flagging the predicate as too restrictive even though
+    ``self.custom_ok(bar)`` may make the OR reachable. With the fix
+    the OR-compound subcond carries ``has_unknown_leg=True`` and the
+    AND zero-hit rule is suppressed.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (self.custom_ok(bar) or close < -50):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+
+    assert report.coverage_category is not CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert all(b.reason != "indicator_filter_zero_hits" for b in report.likely_blockers)
+
+
+def test_or_group_with_ancestor_disjoint_from_tail_flags_conjunction() -> None:
+    """An OR predicate nested under an AND ancestor must flag
+    ``CONJUNCTION_NEVER_TRUE`` when the ancestor's mask is disjoint
+    from the OR-tail's union, even though every leg fires
+    individually.
+
+    Strategy::
+
+        if close > 100:
+            if close < 50 or volume > 0:
+                pass
+
+    Universe: bars with close=200 have volume=0; bars with close=20
+    have volume=10000. Each individual subcond fires:
+    - ``close > 100`` fires on close=200 bars.
+    - ``close < 50`` fires on close=20 bars.
+    - ``volume > 0`` fires on close=20 bars (volume=10000).
+
+    Without the OR-aware conjunction check the probe would skip the
+    classifier (group is OR-with-ancestors) and return ``COVERAGE_OK``.
+    The actual predicate ``close>100 AND (close<50 OR volume>0)`` is
+    empty because the close>100 bars have volume=0 and don't satisfy
+    close<50 either, so the report must classify as
+    ``CONJUNCTION_NEVER_TRUE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100:
+                    if close < 50 or volume > 0:
+                        pass
+        """
+    )
+    n = 20
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.array([200.0] * 10 + [20.0] * 10)
+    volume = np.array([0.0] * 10 + [10_000.0] * 10)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": volume,
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.CONJUNCTION_NEVER_TRUE
+    assert report.likely_blockers
+    assert report.likely_blockers[0].reason == "conjunction_never_true"
+
+
+def test_or_group_with_ancestor_overlap_returns_coverage_ok() -> None:
+    """Sanity: when the ancestor and at least one OR-tail leg fire on
+    overlapping bars, the predicate is reachable and the probe must
+    classify as COVERAGE_OK — the new OR-aware conjunction check
+    must not over-flag."""
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100:
+                    if close < 50 or volume > 0:
+                        pass
+        """
+    )
+    n = 20
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # All bars have close=200 (close>100) AND volume>0, so the OR-tail
+    # fires on the same bars as the ancestor.
+    close = np.full(n, 200.0)
+    volume = np.full(n, 10_000.0)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": volume,
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_zero_valued_named_threshold_is_preserved() -> None:
+    """A named zero (or negative) threshold must resolve in
+    comparisons. Period-use sites still validate ``> 0`` and
+    ``is_integer()`` so a zero / negative scalar is never misapplied
+    as an indicator window.
+
+    Strategy::
+
+        ZERO_LINE = 0
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close)[0] > ZERO_LINE:
+                    pass
+
+    Without the fix the binding pass rejected non-positive numbers, so
+    ``ZERO_LINE`` wasn't recorded, ``_build_operand`` couldn't resolve
+    the ``Name``, the comparison was dropped, and the probe
+    degenerated to ``UNKNOWN_LOW_COVERAGE``.
+    """
+    code = textwrap.dedent(
+        """
+        ZERO_LINE = 0
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close)[0] > ZERO_LINE:
+                    pass
+        """
+    )
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # Sawtooth so MACD oscillates around zero — should fire on roughly
+    # half the warmup-complete bars.
+    moves = ([+0.005] * 10 + [-0.005] * 10) * 3
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # The comparison must be recognised — i.e. NOT degenerate to
+    # UNKNOWN_LOW_COVERAGE — and produce a subcondition row.
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_negative_named_threshold_is_preserved() -> None:
+    """Same fix covers negative thresholds. ``LOWER = -1.0; if close < LOWER:``
+    must surface as a subcondition rather than being dropped at the
+    binding pass."""
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                LOWER = -1.0
+                if close < LOWER:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``close == 100`` never goes below ``-1.0``, so the predicate is
+    # too restrictive. The point is that the comparison was
+    # *recognised* (not silently dropped); a flat-data zero-hit row is
+    # surfaced as INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_helper_method_self_assignment_does_not_shadow_init() -> None:
+    """A helper method ordered before ``__init__`` that assigns to
+    ``self.<NAME>`` must not pre-empt the constructor's value via the
+    bare-attribute keying.
+
+    Strategy code::
+
+        class Strategy:
+            def helper(self):
+                self.THRESHOLD = 100   # state mutation, not a constant
+
+            def __init__(self):
+                self.THRESHOLD = 10    # the actual constant
+
+            def on_bar(self, ctx, bar):
+                if close > self.THRESHOLD:
+                    pass
+
+    On flat ``close=50`` data with the bug, ``self.THRESHOLD`` resolves
+    to 100 (helper's value, recorded first) and ``close > 100`` has
+    zero hits → ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With the fix
+    only ``__init__``'s body is walked for self-attribute bindings,
+    so ``self.THRESHOLD`` resolves to 10, ``close > 10`` fires on
+    every bar → ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def helper(self):
+                self.THRESHOLD = 100
+
+            def __init__(self):
+                self.THRESHOLD = 10
+
+            def on_bar(self, ctx, bar):
+                if close > self.THRESHOLD:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.full(n, 50.0)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # close=50 > THRESHOLD=10 fires on every bar; close=50 > 100 fires
+    # on no bar. Asserting COVERAGE_OK proves __init__'s value won.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == n
+
+
+def test_and_compound_with_unknown_conjunct_in_or_leg_is_declined() -> None:
+    """A compound AND inside an OR leg with an unmodellable conjunct
+    must NOT have the recognised half claim the entire leg fires.
+
+    Strategy:
+        ``if (close > 0 and self.custom_ok(bar)) or close < -999:``
+
+    Universe: flat ``close=100``. The recognised conjunct ``close > 0``
+    fires on every bar. The ``self.custom_ok(bar)`` guard is unknown.
+    The other OR leg ``close < -999`` has zero hits.
+
+    Without the fix the AND-compound silently dropped
+    ``self.custom_ok``, returned a leg that fires whenever
+    ``close > 0`` fires, and the OR's first leg fired on every bar →
+    `COVERAGE_OK`. With the fix ``_build_compound_and_subcond``
+    declines (returns None), ``_process_or_if`` records the AND-leg
+    as unknown via ``has_unknown_or_leg=True``, and the
+    ``or_group_never_fires`` blocker is suppressed for the OR's
+    remaining zero-hit ``close < -999`` leg. The probe must NOT
+    classify as ``INDICATOR_FILTER_TOO_RESTRICTIVE`` and must NOT
+    classify as ``COVERAGE_OK`` based on the falsely-firing AND leg.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if (close > 0 and self.custom_ok(bar)) or close < -999:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+
+    # The AND-leg is unknown so the OR-tail-all-zero blocker is
+    # suppressed; we don't have evidence the predicate fires either.
+    assert report.coverage_category is not CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    # And no firing-leg blocker should claim the predicate is
+    # unreachable based only on close < -999.
+    assert all(b.reason != "or_group_never_fires" for b in report.likely_blockers)
+
+
+def test_module_helper_function_local_does_not_shadow_class_constant() -> None:
+    """A module-level helper function's local assignment must NOT
+    pre-empt the strategy class's same-named class constant.
+
+    Strategy code::
+
+        def helper():
+            WINDOW = 999  # function-local, not a module constant
+
+        class Strategy:
+            WINDOW = 2
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.WINDOW):
+                    pass
+
+    On flat ``close=100`` data with the bug, the helper's local
+    ``WINDOW = 999`` was recorded first via ``setdefault`` and
+    ``self.WINDOW`` resolved to 999. ``sma(close, 999)`` on a 60-bar
+    fixture is all NaN → zero hits → ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    With the fix the helper's body is skipped entirely (function locals
+    are not class/module constants) and ``self.WINDOW`` resolves to 2;
+    ``close > sma(close, 2)`` on flat data has equality (NaN warmup
+    aside, the comparison is False where close == sma) — the test
+    asserts the probe did NOT silently use the helper's value, which
+    we verify by confirming the report is NOT
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` (with WINDOW=2 the SMA is
+    defined and the predicate flips to a benign category).
+    """
+    code = textwrap.dedent(
+        """
+        def helper():
+            WINDOW = 999
+
+        class Strategy:
+            WINDOW = 2
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.WINDOW):
+                    pass
+        """
+    )
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    moves = ([+0.005] * 10 + [-0.005] * 10) * 3
+    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # WINDOW=2 has plenty of warmup-complete bars on a 60-bar fixture
+    # and the predicate fires partially. WINDOW=999 (the helper's
+    # local, used pre-fix) would yield zero hits.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_indicator_kwarg_series_input_is_resolved() -> None:
+    """A series-indicator call passing the input via a ``series=`` /
+    ``data=`` kwarg must resolve to that input rather than defaulting
+    to ``close``.
+
+    Strategy:
+        ``if sma(series=volume, period=2) > 1500:``
+
+    Universe: bars with close=100 and volume that swings between 1000
+    and 2000. The SMA of volume crosses 1500 on roughly half the
+    warmup-complete bars. With the bug ``call.args`` was empty and
+    the probe defaulted to ``close`` — ``sma(close, ...) > 1500`` is
+    always false → ``INDICATOR_FILTER_TOO_RESTRICTIVE`` (zero hits).
+    With the fix the kwarg ``series=volume`` resolves correctly and
+    the SMA tracks volume, yielding partial coverage.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if sma(series=volume, period=2) > 1500:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.full(n, 100.0)
+    # Alternating volume so SMA(2) crosses 1500.
+    volume = np.array([1000.0, 2000.0] * (n // 2))
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": volume,
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # SMA(volume, 2) on alternating 1000/2000 averages 1500 — never
+    # strictly greater. But the comparison must at least be RECOGNISED
+    # against volume rather than close: assert the report did NOT
+    # silently default to a close-based evaluation (which would also
+    # be zero hits but for the wrong reason). We verify by switching
+    # to a more discriminating fixture below.
+    assert len(report.subconditions) == 1
+
+
+def test_indicator_kwarg_volume_input_distinguishes_from_close() -> None:
+    """Direct comparison: ``sma(series=volume, ...) > N`` must classify
+    differently from ``sma(close, ...) > N`` when volume satisfies the
+    threshold but close does not. Confirms the kwarg form resolves to
+    volume rather than silently substituting close.
+    """
+    code_kwarg = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if sma(series=volume, period=3) > 1500:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.full(n, 100.0)  # always below 1500
+    volume = np.full(n, 2000.0)  # always above 1500
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": volume,
+        },
+        index=idx,
+    )
+    report_kwarg = run_indicator_probe(strategy_code=code_kwarg, market_data={"AAPL": df})
+
+    # Volume=2000 -> SMA=2000 -> > 1500 fires every warmup-complete
+    # bar. Resolves to COVERAGE_OK only if the kwarg pointed at volume.
+    # If the bug substituted close=100 the SMA would be 100 and the
+    # comparison would fail every bar -> INDICATOR_FILTER_TOO_RESTRICTIVE.
+    assert report_kwarg.coverage_category is CoverageCategory.COVERAGE_OK
+    assert report_kwarg.subconditions[0].hit_count > 0
+
+
+def test_or_group_with_unknown_leg_suppresses_conjunction_never_true() -> None:
+    """An OR group with an AND-required ancestor and one un-modellable
+    OR-tail leg must NOT report ``CONJUNCTION_NEVER_TRUE`` based on
+    only the recognised half. The unknown alternative may make the OR
+    fire on the ancestor's bars, so flagging unreachable would be a
+    false positive.
+
+    Strategy::
+
+        if close > 100:
+            if close < 50 or self.custom_ok(bar):
+                pass
+
+    Universe: bars with close=200 (satisfies ancestor close>100, fails
+    close<50). Without the fix the recognised leg ``close < 50`` fires
+    on no close>100 bar, the conjunction is empty, and the
+    ``CONJUNCTION_NEVER_TRUE`` classifier flags the predicate
+    unreachable — but ``self.custom_ok`` may fire on those bars. With
+    the fix ``group.has_unknown_or_leg=True`` causes the classifier to
+    skip the group.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100:
+                    if close < 50 or self.custom_ok(bar):
+                        pass
+        """
+    )
+    n = 20
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.full(n, 200.0)  # always > 100, never < 50
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is not CoverageCategory.CONJUNCTION_NEVER_TRUE
+    assert all(b.reason != "conjunction_never_true" for b in report.likely_blockers)
+
+
+def test_strategy_class_constant_overrides_module_constant() -> None:
+    """A class-level constant in the strategy must override a same-named
+    module-level constant for ``self.<NAME>`` resolution. At runtime,
+    Python's attribute lookup goes through the class — the module
+    binding is irrelevant for ``self.WINDOW``.
+
+    Strategy code::
+
+        WINDOW = 1
+
+        class Strategy:
+            WINDOW = 3
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.WINDOW):
+                    pass
+
+    On flat ``close=100`` over 30 bars with the bug, ``self.WINDOW``
+    resolved to the module's ``1`` (recorded first by ``setdefault``),
+    not the class's ``3``. With WINDOW=1 the SMA is just close and the
+    comparison is trivially false; with WINDOW=3 the comparison
+    matches the runtime behavior. We assert the class value wins by
+    using a 3-period constant, where the runtime predicate is
+    consistently false on flat data — the test verifies the probe
+    classifies as ``INDICATOR_FILTER_TOO_RESTRICTIVE`` for the same
+    reason the runtime would (zero hits), rather than for the wrong
+    reason (period 1 means SMA == close, comparison strictly false).
+    Both happen to be zero-hit on flat data, so we use a more
+    discriminating fixture below.
+    """
+    code = textwrap.dedent(
+        """
+        WINDOW = 1
+
+        class Strategy:
+            WINDOW = 3
+
+            def on_bar(self, ctx, bar):
+                if close > sma(close, self.WINDOW):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # Step-up: first 15 bars at 100, last 15 at 110. With WINDOW=3 the
+    # SMA crosses up 3 bars after the step, so close > sma fires
+    # exactly 3 bars (during the SMA's lag). With WINDOW=1, SMA == close
+    # everywhere and the comparison never fires.
+    close = np.array([100.0] * 15 + [110.0] * 15)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    # WINDOW=3 → SMA lags → ``close > sma`` fires during the lag → COVERAGE_OK.
+    # WINDOW=1 (the bug) → SMA == close → comparison never fires →
+    # INDICATOR_FILTER_TOO_RESTRICTIVE (zero hits).
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_unresolved_explicit_period_drops_indicator() -> None:
+    """When the strategy supplies a period expression the probe can't
+    resolve to an integer literal (e.g. ``sma(close, PERIOD + 1)``),
+    the indicator must be dropped — NOT silently substituted with the
+    helper's default. Otherwise the comparison either TypeErrors
+    inside the helper (for those without a default; the aggregator
+    forces the mask to all-False and falsely flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``) or evaluates a different
+    period from the runtime.
+
+    Strategy:
+        ``if sma(close, PERIOD + 1) > 100:``  (where PERIOD has no binding)
+
+    The probe should classify this as ``UNKNOWN_LOW_COVERAGE`` (no
+    recognised subconditions) rather than incorrectly evaluating
+    against a substituted default.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if sma(close, PERIOD + 1) > 100:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Unresolvable period → indicator dropped → no recognised
+    # subconditions → UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_omitted_period_uses_helper_default() -> None:
+    """A bare indicator call with no explicit period (e.g.
+    ``rsi(close)``) should still use the helper's default period —
+    the unresolved-explicit-period suppression must not over-fire and
+    drop legitimate default-using calls.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if rsi(close) < 25:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # rsi(close) with default period is a recognised indicator. The
+    # comparison ``rsi(close) < 25`` is a real subcondition (regardless
+    # of whether it fires on flat data).
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_unresolved_tuple_indicator_subscript_drops_indicator() -> None:
+    """A tuple-indicator subscript with an explicit positional parameter
+    we can't resolve (e.g. ``macd(close, PERIOD + 1)[0]``) must drop
+    the indicator, not silently substitute the helper's defaults.
+
+    Strategy:
+        ``if macd(close, PERIOD + 1)[0] > 0:``  (no PERIOD binding)
+
+    Without the fix ``_trailing_numeric_args`` broke at the unresolved
+    arg and called ``macd(s)`` with default fast/slow/signal, evaluating
+    a different indicator from the runtime — a misleading
+    ``COVERAGE_OK`` (or zero-hit blocker) for the wrong reason. With
+    the fix the tuple-indicator helper is declined and no
+    subcondition is recognised.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close, PERIOD + 1)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unresolved_tuple_unpack_skips_binding() -> None:
+    """An unpacked tuple-indicator with an unresolved positional
+    parameter must not bind any of the unpacked names. ``_build_operand``
+    later falls through to OHLCV / numeric resolution and the
+    comparison is dropped rather than evaluating a substituted helper.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                upper, mid, lower = bollinger_bands(close, PERIOD + 1)
+                if close > upper:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``upper`` doesn't bind, so ``close > upper`` has an unresolvable
+    # RHS and the comparison is dropped → UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_tuple_indicator_with_resolvable_period_still_works() -> None:
+    """Sanity: a tuple-indicator with all positional args as numeric
+    literals still resolves cleanly — the new None-on-unresolved
+    behavior must not over-fire on legitimate calls.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close, 5, 10, 4)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # The tuple-indicator helper is recognised and produces a
+    # subcondition row (regardless of whether it fires on flat data).
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_unresolved_tuple_indicator_kwarg_drops_indicator() -> None:
+    """A tuple-indicator with a known kwarg whose value can't be
+    resolved (e.g. ``bollinger_bands(close, 20, num_std=self.band_width)[0]``)
+    must drop the indicator, not silently substitute the helper's
+    default for the unresolved kwarg.
+
+    Without the fix ``_resolve_known_kwargs`` skipped the kwarg and
+    called ``bollinger_bands(close, 20)`` with the default
+    ``num_std=2.0`` — evaluating a different band width from the
+    runtime. With the fix the helper is declined and no subcondition
+    is recognised.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > bollinger_bands(close, 20, num_std=self.band_width)[0]:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unresolved_macd_kwarg_drops_indicator() -> None:
+    """Same fix covers ``macd`` with an unresolvable ``fast``/``slow``/
+    ``signal`` kwarg.
+
+    Strategy:
+        ``if macd(close, fast=dynamic_fast)[0] > 0:``  (no dynamic_fast binding)
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if macd(close, fast=dynamic_fast)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unresolved_tuple_unpack_kwarg_skips_binding() -> None:
+    """An unpacked tuple-indicator with an unresolvable known kwarg
+    must not bind any of the unpacked names. ``_build_operand`` later
+    falls through to OHLCV / numeric resolution and the comparison is
+    dropped.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                upper, mid, lower = bollinger_bands(close, 20, num_std=self.band_width)
+                if close > upper:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_resolvable_tuple_indicator_kwarg_still_works() -> None:
+    """Sanity: tuple-indicator with all kwargs as numeric literals
+    still resolves cleanly. The new None-on-unresolved kwarg behavior
+    must not over-fire on legitimate kwarg values.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > bollinger_bands(close, 20, num_std=0.1)[0]:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_or_with_unknown_leg_zero_recognised_classifies_unknown() -> None:
+    """When an OR predicate has an un-modellable alternative AND every
+    recognised leg has zero hits, the report must classify as
+    ``UNKNOWN_LOW_COVERAGE``, not ``COVERAGE_OK``. We have no positive
+    evidence the predicate fires — only a custom guard that *might*.
+
+    Strategy:
+        ``if self.custom_ok(bar) or close < -999:``
+
+    Universe: flat ``close=100`` (never satisfies ``close < -999``).
+    Without the new fallthrough check the blocker was suppressed
+    (correctly — custom_ok may fire) but the report fell through to
+    ``COVERAGE_OK`` with summary "indicator subconditions fired at
+    least once" — misleading, since every reported hit count is zero.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if self.custom_ok(bar) or close < -999:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_or_with_unknown_leg_some_recognised_stays_coverage_ok() -> None:
+    """Sanity: when the recognised legs DO fire and the group's
+    conjunction has hits, the unknown-leg fallthrough must NOT flip
+    to ``UNKNOWN_LOW_COVERAGE`` — we have positive coverage signal.
+
+    Strategy:
+        ``if self.custom_ok(bar) or close > 0:``
+
+    Universe: flat ``close=100`` → ``close > 0`` fires every bar.
+    The unknown leg's presence shouldn't downgrade a clearly-firing
+    OR.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if self.custom_ok(bar) or close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_reassign_local_to_non_literal_clears_stale_scalar_binding() -> None:
+    """A scalar local that's later reassigned to a non-literal value
+    must NOT keep its prior literal binding for downstream resolution.
+
+    Strategy:
+        LIMIT = 200
+        LIMIT = self.dynamic_limit()
+        if close > LIMIT:
+            pass
+
+    Without the fix, the first assignment recorded ``LIMIT = 200`` in
+    ``name_periods``; the second assignment cleared the indicator
+    binding (``_resolve_assign_evaluator`` returned None) but
+    ``name_periods["LIMIT"]`` stayed at 200. ``_build_operand``
+    resolved ``LIMIT`` through ``name_periods``, the comparison
+    became ``close > 200``, and the report misclassified based on the
+    stale literal. With the fix the non-literal RHS pops both the
+    evaluator and the period-int binding, so ``close > LIMIT``
+    resolves to nothing and the comparison drops.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                LIMIT = 200
+                LIMIT = self.dynamic_limit()
+                if close > LIMIT:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``LIMIT`` no longer resolves to anything → comparison dropped →
+    # UNKNOWN_LOW_COVERAGE.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_symbol_gate_resolves_named_string_constant() -> None:
+    """A symbol gate that compares ``bar.symbol`` to a named string
+    constant must restrict the predicate to the constant's symbol —
+    not be silently dropped because the RHS isn't an inline literal.
+
+    Strategy::
+
+        TARGET_SYMBOL = "BBB"
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET_SYMBOL and close > 100:
+                    pass
+
+    Universe: BBB with close=50 (never > 100), AAA with close=200
+    (would satisfy ``close > 100`` if the symbol gate is dropped).
+    Without the fix the gate is dropped (RHS isn't a Constant), the
+    AND collapses to ``close > 100`` evaluated against every symbol,
+    AAA satisfies, and the probe falsely reports COVERAGE_OK. With
+    the fix ``_symbol_gate`` resolves ``TARGET_SYMBOL`` via
+    ``name_strings`` and the AND group is gated to ``{BBB}``, where
+    ``close > 100`` has zero hits → ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET_SYMBOL = "BBB"
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET_SYMBOL and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+
+    # AAA can't satisfy because the gate restricts to BBB; BBB never
+    # exceeds 100. The predicate is unreachable on this universe.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_symbol_gate_resolves_self_attribute_string_constant() -> None:
+    """Same fix covers ``self.<NAME>`` references via ``__init__``.
+
+    Strategy::
+
+        class Strategy:
+            def __init__(self):
+                self.TARGET = "BBB"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self):
+                self.TARGET = "BBB"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_strategy_class_string_constant_overrides_module_constant() -> None:
+    """A class-level string constant must override a same-named
+    module-level string constant. At runtime, ``self.TARGET`` resolves
+    through the class — the module binding is irrelevant. With the
+    bug, ``_collect_name_strings`` recorded the module value first via
+    ``setdefault`` and the class binding was ignored, so a symbol gate
+    on ``bar.symbol == self.TARGET`` scoped the indicator to the wrong
+    DataFrame and the report could flip to ``COVERAGE_OK`` (or to
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` for the wrong reason) when
+    the actual target's bars satisfied the entry.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: MSFT with close=200 (always > 100 — the actual target
+    fires), AAPL with close=50 (never > 100). With the bug,
+    ``self.TARGET`` resolves to ``"AAPL"``; the gate scopes to AAPL,
+    AAPL never satisfies, and the probe reports
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``. With the fix,
+    ``self.TARGET`` resolves to ``"MSFT"`` (the class override wins),
+    MSFT satisfies, and the probe reports ``COVERAGE_OK`` with
+    ``[MSFT]`` in the row label.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert "[MSFT]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_bare_name_symbol_gate_resolves_through_module_not_class() -> None:
+    """Companion to ``test_strategy_class_string_constant_overrides_module_constant``:
+    bare-``Name`` symbol-gate references must resolve through the
+    module/global scope, not the class. Python's class body is NOT in
+    lexical scope for methods, so a bare ``TARGET`` reference inside
+    ``on_bar`` resolves to the module's ``TARGET = "AAPL"`` even when
+    the class also defines ``TARGET = "MSFT"``. The previous version
+    of this fix recorded class-body bare-``Name`` targets under the
+    same key the bare-name lookup uses, so the gate scoped to the
+    class value and the report could falsely flip to ``COVERAGE_OK``.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET and close > 100:
+                    pass
+
+    Universe: AAPL with close=50 (the runtime gate scopes here, never
+    > 100), MSFT with close=200 (would satisfy ``close > 100`` if the
+    bare-name gate is dropped or scoped to the class). Without the
+    fix the probe scoped to MSFT; with the fix it scopes to AAPL,
+    AAPL never satisfies, and the report classifies
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]`` in the row
+    label.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_self_attr_alias_to_module_string_constant_resolves() -> None:
+    """``self.TARGET = TARGET`` inside ``__init__`` aliases a module
+    string constant to a class attribute. The RHS is ``ast.Name``,
+    not ``Constant``, so without RHS resolution at write time the
+    attribute binding was silently dropped, ``bar.symbol == self.TARGET``
+    lost its gate, and the sibling indicator condition evaluated
+    against every fetched DataFrame — letting an unrelated symbol
+    falsely flip the report to ``COVERAGE_OK``.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            def __init__(self):
+                self.TARGET = TARGET  # alias module → instance attr
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the attr alias is dropped).
+    Without the fix, the gate is dropped, MSFT satisfies, COVERAGE_OK.
+    With the fix, ``self.TARGET`` resolves to ``"AAPL"`` (via the
+    module global), the gate scopes to AAPL, and the report
+    classifies ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            def __init__(self):
+                self.TARGET = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_class_body_alias_to_module_string_constant_resolves() -> None:
+    """Same alias bug, applied to a class-body ``TARGET = TARGET`` line.
+    At class-body execution time the bare ``TARGET`` RHS resolves
+    through the module scope (the class namespace doesn't yet contain
+    ``TARGET``), so ``Strategy.TARGET`` becomes ``"AAPL"``. Without
+    RHS resolution the binding was dropped and ``bar.symbol ==
+    self.TARGET`` lost its gate.
+
+    Strategy::
+
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = TARGET  # class-body alias
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+    """
+    code = textwrap.dedent(
+        """
+        TARGET = "AAPL"
+
+        class Strategy:
+            TARGET = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_constructor_conditional_assignment_does_not_override_class_attr() -> None:
+    """A guarded ``self.X = ...`` inside ``__init__`` must NOT be
+    treated as unconditional. Walking the constructor body via
+    ``ast.walk`` would have descended into ``if False: self.TARGET =
+    "AAPL"`` and overwritten the class attribute with a value the
+    runtime never sets — the probe would scope the symbol gate to
+    the dead branch and report the wrong coverage.
+
+    The conservative fix walks only the constructor's top-level
+    statements; the class-body binding stays as the fallback,
+    matching Python's runtime attribute lookup when the constructor
+    branch doesn't execute.
+
+    Strategy::
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                if False:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: MSFT close=200 (the runtime gate scopes here, > 100
+    always), AAPL close=50. With the bug, the probe scopes to AAPL
+    and reports ``INDICATOR_FILTER_TOO_RESTRICTIVE``; with the fix,
+    the dead-branch assignment is skipped, the class attribute
+    ``"MSFT"`` wins, and the report classifies ``COVERAGE_OK`` with
+    ``[MSFT]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                if False:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert "[MSFT]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count > 0
+
+
+def test_constructor_literal_true_guard_records_assignment() -> None:
+    """``if True: self.TARGET = "AAPL"`` inside ``__init__`` IS
+    unconditionally executed at runtime, so the assignment must be
+    recorded. The conservative "top-level statements only" walk that
+    fixed the ``if False:`` regression went too far and silently
+    skipped this guaranteed assignment, dropping the symbol gate.
+    The walker now descends into literal-true ``if`` bodies (and
+    ``with`` blocks) while still skipping unknown predicates and
+    loops.
+
+    Strategy::
+
+        class Strategy:
+            def __init__(self):
+                if True:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the gate is dropped). With the
+    bug, the gate is dropped and the report flips to ``COVERAGE_OK``;
+    with the fix, ``self.TARGET`` resolves to ``"AAPL"``, the gate
+    scopes to AAPL, and the report classifies
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self):
+                if True:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_constructor_with_block_records_assignment() -> None:
+    """``with ctx: self.TARGET = "AAPL"`` is unconditionally executed
+    (the context manager's ``__enter__`` runs and the body follows).
+    The walker must descend into ``with`` bodies the same way it
+    descends into literal-true ``if`` bodies.
+    """
+    code = textwrap.dedent(
+        """
+        from contextlib import nullcontext
+
+        class Strategy:
+            def __init__(self):
+                with nullcontext():
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_constructor_unknown_guard_does_not_override_class_attr() -> None:
+    """Companion to ``..._literal_true_guard_records_assignment``:
+    when the predicate isn't a literal we can resolve, the walker
+    must skip both branches conservatively so an unreachable runtime
+    path can't override the class attribute. ``if some_flag:
+    self.TARGET = "AAPL"`` should leave ``self.TARGET`` resolving to
+    the class default ``"MSFT"`` — matching the runtime fallback when
+    the guard is false.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self, some_flag=False):
+                if some_flag:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert "[MSFT]" in report.subconditions[0].label
+
+
+def test_constructor_default_true_param_guard_records_assignment() -> None:
+    """``def __init__(self, enabled=True): if enabled: ...`` — the
+    default-construction path always takes the True branch, so the
+    assignment is guaranteed for the standard strategy invocation.
+    The constructor walker now resolves a bare-``Name`` predicate by
+    looking up the parameter's constant default, the same way it
+    resolves a literal ``if True:``.
+
+    Strategy::
+
+        class Strategy:
+            def __init__(self, enabled=True):
+                if enabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the gate is dropped). Without the
+    fix, ``if enabled:`` is treated as unknown, the binding is
+    skipped, the gate is dropped, and the report flips to
+    ``COVERAGE_OK``. With the fix, ``self.TARGET`` resolves to
+    ``"AAPL"``, the gate scopes to AAPL, and the report classifies
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self, enabled=True):
+                if enabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+    assert report.subconditions[0].hit_count == 0
+
+
+def test_constructor_default_false_param_guard_does_not_record_assignment() -> None:
+    """Companion: ``def __init__(self, enabled=False): if enabled:
+    self.TARGET = "AAPL"``. The default path takes the False branch,
+    so the assignment is NOT guaranteed and the class attribute
+    must remain the resolved value.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self, enabled=False):
+                if enabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert "[MSFT]" in report.subconditions[0].label
+
+
+def test_constructor_negated_default_param_guard_resolves() -> None:
+    """``if not disabled:`` with ``disabled=False`` default → True
+    branch is guaranteed. The predicate resolver handles
+    ``UnaryOp(Not, ...)`` over a parameter default.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def __init__(self, disabled=False):
+                if not disabled:
+                    self.TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_constructor_local_bare_name_is_not_an_instance_attribute() -> None:
+    """A bare-``Name`` assignment inside ``__init__`` is a function
+    local, not an instance attribute. ``class Strategy: TARGET =
+    "MSFT"; def __init__(self): TARGET = "AAPL"`` leaves the runtime
+    ``self.TARGET`` resolving through the class to ``"MSFT"`` — the
+    constructor local is shadowed for the method body but invisible
+    to outside lookups. The probe must NOT record the local under
+    ``attrs``, otherwise the symbol gate scopes to the wrong value.
+
+    Strategy::
+
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                TARGET = "AAPL"  # local — does not change ``self.TARGET``
+                _ = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: MSFT close=200 (the runtime gate scopes here, > 100
+    always), AAPL close=50. With the bug, the probe records
+    ``attrs["TARGET"] = "AAPL"`` and reports
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``; with the fix, only the
+    class attribute ``"MSFT"`` lands in ``attrs`` and the report
+    classifies ``COVERAGE_OK`` with ``[MSFT]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            TARGET = "MSFT"
+
+            def __init__(self):
+                TARGET = "AAPL"
+                _ = TARGET
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"MSFT": _df(200.0), "AAPL": _df(50.0)},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert "[MSFT]" in report.subconditions[0].label
+
+
+def test_class_body_compound_statement_records_under_attrs() -> None:
+    """A class-body compound like ``if True: TARGET = "AAPL"`` creates
+    a class attribute at runtime — same as ``TARGET = "AAPL"`` at
+    class top level. The walker must route nested class-body
+    assignments through ``_record_attr`` (``in_method=False``), not
+    through the module-scope recorder. With the bug, the recursion
+    fell through to ``_record_global`` and the attribute landed in
+    ``globals_``, invisible to ``self.TARGET`` lookups.
+
+    Strategy::
+
+        class Strategy:
+            if True:
+                TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+
+    Universe: AAPL close=50 (the runtime gate scopes here, never > 100),
+    MSFT close=200 (would satisfy if the gate is dropped). With the
+    fix, ``self.TARGET`` resolves to ``"AAPL"`` and the report
+    classifies ``INDICATOR_FILTER_TOO_RESTRICTIVE`` with ``[AAPL]``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            if True:
+                TARGET = "AAPL"
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol == self.TARGET and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_early_return_symbol_neq_guard_propagates_filter() -> None:
+    """``if bar.symbol != "BBB": return`` followed by an entry
+    predicate must propagate the implicit ``{BBB}`` filter to the
+    entry predicate, so an unrelated symbol can't satisfy a sibling
+    indicator condition.
+
+    Strategy::
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol != "BBB":
+                    return
+                if close > 100:
+                    pass
+
+    Universe: BBB with close=50 (never > 100), AAA with close=200
+    (would satisfy if the implicit guard isn't propagated). Without
+    the fix, ``close > 100`` is evaluated against every DataFrame,
+    AAA satisfies, and the probe reports COVERAGE_OK even though the
+    entry path is unreachable for the target. With the fix the
+    implicit ``{BBB}`` filter restricts the predicate and BBB has
+    zero hits → ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol != "BBB":
+                    return
+                if close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_early_return_symbol_not_in_guard_propagates_filter() -> None:
+    """``if bar.symbol not in ("BBB", "CCC"): return`` propagates
+    ``{BBB, CCC}`` to subsequent predicates."""
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in ("BBB", "CCC"):
+                    return
+                if close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={
+            "BBB": _df(50.0),
+            "CCC": _df(50.0),
+            "AAA": _df(200.0),  # high close but not in the allowlist
+        },
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_early_return_with_named_constant_neq_propagates_filter() -> None:
+    """``if bar.symbol != TARGET_SYMBOL: return`` works when
+    TARGET_SYMBOL is a named constant — exercises the
+    ``name_strings`` resolution inside the guard detector.
+    """
+    code = textwrap.dedent(
+        """
+        TARGET_SYMBOL = "BBB"
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                if bar.symbol != TARGET_SYMBOL:
+                    return
+                if close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_plain_or_with_disjoint_legs_and_unknown_leg_is_coverage_ok() -> None:
+    """A plain OR (no ancestors) with disjoint recognised legs plus an
+    un-modellable leg must classify as ``COVERAGE_OK`` — the OR fires
+    on bars where at least one leg fires, regardless of whether the
+    legs' bar-wise AND is empty.
+
+    Strategy::
+
+        if close > 100 or close < 50 or self.custom_ok(bar):
+            pass
+
+    Universe: flat ``close=200`` → ``close > 100`` fires every bar,
+    ``close < 50`` has zero hits, ``self.custom_ok`` is unknown. The
+    OR is satisfied on every bar.
+
+    Without the fix the conjunction-hits computation took the bar-wise
+    AND of recognised legs (``close > 100`` ∩ ``close < 50`` = empty).
+    The unknown-leg fallthrough then saw ``group_conjunction_hits == 0``
+    as "no positive evidence" and returned ``UNKNOWN_LOW_COVERAGE``,
+    even though ``close > 100`` clearly fires every bar.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100 or close < 50 or self.custom_ok(bar):
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.full(n, 200.0)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_atr_explicit_unrecognised_input_drops_indicator() -> None:
+    """An ATR call whose first three positional args aren't the
+    standard OHLCV columns (e.g. ``atr(low, low, close, 14)``) must
+    be declined — the probe shouldn't silently substitute the high
+    column and report coverage for a different indicator than the
+    runtime.
+
+    Strategy:
+        ``if atr(low, low, close, 14) > 0.5:``
+
+    With the fix the explicit positional args resolve via
+    ``_positional_series_input``: 'low' is recognised so it's used
+    where 'high' would default. ATR computed against
+    ``(low, low, close)`` produces a different value series than
+    against ``(high, low, close)``; we don't decline here because
+    the args ARE recognised. The harder case is when an arg can't
+    be resolved at all.
+
+    For the failure-mode test we use a synthetic series: a local
+    that's bound to an indicator helper but can't be resolved, so
+    ATR's first arg falls through and the probe must decline.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                synth = self.compute_synth_high()
+                if atr(synth, low, close, 14) > 0.5:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``synth`` doesn't bind to any recognised series → ATR's first
+    # arg is unresolvable → indicator declined → no subcondition.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_atr_with_recognised_explicit_columns_still_works() -> None:
+    """Sanity: when all three positional series args are recognised
+    OHLCV columns (the normal call shape), ATR still resolves. The
+    new declining behaviour must not over-fire on legitimate calls.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if atr(high, low, close, 14) > 0.5:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_atr_with_omitted_inputs_still_uses_default_columns() -> None:
+    """Sanity: a bare ``atr()`` call (no positional inputs) still
+    resolves to the default high/low/close columns.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if atr() > 0.5:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_vacant_guard_clause_skips_subsequent_exit_predicates() -> None:
+    """A vacant guard-clause (``if pos is None: return``) terminates
+    the entry path. Subsequent sibling predicates only execute on
+    the opposite branch — exit-only logic — and must NOT be
+    classified as entry coverage blockers.
+
+    Strategy::
+
+        if pos is None:
+            return
+        if close < 0:
+            pass
+
+    Without the fix, after visiting the bare-return body the loop
+    continues to the next sibling and processes ``if close < 0:`` as
+    entry coverage. On flat ``close=100`` data this fires zero hits
+    and the probe wrongly reports ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    With the fix the loop breaks after the guard, so only entry-side
+    predicates contribute to the report.
+
+    Since there are no entry-side predicates left after the guard,
+    the probe degrades to ``UNKNOWN_LOW_COVERAGE`` (no recognised
+    entry subconditions) — that's the correct outcome.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                pos = ctx.position(bar.symbol)
+                if pos is None:
+                    return
+                if close < 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # Exit-only ``close < 0`` must NOT classify as
+    # INDICATOR_FILTER_TOO_RESTRICTIVE; the entry path has no
+    # recognised predicates so the report degrades to UNKNOWN.
+    assert report.coverage_category is not CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert all(b.reason != "indicator_filter_zero_hits" for b in report.likely_blockers)
+
+
+def test_vacant_guard_clause_with_real_entry_before_still_classifies() -> None:
+    """Sanity: a real entry predicate BEFORE the guard-clause is
+    still analysed. The break only suppresses subsequent siblings.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                pos = ctx.position(bar.symbol)
+                if pos is None:
+                    if close > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``close > 0`` fires every bar (close=100); entry coverage is
+    # recognised.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_stochastic_explicit_unrecognised_input_drops_indicator() -> None:
+    """A stochastic call whose first three positional args include an
+    unrecognised series (e.g. a synthetic local) must be declined —
+    the tuple-indicator HLC path shouldn't silently substitute the
+    default columns the way the non-tuple HLC path was already
+    refusing to.
+
+    Strategy:
+        ``synth = self.compute_synth_high()
+          if stochastic(synth, low, close, 3)[0] > 0:``
+
+    With the fix the synthetic series can't be resolved, ``stochastic``
+    is declined, and no subcondition is recognised.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                synth = self.compute_synth_high()
+                if stochastic(synth, low, close, 3)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_stochastic_with_recognised_explicit_columns_still_works() -> None:
+    """Sanity: ``stochastic(high, low, close, 3)[0]`` (the standard
+    call) still resolves and produces a recognised subcondition.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if stochastic(high, low, close, 3)[0] > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_local_string_constant_resolves_in_symbol_gate() -> None:
+    """A function-local ``target = "BBB"`` immediately before a
+    symbol gate must be visible to ``_symbol_gate``. The outer-scope
+    ``name_strings`` collector only sees module / class / __init__
+    bindings; a local constant has to flow through
+    ``_apply_assign_inplace``.
+
+    Strategy::
+
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                target = "BBB"
+                if bar.symbol == target and close > 100:
+                    pass
+
+    Universe: BBB with close=50 (never > 100), AAA with close=200
+    (would satisfy the price leg if the symbol gate is dropped).
+    Without the fix the local ``target`` isn't tracked, the gate is
+    dropped, AAA satisfies, and the probe wrongly reports
+    ``COVERAGE_OK``. With the flow-sensitive update the gate
+    restricts to ``{BBB}`` and the predicate is unreachable.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                target = "BBB"
+                if bar.symbol == target and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"BBB": _df(50.0), "AAA": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_local_string_reassignment_clears_stale_symbol_binding() -> None:
+    """Reassigning a previously-string local to a non-literal must
+    drop the stale symbol binding so subsequent gates don't resolve
+    to the old value.
+    """
+    code = textwrap.dedent(
+        """
+        class Strategy:
+            def on_bar(self, ctx, bar):
+                target = "BBB"
+                target = self.lookup()
+                if bar.symbol == target and close > 100:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``target`` no longer resolves to "BBB"; the gate is dropped
+    # and ``close > 100`` runs against AAPL's close=100 → zero hits
+    # (close is NOT strictly greater). Either way the predicate
+    # doesn't resolve to a gated COVERAGE_OK.
+    assert report.coverage_category is not CoverageCategory.COVERAGE_OK
+
+
+def test_stochastic_unpack_explicit_unrecognised_input_skips_binding() -> None:
+    """A tuple-unpacked ``stochastic`` call with an explicit
+    unrecognised positional series arg must NOT bind the unpacked
+    names — downstream comparisons should fall through to UNKNOWN
+    rather than evaluating against the default high/low/close.
+
+    Strategy::
+
+        synth = self.compute_synth_high()
+        k, d = stochastic(synth, low, close, 3)
+        if k > 50:
+            pass
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                synth = self.compute_synth_high()
+                k, d = stochastic(synth, low, close, 3)
+                if k > 50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    # ``synth`` doesn't bind to a recognised series → stochastic
+    # unpack declines → ``k`` doesn't bind → the comparison drops.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_stochastic_unpack_with_recognised_columns_still_works() -> None:
+    """Sanity: ``k, d = stochastic(high, low, close, 3); if k > 50:``
+    still resolves cleanly — the new declining behaviour must not
+    over-fire on legitimate calls.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                k, d = stochastic(high, low, close, 3)
+                if k > 50:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert len(report.subconditions) == 1
+
+
+def test_positive_symbol_in_allowlist_gates_predicate() -> None:
+    """A positive ``bar.symbol in (...)`` allow-list must constrain the
+    predicate to the allowed symbols. ``_symbol_gate`` previously only
+    handled ``==`` so the gate was dropped and a sibling indicator
+    condition was evaluated against every fetched DataFrame.
+
+    Strategy::
+
+        if bar.symbol in ("AAPL", "MSFT") and close > 100:
+            pass
+
+    Universe: AAPL/MSFT close=50 (never > 100), GOOG close=200 (would
+    satisfy the price leg if the gate is dropped). With the fix the
+    AND group is restricted to ``{AAPL, MSFT}``, GOOG bars contribute
+    False to the price subcond, and the predicate is unreachable →
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol in ("AAPL", "MSFT") and close > 100:
+                    pass
+        """
+    )
+
+    def _df(close_value: float) -> pd.DataFrame:
+        n = 30
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame(
+            {
+                "open": np.full(n, close_value),
+                "high": np.full(n, close_value + 1.0),
+                "low": np.full(n, close_value - 1.0),
+                "close": np.full(n, close_value),
+                "volume": np.full(n, 1_000_000.0),
+            },
+            index=idx,
+        )
+
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _df(50.0), "MSFT": _df(50.0), "GOOG": _df(200.0)},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_partial_symbol_in_allowlist_does_not_gate() -> None:
+    """An ``in`` allow-list with an unresolvable element refuses to
+    gate (better unconstrained than wrongly constrained).
+
+    Because the partial allow-list is dropped from the group as an
+    un-modellable Compare conjunct, the surviving ``close > 100``
+    sub-condition is a SUPERSET of the real predicate. The probe must
+    not flip to ``COVERAGE_OK`` from that recognised leg alone — the
+    dropped allow-list could be narrowing the real predicate to zero.
+    The conservative refuse-to-gate is still the test point; the
+    aggregator now correctly classifies as ``UNKNOWN_LOW_COVERAGE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol in ("AAPL", dynamic_lookup) and close > 100:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 200.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 199.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"GOOG": df})
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_renamed_bar_param_preserves_symbol_gate() -> None:
+    """``def on_bar(self, ctx, candle)`` is a valid strategy shape (the
+    safety gate only enforces arity and the harness calls positionally),
+    so the symbol recogniser must use the actual third positional
+    parameter name. With ``"bar"`` hard-coded the ``candle.symbol ==
+    "AAPL"`` gate is silently dropped while ``_column_from`` still
+    treats ``candle.close`` as data, so an unrelated MSFT DataFrame
+    can satisfy ``close > 150`` and the probe falsely reports
+    COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, candle):
+                if candle.symbol == "AAPL" and candle.close > 150:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=50)  # close = 100 — never > 150
+    msft = pd.DataFrame(
+        {
+            "open": np.full(50, 200.0),
+            "high": np.full(50, 201.0),
+            "low": np.full(50, 199.0),
+            "close": np.full(50, 200.0),  # close > 150 always
+            "volume": np.full(50, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=50, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+
+    # AAPL never satisfies close > 150 — that's the real coverage gap.
+    # If the symbol gate were dropped because of the renamed param,
+    # MSFT's 200 close would mask the AAPL miss and flip the report
+    # to COVERAGE_OK.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_renamed_bar_param_preserves_early_return_symbol_guard() -> None:
+    """Same parametrised-bar-name issue, applied to the early-return
+    symbol guard. ``if candle.symbol != "AAPL": return`` must restrict
+    subsequent siblings to the AAPL DataFrame; with ``"bar"`` hard-coded
+    the guard is dropped, ``close > 150`` evaluates against MSFT too,
+    and the report flips to COVERAGE_OK.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, candle):
+                if candle.symbol != "AAPL":
+                    return
+                if close > 150:
+                    pass
+        """
+    )
+    aapl = _flat_ohlcv(n=50)  # close = 100 — never > 150
+    msft = pd.DataFrame(
+        {
+            "open": np.full(50, 200.0),
+            "high": np.full(50, 201.0),
+            "low": np.full(50, 199.0),
+            "close": np.full(50, 200.0),  # close > 150 always
+            "volume": np.full(50, 1_000_000.0),
+        },
+        index=pd.date_range("2024-01-01", periods=50, freq="D"),
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+    )
+
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].hit_count == 0
+    assert "[AAPL]" in report.subconditions[0].label
+
+
+def test_bool_call_on_unbound_name_remains_unknown() -> None:
+    """The compiler-emitted factor-tree shape `_entry = self._n_X(bars)`
+    binds `_entry` to a method call we cannot statically introspect, so
+    `_collect_name_evaluators` doesn't pick it up. The probe must surface
+    that as `UNKNOWN_LOW_COVERAGE` rather than silently treating
+    `bool(_entry)` as always-true.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                _entry = self._n_root(bars)
+                pos = ctx.position(bar.symbol)
+                if pos is None and bool(_entry):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+    assert report.subconditions == []
+
+
+def test_unmodelled_and_conjunct_demotes_coverage_ok_to_unknown() -> None:
+    """An entry predicate that mixes a recognised indicator/column check
+    with an un-modellable AND conjunct (``self.custom_ok(bar)``) is only
+    bounded from above by the recognised legs: the unknown conjunct may
+    still narrow the predicate to zero. The probe must surface this as
+    ``UNKNOWN_LOW_COVERAGE`` rather than letting ``close > 0`` carry
+    the report to ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unmodelled_and_conjunct_with_zero_recognised_leg_still_flags() -> None:
+    """An AND group with a never-firing recognised leg AND an unknown
+    conjunct must still flag ``INDICATOR_FILTER_TOO_RESTRICTIVE``: the
+    recognised mask is a superset of the real predicate, so an empty
+    superset proves the real predicate is also empty (subset of
+    empty = empty).
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close < -50 and self.custom_ok(bar):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_unmodelled_and_conjunct_alongside_clean_predicate_stays_ok() -> None:
+    """A separate clean predicate elsewhere in ``on_bar`` provides
+    independent positive evidence. The probe must not over-flag: the
+    presence of *one* group with an unknown AND conjunct should not
+    veto ``COVERAGE_OK`` when another sibling group fires unaided.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    pass
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_nested_function_in_on_bar_is_skipped() -> None:
+    """A locally-defined helper inside ``on_bar`` must not have its
+    ``if`` predicates analysed as if they ran on the entry path: the
+    helper executes only when explicitly invoked, and the probe doesn't
+    model arbitrary calls. Without this guard a dead-code helper such
+    as ``def debug_helper(): if close < -50: ...`` produced a spurious
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` blocker even when the real
+    entry predicate (``if close > 0:``) is satisfied on every bar.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                def debug_helper():
+                    if close < -50:
+                        return False
+                    return True
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+    assert report.subconditions[0].label == "close > 0"
+
+
+def test_async_nested_function_in_on_bar_is_skipped() -> None:
+    """``AsyncFunctionDef`` shape (``async def`` helpers) must be
+    skipped for the same reason as plain ``FunctionDef``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                async def fetch_helper():
+                    if close < -50:
+                        return False
+                    return True
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+
+
+def test_nested_class_in_on_bar_is_skipped() -> None:
+    """A class defined inside ``on_bar`` should not have its method
+    bodies analysed as entry-path predicates either.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                class Inner:
+                    def helper(self):
+                        if close < -50:
+                            return False
+                        return True
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+    assert len(report.subconditions) == 1
+
+
+def test_unknown_and_conjunct_propagates_to_nested_body() -> None:
+    """An unknown AND conjunct on an outer ``if`` test must taint
+    nested groups — those nested groups only fire when the unknown
+    ancestor conjunct is also true, so their recognised mask is still
+    only an upper bound on the real predicate.
+
+    Without propagation, ``if close > 0 and self.custom_ok(bar):``
+    /``if volume > 0:`` emitted a clean nested group whose
+    ``volume > 0`` + ``close > 0`` ancestor carried the report to
+    ``COVERAGE_OK`` even though ``self.custom_ok`` could narrow the
+    real entry path to zero.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    if volume > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_unknown_and_conjunct_propagates_through_or_into_nested_body() -> None:
+    """The OR-wrapped variant: an unknown AND ancestor must still
+    propagate even when an intermediate ``if`` test is an OR, so the
+    deepest nested group inherits the unknown narrowing.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and self.custom_ok(bar):
+                    if volume > 0 or close > 50:
+                        if close > 25:
+                            pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_literal_true_and_conjunct_does_not_taint_group() -> None:
+    """A statically-true literal AND-conjunct (``and True``) is a
+    no-op gate. The recognised siblings' mask is exact, so the
+    aggregator must keep ``COVERAGE_OK`` rather than refusing to use
+    a recognised firing leg as positive evidence.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and True:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_literal_truthy_constants_do_not_taint_group() -> None:
+    """Other statically-decidable literal constants (non-zero ints,
+    non-empty strings) follow the same rule as ``True``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and 1 and "enabled":
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_constant_compare_does_not_taint_group() -> None:
+    """A statically-decidable AND-conjunct comparison (e.g. ``1 < 2``)
+    has no data-dependent operand, so ``_build_subcond`` returns
+    ``None``. That ``None`` previously tainted the group as having an
+    unknown conjunct and demoted the report from ``COVERAGE_OK`` to
+    ``UNKNOWN_LOW_COVERAGE``. The aggregator should keep
+    ``COVERAGE_OK`` because the recognised siblings' mask is still
+    exact.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and 1 < 2:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_named_constant_compare_does_not_taint_group() -> None:
+    """The named-constant variant of the above: a module-level
+    ``LIMIT = 1`` resolves through ``name_periods`` so both operands
+    of ``LIMIT == 1`` are constants; the group must stay
+    ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        LIMIT = 1
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and LIMIT == 1:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_literal_false_and_conjunct_makes_predicate_unreachable() -> None:
+    """A statically-false literal AND-conjunct (``and False``) makes
+    the entire predicate unreachable. The recognised siblings'
+    ``close > 0`` mask must NOT be allowed to carry the report to
+    ``COVERAGE_OK`` — the real entry path is dead.
+
+    With no live ``if`` predicates anywhere in ``on_bar``, the probe
+    has no recognised indicator subconditions to score and must
+    classify as ``UNKNOWN_LOW_COVERAGE``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and False:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_false_compare_makes_predicate_unreachable() -> None:
+    """A statically-false constant comparison (``1 < 0``) is the
+    Compare-shaped analogue of ``and False`` — same short-circuit
+    rule applies.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and 1 < 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_false_named_constant_compare_makes_predicate_unreachable() -> None:
+    """The named-constant variant: a module-level ``LIMIT = 1``
+    paired with ``LIMIT == 0`` is statically false and must take the
+    unreachable short-circuit path.
+    """
+    code = textwrap.dedent(
+        """
+        LIMIT = 1
+
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and LIMIT == 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_false_conjunct_does_not_block_sibling_predicate() -> None:
+    """A dead ``if close > 0 and False:`` next to a live
+    ``if close > 0:`` must not poison the live predicate's report.
+    The live entry path still produces ``COVERAGE_OK``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and False:
+                    pass
+                if close > 0:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_static_false_conjunct_routes_to_orelse() -> None:
+    """An ``if X and False: ... else: <live entry>`` must still pick
+    up the live entry from the orelse branch — it's the always-taken
+    path.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and False:
+                    pass
+                else:
+                    if close > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_static_false_arithmetic_compare_is_unreachable() -> None:
+    """A constant-only ``Compare`` whose operands are arithmetic
+    ``BinOp`` expressions (e.g. ``1 + 1 == 3``) must be evaluated, not
+    silently dropped. Previously ``_compare_is_static_constant``
+    accepted it (``_build_operand`` folds ``BinOp`` of constants) but
+    ``_evaluate_static_predicate`` couldn't fold the ``BinOp`` and
+    returned ``None``, so the term slipped through as a no-op skip
+    and the surviving ``close > 0`` reported ``COVERAGE_OK``. The
+    arithmetic-folding scalar resolver now sees ``1 + 1 == 3`` as
+    statically false, the AND short-circuits, and the predicate is
+    reported unreachable.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (1 + 1 == 3):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_static_true_arithmetic_compare_is_no_op() -> None:
+    """The matching truthy polarity: ``1 + 1 == 2`` is statically
+    true, so the AND-conjunct is a no-op gate and the recognised
+    sibling's mask remains exact — ``COVERAGE_OK`` is correct.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (1 + 1 == 2):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_unfoldable_static_constant_compare_is_unknown() -> None:
+    """A constant-only Compare we genuinely cannot fold (e.g. an
+    ``ast.Mod`` ``BinOp`` operand the static-scalar resolver does not
+    handle) must NOT silently be skipped. The recognised siblings'
+    mask is at best an upper bound on the real predicate, so the
+    aggregator sees the group as unknown-tainted and refuses to use
+    the recognised firing leg as positive evidence.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (5 % 2 == 0):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": _flat_ohlcv()},
+    )
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_or_predicate_carries_into_nested_body() -> None:
+    """An ``if A or B:`` wrapping a nested entry condition must AND
+    its mask against the body's predicate. ``if close > 100 or close
+    < 0: if volume < 0: pass`` must NOT report ``COVERAGE_OK`` when
+    each leg fires on different bars — the live entry path requires
+    them to fire simultaneously, which never happens here.
+    """
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # close > 100 fires on every bar (close=200), close < 0 never fires,
+    # volume < 0 never fires. So the recognized OR fires every bar but
+    # the nested body never fires → no firing entry path.
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 200.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 199.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100 or close < 0:
+                    if volume < 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    # Without the fix, the nested ``volume < 0`` had zero hits but the
+    # outer OR fired so the report flipped on the recognized AND of
+    # ancestors+nested = empty → ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
+    # With the fix, the OR-compound is added as an ancestor and the
+    # body's nested coverage now correctly reflects the empty
+    # intersection (no bar where some OR leg fires AND volume < 0).
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_or_predicate_with_satisfying_body_stays_ok() -> None:
+    """The matching satisfying-bars case: when there exists a bar
+    where the OR fires AND the nested body fires simultaneously, the
+    report must remain ``COVERAGE_OK``.
+    """
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 200.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 199.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 100 or close < 0:
+                    if volume > 0:
+                        pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_positive_symbol_eq_return_guard_is_denylist() -> None:
+    """``if bar.symbol == "AAPL": return`` excludes AAPL from
+    subsequent siblings. A sibling ``if close > 100:`` predicate must
+    NOT count AAPL bars even if they satisfy it — the live entry path
+    only runs on non-AAPL symbols.
+    """
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    aapl = pd.DataFrame(
+        {
+            "open": np.full(n, 200.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 199.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    msft = pd.DataFrame(
+        {
+            "open": np.full(n, 50.0),
+            "high": np.full(n, 51.0),
+            "low": np.full(n, 49.0),
+            "close": np.full(n, 50.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL":
+                    return
+                if close > 100:
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft})
+    # AAPL is denied, MSFT close=50 doesn't satisfy close > 100
+    # → recognized predicate has zero hits.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_positive_symbol_in_return_guard_is_denylist() -> None:
+    """The ``in (...)`` form of an exclude-return guard works the
+    same as ``==``."""
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    aapl = pd.DataFrame(
+        {
+            "open": np.full(n, 200.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 199.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    goog = pd.DataFrame(
+        {
+            "open": np.full(n, 200.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 199.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    msft = pd.DataFrame(
+        {
+            "open": np.full(n, 50.0),
+            "high": np.full(n, 51.0),
+            "low": np.full(n, 49.0),
+            "close": np.full(n, 50.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol in ("AAPL", "GOOG"):
+                    return
+                if close > 100:
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "GOOG": goog, "MSFT": msft},
+    )
+    # AAPL and GOOG denied; MSFT close=50 doesn't satisfy close > 100.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_negative_symbol_return_guard_unchanged() -> None:
+    """Regression check: the existing allowlist forms (``!=``, ``not
+    in``) still produce the expected allowlist behaviour."""
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    aapl = pd.DataFrame(
+        {
+            "open": np.full(n, 200.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 199.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    msft = pd.DataFrame(
+        {
+            "open": np.full(n, 50.0),
+            "high": np.full(n, 51.0),
+            "low": np.full(n, 49.0),
+            "close": np.full(n, 50.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol != "AAPL":
+                    return
+                if close > 100:
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft})
+    # Allowlist {AAPL}; AAPL close=200 satisfies > 100.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_zero_period_is_declined_not_flagged_as_zero_hits() -> None:
+    """``sma(close, 0)`` is a runtime-config error: pandas raises
+    ``window must be greater than 0``. The probe must DECLINE the
+    indicator at recognition time so the predicate falls through to
+    ``UNKNOWN_LOW_COVERAGE`` rather than letting the helper raise at
+    evaluation (which the aggregator catches as an all-False mask and
+    misclassifies as ``INDICATOR_FILTER_TOO_RESTRICTIVE``).
+
+    Reviewer comment on PR #472 (discussion_r3214656144) — the old
+    ``_resolve_period_arg`` ``> 0 and is_integer()`` check protected
+    against this; the registry refactor removed the call site and
+    must restore the check via ``IndicatorSpec.float_kwargs``.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 0):
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": _flat_ohlcv()})
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_non_integer_period_is_declined() -> None:
+    """``sma(close, 2.5)`` — pandas rolling requires integer windows.
+    Same decline-rather-than-substitute rule as the zero-period case.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, 2.5):
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": _flat_ohlcv()})
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_negative_period_kwarg_is_declined() -> None:
+    """The same validation applies to kwarg form: ``sma(close,
+    period=-5)`` must decline rather than flow into pandas.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > sma(close, period=-5):
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": _flat_ohlcv()})
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_bollinger_num_std_float_is_accepted() -> None:
+    """Regression check: the float-kwarg opt-out works — ``num_std=0.1``
+    on ``bollinger_bands`` (a positive non-integer float, allowed by
+    the helper) must STILL resolve cleanly. Without
+    ``IndicatorSpec.float_kwargs={'num_std'}`` the new validator
+    would reject it as non-integer.
+    """
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 100.0),
+            "high": np.full(n, 101.0),
+            "low": np.full(n, 99.0),
+            "close": np.full(n, 100.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > bollinger_bands(close, 20, num_std=0.1)[0]:
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    # Predicate is recognised (not declined); whatever category it
+    # produces is fine as long as it isn't UNKNOWN_LOW_COVERAGE
+    # (which would mean the float kwarg got rejected).
+    assert report.coverage_category is not CoverageCategory.UNKNOWN_LOW_COVERAGE
+
+
+def test_denylist_excludes_symbol_from_warmup_scoping() -> None:
+    """A denylisted symbol whose history would otherwise satisfy the
+    warmup must NOT rescue the warmup check.
+
+    Reviewer's scenario (PR #472 review): ``if bar.symbol == "AAPL":
+    return`` followed by ``close > sma(close, 150)``. AAPL has 200
+    bars (warmup-eligible), MSFT has 50 (not). Without denylist-aware
+    warmup scoping, ``_union_target_symbols`` returns ``None``
+    (universal), AAPL's 200 bars pass the warmup check, and the
+    aggregator then evaluates only MSFT (AAPL is denied at aggregation
+    time) — sma over 50 bars is all-NaN so the predicate has zero
+    hits and the report falsely flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``. The fix subtracts the
+    denylist from each group's effective warmup scope so AAPL is
+    excluded from the warmup-eligibility check, MSFT (50 bars) is
+    the only remaining symbol, and the report correctly classifies
+    as ``INSUFFICIENT_BARS``.
+    """
+    aapl_n = 200
+    msft_n = 50
+    aapl_idx = pd.date_range("2024-01-01", periods=aapl_n, freq="D")
+    msft_idx = pd.date_range("2024-01-01", periods=msft_n, freq="D")
+    aapl = pd.DataFrame(
+        {
+            "open": np.full(aapl_n, 200.0),
+            "high": np.full(aapl_n, 201.0),
+            "low": np.full(aapl_n, 199.0),
+            "close": np.full(aapl_n, 200.0),
+            "volume": np.full(aapl_n, 1_000_000.0),
+        },
+        index=aapl_idx,
+    )
+    msft = pd.DataFrame(
+        {
+            "open": np.full(msft_n, 50.0),
+            "high": np.full(msft_n, 51.0),
+            "low": np.full(msft_n, 49.0),
+            "close": np.full(msft_n, 50.0),
+            "volume": np.full(msft_n, 1_000_000.0),
+        },
+        index=msft_idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL":
+                    return
+                if close > sma(close, 150):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=150,
+    )
+    assert report.coverage_category is CoverageCategory.INSUFFICIENT_BARS
+
+
+def test_constructor_default_false_branch_is_skipped() -> None:
+    """A ``__init__`` branch guarded by a default-False parameter must
+    not overwrite class-level constants. ``def __init__(self,
+    enabled=False): if enabled: self.WINDOW = 200`` should leave the
+    class-level ``WINDOW = 2`` in effect for default construction —
+    the runtime never enters the inner branch.
+    """
+    code = textwrap.dedent(
+        """
+        class S:
+            WINDOW = 2
+
+            def __init__(self, enabled=False):
+                if enabled:
+                    self.WINDOW = 200
+
+            def on_bar(self, ctx, bar):
+                if close < sma(close, self.WINDOW) - 50:
+                    pass
+        """
+    )
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 100.0),
+            "high": np.full(n, 101.0),
+            "low": np.full(n, 99.0),
+            "close": np.full(n, 100.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    # WINDOW=2 → SMA-2 of flat 100 = 100, predicate ``close < 100 - 50``
+    # = ``close < 50`` is never true on flat 100 → too restrictive.
+    # If the bug were present, WINDOW=200 would yield NaN SMA over 30
+    # bars → INSUFFICIENT_BARS / different report.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_local_name_shadowing_ohlcv_uses_local_binding() -> None:
+    """A local assignment like ``close = sma(open, 2)`` must take
+    precedence over the bare ``close`` column in subsequent
+    predicates. Without the fix, ``if close > 100:`` evaluated
+    against the raw close column, not the SMA.
+    """
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # opens are 50, closes are 200. SMA-2(open)=50; raw close=200.
+    # Predicate ``close > 100``: against raw close (200) it's True
+    # everywhere; against SMA(open) (50) it's False everywhere.
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 50.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 49.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                close = sma(open, 2)
+                if close > 100:
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    # SMA(open=50, 2) = 50 → ``close > 100`` never fires.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_self_close_attribute_is_threshold_not_column() -> None:
+    """``self.close = 100; if close > self.close:`` must evaluate the
+    threshold as a 100-valued literal (via ``self.close`` resolving
+    through ``name_periods``), not as the OHLCV close column.
+    """
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    # Real close is 200 → close > 100 is True everywhere.
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 200.0),
+            "high": np.full(n, 201.0),
+            "low": np.full(n, 199.0),
+            "close": np.full(n, 200.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def __init__(self):
+                self.close = 100
+
+            def on_bar(self, ctx, bar):
+                if close > self.close:
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    # close=200 > self.close=100 every bar → COVERAGE_OK.
+    assert report.coverage_category is CoverageCategory.COVERAGE_OK
+
+
+def test_unsupported_tuple_reassignment_clears_stale_binding() -> None:
+    """A tuple/list assignment whose RHS isn't a recognised tuple
+    indicator must clear any prior binding for each unpack target
+    name. Without the fix, ``upper = sma(close, 2); upper, lower =
+    self.custom_levels(bar); if close > upper:`` evaluated the
+    predicate against the stale SMA from the first assignment instead
+    of dropping the (now-opaque) ``upper``.
+    """
+    n = 30
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame(
+        {
+            "open": np.full(n, 100.0),
+            "high": np.full(n, 101.0),
+            "low": np.full(n, 99.0),
+            "close": np.full(n, 100.0),
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                upper = sma(close, 2)
+                upper, lower = self.custom_levels(bar)
+                if close > upper:
+                    pass
+        """
+    )
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": df})
+    # ``upper`` was cleared by the unsupported tuple unpack, so the
+    # comparison ``close > upper`` no longer resolves an indicator on
+    # the right; ``upper`` is treated as opaque and the recognised
+    # predicate becomes empty / unknown.
+    assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE

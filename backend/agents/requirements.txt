@@ -39,3 +39,6 @@ pyarrow>=15.0,<22.0
 # Investment team metrics engine (#429) — vectorized Sharpe/Sortino/max-DD
 # in investment_team.execution.metrics. Pin matches backend/requirements.txt.
 numpy>=2.4,<3.0
+# Investment team indicator-coverage probe (#448) and executor.indicators —
+# both import pandas at module load. Pin matches backend/requirements.txt.
+pandas>=3.0,<4.0
