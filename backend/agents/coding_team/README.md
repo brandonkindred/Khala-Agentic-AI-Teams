@@ -115,6 +115,61 @@ flowchart LR
 - **Tech Lead**: Get next task from backlog → Groom task (acceptance criteria, out of scope, context from specs/plans, subtasks, priority, dependencies) → Update to To Do → Assign to team member → repeat until backlog groomed. See plan section 2a.
 - **Senior SWE**: Review assigned tasks → Choose next task (deps satisfied) → If subtasks, choose next subtask → Create feature branch → Plan changes → Make changes → Tests (loop until pass) → Linter (loop until pass) → Commit (semantic style) → If more subtasks loop else Mark In Review → Send feature branch to Tech Lead. See plan section 2b.
 
+## GitHub-issue-driven runs
+
+In addition to the planning-team handoff path (`POST /run`), the team accepts work directly from GitHub issues via `POST /run-from-github`. The endpoint reads open issues from the target repo, picks the first whose **GitHub native sub-issues** are all closed, runs the issue through the existing Tech Lead → Senior SWE pipeline on a stable per-issue branch (`khala/issue-<num>`), and reports back on the issue thread.
+
+### Request
+
+```http
+POST /api/coding-team/run-from-github
+Content-Type: application/json
+
+{
+  "owner": "your-org",
+  "repo": "your-repo",
+  "repo_path": "/abs/path/to/local/checkout",
+  "label": "agent-ready",          // optional issue-label filter
+  "issue_number": 123,              // optional: verify a specific issue
+  "github_token": "...",           // optional: overrides GITHUB_TOKEN env
+  "base_branch": "main",           // optional: defaults to repo default branch
+  "remote": "origin"               // optional
+}
+```
+
+Response:
+
+```json
+{ "job_id": "...", "issue_number": 7, "issue_url": "https://github.com/...", "status": "pending" }
+```
+
+Poll `GET /status/{job_id}` to follow progress; the response includes `github_context` and `github_pr_url` once the PR is opened.
+
+### Dependency model
+
+An issue is **ready** iff it has zero open sub-issues (the official GitHub sub-issues API). Repos that don't use sub-issues treat every open issue as ready. Other conventions (task lists, "depends on #N" body text) are out of scope for now.
+
+### What the team writes back
+
+1. A `Coding team started job <id>` comment on the issue when work begins.
+2. A draft PR with `Closes #<num>` against the repo's default branch when work succeeds.
+3. A `Draft PR opened: <url>` comment (or `Reusing existing draft PR: <url>` on retry).
+
+If anything fails — branch prep, the orchestrator, fast-forward, or push — the failure is recorded on the job's `error` field and a best-effort comment is posted on the issue.
+
+### Required configuration
+
+| Env var | Purpose |
+|---|---|
+| `GITHUB_TOKEN` | Fallback when no `github_token` is in the body. Needs `Issues: read/write`, `Pull requests: read/write`, `Contents: read/write`, `Metadata: read` (or classic `repo`). |
+| `GITHUB_API_URL` | Optional. Defaults to `https://api.github.com`; override for GitHub Enterprise. |
+
+`repo_path` must be an existing local working tree of the same repo with `origin` configured for write. The team **never** clones for you, and it pushes the integration branch with `--force-with-lease` so partial-failure retries replace the prior branch tip cleanly.
+
+### Concurrency
+
+Only one job per `(owner, repo, issue_number)` may be running at a time; a second concurrent call returns `409 already running for ...`. Sequential retries (after a failed job is terminal) are safe.
+
 ## Khala platform
 
 This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

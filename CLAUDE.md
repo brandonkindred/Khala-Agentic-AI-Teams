@@ -258,6 +258,8 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `AGENT_INVOKE_MAX_PAYLOAD_BYTES` | Hard cap on request body for `POST /api/agents/{id}/invoke` and the sandbox shim (default `1048576` = 1 MiB; overflow returns 413 without spinning up a sandbox). |
 | `AGENT_INVOKE_MAX_OUTPUT_BYTES` | Hard cap on agent response body; oversized outputs are truncated with `truncated: true` on the envelope (default `1048576` = 1 MiB). Applies inside the shim and on the proxy's re-serialize path. |
 | `AGENT_EXEC_TIMEOUT_S` | Default per-agent execution timeout (`asyncio.wait_for`) inside the sandbox; overflow returns 504 with `timeout_hit: true` (default `60`). Per-agent override via `invoke.timeout_seconds` in the manifest. |
+| `GITHUB_TOKEN` | Default token for the coding team's `POST /api/coding-team/run-from-github` flow. Per-request `github_token` in the body overrides this. Needs `Issues: read/write`, `Pull requests: read/write`, `Contents: read/write`, `Metadata: read` (or classic `repo`). |
+| `GITHUB_API_URL` | Optional override for the GitHub REST base URL used by the coding team's GitHub client (`backend/agents/coding_team/github_source/`). Defaults to `https://api.github.com`; set to a GitHub Enterprise URL when relevant. |
 
 **Blogging pipeline:** `research → planning (ContentPlan) → writer → gates`; `POST /research-and-review` runs research + the same planning step. See `backend/agents/blogging/README.md` and repo `CHANGELOG.md`.
 
