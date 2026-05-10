@@ -5231,6 +5231,66 @@ def test_negative_symbol_return_guard_unchanged() -> None:
     assert report.coverage_category is CoverageCategory.COVERAGE_OK
 
 
+def test_denylist_excludes_symbol_from_warmup_scoping() -> None:
+    """A denylisted symbol whose history would otherwise satisfy the
+    warmup must NOT rescue the warmup check.
+
+    Reviewer's scenario (PR #472 review): ``if bar.symbol == "AAPL":
+    return`` followed by ``close > sma(close, 150)``. AAPL has 200
+    bars (warmup-eligible), MSFT has 50 (not). Without denylist-aware
+    warmup scoping, ``_union_target_symbols`` returns ``None``
+    (universal), AAPL's 200 bars pass the warmup check, and the
+    aggregator then evaluates only MSFT (AAPL is denied at aggregation
+    time) — sma over 50 bars is all-NaN so the predicate has zero
+    hits and the report falsely flags
+    ``INDICATOR_FILTER_TOO_RESTRICTIVE``. The fix subtracts the
+    denylist from each group's effective warmup scope so AAPL is
+    excluded from the warmup-eligibility check, MSFT (50 bars) is
+    the only remaining symbol, and the report correctly classifies
+    as ``INSUFFICIENT_BARS``.
+    """
+    aapl_n = 200
+    msft_n = 50
+    aapl_idx = pd.date_range("2024-01-01", periods=aapl_n, freq="D")
+    msft_idx = pd.date_range("2024-01-01", periods=msft_n, freq="D")
+    aapl = pd.DataFrame(
+        {
+            "open": np.full(aapl_n, 200.0),
+            "high": np.full(aapl_n, 201.0),
+            "low": np.full(aapl_n, 199.0),
+            "close": np.full(aapl_n, 200.0),
+            "volume": np.full(aapl_n, 1_000_000.0),
+        },
+        index=aapl_idx,
+    )
+    msft = pd.DataFrame(
+        {
+            "open": np.full(msft_n, 50.0),
+            "high": np.full(msft_n, 51.0),
+            "low": np.full(msft_n, 49.0),
+            "close": np.full(msft_n, 50.0),
+            "volume": np.full(msft_n, 1_000_000.0),
+        },
+        index=msft_idx,
+    )
+    code = textwrap.dedent(
+        """
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL":
+                    return
+                if close > sma(close, 150):
+                    pass
+        """
+    )
+    report = run_indicator_probe(
+        strategy_code=code,
+        market_data={"AAPL": aapl, "MSFT": msft},
+        warmup_bars_required=150,
+    )
+    assert report.coverage_category is CoverageCategory.INSUFFICIENT_BARS
+
+
 def test_constructor_default_false_branch_is_skipped() -> None:
     """A ``__init__`` branch guarded by a default-False parameter must
     not overwrite class-level constants. ``def __init__(self,

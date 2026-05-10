@@ -216,7 +216,8 @@ def run_indicator_probe(
     # bar count must not be counted. If any group is universal (no
     # symbol filter), every DataFrame is potentially in scope and the
     # check stays over the full universe.
-    target_symbols = _union_target_symbols(subconds)
+    universe = {sym for sym, df in market_data.items() if isinstance(df, pd.DataFrame)}
+    target_symbols = _union_target_symbols(subconds, universe)
     if target_symbols is None:
         warmup_dfs = [df for df in market_data.values() if isinstance(df, pd.DataFrame)]
     else:
@@ -1797,15 +1798,23 @@ def _symbol_gate(
     return None
 
 
-def _union_target_symbols(groups: List[_Group]) -> Optional[set]:
+def _union_target_symbols(groups: List[_Group], universe: Optional[set] = None) -> Optional[set]:
     """Return the union of symbols any group could possibly fire on, or ``None``.
 
     Used by :func:`run_indicator_probe` to size the warmup check to the
     symbols that can actually satisfy a predicate. Returns ``None`` when
     at least one group is **fully unconstrained** — i.e. neither the
     group-level filter nor any required subcond filter narrows the
-    symbol space — so the warmup check stays over every fetched
-    DataFrame.
+    symbol space, AND the group carries no exclude-shaped early-return
+    denylist — so the warmup check stays over every fetched DataFrame.
+
+    ``universe`` is the set of symbol keys present in ``market_data``.
+    It's required to express "universal except for these" when a group
+    has ``denied_symbols`` but no positive allowlist (e.g. ``if
+    bar.symbol == "AAPL": return`` followed by an indicator-only
+    predicate). Without it the function would either treat the group
+    as universal — letting AAPL's long history rescue warmup even
+    though AAPL is never evaluated — or as fully empty, both wrong.
 
     Combinator-aware:
 
@@ -1822,8 +1831,15 @@ def _union_target_symbols(groups: List[_Group]) -> Optional[set]:
       group, but if any OR-tail leg is unrestricted, the OR can fire
       on any symbol — so the group is universal unless ancestors
       narrow it.
+
+    * **Denylists**: ``group.denied_symbols`` (set by an exclude-shaped
+      early-return guard like ``if bar.symbol == "AAPL": return``) is
+      subtracted from each group's effective set before union'ing. A
+      group with no allowlist but a denylist resolves to ``universe -
+      denied_symbols`` rather than ``universe``.
     """
     union: set = set()
+    saw_universal = False
     for g in groups:
         group_syms: Optional[set] = None
         if g.target_symbols is not None:
@@ -1864,9 +1880,9 @@ def _union_target_symbols(groups: List[_Group]) -> Optional[set]:
                 # on any symbol so the disjunction's symbol space is
                 # unbounded. The group's only remaining constraint is
                 # whatever the AND-required prefix imposed via
-                # ``group_syms`` above.
-                if group_syms is None:
-                    return None
+                # ``group_syms`` above, plus the denylist applied
+                # below.
+                pass
             else:
                 for t in or_tail:
                     if t.target_symbols:
@@ -1875,11 +1891,33 @@ def _union_target_symbols(groups: List[_Group]) -> Optional[set]:
                         else:
                             group_syms.update(t.target_symbols)
 
+        denied = set(g.denied_symbols) if g.denied_symbols else set()
+
         if group_syms is None:
-            # Fully unconstrained group — predicate could fire on any
-            # fetched symbol. Treat the warmup as universal.
-            return None
+            # No positive allowlist anywhere in this group. Universal
+            # iff the denylist is also empty; otherwise the group's
+            # effective scope is ``universe - denied`` and the
+            # universal short-circuit doesn't apply.
+            if not denied:
+                saw_universal = True
+                continue
+            if universe is None:
+                # Caller didn't supply a universe — fall back to the
+                # legacy "universal" answer rather than fabricating a
+                # narrowed set we can't validate.
+                saw_universal = True
+                continue
+            group_syms = set(universe) - denied
+        else:
+            group_syms -= denied
+
         union.update(group_syms)
+
+    if saw_universal:
+        # Even one fully-universal group means the predicate could
+        # fire on any fetched symbol — warmup must consider all of
+        # them.
+        return None
     return union if union else None
 
 
