@@ -176,6 +176,15 @@ class _Group:
     # polarity: AND with an unknown conjunct widens the recognised
     # mask, OR with an unknown alternative also widens it.
     has_unknown_and_conjunct: bool = False
+    # Symbols the live entry path explicitly excludes via an
+    # exclude-shaped early-return guard (e.g. ``if bar.symbol ==
+    # "AAPL": return`` or ``if bar.symbol in ("X", "Y"): return``).
+    # The aggregator drops these symbols' DataFrames before counting
+    # hits. Independent of ``target_symbols``: a group can have an
+    # allowlist (everyone in this set is in scope) AND a denylist
+    # (anyone in this set is excluded). Effective scope is
+    # ``target_symbols ∩ (universe - denied_symbols)``.
+    denied_symbols: Optional[frozenset] = None
 
 
 def run_indicator_probe(
@@ -326,6 +335,14 @@ def _aggregate(
             # Symbol-gated groups (``if bar.symbol == "AAPL" and ...``)
             # only consider DataFrames matching one of the gate's symbols.
             if group.target_symbols is not None and symbol not in group.target_symbols:
+                global_idx += len(group.subconds)
+                continue
+            # Exclude-shaped early-return guards
+            # (``if bar.symbol == "AAPL": return``) leave a denylist on
+            # every group emitted past the guard. Skip those symbols so
+            # data the live entry path never reaches can't supply
+            # positive coverage.
+            if group.denied_symbols is not None and symbol in group.denied_symbols:
                 global_idx += len(group.subconds)
                 continue
             group_masks: List[pd.Series] = []
@@ -898,6 +915,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
         ancestor_unknown: bool,
+        ancestor_denied: Optional[set] = None,
     ) -> bool:
         """Process a single if-shape (test + body + orelse) given an
         ancestor stack. Used both for real ``ast.If`` statements and for
@@ -912,12 +930,19 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         ...`` would emit a clean nested group whose recognised legs
         carried the report to ``COVERAGE_OK`` even though the unknown
         ancestor could narrow it to zero.
+
+        ``ancestor_denied`` carries the symbol denylist accumulated
+        from enclosing exclude-shaped early-return guards (``if
+        bar.symbol == "AAPL": return``); the aggregator drops those
+        symbols from every emitted group's evaluation.
         """
         # Top-level OR predicate: each leg becomes an independent
         # subcondition row but the group's blocker classification uses
         # disjunction (only too-restrictive when ALL legs are zero).
         if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
-            return _process_or_if(test, body, orelse, ancestors, ancestor_symbols, ancestor_unknown)
+            return _process_or_if(
+                test, body, orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied
+            )
 
         # Statically-unreachable AND short-circuit. If any conjunct is
         # a literal-falsy ``Constant`` (``False`` / ``0`` / ``None`` /
@@ -931,7 +956,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         for term in _flatten_top_terms(test):
             truth = _evaluate_static_predicate(term, name_periods, name_evaluators)
             if truth is False:
-                if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
+                if not _visit(
+                    orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied
+                ):
                     return False
                 return True
 
@@ -1063,6 +1090,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # value because the negation of an unknown isn't an unknown
         # gate on the orelse path.
         effective_unknown = ancestor_unknown or has_unknown_conjunct
+        effective_denied = frozenset(ancestor_denied) if ancestor_denied else None
 
         group_subs: List[_Subcond] = []
         if not _budgeted_extend(group_subs, ancestors):
@@ -1072,6 +1100,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         subconds=group_subs,
                         target_symbols=effective_symbols,
                         has_unknown_and_conjunct=effective_unknown,
+                        denied_symbols=effective_denied,
                     )
                 )
             return False
@@ -1082,6 +1111,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         subconds=group_subs,
                         target_symbols=effective_symbols,
                         has_unknown_and_conjunct=effective_unknown,
+                        denied_symbols=effective_denied,
                     )
                 )
             return False
@@ -1091,11 +1121,18 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     subconds=group_subs,
                     target_symbols=effective_symbols,
                     has_unknown_and_conjunct=effective_unknown,
+                    denied_symbols=effective_denied,
                 )
             )
-        if not _visit(body, ancestors + own_subs, effective_symbols, effective_unknown):
+        if not _visit(
+            body,
+            ancestors + own_subs,
+            effective_symbols,
+            effective_unknown,
+            ancestor_denied,
+        ):
             return False
-        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
+        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
             return False
         return True
 
@@ -1106,6 +1143,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
         ancestor_unknown: bool,
+        ancestor_denied: Optional[set] = None,
     ) -> bool:
         """Process ``if A or B or C:`` — each leg becomes an independent
         subcondition row, classified disjunctively at aggregation time.
@@ -1185,12 +1223,14 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             else:
                 has_unknown_leg = True
 
+        denied_frozen = frozenset(ancestor_denied) if ancestor_denied else None
+
         if not own_subs:
             # No recognised legs — fall through to body / orelse without
             # emitting a group, so nested ``if`` analysis still runs.
-            if not _visit(body, ancestors, ancestor_symbols, ancestor_unknown):
+            if not _visit(body, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
                 return False
-            if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
+            if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
                 return False
             return True
 
@@ -1209,6 +1249,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         combinator="and",
                         ancestor_count=len(group_subs),
                         has_unknown_and_conjunct=ancestor_unknown,
+                        denied_symbols=denied_frozen,
                     )
                 )
             return False
@@ -1223,6 +1264,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         ancestor_count=ancestor_count,
                         has_unknown_or_leg=has_unknown_leg,
                         has_unknown_and_conjunct=ancestor_unknown,
+                        denied_symbols=denied_frozen,
                     )
                 )
             return False
@@ -1235,12 +1277,46 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     ancestor_count=ancestor_count,
                     has_unknown_or_leg=has_unknown_leg,
                     has_unknown_and_conjunct=ancestor_unknown,
+                    denied_symbols=denied_frozen,
                 )
             )
-        # Body sees no extra ancestors — see docstring.
-        if not _visit(body, ancestors, ancestor_symbols, ancestor_unknown):
+        # Carry the OR predicate into the body recursion as a single
+        # compound ancestor: the body only fires on bars where some
+        # OR leg also fired, so any nested ``if`` predicate must AND
+        # against the OR's bar-wise mask. Without this, a shape like
+        # ``if close > 100 or close < 0: if volume < 0: pass`` was
+        # reported ``COVERAGE_OK`` whenever ``close > 100`` and
+        # ``volume < 0`` each fired on at least one bar, even when
+        # never on the same bar — the live entry path was empty but
+        # the probe had no representation of the OR mask at the
+        # nested level.
+        #
+        # ``_build_compound_or_subcond`` already does the leg
+        # synthesis (compound OR-of-masks evaluator + per-leg symbol
+        # gates rolled into ``target_symbols`` when every leg is
+        # symbol-gated). Reuse it here so the nested body is
+        # evaluated against the same OR semantics the aggregator
+        # uses for the immediate group.
+        body_ancestors = ancestors
+        body_symbols = ancestor_symbols
+        body_unknown = ancestor_unknown or has_unknown_leg
+        or_compound = _build_compound_or_subcond(
+            test, name_periods, name_evaluators, name_strings, bar_name
+        )
+        if or_compound is not None:
+            body_ancestors = ancestors + [or_compound]
+            if or_compound.target_symbols is not None:
+                body_symbols = _intersect_symbols(ancestor_symbols, set(or_compound.target_symbols))
+            if or_compound.has_unknown_leg:
+                body_unknown = True
+        else:
+            # OR was fully un-modellable — every nested predicate is
+            # gated by an unknown ancestor, so descendants can't
+            # supply positive evidence on their own.
+            body_unknown = True
+        if not _visit(body, body_ancestors, body_symbols, body_unknown, ancestor_denied):
             return False
-        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown):
+        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
             return False
         return True
 
@@ -1249,6 +1325,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
         ancestor_unknown: bool = False,
+        ancestor_denied: Optional[set] = None,
     ) -> bool:
         # Transactional: snapshot at entry, restore at exit. Each call
         # to _visit (including the recursive descents from _process_if /
@@ -1269,6 +1346,14 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # COVERAGE_OK even though the live entry path is unreachable
         # for the target.
         current_symbols: Optional[set] = ancestor_symbols
+        # Sibling-scope denylist accumulated from exclude-shaped
+        # early-return guards (``if bar.symbol == "AAPL": return``).
+        # Mirrors ``current_symbols`` but with the opposite polarity:
+        # any symbol in this set is excluded from subsequent siblings'
+        # evaluation. Independent of ``current_symbols`` so a strategy
+        # that combines an allowlist and an exclude on different
+        # symbols composes correctly.
+        current_denied: Optional[set] = set(ancestor_denied) if ancestor_denied else None
         try:
             for stmt in stmts:
                 # Apply assignments in source order so each predicate
@@ -1282,13 +1367,21 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
 
                 if isinstance(stmt, ast.If):
                     # Early-return symbol guard: ``if bar.symbol != "X":
-                    # return`` (or ``not in (...)``). Update the
-                    # implicit symbol filter for subsequent siblings
-                    # rather than emitting a coverage row for the
-                    # guard itself.
-                    guard_syms = _early_return_symbol_guard(stmt, name_strings, bar_name)
-                    if guard_syms is not None:
-                        current_symbols = _intersect_symbols(current_symbols, guard_syms)
+                    # return`` / ``not in (...)`` → allowlist update;
+                    # ``if bar.symbol == "X": return`` / ``in (...)`` →
+                    # denylist update. Both shapes update the implicit
+                    # symbol filter for subsequent siblings rather than
+                    # emitting a coverage row for the guard itself.
+                    guard = _early_return_symbol_guard(stmt, name_strings, bar_name)
+                    if guard is not None:
+                        polarity, syms = guard
+                        if polarity == "allow":
+                            current_symbols = _intersect_symbols(current_symbols, syms)
+                        else:  # "deny"
+                            if current_denied is None:
+                                current_denied = set(syms)
+                            else:
+                                current_denied |= syms
                         continue
 
                     # ``if pos is None: ... else: ...`` (and the inverted
@@ -1302,7 +1395,13 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     position_check, gate_residual = _strip_position_gate(stmt.test)
                     if position_check == "vacant":  # pos is None — body is entry
                         if gate_residual is None:
-                            if not _visit(stmt.body, ancestors, current_symbols, ancestor_unknown):
+                            if not _visit(
+                                stmt.body,
+                                ancestors,
+                                current_symbols,
+                                ancestor_unknown,
+                                current_denied,
+                            ):
                                 return False
                             # Vacant guard-clause: ``if pos is None:
                             # return`` (or any single ``return``).
@@ -1321,11 +1420,18 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                                 ancestors,
                                 current_symbols,
                                 ancestor_unknown,
+                                current_denied,
                             ):
                                 return False
                         continue
                     if position_check == "occupied":  # pos is not None — orelse is entry
-                        if not _visit(stmt.orelse, ancestors, current_symbols, ancestor_unknown):
+                        if not _visit(
+                            stmt.orelse,
+                            ancestors,
+                            current_symbols,
+                            ancestor_unknown,
+                            current_denied,
+                        ):
                             return False
                         continue
 
@@ -1336,6 +1442,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         ancestors,
                         current_symbols,
                         ancestor_unknown,
+                        current_denied,
                     ):
                         return False
                 else:
@@ -1362,7 +1469,13 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     for field in _BLOCK_FIELDS:
                         inner = getattr(stmt, field, None)
                         if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
-                            if not _visit(inner, ancestors, current_symbols, ancestor_unknown):
+                            if not _visit(
+                                inner,
+                                ancestors,
+                                current_symbols,
+                                ancestor_unknown,
+                                current_denied,
+                            ):
                                 return False
                     # ast.Try has handlers; each handler.body is a stmt list.
                     handlers = getattr(stmt, "handlers", None)
@@ -1370,7 +1483,13 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         for h in handlers:
                             h_body = getattr(h, "body", None)
                             if isinstance(h_body, list) and h_body:
-                                if not _visit(h_body, ancestors, current_symbols, ancestor_unknown):
+                                if not _visit(
+                                    h_body,
+                                    ancestors,
+                                    current_symbols,
+                                    ancestor_unknown,
+                                    current_denied,
+                                ):
                                     return False
             return True
         finally:
@@ -1489,18 +1608,20 @@ def _early_return_symbol_guard(
     stmt: ast.If,
     name_strings: Optional["_NameStrings"] = None,
     bar_name: str = "bar",
-) -> Optional[set]:
-    """Detect ``if <bar>.symbol != "X": return`` (or ``not in (...)``).
+) -> Optional[Tuple[str, set]]:
+    """Detect a ``if <bar>.symbol <op> ...: return`` symbol guard.
 
-    Returns the set of symbols the strategy is implicitly restricted to
-    AFTER the guard has run — i.e. the symbols whose code path
-    continues past the guard. Used by :func:`_visit` to propagate the
-    implicit symbol filter into subsequent sibling predicates.
+    Returns ``("allow", syms)`` for guards that *retain* a symbol set
+    (the live code path continues only on those symbols) or
+    ``("deny", syms)`` for guards that *exclude* a symbol set (the
+    live code path continues on everything except those). ``None``
+    means the if isn't a recognised guard shape and the caller should
+    process it as a normal predicate.
 
-    The guard's ``body`` must consist of a single bare ``return`` (or a
-    ``return None``). Compound bodies, conditional returns, or
+    The guard's ``body`` must consist of a single bare ``return`` (or
+    a ``return None``). Compound bodies, conditional returns, or
     side-effecting bodies aren't recognised because the implication
-    isn't unambiguously "skip all but X".
+    isn't unambiguous.
 
     ``bar_name`` is the actual third positional parameter name of the
     strategy's ``on_bar``. The safety gate only enforces arity, so
@@ -1509,10 +1630,24 @@ def _early_return_symbol_guard(
 
     Recognised shapes (with ``bar_name='bar'`` shown for brevity):
 
-    - ``if bar.symbol != "X": return`` → ``{"X"}``
+    Allowlist (retain) shapes:
+    - ``if bar.symbol != "X": return`` → ``("allow", {"X"})``
     - ``if bar.symbol != TARGET_SYMBOL: return`` (with
-      ``TARGET_SYMBOL = "BBB"`` resolved via ``name_strings``) → ``{"BBB"}``
-    - ``if bar.symbol not in ("X", "Y"): return`` → ``{"X", "Y"}``
+      ``TARGET_SYMBOL = "BBB"`` resolved via ``name_strings``) →
+      ``("allow", {"BBB"})``
+    - ``if bar.symbol not in ("X", "Y"): return`` →
+      ``("allow", {"X", "Y"})``
+
+    Denylist (exclude) shapes:
+    - ``if bar.symbol == "X": return`` → ``("deny", {"X"})``
+    - ``if bar.symbol == TARGET_SYMBOL: return`` →
+      ``("deny", {<resolved>})``
+    - ``if bar.symbol in ("X", "Y"): return`` →
+      ``("deny", {"X", "Y"})``
+
+    Without the deny shapes, exclude-guards left subsequent siblings
+    free to count hits from the excluded symbol — the probe could
+    report ``COVERAGE_OK`` from data the live entry path never sees.
 
     Returns ``None`` for anything else; the caller then processes the
     if as a normal predicate.
@@ -1565,21 +1700,26 @@ def _early_return_symbol_guard(
             return name_strings.attrs.get(n.attr)
         return None
 
-    # ``bar.symbol != X`` / ``X != bar.symbol`` → allow {X}
+    # ``bar.symbol <op> X`` / ``X <op> bar.symbol`` → allow / deny
+    # depending on the operator polarity.
     if isinstance(test, ast.Compare) and len(test.ops) == 1:
         op = test.ops[0]
-        if isinstance(op, ast.NotEq):
+        if isinstance(op, (ast.NotEq, ast.Eq)):
+            polarity = "allow" if isinstance(op, ast.NotEq) else "deny"
             left, right = test.left, test.comparators[0]
             if _is_bar_symbol(left):
                 sym = _resolve_string(right)
                 if sym is not None:
-                    return {sym}
+                    return polarity, {sym}
             if _is_bar_symbol(right):
                 sym = _resolve_string(left)
                 if sym is not None:
-                    return {sym}
-        # ``bar.symbol not in (X, Y)`` → allow {X, Y}
-        if isinstance(op, ast.NotIn):
+                    return polarity, {sym}
+        # ``bar.symbol not in (X, Y)`` → allow {X, Y}; the matching
+        # ``in`` form is the deny variant — both keep the same
+        # element-resolution rules and only differ on polarity.
+        if isinstance(op, (ast.NotIn, ast.In)):
+            polarity = "allow" if isinstance(op, ast.NotIn) else "deny"
             left, right = test.left, test.comparators[0]
             if _is_bar_symbol(left) and isinstance(right, (ast.Tuple, ast.List, ast.Set)):
                 syms: set = set()
@@ -1589,7 +1729,7 @@ def _early_return_symbol_guard(
                         return None
                     syms.add(s)
                 if syms:
-                    return syms
+                    return polarity, syms
     return None
 
 
@@ -2529,7 +2669,17 @@ def _collect_name_periods(
             if node is not strategy_class:
                 return
             # Walk class-body Assign / AnnAssign directly. For
-            # FunctionDef children, only descend into the constructor.
+            # FunctionDef children, only descend into the constructor
+            # along the always-taken default-construction path — a
+            # blanket ``ast.walk`` records assignments from dead /
+            # default-false branches such as
+            # ``def __init__(self, enabled=False):
+            #       if enabled: self.WINDOW = 200``,
+            # whose ``self.WINDOW = 200`` would overwrite the class
+            # default ``WINDOW = 2`` and the probe would evaluate
+            # indicators with a window the live default-constructed
+            # strategy never sees. Mirror the helper used by
+            # :func:`_collect_name_strings` to stay consistent.
             # Nested ClassDefs follow the strategy_class skip rule via
             # the recursive call.
             for child in node.body:
@@ -2537,9 +2687,11 @@ def _collect_name_periods(
                     yield child, "class"
                 elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
-                        for sub in ast.walk(child):
-                            if isinstance(sub, (ast.Assign, ast.AnnAssign)):
-                                yield sub, "class"
+                        param_defaults = _constructor_param_defaults(child)
+                        for sub in _iter_unconditional_constructor_assigns(
+                            child.body, param_defaults
+                        ):
+                            yield sub, "class"
                 else:
                     yield from _iter_outer_assigns(child)
             return
@@ -2924,6 +3076,21 @@ def _build_operand(
     model (e.g. function calls into user code, attribute chains we don't
     recognise). Such subconditions are silently dropped.
     """
+    # Resolve a Name to a previously-bound indicator-call evaluator
+    # (e.g. ``sma_var = sma(close, 200)`` then ``if x > sma_var``).
+    # This must be checked BEFORE :func:`_column_from` so a local
+    # assignment that intentionally shadows an OHLCV name takes
+    # precedence over the bare-column shortcut. Without this, a
+    # strategy like ``close = sma(open, 2); if close > 100:`` would
+    # have its predicate evaluated against the raw ``close`` column at
+    # probe time even though the runtime compares the SMA value, and
+    # the report could falsely flip to ``COVERAGE_OK`` /
+    # ``INDICATOR_FILTER_TOO_RESTRICTIVE`` based on the wrong series.
+    if isinstance(node, ast.Name) and name_evaluators is not None:
+        evaluator = name_evaluators.get(node.id)
+        if evaluator is not None:
+            return _Operand(fn=evaluator, data_dependent=True)
+
     column = _column_from(node)
     if column is not None:
 
@@ -2933,15 +3100,6 @@ def _build_operand(
             return pd.Series(float("nan"), index=df.index)
 
         return _Operand(fn=_col, data_dependent=True)
-
-    # Resolve a Name to a previously-bound indicator-call evaluator
-    # (e.g. ``sma_var = sma(close, 200)`` then ``if x > sma_var``).
-    # This must be checked BEFORE _numeric_literal so a Name that refers
-    # to a computed indicator isn't misinterpreted as a numeric literal.
-    if isinstance(node, ast.Name) and name_evaluators is not None:
-        evaluator = name_evaluators.get(node.id)
-        if evaluator is not None:
-            return _Operand(fn=evaluator, data_dependent=True)
 
     literal = _numeric_literal(node, name_periods)
     if literal is not None:
@@ -2981,10 +3139,23 @@ def _build_operand(
 
 
 def _column_from(node: ast.expr) -> Optional[str]:
-    """Resolve a node to an OHLCV column name, if possible."""
+    """Resolve a node to an OHLCV column name, if possible.
+
+    Strategy attributes such as ``self.close`` (a stored threshold)
+    must NOT be misread as the market ``close`` column. The Attribute
+    branch therefore excludes owners ``self`` / ``cls``: they belong
+    to instance/class state and resolve via ``_numeric_literal``'s
+    ``self.X`` / ``cls.X`` path (or are dropped). Bar attributes
+    (``bar.close`` / ``candle.close`` / ``b.close``) and any other
+    non-instance owner remain valid column accesses.
+    """
     if isinstance(node, ast.Name) and node.id in _OHLCV_COLUMNS:
         return node.id
-    if isinstance(node, ast.Attribute) and node.attr in _OHLCV_COLUMNS:
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr in _OHLCV_COLUMNS
+        and not (isinstance(node.value, ast.Name) and node.value.id in {"self", "cls"})
+    ):
         return node.attr
     if isinstance(node, ast.Subscript):
         slc = node.slice
@@ -3022,6 +3193,17 @@ def _numeric_literal(node: ast.expr, name_periods: Dict[str, int]) -> Optional[f
         if inner is not None:
             return -inner
     if isinstance(node, ast.Name):
+        # Bare OHLCV column names (``close``, ``open``, ...) are
+        # data-dependent column references and must NOT be resolved
+        # as static numeric literals — even when ``self.close = 100``
+        # has happened to record ``name_periods["close"] = 100`` for
+        # the matching ``self.close`` Attribute lookup. ``_build_operand``
+        # already takes the column path for these Names; the static
+        # evaluator must agree, otherwise a predicate like
+        # ``close > self.close`` folds to ``100 > 100 = False`` and
+        # the AND short-circuit drops a real data-dependent comparison.
+        if node.id in _OHLCV_COLUMNS:
+            return None
         period = name_periods.get(node.id)
         if period is not None:
             return float(period)
@@ -3382,13 +3564,34 @@ def _bind_tuple_unpack(
             ...
 
     no longer drops to UNKNOWN_LOW_COVERAGE.
+
+    Always clears any prior indicator binding for each unpack target
+    name first. Without that, a sequence like ::
+
+        upper = sma(close, 2)
+        upper, lower = self.custom_levels(bar)   # un-modellable RHS
+        if close > upper:
+
+    would leave ``upper`` bound to the SMA from the first assignment
+    and the probe would evaluate the predicate against the wrong
+    indicator. The drop-stale rule mirrors the Name-target path in
+    ``_apply_assign_inplace``.
     """
+    elements = list(getattr(target, "elts", []))
+    # Drop stale bindings up front: every Name in the tuple/list target
+    # is being reassigned, so any prior binding on those names is no
+    # longer current. Subsequent recognition logic re-establishes
+    # bindings on success; on any early-return path the names stay
+    # cleared so downstream lookups fall through.
+    for elem in elements:
+        if isinstance(elem, ast.Name):
+            bindings.pop(elem.id, None)
+            name_periods.pop(elem.id, None)
     if not isinstance(value, ast.Call):
         return
     func_name = _func_name(value.func)
     if func_name is None or func_name not in _TUPLE_INDICATORS:
         return
-    elements = list(getattr(target, "elts", []))
     if not elements:
         return
     sig_kind, helper, max_idx, kwarg_names = _TUPLE_INDICATORS[func_name]
