@@ -29,7 +29,7 @@ from investment_team.models import (
     LikelyBlocker,
     SubconditionCoverage,
 )
-from investment_team.strategy_lab.executor import indicators as _ind
+from investment_team.strategy_lab.executor.indicators import INDICATORS
 
 logger = logging.getLogger(__name__)
 
@@ -45,40 +45,6 @@ _CMP_OPS: Dict[type, Callable[[pd.Series, pd.Series], pd.Series]] = {
     ast.GtE: lambda a, b: a >= b,
     ast.Eq: lambda a, b: a == b,
     ast.NotEq: lambda a, b: a != b,
-}
-
-# Single-series indicator helpers (take a Series + optional period).
-_SERIES_INDICATORS: Dict[str, Callable[..., pd.Series]] = {
-    "sma": _ind.sma,
-    "ema": _ind.ema,
-    "rsi": _ind.rsi,
-}
-
-# Indicators that take (high, low, close[, ...]) and return a Series.
-_HLC_INDICATORS: Dict[str, Callable[..., pd.Series]] = {
-    "atr": _ind.atr,
-    "adx": _ind.adx,
-}
-
-# Indicators that take (high, low, close, volume) and return a Series.
-_OHLCV_INDICATORS: Dict[str, Callable[..., pd.Series]] = {
-    "vwap": _ind.vwap,
-}
-
-# Tuple-returning helpers (one Series per element). We only recognise
-# them inside a Subscript with a constant integer slice — bare calls are
-# ambiguous because the user hasn't picked which leg to compare.
-# Each entry: (signature_kind, helper, max_idx, kwarg_names).
-#   signature_kind: "series" → helper(series, *period_args)
-#                   "hlc"    → helper(high, low, close, *period_args)
-#   kwarg_names: the kwarg labels the helper accepts after its data
-#                inputs, in declared order. Used to forward strategy-
-#                provided kwargs (e.g. ``bollinger_bands(close, num_std=0.1)``)
-#                so probe results match the strategy's actual thresholds.
-_TUPLE_INDICATORS: Dict[str, tuple] = {
-    "macd": ("series", _ind.macd, 3, ("fast", "slow", "signal")),
-    "bollinger_bands": ("series", _ind.bollinger_bands, 3, ("period", "num_std")),
-    "stochastic": ("hlc", _ind.stochastic, 2, ("k_period", "d_period")),
 }
 
 
@@ -844,11 +810,14 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # this dict, so without it ``ZERO_LINE = 0; if
                 # macd(close)[0] > ZERO_LINE:`` and similar predicates
                 # would be dropped and the probe would degenerate to
-                # ``UNKNOWN_LOW_COVERAGE``. Period-use sites
-                # (:func:`_resolve_period_arg`) re-validate
-                # ``> 0`` and ``is_integer()`` so a non-positive or
-                # float threshold is never misapplied as an indicator
-                # window.
+                # ``UNKNOWN_LOW_COVERAGE``. Indicator dispatch in
+                # :func:`_indicator_call` forwards these literals
+                # straight to the helper (matching the runtime), so a
+                # threshold-shaped binding (e.g. ``ZERO_LINE = 0``)
+                # only matters in operand comparisons, not in window
+                # arguments — strategies that pass non-positive or
+                # float values to a helper will fail identically in
+                # the probe and the runtime.
                 v = _numeric_literal(value, name_periods)
                 if v is not None:
                     name_periods[target.id] = int(v) if float(v).is_integer() else float(v)
@@ -3226,173 +3195,91 @@ def _indicator_call(
     name_periods: Dict[str, int],
     name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
 ) -> Optional[Callable[[pd.DataFrame], pd.Series]]:
-    # Tuple-returning helpers are only recognised inside a Subscript with
-    # a constant integer index — without one we can't tell which leg the
-    # user meant to compare against.
-    if isinstance(node, ast.Subscript):
-        return _tuple_indicator_subscript(node, name_periods, name_evaluators)
+    """Resolve an AST call (or ``Subscript[Call, idx]``) to a per-bar evaluator.
 
-    if not isinstance(node, ast.Call):
+    Tuple-returning helpers are only recognised inside a ``Subscript``
+    with a constant non-negative int slice — bare calls are ambiguous
+    because the user hasn't picked which leg to compare against. The
+    inverse holds for single-Series helpers: subscripting them is a
+    user error we don't model. Returns ``None`` on any unresolvable
+    input so the caller drops the comparison instead of silently
+    substituting the helper's default (which would describe coverage
+    of a different indicator from the runtime).
+    """
+    if isinstance(node, ast.Subscript):
+        if not isinstance(node.value, ast.Call):
+            return None
+        slc = node.slice
+        if not (
+            isinstance(slc, ast.Constant)
+            and isinstance(slc.value, int)
+            and not isinstance(slc.value, bool)
+        ):
+            return None
+        call = node.value
+        idx: Optional[int] = slc.value
+    elif isinstance(node, ast.Call):
+        call = node
+        idx = None
+    else:
         return None
-    func_name = _func_name(node.func)
+
+    func_name = _func_name(call.func)
     if func_name is None:
         return None
-
-    if func_name in _SERIES_INDICATORS:
-        helper = _SERIES_INDICATORS[func_name]
-        series_input = _resolve_series_input(node, name_evaluators)
-        if series_input is None:
-            # Explicit but unrecognised input (e.g. a custom series).
-            # Drop rather than substitute close — see _resolve_series_input.
-            return None
-        # Series helpers: rsi(series, period), sma(series, period), ...
-        period = _resolve_period_arg(node, name_periods, positional_index=1)
-        # If the strategy passed an explicit period that we can't
-        # resolve to a positive integer literal (e.g. ``sma(close,
-        # PERIOD + 1)`` or ``rsi(close, dynamic_window)``), drop the
-        # indicator rather than silently substitute the helper's
-        # default. Falling through to ``helper(s)`` would either
-        # TypeError (for helpers without defaults — the aggregator
-        # then forces the mask to all-False and the predicate
-        # falsely flags ``INDICATOR_FILTER_TOO_RESTRICTIVE``) or
-        # silently evaluate a different period from the runtime.
-        if period is None and _period_arg_present(node, positional_index=1):
-            return None
-
-        def _eval_series(df: pd.DataFrame) -> pd.Series:
-            s = series_input(df)
-            if period is not None:
-                return helper(s, int(period))
-            return helper(s)
-
-        return _eval_series
-
-    if func_name in _HLC_INDICATORS:
-        helper = _HLC_INDICATORS[func_name]
-        # HLC helpers: atr(high, low, close, period), adx(high, low, close, period).
-        # The period is the 4th positional arg (index 3), not the 2nd.
-        period = _resolve_period_arg(node, name_periods, positional_index=3)
-        if period is None and _period_arg_present(node, positional_index=3):
-            return None
-
-        # Resolve each of the three positional series inputs. If the
-        # strategy provided an explicit arg the probe can't reduce to
-        # a known OHLCV column or bound local series, decline rather
-        # than silently substitute the default — without this,
-        # ``atr(low, low, close, 14)`` (or a synthetic series via a
-        # local) was evaluated against ``df['high']`` and the report
-        # described coverage of a different indicator from the
-        # runtime.
-        high_in = _positional_series_input(node, 0, "high", name_evaluators)
-        low_in = _positional_series_input(node, 1, "low", name_evaluators)
-        close_in = _positional_series_input(node, 2, "close", name_evaluators)
-        if high_in is None or low_in is None or close_in is None:
-            return None
-
-        def _eval_hlc(df: pd.DataFrame) -> pd.Series:
-            high = high_in(df)
-            low = low_in(df)
-            close = close_in(df)
-            if period is not None:
-                return helper(high, low, close, int(period))
-            return helper(high, low, close)
-
-        return _eval_hlc
-
-    if func_name in _OHLCV_INDICATORS:
-        helper = _OHLCV_INDICATORS[func_name]
-
-        # vwap(high, low, close, volume) — no scalar period, just OHLCV inputs.
-        # Same explicit-arg validation as HLC.
-        high_in = _positional_series_input(node, 0, "high", name_evaluators)
-        low_in = _positional_series_input(node, 1, "low", name_evaluators)
-        close_in = _positional_series_input(node, 2, "close", name_evaluators)
-        volume_in = _positional_series_input(node, 3, "volume", name_evaluators)
-        if high_in is None or low_in is None or close_in is None or volume_in is None:
-            return None
-
-        def _eval_ohlcv(df: pd.DataFrame) -> pd.Series:
-            return helper(high_in(df), low_in(df), close_in(df), volume_in(df))
-
-        return _eval_ohlcv
-
-    return None
-
-
-def _tuple_indicator_subscript(
-    node: ast.Subscript,
-    name_periods: Dict[str, int],
-    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
-) -> Optional[Callable[[pd.DataFrame], pd.Series]]:
-    """Resolve ``bollinger_bands(close, 20)[0]`` and similar.
-
-    Recognised only when the inner ``Call`` targets a tuple-returning
-    helper and the slice is a constant non-negative integer within the
-    helper's tuple arity.
-    """
-    if not isinstance(node.value, ast.Call):
-        return None
-    func_name = _func_name(node.value.func)
-    if func_name is None or func_name not in _TUPLE_INDICATORS:
-        return None
-    slc = node.slice
-    if not (
-        isinstance(slc, ast.Constant)
-        and isinstance(slc.value, int)
-        and not isinstance(slc.value, bool)
-    ):
+    spec = INDICATORS.get(func_name)
+    if spec is None:
         return None
 
-    sig_kind, helper, max_idx, kwarg_names = _TUPLE_INDICATORS[func_name]
-    idx = slc.value
-    if idx < 0 or idx >= max_idx:
+    is_tuple_call = idx is not None
+    if is_tuple_call != (spec.tuple_arity is not None):
+        # ``sma(close, 20)[0]`` (single-Series subscripted) and
+        # ``macd(close, 12, 26, 9)`` (tuple bare-called) are both
+        # rejected — we'd be guessing the user's intent.
+        return None
+    if is_tuple_call and not (0 <= idx < spec.tuple_arity):
         return None
 
-    call = node.value
-    # ``positional_start`` is the AST arg index of the first scalar config
-    # (period / num_std / fast / etc.) — i.e. one past the data inputs.
-    positional_start = 1 if sig_kind == "series" else 3
-    extra_pos = _trailing_numeric_args(call, name_periods, start_index=positional_start)
+    resolved_inputs: List[Callable[[pd.DataFrame], pd.Series]] = []
+    for slot_idx, kind in enumerate(spec.data_inputs):
+        if kind == "series":
+            resolved = _resolve_series_input(call, name_evaluators)
+        else:
+            resolved = _positional_series_input(call, slot_idx, kind, name_evaluators)
+        if resolved is None:
+            # Explicit but un-modellable input (e.g. ``atr(low, low,
+            # close, 14)`` — second arg is ``low`` but we can't model
+            # synthesised series). Decline rather than substitute the
+            # default OHLCV column.
+            return None
+        resolved_inputs.append(resolved)
+
+    extra_pos = _trailing_numeric_args(call, name_periods, start_index=len(spec.data_inputs))
     if extra_pos is None:
-        # Strategy passed an explicit positional config we can't
-        # resolve (e.g. ``macd(close, PERIOD + 1)``). Decline rather
-        # than substitute the helper's default — same guard the
-        # series / HLC indicator path uses for unresolved periods.
+        # Strategy passed an explicit trailing positional config the
+        # probe can't reduce to a literal (e.g. ``sma(close, PERIOD +
+        # 1)`` or ``macd(close, dynamic_window)``). Drop rather than
+        # silently use the helper's default.
         return None
-    extra_kwargs = _resolve_known_kwargs(call, name_periods, kwarg_names)
+    extra_kwargs = _resolve_known_kwargs(call, name_periods, spec.kwarg_names)
     if extra_kwargs is None:
-        # Unresolvable known kwarg, e.g.
+        # Same guard for unresolvable known kwargs, e.g.
         # ``bollinger_bands(close, 20, num_std=self.band_width)``.
-        # Decline so the comparison drops rather than evaluating the
-        # helper with its default for the unresolved kwarg.
         return None
 
-    if sig_kind == "series":
-        series_input = _resolve_series_input(call, name_evaluators)
-        if series_input is None:
-            return None
+    helper = spec.helper
+    inputs = tuple(resolved_inputs)
+    if idx is None:
 
-        def _eval_tuple_series(df: pd.DataFrame) -> pd.Series:
-            return helper(series_input(df), *extra_pos, **extra_kwargs)[idx]
+        def _eval(df: pd.DataFrame) -> pd.Series:
+            return helper(*(fn(df) for fn in inputs), *extra_pos, **extra_kwargs)
 
-        return _eval_tuple_series
+    else:
 
-    # ``sig_kind == "hlc"`` (stochastic): honour explicit positional
-    # series inputs the same way the non-tuple HLC path does. Without
-    # this, ``stochastic(high, high, close, 3)[0]`` (or any synthetic
-    # series) was silently evaluated against the default
-    # high/low/close columns — measuring a different indicator than
-    # the runtime.
-    high_in = _positional_series_input(call, 0, "high", name_evaluators)
-    low_in = _positional_series_input(call, 1, "low", name_evaluators)
-    close_in = _positional_series_input(call, 2, "close", name_evaluators)
-    if high_in is None or low_in is None or close_in is None:
-        return None
+        def _eval(df: pd.DataFrame) -> pd.Series:
+            return helper(*(fn(df) for fn in inputs), *extra_pos, **extra_kwargs)[idx]
 
-    def _eval_tuple_hlc(df: pd.DataFrame) -> pd.Series:
-        return helper(high_in(df), low_in(df), close_in(df), *extra_pos, **extra_kwargs)[idx]
-
-    return _eval_tuple_hlc
+    return _eval
 
 
 def _trailing_numeric_args(
@@ -3590,74 +3477,51 @@ def _bind_tuple_unpack(
     if not isinstance(value, ast.Call):
         return
     func_name = _func_name(value.func)
-    if func_name is None or func_name not in _TUPLE_INDICATORS:
+    spec = INDICATORS.get(func_name) if func_name else None
+    if spec is None or spec.tuple_arity is None:
         return
     if not elements:
         return
-    sig_kind, helper, max_idx, kwarg_names = _TUPLE_INDICATORS[func_name]
-    if len(elements) > max_idx:
+    if len(elements) > spec.tuple_arity:
         # Unpacking would TypeError at runtime — don't bind anything.
         return
-    positional_start = 1 if sig_kind == "series" else 3
-    extra_pos = _trailing_numeric_args(value, name_periods, start_index=positional_start)
+
+    extra_pos = _trailing_numeric_args(value, name_periods, start_index=len(spec.data_inputs))
     if extra_pos is None:
         # Unpacked tuple-indicator with an unresolved positional config
         # (e.g. ``upper, _, _ = bollinger_bands(close, PERIOD + 1)``).
         # Don't bind anything — downstream lookups fall through and the
         # comparison gets dropped rather than evaluating against a
-        # different indicator than the runtime.
+        # different indicator from the runtime.
         return
-    extra_kwargs = _resolve_known_kwargs(value, name_periods, kwarg_names)
+    extra_kwargs = _resolve_known_kwargs(value, name_periods, spec.kwarg_names)
     if extra_kwargs is None:
         # Same guard for unresolvable known kwargs in the unpack form.
         return
 
-    if sig_kind == "series":
-        series_input = _resolve_series_input(value, bindings)
-        if series_input is None:
+    resolved_inputs: List[Callable[[pd.DataFrame], pd.Series]] = []
+    for slot_idx, kind in enumerate(spec.data_inputs):
+        if kind == "series":
+            resolved = _resolve_series_input(value, bindings)
+        else:
+            # HLC slot for ``stochastic``: honour explicit positional
+            # series args the same way ``_indicator_call`` does so
+            # ``k, d = stochastic(low, low, close, 3)`` declines rather
+            # than silently probing the default high/low/close columns.
+            resolved = _positional_series_input(value, slot_idx, kind, bindings)
+        if resolved is None:
             return
-        for idx, elem in enumerate(elements):
-            if not isinstance(elem, ast.Name):
-                continue
+        resolved_inputs.append(resolved)
 
-            def _make(idx=idx, helper=helper, sin=series_input, ep=extra_pos, ek=extra_kwargs):
-                def _eval(df: pd.DataFrame) -> pd.Series:
-                    return helper(sin(df), *ep, **ek)[idx]
-
-                return _eval
-
-            bindings[elem.id] = _make()
-        return
-
-    # sig_kind == "hlc": resolve the call's explicit positional
-    # series args (or decline) the same way the non-tuple HLC path
-    # does. Without this ``k, d = stochastic(low, low, close, 3)``
-    # was probed against the default high/low/close columns, computing
-    # coverage for a different indicator from the runtime.
-    high_in = _positional_series_input(value, 0, "high", bindings)
-    low_in = _positional_series_input(value, 1, "low", bindings)
-    close_in = _positional_series_input(value, 2, "close", bindings)
-    if high_in is None or low_in is None or close_in is None:
-        # Explicit but unrecognised input — don't bind any of the
-        # unpacked names; downstream lookups fall through and the
-        # comparison gets dropped rather than evaluating against a
-        # different indicator than the runtime.
-        return
+    helper = spec.helper
+    inputs = tuple(resolved_inputs)
     for idx, elem in enumerate(elements):
         if not isinstance(elem, ast.Name):
             continue
 
-        def _make(
-            idx=idx,
-            helper=helper,
-            hi=high_in,
-            lo=low_in,
-            cl=close_in,
-            ep=extra_pos,
-            ek=extra_kwargs,
-        ):
+        def _make(idx=idx, helper=helper, ins=inputs, ep=extra_pos, ek=extra_kwargs):
             def _eval(df: pd.DataFrame) -> pd.Series:
-                return helper(hi(df), lo(df), cl(df), *ep, **ek)[idx]
+                return helper(*(fn(df) for fn in ins), *ep, **ek)[idx]
 
             return _eval
 
@@ -3840,53 +3704,3 @@ def _resolve_series_input(
             return _from_binding
 
     return None
-
-
-def _resolve_period_arg(
-    call: ast.Call,
-    name_periods: Dict[str, int],
-    *,
-    positional_index: int = 1,
-) -> Optional[int]:
-    """Pull the period (integer) from positional or kwarg form.
-
-    ``positional_index`` is the index of the period argument in the
-    helper's positional signature: 1 for series helpers like
-    ``rsi(series, period)``, 3 for HLC helpers like
-    ``atr(high, low, close, period)``.
-
-    Periods must be positive integers — ``name_periods`` may now hold
-    non-integer scalar bindings (e.g. ``limit = 100.5``) so threshold
-    locals can resolve in operand-side comparisons. Validate
-    ``is_integer()`` at lookup time so a float threshold is never
-    silently truncated and applied as an indicator window.
-    """
-    for kw in call.keywords:
-        if kw.arg in {"period", "length", "window", "n"}:
-            value = _numeric_literal(kw.value, name_periods)
-            if value is not None and value > 0 and float(value).is_integer():
-                return int(value)
-    if len(call.args) > positional_index:
-        value = _numeric_literal(call.args[positional_index], name_periods)
-        if value is not None and value > 0 and float(value).is_integer():
-            return int(value)
-    return None
-
-
-def _period_arg_present(call: ast.Call, *, positional_index: int = 1) -> bool:
-    """Return True iff the call supplies an explicit period argument.
-
-    Matches the same positional and kwarg slots as
-    :func:`_resolve_period_arg` but ignores the value's resolvability —
-    the caller uses this to distinguish "no period passed" (use
-    helper default) from "period passed but unresolved" (drop the
-    indicator). Without this distinction, ``sma(close, PERIOD + 1)``
-    falls through to ``helper(s)`` which either TypeErrors (for
-    helpers with no default — the aggregator then forces the mask
-    to all-False) or silently evaluates a different period from the
-    runtime.
-    """
-    for kw in call.keywords:
-        if kw.arg in {"period", "length", "window", "n"}:
-            return True
-    return len(call.args) > positional_index
