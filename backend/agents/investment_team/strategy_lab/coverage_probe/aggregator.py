@@ -73,6 +73,15 @@ _CATEGORY_PRIORITY: tuple[CoverageCategory, ...] = (
     CoverageCategory.COVERAGE_OK,
 )
 
+# Import-time exhaustiveness check. A future ``CoverageCategory`` value
+# not added to ``_CATEGORY_PRIORITY`` would otherwise trigger a
+# ``ValueError`` from ``tuple.index`` deep inside the orchestrator at
+# runtime. Catching it here keeps the failure local to this module.
+assert set(_CATEGORY_PRIORITY) == set(CoverageCategory), (
+    "Aggregator _CATEGORY_PRIORITY must list every CoverageCategory value; "
+    f"missing: {set(CoverageCategory) - set(_CATEGORY_PRIORITY)}"
+)
+
 #: Static-probe categories that make running the indicator probe pointless.
 #: A required warm-up window longer than history, or a target symbol that
 #: isn't in the fetched universe, are absolute blockers: even if the

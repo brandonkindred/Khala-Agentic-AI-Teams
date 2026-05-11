@@ -86,6 +86,35 @@ WINNING_THRESHOLD = 8.0
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
 
 
+def _maybe_attach_coverage_report(
+    *,
+    metrics: BacktestResult,
+    spec: StrategySpec,
+    market_data: Dict[str, Any],
+    config: BacktestConfig,
+    exec_result: StrategyRunResult,
+) -> None:
+    """Run the #451 coverage stage and stamp the report onto ``metrics``.
+
+    The ``spec`` argument MUST carry the same ``strategy_code`` that was
+    handed to ``run_strategy_code`` to produce ``exec_result``. The
+    alignment and zero-trade-repair paths use a ``proposed_spec`` variant
+    of the surrounding spec; pass that, not the loop-level ``spec``,
+    otherwise the static probe will analyse stale source.
+
+    No-ops when ``should_run_probes`` says the run isn't zero/low-trade —
+    successful runs keep ``metrics.coverage_report = None`` and pay no
+    probe cost.
+    """
+    if should_run_probes(exec_result.execution_diagnostics):
+        metrics.coverage_report = run_coverage_stage(
+            spec=spec,
+            market_data=market_data,
+            config=config,
+            exec_result=exec_result,
+        )
+
+
 def _format_execution_diagnostics(
     diagnostics: Optional[BacktestExecutionDiagnostics],
 ) -> str:
@@ -419,15 +448,14 @@ class StrategyLabOrchestrator:
             )
 
             # Issue #451 — attach a deterministic CoverageReport when the
-            # run is zero/low-trade. Successful runs bypass the entire
-            # probe stage (no module work, no probe imports executed).
-            if should_run_probes(exec_result.execution_diagnostics):
-                metrics.coverage_report = run_coverage_stage(
-                    spec=spec,
-                    market_data=market_data,
-                    config=config,
-                    exec_result=exec_result,
-                )
+            # run is zero/low-trade. Successful runs pay no probe cost.
+            _maybe_attach_coverage_report(
+                metrics=metrics,
+                spec=spec,
+                market_data=market_data,
+                config=config,
+                exec_result=exec_result,
+            )
 
             anomaly_gates = self.anomaly_detector.check(
                 metrics,
@@ -735,13 +763,16 @@ class StrategyLabOrchestrator:
 
                 # Issue #451 — alignment re-backtest path also surfaces a
                 # CoverageReport when the fix produced zero/low trades.
-                if should_run_probes(align_exec.execution_diagnostics):
-                    new_metrics.coverage_report = run_coverage_stage(
-                        spec=spec,
-                        market_data=market_data,
-                        config=config,
-                        exec_result=align_exec,
-                    )
+                # Pass ``proposed_spec`` (which carries ``proposed_code``)
+                # — the loop-level ``spec`` still holds the pre-alignment
+                # source, which would mislead the static probe.
+                _maybe_attach_coverage_report(
+                    metrics=new_metrics,
+                    spec=proposed_spec,
+                    market_data=market_data,
+                    config=config,
+                    exec_result=align_exec,
+                )
 
                 # ── Anomaly gates on the post-fix backtest ────────────
                 # The main refinement loop runs these checks after every
@@ -1202,13 +1233,13 @@ class StrategyLabOrchestrator:
 
         # Issue #451 — repair re-execution path also attaches a
         # CoverageReport when the proposed fix produces zero/low trades.
-        if should_run_probes(repair_exec.execution_diagnostics):
-            new_metrics.coverage_report = run_coverage_stage(
-                spec=proposed_spec,
-                market_data=market_data,
-                config=config,
-                exec_result=repair_exec,
-            )
+        _maybe_attach_coverage_report(
+            metrics=new_metrics,
+            spec=proposed_spec,
+            market_data=market_data,
+            config=config,
+            exec_result=repair_exec,
+        )
 
         # ── Anomaly recheck ──────────────────────────────────────────
         new_anomaly_gates = self.anomaly_detector.check(

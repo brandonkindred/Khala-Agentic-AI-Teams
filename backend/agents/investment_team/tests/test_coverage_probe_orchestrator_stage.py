@@ -541,3 +541,145 @@ def test_coverage_stage_is_deterministic() -> None:
         run_strategy_code_fn=_never_called_run_strategy_code,
     )
     assert first.model_dump() == second.model_dump()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Module-level exhaustiveness guard
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_category_priority_covers_every_coverage_category() -> None:
+    # The aggregator module asserts this at import time, but the
+    # explicit test pins the contract so a future enum addition fails
+    # here with a clear name rather than as an opaque ValueError from
+    # tuple.index() deep inside the orchestrator.
+    assert set(agg_mod._CATEGORY_PRIORITY) == set(CoverageCategory)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Orchestrator integration — helper wiring
+#
+# The bug these tests guard against: each of the three orchestrator
+# call sites (primary / alignment / repair) must pass the spec that
+# carries the same ``strategy_code`` the executor actually ran. The
+# alignment site is the failure mode — it has both ``spec`` (stale)
+# and ``proposed_spec`` (current) in scope.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_maybe_attach_coverage_report_no_ops_when_gate_off() -> None:
+    from investment_team.models import BacktestResult
+    from investment_team.strategy_lab.orchestrator import _maybe_attach_coverage_report
+
+    metrics = BacktestResult(
+        total_return_pct=5.0,
+        annualized_return_pct=5.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=2.0,
+        win_rate_pct=55.0,
+        profit_factor=1.5,
+    )
+    # Healthy diagnostics — gate is off.
+    _maybe_attach_coverage_report(
+        metrics=metrics,
+        spec=_spec("X = 1\n"),
+        market_data={"AAPL": _flat_df(50)},
+        config=_config(),
+        exec_result=_exec_result(_diag(closed=10)),
+    )
+    assert metrics.coverage_report is None
+
+
+def test_maybe_attach_coverage_report_runs_stage_when_gate_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.models import BacktestResult
+    from investment_team.strategy_lab import orchestrator as orch_mod
+    from investment_team.strategy_lab.orchestrator import _maybe_attach_coverage_report
+
+    captured: List[Dict[str, Any]] = []
+
+    def _spy_run_coverage_stage(**kwargs: Any) -> CoverageReport:
+        captured.append(kwargs)
+        return _report(CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE)
+
+    monkeypatch.setattr(orch_mod, "run_coverage_stage", _spy_run_coverage_stage)
+
+    metrics = BacktestResult(
+        total_return_pct=0.0,
+        annualized_return_pct=0.0,
+        volatility_pct=0.0,
+        sharpe_ratio=0.0,
+        max_drawdown_pct=0.0,
+        win_rate_pct=0.0,
+        profit_factor=0.0,
+    )
+    spec = _spec("Y = 2\n")
+    _maybe_attach_coverage_report(
+        metrics=metrics,
+        spec=spec,
+        market_data={"AAPL": _flat_df(50)},
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+    )
+    assert metrics.coverage_report is not None
+    assert metrics.coverage_report.coverage_category is (
+        CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+    )
+    assert len(captured) == 1
+    assert captured[0]["spec"] is spec
+
+
+def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
+    # Source-level regression: every ``_maybe_attach_coverage_report``
+    # call site must pair an ``exec_result`` with the spec whose
+    # ``strategy_code`` matches the code that produced it. The
+    # alignment-site bug was passing the loop-level ``spec`` alongside
+    # ``align_exec`` (where ``proposed_spec`` is the source of truth).
+    # Lock the AST shape so a future refactor that re-introduces the
+    # drift fails loudly here.
+    import ast
+    import inspect
+
+    from investment_team.strategy_lab import orchestrator as orch_mod
+
+    source = inspect.getsource(orch_mod)
+    tree = ast.parse(source)
+
+    # The contract: exec_result kwarg names must each have a
+    # matching spec kwarg name following a known-good pairing rule.
+    expected_spec_for_exec = {
+        "exec_result": "spec",
+        "align_exec": "proposed_spec",
+        "repair_exec": "proposed_spec",
+    }
+
+    sites: List[Dict[str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name != "_maybe_attach_coverage_report":
+            continue
+        kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        spec_arg = kwargs.get("spec")
+        exec_arg = kwargs.get("exec_result")
+        assert isinstance(spec_arg, ast.Name), "spec kwarg must be a bare Name reference"
+        assert isinstance(exec_arg, ast.Name), "exec_result kwarg must be a bare Name reference"
+        sites.append({"spec": spec_arg.id, "exec_result": exec_arg.id})
+
+    assert len(sites) == 3, f"expected 3 _maybe_attach_coverage_report sites, found {sites}"
+    for site in sites:
+        expected_spec = expected_spec_for_exec.get(site["exec_result"])
+        assert expected_spec is not None, (
+            f"unknown exec_result variable {site['exec_result']!r}; if a new "
+            f"orchestrator call site is intentional, update "
+            f"expected_spec_for_exec in this test"
+        )
+        assert site["spec"] == expected_spec, (
+            f"_maybe_attach_coverage_report site mismatched spec/exec_result: "
+            f"got spec={site['spec']!r} with exec_result={site['exec_result']!r}; "
+            f"expected spec={expected_spec!r}"
+        )
