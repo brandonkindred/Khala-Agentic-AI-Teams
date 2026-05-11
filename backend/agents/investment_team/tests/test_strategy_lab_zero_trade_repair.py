@@ -21,6 +21,8 @@ from investment_team.market_data_service import OHLCVBar
 from investment_team.models import (
     BacktestConfig,
     BacktestExecutionDiagnostics,
+    CoverageCategory,
+    CoverageReport,
     StrategySpec,
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
@@ -159,12 +161,15 @@ class _StubZeroTradeRepairAgent:
         code: str,
         diagnostics: BacktestExecutionDiagnostics,
         prior_attempts: Optional[List[str]] = None,
+        *,
+        coverage_report: Optional[CoverageReport] = None,
     ) -> ZeroTradeRepairReport:
         self.calls.append(
             {
                 "code": code,
                 "category": diagnostics.zero_trade_category,
                 "prior_attempts": list(prior_attempts or []),
+                "coverage_report": coverage_report,
             }
         )
         if self._raise is not None:
@@ -224,6 +229,7 @@ def _drive_repair(
     market_data: Optional[Dict[str, List[OHLCVBar]]] = None,
     config: Optional[BacktestConfig] = None,
     zero_trade_attempts: Optional[List[str]] = None,
+    coverage_report: Optional[CoverageReport] = None,
 ) -> tuple[_ZeroTradeRepairOutcome, List[tuple[str, Dict[str, Any]]], List[str]]:
     """Convenience wrapper around ``orch._run_zero_trade_repair``.
 
@@ -250,6 +256,7 @@ def _drive_repair(
         zero_trade_attempts=attempts,
         round_num=0,
         emit=emit,
+        coverage_report=coverage_report,
     )
     return outcome, events, attempts
 
@@ -649,3 +656,64 @@ def test_quality_gate_results_are_typed() -> None:
         emit=lambda _phase, _data: None,
     )
     assert all(isinstance(g, QualityGateResult) for g in outcome.new_gates)
+
+
+# ---------------------------------------------------------------------------
+# Issue #452 — orchestrator forwards CoverageReport to the repair agent.
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_report_is_forwarded_to_repair_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the orchestrator has attached a CoverageReport (#451) to the
+    failing run's metrics, ``_run_zero_trade_repair`` must forward it to
+    the repair agent so the prompt sees the static probe's verdict
+    alongside the executor diagnostics.
+    """
+    report = CoverageReport(
+        coverage_category=CoverageCategory.ENTRY_CONDITION_NEVER_TRUE,
+        summary="RSI<30 never true on 20 bars",
+        bars_checked=20,
+        symbols_checked=1,
+    )
+    orch, repair_stub, _sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="NO_ORDERS_EMITTED",
+                evidence="entry guard never true",
+                proposed_code=None,  # decline; falls through cleanly
+            ),
+        ],
+    )
+
+    _drive_repair(orch, coverage_report=report)
+
+    assert len(repair_stub.calls) == 1
+    forwarded = repair_stub.calls[0]["coverage_report"]
+    assert forwarded is report
+
+
+def test_repair_agent_receives_none_when_no_coverage_attached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: the repair agent must still be invoked with
+    ``coverage_report=None`` when the orchestrator did not attach a probe
+    output (e.g. when probes are gated off). Strictly additive (#452).
+    """
+    orch, repair_stub, _sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="NO_ORDERS_EMITTED",
+                evidence="entry guard never true",
+                proposed_code=None,
+            ),
+        ],
+    )
+
+    _drive_repair(orch)  # no coverage_report kwarg
+
+    assert len(repair_stub.calls) == 1
+    assert repair_stub.calls[0]["coverage_report"] is None

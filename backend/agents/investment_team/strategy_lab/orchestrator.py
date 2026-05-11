@@ -42,6 +42,7 @@ from ..models import (
     BacktestExecutionDiagnostics,
     BacktestRecord,
     BacktestResult,
+    CoverageReport,
     StrategyLabRecord,
     StrategySpec,
     TradeRecord,
@@ -55,7 +56,7 @@ from .agents.analysis import AnalysisAgent
 from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent, ZeroTradeRepairReport
-from .coverage_probe import run_coverage_stage, should_run_probes
+from .coverage_probe import format_coverage_report, run_coverage_stage, should_run_probes
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_safety import CodeSafetyChecker
@@ -463,6 +464,7 @@ class StrategyLabOrchestrator:
                 trades,
                 dsr_aware=config.walk_forward_enabled,
                 diagnostics=exec_result.execution_diagnostics,
+                coverage_report=metrics.coverage_report,
             )
             for g in anomaly_gates:
                 g.refinement_round = round_num
@@ -487,6 +489,9 @@ class StrategyLabOrchestrator:
                     )
                     if diagnostics_block:
                         failure_details = f"{failure_details}\n{diagnostics_block}"
+                    coverage_block = format_coverage_report(metrics.coverage_report)
+                    if coverage_block:
+                        failure_details = f"{failure_details}\n{coverage_block}"
 
                     # Issue #405 — specialized zero-trade repair branch.
                     # If the critical anomaly carries a deterministic
@@ -507,6 +512,7 @@ class StrategyLabOrchestrator:
                             spec=spec,
                             code=code,
                             exec_result=exec_result,
+                            coverage_report=metrics.coverage_report,
                             market_data=market_data,
                             config=config,
                             zero_trade_attempts=zero_trade_attempts,
@@ -786,6 +792,7 @@ class StrategyLabOrchestrator:
                     new_trades,
                     dsr_aware=config.walk_forward_enabled,
                     diagnostics=align_exec.execution_diagnostics,
+                    coverage_report=new_metrics.coverage_report,
                 )
                 for g in anomaly_gates:
                     g.refinement_round = align_round
@@ -914,7 +921,12 @@ class StrategyLabOrchestrator:
         if acceptance_results:
             is_winning = execution_succeeded and all(r.passed for r in acceptance_results)
         elif walk_forward_failed and execution_succeeded:
-            fallback_anomalies = self.anomaly_detector.check(metrics, trades, dsr_aware=False)
+            fallback_anomalies = self.anomaly_detector.check(
+                metrics,
+                trades,
+                dsr_aware=False,
+                coverage_report=metrics.coverage_report,
+            )
             fallback_criticals = [
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
             ]
@@ -1072,6 +1084,7 @@ class StrategyLabOrchestrator:
         zero_trade_attempts: List[str],
         round_num: int,
         emit: PhaseCallback,
+        coverage_report: Optional[CoverageReport] = None,
     ) -> _ZeroTradeRepairOutcome:
         """Issue #405 — specialized zero-trade repair attempt.
 
@@ -1107,6 +1120,7 @@ class StrategyLabOrchestrator:
                 spec=spec,
                 code=code,
                 diagnostics=diagnostics,
+                coverage_report=coverage_report,
                 prior_attempts=zero_trade_attempts,
             )
         except Exception as exc:
@@ -1248,6 +1262,7 @@ class StrategyLabOrchestrator:
             new_trades,
             dsr_aware=config.walk_forward_enabled,
             diagnostics=repair_exec.execution_diagnostics,
+            coverage_report=new_metrics.coverage_report,
         )
         for g in new_anomaly_gates:
             g.refinement_round = round_num

@@ -22,7 +22,8 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from strands import Agent
 
-from ...models import BacktestExecutionDiagnostics, StrategySpec, ZeroTradeCategory
+from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
+from ..coverage_probe import format_coverage_report
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ Risk limits: {risk_limits}
 ## Execution Diagnostics
 Zero-trade category: {zero_trade_category}
 Summary: {summary}
-{diagnostics_block}
+{diagnostics_block}{coverage_block}
 
 ## Prior Zero-Trade Repair Attempts ({n_prior_attempts} so far)
 {prior_attempts_text}
@@ -129,6 +130,8 @@ class ZeroTradeRepairAgent:
         code: str,
         diagnostics: BacktestExecutionDiagnostics,
         prior_attempts: Optional[List[str]] = None,
+        *,
+        coverage_report: Optional[CoverageReport] = None,
     ) -> ZeroTradeRepairReport:
         """Run one specialized zero-trade repair attempt.
 
@@ -137,6 +140,13 @@ class ZeroTradeRepairAgent:
         in ``evidence`` so the orchestrator falls through to the generic
         refinement agent (matching the alignment agent's
         no-infinite-loop posture).
+
+        ``coverage_report`` (issue #452) is the deterministic rule-coverage
+        verdict produced by the orchestrator (issue #451) on the same
+        zero/low-trade run. When provided, a compact JSON block is added
+        to the prompt so the repair agent sees the static probe's view
+        alongside the executor diagnostics. ``None`` is rendered as a
+        blank section.
         """
         if diagnostics.zero_trade_category is None:
             # The orchestrator should not have routed a non-zero-trade
@@ -157,6 +167,9 @@ class ZeroTradeRepairAgent:
             else "\n".join(f"  Round {i + 1}: {a}" for i, a in enumerate(prior_attempts))
         )
 
+        coverage_rendered = format_coverage_report(coverage_report)
+        coverage_section = f"\n{coverage_rendered}" if coverage_rendered else ""
+
         user_prompt = _ZERO_TRADE_USER_TEMPLATE.format(
             asset_class=spec.asset_class,
             hypothesis=spec.hypothesis,
@@ -169,6 +182,7 @@ class ZeroTradeRepairAgent:
             zero_trade_category=diagnostics.zero_trade_category,
             summary=diagnostics.summary or "(no executor summary)",
             diagnostics_block=_format_diagnostics_block(diagnostics),
+            coverage_block=coverage_section,
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
             prior_attempts_text=prior_text,
         )

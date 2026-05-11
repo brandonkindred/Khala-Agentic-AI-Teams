@@ -14,6 +14,9 @@ from __future__ import annotations
 from investment_team.models import (
     BacktestExecutionDiagnostics,
     BacktestResult,
+    CoverageCategory,
+    CoverageReport,
+    LikelyBlocker,
     TradeRecord,
 )
 from investment_team.strategy_lab.quality_gates.backtest_anomaly import (
@@ -204,4 +207,108 @@ def test_non_zero_trade_behaviour_unchanged_with_diagnostics_passed():
     without_diag = detector.check(_winning_metrics(), _trades_minimum())
     assert [(r.gate_name, r.passed, r.severity, r.details) for r in with_diag] == [
         (r.gate_name, r.passed, r.severity, r.details) for r in without_diag
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Issue #452 — CoverageReport surfacing on zero-trade gate details.
+# ---------------------------------------------------------------------------
+
+
+def test_zero_trade_details_include_coverage_line_when_report_present():
+    """When the orchestrator attaches a CoverageReport (#451), the zero-trade
+    gate details must carry a single ``Coverage: <category> — <summary>`` line
+    so the persisted ``QualityGateResult`` records the static probe's verdict
+    alongside the executor envelope.
+    """
+    diagnostics = BacktestExecutionDiagnostics(
+        zero_trade_category="NO_ORDERS_EMITTED",
+        summary="Strategy ran 250 bars but never emitted an order.",
+        bars_processed=250,
+    )
+    report = CoverageReport(
+        coverage_category=CoverageCategory.ENTRY_CONDITION_NEVER_TRUE,
+        summary="RSI<25 evaluated false on all 250 bars.",
+        bars_checked=250,
+        symbols_checked=1,
+        likely_blockers=[
+            LikelyBlocker(reason="entry_condition_never_true", evidence="RSI never below 25"),
+        ],
+    )
+    detector = BacktestAnomalyDetector()
+    results = detector.check(_empty_metrics(), [], diagnostics=diagnostics, coverage_report=report)
+    assert len(results) == 1
+    detail = results[0].details
+    assert "Coverage: ENTRY_CONDITION_NEVER_TRUE" in detail
+    assert "RSI<25 evaluated false on all 250 bars." in detail
+    # Existing executor envelope is still rendered.
+    assert "Category: NO_ORDERS_EMITTED" in detail
+    assert "orders_emitted=0" in detail
+
+
+def test_zero_trade_details_coverage_line_when_diagnostics_missing():
+    """Coverage block must still surface when no executor diagnostics
+    envelope is available — the static probe verdict is independent and
+    should not be hidden behind the generic-zero-trade fallback message.
+    """
+    report = CoverageReport(
+        coverage_category=CoverageCategory.WARMUP_EXCEEDS_HISTORY,
+        summary="Strategy needs 200 bars warm-up, only 120 available.",
+        bars_checked=120,
+        warmup_bars_required=200,
+    )
+    detector = BacktestAnomalyDetector()
+    results = detector.check(_empty_metrics(), [], coverage_report=report)
+    detail = results[0].details
+    assert _GENERIC_ZERO_TRADE in detail
+    assert "Coverage: WARMUP_EXCEEDS_HISTORY" in detail
+    assert "Strategy needs 200 bars warm-up, only 120 available." in detail
+
+
+def test_zero_trade_details_unchanged_when_coverage_report_none():
+    """Regression guard: with ``coverage_report=None`` the gate details must
+    be byte-identical to today's output. The new parameter is strictly
+    additive (#452 — non-zero-trade and no-report callers unchanged).
+    """
+    diagnostics = BacktestExecutionDiagnostics(
+        zero_trade_category="NO_ORDERS_EMITTED",
+        summary="Strategy ran 250 bars but never emitted an order.",
+        bars_processed=250,
+    )
+    detector = BacktestAnomalyDetector()
+    with_kw = detector.check(_empty_metrics(), [], diagnostics=diagnostics, coverage_report=None)
+    without_kw = detector.check(_empty_metrics(), [], diagnostics=diagnostics)
+    assert with_kw[0].details == without_kw[0].details
+
+
+def test_zero_trade_details_coverage_line_with_empty_summary():
+    """An attached report with an empty ``summary`` must still render the
+    Coverage line — the category alone is useful and falling back to the
+    sentinel keeps the column shape consistent on disk.
+    """
+    report = CoverageReport(
+        coverage_category=CoverageCategory.TARGET_SYMBOL_MISSING,
+        summary="",
+        bars_checked=0,
+    )
+    detector = BacktestAnomalyDetector()
+    results = detector.check(_empty_metrics(), [], coverage_report=report)
+    detail = results[0].details
+    assert "Coverage: TARGET_SYMBOL_MISSING — (no summary)" in detail
+
+
+def test_non_zero_trade_behaviour_unchanged_with_coverage_passed():
+    """Coverage report is consulted only inside the zero-trade branch — passing
+    it on a successful backtest must not perturb the gate results (mirrors
+    the existing diagnostics regression).
+    """
+    report = CoverageReport(
+        coverage_category=CoverageCategory.COVERAGE_OK,
+        summary="should be ignored when trades exist",
+    )
+    detector = BacktestAnomalyDetector()
+    with_report = detector.check(_winning_metrics(), _trades_minimum(), coverage_report=report)
+    without_report = detector.check(_winning_metrics(), _trades_minimum())
+    assert [(r.gate_name, r.passed, r.severity, r.details) for r in with_report] == [
+        (r.gate_name, r.passed, r.severity, r.details) for r in without_report
     ]

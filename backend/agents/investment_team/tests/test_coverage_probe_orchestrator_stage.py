@@ -1,9 +1,12 @@
 """Orchestrator-wiring tests for the coverage-probe stage (#451).
 
 Tests the orchestrator's ``_maybe_attach_coverage_report`` helper and
-the source-level invariant that each ``run_strategy_code`` call site
-passes a matching spec. Pure aggregator unit tests live in
-``test_coverage_probe_aggregator.py``; pipeline integration in
+the source-level invariants over each ``run_strategy_code`` /
+``anomaly_detector.check`` / ``zero_trade_repair_agent.run`` call site.
+
+Pure aggregator unit tests live in ``test_coverage_probe_aggregator.py``;
+the ``format_coverage_report`` renderer's unit tests live in
+``test_coverage_probe_rendering.py``; full pipeline integration in
 ``test_coverage_probe_stage.py``.
 """
 
@@ -149,3 +152,125 @@ def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
             f"site mismatched spec/exec_result: got spec={site['spec']!r} with "
             f"exec_result={site['exec_result']!r}; expected spec={expected_spec!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Source-level invariants — anomaly-detector + repair-agent forwarding
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _collect_attribute_call_sites(
+    source: str, *, owner_attr: str, method_attr: str
+) -> list[dict[str, Any]]:
+    """Walk ``source`` and return every ``self.{owner_attr}.{method_attr}(...)``
+    call as ``{lineno, kwargs}``. Used by the source-level invariants
+    below; the AST shape keeps tests independent of import paths and
+    avoids false positives from unrelated ``.check``/``.run`` methods
+    (or from an alias on something other than ``self``).
+    """
+    tree = ast.parse(source)
+    sites: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != method_attr:
+            continue
+        owner = func.value
+        if not isinstance(owner, ast.Attribute) or owner.attr != owner_attr:
+            continue
+        # Pin the leftmost token to ``self`` so an unrelated alias
+        # (e.g. ``other.<owner_attr>.<method_attr>``) doesn't match.
+        if not isinstance(owner.value, ast.Name) or owner.value.id != "self":
+            continue
+        sites.append({"lineno": node.lineno, "kwargs": {kw.arg for kw in node.keywords}})
+    return sites
+
+
+_HELPER_SELFTEST_SOURCE = """\
+class Orch:
+    def f(self, report):
+        self.anomaly_detector.check(metrics, [], coverage_report=report)
+        self.anomaly_detector.check(metrics, trades)  # no kwarg
+        self.zero_trade_repair_agent.run(spec, code, coverage_report=report)
+        other.anomaly_detector.check(metrics, [])     # not self → ignored
+        self.something_else.check(metrics, [])        # owner mismatch
+        self.anomaly_detector.run(metrics, [])        # method mismatch
+"""
+
+
+def test_collect_attribute_call_sites_helper_isolates_matching_calls() -> None:
+    """The two invariants below share ``_collect_attribute_call_sites``; an
+    off-by-one in its AST walk would flip both tests together. Pin the
+    helper's behaviour against an inline fixture so a regression points
+    here first.
+    """
+    check_sites = _collect_attribute_call_sites(
+        _HELPER_SELFTEST_SOURCE, owner_attr="anomaly_detector", method_attr="check"
+    )
+    assert len(check_sites) == 2
+    assert {frozenset(s["kwargs"]) for s in check_sites} == {
+        frozenset({"coverage_report"}),
+        frozenset(),
+    }
+
+    run_sites = _collect_attribute_call_sites(
+        _HELPER_SELFTEST_SOURCE, owner_attr="zero_trade_repair_agent", method_attr="run"
+    )
+    assert len(run_sites) == 1
+    assert run_sites[0]["kwargs"] == {"coverage_report"}
+
+
+def test_every_anomaly_detector_check_call_forwards_coverage_report() -> None:
+    """Issue #452 — every ``self.anomaly_detector.check(...)`` call in the
+    orchestrator must forward ``coverage_report=`` so the persisted gate
+    result carries the static probe's verdict (when one is attached).
+
+    Locking this at source level catches the alignment-loop and walk-
+    forward-fallback paths that are not directly exercised by the
+    existing isolated drivers. The site count is pinned (``== 4``) for
+    parity with the sibling ``_maybe_attach_coverage_report`` invariant
+    above — a new call site is a deliberate change and should bump the
+    expected total here intentionally.
+    """
+    sites = _collect_attribute_call_sites(
+        inspect.getsource(orch_mod),
+        owner_attr="anomaly_detector",
+        method_attr="check",
+    )
+    assert len(sites) == 4, (
+        "expected exactly 4 anomaly_detector.check sites (main loop, alignment "
+        "loop, walk-forward-fallback, zero-trade-repair recheck); if a new "
+        f"call site is intentional, bump this assertion. Found: {sites}"
+    )
+    missing = [s for s in sites if "coverage_report" not in s["kwargs"]]
+    assert not missing, (
+        "Every anomaly_detector.check call must forward coverage_report=; "
+        f"missing on lines {[s['lineno'] for s in missing]}"
+    )
+
+
+def test_repair_agent_run_call_forwards_coverage_report() -> None:
+    """Issue #452 — ``self.zero_trade_repair_agent.run(...)`` in the
+    orchestrator must forward ``coverage_report=`` so the agent's prompt
+    sees the static probe's verdict alongside the executor diagnostics.
+
+    Functional coverage of the forwarding lives in
+    ``test_strategy_lab_zero_trade_repair.py``; this AST check locks the
+    contract at the source level too so a refactor that drops the kwarg
+    fails loudly.
+    """
+    sites = _collect_attribute_call_sites(
+        inspect.getsource(orch_mod),
+        owner_attr="zero_trade_repair_agent",
+        method_attr="run",
+    )
+    assert len(sites) == 1, (
+        "expected exactly 1 zero_trade_repair_agent.run site; if a new call "
+        f"site is intentional, bump this assertion. Found: {sites}"
+    )
+    missing = [s for s in sites if "coverage_report" not in s["kwargs"]]
+    assert not missing, (
+        "zero_trade_repair_agent.run must forward coverage_report=; "
+        f"missing on lines {[s['lineno'] for s in missing]}"
+    )

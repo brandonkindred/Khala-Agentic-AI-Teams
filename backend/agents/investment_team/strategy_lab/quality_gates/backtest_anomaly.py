@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from ...models import BacktestExecutionDiagnostics, BacktestResult, TradeRecord
+from ...models import BacktestExecutionDiagnostics, BacktestResult, CoverageReport, TradeRecord
 from .models import QualityGateResult
 
 GATE = "backtest_anomaly"
@@ -14,7 +14,10 @@ _GENERIC_ZERO_TRADE_DETAILS = (
 )
 
 
-def _format_zero_trade_details(diagnostics: Optional[BacktestExecutionDiagnostics]) -> str:
+def _format_zero_trade_details(
+    diagnostics: Optional[BacktestExecutionDiagnostics],
+    coverage_report: Optional[CoverageReport] = None,
+) -> str:
     """Build the ``QualityGateResult.details`` string for a zero-trade backtest.
 
     When ``diagnostics`` carries a deterministic ``zero_trade_category`` (see
@@ -23,8 +26,17 @@ def _format_zero_trade_details(diagnostics: Optional[BacktestExecutionDiagnostic
     enough evidence to repair the entry/exit path. Falls back to the
     historical generic message when diagnostics are missing or the executor
     couldn't classify the failure.
+
+    When ``coverage_report`` is also present (issue #452), append a one-line
+    ``Coverage: <category> — <summary>`` so the persisted gate result records
+    the deterministic rule-coverage verdict from the #451 probe alongside the
+    executor's view.
     """
+    coverage_line = _format_coverage_line(coverage_report)
+
     if diagnostics is None or diagnostics.zero_trade_category is None:
+        if coverage_line:
+            return f"{_GENERIC_ZERO_TRADE_DETAILS} {coverage_line}"
         return _GENERIC_ZERO_TRADE_DETAILS
 
     parts: List[str] = [
@@ -51,7 +63,25 @@ def _format_zero_trade_details(diagnostics: Optional[BacktestExecutionDiagnostic
         )
         parts.append(f"rejection_reasons: {reasons}")
 
+    if coverage_line:
+        parts.append(coverage_line)
+
     return " ".join(parts)
+
+
+def _format_coverage_line(coverage_report: Optional[CoverageReport]) -> str:
+    """One-line ``Coverage: <category> — <summary>`` for the gate details.
+
+    Returns empty string when no report is attached, so callers can treat
+    the line as additive (issue #452). Uses ``.value`` so the persisted
+    string is the bare category name (e.g. ``ENTRY_CONDITION_NEVER_TRUE``)
+    rather than the Python enum repr, matching the existing ``Category:``
+    line style produced by the diagnostics envelope.
+    """
+    if coverage_report is None:
+        return ""
+    summary = coverage_report.summary or "(no summary)"
+    return f"Coverage: {coverage_report.coverage_category.value} — {summary}"
 
 
 class BacktestAnomalyDetector:
@@ -65,6 +95,7 @@ class BacktestAnomalyDetector:
         mode: str = "backtest",
         dsr_aware: bool = False,
         diagnostics: Optional[BacktestExecutionDiagnostics] = None,
+        coverage_report: Optional[CoverageReport] = None,
     ) -> List[QualityGateResult]:
         """Run anomaly checks.
 
@@ -85,6 +116,13 @@ class BacktestAnomalyDetector:
         a deterministic failure category and order counters so the
         refinement agent can target the actual failure mode. Other gates
         ignore it.
+
+        ``coverage_report`` (default None, issue #452) is the optional
+        deterministic rule-coverage probe output produced by the orchestrator
+        (issue #451) on zero/low-trade runs. When provided it adds a single
+        ``Coverage: <category> — <summary>`` line to the zero-trade gate
+        details so the persisted ``QualityGateResult`` carries the static
+        probe's verdict alongside the executor's view. Other gates ignore it.
         """
         results: List[QualityGateResult] = []
 
@@ -96,7 +134,7 @@ class BacktestAnomalyDetector:
                     gate_name=GATE,
                     passed=False,
                     severity="critical",
-                    details=_format_zero_trade_details(diagnostics),
+                    details=_format_zero_trade_details(diagnostics, coverage_report),
                 )
             )
             return results
