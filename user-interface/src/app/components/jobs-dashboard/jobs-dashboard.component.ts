@@ -405,6 +405,17 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     return `${diffDays}d ago`;
   }
 
+  getProgress(job: DashboardRow): number | null {
+    if (job.seDetail?.progress != null) return job.seDetail.progress;
+    if (job.unified.progress != null) return job.unified.progress;
+    return null;
+  }
+
+  /**
+   * Short, free-form description of what the job is doing right now —
+   * rendered as a subtitle under the Team label so non-SE rows (which
+   * have no per-team chips) still surface phase / status info.
+   */
   getActivityText(job: DashboardRow): string {
     if (job.seDetail?.waitingForAnswers) return 'Waiting for answers';
     if (job.seDetail?.statusText) return job.seDetail.statusText;
@@ -415,12 +426,6 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       return job.unified.phase.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
     }
     return '';
-  }
-
-  getProgress(job: DashboardRow): number | null {
-    if (job.seDetail?.progress != null) return job.seDetail.progress;
-    if (job.unified.progress != null) return job.unified.progress;
-    return null;
   }
 
   getShowIndeterminate(job: DashboardRow): boolean {

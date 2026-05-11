@@ -124,6 +124,7 @@
 
 .jobs-table {
   width: 100%;
+  table-layout: auto;
   border-collapse: collapse;
   font-size: var(--kh-text-sm);
   font-family: var(--kh-font-sans);
@@ -133,7 +134,7 @@
     border-bottom: 1px solid var(--kh-border-strong);
 
     th {
-      padding: var(--kh-space-3) var(--kh-space-4);
+      padding: var(--kh-space-3) var(--kh-space-3);
       text-align: left;
       font-weight: 600;
       font-size: var(--kh-text-xs);
@@ -168,7 +169,7 @@
       &.status-interrupted  { border-left: 3px solid var(--kh-warning); }
 
       td {
-        padding: var(--kh-space-3) var(--kh-space-4);
+        padding: var(--kh-space-2) var(--kh-space-3);
         vertical-align: middle;
       }
     }
@@ -176,18 +177,24 @@
 }
 
 // ── Column Widths ───────────────────────────────────────────────────────────
+// Widths are hints — `table-layout: auto` lets columns shrink so the
+// table fits the viewport without horizontal scroll on a 15" MacBook.
 
-.col-status   { width: 100px; }
-.col-team     { width: 160px; }
-.col-type     { width: 160px; }
-.col-repo     { width: 180px; }
-.col-progress { width: 160px; }
-.col-activity { min-width: 200px; }
-.col-time     { width: 100px; }
-.col-agents   { min-width: 180px; }
+.col-status   { width: 1%; white-space: nowrap; }
+.col-team     { width: 1%; white-space: nowrap; }
+.col-type     { width: 1%; white-space: nowrap; }
+.col-repo     { width: 14%; min-width: 120px; max-width: 200px; }
+.col-progress { width: 14%; min-width: 110px; }
+.col-agents   { min-width: 140px; }
+.col-time     { width: 1%; white-space: nowrap; }
 .col-actions  {
-  width: 140px;
+  width: 1%;
+  white-space: nowrap;
   text-align: center;
+}
+
+// Actions cell: flex layout applies to the <td> only, not the <th>.
+tbody .col-actions {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -274,9 +281,35 @@
   }
 }
 
+// Two-line team cell: name on top, current-activity subtitle below.
+// Subtitle replaces the standalone "Current Activity" column and is the
+// only place non-SE rows (with no Active Agents chips) surface phase info.
+.team-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.team-cell .team-subtitle {
+  font-size: var(--kh-text-xs);
+  color: var(--kh-text-tertiary);
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+@media (max-width: 1280px) {
+  .team-cell .team-subtitle {
+    max-width: 140px;
+  }
+}
+
 .repo-name {
   display: block;
-  max-width: 160px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -307,32 +340,8 @@
 }
 
 .progress-na,
-.activity-na,
 .agents-na {
   color: var(--kh-text-muted);
-}
-
-.activity-cell {
-  display: flex;
-  align-items: center;
-  gap: var(--kh-space-2);
-
-  .activity-icon {
-    font-size: 14px;
-    width: 14px;
-    height: 14px;
-    color: var(--kh-accent);
-    opacity: 0.7;
-  }
-
-  .activity-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 250px;
-    color: var(--kh-text-tertiary);
-    font-size: var(--kh-text-sm);
-  }
 }
 
 .time-ago {
@@ -454,12 +463,27 @@
 
 // ── Responsive ──────────────────────────────────────────────────────────────
 
-@media (max-width: 1200px) {
+// Allow horizontal scroll only on screens too narrow to fit the compacted
+// layout (e.g. tablets / smaller laptops). 15" MacBook (1440 CSS px) and up
+// fits without scrolling.
+@media (max-width: 1024px) {
   .jobs-table-container {
     overflow-x: auto;
   }
 
   .jobs-table {
-    min-width: 900px;
+    min-width: 880px;
+  }
+}
+
+// On narrower laptops, shrink the agent chips so the row doesn't blow out
+// the table width.
+@media (max-width: 1280px) {
+  .agent-chip .agent-phase {
+    max-width: 56px;
+  }
+
+  .col-repo {
+    max-width: 160px;
   }
 }
