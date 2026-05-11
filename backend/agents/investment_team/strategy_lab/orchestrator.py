@@ -55,6 +55,7 @@ from .agents.analysis import AnalysisAgent
 from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent, ZeroTradeRepairReport
+from .coverage_probe import run_coverage_stage, should_run_probes
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_safety import CodeSafetyChecker
@@ -83,6 +84,36 @@ WINNING_THRESHOLD = 8.0
 # block. The model already trims to 20; 10 is enough signal for the LLM to
 # spot the failure pattern while keeping the JSON line under ~1 KB.
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
+
+
+def _maybe_attach_coverage_report(
+    *,
+    metrics: BacktestResult,
+    spec: StrategySpec,
+    market_data: Dict[str, List[OHLCVBar]],
+    config: BacktestConfig,
+    exec_result: StrategyRunResult,
+) -> None:
+    """Run the #451 coverage stage and stamp the report onto ``metrics``.
+
+    The ``spec`` argument MUST carry the same ``strategy_code`` that was
+    handed to ``run_strategy_code`` to produce ``exec_result``. The
+    alignment and zero-trade-repair paths use a ``proposed_spec`` variant
+    of the surrounding spec; pass that, not the loop-level ``spec``,
+    otherwise the static probe will analyse stale source.
+
+    No-ops when ``should_run_probes`` says the run isn't zero/low-trade —
+    successful runs keep ``metrics.coverage_report = None`` and pay no
+    probe cost.
+    """
+    if should_run_probes(exec_result.execution_diagnostics):
+        metrics.coverage_report = run_coverage_stage(
+            spec=spec,
+            market_data=market_data,
+            config=config,
+            exec_result=exec_result,
+            run_strategy_code_fn=run_strategy_code,
+        )
 
 
 def _format_execution_diagnostics(
@@ -417,6 +448,16 @@ class StrategyLabOrchestrator:
                 trades, config.initial_capital, config.start_date, config.end_date
             )
 
+            # Issue #451 — attach a deterministic CoverageReport when the
+            # run is zero/low-trade. Successful runs pay no probe cost.
+            _maybe_attach_coverage_report(
+                metrics=metrics,
+                spec=spec,
+                market_data=market_data,
+                config=config,
+                exec_result=exec_result,
+            )
+
             anomaly_gates = self.anomaly_detector.check(
                 metrics,
                 trades,
@@ -719,6 +760,19 @@ class StrategyLabOrchestrator:
 
                 new_metrics = compute_metrics(
                     new_trades, config.initial_capital, config.start_date, config.end_date
+                )
+
+                # Issue #451 — alignment re-backtest path also surfaces a
+                # CoverageReport when the fix produced zero/low trades.
+                # Pass ``proposed_spec`` (which carries ``proposed_code``)
+                # — the loop-level ``spec`` still holds the pre-alignment
+                # source, which would mislead the static probe.
+                _maybe_attach_coverage_report(
+                    metrics=new_metrics,
+                    spec=proposed_spec,
+                    market_data=market_data,
+                    config=config,
+                    exec_result=align_exec,
                 )
 
                 # ── Anomaly gates on the post-fix backtest ────────────
@@ -1176,6 +1230,16 @@ class StrategyLabOrchestrator:
         new_trades = repair_exec.trades
         new_metrics = compute_metrics(
             new_trades, config.initial_capital, config.start_date, config.end_date
+        )
+
+        # Issue #451 — repair re-execution path also attaches a
+        # CoverageReport when the proposed fix produces zero/low trades.
+        _maybe_attach_coverage_report(
+            metrics=new_metrics,
+            spec=proposed_spec,
+            market_data=market_data,
+            config=config,
+            exec_result=repair_exec,
         )
 
         # ── Anomaly recheck ──────────────────────────────────────────
