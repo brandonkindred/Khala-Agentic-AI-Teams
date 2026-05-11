@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ...models import BacktestConfig, BacktestExecutionDiagnostics, StrategySpec, TradeRecord
 from .backtest import run_backtest
@@ -42,6 +42,13 @@ class StrategyRunResult:
     execution_time_seconds: float = 0.0
     error_type: Optional[str] = None
     execution_diagnostics: Optional[BacktestExecutionDiagnostics] = None
+    #: Aggregated coverage-probe events from the strategy subprocess
+    #: (#450). ``None`` unless ``run_strategy_code`` was called with
+    #: ``coverage_probe_mode=True`` and the run reached its clean
+    #: ``end`` to flush a ``probe_event`` frame. Shape mirrors
+    #: ``TradingServiceResult.probe_events``: ``{"events": [...],
+    #: "truncated": bool}``.
+    probe_events: Optional[Dict[str, Any]] = None
 
 
 # Keys here match the legacy sandbox ``error_type`` taxonomy so the
@@ -57,6 +64,7 @@ def run_strategy_code(
     config: BacktestConfig,
     *,
     strategy: Optional[StrategySpec] = None,
+    coverage_probe_mode: bool = False,
 ) -> StrategyRunResult:
     """Execute ``strategy_code`` through :func:`run_backtest`.
 
@@ -84,7 +92,12 @@ def run_strategy_code(
         strategy = strategy.model_copy(update={"strategy_code": strategy_code})
 
     try:
-        run = run_backtest(strategy=strategy, config=config, market_data=market_data)
+        run = run_backtest(
+            strategy=strategy,
+            config=config,
+            market_data=market_data,
+            coverage_probe_mode=coverage_probe_mode,
+        )
     except ValueError as exc:
         # Typically raised when strategy_code is missing or the market_data
         # arg is ambiguous — surface as a generic runtime error. No service
@@ -113,6 +126,7 @@ def run_strategy_code(
             stderr=(service_result.error or "")[:2000],
             execution_time_seconds=elapsed,
             execution_diagnostics=service_result.execution_diagnostics,
+            probe_events=service_result.probe_events,
         )
     if service_result.error:
         # Any surfaced service error — initialisation failure, mid-run
@@ -130,6 +144,7 @@ def run_strategy_code(
             stderr=service_result.error[:2000],
             execution_time_seconds=elapsed,
             execution_diagnostics=service_result.execution_diagnostics,
+            probe_events=service_result.probe_events,
         )
 
     return StrategyRunResult(
@@ -137,6 +152,7 @@ def run_strategy_code(
         trades=run.trades,
         execution_time_seconds=elapsed,
         execution_diagnostics=service_result.execution_diagnostics,
+        probe_events=service_result.probe_events,
     )
 
 

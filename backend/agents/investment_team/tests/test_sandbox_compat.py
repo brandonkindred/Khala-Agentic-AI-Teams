@@ -78,10 +78,21 @@ def _empty_metrics() -> BacktestResult:
     )
 
 
-def _patch_run_backtest(monkeypatch, *, service_result: TradingServiceResult) -> None:
-    """Replace ``run_backtest`` with a stub returning a canned service result."""
+def _patch_run_backtest(monkeypatch, *, service_result: TradingServiceResult) -> dict:
+    """Replace ``run_backtest`` with a stub returning a canned service result.
 
-    def _fake(*, strategy, config, market_data=None, **_kwargs):
+    Returns the ``captured`` kwargs dict so #450's threading test can
+    assert that ``coverage_probe_mode`` actually reached ``run_backtest``.
+    Existing callers that ignore the return value remain unaffected.
+    """
+
+    captured: dict[str, object] = {}
+
+    def _fake(*, strategy, config, market_data=None, **kwargs):
+        # Capture the kwargs so individual tests can assert that
+        # ``run_strategy_code`` actually forwarded options like
+        # ``coverage_probe_mode`` to ``run_backtest`` (#450).
+        captured.update(kwargs)
         return BacktestRunResult(
             result=_empty_metrics(),
             trades=service_result.trades,
@@ -89,6 +100,7 @@ def _patch_run_backtest(monkeypatch, *, service_result: TradingServiceResult) ->
         )
 
     monkeypatch.setattr(sandbox_compat, "run_backtest", _fake)
+    return captured  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -240,3 +252,143 @@ def test_pre_backtest_value_error_synthesizes_unknown_zero_trade_diagnostics(
     # Counter fields stay at their model defaults — no bars were processed.
     assert result.execution_diagnostics.bars_processed == 0
     assert result.execution_diagnostics.orders_emitted == 0
+
+
+# ---------------------------------------------------------------------------
+# Coverage-probe events propagation (#450)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_events_default_to_none_on_dataclass() -> None:
+    """``StrategyRunResult.probe_events`` is opt-in: every existing
+    construction site that didn't pass the field gets ``None``."""
+    r = sandbox_compat.StrategyRunResult(success=True)
+    assert r.probe_events is None
+
+
+def test_probe_events_propagate_through_success_path(monkeypatch) -> None:
+    """When the service result carries ``probe_events``, the success-path
+    construction in ``run_strategy_code`` must copy them onto the
+    returned ``StrategyRunResult`` (#450)."""
+    diagnostics = BacktestExecutionDiagnostics(
+        summary="clean run, 1 trade",
+        bars_processed=10,
+        closed_trades=1,
+    )
+    payload = {
+        "events": [
+            {"rule_id": "r0", "hit_count": 4, "first_true_bar": 0, "last_true_bar": 9},
+        ],
+        "truncated": False,
+    }
+    _patch_run_backtest(
+        monkeypatch,
+        service_result=TradingServiceResult(
+            trades=[_partial_trade()],
+            execution_diagnostics=diagnostics,
+            probe_events=payload,
+        ),
+    )
+
+    result = sandbox_compat.run_strategy_code(
+        "dummy", {}, _config(), strategy=_strategy(), coverage_probe_mode=True
+    )
+
+    assert result.success is True
+    assert result.probe_events is payload
+
+
+def test_probe_events_propagate_through_runtime_error_path(monkeypatch) -> None:
+    """Probe events also flow on the mid-run-crash path so refinement
+    can still see whatever subconditions did fire before the strategy
+    raised."""
+    partial_payload = {
+        "events": [
+            {"rule_id": "r0", "hit_count": 1, "first_true_bar": 3, "last_true_bar": 3},
+        ],
+        "truncated": False,
+    }
+    _patch_run_backtest(
+        monkeypatch,
+        service_result=TradingServiceResult(
+            trades=[],
+            error="IndexError: list index out of range",
+            lookahead_violation=False,
+            execution_diagnostics=BacktestExecutionDiagnostics(
+                zero_trade_category="UNKNOWN_ZERO_TRADE_PATH",
+                summary="crash mid-run",
+            ),
+            probe_events=partial_payload,
+        ),
+    )
+
+    result = sandbox_compat.run_strategy_code(
+        "dummy", {}, _config(), strategy=_strategy(), coverage_probe_mode=True
+    )
+
+    assert result.success is False
+    assert result.error_type == "runtime_error"
+    assert result.probe_events is partial_payload
+
+
+def test_probe_events_propagate_through_lookahead_path(monkeypatch) -> None:
+    """Same as above for the lookahead-violation path."""
+    payload = {
+        "events": [
+            {"rule_id": "r0", "hit_count": 2, "first_true_bar": 1, "last_true_bar": 5},
+        ],
+        "truncated": False,
+    }
+    _patch_run_backtest(
+        monkeypatch,
+        service_result=TradingServiceResult(
+            trades=[],
+            error="AttributeError: Bar has no 'next_close'",
+            lookahead_violation=True,
+            execution_diagnostics=BacktestExecutionDiagnostics(
+                summary="lookahead detected",
+            ),
+            probe_events=payload,
+        ),
+    )
+
+    result = sandbox_compat.run_strategy_code(
+        "dummy", {}, _config(), strategy=_strategy(), coverage_probe_mode=True
+    )
+
+    assert result.success is False
+    assert result.error_type == "lookahead_violation"
+    assert result.probe_events is payload
+
+
+def test_coverage_probe_mode_is_forwarded_to_run_backtest(monkeypatch) -> None:
+    """The plumbing: ``run_strategy_code(coverage_probe_mode=True)`` must
+    forward the flag through to ``run_backtest`` so the underlying
+    ``TradingService`` and ``StreamingHarness`` get the env var set."""
+    captured = _patch_run_backtest(
+        monkeypatch,
+        service_result=TradingServiceResult(
+            execution_diagnostics=BacktestExecutionDiagnostics(),
+        ),
+    )
+
+    sandbox_compat.run_strategy_code(
+        "dummy", {}, _config(), strategy=_strategy(), coverage_probe_mode=True
+    )
+
+    assert captured.get("coverage_probe_mode") is True
+
+
+def test_coverage_probe_mode_defaults_off(monkeypatch) -> None:
+    """Regression guard: callers that don't opt in keep the off path —
+    no breakage of existing zero-overhead expectations."""
+    captured = _patch_run_backtest(
+        monkeypatch,
+        service_result=TradingServiceResult(
+            execution_diagnostics=BacktestExecutionDiagnostics(),
+        ),
+    )
+
+    sandbox_compat.run_strategy_code("dummy", {}, _config(), strategy=_strategy())
+
+    assert captured.get("coverage_probe_mode") is False
