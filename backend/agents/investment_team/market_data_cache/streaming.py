@@ -205,13 +205,23 @@ def _bar_to_ohlcv(bar) -> OHLCVBar:
 
     The two share the same OHLCV fields modulo the timestamp / date
     naming convention; bar.timestamp is an ISO-formatted string.
+
+    Normalises OHLC invariants — Yahoo / Alpha Vantage / Twelve Data
+    daily FX bars aggregate intraday snapshots from different
+    counterparties and can produce H < max(O, C) or L > min(O, C).
+    Repair here so cached parquet snapshots and downstream consumers
+    always see coherent bars regardless of provider quirks.
     """
+    o = float(bar.open)
+    h = float(bar.high)
+    ll = float(bar.low)
+    c = float(bar.close)
     return OHLCVBar(
         date=str(bar.timestamp),
-        open=float(bar.open),
-        high=float(bar.high),
-        low=float(bar.low),
-        close=float(bar.close),
+        open=o,
+        high=max(o, h, ll, c),
+        low=min(o, h, ll, c),
+        close=c,
         volume=float(getattr(bar, "volume", 0.0)),
     )
 

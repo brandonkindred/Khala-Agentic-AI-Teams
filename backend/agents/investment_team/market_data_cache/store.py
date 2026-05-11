@@ -169,17 +169,40 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
     cols = {
         name: table[name].to_pylist() for name in ("date", "open", "high", "low", "close", "volume")
     }
-    return [
-        OHLCVBar(
-            date=cols["date"][i],
-            open=cols["open"][i],
-            high=cols["high"][i],
-            low=cols["low"][i],
-            close=cols["close"][i],
-            volume=cols["volume"][i],
+    # Normalise OHLC invariants on cache read. Parquet snapshots persisted
+    # before market_data_service started repairing invariants at fetch
+    # time still contain inconsistent bars (Yahoo / Alpha Vantage / Twelve
+    # Data daily FX aggregates intraday snapshots across counterparties,
+    # producing H < max(O, C) or L > min(O, C)). Repairing on read makes
+    # the cache self-healing without forcing a global re-fetch.
+    bars: List[OHLCVBar] = []
+    repairs = 0
+    for i in range(table.num_rows):
+        o = cols["open"][i]
+        h = cols["high"][i]
+        ll = cols["low"][i]
+        c = cols["close"][i]
+        h_fixed = max(o, h, ll, c)
+        l_fixed = min(o, h, ll, c)
+        if h_fixed != h or l_fixed != ll:
+            repairs += 1
+        bars.append(
+            OHLCVBar(
+                date=cols["date"][i],
+                open=o,
+                high=h_fixed,
+                low=l_fixed,
+                close=c,
+                volume=cols["volume"][i],
+            )
         )
-        for i in range(table.num_rows)
-    ]
+    if repairs > 0:
+        logger.warning(
+            "market_data_cache: repaired OHLC invariants on %d/%d bars at read",
+            repairs,
+            table.num_rows,
+        )
+    return bars
 
 
 # ---------------------------------------------------------------------------

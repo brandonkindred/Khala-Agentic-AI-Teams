@@ -693,6 +693,38 @@ def test_df_to_bars_repairs_ohlc_invariants() -> None:
         assert b.low <= min(b.open, b.high, b.close)
 
 
+def test_cache_table_to_bars_repairs_ohlc_invariants() -> None:
+    """Parquet snapshots persisted before the fetch-time repair landed
+    still carry broken OHLC invariants. ``_table_to_bars`` self-heals on
+    read so the cache doesn't have to be wiped to recover.
+    """
+    pa = pytest.importorskip("pyarrow")
+    from investment_team.market_data_cache.store import _get_parquet_schema, _table_to_bars
+
+    table = pa.Table.from_pydict(
+        {
+            "date": ["2024-01-02", "2024-01-03"],
+            # Row 0: H below close — pre-fix corruption that lived in cache.
+            # Row 1: clean — no repair.
+            "open": [1.0512, 1.0513],
+            "high": [1.0512, 1.0515],
+            "low": [1.0509, 1.0511],
+            "close": [1.0513, 1.0514],
+            "volume": [0.0, 0.0],
+        },
+        schema=_get_parquet_schema(),
+    )
+    bars = _table_to_bars(table)
+    assert len(bars) == 2
+    # Row 0 was repaired: H lifted to close.
+    assert bars[0].high == 1.0513
+    # Row 1 untouched.
+    assert bars[1].high == 1.0515
+    for b in bars:
+        assert b.high >= max(b.open, b.low, b.close)
+        assert b.low <= min(b.open, b.high, b.close)
+
+
 def test_forex_materially_broken_bar_still_flags() -> None:
     """The more generous forex tolerance must not mask real corruption.
 
