@@ -212,22 +212,34 @@ def test_merge_dedups_blockers_and_preserves_order() -> None:
     assert reasons == ["first", "dup", "second"]
 
 
-def test_merge_takes_max_of_numeric_fields() -> None:
+def test_merge_warmup_takes_max_across_reports() -> None:
+    static = _report(CoverageCategory.UNKNOWN_LOW_COVERAGE, warmup=80)
+    indicator = _report(CoverageCategory.UNKNOWN_LOW_COVERAGE, warmup=120)
+    merged = merge_reports(static, indicator)
+    # Warmup is a per-symbol bars count; both probes use the same unit
+    # so max() is safe.
+    assert merged.warmup_bars_required == 120
+
+
+def test_merge_bars_and_symbols_take_indicator_values() -> None:
+    # bars_checked / symbols_checked are reported in different units by
+    # the two probes (static = longest single-symbol history; indicator =
+    # sum across symbols). merge_reports trusts the indicator probe's
+    # values because they reflect what was actually examined for hit-rate
+    # computation, which is what downstream consumers (refinement prompt
+    # in #452) want.
     static = _report(
         CoverageCategory.UNKNOWN_LOW_COVERAGE,
-        warmup=80,
-        bars=250,
+        bars=250,  # longest single symbol
         symbols=1,
     )
     indicator = _report(
         CoverageCategory.UNKNOWN_LOW_COVERAGE,
-        warmup=120,
-        bars=200,
+        bars=200,  # sum across symbols actually examined
         symbols=3,
     )
     merged = merge_reports(static, indicator)
-    assert merged.warmup_bars_required == 120
-    assert merged.bars_checked == 250
+    assert merged.bars_checked == 200
     assert merged.symbols_checked == 3
 
 
@@ -451,6 +463,8 @@ def test_runtime_reexecution_failure_records_failure_blocker(
 
     failure_blockers = [b for b in report.likely_blockers if b.reason == "runtime_probe_failed"]
     assert failure_blockers, "expected runtime_probe_failed blocker"
+    assert "runtime_error" in failure_blockers[0].evidence
+    assert "runtime_events=failed" in report.summary
     assert report.coverage_category is CoverageCategory.UNKNOWN_LOW_COVERAGE
 
 
@@ -683,3 +697,257 @@ def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
             f"got spec={site['spec']!r} with exec_result={site['exec_result']!r}; "
             f"expected spec={expected_spec!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Runtime probe outcome distinctions (B1, B2)
+#
+# These pin down the four distinct outcomes of the runtime stage so the
+# refinement prompt (#452) can render them honestly:
+#   - "n/a"     → didn't run (static short-circuited, or merged != UNKNOWN)
+#   - "<N>"     → ran cleanly, N events emitted (0 is informative!)
+#   - "failed"  → subprocess crashed
+#   - "no_frame"→ subprocess ran cleanly but emitted no probe_events
+#   - "skipped" → preconditions unmet (empty code, no on_bar)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _unknown_indicator(*args: Any, **kwargs: Any) -> CoverageReport:
+    """Force ``run_coverage_stage`` into the runtime-reexecution branch."""
+    return _report(CoverageCategory.UNKNOWN_LOW_COVERAGE)
+
+
+def _runtime_capable_code() -> str:
+    return textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if self.custom_helper(bar):
+                    ctx.submit_order(symbol=bar.symbol, side="long", qty=1)
+        """
+    )
+
+
+def test_runtime_zero_events_records_no_hits_blocker_and_zero_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # B1: a clean run with an empty events list is a strong "predicates
+    # never fired" signal — must be surfaced as a distinct blocker, and
+    # the summary must say "runtime_events=0" (not "n/a").
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", _unknown_indicator)
+
+    def _fake_run_strategy_code(*args: Any, **kwargs: Any) -> StrategyRunResult:
+        return StrategyRunResult(
+            success=True,
+            trades=[],
+            probe_events={"events": [], "truncated": False},
+        )
+
+    report = run_coverage_stage(
+        spec=_spec(_runtime_capable_code()),
+        market_data={"AAPL": _flat_df(120)},
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_fake_run_strategy_code,
+    )
+
+    no_hits = [b for b in report.likely_blockers if b.reason == "runtime_probe_no_hits"]
+    assert no_hits, "expected a runtime_probe_no_hits blocker"
+    assert "hits=0" in no_hits[0].evidence
+    assert "runtime_events=0" in report.summary
+
+
+def test_runtime_success_with_no_probe_events_field_records_no_frame_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # B2: success=True but probe_events=None must be distinguishable
+    # from a hard failure. Surface as a separate blocker so #452 can
+    # decide whether to retry the run.
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", _unknown_indicator)
+
+    def _no_frame_run(*args: Any, **kwargs: Any) -> StrategyRunResult:
+        return StrategyRunResult(success=True, trades=[], probe_events=None)
+
+    report = run_coverage_stage(
+        spec=_spec(_runtime_capable_code()),
+        market_data={"AAPL": _flat_df(120)},
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_no_frame_run,
+    )
+
+    no_frame = [b for b in report.likely_blockers if b.reason == "runtime_probe_no_frame"]
+    assert no_frame, "expected a runtime_probe_no_frame blocker"
+    assert "runtime_events=no_frame" in report.summary
+    failure = [b for b in report.likely_blockers if b.reason == "runtime_probe_failed"]
+    assert not failure, "no_frame must not be conflated with failure"
+
+
+def test_runtime_skipped_summary_token_for_empty_strategy_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Runtime stage's "skipped" outcome (empty strategy_code) must show
+    # up as ``runtime_events=skipped`` in the summary.
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", _unknown_indicator)
+
+    report = run_coverage_stage(
+        spec=_spec(""),
+        market_data={"AAPL": _flat_df(120)},
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_never_called_run_strategy_code,
+    )
+    skipped = [b for b in report.likely_blockers if b.reason == "runtime_probe_skipped"]
+    assert skipped
+    assert "spec.strategy_code is empty" in skipped[0].evidence
+    assert "runtime_events=skipped" in report.summary
+
+
+def test_runtime_uncaught_exception_is_logged_and_recorded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Q3: the runtime exception path must use ``logger.exception`` so
+    # the traceback is preserved under DEBUG logging, not silently
+    # discarded.
+    import logging
+
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", _unknown_indicator)
+
+    def _raising_run(*args: Any, **kwargs: Any) -> StrategyRunResult:
+        raise RuntimeError("sandbox blew up")
+
+    with caplog.at_level(
+        logging.DEBUG, logger="investment_team.strategy_lab.coverage_probe.aggregator"
+    ):
+        report = run_coverage_stage(
+            spec=_spec(_runtime_capable_code()),
+            market_data={"AAPL": _flat_df(120)},
+            config=_config(),
+            exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+            run_strategy_code_fn=_raising_run,
+        )
+
+    failed = [b for b in report.likely_blockers if b.reason == "runtime_probe_failed"]
+    assert failed
+    assert "RuntimeError" in failed[0].evidence
+    assert "runtime_events=failed" in report.summary
+    # logger.exception records ERROR level by default but here we log at
+    # the module's level (DEBUG via logger.exception → ERROR). Confirm a
+    # traceback is captured.
+    assert any(
+        "runtime re-execution" in r.message and r.exc_info is not None for r in caplog.records
+    ), "expected logger.exception to capture exc_info"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Summary line — "indicator=SKIPPED" honesty (Q4)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_static_short_circuit_summary_says_indicator_skipped() -> None:
+    # Q4: when the static probe short-circuits, the indicator probe is
+    # not run. The summary must reflect that with "indicator=SKIPPED"
+    # rather than lying with a default UNKNOWN_LOW_COVERAGE.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            WINDOW = 9999
+            def on_bar(self, ctx, bar):
+                bars = ctx.history(bar.symbol, self.WINDOW)
+                if len(bars) < self.WINDOW:
+                    return
+        """
+    )
+    report = run_coverage_stage(
+        spec=_spec(code),
+        market_data={"AAPL": _flat_df(50)},
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_never_called_run_strategy_code,
+    )
+    assert "indicator=SKIPPED" in report.summary
+    assert "UNKNOWN" not in report.summary.split("indicator=")[1].split(";")[0]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Dedup respects hit_rate (B3)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_dedup_keeps_blockers_with_distinct_hit_rates() -> None:
+    # B3: two blockers with identical (reason, evidence) but distinct
+    # hit_rates carry different information. The dedup key includes
+    # hit_rate so neither is dropped.
+    static = _report(
+        CoverageCategory.UNKNOWN_LOW_COVERAGE,
+        blockers=[LikelyBlocker(reason="r", evidence="e", hit_rate=0.0)],
+    )
+    indicator = _report(
+        CoverageCategory.UNKNOWN_LOW_COVERAGE,
+        blockers=[
+            LikelyBlocker(reason="r", evidence="e", hit_rate=0.0),  # exact dup → drop
+            LikelyBlocker(reason="r", evidence="e", hit_rate=0.25),  # distinct → keep
+        ],
+    )
+    merged = merge_reports(static, indicator)
+    rates = [b.hit_rate for b in merged.likely_blockers if b.reason == "r"]
+    assert rates == [0.0, 0.25]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Numeric-aware sort on rule_ids (C5 / cosmetic)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_runtime_blockers_sorted_numerically_by_rule_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.models import RuleIndex
+
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", _unknown_indicator)
+
+    # Force a known rule_index so the test exercises only the sort key,
+    # not the instrumenter's labeling logic.
+    rule_index = RuleIndex(rules={"r0": "p0", "r1": "p1", "r2": "p2", "r10": "p10"})
+    monkeypatch.setattr(
+        agg_mod,
+        "instrument_strategy_code",
+        lambda code: (code, rule_index),
+    )
+
+    # Mirror a real runtime emission: r0, r1, r2, r10 should sort
+    # numerically rather than lexicographically (which would interleave
+    # r10 between r1 and r2).
+    def _fake_run(*args: Any, **kwargs: Any) -> StrategyRunResult:
+        return StrategyRunResult(
+            success=True,
+            trades=[],
+            probe_events={
+                "events": [
+                    {"rule_id": "r10", "hit_count": 10},
+                    {"rule_id": "r2", "hit_count": 2},
+                    {"rule_id": "r0", "hit_count": 0},
+                    {"rule_id": "r1", "hit_count": 1},
+                ],
+                "truncated": False,
+            },
+        )
+
+    report = run_coverage_stage(
+        spec=_spec(_runtime_capable_code()),
+        market_data={"AAPL": _flat_df(120)},
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_fake_run,
+    )
+    runtime_reasons = [b.reason for b in report.likely_blockers if b.reason.startswith("runtime:")]
+    assert runtime_reasons == [
+        "runtime: p0",
+        "runtime: p1",
+        "runtime: p2",
+        "runtime: p10",
+    ]
