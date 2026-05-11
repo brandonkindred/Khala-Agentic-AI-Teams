@@ -297,13 +297,22 @@ def _summarize_market_data(
     return universe, longest
 
 
+def _is_ohlcv_bar_list(data: object) -> bool:
+    """True when ``data`` is a non-empty ``list[OHLCVBar]``.
+
+    Single source of truth for "production-shape market-data entry" —
+    both :func:`_has_bars` (used by :func:`_summarize_market_data`) and
+    :func:`_to_dataframes` consult this predicate so they can't drift
+    on what counts as a valid bar list.
+    """
+    return isinstance(data, list) and bool(data) and isinstance(data[0], OHLCVBar)
+
+
 def _has_bars(data: object) -> bool:
     """True when ``data`` is a non-empty DataFrame or OHLCVBar list."""
     if isinstance(data, pd.DataFrame):
         return len(data) > 0
-    if isinstance(data, list) and data and isinstance(data[0], OHLCVBar):
-        return True
-    return False
+    return _is_ohlcv_bar_list(data)
 
 
 _OHLCV_FIELDS: tuple[str, ...] = ("date", "open", "high", "low", "close", "volume")
@@ -323,7 +332,7 @@ def _to_dataframes(market_data: dict[str, SymbolBars]) -> dict[str, pd.DataFrame
         if isinstance(data, pd.DataFrame):
             out[sym] = data
             continue
-        if isinstance(data, list) and data and isinstance(data[0], OHLCVBar):
+        if _is_ohlcv_bar_list(data):
             out[sym] = _ohlcv_list_to_dataframe(data)
             continue
         logger.debug(
