@@ -39,7 +39,7 @@
 
     .last-updated {
       font-size: var(--kh-text-xs);
-      color: var(--kh-text-muted);
+      color: var(--kh-text-secondary);
       font-family: var(--kh-font-mono);
     }
   }
@@ -109,7 +109,7 @@
   .hint {
     margin-top: var(--kh-space-4);
     font-size: var(--kh-text-sm);
-    color: var(--kh-text-muted);
+    color: var(--kh-text-secondary);
   }
 }
 
@@ -140,7 +140,7 @@
       font-size: var(--kh-text-xs);
       text-transform: uppercase;
       letter-spacing: 0.06em;
-      color: var(--kh-text-muted);
+      color: var(--kh-text-secondary);
       white-space: nowrap;
     }
   }
@@ -255,7 +255,7 @@ tbody .col-actions {
 
   &.status-cancelled {
     background: rgba(113, 113, 122, 0.12);
-    color: var(--kh-text-muted);
+    color: var(--kh-text-secondary);
   }
 
   &.status-interrupted {
@@ -346,11 +346,11 @@ tbody .col-actions {
 
 .progress-na,
 .agents-na {
-  color: var(--kh-text-muted);
+  color: var(--kh-text-secondary);
 }
 
 .time-ago {
-  color: var(--kh-text-muted);
+  color: var(--kh-text-secondary);
   font-size: var(--kh-text-xs);
   font-family: var(--kh-font-mono);
 }

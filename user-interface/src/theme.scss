@@ -32,7 +32,8 @@ body {
 
 :root {
   // ── HIGH CONTRAST DESIGN ────────────────────────────────────────────────
-  // Designed for color acuity issues. All color pairs exceed WCAG AAA (7:1).
+  // Designed for color acuity issues. Most text/background pairs exceed
+  // WCAG AAA (7:1); --kh-text-muted is the lone exception (see note below).
   // Semantic colors are maximally separated in luminance, not just hue.
   // Borders and surfaces have strong visible separation.
 
@@ -61,6 +62,10 @@ body {
   --kh-text-primary:      #ffffff;
   --kh-text-secondary:    #d4d4d8;
   --kh-text-tertiary:     #a1a1aa;
+  // --kh-text-muted is BELOW WCAG AA (4.5:1) for body text on surface-0/1/2.
+  // Use it only for decorative borders or icons. For text, prefer
+  // --kh-text-tertiary or --kh-text-secondary. Global token bump tracked in
+  // the follow-up issue to #494.
   --kh-text-muted:        #71717a;
 
   // ── Borders (strong and visible) ────────────────────────────────────────
