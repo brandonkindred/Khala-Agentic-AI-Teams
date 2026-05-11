@@ -451,7 +451,7 @@ def _validate_symbol(
             seen_ts.add(bar.date)
         if _has_nan_or_negative_price(bar):
             report.nan_or_negative_prices += 1
-        if _ohlc_violation(bar):
+        if _ohlc_violation(bar, asset_class=asset_class):
             report.ohlc_violations += 1
         if not volumeless and bar.volume == 0:
             report.zero_volume_bars += 1
@@ -518,21 +518,31 @@ def _has_nan_or_negative_price(bar: OHLCVBar) -> bool:
     return False
 
 
-def _ohlc_violation(bar: OHLCVBar) -> bool:
+def _ohlc_violation(bar: OHLCVBar, *, asset_class: str = "") -> bool:
     o, h, ll, c = bar.open, bar.high, bar.low, bar.close
     if not all(math.isfinite(v) for v in (o, h, ll, c)):
         # Already counted by the NaN check; do not double-count.
         return False
 
-    # Vendor feeds commonly round OHLC independently to a fixed number of
-    # decimals (e.g. market_data_service rounds Yahoo Finance bars to 4
-    # decimals), which can flip invariants by up to one rounding step per
-    # value even when the underlying data was internally consistent. Use
-    # an absolute noise floor of 2e-4 (≈ twice the worst-case error of a
-    # 4-decimal vendor) plus a relative term for very-high-priced assets
-    # where the noise floor is ULP-bound rather than rounding-bound.
     scale = max(1.0, abs(o), abs(h), abs(ll), abs(c))
-    eps = max(2e-4, 1e-9 * scale)
+    if asset_class in _VOLUMELESS_ASSET_CLASSES:
+        # Daily FX bars from Yahoo Finance / Alpha Vantage are not a single
+        # quote stream — vendors aggregate intraday snapshots from
+        # different counterparties, which routinely produces several-pip
+        # OHLC inconsistencies that are not pure rounding artifacts. Use a
+        # relative tolerance generous enough to absorb that vendor noise
+        # (~10 pips on EUR/USD ≈ 1.05, ~15 pips on USD/JPY ≈ 150) while
+        # still flagging materially broken bars (e.g. a high quoted well
+        # below the close).
+        eps = 1e-3 * scale
+    else:
+        # Stocks / crypto: vendor feeds round OHLC independently to a fixed
+        # number of decimals (e.g. market_data_service rounds to 4
+        # decimals), which can flip invariants by up to one rounding step
+        # per value. Absorb that noise floor (~2e-4 absolute, twice the
+        # worst-case 4-decimal rounding error) and keep the ULP-relative
+        # term for very-high-priced assets like BTC.
+        eps = max(2e-4, 1e-9 * scale)
 
     if h + eps < ll:
         return True

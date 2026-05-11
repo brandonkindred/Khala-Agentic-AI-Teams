@@ -584,7 +584,7 @@ def test_forex_zero_volume_not_flagged() -> None:
     assert "zero_volume_bars" not in report.per_symbol["EURUSD=X"].issues
 
 
-def test_ohlc_tolerance_absorbs_vendor_rounding_noise() -> None:
+def test_ohlc_tolerance_absorbs_forex_vendor_noise_eurusd() -> None:
     """4-decimal vendor rounding can flip H/C by up to ~1e-4 absolute.
 
     Reviewer (production): the Strategy Lab forex run failed with
@@ -620,6 +620,76 @@ def test_ohlc_tolerance_absorbs_vendor_rounding_noise() -> None:
         mode="strict",
     )
     assert report.per_symbol["EURUSD=X"].ohlc_violations == 0
+
+
+def test_ohlc_tolerance_absorbs_forex_vendor_noise_usdjpy() -> None:
+    """USD/JPY trades ~150; pip = 1e-2. Yahoo daily bars can drift several
+    pips between snapshots even when the underlying data is internally
+    consistent. The forex tolerance must scale with price level so a
+    USDJPY high a few pips below the close (e.g. 150.10 vs 150.12)
+    doesn't false-fail the run.
+    """
+    bars = [
+        OHLCVBar(
+            date="2024-01-02",
+            open=150.1100,
+            high=150.1000,   # 0.01 = 1 pip below close — pure vendor noise
+            low=150.0500,
+            close=150.1200,
+            volume=0.0,
+        ),
+        OHLCVBar(
+            date="2024-01-03",
+            open=150.1300,
+            high=150.1500,
+            low=150.1000,
+            close=150.1400,
+            volume=0.0,
+        ),
+    ]
+    report = validate_market_data(
+        bars_by_symbol={"USDJPY=X": bars},
+        expected_frequency="1d",
+        asset_class="forex",
+        mode="strict",
+    )
+    assert report.per_symbol["USDJPY=X"].ohlc_violations == 0
+
+
+def test_forex_materially_broken_bar_still_flags() -> None:
+    """The more generous forex tolerance must not mask real corruption.
+
+    A high quoted ~1% below the close on EUR/USD (e.g. 1.04 vs 1.05) is
+    clearly broken — well outside any reasonable vendor-noise floor —
+    and must still raise.
+    """
+    bars: List[OHLCVBar] = []
+    cur = datetime.fromisoformat("2024-01-02")
+    while len(bars) < 10:
+        while cur.weekday() >= 5:
+            cur += timedelta(days=1)
+        bars.append(
+            OHLCVBar(
+                date=cur.date().isoformat(),
+                open=1.0512,
+                high=1.0514,
+                low=1.0510,
+                close=1.0513,
+                volume=0.0,
+            )
+        )
+        cur += timedelta(days=1)
+    # Corrupt one bar with a high 1% below close — way above the ~10-pip
+    # noise tolerance.
+    bars[3] = bars[3].model_copy(update={"high": 1.0400})
+    with pytest.raises(DataIntegrityError) as excinfo:
+        validate_market_data(
+            bars_by_symbol={"EURUSD=X": bars},
+            expected_frequency="1d",
+            asset_class="forex",
+            mode="strict",
+        )
+    assert excinfo.value.report.per_symbol["EURUSD=X"].ohlc_violations == 1
 
 
 def test_ohlc_tolerance_still_catches_material_violation_at_stock_prices() -> None:
