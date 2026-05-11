@@ -230,6 +230,23 @@ describe('JobsDashboardComponent', () => {
       expect(label).toContain('My Post');
       expect(label).toContain('status completed');
     });
+
+    it('reports "status waiting" for SE jobs awaiting answers', () => {
+      const job = {
+        unified: {
+          source: 'software_engineering',
+          jobType: 'run_team',
+          jobId: 'j1',
+          status: 'running',
+          label: 'Run',
+          repoPath: '/work/payments-api',
+          createdAt: '',
+        },
+        seDetail: { waitingForAnswers: true },
+      } as any;
+      const label = component.getJobAriaLabel(job);
+      expect(label).toContain('status waiting');
+    });
   });
 
   it('refresh sets loading and restarts polling', () => {
