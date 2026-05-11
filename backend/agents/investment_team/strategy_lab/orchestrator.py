@@ -90,7 +90,7 @@ def _maybe_attach_coverage_report(
     *,
     metrics: BacktestResult,
     spec: StrategySpec,
-    market_data: Dict[str, Any],
+    market_data: Dict[str, List[OHLCVBar]],
     config: BacktestConfig,
     exec_result: StrategyRunResult,
 ) -> None:
@@ -112,6 +112,7 @@ def _maybe_attach_coverage_report(
             market_data=market_data,
             config=config,
             exec_result=exec_result,
+            run_strategy_code_fn=run_strategy_code,
         )
 
 

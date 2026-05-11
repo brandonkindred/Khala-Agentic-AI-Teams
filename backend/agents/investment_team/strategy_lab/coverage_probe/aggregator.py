@@ -14,10 +14,11 @@ import is touched.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional, get_args
+from typing import Any, Callable, Union, get_args
 
 import pandas as pd
 
+from investment_team.market_data_service import OHLCVBar
 from investment_team.models import (
     BacktestConfig,
     BacktestExecutionDiagnostics,
@@ -32,10 +33,7 @@ from investment_team.strategy_lab.coverage_probe.runtime_instrument import (
     instrument_strategy_code,
 )
 from investment_team.strategy_lab.coverage_probe.static_probe import run_static_probe
-from investment_team.trading_service.modes.sandbox_compat import (
-    StrategyRunResult,
-    run_strategy_code,
-)
+from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +59,17 @@ _PROBE_TRIGGERING_CATEGORIES = frozenset(
     }
 )
 
-# Import-time check: every entry in ``_PROBE_TRIGGERING_CATEGORIES`` must
-# be a real ``ZeroTradeCategory`` literal. Renames in ``models.py`` would
-# otherwise drift past this set silently.
-assert _PROBE_TRIGGERING_CATEGORIES <= set(get_args(ZeroTradeCategory)), (
-    "_PROBE_TRIGGERING_CATEGORIES contains values not in ZeroTradeCategory; "
-    f"orphans: {_PROBE_TRIGGERING_CATEGORIES - set(get_args(ZeroTradeCategory))}"
-)
+# Permanent invariant: every entry in ``_PROBE_TRIGGERING_CATEGORIES``
+# must be a real ``ZeroTradeCategory`` literal. Renames in ``models.py``
+# would otherwise drift past this set silently. Uses an explicit raise
+# rather than ``assert`` so the guard survives ``python -O``.
+_zero_trade_literals = set(get_args(ZeroTradeCategory))
+if not _PROBE_TRIGGERING_CATEGORIES <= _zero_trade_literals:
+    raise AssertionError(
+        "_PROBE_TRIGGERING_CATEGORIES contains values not in ZeroTradeCategory; "
+        f"orphans: {_PROBE_TRIGGERING_CATEGORIES - _zero_trade_literals}"
+    )
+del _zero_trade_literals
 
 #: Aggregation priority. The static probe's impossible-configuration
 #: categories outrank everything because they describe a strategy that
@@ -86,14 +88,15 @@ _CATEGORY_PRIORITY: tuple[CoverageCategory, ...] = (
     CoverageCategory.COVERAGE_OK,
 )
 
-# Import-time exhaustiveness check. A future ``CoverageCategory`` value
-# not added to ``_CATEGORY_PRIORITY`` would otherwise trigger a
+# Permanent invariant: ``_CATEGORY_PRIORITY`` must list every value of
+# ``CoverageCategory``. A missing value would otherwise trigger a
 # ``KeyError`` from ``_CATEGORY_RANK`` deep inside the orchestrator at
-# runtime. Catching it here keeps the failure local to this module.
-assert set(_CATEGORY_PRIORITY) == set(CoverageCategory), (
-    "Aggregator _CATEGORY_PRIORITY must list every CoverageCategory value; "
-    f"missing: {set(CoverageCategory) - set(_CATEGORY_PRIORITY)}"
-)
+# runtime. Survives ``python -O`` (see note above).
+if set(_CATEGORY_PRIORITY) != set(CoverageCategory):
+    raise AssertionError(
+        "Aggregator _CATEGORY_PRIORITY must list every CoverageCategory value; "
+        f"missing: {set(CoverageCategory) - set(_CATEGORY_PRIORITY)}"
+    )
 
 #: O(1) priority lookup; lower rank = higher priority.
 _CATEGORY_RANK: dict[CoverageCategory, int] = {cat: i for i, cat in enumerate(_CATEGORY_PRIORITY)}
@@ -109,9 +112,15 @@ _STATIC_SHORT_CIRCUIT_CATEGORIES = frozenset(
     }
 )
 
+#: Type alias for market data as it appears at the probe stage. The
+#: orchestrator hands us ``list[OHLCVBar]`` per symbol (production
+#: contract from ``run_backtest``); the existing probe tests use
+#: ``pd.DataFrame`` directly. Both shapes are accepted and the
+#: indicator probe gets converted DataFrames internally.
+SymbolBars = Union[list[OHLCVBar], pd.DataFrame]
+
 # Callable contract for the runtime re-execution. Kept as a module-level
-# alias so tests can inject a fake without monkeypatching
-# ``run_strategy_code`` globally.
+# alias so tests can inject a fake.
 RunStrategyCode = Callable[..., StrategyRunResult]
 
 
@@ -121,7 +130,7 @@ RunStrategyCode = Callable[..., StrategyRunResult]
 
 
 def should_run_probes(
-    diagnostics: Optional[BacktestExecutionDiagnostics],
+    diagnostics: BacktestExecutionDiagnostics | None,
 ) -> bool:
     """Gate for the coverage-probe stage.
 
@@ -143,10 +152,10 @@ def should_run_probes(
 def run_coverage_stage(
     *,
     spec: StrategySpec,
-    market_data: dict[str, pd.DataFrame],
+    market_data: dict[str, SymbolBars],
     config: BacktestConfig,
     exec_result: StrategyRunResult,
-    run_strategy_code_fn: RunStrategyCode = run_strategy_code,
+    run_strategy_code_fn: RunStrategyCode,
 ) -> CoverageReport:
     """Execute the three-stage coverage pipeline and return one report.
 
@@ -154,13 +163,20 @@ def run_coverage_stage(
     backtests don't pay the cost. The function itself is safe to call on
     any run — it just produces an ``UNKNOWN_LOW_COVERAGE`` report when no
     probe has anything to say.
+
+    ``market_data`` accepts either ``list[OHLCVBar]`` (production shape
+    from the orchestrator) or ``pd.DataFrame`` (existing probe-test
+    fixtures). The indicator probe is fed pandas-converted data; the
+    runtime stage forwards the original objects so the harness sees the
+    same shape it always does.
     """
     exec_diag = exec_result.execution_diagnostics
+    universe = _fetched_universe(market_data)
     available_bars = _longest_symbol_bars(market_data)
 
     static_report = run_static_probe(
         spec=spec,
-        fetched_universe=_fetched_universe(market_data),
+        fetched_universe=universe,
         available_bars=available_bars,
     )
 
@@ -171,7 +187,7 @@ def run_coverage_stage(
 
     indicator_report = run_indicator_probe(
         strategy_code=spec.strategy_code or "",
-        market_data=market_data,
+        market_data=_to_dataframes(market_data),
         warmup_bars_required=static_report.warmup_bars_required,
     )
 
@@ -187,7 +203,7 @@ def run_coverage_stage(
         static_cat=static_report.coverage_category,
         indicator_cat=indicator_report.coverage_category,
         spec=spec,
-        market_data=market_data,
+        market_data=market_data,  # original shape — harness expects OHLCVBar lists
         config=config,
         run_strategy_code_fn=run_strategy_code_fn,
     )
@@ -197,7 +213,7 @@ def merge_reports(
     static_report: CoverageReport,
     indicator_report: CoverageReport,
     *,
-    exec_diag: Optional[BacktestExecutionDiagnostics] = None,
+    exec_diag: BacktestExecutionDiagnostics | None = None,
 ) -> CoverageReport:
     """Merge a static and indicator report into one ``CoverageReport``.
 
@@ -212,8 +228,9 @@ def merge_reports(
       ``max(...)`` across them would conflate units. The indicator
       probe's value reflects what was actually examined for hit-rate
       computation, which is what downstream consumers want.
-    * Subconditions: indicator report's list verbatim (static never
-      produces any).
+    * Subconditions: each ``SubconditionCoverage`` deep-copied from the
+      indicator report so downstream consumers can mutate without
+      affecting the source.
     * Blockers: static then indicator, deduplicated on
       ``(reason, evidence, hit_rate)`` preserving first-seen order.
     * Summary: deterministic templated string.
@@ -233,7 +250,7 @@ def merge_reports(
             indicator_report.warmup_bars_required,
         ),
         entry_orders_emitted=_entry_orders_emitted(exec_diag),
-        subconditions=list(indicator_report.subconditions),
+        subconditions=[s.model_copy() for s in indicator_report.subconditions],
         likely_blockers=_dedup_blockers(
             list(static_report.likely_blockers) + list(indicator_report.likely_blockers)
         ),
@@ -245,18 +262,56 @@ def merge_reports(
 # ─────────────────────────────────────────────────────────────────────
 
 
-def _fetched_universe(market_data: dict[str, pd.DataFrame]) -> list[str]:
-    return [sym for sym, df in market_data.items() if isinstance(df, pd.DataFrame)]
+def _fetched_universe(market_data: dict[str, SymbolBars]) -> list[str]:
+    return [sym for sym, data in market_data.items() if _has_bars(data)]
 
 
-def _longest_symbol_bars(market_data: dict[str, pd.DataFrame]) -> int:
+def _longest_symbol_bars(market_data: dict[str, SymbolBars]) -> int:
     return max(
-        (len(df) for df in market_data.values() if isinstance(df, pd.DataFrame)),
+        (len(data) for data in market_data.values() if _has_bars(data)),
         default=0,
     )
 
 
-def _entry_orders_emitted(exec_diag: Optional[BacktestExecutionDiagnostics]) -> int:
+def _has_bars(data: object) -> bool:
+    """True when ``data`` is a non-empty DataFrame or OHLCVBar list."""
+    if isinstance(data, pd.DataFrame):
+        return len(data) > 0
+    if isinstance(data, list) and data and isinstance(data[0], OHLCVBar):
+        return True
+    return False
+
+
+def _to_dataframes(market_data: dict[str, SymbolBars]) -> dict[str, pd.DataFrame]:
+    """Convert OHLCV-bar lists to pandas DataFrames for the indicator probe.
+
+    The orchestrator hands us ``list[OHLCVBar]`` per symbol (production
+    shape) but the indicator probe is written against ``pd.DataFrame``.
+    Already-DataFrame entries are passed through. Empty / malformed
+    entries are dropped so the probe's ``isinstance(df, pd.DataFrame)``
+    filter stays valid.
+    """
+    out: dict[str, pd.DataFrame] = {}
+    for sym, data in market_data.items():
+        if isinstance(data, pd.DataFrame):
+            out[sym] = data
+            continue
+        if isinstance(data, list) and data and isinstance(data[0], OHLCVBar):
+            df = pd.DataFrame([bar.model_dump() for bar in data])
+            # Index on the date column when parseable, so indicator
+            # helpers that key off the index line up with the live
+            # harness. ``errors="coerce"`` keeps the conversion
+            # best-effort — bad dates fall through as NaT rather than
+            # raising.
+            if "date" in df.columns:
+                parsed = pd.to_datetime(df["date"], errors="coerce")
+                if not parsed.isna().all():
+                    df.index = parsed
+            out[sym] = df
+    return out
+
+
+def _entry_orders_emitted(exec_diag: BacktestExecutionDiagnostics | None) -> int:
     return exec_diag.orders_accepted if exec_diag is not None else 0
 
 
@@ -268,7 +323,7 @@ def _pick_category(
 
 def _dedup_blockers(blockers: list[LikelyBlocker]) -> list[LikelyBlocker]:
     """Stable dedup of likely blockers on ``(reason, evidence, hit_rate)``."""
-    seen: set[tuple[str, str, Optional[float]]] = set()
+    seen: set[tuple[str, str, float | None]] = set()
     out: list[LikelyBlocker] = []
     for b in blockers:
         key = (b.reason, b.evidence, b.hit_rate)
@@ -282,7 +337,7 @@ def _dedup_blockers(blockers: list[LikelyBlocker]) -> list[LikelyBlocker]:
 def _summary_line(
     *,
     static_cat: CoverageCategory,
-    indicator_cat: Optional[CoverageCategory],
+    indicator_cat: CoverageCategory | None,
     runtime: str = "n/a",
 ) -> str:
     """Render the prompt-facing summary line.
@@ -302,7 +357,7 @@ def _summary_line(
 def _finalize_short_circuit(
     report: CoverageReport,
     *,
-    exec_diag: Optional[BacktestExecutionDiagnostics],
+    exec_diag: BacktestExecutionDiagnostics | None,
 ) -> CoverageReport:
     """Stamp orchestrator-only fields onto a stand-alone static report."""
     return report.model_copy(
@@ -316,16 +371,42 @@ def _finalize_short_circuit(
     )
 
 
+# Runtime-stage outcome helpers. Each builds a ``(blockers, token)``
+# pair where ``token`` is the runtime-events render in the summary.
+
+
 def _skip(reason: str, evidence: str) -> tuple[list[LikelyBlocker], str]:
-    """Build a (blockers, runtime-token) pair for an unmet runtime precondition."""
     return [LikelyBlocker(reason=reason, evidence=evidence)], "skipped"
 
 
 def _fail(error_type: str) -> tuple[list[LikelyBlocker], str]:
-    """Build a (blockers, runtime-token) pair for a hard runtime failure."""
     return (
         [LikelyBlocker(reason="runtime_probe_failed", evidence=error_type[:160])],
         "failed",
+    )
+
+
+def _no_frame() -> tuple[list[LikelyBlocker], str]:
+    return (
+        [
+            LikelyBlocker(
+                reason="runtime_probe_no_frame",
+                evidence="strategy completed without emitting probe_events",
+            )
+        ],
+        "no_frame",
+    )
+
+
+def _no_hits(rule_count: int) -> tuple[list[LikelyBlocker], str]:
+    return (
+        [
+            LikelyBlocker(
+                reason="runtime_probe_no_hits",
+                evidence=f"rules_instrumented={rule_count}; hits=0",
+            )
+        ],
+        "0",
     )
 
 
@@ -335,7 +416,7 @@ def _augment_with_runtime(
     static_cat: CoverageCategory,
     indicator_cat: CoverageCategory,
     spec: StrategySpec,
-    market_data: dict[str, pd.DataFrame],
+    market_data: dict[str, SymbolBars],
     config: BacktestConfig,
     run_strategy_code_fn: RunStrategyCode,
 ) -> CoverageReport:
@@ -367,7 +448,7 @@ def _augment_with_runtime(
 def _runtime_reexecute(
     *,
     spec: StrategySpec,
-    market_data: dict[str, pd.DataFrame],
+    market_data: dict[str, SymbolBars],
     config: BacktestConfig,
     run_strategy_code_fn: RunStrategyCode,
 ) -> tuple[list[LikelyBlocker], str]:
@@ -375,9 +456,9 @@ def _runtime_reexecute(
 
     Returns ``(blockers, runtime_token)``. The token is one of:
 
-    * ``"<int>"`` — the number of probe events the harness emitted.
-      ``"0"`` is a legitimate, informative outcome ("predicates never
-      fired across the run").
+    * ``"<int>"`` — the number of ``runtime:`` blockers produced (one
+      per rule with a recognised ``rule_id``). ``"0"`` is a legitimate,
+      informative outcome ("predicates never fired across the run").
     * ``"skipped"`` — preconditions weren't met (no source, no
       instrumentable predicates).
     * ``"failed"`` — the subprocess crashed.
@@ -413,8 +494,12 @@ def _runtime_reexecute(
             coverage_probe_mode=True,
         )
     except Exception as exc:  # noqa: BLE001 — probe is best-effort
-        logger.exception("coverage_probe runtime re-execution raised")
-        return _fail(f"{type(exc).__name__}: {str(exc)[:120]}")
+        # ``logger.debug`` (rather than ``logger.exception``) keeps prod
+        # logs quiet: a sandbox crash here is expected behaviour for a
+        # best-effort probe, not a system fault. ``exc_info=True``
+        # preserves the traceback for anyone watching at DEBUG.
+        logger.debug("coverage_probe runtime re-execution raised", exc_info=True)
+        return _fail(f"{type(exc).__name__}: {exc}")
 
     if not probe_exec.success:
         return _fail(probe_exec.error_type or "unknown error")
@@ -423,34 +508,19 @@ def _runtime_reexecute(
         # Subprocess ran cleanly but the harness didn't flush a frame.
         # Distinct from a hard failure — surface separately so #452 can
         # decide whether to retry vs. treat the strategy as opaque.
-        return (
-            [
-                LikelyBlocker(
-                    reason="runtime_probe_no_frame",
-                    evidence="strategy completed without emitting probe_events",
-                )
-            ],
-            "no_frame",
-        )
+        return _no_frame()
 
     events = probe_exec.probe_events.get("events") or []
     if not events:
         # The runtime probe ran and observed zero predicate firings —
         # the strongest possible evidence of ENTRY_CONDITION_NEVER_TRUE.
-        # #452 will fold this into the prompt; for now we record it as
-        # a single high-signal blocker.
-        return (
-            [
-                LikelyBlocker(
-                    reason="runtime_probe_no_hits",
-                    evidence=f"rules_instrumented={len(rule_index.rules)}; hits=0",
-                )
-            ],
-            "0",
-        )
+        return _no_hits(len(rule_index.rules))
 
     blockers = _runtime_events_to_blockers(events, rule_index.rules)
-    return blockers, str(len(events))
+    # The token reflects the number of blockers actually produced — if
+    # the harness ever emits events with empty ``rule_id``s they get
+    # filtered out, and the count stays truthful.
+    return blockers, str(len(blockers))
 
 
 def _runtime_events_to_blockers(
@@ -504,6 +574,7 @@ def _rule_sort_key(rule_id: Any) -> tuple[int, int, str]:
 
 __all__ = [
     "LOW_TRADE_THRESHOLD",
+    "SymbolBars",
     "merge_reports",
     "run_coverage_stage",
     "should_run_probes",

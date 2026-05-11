@@ -669,7 +669,7 @@ def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
         "repair_exec": "proposed_spec",
     }
 
-    sites: List[Dict[str, str]] = []
+    sites: List[Dict[str, Any]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -680,22 +680,27 @@ def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
         kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
         spec_arg = kwargs.get("spec")
         exec_arg = kwargs.get("exec_result")
-        assert isinstance(spec_arg, ast.Name), "spec kwarg must be a bare Name reference"
-        assert isinstance(exec_arg, ast.Name), "exec_result kwarg must be a bare Name reference"
-        sites.append({"spec": spec_arg.id, "exec_result": exec_arg.id})
+        lineno = node.lineno
+        assert isinstance(spec_arg, ast.Name), (
+            f"orchestrator.py:{lineno} — spec kwarg must be a bare Name reference"
+        )
+        assert isinstance(exec_arg, ast.Name), (
+            f"orchestrator.py:{lineno} — exec_result kwarg must be a bare Name reference"
+        )
+        sites.append({"spec": spec_arg.id, "exec_result": exec_arg.id, "lineno": lineno})
 
     assert len(sites) == 3, f"expected 3 _maybe_attach_coverage_report sites, found {sites}"
     for site in sites:
         expected_spec = expected_spec_for_exec.get(site["exec_result"])
         assert expected_spec is not None, (
-            f"unknown exec_result variable {site['exec_result']!r}; if a new "
-            f"orchestrator call site is intentional, update "
-            f"expected_spec_for_exec in this test"
+            f"orchestrator.py:{site['lineno']} — unknown exec_result variable "
+            f"{site['exec_result']!r}; if a new orchestrator call site is "
+            f"intentional, update expected_spec_for_exec in this test"
         )
         assert site["spec"] == expected_spec, (
-            f"_maybe_attach_coverage_report site mismatched spec/exec_result: "
-            f"got spec={site['spec']!r} with exec_result={site['exec_result']!r}; "
-            f"expected spec={expected_spec!r}"
+            f"orchestrator.py:{site['lineno']} — _maybe_attach_coverage_report "
+            f"site mismatched spec/exec_result: got spec={site['spec']!r} with "
+            f"exec_result={site['exec_result']!r}; expected spec={expected_spec!r}"
         )
 
 
@@ -951,3 +956,142 @@ def test_runtime_blockers_sorted_numerically_by_rule_id(
         "runtime: p2",
         "runtime: p10",
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Production market_data shape — OHLCVBar lists must reach the
+# indicator probe as DataFrames.
+#
+# The orchestrator hands ``Dict[str, List[OHLCVBar]]`` to the aggregator
+# (production contract from ``run_backtest``). The indicator probe is
+# written against ``Dict[str, pd.DataFrame]`` and filters on
+# ``isinstance(df, pd.DataFrame)`` — without internal conversion the
+# probe would silently see zero data in prod and always return
+# UNKNOWN_LOW_COVERAGE.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _ohlcv_bar(date: str, close: float) -> "OHLCVBar":  # noqa: F821
+    from investment_team.market_data_service import OHLCVBar
+
+    return OHLCVBar(date=date, open=close, high=close + 1, low=close - 1, close=close, volume=1e6)
+
+
+def _ohlcv_series(n: int = 120, close: float = 100.0) -> list:
+    dates = pd.date_range("2024-01-01", periods=n, freq="D").strftime("%Y-%m-%d")
+    return [_ohlcv_bar(d, close) for d in dates]
+
+
+def test_market_data_ohlcv_bar_lists_reach_indicator_probe_as_dataframes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The aggregator must convert ``list[OHLCVBar]`` → ``pd.DataFrame``
+    before invoking the indicator probe, otherwise the probe sees zero
+    data in production and the whole stage becomes a no-op.
+    """
+    captured: List[Dict[str, Any]] = []
+
+    def _spy_indicator(**kwargs: Any) -> CoverageReport:
+        captured.append(kwargs)
+        return _report(CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE, bars=120, symbols=1)
+
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", _spy_indicator)
+
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.close > 0:
+                    ctx.submit_order(symbol=bar.symbol, side="long", qty=1)
+        """
+    )
+    market_data = {"AAPL": _ohlcv_series(120)}
+
+    report = run_coverage_stage(
+        spec=_spec(code),
+        market_data=market_data,
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_never_called_run_strategy_code,
+    )
+
+    # Indicator probe was called.
+    assert len(captured) == 1
+    # And it received a DataFrame, not the OHLCVBar list.
+    converted = captured[0]["market_data"]
+    assert isinstance(converted["AAPL"], pd.DataFrame)
+    assert len(converted["AAPL"]) == 120
+    assert {"open", "high", "low", "close", "volume"}.issubset(converted["AAPL"].columns)
+    # Static probe's universe / bar-count helpers also saw the data,
+    # so the merged report reflects it.
+    assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
+def test_market_data_dataframe_inputs_still_work() -> None:
+    """Existing tests + ad-hoc callers that hand in DataFrames directly
+    must keep working. The conversion path is opportunistic, not
+    coercive."""
+    report = run_coverage_stage(
+        spec=_spec(
+            textwrap.dedent(
+                """
+                from contract import Strategy
+                class S(Strategy):
+                    def on_bar(self, ctx, bar):
+                        if bar.close > 0: pass
+                """
+            )
+        ),
+        market_data={"AAPL": _flat_df(120)},
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_never_called_run_strategy_code,
+    )
+    # Report builds successfully — no errors from passing a DataFrame
+    # through the universe / longest-bars / conversion helpers.
+    assert report is not None
+
+
+def test_runtime_stage_forwards_original_market_data_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime stage must forward the ORIGINAL market_data shape
+    (OHLCVBar lists in prod), not the pandas-converted version — the
+    harness expects what ``run_strategy_code`` always sees.
+    """
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", _unknown_indicator)
+
+    captured: List[Any] = []
+
+    def _spy_run(
+        strategy_code: str, market_data: Any, config: Any, **kwargs: Any
+    ) -> StrategyRunResult:
+        captured.append(market_data)
+        return StrategyRunResult(
+            success=True,
+            trades=[],
+            probe_events={"events": [], "truncated": False},
+        )
+
+    bars = _ohlcv_series(120)
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if self.helper(bar):
+                    ctx.submit_order(symbol=bar.symbol, side="long", qty=1)
+        """
+    )
+    run_coverage_stage(
+        spec=_spec(code),
+        market_data={"AAPL": bars},
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_spy_run,
+    )
+    assert len(captured) == 1
+    # Identity check: the runtime stage forwarded the OHLCVBar list
+    # untouched, not a DataFrame conversion.
+    assert captured[0]["AAPL"] is bars
