@@ -55,6 +55,7 @@ from .agents.analysis import AnalysisAgent
 from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent, ZeroTradeRepairReport
+from .coverage_probe import run_coverage_stage, should_run_probes
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_safety import CodeSafetyChecker
@@ -417,6 +418,17 @@ class StrategyLabOrchestrator:
                 trades, config.initial_capital, config.start_date, config.end_date
             )
 
+            # Issue #451 — attach a deterministic CoverageReport when the
+            # run is zero/low-trade. Successful runs bypass the entire
+            # probe stage (no module work, no probe imports executed).
+            if should_run_probes(exec_result.execution_diagnostics):
+                metrics.coverage_report = run_coverage_stage(
+                    spec=spec,
+                    market_data=market_data,
+                    config=config,
+                    exec_result=exec_result,
+                )
+
             anomaly_gates = self.anomaly_detector.check(
                 metrics,
                 trades,
@@ -720,6 +732,16 @@ class StrategyLabOrchestrator:
                 new_metrics = compute_metrics(
                     new_trades, config.initial_capital, config.start_date, config.end_date
                 )
+
+                # Issue #451 — alignment re-backtest path also surfaces a
+                # CoverageReport when the fix produced zero/low trades.
+                if should_run_probes(align_exec.execution_diagnostics):
+                    new_metrics.coverage_report = run_coverage_stage(
+                        spec=spec,
+                        market_data=market_data,
+                        config=config,
+                        exec_result=align_exec,
+                    )
 
                 # ── Anomaly gates on the post-fix backtest ────────────
                 # The main refinement loop runs these checks after every
@@ -1177,6 +1199,16 @@ class StrategyLabOrchestrator:
         new_metrics = compute_metrics(
             new_trades, config.initial_capital, config.start_date, config.end_date
         )
+
+        # Issue #451 — repair re-execution path also attaches a
+        # CoverageReport when the proposed fix produces zero/low trades.
+        if should_run_probes(repair_exec.execution_diagnostics):
+            new_metrics.coverage_report = run_coverage_stage(
+                spec=proposed_spec,
+                market_data=market_data,
+                config=config,
+                exec_result=repair_exec,
+            )
 
         # ── Anomaly recheck ──────────────────────────────────────────
         new_anomaly_gates = self.anomaly_detector.check(
