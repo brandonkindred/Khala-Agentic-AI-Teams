@@ -813,9 +813,10 @@ def test_runtime_skipped_summary_token_for_empty_strategy_code(
 def test_runtime_uncaught_exception_is_logged_and_recorded(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Q3: the runtime exception path must use ``logger.exception`` so
-    # the traceback is preserved under DEBUG logging, not silently
-    # discarded.
+    # N4: the runtime exception path uses ``logger.warning`` — visible
+    # in prod (so a spike in sandbox crashes is observable) but not
+    # ERROR-severity (probe is best-effort, not a system fault). The
+    # ``exc_info=True`` preserves the traceback for triage.
     import logging
 
     monkeypatch.setattr(agg_mod, "run_indicator_probe", _unknown_indicator)
@@ -824,7 +825,7 @@ def test_runtime_uncaught_exception_is_logged_and_recorded(
         raise RuntimeError("sandbox blew up")
 
     with caplog.at_level(
-        logging.DEBUG, logger="investment_team.strategy_lab.coverage_probe.aggregator"
+        logging.WARNING, logger="investment_team.strategy_lab.coverage_probe.aggregator"
     ):
         report = run_coverage_stage(
             spec=_spec(_runtime_capable_code()),
@@ -838,12 +839,13 @@ def test_runtime_uncaught_exception_is_logged_and_recorded(
     assert failed
     assert "RuntimeError" in failed[0].evidence
     assert "runtime_events=failed" in report.summary
-    # logger.exception records ERROR level by default but here we log at
-    # the module's level (DEBUG via logger.exception → ERROR). Confirm a
-    # traceback is captured.
-    assert any(
-        "runtime re-execution" in r.message and r.exc_info is not None for r in caplog.records
-    ), "expected logger.exception to capture exc_info"
+    warning_records = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "runtime re-execution" in r.message
+    ]
+    assert warning_records, "expected a WARNING-level log record"
+    assert warning_records[0].exc_info is not None, "expected exc_info on the warning record"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1028,11 +1030,23 @@ def test_market_data_ohlcv_bar_lists_reach_indicator_probe_as_dataframes(
     assert report.coverage_category is CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE
 
 
-def test_market_data_dataframe_inputs_still_work() -> None:
-    """Existing tests + ad-hoc callers that hand in DataFrames directly
-    must keep working. The conversion path is opportunistic, not
-    coercive."""
-    report = run_coverage_stage(
+def test_market_data_dataframe_inputs_pass_through_without_reconstruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DataFrame inputs reach the indicator probe as the SAME object the
+    caller passed. The conversion path is opportunistic, not coercive —
+    pre-built DataFrames must not be cloned or rebuilt.
+    """
+    captured: List[Dict[str, Any]] = []
+
+    def _spy_indicator(**kwargs: Any) -> CoverageReport:
+        captured.append(kwargs)
+        return _report(CoverageCategory.COVERAGE_OK)
+
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", _spy_indicator)
+
+    df = _flat_df(120)
+    run_coverage_stage(
         spec=_spec(
             textwrap.dedent(
                 """
@@ -1043,14 +1057,14 @@ def test_market_data_dataframe_inputs_still_work() -> None:
                 """
             )
         ),
-        market_data={"AAPL": _flat_df(120)},
+        market_data={"AAPL": df},
         config=_config(),
         exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
         run_strategy_code_fn=_never_called_run_strategy_code,
     )
-    # Report builds successfully — no errors from passing a DataFrame
-    # through the universe / longest-bars / conversion helpers.
-    assert report is not None
+    # Identity check — not just shape.
+    assert len(captured) == 1
+    assert captured[0]["market_data"]["AAPL"] is df
 
 
 def test_runtime_stage_forwards_original_market_data_shape(
@@ -1095,3 +1109,134 @@ def test_runtime_stage_forwards_original_market_data_shape(
     # Identity check: the runtime stage forwarded the OHLCVBar list
     # untouched, not a DataFrame conversion.
     assert captured[0]["AAPL"] is bars
+
+
+# ─────────────────────────────────────────────────────────────────────
+# R1 — events with empty/missing rule_id don't inflate the summary count
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_runtime_events_with_empty_rule_id_are_filtered_and_count_stays_truthful(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harness contract is one event per rule_id; if it ever emits
+    events with empty rule_ids those get filtered out by the renderer,
+    and the summary's ``runtime_events=N`` must reflect the produced
+    blocker count, not the raw event count.
+    """
+    from investment_team.models import RuleIndex
+
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", _unknown_indicator)
+    rule_index = RuleIndex(rules={"r0": "p0", "r1": "p1"})
+    monkeypatch.setattr(
+        agg_mod,
+        "instrument_strategy_code",
+        lambda code: (code, rule_index),
+    )
+
+    def _fake_run(*args: Any, **kwargs: Any) -> StrategyRunResult:
+        return StrategyRunResult(
+            success=True,
+            trades=[],
+            probe_events={
+                "events": [
+                    {"rule_id": "r0", "hit_count": 5},
+                    {"rule_id": "", "hit_count": 3},  # filtered: empty id
+                    {"rule_id": "r1", "hit_count": 2},
+                    {"rule_id": None, "hit_count": 1},  # filtered: missing id
+                ],
+                "truncated": False,
+            },
+        )
+
+    report = run_coverage_stage(
+        spec=_spec(_runtime_capable_code()),
+        market_data={"AAPL": _flat_df(120)},
+        config=_config(),
+        exec_result=_exec_result(_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_fake_run,
+    )
+    runtime_blockers = [b for b in report.likely_blockers if b.reason.startswith("runtime:")]
+    assert len(runtime_blockers) == 2
+    assert "runtime_events=2" in report.summary
+
+
+# ─────────────────────────────────────────────────────────────────────
+# R2 — _to_dataframes is all-or-nothing on date parsing
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_to_dataframes_falls_back_to_integer_index_on_any_unparseable_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If any OHLCVBar date fails to parse, the entire DataFrame keeps
+    the integer index rather than producing a half-broken
+    DatetimeIndex peppered with NaT.
+    """
+    from investment_team.market_data_service import OHLCVBar
+    from investment_team.strategy_lab.coverage_probe.aggregator import _to_dataframes
+
+    bars = [
+        OHLCVBar(date="2024-01-01", open=1, high=1, low=1, close=1, volume=1),
+        OHLCVBar(date="not-a-date", open=1, high=1, low=1, close=1, volume=1),
+        OHLCVBar(date="2024-01-03", open=1, high=1, low=1, close=1, volume=1),
+    ]
+    out = _to_dataframes({"AAPL": bars})
+    df = out["AAPL"]
+    assert isinstance(df, pd.DataFrame)
+    # Integer index, not DatetimeIndex.
+    assert not isinstance(df.index, pd.DatetimeIndex)
+    assert len(df) == 3
+
+
+def test_to_dataframes_sets_datetime_index_when_every_date_parses() -> None:
+    from investment_team.market_data_service import OHLCVBar
+    from investment_team.strategy_lab.coverage_probe.aggregator import _to_dataframes
+
+    bars = [
+        OHLCVBar(date=f"2024-01-{i + 1:02d}", open=1, high=1, low=1, close=1, volume=1)
+        for i in range(5)
+    ]
+    out = _to_dataframes({"AAPL": bars})
+    df = out["AAPL"]
+    assert isinstance(df.index, pd.DatetimeIndex)
+    assert len(df) == 5
+
+
+# ─────────────────────────────────────────────────────────────────────
+# R3 — dropped symbols emit a debug log instead of silent omission
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_to_dataframes_drops_malformed_entries_with_debug_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Anything that isn't a DataFrame or a non-empty list of OHLCVBars
+    is dropped from the indicator-probe input — and the drop is logged
+    at DEBUG so future debugging isn't a silent mystery.
+    """
+    import logging
+
+    from investment_team.strategy_lab.coverage_probe.aggregator import _to_dataframes
+
+    with caplog.at_level(
+        logging.DEBUG, logger="investment_team.strategy_lab.coverage_probe.aggregator"
+    ):
+        out = _to_dataframes(
+            {
+                "GOOD": _flat_df(10),
+                "BAD_NONE": None,  # type: ignore[dict-item]
+                "BAD_DICT": {"close": 1},  # type: ignore[dict-item]
+                "BAD_EMPTY": [],
+            }
+        )
+
+    assert set(out.keys()) == {"GOOD"}
+    dropped_symbols = {
+        sym
+        for r in caplog.records
+        if "dropping market_data entry" in r.message
+        for sym in ("BAD_NONE", "BAD_DICT", "BAD_EMPTY")
+        if repr(sym) in r.message
+    }
+    assert dropped_symbols == {"BAD_NONE", "BAD_DICT", "BAD_EMPTY"}

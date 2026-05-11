@@ -14,7 +14,7 @@ import is touched.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Union, get_args
+from typing import Any, Callable, get_args
 
 import pandas as pd
 
@@ -63,13 +63,11 @@ _PROBE_TRIGGERING_CATEGORIES = frozenset(
 # must be a real ``ZeroTradeCategory`` literal. Renames in ``models.py``
 # would otherwise drift past this set silently. Uses an explicit raise
 # rather than ``assert`` so the guard survives ``python -O``.
-_zero_trade_literals = set(get_args(ZeroTradeCategory))
-if not _PROBE_TRIGGERING_CATEGORIES <= _zero_trade_literals:
+if not _PROBE_TRIGGERING_CATEGORIES <= set(get_args(ZeroTradeCategory)):
     raise AssertionError(
         "_PROBE_TRIGGERING_CATEGORIES contains values not in ZeroTradeCategory; "
-        f"orphans: {_PROBE_TRIGGERING_CATEGORIES - _zero_trade_literals}"
+        f"orphans: {_PROBE_TRIGGERING_CATEGORIES - set(get_args(ZeroTradeCategory))}"
     )
-del _zero_trade_literals
 
 #: Aggregation priority. The static probe's impossible-configuration
 #: categories outrank everything because they describe a strategy that
@@ -117,7 +115,7 @@ _STATIC_SHORT_CIRCUIT_CATEGORIES = frozenset(
 #: contract from ``run_backtest``); the existing probe tests use
 #: ``pd.DataFrame`` directly. Both shapes are accepted and the
 #: indicator probe gets converted DataFrames internally.
-SymbolBars = Union[list[OHLCVBar], pd.DataFrame]
+SymbolBars = list[OHLCVBar] | pd.DataFrame
 
 # Callable contract for the runtime re-execution. Kept as a module-level
 # alias so tests can inject a fake.
@@ -288,8 +286,8 @@ def _to_dataframes(market_data: dict[str, SymbolBars]) -> dict[str, pd.DataFrame
     The orchestrator hands us ``list[OHLCVBar]`` per symbol (production
     shape) but the indicator probe is written against ``pd.DataFrame``.
     Already-DataFrame entries are passed through. Empty / malformed
-    entries are dropped so the probe's ``isinstance(df, pd.DataFrame)``
-    filter stays valid.
+    entries are dropped (with a debug log) so the probe's
+    ``isinstance(df, pd.DataFrame)`` filter stays valid.
     """
     out: dict[str, pd.DataFrame] = {}
     for sym, data in market_data.items():
@@ -298,16 +296,25 @@ def _to_dataframes(market_data: dict[str, SymbolBars]) -> dict[str, pd.DataFrame
             continue
         if isinstance(data, list) and data and isinstance(data[0], OHLCVBar):
             df = pd.DataFrame([bar.model_dump() for bar in data])
-            # Index on the date column when parseable, so indicator
-            # helpers that key off the index line up with the live
-            # harness. ``errors="coerce"`` keeps the conversion
-            # best-effort — bad dates fall through as NaT rather than
-            # raising.
+            # Index on the date column when every value parses cleanly,
+            # so indicator helpers that key off the index line up with
+            # the live harness. ``errors="coerce"`` produces NaT for bad
+            # values rather than raising; an all-or-nothing check keeps
+            # the index consistent — a half-parsed DatetimeIndex would
+            # leave NaT rows that downstream renderers would spell out
+            # as the literal string "NaT".
             if "date" in df.columns:
                 parsed = pd.to_datetime(df["date"], errors="coerce")
-                if not parsed.isna().all():
+                if not parsed.isna().any():
                     df.index = parsed
             out[sym] = df
+            continue
+        logger.debug(
+            "coverage_probe: dropping market_data entry for %r — "
+            "unexpected shape %s (expected pd.DataFrame or non-empty list[OHLCVBar])",
+            sym,
+            type(data).__name__,
+        )
     return out
 
 
@@ -494,11 +501,12 @@ def _runtime_reexecute(
             coverage_probe_mode=True,
         )
     except Exception as exc:  # noqa: BLE001 — probe is best-effort
-        # ``logger.debug`` (rather than ``logger.exception``) keeps prod
-        # logs quiet: a sandbox crash here is expected behaviour for a
-        # best-effort probe, not a system fault. ``exc_info=True``
-        # preserves the traceback for anyone watching at DEBUG.
-        logger.debug("coverage_probe runtime re-execution raised", exc_info=True)
+        # ``logger.warning`` is the middle ground between ``exception``
+        # (ERROR, page-worthy) and ``debug`` (silent in prod). The probe
+        # is best-effort, so a sandbox crash isn't a fault — but a spike
+        # in crashes is worth seeing in steady-state logs. ``exc_info``
+        # preserves the traceback for triage.
+        logger.warning("coverage_probe runtime re-execution raised", exc_info=True)
         return _fail(f"{type(exc).__name__}: {exc}")
 
     if not probe_exec.success:
@@ -536,7 +544,13 @@ def _runtime_events_to_blockers(
     """
     out: list[LikelyBlocker] = []
     for ev in sorted(events, key=lambda e: _rule_sort_key(e.get("rule_id"))):
-        rule_id = str(ev.get("rule_id", ""))
+        raw_id = ev.get("rule_id")
+        if raw_id is None:
+            # ``str(None)`` would otherwise render as the literal "None"
+            # — drop missing-id events so the produced-blocker count
+            # stays in sync with the summary token.
+            continue
+        rule_id = str(raw_id)
         if not rule_id:
             continue
         label = rule_labels.get(rule_id, rule_id)
