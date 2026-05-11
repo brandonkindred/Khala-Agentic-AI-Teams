@@ -50,7 +50,6 @@
             <th class="col-type">Type</th>
             <th class="col-repo">Repository / Context</th>
             <th class="col-progress">Progress</th>
-            <th class="col-activity">Current Activity</th>
             <th class="col-agents">Active Agents</th>
             <th class="col-time">Started</th>
             <th class="col-actions">Actions</th>
@@ -98,18 +97,6 @@
                     <span class="progress-na">—</span>
                   }
                 </div>
-              </td>
-              <td class="col-activity">
-                @if (getActivityText(job)) {
-                  <div class="activity-cell">
-                    <mat-icon class="activity-icon" [class.spinning]="job.unified.status === 'running' && !job.seDetail?.waitingForAnswers">
-                      {{ job.seDetail?.waitingForAnswers ? 'help_outline' : 'sync' }}
-                    </mat-icon>
-                    <span class="activity-text">{{ getActivityText(job) }}</span>
-                  </div>
-                } @else {
-                  <span class="activity-na">—</span>
-                }
               </td>
               <td class="col-agents">
                 @if ((job.seDetail?.teamStatuses?.length ?? 0) > 0) {

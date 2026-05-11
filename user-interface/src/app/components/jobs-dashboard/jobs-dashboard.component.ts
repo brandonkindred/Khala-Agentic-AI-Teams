@@ -405,18 +405,6 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     return `${diffDays}d ago`;
   }
 
-  getActivityText(job: DashboardRow): string {
-    if (job.seDetail?.waitingForAnswers) return 'Waiting for answers';
-    if (job.seDetail?.statusText) return job.seDetail.statusText;
-    if (job.seDetail?.currentPhase) {
-      return job.seDetail.currentPhase.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-    }
-    if (job.unified.phase) {
-      return job.unified.phase.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-    }
-    return '';
-  }
-
   getProgress(job: DashboardRow): number | null {
     if (job.seDetail?.progress != null) return job.seDetail.progress;
     if (job.unified.progress != null) return job.unified.progress;
