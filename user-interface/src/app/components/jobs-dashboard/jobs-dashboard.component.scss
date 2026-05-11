@@ -166,11 +166,11 @@
 
       // Status left-border indicators
       &.status-running   { border-left: 3px solid var(--kh-accent); }
-      &.status-pending    { border-left: 3px solid var(--kh-text-muted); }
+      &.status-pending    { border-left: 3px solid var(--kh-border-muted); }
       &.status-waiting    { border-left: 3px solid var(--kh-warning); }
       &.status-completed  { border-left: 3px solid var(--kh-success); }
       &.status-failed     { border-left: 3px solid var(--kh-error); }
-      &.status-cancelled    { border-left: 3px solid var(--kh-text-muted); }
+      &.status-cancelled    { border-left: 3px solid var(--kh-border-muted); }
       &.status-interrupted  { border-left: 3px solid var(--kh-warning); }
 
       td {
