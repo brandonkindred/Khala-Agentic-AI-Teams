@@ -368,6 +368,38 @@ class _FakeStore:
             author=author,
         )
 
+    def update_feedback_link(
+        self,
+        *,
+        feedback_id: str,
+        linked_story_id: str | None,
+    ) -> FeedbackItem:
+        """In-memory mirror of ``ProductDeliveryStore.update_feedback_link``.
+
+        Same contract as the real store: missing feedback → 404, missing
+        story → 404, cross-product story → 400. Explicit ``None`` clears
+        an existing link. Mutates the row's ``updated_at`` so callers can
+        assert the audit timestamp moved.
+        """
+        existing = self.feedback.get(feedback_id)
+        if existing is None:
+            raise UnknownProductDeliveryEntity(f"feedback {feedback_id!r} does not exist")
+        if linked_story_id is not None:
+            story = self.stories.get(linked_story_id)
+            if story is None:
+                raise UnknownProductDeliveryEntity(f"story {linked_story_id!r} does not exist")
+            owning_product = self.initiatives[self.epics[story.epic_id].initiative_id].product_id
+            if owning_product != existing.product_id:
+                raise CrossProductFeedbackLink(
+                    f"story {linked_story_id!r} belongs to product "
+                    f"{owning_product!r}, not {existing.product_id!r}"
+                )
+        updated = existing.model_copy(
+            update={"linked_story_id": linked_story_id, "updated_at": _now()}
+        )
+        self.feedback[feedback_id] = updated
+        return updated
+
     def list_feedback(self, product_id: str, *, status: str | None = None) -> list[FeedbackItem]:
         # Mirror the real store: unknown product raises 404 inside the
         # same transaction as the SELECT, so concurrent deletes don't
@@ -1251,6 +1283,115 @@ def test_feedback_accepts_same_product_story_link(client: TestClient) -> None:
     )
     assert resp.status_code == 200
     assert resp.json()["linked_story_id"] == sid
+
+
+# ---------------------------------------------------------------------------
+# PATCH /feedback/{id}/link (#372 phase 4) — linking auto-promoted items
+# ---------------------------------------------------------------------------
+
+
+def _seed_product_with_story(client: TestClient, name: str) -> tuple[str, str]:
+    """Helper: create product + initiative + epic + story; return (pid, sid)."""
+    pid = client.post("/api/product-delivery/products", json={"name": name}).json()["id"]
+    iid = client.post(
+        "/api/product-delivery/initiatives",
+        json={"product_id": pid, "title": "I"},
+    ).json()["id"]
+    eid = client.post(
+        "/api/product-delivery/epics",
+        json={"initiative_id": iid, "title": "E"},
+    ).json()["id"]
+    sid = client.post(
+        "/api/product-delivery/stories",
+        json={"epic_id": eid, "title": "S"},
+    ).json()["id"]
+    return pid, sid
+
+
+def test_patch_feedback_link_attaches_story(client: TestClient) -> None:
+    pid, sid = _seed_product_with_story(client, "P")
+    fid = client.post(
+        "/api/product-delivery/feedback",
+        json={"product_id": pid, "source": "qa", "raw_payload": {}, "severity": "low"},
+    ).json()["id"]
+    # Auto-promoted feedback starts with linked_story_id=None — reviewer
+    # then attaches it to a backlog story via the Feedback tab.
+    resp = client.patch(
+        f"/api/product-delivery/feedback/{fid}/link",
+        json={"linked_story_id": sid},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["linked_story_id"] == sid
+
+
+def test_patch_feedback_link_clears_existing_link(client: TestClient) -> None:
+    pid, sid = _seed_product_with_story(client, "P")
+    fid = client.post(
+        "/api/product-delivery/feedback",
+        json={
+            "product_id": pid,
+            "source": "qa",
+            "raw_payload": {},
+            "severity": "low",
+            "linked_story_id": sid,
+        },
+    ).json()["id"]
+    # Explicit None unlinks (the body field is required-but-nullable, so
+    # callers can't drop the link by sending an empty object).
+    resp = client.patch(
+        f"/api/product-delivery/feedback/{fid}/link",
+        json={"linked_story_id": None},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["linked_story_id"] is None
+
+
+def test_patch_feedback_link_rejects_cross_product_story(client: TestClient) -> None:
+    pid_a, _ = _seed_product_with_story(client, "A")
+    _, sid_b = _seed_product_with_story(client, "B")
+    fid = client.post(
+        "/api/product-delivery/feedback",
+        json={"product_id": pid_a, "source": "qa", "raw_payload": {}, "severity": "low"},
+    ).json()["id"]
+    resp = client.patch(
+        f"/api/product-delivery/feedback/{fid}/link",
+        json={"linked_story_id": sid_b},
+    )
+    assert resp.status_code == 400
+    assert "belongs to product" in resp.json()["detail"]
+
+
+def test_patch_feedback_link_404_for_unknown_feedback(client: TestClient) -> None:
+    resp = client.patch(
+        "/api/product-delivery/feedback/ghost/link",
+        json={"linked_story_id": None},
+    )
+    assert resp.status_code == 404
+
+
+def test_patch_feedback_link_404_for_unknown_story(client: TestClient) -> None:
+    pid, _ = _seed_product_with_story(client, "P")
+    fid = client.post(
+        "/api/product-delivery/feedback",
+        json={"product_id": pid, "source": "qa", "raw_payload": {}, "severity": "low"},
+    ).json()["id"]
+    resp = client.patch(
+        f"/api/product-delivery/feedback/{fid}/link",
+        json={"linked_story_id": "ghost-story"},
+    )
+    assert resp.status_code == 404
+
+
+def test_patch_feedback_link_requires_explicit_field(client: TestClient) -> None:
+    """Empty body is a 422 — the field is required-but-nullable, so
+    callers can't drop a link accidentally by POSTing ``{}``."""
+    pid, _ = _seed_product_with_story(client, "P")
+    fid = client.post(
+        "/api/product-delivery/feedback",
+        json={"product_id": pid, "source": "qa", "raw_payload": {}, "severity": "low"},
+    ).json()["id"]
+    resp = client.patch(f"/api/product-delivery/feedback/{fid}/link", json={})
+    assert resp.status_code == 422
 
 
 def test_groom_returns_503_when_storage_unavailable(

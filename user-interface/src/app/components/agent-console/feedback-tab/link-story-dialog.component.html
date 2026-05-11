@@ -1,0 +1,39 @@
+<h2 mat-dialog-title>Link to story</h2>
+<mat-dialog-content>
+  @if (data.stories.length === 0) {
+    <p class="link-story-dialog__empty">
+      This product has no stories yet. Create one in the Backlog tab first.
+    </p>
+  } @else {
+    <mat-form-field appearance="outline" class="link-story-dialog__field">
+      <mat-label>Story</mat-label>
+      <mat-select
+        [value]="selected()"
+        (selectionChange)="selected.set($event.value)"
+      >
+        <mat-option [value]="null">— Unlink —</mat-option>
+        @for (s of data.stories; track s.id) {
+          <mat-option [value]="s.id">{{ s.title }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+  }
+</mat-dialog-content>
+<mat-dialog-actions align="end">
+  <button mat-button type="button" (click)="cancel()">Cancel</button>
+  @if (data.currentStoryId !== null) {
+    <button mat-button color="warn" type="button" (click)="unlink()">
+      <mat-icon>link_off</mat-icon>
+      Unlink
+    </button>
+  }
+  <button
+    mat-flat-button
+    color="primary"
+    type="button"
+    (click)="apply()"
+    [disabled]="data.stories.length === 0 || selected() === data.currentStoryId"
+  >
+    Apply
+  </button>
+</mat-dialog-actions>

@@ -1,8 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { provideRouter } from '@angular/router';
-import { MatDialog, MatDialogRef } from '@angular/material/dialog';
-import { of, Subject } from 'rxjs';
+import { of } from 'rxjs';
 import { vi } from 'vitest';
 import { PersonaTestingDashboardComponent } from './persona-testing-dashboard.component';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
@@ -27,7 +26,6 @@ describe('PersonaTestingDashboardComponent', () => {
     updatePersona: ReturnType<typeof vi.fn>;
     deletePersona: ReturnType<typeof vi.fn>;
   };
-  let dialogStub: { open: ReturnType<typeof vi.fn> };
 
   const sampleRun = (overrides: Partial<PersonaTestRun> = {}): PersonaTestRun => ({
     run_id: 'run-abc',
@@ -69,8 +67,6 @@ describe('PersonaTestingDashboardComponent', () => {
       updatePersona: vi.fn().mockReturnValue(of(samplePersona())),
       deletePersona: vi.fn().mockReturnValue(of(undefined)),
     };
-    dialogStub = { open: vi.fn() };
-
     await TestBed.configureTestingModule({
       imports: [PersonaTestingDashboardComponent],
       providers: [
@@ -78,7 +74,6 @@ describe('PersonaTestingDashboardComponent', () => {
         provideRouter([]),
         { provide: PersonaTestingApiService, useValue: apiStub },
         { provide: JobActionsService, useValue: jobActionsSpy },
-        { provide: MatDialog, useValue: dialogStub },
       ],
     }).compileComponents();
 
@@ -132,30 +127,24 @@ describe('PersonaTestingDashboardComponent', () => {
   });
 
   // ── Persona CRUD dialogs ────────────────────────────────────────────────
+  //
+  // We test the post-dialog handlers (`onCreateDialogClosed`,
+  // `onEditDialogClosed`, `onStartTestDialogClosed`) directly rather than
+  // driving them through `openXxxDialog()`. Reason: with standalone
+  // components that `import MatDialogModule`, the real `MatDialog`
+  // service is registered at the component's environment-injector level
+  // and wins over a `{ provide: MatDialog, useValue: dialogStub }` mock
+  // in `TestBed.providers`. The opener methods themselves are thin
+  // delegators — the meaningful logic is in the handlers.
 
-  function makeDialogRef<T>(emit: T | undefined) {
-    const closed = new Subject<T | undefined>();
-    queueMicrotask(() => {
-      closed.next(emit);
-      closed.complete();
+  it('dispatches createPersona when the create dialog closes with a result', () => {
+    component.onCreateDialogClosed({
+      name: 'QA',
+      description: 'd',
+      icon: 'bug_report',
+      system_prompt: 's',
+      spec_generation_prompt: 'g',
     });
-    return {
-      afterClosed: () => closed.asObservable(),
-    } as unknown as MatDialogRef<unknown, T>;
-  }
-
-  it('opens create dialog and dispatches createPersona on save', async () => {
-    dialogStub.open.mockReturnValueOnce(
-      makeDialogRef({
-        name: 'QA',
-        description: 'd',
-        icon: 'bug_report',
-        system_prompt: 's',
-        spec_generation_prompt: 'g',
-      }),
-    );
-    component.openCreateDialog();
-    await Promise.resolve();
     expect(apiStub.createPersona).toHaveBeenCalledWith({
       name: 'QA',
       description: 'd',
@@ -165,33 +154,29 @@ describe('PersonaTestingDashboardComponent', () => {
     });
   });
 
-  it('skips API call when create dialog is cancelled', async () => {
-    dialogStub.open.mockReturnValueOnce(makeDialogRef(undefined));
-    component.openCreateDialog();
-    await Promise.resolve();
+  it('skips API call when the create dialog is cancelled', () => {
+    component.onCreateDialogClosed(undefined);
     expect(apiStub.createPersona).not.toHaveBeenCalled();
   });
 
-  it('opens edit dialog with the selected persona and dispatches updatePersona on save', async () => {
+  it('dispatches updatePersona with the persona id when the edit dialog closes with a result', () => {
     const p = samplePersona({ id: 'p-99' });
-    dialogStub.open.mockReturnValueOnce(
-      makeDialogRef({
-        name: 'New Name',
-        description: 'd',
-        icon: 'person',
-        system_prompt: 's',
-        spec_generation_prompt: 'g',
-      }),
-    );
-    component.openEditDialog(p);
-    expect(dialogStub.open).toHaveBeenCalledTimes(1);
-    const passedData = dialogStub.open.mock.calls[0][1].data;
-    expect(passedData).toEqual({ mode: 'edit', persona: p });
-    await Promise.resolve();
+    component.onEditDialogClosed(p, {
+      name: 'New Name',
+      description: 'd',
+      icon: 'person',
+      system_prompt: 's',
+      spec_generation_prompt: 'g',
+    });
     expect(apiStub.updatePersona).toHaveBeenCalledWith(
       'p-99',
       expect.objectContaining({ name: 'New Name' }),
     );
+  });
+
+  it('skips API call when the edit dialog is cancelled', () => {
+    component.onEditDialogClosed(samplePersona({ id: 'p-99' }), undefined);
+    expect(apiStub.updatePersona).not.toHaveBeenCalled();
   });
 
   it('confirms then dispatches deletePersona', () => {
@@ -210,13 +195,20 @@ describe('PersonaTestingDashboardComponent', () => {
   });
 
   it('Edit and Delete are available even on builtin personas (per user choice)', () => {
-    // Visual is just an extra chip; behaviorally, Edit and Delete fire on any
-    // persona regardless of is_builtin. Both methods take a PersonaInfo and
-    // dispatch unconditionally — no read-only branch exists.
+    // Behaviorally, Edit and Delete fire on any persona regardless of
+    // is_builtin. The is_builtin flag is purely visual (extra chip).
     const builtin = samplePersona({ id: 'startup-founder', is_builtin: true });
-    dialogStub.open.mockReturnValueOnce(makeDialogRef(undefined));
-    component.openEditDialog(builtin);
-    expect(dialogStub.open).toHaveBeenCalled();
+    component.onEditDialogClosed(builtin, {
+      name: 'Renamed',
+      description: 'd',
+      icon: 'person',
+      system_prompt: 's',
+      spec_generation_prompt: 'g',
+    });
+    expect(apiStub.updatePersona).toHaveBeenCalledWith(
+      'startup-founder',
+      expect.objectContaining({ name: 'Renamed' }),
+    );
 
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     component.deletePersona(builtin);
@@ -226,21 +218,17 @@ describe('PersonaTestingDashboardComponent', () => {
 
   // ── Start Test dialog ────────────────────────────────────────────────────
 
-  it('opens start-test dialog and starts test with the selected payload', async () => {
+  it('dispatches startTest when the start-test dialog closes with a payload', () => {
     component.personas = [samplePersona()];
     component.teams = [{ team_key: 'software_engineering', display_name: 'Software Engineering' }];
     apiStub.startTest.mockReturnValueOnce(
       of({ job_id: 'new-run', status: 'running', message: '' }),
     );
-    dialogStub.open.mockReturnValueOnce(
-      makeDialogRef({
-        persona_id: 'p-1',
-        target_team_key: 'software_engineering',
-        project_name: 'taskflow-mvp',
-      }),
-    );
-    component.openStartTestDialog();
-    await Promise.resolve();
+    component.onStartTestDialogClosed({
+      persona_id: 'p-1',
+      target_team_key: 'software_engineering',
+      project_name: 'taskflow-mvp',
+    });
     expect(apiStub.startTest).toHaveBeenCalledWith({
       persona_id: 'p-1',
       target_team_key: 'software_engineering',
@@ -248,11 +236,17 @@ describe('PersonaTestingDashboardComponent', () => {
     });
   });
 
-  it('does nothing if no personas or teams are loaded yet', () => {
+  it('skips startTest when the start-test dialog is cancelled', () => {
+    component.onStartTestDialogClosed(undefined);
+    expect(apiStub.startTest).not.toHaveBeenCalled();
+  });
+
+  it('openStartTestDialog short-circuits if no personas or teams are loaded yet', () => {
     component.personas = [];
     component.teams = [];
     component.openStartTestDialog();
-    expect(dialogStub.open).not.toHaveBeenCalled();
+    // No API call attempted; the opener bails before touching MatDialog.
+    expect(apiStub.startTest).not.toHaveBeenCalled();
   });
 
   // ── Run lookup helpers ───────────────────────────────────────────────────

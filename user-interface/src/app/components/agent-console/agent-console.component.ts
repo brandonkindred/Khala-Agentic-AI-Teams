@@ -6,13 +6,21 @@ import { MatButtonModule } from '@angular/material/button';
 import { AgentCatalogComponent } from './agent-catalog/agent-catalog.component';
 import { AgentRunnerComponent } from './agent-runner/agent-runner.component';
 import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
+import { BacklogTabComponent } from './backlog-tab/backlog-tab.component';
+import { SprintsTabComponent } from './sprints-tab/sprints-tab.component';
+import { FeedbackTabComponent } from './feedback-tab/feedback-tab.component';
 
 /**
  * Top-level page for the Agent Console.
  *
- * Hosts three tabs:
+ * Hosts six tabs:
  *   - **Catalog** (default) — browse and inspect every registered agent.
  *   - **Runner** — invoke any agent in a per-team warm Docker sandbox.
+ *   - **Backlog** — `product_delivery` initiatives/epics/stories with
+ *     inline edit + grooming (#243 phase 4).
+ *   - **Sprints** — sprint list with `Plan sprint` action (#243 phase 4).
+ *   - **Feedback** — auto-promoted feedback with story-linking (#243
+ *     phase 4 + the new PATCH /feedback/{id}/link route).
  *   - **Provisioning & Environments** — embeds the existing provisioning
  *     dashboard verbatim so its behavior is unchanged.
  */
@@ -27,6 +35,9 @@ import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashb
     AgentCatalogComponent,
     AgentRunnerComponent,
     AgentProvisioningDashboardComponent,
+    BacklogTabComponent,
+    SprintsTabComponent,
+    FeedbackTabComponent,
   ],
   templateUrl: './agent-console.component.html',
   styleUrl: './agent-console.component.scss',

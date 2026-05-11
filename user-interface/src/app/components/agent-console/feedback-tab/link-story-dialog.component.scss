@@ -1,0 +1,11 @@
+.link-story-dialog {
+  &__field {
+    width: 360px;
+    max-width: 80vw;
+  }
+
+  &__empty {
+    color: var(--kh-text-muted, #71717a);
+    padding: 16px 0;
+  }
+}

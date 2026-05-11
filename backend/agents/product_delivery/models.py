@@ -307,6 +307,19 @@ class ScoreUpdate(BaseModel):
     rice_score: FiniteScore = None
 
 
+class FeedbackLinkUpdate(BaseModel):
+    """PATCH body for ``PATCH /feedback/{id}/link``.
+
+    ``linked_story_id`` is required-but-nullable: callers must include
+    the field explicitly so a stray empty body can't accidentally clear
+    an existing link. ``None`` means "unlink"; a string means "link to
+    this story". Cross-product mismatches are rejected by the store as
+    :class:`~product_delivery.store.CrossProductFeedbackLink` (→ 400).
+    """
+
+    linked_story_id: str | None = Field(...)
+
+
 # ---------------------------------------------------------------------------
 # Read projections
 # ---------------------------------------------------------------------------

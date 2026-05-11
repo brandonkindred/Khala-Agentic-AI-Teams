@@ -1,0 +1,108 @@
+<div class="sprints-tab">
+  <header class="sprints-tab__header">
+    <mat-form-field appearance="outline">
+      <mat-label>Product</mat-label>
+      <mat-select
+        [value]="selectedProductId()"
+        (selectionChange)="selectProduct($event.value)"
+        [disabled]="loadingProducts() || products().length === 0"
+      >
+        @for (p of products(); track p.id) {
+          <mat-option [value]="p.id">{{ p.name }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+    <button
+      mat-stroked-button
+      type="button"
+      (click)="loadSprints()"
+      [disabled]="!selectedProductId() || loadingSprints()"
+    >
+      <mat-icon>refresh</mat-icon>
+      Reload
+    </button>
+  </header>
+
+  @if (error()) {
+    <div class="sprints-tab__error" role="alert">{{ error() }}</div>
+  }
+
+  @if (planResult(); as r) {
+    <section class="sprints-tab__plan-result" role="status">
+      <header>
+        <span>Plan result</span>
+        <button
+          mat-icon-button
+          type="button"
+          aria-label="Dismiss"
+          (click)="dismissPlanResult()"
+        >
+          <mat-icon>close</mat-icon>
+        </button>
+      </header>
+      <dl>
+        <dt>Selected</dt>
+        <dd>{{ r.selected_story_ids.length }} story/stories</dd>
+        <dt>Skipped</dt>
+        <dd>{{ r.skipped_story_ids.length }} story/stories</dd>
+        <dt>Used capacity</dt>
+        <dd>{{ r.used_capacity }}</dd>
+        <dt>Remaining</dt>
+        <dd>{{ r.remaining_capacity }}</dd>
+        @if (r.rationale) {
+          <dt>Rationale</dt>
+          <dd class="rationale">{{ r.rationale }}</dd>
+        }
+      </dl>
+    </section>
+  }
+
+  @if (loadingProducts() || loadingSprints()) {
+    <div class="sprints-tab__loading">
+      <mat-spinner diameter="32"></mat-spinner>
+    </div>
+  } @else if (endpointMissing()) {
+    <div class="sprints-tab__empty">
+      Sprint listing endpoint isn't available on this deployment. Create sprints via
+      <code>POST /api/product-delivery/sprints</code> and use
+      <code>POST /sprints/{{ '{' }}id{{ '}' }}/plan</code> directly until the listing
+      route ships.
+    </div>
+  } @else if (sprints().length === 0) {
+    <div class="sprints-tab__empty">No sprints yet for this product.</div>
+  } @else {
+    <ul class="sprints-tab__list">
+      @for (s of sprints(); track s.id) {
+        <li class="sprint-card">
+          <header>
+            <span class="sprint-card__name">{{ s.name }}</span>
+            <mat-chip-set>
+              <mat-chip class="is-status">{{ s.status }}</mat-chip>
+              <mat-chip class="is-capacity">{{ s.capacity_points }} pts</mat-chip>
+            </mat-chip-set>
+          </header>
+          <div class="sprint-card__dates">
+            <span>{{ s.starts_at ?? '—' }}</span>
+            <span>→</span>
+            <span>{{ s.ends_at ?? '—' }}</span>
+          </div>
+          <footer>
+            <button
+              mat-stroked-button
+              color="primary"
+              type="button"
+              (click)="planSprint(s)"
+              [disabled]="!canPlan(s) || planningId() === s.id"
+            >
+              @if (planningId() === s.id) {
+                <mat-spinner diameter="18"></mat-spinner>
+              } @else {
+                Plan sprint
+              }
+            </button>
+          </footer>
+        </li>
+      }
+    </ul>
+  }
+</div>

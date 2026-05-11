@@ -1,0 +1,70 @@
+<h2 mat-dialog-title>Groom backlog</h2>
+<mat-dialog-content class="groom-modal">
+  <header class="groom-modal__header">
+    <mat-button-toggle-group
+      [value]="method()"
+      (change)="setMethod($event.value)"
+      hideSingleSelectionIndicator="true"
+    >
+      <mat-button-toggle value="wsjf">WSJF</mat-button-toggle>
+      <mat-button-toggle value="rice">RICE</mat-button-toggle>
+    </mat-button-toggle-group>
+    @if (previewing()) {
+      <mat-spinner diameter="20"></mat-spinner>
+    }
+  </header>
+
+  @if (error()) {
+    <div class="groom-modal__error" role="alert">{{ error() }}</div>
+  }
+
+  @if (preview(); as result) {
+    @if (result.rationale) {
+      <p class="groom-modal__banner">{{ result.rationale }}</p>
+    }
+    @if (result.ranked.length === 0) {
+      <p class="groom-modal__empty">No scored items yet for this product.</p>
+    } @else {
+      <table class="groom-modal__table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Item</th>
+            <th>Kind</th>
+            <th>Score</th>
+            <th>Rationale</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (item of result.ranked; track item.id; let i = $index) {
+            <tr>
+              <td>{{ i + 1 }}</td>
+              <td>{{ item.title }}</td>
+              <td>{{ item.kind }}</td>
+              <td>{{ scoreFor(item) ?? '—' }}</td>
+              <td class="rationale">{{ item.rationale || '—' }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  }
+</mat-dialog-content>
+<mat-dialog-actions align="end">
+  <button mat-button type="button" (click)="discard()" [disabled]="applying()">
+    Discard
+  </button>
+  <button
+    mat-flat-button
+    color="primary"
+    type="button"
+    (click)="apply()"
+    [disabled]="previewing() || applying() || !preview()"
+  >
+    @if (applying()) {
+      <mat-spinner diameter="18"></mat-spinner>
+    } @else {
+      Apply
+    }
+  </button>
+</mat-dialog-actions>

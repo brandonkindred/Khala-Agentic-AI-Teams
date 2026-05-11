@@ -1,0 +1,188 @@
+<div class="backlog-tab">
+  <header class="backlog-tab__header">
+    <div class="backlog-tab__product-picker">
+      <mat-form-field appearance="outline">
+        <mat-label>Product</mat-label>
+        <mat-select
+          [value]="selectedProductId()"
+          (selectionChange)="selectProduct($event.value)"
+          [disabled]="loadingProducts() || products().length === 0"
+        >
+          @for (p of products(); track p.id) {
+            <mat-option [value]="p.id">{{ p.name }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+      <button
+        mat-icon-button
+        type="button"
+        aria-label="Refresh products"
+        (click)="refreshProducts()"
+        [disabled]="loadingProducts()"
+      >
+        <mat-icon>refresh</mat-icon>
+      </button>
+    </div>
+    <div class="backlog-tab__actions">
+      <button
+        mat-stroked-button
+        type="button"
+        color="primary"
+        (click)="loadBacklog()"
+        [disabled]="!hasSelection() || loadingBacklog()"
+      >
+        <mat-icon>cached</mat-icon>
+        Reload
+      </button>
+      <button
+        mat-flat-button
+        color="primary"
+        type="button"
+        (click)="openGroomModal()"
+        [disabled]="!hasSelection() || loadingBacklog()"
+      >
+        <mat-icon>auto_awesome</mat-icon>
+        Groom backlog
+      </button>
+    </div>
+  </header>
+
+  @if (error()) {
+    <div class="backlog-tab__error" role="alert">{{ error() }}</div>
+  }
+
+  @if (loadingProducts() || loadingBacklog()) {
+    <div class="backlog-tab__loading">
+      <mat-spinner diameter="32"></mat-spinner>
+    </div>
+  } @else if (!hasSelection()) {
+    <div class="backlog-tab__empty">No products yet.</div>
+  } @else if (backlog() === null) {
+    <div class="backlog-tab__empty">Backlog unavailable.</div>
+  } @else if (backlog()!.initiatives.length === 0) {
+    <div class="backlog-tab__empty">This product has no initiatives yet.</div>
+  } @else {
+    <div class="backlog-tab__tree">
+      @for (i of backlog()!.initiatives; track i.id) {
+          <section class="initiative">
+            <header class="initiative__header">
+              <span class="initiative__title">{{ i.title }}</span>
+              <mat-chip-set>
+                <mat-chip [class.is-status]="true">{{ i.status }}</mat-chip>
+                @if (i.wsjf_score !== null) {
+                  <mat-chip class="is-score-wsjf">WSJF {{ i.wsjf_score }}</mat-chip>
+                }
+                @if (i.rice_score !== null) {
+                  <mat-chip class="is-score-rice">RICE {{ i.rice_score }}</mat-chip>
+                }
+              </mat-chip-set>
+            </header>
+
+            @for (e of i.epics; track e.id) {
+              <article class="epic">
+                <header class="epic__header">
+                  <span class="epic__title">{{ e.title }}</span>
+                  <mat-chip-set>
+                    <mat-chip class="is-status">{{ e.status }}</mat-chip>
+                    @if (e.wsjf_score !== null) {
+                      <mat-chip class="is-score-wsjf">WSJF {{ e.wsjf_score }}</mat-chip>
+                    }
+                    @if (e.rice_score !== null) {
+                      <mat-chip class="is-score-rice">RICE {{ e.rice_score }}</mat-chip>
+                    }
+                  </mat-chip-set>
+                </header>
+                <ul class="epic__stories">
+                  @for (s of e.stories; track s.id) {
+                    <li
+                      class="story"
+                      tabindex="0"
+                      role="button"
+                      (click)="openStoryDrawer(s)"
+                      (keydown.enter)="openStoryDrawer(s)"
+                    >
+                      <span class="story__title">{{ s.title }}</span>
+                      <mat-chip-set>
+                        <mat-chip class="is-status">{{ s.status }}</mat-chip>
+                        @if (s.wsjf_score !== null) {
+                          <mat-chip class="is-score-wsjf">WSJF {{ s.wsjf_score }}</mat-chip>
+                        }
+                        @if (s.rice_score !== null) {
+                          <mat-chip class="is-score-rice">RICE {{ s.rice_score }}</mat-chip>
+                        }
+                        @if (s.estimate_points !== null) {
+                          <mat-chip class="is-estimate">{{ s.estimate_points }} pts</mat-chip>
+                        }
+                      </mat-chip-set>
+                    </li>
+                  }
+                </ul>
+              </article>
+            }
+          </section>
+        }
+    </div>
+  }
+
+  @if (drawerStory(); as story) {
+    <aside class="backlog-tab__drawer" role="dialog" aria-label="Edit story">
+      <header class="backlog-tab__drawer-header">
+        <span class="backlog-tab__drawer-title">{{ story.title }}</span>
+        <button
+          mat-icon-button
+          type="button"
+          aria-label="Close drawer"
+          (click)="closeDrawer()"
+        >
+          <mat-icon>close</mat-icon>
+        </button>
+      </header>
+      <div class="backlog-tab__drawer-body">
+        <mat-form-field appearance="outline">
+          <mat-label>Status</mat-label>
+          <input
+            matInput
+            [ngModel]="drawerStatus()"
+            (ngModelChange)="drawerStatus.set($event)"
+            placeholder="proposed / in_progress / done"
+          />
+        </mat-form-field>
+        <mat-form-field appearance="outline">
+          <mat-label>WSJF score</mat-label>
+          <input
+            matInput
+            type="number"
+            [ngModel]="drawerWsjf()"
+            (ngModelChange)="drawerWsjf.set($event)"
+          />
+        </mat-form-field>
+        <mat-form-field appearance="outline">
+          <mat-label>RICE score</mat-label>
+          <input
+            matInput
+            type="number"
+            [ngModel]="drawerRice()"
+            (ngModelChange)="drawerRice.set($event)"
+          />
+        </mat-form-field>
+        @if (drawerError()) {
+          <div class="backlog-tab__drawer-error" role="alert">{{ drawerError() }}</div>
+        }
+      </div>
+      <footer class="backlog-tab__drawer-footer">
+        <button mat-button type="button" (click)="closeDrawer()" [disabled]="drawerSaving()">
+          Cancel
+        </button>
+        <button
+          mat-flat-button
+          color="primary"
+          type="button"
+          (click)="saveDrawer()"
+          [disabled]="drawerSaving()"
+        >
+          Save
+        </button>
+      </footer>
+    </aside>
+  }
+</div>

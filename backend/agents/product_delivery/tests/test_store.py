@@ -253,6 +253,92 @@ def test_feedback_rejects_cross_product_story_link() -> None:
         )
 
 
+def test_update_feedback_link_attaches_and_clears() -> None:
+    store = _store()
+    p = store.create_product(name="P", description="", vision="", author="alice")
+    i = store.create_initiative(
+        product_id=p.id, title="I", summary="", status="proposed", author="alice"
+    )
+    e = store.create_epic(
+        initiative_id=i.id, title="E", summary="", status="proposed", author="alice"
+    )
+    s = store.create_story(
+        epic_id=e.id,
+        title="S",
+        user_story="",
+        status="proposed",
+        estimate_points=None,
+        author="alice",
+    )
+    f = store.create_feedback_item(
+        product_id=p.id,
+        source="qa",
+        raw_payload={},
+        severity="normal",
+        linked_story_id=None,
+        author="alice",
+    )
+    assert f.linked_story_id is None
+
+    linked = store.update_feedback_link(feedback_id=f.id, linked_story_id=s.id)
+    assert linked.linked_story_id == s.id
+    assert linked.updated_at >= f.updated_at
+
+    cleared = store.update_feedback_link(feedback_id=f.id, linked_story_id=None)
+    assert cleared.linked_story_id is None
+
+
+def test_update_feedback_link_rejects_cross_product_story() -> None:
+    store = _store()
+    p_a = store.create_product(name="A", description="", vision="", author="alice")
+    p_b = store.create_product(name="B", description="", vision="", author="alice")
+    i_b = store.create_initiative(
+        product_id=p_b.id, title="I", summary="", status="proposed", author="alice"
+    )
+    e_b = store.create_epic(
+        initiative_id=i_b.id, title="E", summary="", status="proposed", author="alice"
+    )
+    s_b = store.create_story(
+        epic_id=e_b.id,
+        title="S",
+        user_story="",
+        status="proposed",
+        estimate_points=None,
+        author="alice",
+    )
+    f_a = store.create_feedback_item(
+        product_id=p_a.id,
+        source="qa",
+        raw_payload={},
+        severity="normal",
+        linked_story_id=None,
+        author="alice",
+    )
+    with pytest.raises(CrossProductFeedbackLink):
+        store.update_feedback_link(feedback_id=f_a.id, linked_story_id=s_b.id)
+
+
+def test_update_feedback_link_raises_for_unknown_feedback() -> None:
+    store = _store()
+    with pytest.raises(UnknownProductDeliveryEntity):
+        store.update_feedback_link(feedback_id="ghost", linked_story_id=None)
+
+
+def test_update_feedback_link_raises_for_unknown_story() -> None:
+    store = _store()
+    p = store.create_product(name="P", description="", vision="", author="alice")
+    f = store.create_feedback_item(
+        product_id=p.id,
+        source="qa",
+        raw_payload={},
+        severity="normal",
+        linked_story_id=None,
+        author="alice",
+    )
+    with pytest.raises(UnknownProductDeliveryEntity):
+        store.update_feedback_link(feedback_id=f.id, linked_story_id="ghost-story")
+
+
 # ---------------------------------------------------------------------------
 # Sprints (Phase 2 of #243)
 # ---------------------------------------------------------------------------
