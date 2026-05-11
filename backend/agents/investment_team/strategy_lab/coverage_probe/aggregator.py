@@ -110,6 +110,16 @@ _STATIC_SHORT_CIRCUIT_CATEGORIES = frozenset(
     }
 )
 
+# Runtime-stage outcome tokens. Single source of truth — both
+# ``_summary_line`` (which renders them) and ``_runtime_reexecute``
+# (which produces them) read from here, so the vocabulary can't drift.
+# A numeric token (``"0"``, ``"1"``, …) is also valid and reflects the
+# count of ``runtime:`` blockers produced.
+_RUNTIME_NOT_RUN = "n/a"
+_RUNTIME_SKIPPED = "skipped"
+_RUNTIME_FAILED = "failed"
+_RUNTIME_NO_FRAME = "no_frame"
+
 #: Type alias for market data as it appears at the probe stage. The
 #: orchestrator hands us ``list[OHLCVBar]`` per symbol (production
 #: contract from ``run_backtest``); the existing probe tests use
@@ -155,7 +165,19 @@ def run_coverage_stage(
     exec_result: StrategyRunResult,
     run_strategy_code_fn: RunStrategyCode,
 ) -> CoverageReport:
-    """Execute the three-stage coverage pipeline and return one report.
+    """Run the coverage pipeline and return one ``CoverageReport``.
+
+    The pipeline has five phases — two of which are early exits:
+
+    1. Summarise market data (universe + longest-history bars).
+    2. Static probe (#447). Exits with a finalised report if the static
+       category is an absolute blocker (``WARMUP_EXCEEDS_HISTORY`` /
+       ``TARGET_SYMBOL_MISSING``).
+    3. Indicator probe (#448). Merged with the static report.
+    4. Exit with the merged report if the merged category is conclusive.
+    5. Runtime instrumentation (#449/#450). Augments the merged report
+       with structured ``runtime:`` blockers and a runtime token in the
+       summary.
 
     Callers should gate this with :func:`should_run_probes` so successful
     backtests don't pay the cost. The function itself is safe to call on
@@ -169,8 +191,7 @@ def run_coverage_stage(
     same shape it always does.
     """
     exec_diag = exec_result.execution_diagnostics
-    universe = _fetched_universe(market_data)
-    available_bars = _longest_symbol_bars(market_data)
+    universe, available_bars = _summarize_market_data(market_data)
 
     static_report = run_static_probe(
         spec=spec,
@@ -260,15 +281,20 @@ def merge_reports(
 # ─────────────────────────────────────────────────────────────────────
 
 
-def _fetched_universe(market_data: dict[str, SymbolBars]) -> list[str]:
-    return [sym for sym, data in market_data.items() if _has_bars(data)]
+def _summarize_market_data(
+    market_data: dict[str, SymbolBars],
+) -> tuple[list[str], int]:
+    """Return ``(universe, longest_symbol_bars)`` in a single pass.
 
-
-def _longest_symbol_bars(market_data: dict[str, SymbolBars]) -> int:
-    return max(
-        (len(data) for data in market_data.values() if _has_bars(data)),
-        default=0,
-    )
+    ``universe`` is the list of symbols whose ``data`` has at least one
+    bar (DataFrame or ``list[OHLCVBar]``). ``longest_symbol_bars`` is
+    the max bar count across that filtered set — the static probe needs
+    it to evaluate warm-up windows.
+    """
+    valid = [(sym, data) for sym, data in market_data.items() if _has_bars(data)]
+    universe = [sym for sym, _ in valid]
+    longest = max((len(data) for _, data in valid), default=0)
+    return universe, longest
 
 
 def _has_bars(data: object) -> bool:
@@ -278,6 +304,9 @@ def _has_bars(data: object) -> bool:
     if isinstance(data, list) and data and isinstance(data[0], OHLCVBar):
         return True
     return False
+
+
+_OHLCV_FIELDS: tuple[str, ...] = ("date", "open", "high", "low", "close", "volume")
 
 
 def _to_dataframes(market_data: dict[str, SymbolBars]) -> dict[str, pd.DataFrame]:
@@ -295,19 +324,7 @@ def _to_dataframes(market_data: dict[str, SymbolBars]) -> dict[str, pd.DataFrame
             out[sym] = data
             continue
         if isinstance(data, list) and data and isinstance(data[0], OHLCVBar):
-            df = pd.DataFrame([bar.model_dump() for bar in data])
-            # Index on the date column when every value parses cleanly,
-            # so indicator helpers that key off the index line up with
-            # the live harness. ``errors="coerce"`` produces NaT for bad
-            # values rather than raising; an all-or-nothing check keeps
-            # the index consistent — a half-parsed DatetimeIndex would
-            # leave NaT rows that downstream renderers would spell out
-            # as the literal string "NaT".
-            if "date" in df.columns:
-                parsed = pd.to_datetime(df["date"], errors="coerce")
-                if not parsed.isna().any():
-                    df.index = parsed
-            out[sym] = df
+            out[sym] = _ohlcv_list_to_dataframe(data)
             continue
         logger.debug(
             "coverage_probe: dropping market_data entry for %r — "
@@ -318,14 +335,43 @@ def _to_dataframes(market_data: dict[str, SymbolBars]) -> dict[str, pd.DataFrame
     return out
 
 
+def _ohlcv_list_to_dataframe(bars: list[OHLCVBar]) -> pd.DataFrame:
+    """Build a DataFrame from a list of ``OHLCVBar`` via attribute access.
+
+    Uses ``from_records`` with explicit columns rather than
+    ``[bar.model_dump() for bar in bars]`` to skip the per-bar pydantic
+    dict construction — meaningfully faster for the multi-thousand-bar
+    history typical of strategy backtests.
+    """
+    df = pd.DataFrame.from_records(
+        ((b.date, b.open, b.high, b.low, b.close, b.volume) for b in bars),
+        columns=_OHLCV_FIELDS,
+    )
+    # Index on the date column when every value parses; ``errors="raise"``
+    # lets pandas short-circuit on the first bad value, so we don't pay
+    # the full conversion cost just to throw it away. Any parse failure
+    # keeps the integer index — a half-parsed DatetimeIndex would leave
+    # NaT rows that downstream renderers spell out as the literal "NaT".
+    try:
+        df.index = pd.to_datetime(df["date"], errors="raise")
+    except (ValueError, TypeError):
+        pass
+    return df
+
+
 def _entry_orders_emitted(exec_diag: BacktestExecutionDiagnostics | None) -> int:
     return exec_diag.orders_accepted if exec_diag is not None else 0
+
+
+def _category_rank(cat: CoverageCategory) -> int:
+    """Lookup priority rank for a coverage category (lower = wins)."""
+    return _CATEGORY_RANK[cat]
 
 
 def _pick_category(
     static_cat: CoverageCategory, indicator_cat: CoverageCategory
 ) -> CoverageCategory:
-    return min(static_cat, indicator_cat, key=_CATEGORY_RANK.__getitem__)
+    return min(static_cat, indicator_cat, key=_category_rank)
 
 
 def _dedup_blockers(blockers: list[LikelyBlocker]) -> list[LikelyBlocker]:
@@ -345,7 +391,7 @@ def _summary_line(
     *,
     static_cat: CoverageCategory,
     indicator_cat: CoverageCategory | None,
-    runtime: str = "n/a",
+    runtime: str = _RUNTIME_NOT_RUN,
 ) -> str:
     """Render the prompt-facing summary line.
 
@@ -353,9 +399,10 @@ def _summary_line(
     skipped (static short-circuited); render as ``SKIPPED`` rather than
     lying with a default-valued ``UNKNOWN_LOW_COVERAGE``.
 
-    ``runtime`` is a free-form short token: ``"n/a"`` (didn't run),
-    ``"0"`` / ``"5"`` (event count), ``"failed"`` / ``"no_frame"`` /
-    ``"skipped"`` (negative outcomes).
+    ``runtime`` is a short token from the runtime stage. See the
+    ``_RUNTIME_*`` constants at the top of the module for the
+    vocabulary; numeric strings (``"0"``, ``"1"``, …) are also valid
+    and reflect the produced ``runtime:`` blocker count.
     """
     indicator = "SKIPPED" if indicator_cat is None else indicator_cat.value
     return f"static={static_cat.value}; indicator={indicator}; runtime_events={runtime}"
@@ -383,13 +430,13 @@ def _finalize_short_circuit(
 
 
 def _skip(reason: str, evidence: str) -> tuple[list[LikelyBlocker], str]:
-    return [LikelyBlocker(reason=reason, evidence=evidence)], "skipped"
+    return [LikelyBlocker(reason=reason, evidence=evidence)], _RUNTIME_SKIPPED
 
 
 def _fail(error_type: str) -> tuple[list[LikelyBlocker], str]:
     return (
         [LikelyBlocker(reason="runtime_probe_failed", evidence=error_type[:160])],
-        "failed",
+        _RUNTIME_FAILED,
     )
 
 
@@ -401,7 +448,7 @@ def _no_frame() -> tuple[list[LikelyBlocker], str]:
                 evidence="strategy completed without emitting probe_events",
             )
         ],
-        "no_frame",
+        _RUNTIME_NO_FRAME,
     )
 
 
@@ -461,21 +508,12 @@ def _runtime_reexecute(
 ) -> tuple[list[LikelyBlocker], str]:
     """Instrument the strategy and re-run with ``coverage_probe_mode=True``.
 
-    Returns ``(blockers, runtime_token)``. The token is one of:
+    Returns ``(blockers, runtime_token)``. Tokens are documented in the
+    module-level ``_RUNTIME_*`` constants; numeric strings reflect the
+    produced ``runtime:`` blocker count.
 
-    * ``"<int>"`` — the number of ``runtime:`` blockers produced (one
-      per rule with a recognised ``rule_id``). ``"0"`` is a legitimate,
-      informative outcome ("predicates never fired across the run").
-    * ``"skipped"`` — preconditions weren't met (no source, no
-      instrumentable predicates).
-    * ``"failed"`` — the subprocess crashed.
-    * ``"no_frame"`` — subprocess ran cleanly but the harness produced
-      no ``probe_events`` frame (likely a soft failure inside ``on_bar``
-      before ``end``).
-
-    The blockers list is structured material for #452 to render into the
-    refinement prompt; the runtime stage does not change the merged
-    category — it only enriches the evidence.
+    This function orchestrates only — actual outcome classification
+    lives in :func:`_interpret_probe_exec`.
     """
     code = spec.strategy_code or ""
     if not code:
@@ -509,6 +547,20 @@ def _runtime_reexecute(
         logger.warning("coverage_probe runtime re-execution raised", exc_info=True)
         return _fail(f"{type(exc).__name__}: {exc}")
 
+    return _interpret_probe_exec(probe_exec, rule_index.rules)
+
+
+def _interpret_probe_exec(
+    probe_exec: StrategyRunResult,
+    rule_labels: dict[str, str],
+) -> tuple[list[LikelyBlocker], str]:
+    """Map a successful sandbox re-execution to ``(blockers, token)``.
+
+    Split out from :func:`_runtime_reexecute` so the orchestration
+    (set up + run subprocess + handle exception) reads separately from
+    outcome interpretation. Each branch corresponds to one observable
+    state of the probe envelope.
+    """
     if not probe_exec.success:
         return _fail(probe_exec.error_type or "unknown error")
 
@@ -522,12 +574,12 @@ def _runtime_reexecute(
     if not events:
         # The runtime probe ran and observed zero predicate firings —
         # the strongest possible evidence of ENTRY_CONDITION_NEVER_TRUE.
-        return _no_hits(len(rule_index.rules))
+        return _no_hits(len(rule_labels))
 
-    blockers = _runtime_events_to_blockers(events, rule_index.rules)
+    blockers = _runtime_events_to_blockers(events, rule_labels)
     # The token reflects the number of blockers actually produced — if
-    # the harness ever emits events with empty ``rule_id``s they get
-    # filtered out, and the count stays truthful.
+    # the harness ever emits events with empty/None ``rule_id``s they
+    # get filtered out, and the count stays truthful.
     return blockers, str(len(blockers))
 
 
@@ -536,54 +588,63 @@ def _runtime_events_to_blockers(
 ) -> list[LikelyBlocker]:
     """Render runtime probe events as structured ``LikelyBlocker`` rows.
 
-    The renderer is intentionally minimal — #451's contract is "incorporate
-    probe_events"; full prompt formatting belongs to #452. Each rule is
-    one row, sorted by ``rule_id`` for determinism, hit-rate left as
-    ``None`` (the runtime collector caps per-rule events rather than
-    counting bars, so a true rate isn't computable here).
+    The pipeline is filter → sort → map:
+
+    1. Filter events without a valid ``rule_id`` (None / empty string).
+       Doing this first means the produced-blocker count stays truthful
+       and the sort key receives only valid strings.
+    2. Sort the survivors by their numeric rule index so the prompt
+       reads ``r0, r1, r2, r10`` rather than the lexicographic mess.
+    3. Map each survivor to a ``LikelyBlocker`` carrying the rule label
+       and a compact evidence string.
+
+    #451's contract is "incorporate probe_events"; full prompt
+    formatting belongs to #452. Hit-rate is left as ``None`` (the
+    runtime collector caps per-rule events rather than counting bars,
+    so a true rate isn't computable here).
     """
-    out: list[LikelyBlocker] = []
-    for ev in sorted(events, key=lambda e: _rule_sort_key(e.get("rule_id"))):
-        raw_id = ev.get("rule_id")
-        if raw_id is None:
-            # ``str(None)`` would otherwise render as the literal "None"
-            # — drop missing-id events so the produced-blocker count
-            # stays in sync with the summary token.
-            continue
-        rule_id = str(raw_id)
-        if not rule_id:
-            continue
-        label = rule_labels.get(rule_id, rule_id)
-        evidence_parts = [
-            f"{tag}={value}"
-            for tag, value in (
-                ("hits", ev.get("hit_count")),
-                ("first", ev.get("first_true_bar")),
-                ("last", ev.get("last_true_bar")),
-            )
-            if value is not None
-        ]
-        out.append(
-            LikelyBlocker(
-                reason=f"runtime: {label}",
-                evidence=" ".join(evidence_parts),
-            )
+    valid = [(rid, ev) for ev in events if (rid := _normalized_rule_id(ev.get("rule_id")))]
+    valid.sort(key=lambda pair: _rule_sort_key(pair[0]))
+    return [_event_to_blocker(rule_id, ev, rule_labels) for rule_id, ev in valid]
+
+
+def _normalized_rule_id(raw: Any) -> str:
+    """Return the canonical string rule_id, or an empty string to skip."""
+    if raw is None:
+        return ""  # ``str(None) == "None"`` would otherwise sneak through
+    return str(raw)
+
+
+def _event_to_blocker(
+    rule_id: str, event: dict[str, Any], rule_labels: dict[str, str]
+) -> LikelyBlocker:
+    label = rule_labels.get(rule_id, rule_id)
+    evidence_parts = [
+        f"{tag}={value}"
+        for tag, value in (
+            ("hits", event.get("hit_count")),
+            ("first", event.get("first_true_bar")),
+            ("last", event.get("last_true_bar")),
         )
-    return out
+        if value is not None
+    ]
+    return LikelyBlocker(reason=f"runtime: {label}", evidence=" ".join(evidence_parts))
 
 
-def _rule_sort_key(rule_id: Any) -> tuple[int, int, str]:
-    """Numeric-aware sort key for ``rule_id`` strings.
+def _rule_sort_key(rule_id: str) -> tuple[int, int, str]:
+    """Numeric-aware sort key for valid ``rule_id`` strings.
 
     Rules are emitted as ``r0``, ``r1``, …, ``r10``. Lexicographic sort
     would order them ``r0, r1, r10, r2`` — numeric sort is more
     intuitive in the prompt. Strings that don't match the ``rN`` shape
     fall back to lexicographic order, sorted after the numeric ones.
+
+    Callers must filter out empty / ``None`` rule_ids before invoking
+    this function (see :func:`_runtime_events_to_blockers`).
     """
-    raw = str(rule_id) if rule_id is not None else ""
-    if raw.startswith("r") and raw[1:].isdigit():
-        return (0, int(raw[1:]), "")
-    return (1, 0, raw)
+    if rule_id.startswith("r") and rule_id[1:].isdigit():
+        return (0, int(rule_id[1:]), "")
+    return (1, 0, rule_id)
 
 
 __all__ = [
