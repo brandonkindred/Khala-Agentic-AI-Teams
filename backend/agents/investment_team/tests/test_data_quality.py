@@ -656,6 +656,43 @@ def test_ohlc_tolerance_absorbs_forex_vendor_noise_usdjpy() -> None:
     assert report.per_symbol["USDJPY=X"].ohlc_violations == 0
 
 
+def test_df_to_bars_repairs_ohlc_invariants() -> None:
+    """Yahoo Finance daily FX bars sometimes report H < max(O, C) or L >
+    min(O, C). market_data_service repairs the invariants at fetch time
+    so downstream consumers (strategies, validator, indicators) always
+    see coherent bars.
+    """
+    pd = pytest.importorskip("pandas")
+    from investment_team.market_data_service import MarketDataService
+
+    # Row 1: H quoted a tick below close — repair lifts H to close.
+    # Row 2: L quoted a tick above open — repair lowers L to open.
+    # Row 3: already invariant-clean — no repair.
+    df = pd.DataFrame(
+        [
+            {"Open": 1.0512, "High": 1.0512, "Low": 1.0509, "Close": 1.0513, "Volume": 0},
+            {"Open": 150.1100, "High": 150.1500, "Low": 150.1200, "Close": 150.1400, "Volume": 0},
+            {"Open": 1.0513, "High": 1.0515, "Low": 1.0511, "Close": 1.0514, "Volume": 0},
+        ],
+        index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+    )
+    bars = MarketDataService._df_to_bars(df)
+    assert len(bars) == 3
+    # Row 1 was repaired: H lifted from 1.0512 to 1.0513 (close).
+    assert bars[0].high == 1.0513
+    assert bars[0].low == 1.0509
+    # Row 2 was repaired: L lowered from 150.12 to 150.11 (open).
+    assert bars[1].high == 150.1500
+    assert bars[1].low == 150.1100
+    # Row 3 untouched.
+    assert bars[2].high == 1.0515
+    assert bars[2].low == 1.0511
+    # Resulting bars must all satisfy OHLC invariants.
+    for b in bars:
+        assert b.high >= max(b.open, b.low, b.close)
+        assert b.low <= min(b.open, b.high, b.close)
+
+
 def test_forex_materially_broken_bar_still_flags() -> None:
     """The more generous forex tolerance must not mask real corruption.
 
