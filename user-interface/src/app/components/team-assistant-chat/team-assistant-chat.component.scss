@@ -112,7 +112,7 @@
   display: flex; gap: 4px; padding: 4px 0;
   span {
     width: 7px; height: 7px;
-    background: var(--kh-text-muted, #8b949e);
+    background: var(--kh-border-muted, #8b949e);
     border-radius: 50%;
     animation: bounce 1.4s infinite ease-in-out;
     &:nth-child(1) { animation-delay: 0s; }

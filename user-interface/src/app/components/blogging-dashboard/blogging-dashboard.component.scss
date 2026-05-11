@@ -101,7 +101,7 @@
   &.status-running, &.status-pending { border-left-color: var(--kh-accent); }
   &.status-completed, &.status-needs_human_review { border-left-color: var(--kh-success); }
   &.status-failed    { border-left-color: var(--kh-error); }
-  &.status-cancelled { border-left-color: var(--kh-text-muted); }
+  &.status-cancelled { border-left-color: var(--kh-border-muted); }
   &.status-interrupted { border-left-color: var(--kh-warning, #d97706); }
 
   .brief-text {

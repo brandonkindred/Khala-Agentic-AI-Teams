@@ -32,8 +32,10 @@ body {
 
 :root {
   // ── HIGH CONTRAST DESIGN ────────────────────────────────────────────────
-  // Designed for color acuity issues. Most text/background pairs exceed
-  // WCAG AAA (7:1); --kh-text-muted is the lone exception (see note below).
+  // Designed for color acuity issues. All text/background pairs exceed
+  // WCAG AAA (7:1) except --kh-text-muted, which clears AA (≥ 4.5:1) on
+  // every --kh-surface-* layer. Decorative usages of the original muted
+  // shade live on --kh-border-muted.
   // Semantic colors are maximally separated in luminance, not just hue.
   // Borders and surfaces have strong visible separation.
 
@@ -58,20 +60,18 @@ body {
   --kh-glass-active:      rgba(255, 255, 255, 0.16);
   --kh-glass-border:      rgba(255, 255, 255, 0.10);
 
-  // ── Text Colors (high contrast — all exceed 7:1 on surface-0/1/2) ──────
+  // ── Text Colors (high contrast — primary/secondary/tertiary exceed 7:1
+  // on surface-0/1/2; muted clears AA ≥ 4.5:1 on every surface) ───────────
   --kh-text-primary:      #ffffff;
   --kh-text-secondary:    #d4d4d8;
   --kh-text-tertiary:     #a1a1aa;
-  // --kh-text-muted is BELOW WCAG AA (4.5:1) for body text on surface-0/1/2.
-  // Use it only for decorative borders or icons. For text, prefer
-  // --kh-text-tertiary or --kh-text-secondary. Global token bump tracked in
-  // the follow-up issue to #494.
-  --kh-text-muted:        #71717a;
+  --kh-text-muted:        #909099;
 
   // ── Borders (strong and visible) ────────────────────────────────────────
   --kh-border:            rgba(255, 255, 255, 0.16);
   --kh-border-subtle:     rgba(255, 255, 255, 0.10);
   --kh-border-strong:     rgba(255, 255, 255, 0.25);
+  --kh-border-muted:      #71717a;   // decorative-only — matches pre-#502 --kh-text-muted
 
   // ── Semantic Colors (maximally bright — high luminance contrast) ────────
   // These are chosen to differ in LUMINANCE, not just hue, so they remain

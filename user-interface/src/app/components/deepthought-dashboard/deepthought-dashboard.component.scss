@@ -389,7 +389,7 @@
   span {
     width: 7px;
     height: 7px;
-    background: var(--kh-text-muted, #71717a);
+    background: var(--kh-border-muted, #71717a);
     border-radius: 50%;
     animation: bounce 1.4s infinite ease-in-out;
     &:nth-child(1) { animation-delay: 0s; }
