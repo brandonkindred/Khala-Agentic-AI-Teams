@@ -56,7 +56,7 @@ from .agents.analysis import AnalysisAgent
 from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent, ZeroTradeRepairReport
-from .coverage_probe import run_coverage_stage, should_run_probes
+from .coverage_probe import format_coverage_report, run_coverage_stage, should_run_probes
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_safety import CodeSafetyChecker
@@ -85,12 +85,6 @@ WINNING_THRESHOLD = 8.0
 # block. The model already trims to 20; 10 is enough signal for the LLM to
 # spot the failure pattern while keeping the JSON line under ~1 KB.
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
-
-# Caps on the coverage-report block rendered into the refinement and
-# zero-trade-repair prompts (issue #452). Keep the JSON line bounded so a
-# pathological probe output cannot blow up ``failure_details``.
-_COVERAGE_LIKELY_BLOCKERS_CAP = 6
-_COVERAGE_SUBCONDITIONS_CAP = 8
 
 
 def _maybe_attach_coverage_report(
@@ -146,33 +140,6 @@ def _format_execution_diagnostics(
 
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     return f"Execution Diagnostics: {encoded}"
-
-
-def _format_coverage_report(report: Optional[CoverageReport]) -> str:
-    """Render a compact JSON block of the rule-coverage probe verdict for
-    the refinement prompt (issue #452, part of #406).
-
-    Mirrors :func:`_format_execution_diagnostics`: returns an empty string
-    when no report is attached (successful runs and runs where
-    ``should_run_probes`` short-circuited keep ``metrics.coverage_report``
-    as ``None``), otherwise a single line ``"Coverage Report: {<json>}"``
-    whose payload is stable-key-sorted and compact. ``likely_blockers`` and
-    ``subconditions`` are capped so a pathological probe output cannot
-    blow up ``failure_details``.
-    """
-    if report is None:
-        return ""
-
-    payload = report.model_dump(mode="json", exclude_none=True)
-    blockers = payload.get("likely_blockers") or []
-    if len(blockers) > _COVERAGE_LIKELY_BLOCKERS_CAP:
-        payload["likely_blockers"] = blockers[:_COVERAGE_LIKELY_BLOCKERS_CAP]
-    subconditions = payload.get("subconditions") or []
-    if len(subconditions) > _COVERAGE_SUBCONDITIONS_CAP:
-        payload["subconditions"] = subconditions[:_COVERAGE_SUBCONDITIONS_CAP]
-
-    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    return f"Coverage Report: {encoded}"
 
 
 # Spec keys honoured when applying ``ZeroTradeRepairReport.proposed_spec_updates``.
@@ -522,7 +489,7 @@ class StrategyLabOrchestrator:
                     )
                     if diagnostics_block:
                         failure_details = f"{failure_details}\n{diagnostics_block}"
-                    coverage_block = _format_coverage_report(metrics.coverage_report)
+                    coverage_block = format_coverage_report(metrics.coverage_report)
                     if coverage_block:
                         failure_details = f"{failure_details}\n{coverage_block}"
 
