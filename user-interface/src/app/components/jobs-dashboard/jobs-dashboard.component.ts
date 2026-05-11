@@ -6,8 +6,13 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { Subscription, forkJoin, of, timer } from 'rxjs';
 import { switchMap, catchError, map } from 'rxjs/operators';
+import {
+  ConfirmDialogComponent,
+  type ConfirmDialogData,
+} from '../../shared/confirm-dialog/confirm-dialog.component';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { BloggingApiService } from '../../services/blogging-api.service';
 import { AISystemsApiService } from '../../services/ai-systems-api.service';
@@ -95,6 +100,7 @@ const PHASE_DISPLAY: Record<string, string> = {
     MatIconModule,
     MatButtonModule,
     MatTooltipModule,
+    MatDialogModule,
   ],
   templateUrl: './jobs-dashboard.component.html',
   styleUrl: './jobs-dashboard.component.scss',
@@ -113,6 +119,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   private readonly genericJobsApi = inject(GenericJobsApiService);
   private readonly jobActions = inject(JobActionsService);
   private readonly router = inject(Router);
+  private readonly dialog = inject(MatDialog);
 
   jobs: DashboardRow[] = [];
   loading = true;
@@ -473,10 +480,17 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   stopJob(event: Event, job: DashboardRow): void {
     event.stopPropagation();
-    if (!confirm(`Are you sure you want to stop the job for "${job.unified.label}"?`)) return;
-    this.jobActions.stop(job.unified.source, job.unified.jobId).subscribe({
-      next: () => this.refresh(),
-      error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to stop job'; },
+    this.confirmDestructive({
+      title: 'Stop job',
+      message: `Are you sure you want to stop the job for "${job.unified.label}"?`,
+      confirmLabel: 'Stop',
+      variant: 'danger',
+    }).subscribe((confirmed) => {
+      if (!confirmed) return;
+      this.jobActions.stop(job.unified.source, job.unified.jobId).subscribe({
+        next: () => this.refresh(),
+        error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to stop job'; },
+      });
     });
   }
 
@@ -490,20 +504,45 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   restartJob(event: Event, job: DashboardRow): void {
     event.stopPropagation();
-    if (!confirm(`Restart job for "${job.unified.label}" from scratch?`)) return;
-    this.jobActions.restart(job.unified.source, job.unified.jobId).subscribe({
-      next: () => this.refresh(),
-      error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to restart job'; },
+    this.confirmDestructive({
+      title: 'Restart job',
+      message: `Restart job for "${job.unified.label}" from scratch?`,
+      confirmLabel: 'Restart',
+      variant: 'warn',
+    }).subscribe((confirmed) => {
+      if (!confirmed) return;
+      this.jobActions.restart(job.unified.source, job.unified.jobId).subscribe({
+        next: () => this.refresh(),
+        error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to restart job'; },
+      });
     });
   }
 
   deleteJob(event: Event, job: DashboardRow): void {
     event.stopPropagation();
-    if (!confirm('Permanently delete this job? It will be removed from the list.')) return;
-    this.jobActions.delete(job.unified.source, job.unified.jobId).subscribe({
-      next: () => this.refresh(),
-      error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete job'; },
+    this.confirmDestructive({
+      title: 'Delete job',
+      message: 'Permanently delete this job? It will be removed from the list.',
+      confirmLabel: 'Delete',
+      variant: 'danger',
+    }).subscribe((confirmed) => {
+      if (!confirmed) return;
+      this.jobActions.delete(job.unified.source, job.unified.jobId).subscribe({
+        next: () => this.refresh(),
+        error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete job'; },
+      });
     });
+  }
+
+  private confirmDestructive(data: ConfirmDialogData) {
+    return this.dialog
+      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, {
+        data,
+        autoFocus: true,
+        restoreFocus: true,
+      })
+      .afterClosed()
+      .pipe(map((result) => result === true));
   }
 
   canStopJob(job: DashboardRow): boolean {

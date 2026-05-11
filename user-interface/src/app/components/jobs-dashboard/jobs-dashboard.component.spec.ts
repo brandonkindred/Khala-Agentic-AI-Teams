@@ -1,9 +1,12 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
+import { MatDialog } from '@angular/material/dialog';
 import { Router } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
+import { ConfirmDialogComponent } from '../../shared/confirm-dialog/confirm-dialog.component';
+import { JobActionsService } from '../../services/job-actions.service';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { BloggingApiService } from '../../services/blogging-api.service';
 import { AISystemsApiService } from '../../services/ai-systems-api.service';
@@ -21,9 +24,25 @@ describe('JobsDashboardComponent', () => {
   let component: JobsDashboardComponent;
   let fixture: ComponentFixture<JobsDashboardComponent>;
   let routerSpy: { navigate: ReturnType<typeof vi.fn> };
+  let dialogSpy: { open: ReturnType<typeof vi.fn> };
+  let jobActionsSpy: {
+    stop: ReturnType<typeof vi.fn>;
+    resume: ReturnType<typeof vi.fn>;
+    restart: ReturnType<typeof vi.fn>;
+    delete: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(async () => {
     routerSpy = { navigate: vi.fn() };
+    dialogSpy = {
+      open: vi.fn().mockReturnValue({ afterClosed: () => of(true) }),
+    };
+    jobActionsSpy = {
+      stop: vi.fn().mockReturnValue(of({})),
+      resume: vi.fn().mockReturnValue(of({})),
+      restart: vi.fn().mockReturnValue(of({})),
+      delete: vi.fn().mockReturnValue(of({})),
+    };
     const seApi = {
       getRunningJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
       getJobStatus: vi.fn(),
@@ -95,8 +114,11 @@ describe('JobsDashboardComponent', () => {
         { provide: CodingTeamApiService, useValue: codingTeamApi },
         { provide: GenericJobsApiService, useValue: genericJobsApi },
         { provide: Router, useValue: routerSpy },
+        { provide: JobActionsService, useValue: jobActionsSpy },
       ],
-    }).compileComponents();
+    })
+      .overrideProvider(MatDialog, { useValue: dialogSpy })
+      .compileComponents();
 
     fixture = TestBed.createComponent(JobsDashboardComponent);
     component = fixture.componentInstance;
@@ -327,6 +349,103 @@ describe('JobsDashboardComponent', () => {
     it('returns false for running or pending jobs', () => {
       expect(component.canDeleteJob({ unified: { source: 'software_engineering', status: 'running' } } as any)).toBe(false);
       expect(component.canDeleteJob({ unified: { source: 'sales', status: 'pending' } } as any)).toBe(false);
+    });
+  });
+
+  describe('destructive actions', () => {
+    const makeEvent = (): Event =>
+      ({ stopPropagation: vi.fn() } as unknown as Event);
+
+    const job = (status = 'running'): any => ({
+      unified: {
+        source: 'software_engineering',
+        jobId: 'j1',
+        label: 'My Job',
+        status,
+      },
+      seDetail: undefined,
+    });
+
+    const dialogReturnsConfirmed = (confirmed: boolean): void => {
+      dialogSpy.open.mockReturnValue({ afterClosed: () => of(confirmed) });
+    };
+
+    it('stopJob opens ConfirmDialogComponent with danger variant and Stop label', () => {
+      dialogReturnsConfirmed(true);
+      component.stopJob(makeEvent(), job());
+      expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+      const [comp, config] = dialogSpy.open.mock.calls[0];
+      expect(comp).toBe(ConfirmDialogComponent);
+      expect(config.data).toMatchObject({
+        title: 'Stop job',
+        message: 'Are you sure you want to stop the job for "My Job"?',
+        confirmLabel: 'Stop',
+        variant: 'danger',
+      });
+    });
+
+    it('stopJob calls jobActions.stop only when the dialog confirms', () => {
+      dialogReturnsConfirmed(true);
+      component.stopJob(makeEvent(), job());
+      expect(jobActionsSpy.stop).toHaveBeenCalledWith('software_engineering', 'j1');
+    });
+
+    it('stopJob does NOT call jobActions.stop when the dialog is cancelled', () => {
+      dialogReturnsConfirmed(false);
+      component.stopJob(makeEvent(), job());
+      expect(jobActionsSpy.stop).not.toHaveBeenCalled();
+    });
+
+    it('restartJob opens ConfirmDialogComponent with warn variant and Restart label', () => {
+      dialogReturnsConfirmed(true);
+      component.restartJob(makeEvent(), job('failed'));
+      expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+      const [comp, config] = dialogSpy.open.mock.calls[0];
+      expect(comp).toBe(ConfirmDialogComponent);
+      expect(config.data).toMatchObject({
+        title: 'Restart job',
+        message: 'Restart job for "My Job" from scratch?',
+        confirmLabel: 'Restart',
+        variant: 'warn',
+      });
+    });
+
+    it('restartJob calls jobActions.restart only when the dialog confirms', () => {
+      dialogReturnsConfirmed(true);
+      component.restartJob(makeEvent(), job('failed'));
+      expect(jobActionsSpy.restart).toHaveBeenCalledWith('software_engineering', 'j1');
+    });
+
+    it('restartJob does NOT call jobActions.restart when the dialog is cancelled', () => {
+      dialogReturnsConfirmed(false);
+      component.restartJob(makeEvent(), job('failed'));
+      expect(jobActionsSpy.restart).not.toHaveBeenCalled();
+    });
+
+    it('deleteJob opens ConfirmDialogComponent with danger variant and Delete label', () => {
+      dialogReturnsConfirmed(true);
+      component.deleteJob(makeEvent(), job('completed'));
+      expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+      const [comp, config] = dialogSpy.open.mock.calls[0];
+      expect(comp).toBe(ConfirmDialogComponent);
+      expect(config.data).toMatchObject({
+        title: 'Delete job',
+        message: 'Permanently delete this job? It will be removed from the list.',
+        confirmLabel: 'Delete',
+        variant: 'danger',
+      });
+    });
+
+    it('deleteJob calls jobActions.delete only when the dialog confirms', () => {
+      dialogReturnsConfirmed(true);
+      component.deleteJob(makeEvent(), job('completed'));
+      expect(jobActionsSpy.delete).toHaveBeenCalledWith('software_engineering', 'j1');
+    });
+
+    it('deleteJob does NOT call jobActions.delete when the dialog is cancelled', () => {
+      dialogReturnsConfirmed(false);
+      component.deleteJob(makeEvent(), job('completed'));
+      expect(jobActionsSpy.delete).not.toHaveBeenCalled();
     });
   });
 });
