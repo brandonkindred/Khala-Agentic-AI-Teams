@@ -157,6 +157,98 @@ describe('JobsDashboardComponent', () => {
     expect(routerSpy.navigate).toHaveBeenCalledWith(['/software-engineering'], { queryParams: { jobId: 'j1', tab: 0 } });
   });
 
+  describe('onRowKeydown', () => {
+    const seJob = () =>
+      ({
+        unified: { source: 'software_engineering', jobType: 'run_team', jobId: 'j1' },
+        seDetail: undefined,
+      }) as any;
+
+    const makeEvent = (key: string, target: EventTarget, currentTarget: EventTarget): KeyboardEvent => {
+      const evt = new KeyboardEvent('keydown', { key, cancelable: true });
+      Object.defineProperty(evt, 'target', { value: target });
+      Object.defineProperty(evt, 'currentTarget', { value: currentTarget });
+      return evt;
+    };
+
+    it('navigates on Enter', () => {
+      const tr = document.createElement('tr');
+      component.onRowKeydown(makeEvent('Enter', tr, tr), seJob());
+      expect(routerSpy.navigate).toHaveBeenCalled();
+    });
+
+    it('navigates on Space and prevents default', () => {
+      const tr = document.createElement('tr');
+      const evt = makeEvent(' ', tr, tr);
+      const preventSpy = vi.spyOn(evt, 'preventDefault');
+      component.onRowKeydown(evt, seJob());
+      expect(preventSpy).toHaveBeenCalled();
+      expect(routerSpy.navigate).toHaveBeenCalled();
+    });
+
+    it('ignores other keys', () => {
+      const tr = document.createElement('tr');
+      component.onRowKeydown(makeEvent('Tab', tr, tr), seJob());
+      expect(routerSpy.navigate).not.toHaveBeenCalled();
+    });
+
+    it('ignores events whose target is a child control', () => {
+      const tr = document.createElement('tr');
+      const button = document.createElement('button');
+      component.onRowKeydown(makeEvent('Enter', button, tr), seJob());
+      expect(routerSpy.navigate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getJobAriaLabel', () => {
+    it('composes team, type, repo, status, time-ago for SE job', () => {
+      const job = {
+        unified: {
+          source: 'software_engineering',
+          jobType: 'run_team',
+          jobId: 'j1',
+          status: 'running',
+          label: 'Run',
+          repoPath: '/work/payments-api',
+          createdAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+        },
+        seDetail: undefined,
+      } as any;
+      const label = component.getJobAriaLabel(job);
+      expect(label).toContain('Run Team');
+      expect(label).toContain('repo payments-api');
+      expect(label).toContain('status running');
+      expect(label).toContain('started 3m ago');
+    });
+
+    it('falls back to job label for non-SE rows', () => {
+      const job = {
+        unified: { source: 'blogging', jobType: undefined, jobId: 'j1', status: 'completed', label: 'My Post', createdAt: '' },
+        seDetail: undefined,
+      } as any;
+      const label = component.getJobAriaLabel(job);
+      expect(label).toContain('My Post');
+      expect(label).toContain('status completed');
+    });
+
+    it('reports "status waiting" for SE jobs awaiting answers', () => {
+      const job = {
+        unified: {
+          source: 'software_engineering',
+          jobType: 'run_team',
+          jobId: 'j1',
+          status: 'running',
+          label: 'Run',
+          repoPath: '/work/payments-api',
+          createdAt: '',
+        },
+        seDetail: { waitingForAnswers: true },
+      } as any;
+      const label = component.getJobAriaLabel(job);
+      expect(label).toContain('status waiting');
+    });
+  });
+
   it('refresh sets loading and restarts polling', () => {
     component.refresh();
     expect(component.loading).toBe(true);

@@ -449,6 +449,28 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     }
   }
 
+  onRowKeydown(event: KeyboardEvent, job: DashboardRow): void {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+      event.preventDefault();
+      this.navigateToJob(job);
+    }
+  }
+
+  getJobAriaLabel(job: DashboardRow): string {
+    const team = SOURCE_DISPLAY[job.unified.source]?.label ?? job.unified.source;
+    const type = this.getJobTypeInfo(job).label;
+    const subject =
+      job.unified.source === 'software_engineering' && job.unified.repoPath
+        ? `repo ${this.getRepoName(job.unified.repoPath)}`
+        : job.unified.label;
+    const status = this.getStatusLabel(job).toLowerCase();
+    const when = this.getTimeAgo(job.unified.createdAt);
+    const parts = [`Open ${team} ${type} job for ${subject}`, `status ${status}`];
+    if (when) parts.push(`started ${when}`);
+    return parts.join(', ');
+  }
+
   stopJob(event: Event, job: DashboardRow): void {
     event.stopPropagation();
     if (!confirm(`Are you sure you want to stop the job for "${job.unified.label}"?`)) return;
