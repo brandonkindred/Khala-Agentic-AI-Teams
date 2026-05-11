@@ -159,6 +159,11 @@
         background: var(--kh-glass-hover);
       }
 
+      &:focus-visible {
+        outline: none;
+        box-shadow: inset 0 0 0 2px var(--kh-accent);
+      }
+
       // Status left-border indicators
       &.status-running   { border-left: 3px solid var(--kh-accent); }
       &.status-pending    { border-left: 3px solid var(--kh-text-muted); }
