@@ -60,7 +60,7 @@
             <tr class="job-row"
                 [class]="getStatusClass(job)"
                 tabindex="0"
-                role="button"
+                role="link"
                 [attr.aria-label]="getJobAriaLabel(job)"
                 (click)="navigateToJob(job)"
                 (keydown)="onRowKeydown($event, job)">
