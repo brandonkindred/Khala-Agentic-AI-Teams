@@ -98,15 +98,18 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
       data: { mode: 'create' },
       width: '720px',
     });
-    ref.afterClosed().subscribe((result) => {
-      if (!result) return;
-      this.personaError = null;
-      this.api.createPersona(result).subscribe({
-        next: () => this.refreshPersonas(),
-        error: (err) => {
-          this.personaError = err?.error?.detail ?? 'Failed to create persona';
-        },
-      });
+    ref.afterClosed().subscribe((result) => this.onCreateDialogClosed(result));
+  }
+
+  /** Public for unit tests; invoked by `openCreateDialog` after the dialog closes. */
+  onCreateDialogClosed(result: PersonaEditorDialogResult | undefined): void {
+    if (!result) return;
+    this.personaError = null;
+    this.api.createPersona(result).subscribe({
+      next: () => this.refreshPersonas(),
+      error: (err) => {
+        this.personaError = err?.error?.detail ?? 'Failed to create persona';
+      },
     });
   }
 
@@ -119,15 +122,21 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
       data: { mode: 'edit', persona },
       width: '720px',
     });
-    ref.afterClosed().subscribe((result) => {
-      if (!result) return;
-      this.personaError = null;
-      this.api.updatePersona(persona.id, result).subscribe({
-        next: () => this.refreshPersonas(),
-        error: (err) => {
-          this.personaError = err?.error?.detail ?? 'Failed to update persona';
-        },
-      });
+    ref.afterClosed().subscribe((result) => this.onEditDialogClosed(persona, result));
+  }
+
+  /** Public for unit tests; invoked by `openEditDialog` after the dialog closes. */
+  onEditDialogClosed(
+    persona: PersonaInfo,
+    result: PersonaEditorDialogResult | undefined,
+  ): void {
+    if (!result) return;
+    this.personaError = null;
+    this.api.updatePersona(persona.id, result).subscribe({
+      next: () => this.refreshPersonas(),
+      error: (err) => {
+        this.personaError = err?.error?.detail ?? 'Failed to update persona';
+      },
     });
   }
 
@@ -164,20 +173,23 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
       },
       width: '480px',
     });
-    ref.afterClosed().subscribe((result) => {
-      if (!result) return;
-      this.starting = true;
-      this.startError = null;
-      this.api.startTest(result).subscribe({
-        next: (resp) => {
-          this.starting = false;
-          this.router.navigate(['/persona-testing/audit', resp.job_id]);
-        },
-        error: (err) => {
-          this.starting = false;
-          this.startError = err?.error?.detail ?? 'Failed to start test';
-        },
-      });
+    ref.afterClosed().subscribe((result) => this.onStartTestDialogClosed(result));
+  }
+
+  /** Public for unit tests; invoked by `openStartTestDialog` after the dialog closes. */
+  onStartTestDialogClosed(result: StartTestDialogResult | undefined): void {
+    if (!result) return;
+    this.starting = true;
+    this.startError = null;
+    this.api.startTest(result).subscribe({
+      next: (resp) => {
+        this.starting = false;
+        this.router.navigate(['/persona-testing/audit', resp.job_id]);
+      },
+      error: (err) => {
+        this.starting = false;
+        this.startError = err?.error?.detail ?? 'Failed to start test';
+      },
     });
   }
 
