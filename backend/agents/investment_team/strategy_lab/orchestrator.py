@@ -42,6 +42,7 @@ from ..models import (
     BacktestExecutionDiagnostics,
     BacktestRecord,
     BacktestResult,
+    CoverageReport,
     StrategyLabRecord,
     StrategySpec,
     TradeRecord,
@@ -84,6 +85,12 @@ WINNING_THRESHOLD = 8.0
 # block. The model already trims to 20; 10 is enough signal for the LLM to
 # spot the failure pattern while keeping the JSON line under ~1 KB.
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
+
+# Caps on the coverage-report block rendered into the refinement and
+# zero-trade-repair prompts (issue #452). Keep the JSON line bounded so a
+# pathological probe output cannot blow up ``failure_details``.
+_COVERAGE_LIKELY_BLOCKERS_CAP = 6
+_COVERAGE_SUBCONDITIONS_CAP = 8
 
 
 def _maybe_attach_coverage_report(
@@ -139,6 +146,33 @@ def _format_execution_diagnostics(
 
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     return f"Execution Diagnostics: {encoded}"
+
+
+def _format_coverage_report(report: Optional[CoverageReport]) -> str:
+    """Render a compact JSON block of the rule-coverage probe verdict for
+    the refinement prompt (issue #452, part of #406).
+
+    Mirrors :func:`_format_execution_diagnostics`: returns an empty string
+    when no report is attached (successful runs and runs where
+    ``should_run_probes`` short-circuited keep ``metrics.coverage_report``
+    as ``None``), otherwise a single line ``"Coverage Report: {<json>}"``
+    whose payload is stable-key-sorted and compact. ``likely_blockers`` and
+    ``subconditions`` are capped so a pathological probe output cannot
+    blow up ``failure_details``.
+    """
+    if report is None:
+        return ""
+
+    payload = report.model_dump(mode="json", exclude_none=True)
+    blockers = payload.get("likely_blockers") or []
+    if len(blockers) > _COVERAGE_LIKELY_BLOCKERS_CAP:
+        payload["likely_blockers"] = blockers[:_COVERAGE_LIKELY_BLOCKERS_CAP]
+    subconditions = payload.get("subconditions") or []
+    if len(subconditions) > _COVERAGE_SUBCONDITIONS_CAP:
+        payload["subconditions"] = subconditions[:_COVERAGE_SUBCONDITIONS_CAP]
+
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return f"Coverage Report: {encoded}"
 
 
 # Spec keys honoured when applying ``ZeroTradeRepairReport.proposed_spec_updates``.
@@ -463,6 +497,7 @@ class StrategyLabOrchestrator:
                 trades,
                 dsr_aware=config.walk_forward_enabled,
                 diagnostics=exec_result.execution_diagnostics,
+                coverage_report=metrics.coverage_report,
             )
             for g in anomaly_gates:
                 g.refinement_round = round_num
@@ -487,6 +522,9 @@ class StrategyLabOrchestrator:
                     )
                     if diagnostics_block:
                         failure_details = f"{failure_details}\n{diagnostics_block}"
+                    coverage_block = _format_coverage_report(metrics.coverage_report)
+                    if coverage_block:
+                        failure_details = f"{failure_details}\n{coverage_block}"
 
                     # Issue #405 — specialized zero-trade repair branch.
                     # If the critical anomaly carries a deterministic
@@ -507,6 +545,7 @@ class StrategyLabOrchestrator:
                             spec=spec,
                             code=code,
                             exec_result=exec_result,
+                            coverage_report=metrics.coverage_report,
                             market_data=market_data,
                             config=config,
                             zero_trade_attempts=zero_trade_attempts,
@@ -786,6 +825,7 @@ class StrategyLabOrchestrator:
                     new_trades,
                     dsr_aware=config.walk_forward_enabled,
                     diagnostics=align_exec.execution_diagnostics,
+                    coverage_report=new_metrics.coverage_report,
                 )
                 for g in anomaly_gates:
                     g.refinement_round = align_round
@@ -914,7 +954,12 @@ class StrategyLabOrchestrator:
         if acceptance_results:
             is_winning = execution_succeeded and all(r.passed for r in acceptance_results)
         elif walk_forward_failed and execution_succeeded:
-            fallback_anomalies = self.anomaly_detector.check(metrics, trades, dsr_aware=False)
+            fallback_anomalies = self.anomaly_detector.check(
+                metrics,
+                trades,
+                dsr_aware=False,
+                coverage_report=metrics.coverage_report,
+            )
             fallback_criticals = [
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
             ]
@@ -1072,6 +1117,7 @@ class StrategyLabOrchestrator:
         zero_trade_attempts: List[str],
         round_num: int,
         emit: PhaseCallback,
+        coverage_report: Optional[CoverageReport] = None,
     ) -> _ZeroTradeRepairOutcome:
         """Issue #405 — specialized zero-trade repair attempt.
 
@@ -1107,6 +1153,7 @@ class StrategyLabOrchestrator:
                 spec=spec,
                 code=code,
                 diagnostics=diagnostics,
+                coverage_report=coverage_report,
                 prior_attempts=zero_trade_attempts,
             )
         except Exception as exc:
@@ -1248,6 +1295,7 @@ class StrategyLabOrchestrator:
             new_trades,
             dsr_aware=config.walk_forward_enabled,
             diagnostics=repair_exec.execution_diagnostics,
+            coverage_report=new_metrics.coverage_report,
         )
         for g in new_anomaly_gates:
             g.refinement_round = round_num

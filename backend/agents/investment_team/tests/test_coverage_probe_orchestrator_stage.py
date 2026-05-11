@@ -11,13 +11,25 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from typing import Any
 
 import pytest
 
-from investment_team.models import BacktestResult, CoverageCategory, CoverageReport
+from investment_team.models import (
+    BacktestResult,
+    CoverageCategory,
+    CoverageReport,
+    LikelyBlocker,
+    SubconditionCoverage,
+)
 from investment_team.strategy_lab import orchestrator as orch_mod
-from investment_team.strategy_lab.orchestrator import _maybe_attach_coverage_report
+from investment_team.strategy_lab.orchestrator import (
+    _COVERAGE_LIKELY_BLOCKERS_CAP,
+    _COVERAGE_SUBCONDITIONS_CAP,
+    _format_coverage_report,
+    _maybe_attach_coverage_report,
+)
 
 from ._coverage_probe_test_helpers import (
     make_config,
@@ -149,3 +161,75 @@ def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
             f"site mismatched spec/exec_result: got spec={site['spec']!r} with "
             f"exec_result={site['exec_result']!r}; expected spec={expected_spec!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# _format_coverage_report — refinement-prompt rendering (#452)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_format_coverage_report_returns_empty_when_no_report() -> None:
+    """No probe attached → no prompt bloat. Mirrors the
+    ``_format_execution_diagnostics`` empty-on-None contract so callers can
+    treat the line as additive.
+    """
+    assert _format_coverage_report(None) == ""
+
+
+def test_format_coverage_report_emits_single_compact_json_line() -> None:
+    """Rendered block is exactly one line, ``Coverage Report: {<json>}``,
+    with stable-sorted keys and compact separators — matches the existing
+    ``Execution Diagnostics:`` line shape so the refinement prompt's
+    parser-friendliness is unchanged.
+    """
+    report = CoverageReport(
+        coverage_category=CoverageCategory.ENTRY_CONDITION_NEVER_TRUE,
+        summary="RSI<25 never satisfied",
+        bars_checked=250,
+        symbols_checked=1,
+        warmup_bars_required=14,
+        entry_orders_emitted=0,
+    )
+    line = _format_coverage_report(report)
+    assert "\n" not in line
+    assert line.startswith("Coverage Report: {")
+    payload = json.loads(line[len("Coverage Report: ") :])
+    assert payload["coverage_category"] == "ENTRY_CONDITION_NEVER_TRUE"
+    assert payload["bars_checked"] == 250
+    assert payload["warmup_bars_required"] == 14
+    # Stable key ordering for diff-friendliness — sort_keys=True must hold.
+    keys = list(payload.keys())
+    assert keys == sorted(keys)
+    # Compact separators (no whitespace after `:` or `,`).
+    assert ", " not in line
+    assert ": " not in line[len("Coverage Report: ") :]
+
+
+def test_format_coverage_report_caps_likely_blockers_and_subconditions() -> None:
+    """A pathological probe with many blockers/subconditions must not blow
+    up ``failure_details``. The rendered JSON truncates to the module-level
+    caps so the LLM context stays bounded.
+    """
+    blockers = [
+        LikelyBlocker(reason=f"blocker_{i}", evidence=f"evidence {i}")
+        for i in range(_COVERAGE_LIKELY_BLOCKERS_CAP + 4)
+    ]
+    subconditions = [
+        SubconditionCoverage(label=f"sub_{i}", hit_count=0, hit_rate=0.0)
+        for i in range(_COVERAGE_SUBCONDITIONS_CAP + 5)
+    ]
+    report = CoverageReport(
+        coverage_category=CoverageCategory.CONJUNCTION_NEVER_TRUE,
+        summary="too many conjuncts",
+        likely_blockers=blockers,
+        subconditions=subconditions,
+    )
+    line = _format_coverage_report(report)
+    payload = json.loads(line[len("Coverage Report: ") :])
+    assert len(payload["likely_blockers"]) == _COVERAGE_LIKELY_BLOCKERS_CAP
+    assert len(payload["subconditions"]) == _COVERAGE_SUBCONDITIONS_CAP
+    # First-N retained (head-trim, not tail-trim) so the prompt sees the
+    # earliest-detected blockers — these are the most likely to be the
+    # root cause from a deterministic probe.
+    assert payload["likely_blockers"][0]["reason"] == "blocker_0"
+    assert payload["subconditions"][0]["label"] == "sub_0"

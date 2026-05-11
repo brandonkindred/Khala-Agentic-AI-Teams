@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from strands import Agent
 
-from ...models import BacktestExecutionDiagnostics, StrategySpec, ZeroTradeCategory
+from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,12 @@ _ALLOWED_SPEC_UPDATE_KEYS = frozenset(
 # already trims to 20; 10 is enough signal for the LLM to spot the
 # failure pattern while keeping the JSON line under ~1 KB.
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
+
+# Caps on the coverage-report block rendered into the repair prompt
+# (issue #452). Mirror the orchestrator's refinement-prompt caps so a
+# pathological probe output cannot blow up the LLM context.
+_COVERAGE_LIKELY_BLOCKERS_CAP = 6
+_COVERAGE_SUBCONDITIONS_CAP = 8
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +103,7 @@ Risk limits: {risk_limits}
 Zero-trade category: {zero_trade_category}
 Summary: {summary}
 {diagnostics_block}
+{coverage_block}
 
 ## Prior Zero-Trade Repair Attempts ({n_prior_attempts} so far)
 {prior_attempts_text}
@@ -129,6 +136,8 @@ class ZeroTradeRepairAgent:
         code: str,
         diagnostics: BacktestExecutionDiagnostics,
         prior_attempts: Optional[List[str]] = None,
+        *,
+        coverage_report: Optional[CoverageReport] = None,
     ) -> ZeroTradeRepairReport:
         """Run one specialized zero-trade repair attempt.
 
@@ -137,6 +146,13 @@ class ZeroTradeRepairAgent:
         in ``evidence`` so the orchestrator falls through to the generic
         refinement agent (matching the alignment agent's
         no-infinite-loop posture).
+
+        ``coverage_report`` (issue #452) is the deterministic rule-coverage
+        verdict produced by the orchestrator (issue #451) on the same
+        zero/low-trade run. When provided, a compact JSON block is added
+        to the prompt so the repair agent sees the static probe's view
+        alongside the executor diagnostics. ``None`` is rendered as a
+        blank section.
         """
         if diagnostics.zero_trade_category is None:
             # The orchestrator should not have routed a non-zero-trade
@@ -169,6 +185,7 @@ class ZeroTradeRepairAgent:
             zero_trade_category=diagnostics.zero_trade_category,
             summary=diagnostics.summary or "(no executor summary)",
             diagnostics_block=_format_diagnostics_block(diagnostics),
+            coverage_block=_format_coverage_block(coverage_report),
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
             prior_attempts_text=prior_text,
         )
@@ -214,6 +231,28 @@ def _format_diagnostics_block(diagnostics: BacktestExecutionDiagnostics) -> str:
         payload["last_order_events"] = events[-_DIAGNOSTICS_LAST_EVENTS_CAP:]
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     return f"Envelope: {encoded}"
+
+
+def _format_coverage_block(coverage_report: Optional[CoverageReport]) -> str:
+    """Render a compact JSON block of the rule-coverage probe verdict
+    (issue #452). Empty string when no report is attached so the prompt
+    template collapses the line cleanly.
+
+    Mirrors :func:`strategy_lab.orchestrator._format_coverage_report` —
+    same caps on ``likely_blockers`` (6) and ``subconditions`` (8) — so a
+    pathological probe output cannot blow up the LLM context.
+    """
+    if coverage_report is None:
+        return ""
+    payload = coverage_report.model_dump(mode="json", exclude_none=True)
+    blockers = payload.get("likely_blockers") or []
+    if len(blockers) > _COVERAGE_LIKELY_BLOCKERS_CAP:
+        payload["likely_blockers"] = blockers[:_COVERAGE_LIKELY_BLOCKERS_CAP]
+    subconditions = payload.get("subconditions") or []
+    if len(subconditions) > _COVERAGE_SUBCONDITIONS_CAP:
+        payload["subconditions"] = subconditions[:_COVERAGE_SUBCONDITIONS_CAP]
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return f"Coverage Report: {encoded}"
 
 
 def _coerce_report(
