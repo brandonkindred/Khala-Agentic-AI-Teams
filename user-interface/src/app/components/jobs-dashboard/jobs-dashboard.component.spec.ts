@@ -177,13 +177,10 @@ describe('JobsDashboardComponent', () => {
       expect(routerSpy.navigate).toHaveBeenCalled();
     });
 
-    it('navigates on Space and prevents default', () => {
+    it('ignores Space (role="link" only activates on Enter)', () => {
       const tr = document.createElement('tr');
-      const evt = makeEvent(' ', tr, tr);
-      const preventSpy = vi.spyOn(evt, 'preventDefault');
-      component.onRowKeydown(evt, seJob());
-      expect(preventSpy).toHaveBeenCalled();
-      expect(routerSpy.navigate).toHaveBeenCalled();
+      component.onRowKeydown(makeEvent(' ', tr, tr), seJob());
+      expect(routerSpy.navigate).not.toHaveBeenCalled();
     });
 
     it('ignores other keys', () => {

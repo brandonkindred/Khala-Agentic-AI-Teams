@@ -451,7 +451,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   onRowKeydown(event: KeyboardEvent, job: DashboardRow): void {
     if (event.target !== event.currentTarget) return;
-    if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+    if (event.key === 'Enter') {
       event.preventDefault();
       this.navigateToJob(job);
     }
