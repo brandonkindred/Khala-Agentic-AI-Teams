@@ -5,6 +5,10 @@ The shared helper renders a compact JSON block of a
 the zero-trade repair agent prompt. Same caps and same format string for
 both consumers — tests live here so the contract is asserted in one
 place.
+
+Orchestrator-wiring tests (i.e. that each consumer actually *calls* the
+helper or forwards the report) live in
+``test_coverage_probe_orchestrator_stage.py``.
 """
 
 from __future__ import annotations
