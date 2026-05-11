@@ -1,0 +1,119 @@
+.feedback-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 24px;
+
+  &__header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+
+    mat-form-field {
+      min-width: 180px;
+    }
+  }
+
+  &__error {
+    color: var(--kh-error, #f87171);
+    background: rgba(248, 113, 113, 0.08);
+    padding: 8px 12px;
+    border-radius: 6px;
+  }
+
+  &__loading {
+    display: flex;
+    justify-content: center;
+    padding: 32px 0;
+  }
+
+  &__empty {
+    color: var(--kh-text-muted, #71717a);
+    padding: 24px;
+    text-align: center;
+  }
+
+  &__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+.feedback-card {
+  border: 1px solid var(--kh-surface-3, #2a2a2a);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: var(--kh-surface-1, #1a1a1a);
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  &__source {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--kh-text-primary, #fff);
+  }
+
+  &__body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 13px;
+  }
+
+  &__payload {
+    font-family: var(--kh-mono-font, ui-monospace, monospace);
+    background: var(--kh-surface-2, #1f1f1f);
+    padding: 6px 8px;
+    border-radius: 4px;
+    color: var(--kh-text-secondary, #d4d4d8);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__link {
+    display: flex;
+    gap: 8px;
+    color: var(--kh-text-secondary, #d4d4d8);
+  }
+
+  &__link-label {
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  &__link-value {
+    color: var(--kh-text-primary, #fff);
+  }
+
+  footer {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+  }
+}
+
+mat-chip.is-status {
+  background: var(--kh-surface-3, #2a2a2a);
+  color: var(--kh-text-secondary, #d4d4d8);
+}
+
+mat-chip.is-severity {
+  background: rgba(248, 113, 113, 0.18);
+  color: var(--kh-error, #f87171);
+}
+
+mat-chip.is-sprint {
+  background: rgba(147, 197, 253, 0.18);
+  color: var(--kh-info, #93c5fd);
+}

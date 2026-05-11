@@ -934,6 +934,93 @@ class ProductDeliveryStore:
             updated_at=now,
         )
 
+    @timed_query(store=_STORE, op="update_feedback_link")
+    def update_feedback_link(
+        self,
+        *,
+        feedback_id: str,
+        linked_story_id: str | None,
+    ) -> FeedbackItem:
+        """Set or clear ``linked_story_id`` on an existing feedback row.
+
+        Used by the Agent Console's Feedback tab to attach an
+        auto-promoted feedback item (which arrives with
+        ``linked_story_id=None`` from ``release_manager_agent``) to a
+        backlog story chosen by the human reviewer. Passing
+        ``linked_story_id=None`` clears an existing link.
+
+        Validation runs in the same ``REPEATABLE READ`` transaction as
+        the UPDATE so a concurrent delete of the story between the
+        cross-product check and the UPDATE can't slip a stale link past
+        us — mirrors the create-side contract in
+        :meth:`create_feedback_item`.
+
+        Raises:
+            UnknownProductDeliveryEntity: feedback row missing, or the
+                target story doesn't exist.
+            CrossProductFeedbackLink: target story belongs to a
+                different product than the feedback row.
+        """
+        try:
+            with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+                _begin_repeatable_read(cur)
+                cur.execute(
+                    f"SELECT {_FEEDBACK_COLS} FROM product_delivery_feedback_items WHERE id = %s",
+                    (feedback_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise UnknownProductDeliveryEntity(f"feedback {feedback_id!r} does not exist")
+                if linked_story_id is not None:
+                    cur.execute(
+                        """SELECT i.product_id
+                           FROM product_delivery_stories s
+                           JOIN product_delivery_epics e ON e.id = s.epic_id
+                           JOIN product_delivery_initiatives i ON i.id = e.initiative_id
+                           WHERE s.id = %s""",
+                        (linked_story_id,),
+                    )
+                    story_row = cur.fetchone()
+                    if story_row is None:
+                        raise UnknownProductDeliveryEntity(
+                            f"story {linked_story_id!r} does not exist"
+                        )
+                    if story_row["product_id"] != row["product_id"]:
+                        raise CrossProductFeedbackLink(
+                            f"story {linked_story_id!r} belongs to product "
+                            f"{story_row['product_id']!r}, not {row['product_id']!r}"
+                        )
+                now = _now()
+                cur.execute(
+                    """UPDATE product_delivery_feedback_items
+                       SET linked_story_id = %s, updated_at = %s
+                       WHERE id = %s
+                       RETURNING """
+                    + _FEEDBACK_COLS,
+                    (linked_story_id, now, feedback_id),
+                )
+                updated = cur.fetchone()
+                if updated is None:
+                    # Row vanished between SELECT and UPDATE under a
+                    # concurrent delete. Surface as 404 — same contract
+                    # as the FK-race path in ``create_feedback_item``.
+                    raise UnknownProductDeliveryEntity(
+                        f"feedback {feedback_id!r} disappeared mid-write"
+                    )
+                return FeedbackItem.model_validate(updated)
+        except psycopg_errors.ForeignKeyViolation as exc:
+            # Race: a concurrent caller deleted the story between the
+            # validation SELECT and our UPDATE. ON DELETE SET NULL would
+            # otherwise silently null the link, hiding the 404 the
+            # eager check would have produced.
+            logger.warning(
+                "update_feedback_link: FK race for feedback=%s story=%s: %s",
+                feedback_id,
+                linked_story_id,
+                exc,
+            )
+            raise UnknownProductDeliveryEntity("linked story disappeared mid-write") from exc
+
     @timed_query(store=_STORE, op="list_feedback")
     def list_feedback(
         self,

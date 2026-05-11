@@ -52,6 +52,7 @@ from product_delivery.models import (
     CreateSprintRequest,
     EpicCreate,
     FeedbackItemCreate,
+    FeedbackLinkUpdate,
     InitiativeCreate,
     ProductCreate,
     ScoreUpdate,
@@ -301,6 +302,23 @@ def list_feedback(
     # (→ 404) when the product is missing — no TOCTTOU window where a
     # concurrent delete could turn a 404 into a `200 []`.
     return get_store().list_feedback(product_id, status=status)
+
+
+@router.patch("/feedback/{feedback_id}/link", response_model=FeedbackItem)
+def patch_feedback_link(feedback_id: str, body: FeedbackLinkUpdate) -> FeedbackItem:
+    """Attach (or clear) the backlog story linked to a feedback item.
+
+    Used by the Agent Console Feedback tab to link auto-promoted items
+    (created with ``linked_story_id=None`` by ``release_manager_agent``
+    in Phase 3) to a backlog story chosen by a human reviewer.
+    Cross-product mismatches surface as 400 via the global
+    ``CrossProductFeedbackLink`` handler; missing feedback / story rows
+    surface as 404 via ``UnknownProductDeliveryEntity``.
+    """
+    return get_store().update_feedback_link(
+        feedback_id=feedback_id,
+        linked_story_id=body.linked_story_id,
+    )
 
 
 # ---------------------------------------------------------------------------

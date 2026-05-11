@@ -1,0 +1,135 @@
+.sprints-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 24px;
+
+  &__header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+
+    mat-form-field {
+      min-width: 220px;
+    }
+  }
+
+  &__error {
+    color: var(--kh-error, #f87171);
+    background: rgba(248, 113, 113, 0.08);
+    padding: 8px 12px;
+    border-radius: 6px;
+  }
+
+  &__loading {
+    display: flex;
+    justify-content: center;
+    padding: 32px 0;
+  }
+
+  &__empty {
+    color: var(--kh-text-muted, #71717a);
+    padding: 24px;
+    text-align: center;
+    line-height: 1.6;
+
+    code {
+      background: var(--kh-surface-2, #1f1f1f);
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+  }
+
+  &__plan-result {
+    background: var(--kh-surface-1, #1a1a1a);
+    border: 1px solid var(--kh-surface-3, #2a2a2a);
+    border-left: 3px solid var(--kh-success, #4ade80);
+    border-radius: 6px;
+    padding: 12px 16px;
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 4px 12px;
+      margin: 0;
+      font-size: 13px;
+    }
+
+    dt {
+      color: var(--kh-text-secondary, #d4d4d8);
+    }
+
+    dd {
+      margin: 0;
+      color: var(--kh-text-primary, #fff);
+    }
+
+    .rationale {
+      white-space: pre-wrap;
+    }
+  }
+
+  &__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+.sprint-card {
+  border: 1px solid var(--kh-surface-3, #2a2a2a);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: var(--kh-surface-1, #1a1a1a);
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  &__name {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--kh-text-primary, #fff);
+  }
+
+  &__dates {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  footer {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+  }
+}
+
+mat-chip.is-status {
+  background: var(--kh-surface-3, #2a2a2a);
+  color: var(--kh-text-secondary, #d4d4d8);
+}
+
+mat-chip.is-capacity {
+  background: var(--kh-accent-subtle, rgba(251, 191, 36, 0.18));
+  color: var(--kh-accent, #fbbf24);
+}

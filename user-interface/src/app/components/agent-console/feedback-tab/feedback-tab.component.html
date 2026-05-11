@@ -1,0 +1,78 @@
+<div class="feedback-tab">
+  <header class="feedback-tab__header">
+    <mat-form-field appearance="outline">
+      <mat-label>Product</mat-label>
+      <mat-select
+        [value]="selectedProductId()"
+        (selectionChange)="selectProduct($event.value)"
+        [disabled]="loadingProducts() || products().length === 0"
+      >
+        @for (p of products(); track p.id) {
+          <mat-option [value]="p.id">{{ p.name }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+    <mat-form-field appearance="outline">
+      <mat-label>Status</mat-label>
+      <mat-select
+        [value]="statusFilter()"
+        (selectionChange)="setStatusFilter($event.value)"
+      >
+        @for (f of statusFilters; track f.value) {
+          <mat-option [value]="f.value">{{ f.label }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+    <button
+      mat-stroked-button
+      type="button"
+      (click)="loadFeedback()"
+      [disabled]="!selectedProductId() || loadingFeedback()"
+    >
+      <mat-icon>refresh</mat-icon>
+      Reload
+    </button>
+  </header>
+
+  @if (error()) {
+    <div class="feedback-tab__error" role="alert">{{ error() }}</div>
+  }
+
+  @if (loadingProducts() || loadingFeedback()) {
+    <div class="feedback-tab__loading">
+      <mat-spinner diameter="32"></mat-spinner>
+    </div>
+  } @else if (items().length === 0) {
+    <div class="feedback-tab__empty">No feedback items for the current filter.</div>
+  } @else {
+    <ul class="feedback-tab__list">
+      @for (item of items(); track item.id) {
+        <li class="feedback-card">
+          <header>
+            <span class="feedback-card__source">{{ item.source }}</span>
+            <mat-chip-set>
+              <mat-chip class="is-status">{{ item.status }}</mat-chip>
+              <mat-chip class="is-severity">{{ item.severity }}</mat-chip>
+              @if (item.sprint_id) {
+                <mat-chip class="is-sprint">sprint {{ item.sprint_id }}</mat-chip>
+              }
+            </mat-chip-set>
+          </header>
+          <div class="feedback-card__body">
+            <div class="feedback-card__payload">{{ payloadSnippet(item) }}</div>
+            <div class="feedback-card__link">
+              <span class="feedback-card__link-label">Linked story:</span>
+              <span class="feedback-card__link-value">{{ storyTitle(item.linked_story_id) }}</span>
+            </div>
+          </div>
+          <footer>
+            <button mat-stroked-button type="button" (click)="openLinkDialog(item)">
+              <mat-icon>link</mat-icon>
+              {{ item.linked_story_id === null ? 'Link to story' : 'Change link' }}
+            </button>
+          </footer>
+        </li>
+      }
+    </ul>
+  }
+</div>
