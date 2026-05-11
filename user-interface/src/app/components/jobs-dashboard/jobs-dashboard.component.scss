@@ -281,6 +281,32 @@ tbody .col-actions {
   }
 }
 
+// Two-line team cell: name on top, current-activity subtitle below.
+// Subtitle replaces the standalone "Current Activity" column and is the
+// only place non-SE rows (with no Active Agents chips) surface phase info.
+.team-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.team-cell .team-subtitle {
+  font-size: var(--kh-text-xs);
+  color: var(--kh-text-tertiary);
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+@media (max-width: 1280px) {
+  .team-cell .team-subtitle {
+    max-width: 140px;
+  }
+}
+
 .repo-name {
   display: block;
   max-width: 100%;

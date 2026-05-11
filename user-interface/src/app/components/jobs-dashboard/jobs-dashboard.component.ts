@@ -411,6 +411,23 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     return null;
   }
 
+  /**
+   * Short, free-form description of what the job is doing right now —
+   * rendered as a subtitle under the Team label so non-SE rows (which
+   * have no per-team chips) still surface phase / status info.
+   */
+  getActivityText(job: DashboardRow): string {
+    if (job.seDetail?.waitingForAnswers) return 'Waiting for answers';
+    if (job.seDetail?.statusText) return job.seDetail.statusText;
+    if (job.seDetail?.currentPhase) {
+      return job.seDetail.currentPhase.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+    if (job.unified.phase) {
+      return job.unified.phase.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+    return '';
+  }
+
   getShowIndeterminate(job: DashboardRow): boolean {
     return job.unified.status === 'running' && !job.seDetail?.waitingForAnswers && this.getProgress(job) == null;
   }
