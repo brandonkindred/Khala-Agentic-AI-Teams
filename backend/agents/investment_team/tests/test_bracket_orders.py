@@ -26,8 +26,11 @@ on the no-attachment path and two follow-ups from the PR review:
 13. Bracket children materialized at expiry time defer past the bar that
     triggered the expiry — a gap-through opening must not abort the
     backtest via ``LookAheadError``.
-14. Trailing-stop attachments (``StopAttachment.trail_offset``) remain
-    gated until #390 — runtime materialization lands with Step 8.
+14. Trailing-stop attachments (``StopAttachment.trail_offset``) materialize
+    as TRAILING_STOP children with ratchet state pre-seeded from the
+    parent's fill price (#390).
+15. Trailing-stop bracket child ratchets across bars and OCO-cancels the
+    take-profit sibling on first child fill.
 """
 
 from __future__ import annotations
@@ -55,7 +58,6 @@ from investment_team.trading_service.strategy.contract import (
     StopAttachment,
     TimeInForce,
     UnfilledPolicy,
-    UnsupportedOrderFeatureError,
 )
 
 
@@ -842,27 +844,23 @@ def test_expiry_bar_gap_through_does_not_abort_via_lookahead() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Trailing-stop attachments remain gated until #390 (Codex P2)
+# Trailing-stop attachments are runtime-supported as of #390
 # ---------------------------------------------------------------------------
 
 
-def test_trailing_stop_attachment_is_gated_until_step_8() -> None:
-    """``StopAttachment(trail_offset=...)`` is a trailing stop; the
-    materializer would otherwise silently downgrade it to a fixed STOP at
-    ``stop_price``. Reject loudly until #390 ships trailing-stop runtime."""
-    req = OrderRequest(
+def test_trailing_stop_attachment_validates_and_materializes_as_trailing_child() -> None:
+    """``StopAttachment(trail_offset=...)`` materializes as a TRAILING_STOP
+    child with the ratchet pre-seeded from the parent's fill price (#390)."""
+    # Both abs and bps variants now validate at submission time.
+    OrderRequest(
         client_order_id="entry-1",
         symbol="AAA",
         side=OrderSide.LONG,
         qty=10.0,
         order_type=OrderType.MARKET,
         attached_stop_loss=StopAttachment(stop_price=95.0, trail_offset=2.0),
-    )
-    with pytest.raises(UnsupportedOrderFeatureError, match="#390"):
-        req.validate_prices()
-
-    # ``trail_offset_kind="bps"`` variant is also blocked.
-    req_bps = OrderRequest(
+    ).validate_prices()
+    OrderRequest(
         client_order_id="entry-1",
         symbol="AAA",
         side=OrderSide.LONG,
@@ -871,11 +869,9 @@ def test_trailing_stop_attachment_is_gated_until_step_8() -> None:
         attached_stop_loss=StopAttachment(
             stop_price=95.0, trail_offset=20.0, trail_offset_kind="bps"
         ),
-    )
-    with pytest.raises(UnsupportedOrderFeatureError, match="#390"):
-        req_bps.validate_prices()
+    ).validate_prices()
 
-    # Plain fixed-stop attachment (no trail_offset) still validates.
+    # Plain fixed-stop attachment (no trail_offset) is unaffected.
     OrderRequest(
         client_order_id="entry-1",
         symbol="AAA",
@@ -884,3 +880,93 @@ def test_trailing_stop_attachment_is_gated_until_step_8() -> None:
         order_type=OrderType.MARKET,
         attached_stop_loss=StopAttachment(stop_price=95.0),
     ).validate_prices()
+
+    # End-to-end: entry fill materializes a TRAILING_STOP child whose
+    # ``trailing_water`` / ``effective_stop_price`` are pre-seeded from
+    # the parent's fill price (so the first eligible bar trails from
+    # the entry, not from that bar's high).
+    sim, order_book, _portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            attached_stop_loss=StopAttachment(stop_price=95.0, trail_offset=2.0),
+            attached_take_profit=LimitAttachment(limit_price=110.0),
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+
+    children = order_book.children_of(parent.order_id)
+    sl = next(c for c in children if c.request.order_type == OrderType.TRAILING_STOP)
+    assert sl.request.trail_offset == pytest.approx(2.0, rel=1e-9)
+    assert sl.request.trail_offset_kind == "abs"
+    assert sl.trailing_water == pytest.approx(100.0, rel=1e-9)
+    assert sl.effective_stop_price == pytest.approx(98.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 15. Trailing-stop bracket child ratchets across bars; TP fill cancels SL via OCO
+# ---------------------------------------------------------------------------
+
+
+def test_trailing_stop_bracket_child_ratchets_and_oco_cancels_on_tp_fill() -> None:
+    """Trailing-stop bracket child must (a) ratchet ``trailing_water`` and
+    ``effective_stop_price`` favorably across bars, (b) leave them
+    untouched on an adverse bar, and (c) be removed via the existing OCO
+    cancellation when its take-profit sibling fills first."""
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            attached_stop_loss=StopAttachment(stop_price=95.0, trail_offset=2.0),
+            attached_take_profit=LimitAttachment(limit_price=110.0),
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    # Bar 1: entry fills at 100 → trailing child pre-seeded to (100, 98).
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    children = order_book.children_of(parent.order_id)
+    sl = next(c for c in children if c.request.order_type == OrderType.TRAILING_STOP)
+    tp = next(c for c in children if c.request.order_type == OrderType.LIMIT)
+    assert sl.trailing_water == pytest.approx(100.0, rel=1e-9)
+    assert sl.effective_stop_price == pytest.approx(98.0, rel=1e-9)
+
+    # Bar 2: favorable move (high 108, low 107 — above the new eff=106 so SL
+    # doesn't fire) → ratchet up.
+    sim.process_bar(_bar("2024-01-03", open_price=105.0, high=108.0, low=107.0, close=107.5))
+    assert sl.trailing_water == pytest.approx(108.0, rel=1e-9)
+    assert sl.effective_stop_price == pytest.approx(106.0, rel=1e-9)
+
+    # Bar 3: adverse retrace (high 107.5, low 106.5 — still above eff=106) →
+    # no change to ratchet.
+    sim.process_bar(_bar("2024-01-04", open_price=107.0, high=107.5, low=106.5, close=106.8))
+    assert sl.trailing_water == pytest.approx(108.0, rel=1e-9)
+    assert sl.effective_stop_price == pytest.approx(106.0, rel=1e-9)
+
+    # Bar 4: high 112 crosses TP limit 110; low 111 stays above SL eff_stop
+    # (which ratchets to 112-2=110 on this bar). TP fills first; OCO cancels
+    # the trailing SL sibling.
+    outcome = sim.process_bar(
+        _bar("2024-01-05", open_price=109.0, high=112.0, low=111.0, close=111.5)
+    )
+    assert len(outcome.exit_fills) == 1
+    assert outcome.exit_fills[0].price == pytest.approx(110.0, rel=1e-9)
+    assert outcome.exit_fills[0].order_id == tp.order_id
+    assert "AAA" not in portfolio.positions
+    assert order_book.children_of(parent.order_id) == []
+    assert order_book.all_pending() == []
