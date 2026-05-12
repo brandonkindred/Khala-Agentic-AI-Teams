@@ -8,7 +8,7 @@
       @if (lastUpdated) {
         <span class="last-updated">Updated {{ lastUpdated | date:'shortTime' }}</span>
       }
-      <button mat-icon-button (click)="refresh()" [disabled]="loading" matTooltip="Refresh jobs">
+      <button mat-icon-button (click)="refresh()" [disabled]="loading" matTooltip="Refresh jobs" aria-label="Refresh jobs">
         <mat-icon [class.spinning]="loading">refresh</mat-icon>
       </button>
     </div>
@@ -130,7 +130,8 @@
                   <button mat-icon-button
                           class="stop-button"
                           (click)="stopJob($event, job)"
-                          matTooltip="Stop job">
+                          matTooltip="Stop job"
+                          [attr.aria-label]="getActionAriaLabel(job, 'Stop')">
                     <mat-icon>stop</mat-icon>
                   </button>
                 }
@@ -138,7 +139,8 @@
                   <button mat-icon-button
                           class="resume-button"
                           (click)="resumeJob($event, job)"
-                          matTooltip="Resume job (continue from where it left off, e.g. after server restart)">
+                          matTooltip="Resume job (continue from where it left off, e.g. after server restart)"
+                          [attr.aria-label]="getActionAriaLabel(job, 'Resume')">
                     <mat-icon>play_arrow</mat-icon>
                   </button>
                 }
@@ -146,7 +148,8 @@
                   <button mat-icon-button
                           class="restart-button"
                           (click)="restartJob($event, job)"
-                          matTooltip="Restart from scratch (same job, workflow runs again from the start)">
+                          matTooltip="Restart from scratch (same job, workflow runs again from the start)"
+                          [attr.aria-label]="getActionAriaLabel(job, 'Restart')">
                     <mat-icon>replay</mat-icon>
                   </button>
                 }
@@ -154,7 +157,8 @@
                   <button mat-icon-button
                           class="delete-button"
                           (click)="deleteJob($event, job)"
-                          matTooltip="Delete job">
+                          matTooltip="Delete job"
+                          [attr.aria-label]="getActionAriaLabel(job, 'Delete')">
                     <mat-icon>delete</mat-icon>
                   </button>
                 }

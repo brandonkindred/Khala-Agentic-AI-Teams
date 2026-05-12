@@ -80,19 +80,13 @@ describe('JobsDashboardComponent a11y', () => {
     }).compileComponents();
   };
 
-  // Two axe rules are disabled here:
-  //   - `color-contrast`: jsdom can't paint, so axe can't compute real
-  //     composited colors and hangs on HTMLCanvasElement.getContext.
-  //     Contrast is verified via math in the PR description + browser axe
-  //     DevTools, not in this unit spec.
-  //   - `button-name`: icon-only action buttons rely on matTooltip for the
-  //     accessible name; matTooltip resolves to aria-describedby, which axe
-  //     does not accept as a button name. Tracked in #495 — when that lands,
-  //     this disable should be removed.
+  // `color-contrast` is disabled because jsdom can't paint, so axe can't
+  // compute real composited colors and hangs on HTMLCanvasElement.getContext.
+  // Contrast is verified via math in the PR description + browser axe
+  // DevTools, not in this unit spec.
   const axeOptions = {
     rules: {
       'color-contrast': { enabled: false },
-      'button-name': { enabled: false },
     },
   };
 
