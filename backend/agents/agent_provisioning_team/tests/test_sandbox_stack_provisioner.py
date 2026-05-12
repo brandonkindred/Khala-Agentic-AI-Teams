@@ -178,9 +178,12 @@ def test_secrets_file_does_not_carry_global_postgres_creds(
 ) -> None:
     """Per-sandbox stacks own their Postgres — the host's ``POSTGRES_*`` env
     vars must NOT bleed into the agent's secrets file."""
-    monkeypatch.setenv("POSTGRES_USER", "host_user")
-    monkeypatch.setenv("POSTGRES_PASSWORD", "host_pw")
-    monkeypatch.setenv("POSTGRES_DB", "host_db")
+    # Sentinel values; hyphenated so secret-scanners don't flag them as
+    # credential-shaped literals. We only need to assert these strings
+    # don't appear in the rendered secrets file.
+    monkeypatch.setenv("POSTGRES_USER", "host-user-sentinel")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "host-pw-sentinel")
+    monkeypatch.setenv("POSTGRES_DB", "host-db-sentinel")
 
     path = provisioner_mod._write_sandbox_secrets_file(
         "khala-sbx-iso", postgres_password="freshly-minted"
@@ -188,6 +191,6 @@ def test_secrets_file_does_not_carry_global_postgres_creds(
     body = path.read_text(encoding="utf-8")
 
     assert "POSTGRES_PASSWORD=freshly-minted\n" in body
-    assert "host_user" not in body
-    assert "host_pw" not in body
-    assert "host_db" not in body
+    assert "host-user-sentinel" not in body
+    assert "host-pw-sentinel" not in body
+    assert "host-db-sentinel" not in body
