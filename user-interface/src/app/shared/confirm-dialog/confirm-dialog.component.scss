@@ -1,0 +1,46 @@
+:host {
+  display: block;
+  // Pull Khala tokens into the MDC dialog surface so the dialog inherits
+  // the dark theme regardless of how it's opened.
+  --mdc-dialog-container-color: var(--kh-surface-2);
+  --mdc-dialog-subhead-color: var(--kh-text-primary);
+  --mdc-dialog-supporting-text-color: var(--kh-text-secondary);
+}
+
+.confirm-dialog__title {
+  color: var(--kh-text-primary);
+  font-family: var(--kh-font-sans);
+  font-weight: 600;
+  font-size: var(--kh-text-lg);
+  margin: 0;
+  padding-bottom: var(--kh-space-2);
+}
+
+.confirm-dialog__content {
+  color: var(--kh-text-secondary);
+  font-family: var(--kh-font-sans);
+  font-size: var(--kh-text-base);
+  line-height: 1.5;
+
+  p {
+    margin: 0;
+  }
+}
+
+.confirm-dialog__actions {
+  padding-top: var(--kh-space-3);
+  gap: var(--kh-space-2);
+}
+
+// Destructive primary — overrides Material's warn palette with the Khala
+// error token so the button reads as the "danger" action in dark theme.
+.confirm-dialog__confirm--danger {
+  background-color: var(--kh-error) !important;
+  color: var(--kh-text-primary) !important;
+}
+
+// Caution (non-destructive but irreversible) — uses the Khala warning token.
+.confirm-dialog__confirm--warn {
+  background-color: var(--kh-warning) !important;
+  color: var(--kh-surface-0) !important;
+}
