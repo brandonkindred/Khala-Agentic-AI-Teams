@@ -325,6 +325,74 @@ describe('JobsDashboardComponent', () => {
     });
   });
 
+  describe('getActionAriaLabel', () => {
+    it('composes action, team, type, and repo name for SE job', () => {
+      const job = {
+        unified: {
+          source: 'software_engineering',
+          jobType: 'run_team',
+          jobId: 'j1',
+          status: 'running',
+          label: 'Run',
+          repoPath: '/work/payments-api',
+          createdAt: '',
+        },
+        seDetail: undefined,
+      } as any;
+      expect(component.getActionAriaLabel(job, 'Stop')).toBe(
+        'Stop Software Engineering Run Team job for payments-api',
+      );
+      expect(component.getActionAriaLabel(job, 'Resume')).toBe(
+        'Resume Software Engineering Run Team job for payments-api',
+      );
+      expect(component.getActionAriaLabel(job, 'Restart')).toBe(
+        'Restart Software Engineering Run Team job for payments-api',
+      );
+      expect(component.getActionAriaLabel(job, 'Delete')).toBe(
+        'Delete Software Engineering Run Team job for payments-api',
+      );
+    });
+
+    it('falls back to unified.label for non-SE rows', () => {
+      const job = {
+        unified: { source: 'blogging', jobType: undefined, jobId: 'j1', status: 'completed', label: 'My Post', createdAt: '' },
+        seDetail: undefined,
+      } as any;
+      expect(component.getActionAriaLabel(job, 'Delete')).toBe('Delete Blogging Blog pipeline job for My Post');
+    });
+
+    it('omits "for ..." suffix when no subject is available', () => {
+      const job = {
+        unified: { source: 'soc2_compliance', jobId: 'j2', status: 'failed', label: '', createdAt: '' },
+        seDetail: undefined,
+      } as any;
+      expect(component.getActionAriaLabel(job, 'Restart')).toBe('Restart SOC2 Compliance SOC2 Compliance job');
+    });
+
+    it('renders aria-label on each visible action button in the row', () => {
+      component.jobs = [
+        {
+          unified: {
+            source: 'blogging',
+            jobId: 'j-done',
+            status: 'completed',
+            label: 'Sample Post',
+            createdAt: new Date().toISOString(),
+          },
+          seDetail: undefined,
+        } as any,
+      ];
+      fixture.detectChanges();
+
+      const host = fixture.nativeElement as HTMLElement;
+      // status 'completed' → restart + delete are visible, stop + resume are not.
+      const restart = host.querySelector('button.restart-button');
+      const del = host.querySelector('button.delete-button');
+      expect(restart?.getAttribute('aria-label')).toBe('Restart Blogging Blog pipeline job for Sample Post');
+      expect(del?.getAttribute('aria-label')).toBe('Delete Blogging Blog pipeline job for Sample Post');
+    });
+  });
+
   it('refresh sets loading and restarts polling', () => {
     component.refresh();
     expect(component.loading).toBe(true);

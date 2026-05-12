@@ -481,6 +481,18 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     return parts.join(', ');
   }
 
+  getActionAriaLabel(job: DashboardRow, action: 'Stop' | 'Resume' | 'Restart' | 'Delete'): string {
+    const team = SOURCE_DISPLAY[job.unified.source]?.label ?? job.unified.source;
+    const type = this.getJobTypeInfo(job).label;
+    const subject =
+      job.unified.source === 'software_engineering' && job.unified.repoPath
+        ? this.getRepoName(job.unified.repoPath)
+        : job.unified.label;
+    return subject
+      ? `${action} ${team} ${type} job for ${subject}`
+      : `${action} ${team} ${type} job`;
+  }
+
   stopJob(event: Event, job: DashboardRow): void {
     event.stopPropagation();
     this.confirmDestructive({
