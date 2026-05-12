@@ -170,6 +170,39 @@ describe('JobsDashboardComponent', () => {
     expect(component.getStatusClass(job)).toContain('status-running');
   });
 
+  it('renders a single merged Job column (no separate Team/Type headers)', () => {
+    component.jobs = [
+      {
+        unified: {
+          source: 'software_engineering',
+          jobType: 'run_team',
+          jobId: 'j1',
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          label: 'Run',
+          repoPath: '/work/payments-api',
+        },
+        seDetail: undefined,
+      } as any,
+    ];
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    const headers = Array.from(host.querySelectorAll('thead th')).map((th) => (th.textContent ?? '').trim());
+    expect(headers).toContain('Job');
+    expect(headers).not.toContain('Team');
+    expect(headers).not.toContain('Type');
+
+    expect(host.querySelectorAll('td.col-job').length).toBe(1);
+    expect(host.querySelectorAll('td.col-team').length).toBe(0);
+    expect(host.querySelectorAll('td.col-type').length).toBe(0);
+
+    const jobLabel = host.querySelector('td.col-job .job-label')?.textContent?.trim();
+    const jobTeam = host.querySelector('td.col-job .job-team')?.textContent?.trim();
+    expect(jobLabel).toBe('Run Team');
+    expect(jobTeam).toBe('Software Engineering');
+  });
+
   it('navigateToJob navigates with jobId and tab for SE job', () => {
     const job = {
       unified: { source: 'software_engineering', jobType: 'run_team', jobId: 'j1' },

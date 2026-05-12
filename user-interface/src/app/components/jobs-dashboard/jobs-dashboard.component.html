@@ -46,8 +46,7 @@
         <thead>
           <tr>
             <th class="col-status">Status</th>
-            <th class="col-team">Team</th>
-            <th class="col-type">Type</th>
+            <th class="col-job">Job</th>
             <th class="col-repo">Repository / Context</th>
             <th class="col-progress">Progress</th>
             <th class="col-agents">Active Agents</th>
@@ -67,21 +66,16 @@
               <td class="col-status">
                 <span class="status-badge" [class]="getStatusClass(job)">{{ getStatusLabel(job) }}</span>
               </td>
-              <td class="col-team">
-                <div class="team-cell">
-                  <mat-icon class="team-icon">{{ SOURCE_DISPLAY[job.unified.source].icon }}</mat-icon>
-                  <div class="team-text">
-                    <span class="team-label">{{ SOURCE_DISPLAY[job.unified.source].label }}</span>
+              <td class="col-job">
+                <div class="job-cell">
+                  <mat-icon class="job-icon">{{ getJobTypeInfo(job).icon }}</mat-icon>
+                  <div class="job-text">
+                    <span class="job-label">{{ getJobTypeInfo(job).label }}</span>
+                    <span class="job-team">{{ SOURCE_DISPLAY[job.unified.source].label }}</span>
                     @if (getActivityText(job); as activity) {
-                      <span class="team-subtitle" [matTooltip]="activity">{{ activity }}</span>
+                      <span class="job-subtitle" [matTooltip]="activity">{{ activity }}</span>
                     }
                   </div>
-                </div>
-              </td>
-              <td class="col-type">
-                <div class="type-cell">
-                  <mat-icon class="type-icon">{{ getJobTypeInfo(job).icon }}</mat-icon>
-                  <span>{{ getJobTypeInfo(job).label }}</span>
                 </div>
               </td>
               <td class="col-repo">

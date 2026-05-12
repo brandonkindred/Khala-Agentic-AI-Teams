@@ -186,8 +186,7 @@
 // table fits the viewport without horizontal scroll on a 15" MacBook.
 
 .col-status   { width: 1%; white-space: nowrap; }
-.col-team     { width: 1%; white-space: nowrap; }
-.col-type     { width: 1%; white-space: nowrap; }
+.col-job      { width: 1%; min-width: 180px; }
 .col-repo     { width: 14%; min-width: 120px; max-width: 200px; }
 .col-progress { width: 14%; min-width: 110px; }
 .col-agents   { min-width: 140px; }
@@ -266,37 +265,39 @@ tbody .col-actions {
 
 // ── Cell Contents ───────────────────────────────────────────────────────────
 
-.team-cell,
-.type-cell {
+.job-cell {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--kh-space-2);
 
-  .team-icon,
-  .type-icon {
+  .job-icon {
     font-size: 16px;
     width: 16px;
     height: 16px;
     color: var(--kh-accent);
     opacity: 0.8;
+    flex-shrink: 0;
+    margin-top: 2px;
   }
 
-  span {
+  .job-label {
     color: var(--kh-text-secondary);
   }
 }
 
-// Two-line team cell: name on top, current-activity subtitle below.
-// Subtitle replaces the standalone "Current Activity" column and is the
+// Three-line job cell: type label on top, team label below, optional
+// current-activity subtitle as a third line. The activity line replaces
+// the standalone "Current Activity" column dropped in #477 and is the
 // only place non-SE rows (with no Active Agents chips) surface phase info.
-.team-text {
+.job-text {
   display: flex;
   flex-direction: column;
   min-width: 0;
   line-height: 1.25;
 }
 
-.team-cell .team-subtitle {
+.job-cell .job-team,
+.job-cell .job-subtitle {
   font-size: var(--kh-text-xs);
   color: var(--kh-text-tertiary);
   font-weight: 400;
@@ -307,7 +308,8 @@ tbody .col-actions {
 }
 
 @media (max-width: 1280px) {
-  .team-cell .team-subtitle {
+  .job-cell .job-team,
+  .job-cell .job-subtitle {
     max-width: 140px;
   }
 }
