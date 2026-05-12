@@ -514,6 +514,37 @@ describe('JobsDashboardComponent', () => {
       expect(component.getJobAriaLabel(job)).toContain('appears stuck');
     });
 
+    it('does not flag a job whose progress is null but phase keeps changing', () => {
+      const makePhaseJob = (phase: string) => {
+        const job = makeJob('running', 'j1', oldCreatedAt(), null);
+        job.unified.phase = phase;
+        return job;
+      };
+      record([makePhaseJob('setup')]);
+      record([makePhaseJob('planning')]);
+      record([makePhaseJob('execution')]);
+      expect(component.isStuck(makePhaseJob('execution'))).toBe(false);
+    });
+
+    it('flags a job with null progress + frozen phase across enough polls', () => {
+      const makePhaseJob = () => {
+        const job = makeJob('running', 'j1', oldCreatedAt(), null);
+        job.unified.phase = 'execution';
+        return job;
+      };
+      record([makePhaseJob()]);
+      record([makePhaseJob()]);
+      expect(component.isStuck(makePhaseJob())).toBe(true);
+    });
+
+    it('excludes SE jobs waiting for answers even after threshold elapsed', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      job.seDetail = { waitingForAnswers: true, progress: 25 } as any;
+      record([job]);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+    });
+
     it('renders the stuck glyph with aria-hidden="false" and a non-empty aria-label', () => {
       const job = makeJob('running', 'j1', oldCreatedAt(), 25);
       job.unified.jobType = 'run_team';

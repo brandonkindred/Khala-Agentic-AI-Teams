@@ -121,7 +121,7 @@ const STUCK_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2h since createdAt
 const STUCK_REQUIRED_STILL_POLLS = 2;
 
 interface ProgressSample {
-  progress: number | null;
+  signal: string;
   lastChangedAt: number;
   sampleCount: number;
 }
@@ -220,9 +220,23 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Fingerprint of all "is the job advancing?" signals: numeric progress plus
+   * phase / status text. Sources without numeric progress (e.g. founder,
+   * generic jobs) still surface phase or statusText changes, so combining
+   * them prevents a row from being flagged stuck when its progress field is
+   * permanently null but its phase ticks forward.
+   */
+  private progressSignal(job: DashboardRow): string {
+    const progress = this.getProgress(job);
+    const phase = job.seDetail?.currentPhase ?? job.unified.phase ?? '';
+    const statusText = job.seDetail?.statusText ?? '';
+    return `${progress ?? 'null'}|${phase}|${statusText}`;
+  }
+
+  /**
    * Update per-job progress history from the latest poll. Resets sampleCount
-   * whenever the progress value changes; otherwise increments it. Prunes
-   * entries for jobs that disappeared from the dashboard.
+   * whenever the signal changes; otherwise increments it. Prunes entries for
+   * jobs that disappeared from the dashboard.
    */
   private recordProgressSamples(rows: DashboardRow[]): void {
     const now = Date.now();
@@ -230,17 +244,17 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     for (const job of rows) {
       const key = this.historyKey(job);
       seen.add(key);
-      const current = this.getProgress(job);
+      const signal = this.progressSignal(job);
       const prev = this.progressHistory.get(key);
-      if (!prev || prev.progress !== current) {
+      if (!prev || prev.signal !== signal) {
         this.progressHistory.set(key, {
-          progress: current,
+          signal,
           lastChangedAt: now,
           sampleCount: 1,
         });
       } else {
         this.progressHistory.set(key, {
-          progress: prev.progress,
+          signal: prev.signal,
           lastChangedAt: prev.lastChangedAt,
           sampleCount: prev.sampleCount + 1,
         });
@@ -480,6 +494,10 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
    */
   isStuck(job: DashboardRow): boolean {
     if (job.unified.status !== 'running') return false;
+    // SE jobs that are intentionally paused for user input show
+    // status === 'running' but the dashboard labels them "Waiting". Don't
+    // double-surface those as stuck.
+    if (job.seDetail?.waitingForAnswers) return false;
     const createdAt = job.unified.createdAt;
     if (!createdAt) return false;
     const age = Date.now() - new Date(createdAt).getTime();
