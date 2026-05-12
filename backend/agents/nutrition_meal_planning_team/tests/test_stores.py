@@ -18,7 +18,7 @@ from nutrition_meal_planning_team.shared.meal_feedback_store import (
     record_feedback,
     record_recommendation,
 )
-from shared_postgres import is_postgres_enabled
+from shared_postgres import dict_row, get_conn, is_postgres_enabled
 
 pytestmark = pytest.mark.skipif(
     not is_postgres_enabled(),
@@ -109,3 +109,46 @@ class TestMealFeedbackStore:
         entries = get_meal_history("c2")
         assert len(entries) == 1
         assert entries[0].feedback and entries[0].feedback.rating == 4
+
+    def test_record_recommendation_without_guardrail_kwargs(self, store):
+        # Legacy / pre-SPEC-007-W5 insert path: all four new columns
+        # must persist as NULL (acceptance: "accepts guardrail_version=None").
+        rec_id = store.record_recommendation("c-legacy", {"name": "Toast"})
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT guardrail_version, parsed_ingredients_json, "
+                "       flags_json, restriction_snapshot_hash "
+                "FROM nutrition_recommendations WHERE recommendation_id = %s",
+                (rec_id,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row["guardrail_version"] is None
+        assert row["parsed_ingredients_json"] is None
+        assert row["flags_json"] is None
+        assert row["restriction_snapshot_hash"] is None
+
+    def test_record_recommendation_with_guardrail_metadata(self, store):
+        parsed = [{"raw": "almonds", "canonical_id": "tree_nut"}]
+        flags = [{"tag": "allergen", "detail": "tree_nut"}]
+        rec_id = store.record_recommendation(
+            "c-guarded",
+            {"name": "Almond bowl"},
+            guardrail_version="1.0.0",
+            parsed_ingredients=parsed,
+            flags=flags,
+            restriction_snapshot_hash="abc123",
+        )
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT guardrail_version, parsed_ingredients_json, "
+                "       flags_json, restriction_snapshot_hash "
+                "FROM nutrition_recommendations WHERE recommendation_id = %s",
+                (rec_id,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row["guardrail_version"] == "1.0.0"
+        assert row["parsed_ingredients_json"] == parsed
+        assert row["flags_json"] == flags
+        assert row["restriction_snapshot_hash"] == "abc123"

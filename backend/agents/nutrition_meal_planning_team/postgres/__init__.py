@@ -136,6 +136,37 @@ SCHEMA = TeamSchema(
             expires_at   TIMESTAMPTZ NOT NULL,
             created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
         )""",
+        # --- SPEC-007 additions (guardrail audit trail) ---
+        # Stamps every persisted recommendation with the guardrail
+        # version that cleared it, plus the parsed-ingredients / flags
+        # snapshot used to make the call. Nullable-default so legacy
+        # rows and the pre-W5 insert path stay valid; W5 begins
+        # populating them once the two-pass pipeline lands.
+        # ``restriction_snapshot_hash`` lets W12's replay job find
+        # rows whose snapshot predates the current RestrictionResolution
+        # KB version.
+        "ALTER TABLE nutrition_recommendations ADD COLUMN IF NOT EXISTS guardrail_version TEXT",
+        "ALTER TABLE nutrition_recommendations ADD COLUMN IF NOT EXISTS parsed_ingredients_json JSONB",
+        "ALTER TABLE nutrition_recommendations ADD COLUMN IF NOT EXISTS flags_json JSONB",
+        "ALTER TABLE nutrition_recommendations ADD COLUMN IF NOT EXISTS restriction_snapshot_hash TEXT",
+        # Append-only log of every guardrail rejection. One row per
+        # violation (not per recommendation) so a meal with two flagged
+        # ingredients produces two rows.
+        """CREATE TABLE IF NOT EXISTS nutrition_guardrail_rejections (
+            id                 BIGSERIAL PRIMARY KEY,
+            client_id          TEXT NOT NULL,
+            meal_snapshot      JSONB NOT NULL,
+            violation_reason   TEXT NOT NULL,
+            ingredient_raw     TEXT,
+            canonical_id       TEXT,
+            tag                TEXT,
+            detail             TEXT,
+            guardrail_version  TEXT NOT NULL,
+            kb_version         TEXT,
+            created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_guardrail_rejections_client_time
+            ON nutrition_guardrail_rejections (client_id, created_at DESC)""",
     ],
     table_names=[
         "nutrition_profiles",
@@ -146,5 +177,6 @@ SCHEMA = TeamSchema(
         "nutrition_clinical_overrides_log",
         "nutrition_pantry",
         "nutrition_pantry_import_drafts",
+        "nutrition_guardrail_rejections",
     ],
 )

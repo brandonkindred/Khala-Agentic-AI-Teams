@@ -47,16 +47,40 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
 
 
 @timed_query(store=_STORE, op="record_recommendation")
-def record_recommendation(client_id: str, meal_snapshot: Dict[str, Any]) -> str:
-    """Store a meal recommendation and return its recommendation_id."""
+def record_recommendation(
+    client_id: str,
+    meal_snapshot: Dict[str, Any],
+    *,
+    guardrail_version: Optional[str] = None,
+    parsed_ingredients: Optional[List[Dict[str, Any]]] = None,
+    flags: Optional[List[Dict[str, Any]]] = None,
+    restriction_snapshot_hash: Optional[str] = None,
+) -> str:
+    """Store a meal recommendation and return its recommendation_id.
+
+    Guardrail metadata kwargs are nullable for the legacy / pre-W5
+    insert path; SPEC-007 W5's two-pass pipeline starts populating them
+    once it lands.
+    """
     recommendation_id = str(uuid4())
     ts = datetime.now(tz=timezone.utc)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO nutrition_recommendations "
-            "(recommendation_id, client_id, meal_snapshot, recommended_at) "
-            "VALUES (%s, %s, %s, %s)",
-            (recommendation_id, client_id, Json(meal_snapshot or {}), ts),
+            "(recommendation_id, client_id, meal_snapshot, recommended_at, "
+            " guardrail_version, parsed_ingredients_json, flags_json, "
+            " restriction_snapshot_hash) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                recommendation_id,
+                client_id,
+                Json(meal_snapshot or {}),
+                ts,
+                guardrail_version,
+                Json(parsed_ingredients) if parsed_ingredients is not None else None,
+                Json(flags) if flags is not None else None,
+                restriction_snapshot_hash,
+            ),
         )
     return recommendation_id
 
@@ -152,8 +176,24 @@ class MealFeedbackStore:
         # Stateless; the connection pool lives inside shared_postgres.
         pass
 
-    def record_recommendation(self, client_id: str, meal_snapshot: Dict[str, Any]) -> str:
-        return record_recommendation(client_id, meal_snapshot)
+    def record_recommendation(
+        self,
+        client_id: str,
+        meal_snapshot: Dict[str, Any],
+        *,
+        guardrail_version: Optional[str] = None,
+        parsed_ingredients: Optional[List[Dict[str, Any]]] = None,
+        flags: Optional[List[Dict[str, Any]]] = None,
+        restriction_snapshot_hash: Optional[str] = None,
+    ) -> str:
+        return record_recommendation(
+            client_id,
+            meal_snapshot,
+            guardrail_version=guardrail_version,
+            parsed_ingredients=parsed_ingredients,
+            flags=flags,
+            restriction_snapshot_hash=restriction_snapshot_hash,
+        )
 
     def record_feedback(
         self,
