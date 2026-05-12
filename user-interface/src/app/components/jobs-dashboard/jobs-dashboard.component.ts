@@ -34,6 +34,7 @@ import type {
 } from '../../models';
 import {
   type DashboardRow,
+  type JobSource,
   type SEDetail,
   type TeamStatus,
   SOURCE_DISPLAY,
@@ -90,6 +91,34 @@ const PHASE_DISPLAY: Record<string, string> = {
   'problem_solving': 'Fixing',
 };
 
+// ── Filter pill model ──────────────────────────────────────────────────────
+// All / Active / Failed / Completed cover every status emitted by the 14 job
+// sources so the pill counts always sum to the total `jobs.length`. The
+// bucket for "unknown" statuses is `active` so a row never silently
+// disappears under any pill.
+const STATUS_BUCKETS = ['all', 'active', 'failed', 'completed'] as const;
+type StatusBucket = (typeof STATUS_BUCKETS)[number];
+
+const STATUS_LABELS: Record<StatusBucket, string> = {
+  all: 'All',
+  active: 'Active',
+  failed: 'Failed',
+  completed: 'Completed',
+};
+
+// Ordered alphabetically by display label so the team chip row is stable
+// across reloads and stays in sync with `SOURCE_DISPLAY` automatically.
+const TEAM_FILTER_ORDER: JobSource[] = (Object.keys(SOURCE_DISPLAY) as JobSource[])
+  .slice()
+  .sort((a, b) => SOURCE_DISPLAY[a].label.localeCompare(SOURCE_DISPLAY[b].label));
+
+const FILTER_STORAGE_KEY = 'jobs-dashboard-filters-v1';
+
+interface PersistedFilters {
+  status: StatusBucket;
+  teams: JobSource[];
+}
+
 @Component({
   selector: 'app-jobs-dashboard',
   standalone: true,
@@ -128,11 +157,19 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   seFetchError: string | null = null;
 
   readonly SOURCE_DISPLAY = SOURCE_DISPLAY;
+  readonly STATUS_BUCKETS = STATUS_BUCKETS;
+  readonly STATUS_LABELS = STATUS_LABELS;
+  readonly TEAM_FILTER_ORDER = TEAM_FILTER_ORDER;
+
+  selectedStatus: StatusBucket = 'all';
+  /** Empty set = no team restriction (all teams visible). */
+  selectedTeams = new Set<JobSource>();
 
   private pollSub: Subscription | null = null;
   private readonly POLL_INTERVAL = 20000;
 
   ngOnInit(): void {
+    this.loadFilters();
     this.startPolling();
   }
 
@@ -603,5 +640,177 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   trackByTeamId(_index: number, team: TeamStatus): string {
     return team.teamId;
+  }
+
+  // ── Filter pills ──────────────────────────────────────────────────────────
+
+  /**
+   * Rows that pass the active status pill + team chip selection. Used by the
+   * template instead of `jobs` so existing tests that seed `component.jobs`
+   * directly still drive the table.
+   */
+  get filteredJobs(): DashboardRow[] {
+    return this.jobs.filter((row) => this.matchesFilters(row));
+  }
+
+  /** Per-bucket counts over the unfiltered job list; `all` is the total. */
+  get statusCounts(): Record<StatusBucket, number> {
+    const counts: Record<StatusBucket, number> = { all: 0, active: 0, failed: 0, completed: 0 };
+    for (const row of this.jobs) {
+      counts.all += 1;
+      counts[this.statusBucketFor(row)] += 1;
+    }
+    return counts;
+  }
+
+  /**
+   * True when there are jobs to show but the active filter excludes every
+   * one — the template uses this to render a distinct "no jobs match" state
+   * with a Clear-filters button instead of the generic empty state.
+   */
+  get hasFilteredOutJobs(): boolean {
+    return this.jobs.length > 0 && this.filteredJobs.length === 0;
+  }
+
+  /** True iff any non-default filter is active. */
+  get hasActiveFilters(): boolean {
+    return this.selectedStatus !== 'all' || this.selectedTeams.size > 0;
+  }
+
+  statusLabel(bucket: StatusBucket): string {
+    return STATUS_LABELS[bucket];
+  }
+
+  setStatus(bucket: StatusBucket): void {
+    if (this.selectedStatus === bucket) return;
+    this.selectedStatus = bucket;
+    this.persistFilters();
+  }
+
+  toggleTeam(source: JobSource): void {
+    if (this.selectedTeams.has(source)) {
+      this.selectedTeams.delete(source);
+    } else {
+      this.selectedTeams.add(source);
+    }
+    // Replace the set so OnPush / Angular change-detection notices the change.
+    this.selectedTeams = new Set(this.selectedTeams);
+    this.persistFilters();
+  }
+
+  clearTeams(): void {
+    if (this.selectedTeams.size === 0) return;
+    this.selectedTeams = new Set();
+    this.persistFilters();
+  }
+
+  clearAllFilters(): void {
+    const changed = this.selectedStatus !== 'all' || this.selectedTeams.size > 0;
+    this.selectedStatus = 'all';
+    this.selectedTeams = new Set();
+    if (changed) this.persistFilters();
+  }
+
+  /**
+   * Roving-style arrow nav across the status pills (role="radiogroup").
+   * Activates the focused pill on Enter/Space (native <button> behaviour
+   * handles those without us preventing default).
+   */
+  onPillKeydown(event: KeyboardEvent, bucket: StatusBucket): void {
+    const idx = STATUS_BUCKETS.indexOf(bucket);
+    if (idx < 0) return;
+    let nextIdx = idx;
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        nextIdx = (idx + 1) % STATUS_BUCKETS.length;
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        nextIdx = (idx - 1 + STATUS_BUCKETS.length) % STATUS_BUCKETS.length;
+        break;
+      case 'Home':
+        nextIdx = 0;
+        break;
+      case 'End':
+        nextIdx = STATUS_BUCKETS.length - 1;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    const nextBucket = STATUS_BUCKETS[nextIdx];
+    this.setStatus(nextBucket);
+    // Move focus to the newly-selected pill so a screen reader keeps up.
+    const pills = (event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLElement>(
+      '.filter-pill[role="radio"]',
+    );
+    pills?.[nextIdx]?.focus();
+  }
+
+  private matchesFilters(row: DashboardRow): boolean {
+    if (this.selectedTeams.size > 0 && !this.selectedTeams.has(row.unified.source)) {
+      return false;
+    }
+    if (this.selectedStatus === 'all') return true;
+    return this.statusBucketFor(row) === this.selectedStatus;
+  }
+
+  /**
+   * Maps every status the 14 sources can emit to one of the three filter
+   * buckets. Mirrors `getStatusClass` so a new status only needs to be
+   * categorised in one place. Unknown statuses bucket as `active` so they
+   * remain visible under any pill except Failed/Completed.
+   */
+  private statusBucketFor(row: DashboardRow): Exclude<StatusBucket, 'all'> {
+    if (row.seDetail?.waitingForAnswers) return 'active';
+    switch (row.unified.status) {
+      case 'running':
+      case 'pending':
+        return 'active';
+      case 'failed':
+      case 'interrupted':
+      case 'agent_crash':
+        return 'failed';
+      case 'completed':
+      case 'cancelled':
+        return 'completed';
+      default:
+        return 'active';
+    }
+  }
+
+  private loadFilters(): void {
+    try {
+      const raw = sessionStorage.getItem(FILTER_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<PersistedFilters>;
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.status === 'string' && (STATUS_BUCKETS as readonly string[]).includes(parsed.status)) {
+          this.selectedStatus = parsed.status as StatusBucket;
+        }
+        if (Array.isArray(parsed.teams)) {
+          const validKeys = new Set<string>(Object.keys(SOURCE_DISPLAY));
+          this.selectedTeams = new Set(
+            parsed.teams.filter((t): t is JobSource => typeof t === 'string' && validKeys.has(t)),
+          );
+        }
+      }
+    } catch {
+      // Storage unavailable, quota exceeded, or corrupted payload — fall back
+      // to defaults silently. Filters are a UX nicety, not a correctness gate.
+    }
+  }
+
+  private persistFilters(): void {
+    try {
+      const payload: PersistedFilters = {
+        status: this.selectedStatus,
+        teams: [...this.selectedTeams],
+      };
+      sessionStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // Storage unavailable or quota exceeded — silently ignore.
+    }
   }
 }

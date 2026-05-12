@@ -33,6 +33,10 @@ describe('JobsDashboardComponent', () => {
   };
 
   beforeEach(async () => {
+    // Filters persist to sessionStorage; clear it before each test so state
+    // from one test does not leak into the next via the new component's
+    // ngOnInit → loadFilters call.
+    sessionStorage.clear();
     routerSpy = { navigate: vi.fn() };
     dialogSpy = {
       open: vi.fn().mockReturnValue({ afterClosed: () => of(true) }),
@@ -474,6 +478,191 @@ describe('JobsDashboardComponent', () => {
     it('returns false for running or pending jobs', () => {
       expect(component.canDeleteJob({ unified: { source: 'software_engineering', status: 'running' } } as any)).toBe(false);
       expect(component.canDeleteJob({ unified: { source: 'sales', status: 'pending' } } as any)).toBe(false);
+    });
+  });
+
+  describe('filters', () => {
+    const buildRow = (overrides: {
+      jobId: string;
+      status: string;
+      source?: string;
+      waitingForAnswers?: boolean;
+    }): any => ({
+      unified: {
+        source: overrides.source ?? 'software_engineering',
+        jobId: overrides.jobId,
+        status: overrides.status,
+        label: overrides.jobId,
+        createdAt: new Date().toISOString(),
+      },
+      seDetail: overrides.waitingForAnswers ? { waitingForAnswers: true } : undefined,
+    });
+
+    it('statusCounts buckets running/pending/waiting → active', () => {
+      component.jobs = [
+        buildRow({ jobId: 'r', status: 'running' }),
+        buildRow({ jobId: 'p', status: 'pending' }),
+        buildRow({ jobId: 'w', status: 'running', waitingForAnswers: true }),
+      ];
+      const counts = component.statusCounts;
+      expect(counts.active).toBe(3);
+      expect(counts.failed).toBe(0);
+      expect(counts.completed).toBe(0);
+      expect(counts.all).toBe(3);
+    });
+
+    it('statusCounts buckets failed/interrupted/agent_crash → failed', () => {
+      component.jobs = [
+        buildRow({ jobId: 'f', status: 'failed' }),
+        buildRow({ jobId: 'i', status: 'interrupted' }),
+        buildRow({ jobId: 'c', status: 'agent_crash' }),
+      ];
+      const counts = component.statusCounts;
+      expect(counts.failed).toBe(3);
+      expect(counts.active).toBe(0);
+      expect(counts.completed).toBe(0);
+    });
+
+    it('statusCounts buckets completed/cancelled → completed', () => {
+      component.jobs = [
+        buildRow({ jobId: 'd', status: 'completed' }),
+        buildRow({ jobId: 'x', status: 'cancelled' }),
+      ];
+      const counts = component.statusCounts;
+      expect(counts.completed).toBe(2);
+      expect(counts.all).toBe(2);
+    });
+
+    it('statusCounts.all always equals total job count', () => {
+      component.jobs = [
+        buildRow({ jobId: 'r', status: 'running' }),
+        buildRow({ jobId: 'f', status: 'failed' }),
+        buildRow({ jobId: 'd', status: 'completed' }),
+      ];
+      const counts = component.statusCounts;
+      expect(counts.all).toBe(3);
+      expect(counts.active + counts.failed + counts.completed).toBe(counts.all);
+    });
+
+    it('setStatus("failed") restricts filteredJobs to failed-bucket rows', () => {
+      component.jobs = [
+        buildRow({ jobId: 'r', status: 'running' }),
+        buildRow({ jobId: 'f', status: 'failed' }),
+        buildRow({ jobId: 'i', status: 'interrupted' }),
+        buildRow({ jobId: 'd', status: 'completed' }),
+      ];
+      component.setStatus('failed');
+      const ids = component.filteredJobs.map((r) => r.unified.jobId);
+      expect(ids.sort()).toEqual(['f', 'i']);
+    });
+
+    it('SE row waitingForAnswers is Active even when status is "completed"', () => {
+      // The waiting flag wins over unified.status — a job that's waiting for
+      // human answers is live work, not done work.
+      const row = buildRow({ jobId: 'w', status: 'completed', waitingForAnswers: true });
+      component.jobs = [row];
+      component.setStatus('active');
+      expect(component.filteredJobs).toHaveLength(1);
+      component.setStatus('completed');
+      expect(component.filteredJobs).toHaveLength(0);
+    });
+
+    it('toggleTeam restricts to that team, again removes the restriction', () => {
+      component.jobs = [
+        buildRow({ jobId: 'a', status: 'running', source: 'software_engineering' }),
+        buildRow({ jobId: 'b', status: 'running', source: 'blogging' }),
+      ];
+      component.toggleTeam('blogging' as any);
+      expect(component.filteredJobs.map((r) => r.unified.jobId)).toEqual(['b']);
+      component.toggleTeam('blogging' as any);
+      expect(component.filteredJobs).toHaveLength(2);
+    });
+
+    it('clearTeams() resets to all teams visible', () => {
+      component.jobs = [
+        buildRow({ jobId: 'a', status: 'running', source: 'software_engineering' }),
+        buildRow({ jobId: 'b', status: 'running', source: 'blogging' }),
+      ];
+      component.toggleTeam('software_engineering' as any);
+      component.toggleTeam('blogging' as any);
+      component.clearTeams();
+      expect(component.selectedTeams.size).toBe(0);
+      expect(component.filteredJobs).toHaveLength(2);
+    });
+
+    it('persists status + teams to sessionStorage and restores them', () => {
+      component.setStatus('failed');
+      component.toggleTeam('blogging' as any);
+
+      const raw = sessionStorage.getItem('jobs-dashboard-filters-v1');
+      expect(raw).toBeTruthy();
+      expect(JSON.parse(raw!)).toEqual({ status: 'failed', teams: ['blogging'] });
+
+      // Fresh component instance reads the same key.
+      const fresh = TestBed.createComponent(JobsDashboardComponent);
+      fresh.detectChanges();
+      expect(fresh.componentInstance.selectedStatus).toBe('failed');
+      expect([...fresh.componentInstance.selectedTeams]).toEqual(['blogging']);
+    });
+
+    it('drops unknown teams during restore (defensive against schema drift)', () => {
+      sessionStorage.setItem(
+        'jobs-dashboard-filters-v1',
+        JSON.stringify({ status: 'active', teams: ['blogging', 'not_a_real_team'] }),
+      );
+      const fresh = TestBed.createComponent(JobsDashboardComponent);
+      fresh.detectChanges();
+      expect([...fresh.componentInstance.selectedTeams]).toEqual(['blogging']);
+    });
+
+    it('ArrowRight on the All pill moves selection to Active', () => {
+      const target = document.createElement('button');
+      target.classList.add('filter-pill');
+      const evt = new KeyboardEvent('keydown', { key: 'ArrowRight', cancelable: true });
+      Object.defineProperty(evt, 'currentTarget', { value: target });
+      component.onPillKeydown(evt, 'all');
+      expect(component.selectedStatus).toBe('active');
+    });
+
+    it('ArrowLeft on the All pill wraps to Completed', () => {
+      const target = document.createElement('button');
+      const evt = new KeyboardEvent('keydown', { key: 'ArrowLeft', cancelable: true });
+      Object.defineProperty(evt, 'currentTarget', { value: target });
+      component.onPillKeydown(evt, 'all');
+      expect(component.selectedStatus).toBe('completed');
+    });
+
+    it('renders "no jobs match" empty state when filters exclude every row', () => {
+      component.jobs = [buildRow({ jobId: 'r', status: 'running' })];
+      component.setStatus('failed');
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('.filtered-empty')).toBeTruthy();
+      expect(host.querySelector('.filtered-empty h2')?.textContent).toContain('No jobs match');
+      expect(host.querySelector('.filter-pill.clear-all')).toBeTruthy();
+    });
+
+    it('Clear filters button resets status and teams to defaults', () => {
+      component.setStatus('failed');
+      component.toggleTeam('blogging' as any);
+      component.clearAllFilters();
+      expect(component.selectedStatus).toBe('all');
+      expect(component.selectedTeams.size).toBe(0);
+    });
+
+    it('renders one pill per status bucket with live counts', () => {
+      component.jobs = [
+        buildRow({ jobId: 'r', status: 'running' }),
+        buildRow({ jobId: 'f', status: 'failed' }),
+      ];
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      const pills = host.querySelectorAll('.status-pills .filter-pill');
+      expect(pills.length).toBe(4); // all / active / failed / completed
+      const labels = Array.from(pills).map((p) => p.querySelector('.pill-label')?.textContent?.trim());
+      const counts = Array.from(pills).map((p) => p.querySelector('.pill-count')?.textContent?.trim());
+      expect(labels).toEqual(['All', 'Active', 'Failed', 'Completed']);
+      expect(counts).toEqual(['2', '1', '1', '0']);
     });
   });
 

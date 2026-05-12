@@ -105,6 +105,8 @@ describe('JobsDashboardComponent a11y', () => {
 
     // Guard: don't pass axe vacuously against an empty DOM.
     expect(fixture.nativeElement.querySelector('tbody tr.job-row')).toBeTruthy();
+    // Guard: filter toolbar is in the DOM so axe actually audits it.
+    expect(fixture.nativeElement.querySelector('.jobs-filters [role="radiogroup"]')).toBeTruthy();
 
     const results = await axe(fixture.nativeElement, axeOptions);
     expect(results).toHaveNoViolations();

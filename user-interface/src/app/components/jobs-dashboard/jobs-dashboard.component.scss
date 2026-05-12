@@ -73,6 +73,140 @@
   }
 }
 
+// ── Filter Toolbar ──────────────────────────────────────────────────────────
+
+.jobs-filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kh-space-3);
+  margin-bottom: var(--kh-space-4);
+
+  .status-pills,
+  .team-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--kh-space-2);
+    align-items: center;
+  }
+}
+
+.filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kh-space-2);
+  padding: var(--kh-space-1) var(--kh-space-3);
+  border-radius: var(--kh-radius-full);
+  border: 1px solid var(--kh-border);
+  background: var(--kh-surface-2);
+  color: var(--kh-text-secondary);
+  font-family: var(--kh-font-sans);
+  font-size: var(--kh-text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--kh-transition), color var(--kh-transition),
+    border-color var(--kh-transition);
+
+  &:hover {
+    background: var(--kh-glass-hover);
+    color: var(--kh-text-primary);
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--kh-accent);
+  }
+
+  &.active,
+  &[aria-checked='true'] {
+    background: var(--kh-accent-subtle);
+    color: var(--kh-accent-text);
+    border-color: rgba(251, 191, 36, 0.35);
+  }
+
+  &.clear-teams,
+  &.clear-all {
+    color: var(--kh-text-tertiary);
+    background: transparent;
+    border-style: dashed;
+  }
+}
+
+.pill-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.5rem;
+  padding: 0 var(--kh-space-1);
+  border-radius: var(--kh-radius-full);
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font-family: var(--kh-font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.4;
+
+  .filter-pill.active &,
+  .filter-pill[aria-checked='true'] & {
+    background: rgba(251, 191, 36, 0.18);
+  }
+}
+
+.team-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kh-space-1);
+  padding: var(--kh-space-1) var(--kh-space-3);
+  border-radius: var(--kh-radius-full);
+  border: 1px solid var(--kh-border);
+  background: var(--kh-surface-2);
+  color: var(--kh-text-tertiary);
+  font-family: var(--kh-font-sans);
+  font-size: var(--kh-text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--kh-transition), color var(--kh-transition),
+    border-color var(--kh-transition);
+
+  .team-chip-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+    opacity: 0.8;
+  }
+
+  .team-chip-label {
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &:hover {
+    background: var(--kh-glass-hover);
+    color: var(--kh-text-primary);
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--kh-accent);
+  }
+
+  &.selected,
+  &[aria-pressed='true'] {
+    background: var(--kh-accent-subtle);
+    color: var(--kh-accent-text);
+    border-color: rgba(251, 191, 36, 0.35);
+
+    .team-chip-icon {
+      opacity: 1;
+    }
+  }
+}
+
+.empty-state.filtered-empty .filter-pill.clear-all {
+  margin-top: var(--kh-space-4);
+}
+
 // ── Loading & Empty States ──────────────────────────────────────────────────
 
 .loading-state,
