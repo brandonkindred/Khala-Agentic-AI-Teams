@@ -371,7 +371,11 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       agent_provisioning: { label: 'Provisioning', icon: 'settings', route: '/agent-provisioning' },
       social_marketing: { label: 'Campaign', icon: 'campaign', route: '/social-marketing' },
     };
-    return typeLabels[job.unified.source] ?? { label: job.unified.source, icon: 'work', route: '/' };
+    // Fall back to the team's friendly SOURCE_DISPLAY name so the merged Job
+    // column never renders a raw source id (e.g. `soc2_compliance`) for the
+    // sources without an explicit Type entry. Template suppresses the
+    // duplicate secondary `.job-team` line when label === team label.
+    return typeLabels[job.unified.source] ?? SOURCE_DISPLAY[job.unified.source] ?? { label: job.unified.source, icon: 'work', route: '/' };
   }
 
   getRepoName(repoPath?: string): string {
