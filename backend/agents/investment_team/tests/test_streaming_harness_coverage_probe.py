@@ -317,3 +317,28 @@ def test_probe_mode_truncated_flag_when_distinct_rule_ids_exceed_cap(
     assert payload["truncated"] is True
     # Only the first 3 distinct rule_ids should have been tracked.
     assert len(payload["events"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Idempotency
+# ---------------------------------------------------------------------------
+
+
+def test_instrument_strategy_code_is_idempotent() -> None:
+    """Re-instrumenting an already-instrumented module is a no-op (#449/#453).
+
+    Pins the ``_is_already_instrumented`` short-circuit in
+    ``runtime_instrument.py``: a second pass over rewritten code returns
+    the input bytes unchanged and reconstructs the same ``RuleIndex``
+    from the already-emitted ``__probe_record__`` calls. Without this
+    guarantee the bootstrap prelude would be inserted twice and rule_ids
+    would renumber, breaking the harness's per-rule aggregation.
+    """
+    code1, rule_index1 = instrument_strategy_code(_TWO_RULE_CODE)
+    code2, rule_index2 = instrument_strategy_code(code1)
+
+    assert code1 == code2
+    assert rule_index2.rules == rule_index1.rules
+    # The prelude is emitted exactly once on the first pass. A second
+    # pass must not append another copy.
+    assert code1.count("def __probe_record__(_rid, _bidx, _value):") == 1
