@@ -67,11 +67,15 @@
                 <span class="status-badge" [class]="getStatusClass(job)">{{ getStatusLabel(job) }}</span>
               </td>
               <td class="col-job">
+                @let typeInfo = getJobTypeInfo(job);
+                @let teamLabel = SOURCE_DISPLAY[job.unified.source].label;
                 <div class="job-cell">
-                  <mat-icon class="job-icon">{{ getJobTypeInfo(job).icon }}</mat-icon>
+                  <mat-icon class="job-icon">{{ typeInfo.icon }}</mat-icon>
                   <div class="job-text">
-                    <span class="job-label">{{ getJobTypeInfo(job).label }}</span>
-                    <span class="job-team">{{ SOURCE_DISPLAY[job.unified.source].label }}</span>
+                    <span class="job-label">{{ typeInfo.label }}</span>
+                    @if (typeInfo.label !== teamLabel) {
+                      <span class="job-team">{{ teamLabel }}</span>
+                    }
                     @if (getActivityText(job); as activity) {
                       <span class="job-subtitle" [matTooltip]="activity">{{ activity }}</span>
                     }

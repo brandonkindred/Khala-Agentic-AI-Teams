@@ -203,6 +203,30 @@ describe('JobsDashboardComponent', () => {
     expect(jobTeam).toBe('Software Engineering');
   });
 
+  it('renders friendly fallback label for sources without an explicit type entry', () => {
+    component.jobs = [
+      {
+        unified: {
+          source: 'soc2_compliance',
+          jobId: 'j2',
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          label: 'Audit run',
+        },
+        seDetail: undefined,
+      } as any,
+    ];
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    const jobLabel = host.querySelector('td.col-job .job-label')?.textContent?.trim();
+    // Falls back to SOURCE_DISPLAY['soc2_compliance'].label — never the raw id.
+    expect(jobLabel).toBe('SOC2 Compliance');
+    // When the primary already equals the team label, suppress the secondary
+    // .job-team line so the cell doesn't render "SOC2 Compliance / SOC2 Compliance".
+    expect(host.querySelector('td.col-job .job-team')).toBeNull();
+  });
+
   it('navigateToJob navigates with jobId and tab for SE job', () => {
     const job = {
       unified: { source: 'software_engineering', jobType: 'run_team', jobId: 'j1' },
