@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import ast
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as _field
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -703,74 +704,87 @@ def _aggregate(
 _BLOCK_FIELDS = ("body", "orelse", "finalbody")
 
 
-def _extract_subconditions(strategy_code: str) -> List[_Group]:
-    """Return one group of subconditions per ``if`` predicate.
+class SubconditionVisitor:
+    """Statement-list-driven walker that produces coverage groups.
 
-    Subconditions are grouped by their parent ``if`` so the conjunction
-    hit-rate check stays scoped to a single predicate. Two **sibling**
-    branches like ``if close > 100: enter`` and ``if close < 50: exit``
-    are returned as separate groups and are never ANDed together.
+    Replaces the closure-soup form of ``_extract_subconditions``
+    (#467). Each former nested ``def`` is now a method; the formerly-
+    captured ``name_evaluators`` / ``name_periods`` / ``name_strings``
+    dicts become instance attributes; the budget counter (formerly
+    ``state["total"]``) is ``self._budget``; the transactional
+    save/restore in ``_visit`` is the ``_snapshot`` context manager.
 
-    A **nested** ``if`` inherits the subconditions of every enclosing
-    ``if`` on its positive control-flow path: ``if close > 100: if close
-    < 50: pass`` produces a single group containing both legs.
-
-    Position checks (``if pos is None: ... else: ...``) are special-cased:
-    the documented strategy template uses this to gate the entry logic
-    in ``body`` and the exit logic in ``orelse``. We only recurse into
-    ``body`` so exit predicates aren't mis-reported as entry-coverage
-    blockers.
-
-    Symbol gates (``bar.symbol == "AAPL"``) attach a per-group symbol
-    filter so the indicator condition is only evaluated against that
-    DataFrame — otherwise an unrelated symbol's data could satisfy a
-    ``close > 1000`` filter and mask the actual zero-coverage on the
-    target symbol.
-
-    The positive branch (``body``) propagates the ancestor predicate;
-    ``orelse`` does not, since negating an arbitrary indicator subcond
-    is generally ambiguous and we'd rather under-flag than over-flag.
+    Deliberately NOT a subclass of :class:`ast.NodeVisitor` — ``_visit``
+    is statement-list-driven (it iterates a ``List[ast.stmt]`` and
+    applies assignments in source order between siblings), which does
+    not fit the per-node dispatch ``NodeVisitor`` provides. The
+    function-body / class-body short-circuit in ``_visit`` is
+    explicit; subclassing ``NodeVisitor`` would silently re-enable
+    descent into nested helper functions.
     """
-    if not strategy_code:
-        return []
-    tree = ast.parse(strategy_code)
-    on_bar = _find_on_bar(tree)
-    if on_bar is None:
-        return []
-    # Outer-scope (module / strategy class / __init__) period bindings
-    # only. Function-local ``WINDOW = 5`` shadowing (and all
-    # ``Name = <indicator>`` bindings inside on_bar) are now applied
-    # **flow-sensitively** in :func:`_visit` so a later reassignment
-    # can't shadow a predicate that lexically precedes it.
-    # ``strategy_class`` confines the outer-scope walk to the strategy's
-    # own ``ClassDef`` so a sibling helper class can't pre-empt the
-    # strategy's bare-name attribute bindings.
-    strategy_class = _find_strategy_class(tree, on_bar)
-    # ``bar_name`` is the actual third positional parameter name on
-    # ``on_bar``. The symbol recognisers historically hard-coded
-    # ``"bar"`` and silently dropped the gate when the strategy named
-    # it ``candle`` / ``b`` — see :func:`_bar_param_name`.
-    bar_name = _bar_param_name(on_bar)
-    name_periods = _collect_name_periods(tree, function_node=None, strategy_class=strategy_class)
-    # String-constant bindings (``TARGET_SYMBOL = "BBB"``) — used by
-    # ``_symbol_gate`` so ``bar.symbol == TARGET_SYMBOL`` resolves to
-    # the same gated subcondition as ``bar.symbol == "BBB"``. Without
-    # this, the symbol gate is dropped and a sibling indicator
-    # condition is evaluated against every fetched DataFrame, letting
-    # an unrelated symbol satisfy the predicate and falsely flagging
-    # COVERAGE_OK.
-    name_strings = _collect_name_strings(tree, strategy_class=strategy_class)
-    # Local name → indicator evaluator bindings start empty. The
-    # walker fills them as it encounters assignments in source order
-    # and only the bindings established before a given predicate are
-    # visible to that predicate.
-    name_evaluators: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {}
 
-    groups: List[_Group] = []
-    state = {"total": 0}
+    def __init__(self, tree: ast.Module, on_bar: ast.FunctionDef) -> None:
+        # Outer-scope (module / strategy class / __init__) period bindings
+        # only. Function-local ``WINDOW = 5`` shadowing (and all
+        # ``Name = <indicator>`` bindings inside on_bar) are applied
+        # **flow-sensitively** in :meth:`_visit` so a later reassignment
+        # can't shadow a predicate that lexically precedes it.
+        # ``strategy_class`` confines the outer-scope walk to the strategy's
+        # own ``ClassDef`` so a sibling helper class can't pre-empt the
+        # strategy's bare-name attribute bindings.
+        self._tree = tree
+        self._on_bar = on_bar
+        self._strategy_class = _find_strategy_class(tree, on_bar)
+        # ``bar_name`` is the actual third positional parameter name on
+        # ``on_bar``. The symbol recognisers historically hard-coded
+        # ``"bar"`` and silently dropped the gate when the strategy named
+        # it ``candle`` / ``b`` — see :func:`_bar_param_name`.
+        self._bar_name = _bar_param_name(on_bar)
+        self._name_periods = _collect_name_periods(
+            tree, function_node=None, strategy_class=self._strategy_class
+        )
+        # String-constant bindings (``TARGET_SYMBOL = "BBB"``) — used by
+        # ``_symbol_gate`` so ``bar.symbol == TARGET_SYMBOL`` resolves to
+        # the same gated subcondition as ``bar.symbol == "BBB"``.
+        self._name_strings = _collect_name_strings(tree, strategy_class=self._strategy_class)
+        # Local name → indicator evaluator bindings start empty. The
+        # walker fills them as it encounters assignments in source order.
+        self._name_evaluators: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {}
+        self._groups: List[_Group] = []
+        # Budget counter — formerly ``state["total"]`` in the closure.
+        self._budget = 0
 
-    def _apply_assign_inplace(stmt: ast.stmt) -> None:
-        """Update name_evaluators / name_periods from a single assignment.
+    def walk(self, on_bar: ast.FunctionDef) -> List[_Group]:
+        body = getattr(on_bar, "body", None)
+        if isinstance(body, list):
+            self._visit(body, [], None)
+        return self._groups
+
+    @contextmanager
+    def _snapshot(self) -> Iterator[None]:
+        """Save / restore the three name-binding dicts across a ``_visit`` call.
+
+        ``self._groups`` and ``self._budget`` are deliberately NOT rolled
+        back: the early-emit blocks in :meth:`_process_if` and
+        :meth:`_process_or_if` append partial groups when the budget is
+        hit mid-walk and that emission is observable behaviour the
+        robustness suite anchors. The restore order mirrors the legacy
+        try/finally at the same point in :meth:`_visit`.
+        """
+        saved_evals = dict(self._name_evaluators)
+        saved_periods = dict(self._name_periods)
+        saved_strings = self._name_strings.copy()
+        try:
+            yield
+        finally:
+            self._name_evaluators.clear()
+            self._name_evaluators.update(saved_evals)
+            self._name_periods.clear()
+            self._name_periods.update(saved_periods)
+            self._name_strings.restore_from(saved_strings)
+
+    def _apply_assign_inplace(self, stmt: ast.stmt) -> None:
+        """Update self._name_evaluators / self._name_periods from a single assignment.
 
         Mirrors the per-target logic of the previous global pre-pass
         (``_collect_name_evaluators`` and the function-local pass of
@@ -790,18 +804,20 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             return
         for target in targets:
             if isinstance(target, (ast.Tuple, ast.List)):
-                _bind_tuple_unpack(target, value, name_periods, name_evaluators)
+                _bind_tuple_unpack(target, value, self._name_periods, self._name_evaluators)
                 continue
             if isinstance(target, ast.Name):
-                evaluator = _resolve_assign_evaluator(value, name_periods, name_evaluators)
+                evaluator = _resolve_assign_evaluator(
+                    value, self._name_periods, self._name_evaluators
+                )
                 if evaluator is not None:
-                    name_evaluators[target.id] = evaluator
+                    self._name_evaluators[target.id] = evaluator
                 else:
                     # RHS is a scalar / unsupported call — drop any
                     # prior indicator binding so downstream lookups
                     # fall through to numeric-literal / OHLCV
                     # resolution.
-                    name_evaluators.pop(target.id, None)
+                    self._name_evaluators.pop(target.id, None)
                 # Numeric-scalar side: record any numeric value
                 # (including zero and negatives), preserving int-ness
                 # when the value is integer-valued so period-use sites
@@ -819,16 +835,16 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # arguments — strategies that pass non-positive or
                 # float values to a helper will fail identically in
                 # the probe and the runtime.
-                v = _numeric_literal(value, name_periods)
+                v = _numeric_literal(value, self._name_periods)
                 if v is not None:
-                    name_periods[target.id] = int(v) if float(v).is_integer() else float(v)
+                    self._name_periods[target.id] = int(v) if float(v).is_integer() else float(v)
                 else:
                     # Non-literal RHS (e.g. ``LIMIT = self.dynamic_limit()``).
                     # Drop any prior scalar binding so downstream
                     # ``_build_operand`` lookups treat the comparison
                     # as unmodelled rather than evaluating against the
                     # stale literal that the previous assignment set.
-                    name_periods.pop(target.id, None)
+                    self._name_periods.pop(target.id, None)
                 # String-scalar side: a function-local ``target = "BBB"``
                 # is a bare-name binding inside ``on_bar`` and must be
                 # visible to bare-``Name`` resolution in ``_symbol_gate``
@@ -842,43 +858,44 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # resolve through the current bindings — bare ``Name``
                 # via ``globals_`` (method scope = module scope),
                 # ``self.X`` via ``attrs``.
-                str_value = _resolve_string_in_method(value, name_strings)
+                str_value = _resolve_string_in_method(value, self._name_strings)
                 if str_value is not None:
-                    name_strings.globals_[target.id] = str_value
+                    self._name_strings.globals_[target.id] = str_value
                 else:
-                    name_strings.globals_.pop(target.id, None)
+                    self._name_strings.globals_.pop(target.id, None)
             elif isinstance(target, ast.Attribute):
                 # ``self.WINDOW = N`` — record by attribute name.
-                v = _numeric_literal(value, name_periods)
+                v = _numeric_literal(value, self._name_periods)
                 if v is not None:
-                    name_periods[target.attr] = int(v) if float(v).is_integer() else float(v)
+                    self._name_periods[target.attr] = int(v) if float(v).is_integer() else float(v)
                 else:
                     # Same drop-stale rule for ``self.X = <non-literal>``.
-                    name_periods.pop(target.attr, None)
+                    self._name_periods.pop(target.attr, None)
                 # ``self.TARGET = "BBB"`` (or alias from a module/global
                 # constant) — flow-sensitive instance-attr binding
                 # routed through ``attrs`` so ``self.TARGET`` /
                 # ``cls.TARGET`` resolution sees it without leaking into
                 # bare-name lookups.
-                str_value = _resolve_string_in_method(value, name_strings)
+                str_value = _resolve_string_in_method(value, self._name_strings)
                 if str_value is not None:
-                    name_strings.attrs[target.attr] = str_value
+                    self._name_strings.attrs[target.attr] = str_value
                 else:
-                    name_strings.attrs.pop(target.attr, None)
+                    self._name_strings.attrs.pop(target.attr, None)
 
-    def _budgeted_extend(group_subs: List[_Subcond], extras: List[_Subcond]) -> bool:
+    def _budgeted_extend(self, group_subs: List[_Subcond], extras: List[_Subcond]) -> bool:
         """Append extras into group within the global subcond budget.
 
         Returns False when the global cap is hit (caller should stop).
         """
         for sub in extras:
-            if state["total"] >= _MAX_SUBCONDITIONS:
+            if self._budget >= _MAX_SUBCONDITIONS:
                 return False
             group_subs.append(sub)
-            state["total"] += 1
+            self._budget += 1
         return True
 
     def _process_if(
+        self,
         test: ast.expr,
         body: List[ast.stmt],
         orelse: List[ast.stmt],
@@ -910,7 +927,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # subcondition row but the group's blocker classification uses
         # disjunction (only too-restrictive when ALL legs are zero).
         if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
-            return _process_or_if(
+            return self._process_or_if(
                 test, body, orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied
             )
 
@@ -924,9 +941,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # body recursion entirely; ``orelse`` runs unconditionally so
         # we still recurse into it.
         for term in _flatten_top_terms(test):
-            truth = _evaluate_static_predicate(term, name_periods, name_evaluators)
+            truth = _evaluate_static_predicate(term, self._name_periods, self._name_evaluators)
             if truth is False:
-                if not _visit(
+                if not self._visit(
                     orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied
                 ):
                     return False
@@ -963,11 +980,11 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             # ``(5 % 2 == 0)`` whose ``Mod`` operand isn't in the
             # constant-folding scope) lands in the unknown-conjunct
             # path rather than slipping through as a silent no-op.
-            truth = _evaluate_static_predicate(term, name_periods, name_evaluators)
+            truth = _evaluate_static_predicate(term, self._name_periods, self._name_evaluators)
             if truth is not None:
                 continue
             if isinstance(term, ast.Compare):
-                sym = _symbol_gate(term, name_strings, bar_name)
+                sym = _symbol_gate(term, self._name_strings, self._bar_name)
                 if sym is not None:
                     # Multiple ``bar.symbol == X`` gates within a single
                     # ``and`` are conjoined, so a second different literal
@@ -980,7 +997,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     else:
                         own_symbols &= sym
                     continue
-                sub = _build_subcond(term, name_periods, name_evaluators)
+                sub = _build_subcond(term, self._name_periods, self._name_evaluators)
                 if sub is not None:
                     own_subs.append(sub)
                 else:
@@ -1005,7 +1022,11 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             # only the surviving Compare conjuncts.
             if isinstance(term, ast.BoolOp) and isinstance(term.op, ast.Or):
                 or_compound = _build_compound_or_subcond(
-                    term, name_periods, name_evaluators, name_strings, bar_name
+                    term,
+                    self._name_periods,
+                    self._name_evaluators,
+                    self._name_strings,
+                    self._bar_name,
                 )
                 if or_compound is not None:
                     own_subs.append(or_compound)
@@ -1041,7 +1062,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             # resolve to a recognised indicator helper (e.g. compiler-
             # emitted ``self._n_X`` factor methods), we leave the term
             # unhandled rather than silently treating it as always-true.
-            truthy = _build_truthy_subcond(term, name_periods, name_evaluators)
+            truthy = _build_truthy_subcond(term, self._name_periods, self._name_evaluators)
             if truthy is not None:
                 own_subs.append(truthy)
             else:
@@ -1053,7 +1074,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 has_unknown_conjunct = True
 
         effective_symbols = _intersect_symbols(ancestor_symbols, own_symbols)
-        # Effective unknown narrowing for groups emitted at this level:
+        # Effective unknown narrowing for self._groups emitted at this level:
         # the union of any inherited unknown ancestor and a locally-
         # detected unknown conjunct. Body recursion uses the same flag
         # so descendants remain tainted; orelse uses the bare inherited
@@ -1063,9 +1084,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         effective_denied = frozenset(ancestor_denied) if ancestor_denied else None
 
         group_subs: List[_Subcond] = []
-        if not _budgeted_extend(group_subs, ancestors):
+        if not self._budgeted_extend(group_subs, ancestors):
             if group_subs:
-                groups.append(
+                self._groups.append(
                     _Group(
                         subconds=group_subs,
                         target_symbols=effective_symbols,
@@ -1074,9 +1095,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     )
                 )
             return False
-        if not _budgeted_extend(group_subs, own_subs):
+        if not self._budgeted_extend(group_subs, own_subs):
             if group_subs:
-                groups.append(
+                self._groups.append(
                     _Group(
                         subconds=group_subs,
                         target_symbols=effective_symbols,
@@ -1086,7 +1107,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 )
             return False
         if group_subs and not (effective_symbols is not None and not effective_symbols):
-            groups.append(
+            self._groups.append(
                 _Group(
                     subconds=group_subs,
                     target_symbols=effective_symbols,
@@ -1094,7 +1115,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     denied_symbols=effective_denied,
                 )
             )
-        if not _visit(
+        if not self._visit(
             body,
             ancestors + own_subs,
             effective_symbols,
@@ -1102,11 +1123,12 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             ancestor_denied,
         ):
             return False
-        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
+        if not self._visit(orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
             return False
         return True
 
     def _process_or_if(
+        self,
         test: ast.BoolOp,
         body: List[ast.stmt],
         orelse: List[ast.stmt],
@@ -1156,7 +1178,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # the nested-OR helper: emit an always-true mask scoped
                 # by the leg's symbol so the aggregator counts AAPL bars
                 # as a firing leg.
-                sym = _symbol_gate(leg, name_strings, bar_name)
+                sym = _symbol_gate(leg, self._name_strings, self._bar_name)
                 if sym is not None:
                     own_subs.append(
                         _Subcond(
@@ -1166,7 +1188,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         )
                     )
                     continue
-                sub = _build_subcond(leg, name_periods, name_evaluators)
+                sub = _build_subcond(leg, self._name_periods, self._name_evaluators)
                 if sub is not None:
                     own_subs.append(sub)
                 else:
@@ -1180,14 +1202,18 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # the disjunction needs to test. Drops cleanly to None
                 # when no inner term is recognisable.
                 compound = _build_compound_and_subcond(
-                    leg, name_periods, name_evaluators, name_strings, bar_name
+                    leg,
+                    self._name_periods,
+                    self._name_evaluators,
+                    self._name_strings,
+                    self._bar_name,
                 )
                 if compound is not None:
                     own_subs.append(compound)
                 else:
                     has_unknown_leg = True
                 continue
-            truthy = _build_truthy_subcond(leg, name_periods, name_evaluators)
+            truthy = _build_truthy_subcond(leg, self._name_periods, self._name_evaluators)
             if truthy is not None:
                 own_subs.append(truthy)
             else:
@@ -1198,9 +1224,13 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         if not own_subs:
             # No recognised legs — fall through to body / orelse without
             # emitting a group, so nested ``if`` analysis still runs.
-            if not _visit(body, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
+            if not self._visit(
+                body, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied
+            ):
                 return False
-            if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
+            if not self._visit(
+                orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied
+            ):
                 return False
             return True
 
@@ -1210,9 +1240,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # ends and the OR-leg head begins. (See _Group docstring for
         # the per-position rule.)
         group_subs: List[_Subcond] = []
-        if not _budgeted_extend(group_subs, ancestors):
+        if not self._budgeted_extend(group_subs, ancestors):
             if group_subs:
-                groups.append(
+                self._groups.append(
                     _Group(
                         subconds=group_subs,
                         target_symbols=ancestor_symbols,
@@ -1224,9 +1254,9 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 )
             return False
         ancestor_count = len(group_subs)
-        if not _budgeted_extend(group_subs, own_subs):
+        if not self._budgeted_extend(group_subs, own_subs):
             if group_subs:
-                groups.append(
+                self._groups.append(
                     _Group(
                         subconds=group_subs,
                         target_symbols=ancestor_symbols,
@@ -1239,7 +1269,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 )
             return False
         if group_subs:
-            groups.append(
+            self._groups.append(
                 _Group(
                     subconds=group_subs,
                     target_symbols=ancestor_symbols,
@@ -1271,7 +1301,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         body_symbols = ancestor_symbols
         body_unknown = ancestor_unknown or has_unknown_leg
         or_compound = _build_compound_or_subcond(
-            test, name_periods, name_evaluators, name_strings, bar_name
+            test, self._name_periods, self._name_evaluators, self._name_strings, self._bar_name
         )
         if or_compound is not None:
             body_ancestors = ancestors + [or_compound]
@@ -1284,29 +1314,20 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
             # gated by an unknown ancestor, so descendants can't
             # supply positive evidence on their own.
             body_unknown = True
-        if not _visit(body, body_ancestors, body_symbols, body_unknown, ancestor_denied):
+        if not self._visit(body, body_ancestors, body_symbols, body_unknown, ancestor_denied):
             return False
-        if not _visit(orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
+        if not self._visit(orelse, ancestors, ancestor_symbols, ancestor_unknown, ancestor_denied):
             return False
         return True
 
     def _visit(
+        self,
         stmts: List[ast.stmt],
         ancestors: List[_Subcond],
         ancestor_symbols: Optional[set],
         ancestor_unknown: bool = False,
         ancestor_denied: Optional[set] = None,
     ) -> bool:
-        # Transactional: snapshot at entry, restore at exit. Each call
-        # to _visit (including the recursive descents from _process_if /
-        # _process_or_if into body / orelse) leaves the caller's
-        # ``name_evaluators`` and ``name_periods`` unchanged, while
-        # mutations persist across sibling statements within this
-        # for-loop. This gives flow-sensitivity without leaking branch-
-        # internal reassignments to siblings or parents.
-        saved_evals = dict(name_evaluators)
-        saved_periods = dict(name_periods)
-        saved_strings = name_strings.copy()
         # Implicit symbol filter accumulated from early-return guards
         # at this scope. ``if bar.symbol != "BBB": return`` excludes
         # all symbols other than BBB for any statement that follows in
@@ -1324,7 +1345,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
         # that combines an allowlist and an exclude on different
         # symbols composes correctly.
         current_denied: Optional[set] = set(ancestor_denied) if ancestor_denied else None
-        try:
+        with self._snapshot():
             for stmt in stmts:
                 # Apply assignments in source order so each predicate
                 # sees only the bindings established by lexically
@@ -1332,7 +1353,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                 # reassignment leaks back to earlier predicates via the
                 # shared dicts.
                 if isinstance(stmt, ast.Assign) or isinstance(stmt, ast.AnnAssign):
-                    _apply_assign_inplace(stmt)
+                    self._apply_assign_inplace(stmt)
                     continue
 
                 if isinstance(stmt, ast.If):
@@ -1342,7 +1363,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     # denylist update. Both shapes update the implicit
                     # symbol filter for subsequent siblings rather than
                     # emitting a coverage row for the guard itself.
-                    guard = _early_return_symbol_guard(stmt, name_strings, bar_name)
+                    guard = _early_return_symbol_guard(stmt, self._name_strings, self._bar_name)
                     if guard is not None:
                         polarity, syms = guard
                         if polarity == "allow":
@@ -1365,7 +1386,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     position_check, gate_residual = _strip_position_gate(stmt.test)
                     if position_check == "vacant":  # pos is None — body is entry
                         if gate_residual is None:
-                            if not _visit(
+                            if not self._visit(
                                 stmt.body,
                                 ancestors,
                                 current_symbols,
@@ -1383,7 +1404,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                             if _is_return_only_body(stmt.body):
                                 break
                         else:
-                            if not _process_if(
+                            if not self._process_if(
                                 gate_residual,
                                 stmt.body,
                                 [],
@@ -1395,7 +1416,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                                 return False
                         continue
                     if position_check == "occupied":  # pos is not None — orelse is entry
-                        if not _visit(
+                        if not self._visit(
                             stmt.orelse,
                             ancestors,
                             current_symbols,
@@ -1405,7 +1426,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                             return False
                         continue
 
-                    if not _process_if(
+                    if not self._process_if(
                         stmt.test,
                         stmt.body,
                         stmt.orelse,
@@ -1439,7 +1460,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                     for field in _BLOCK_FIELDS:
                         inner = getattr(stmt, field, None)
                         if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
-                            if not _visit(
+                            if not self._visit(
                                 inner,
                                 ancestors,
                                 current_symbols,
@@ -1453,7 +1474,7 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                         for h in handlers:
                             h_body = getattr(h, "body", None)
                             if isinstance(h_body, list) and h_body:
-                                if not _visit(
+                                if not self._visit(
                                     h_body,
                                     ancestors,
                                     current_symbols,
@@ -1462,17 +1483,44 @@ def _extract_subconditions(strategy_code: str) -> List[_Group]:
                                 ):
                                     return False
             return True
-        finally:
-            name_evaluators.clear()
-            name_evaluators.update(saved_evals)
-            name_periods.clear()
-            name_periods.update(saved_periods)
-            name_strings.restore_from(saved_strings)
 
-    body = getattr(on_bar, "body", None)
-    if isinstance(body, list):
-        _visit(body, [], None)
-    return groups
+
+def _extract_subconditions(strategy_code: str) -> List[_Group]:
+    """Return one group of subconditions per ``if`` predicate.
+
+    Subconditions are grouped by their parent ``if`` so the conjunction
+    hit-rate check stays scoped to a single predicate. Two **sibling**
+    branches like ``if close > 100: enter`` and ``if close < 50: exit``
+    are returned as separate groups and are never ANDed together.
+
+    A **nested** ``if`` inherits the subconditions of every enclosing
+    ``if`` on its positive control-flow path: ``if close > 100: if close
+    < 50: pass`` produces a single group containing both legs.
+
+    Position checks (``if pos is None: ... else: ...``) are special-cased:
+    the documented strategy template uses this to gate the entry logic
+    in ``body`` and the exit logic in ``orelse``. We only recurse into
+    ``body`` so exit predicates aren't mis-reported as entry-coverage
+    blockers.
+
+    Symbol gates (``bar.symbol == "AAPL"``) attach a per-group symbol
+    filter so the indicator condition is only evaluated against that
+    DataFrame — otherwise an unrelated symbol's data could satisfy a
+    ``close > 1000`` filter and mask the actual zero-coverage on the
+    target symbol.
+
+    The positive branch (``body``) propagates the ancestor predicate;
+    ``orelse`` does not, since negating an arbitrary indicator subcond
+    is generally ambiguous and we'd rather under-flag than over-flag.
+    """
+    if not strategy_code:
+        return []
+    tree = ast.parse(strategy_code)
+    on_bar = _find_on_bar(tree)
+    if on_bar is None:
+        return []
+    visitor = SubconditionVisitor(tree, on_bar)
+    return visitor.walk(on_bar)
 
 
 def _strip_position_gate(test: ast.expr) -> tuple:
