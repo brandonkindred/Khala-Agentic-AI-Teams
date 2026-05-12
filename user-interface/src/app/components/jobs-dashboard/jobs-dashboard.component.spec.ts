@@ -591,6 +591,19 @@ describe('JobsDashboardComponent', () => {
       expect(component.isStuck(resumed)).toBe(true);
     });
 
+    it('does not flag an SE row whose detail fetch failed (no observable signal)', () => {
+      // fetchSEDetail returned null → seDetail is undefined, progress is null,
+      // phase and statusText are empty. Repeated polls in that state must
+      // not trip the stuck heuristic, even past the age gate.
+      const job = makeJob('running', 'j1', oldCreatedAt(), null);
+      job.seDetail = undefined;
+      delete (job.unified as any).phase;
+      record([job]);
+      record([job]);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+    });
+
     it('excludes SE jobs waiting for answers even after threshold elapsed', () => {
       const job = makeJob('running', 'j1', oldCreatedAt(), 25);
       job.seDetail = { waitingForAnswers: true, progress: 25 } as any;

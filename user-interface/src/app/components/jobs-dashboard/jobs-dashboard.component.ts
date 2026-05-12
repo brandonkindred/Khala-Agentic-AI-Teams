@@ -238,6 +238,23 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * True only when we have at least one piece of progress information for
+   * this job (numeric progress, a phase, or a status text). When this returns
+   * false (e.g. an SE row whose detail fetch failed so seDetail is null and
+   * nothing else surfaces), we can't honestly distinguish "stuck" from
+   * "couldn't observe" and isStuck() should bail out — otherwise a transient
+   * detail-endpoint outage would mass-surface false stuck warnings.
+   */
+  private hasObservableSignal(job: DashboardRow): boolean {
+    if (this.getProgress(job) != null) return true;
+    const phase = job.seDetail?.currentPhase ?? job.unified.phase ?? '';
+    if (phase !== '') return true;
+    const statusText = job.seDetail?.statusText ?? '';
+    if (statusText !== '') return true;
+    return false;
+  }
+
+  /**
    * Update per-job progress history from the latest poll. Resets sampleCount
    * whenever the signal changes; otherwise increments it. Prunes entries for
    * jobs that disappeared from the dashboard.
@@ -504,6 +521,10 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     // status === 'running' but the dashboard labels them "Waiting". Don't
     // double-surface those as stuck.
     if (job.seDetail?.waitingForAnswers) return false;
+    // Without any observable progress signal we can't distinguish "stuck"
+    // from "we couldn't read its state" — refuse to flag rather than fire
+    // false alarms during a transient detail-endpoint outage.
+    if (!this.hasObservableSignal(job)) return false;
     const entry = this.progressHistory.get(this.historyKey(job));
     if (!entry) return false;
     // Prefer createdAt for the age gate; fall back to firstSeenAt for sources
