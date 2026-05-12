@@ -114,6 +114,24 @@ const TEAM_FILTER_ORDER: JobSource[] = (Object.keys(SOURCE_DISPLAY) as JobSource
 
 const FILTER_STORAGE_KEY = 'jobs-dashboard-filters-v1';
 
+// Stuck-job detection: a running job is "stuck" once it has been alive longer
+// than STUCK_THRESHOLD_MS, its progress signal has been unchanged across at
+// least STUCK_REQUIRED_STILL_POLLS consecutive polls (anti-blip), AND wall
+// clock has advanced STUCK_STILL_DURATION_MS since the last signal change.
+// The sampleCount gate alone wasn't enough — for any old job, two polls (40s)
+// of unchanged progress would otherwise trip the warning right after a real
+// phase tick. Tune all three here.
+const STUCK_THRESHOLD_MS = 2 * 60 * 60 * 1000;     // 2h since createdAt / firstSeenAt
+const STUCK_REQUIRED_STILL_POLLS = 2;              // unchanged across N polls
+const STUCK_STILL_DURATION_MS = 30 * 60 * 1000;    // 30min since last signal change
+
+interface ProgressSample {
+  signal: string;
+  firstSeenAt: number;
+  lastChangedAt: number;
+  sampleCount: number;
+}
+
 interface PersistedFilters {
   status: StatusBucket;
   teams: JobSource[];
@@ -168,6 +186,9 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   private pollSub: Subscription | null = null;
   private readonly POLL_INTERVAL = 20000;
 
+  /** Per-job progress history used by isStuck(). Key = `${source}::${jobId}`. */
+  private progressHistory = new Map<string, ProgressSample>();
+
   ngOnInit(): void {
     this.loadFilters();
     this.startPolling();
@@ -191,12 +212,124 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       )
       .subscribe({
         next: (dashboardRows) => {
+          this.recordProgressSamples(dashboardRows);
           this.jobs = dashboardRows;
           this.loading = false;
           this.error = null;
           this.lastUpdated = new Date();
         },
       });
+  }
+
+  private historyKey(job: DashboardRow): string {
+    return `${job.unified.source}::${job.unified.jobId}`;
+  }
+
+  /**
+   * Fingerprint of all "is the job advancing?" signals. Includes:
+   *  - `status` so a transition through any non-running state
+   *    (failed/cancelled/interrupted → resume) flips the fingerprint and
+   *    resets sampleCount, preventing a freshly resumed job from being
+   *    marked stuck on its first post-resume poll.
+   *  - `progress`, `phase`, `statusText` — the headline progress fields.
+   *  - SE per-team `phase`, `currentTaskId`, `microtasksCompleted` plus the
+   *    job-level `currentTask`. The SE orchestrator advances work by
+   *    updating task IDs / microtask counters while job-level phase /
+   *    status_text can stay unchanged for long stretches, so without these
+   *    a long-running SE job that is actively progressing through tasks
+   *    would satisfy the stillness gate and be flagged as stuck.
+   */
+  private progressSignal(job: DashboardRow): string {
+    const status = job.unified.status ?? '';
+    const progress = this.getProgress(job);
+    const phase = job.seDetail?.currentPhase ?? job.unified.phase ?? '';
+    const statusText = job.seDetail?.statusText ?? '';
+    const currentTask = job.seDetail?.currentTask ?? '';
+    // Per-team fingerprint also covers microtask-level fields — the
+    // orchestrator updates current_microtask / current_microtask_phase /
+    // current_microtask_index / phase_detail while a single task moves
+    // through coding/review/QA before microtasks_completed ticks, so we'd
+    // miss real motion if we only watched task IDs and completion counts.
+    const teamFp = (job.seDetail?.teamStatuses ?? [])
+      .map(
+        (t) =>
+          `${t.teamId}=${t.phase}:${t.currentTaskId ?? ''}:${t.microtasksCompleted ?? ''}` +
+          `:${t.currentMicrotaskIndex ?? ''}:${t.currentMicrotask ?? ''}` +
+          `:${t.currentMicrotaskPhase ?? ''}:${t.phaseDetail ?? ''}`,
+      )
+      .join(',');
+    return `${status}|${progress ?? 'null'}|${phase}|${statusText}|${currentTask}|${teamFp}`;
+  }
+
+  /**
+   * True only when we have at least one piece of progress information for
+   * this job (numeric progress, a phase, a status text, a current task, or
+   * a per-team phase). When this returns false (e.g. an SE row whose detail
+   * fetch failed so seDetail is null and nothing else surfaces), we can't
+   * honestly distinguish "stuck" from "couldn't observe" and isStuck() should
+   * bail out — otherwise a transient detail-endpoint outage would mass-
+   * surface false stuck warnings.
+   */
+  private hasObservableSignal(job: DashboardRow): boolean {
+    if (this.getProgress(job) != null) return true;
+    const phase = job.seDetail?.currentPhase ?? job.unified.phase ?? '';
+    if (phase !== '') return true;
+    const statusText = job.seDetail?.statusText ?? '';
+    if (statusText !== '') return true;
+    if ((job.seDetail?.currentTask ?? '') !== '') return true;
+    // Match the set of TeamStatus fields consumed by progressSignal so a row
+    // whose only ticking signal is e.g. currentMicrotaskPhase still counts as
+    // observable and isn't filtered out by the outage guard.
+    const teams = job.seDetail?.teamStatuses ?? [];
+    if (
+      teams.some(
+        (t) =>
+          t.phase !== '' ||
+          !!t.currentTaskId ||
+          t.microtasksCompleted != null ||
+          t.currentMicrotaskIndex != null ||
+          !!t.currentMicrotask ||
+          !!t.currentMicrotaskPhase ||
+          !!t.phaseDetail,
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Update per-job progress history from the latest poll. Resets sampleCount
+   * whenever the signal changes; otherwise increments it. Prunes entries for
+   * jobs that disappeared from the dashboard.
+   */
+  private recordProgressSamples(rows: DashboardRow[]): void {
+    const now = Date.now();
+    const seen = new Set<string>();
+    for (const job of rows) {
+      const key = this.historyKey(job);
+      seen.add(key);
+      const signal = this.progressSignal(job);
+      const prev = this.progressHistory.get(key);
+      if (!prev || prev.signal !== signal) {
+        this.progressHistory.set(key, {
+          signal,
+          firstSeenAt: now,
+          lastChangedAt: now,
+          sampleCount: 1,
+        });
+      } else {
+        this.progressHistory.set(key, {
+          signal: prev.signal,
+          firstSeenAt: prev.firstSeenAt,
+          lastChangedAt: prev.lastChangedAt,
+          sampleCount: prev.sampleCount + 1,
+        });
+      }
+    }
+    for (const key of this.progressHistory.keys()) {
+      if (!seen.has(key)) this.progressHistory.delete(key);
+    }
   }
 
   /** Fetch from all team list endpoints and merge into sorted DashboardRow[] (seDetail not set yet). */
@@ -352,6 +485,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
         statusText: status.status_text,
         currentPhase: status.phase,
         waitingForAnswers: status.waiting_for_answers,
+        currentTask: status.current_task,
         teamProgress: status.team_progress,
       })),
       catchError(() => of(null))
@@ -363,6 +497,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     statusText?: string;
     currentPhase?: string;
     waitingForAnswers?: boolean;
+    currentTask?: string;
     teamProgress?: Record<string, TeamProgressEntry>;
   }): SEDetail {
     return {
@@ -370,6 +505,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       statusText: params.statusText,
       currentPhase: params.currentPhase,
       waitingForAnswers: params.waitingForAnswers,
+      currentTask: params.currentTask,
       teamStatuses: this.buildTeamStatuses(params.teamProgress),
     };
   }
@@ -389,6 +525,12 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
           phase,
           phaseLabel,
           isActive: phase !== 'completed' && phase !== '',
+          currentTaskId: entry.current_task_id,
+          microtasksCompleted: entry.microtasks_completed,
+          currentMicrotask: entry.current_microtask,
+          currentMicrotaskPhase: entry.current_microtask_phase,
+          currentMicrotaskIndex: entry.current_microtask_index,
+          phaseDetail: entry.phase_detail,
         };
       });
   }
@@ -419,6 +561,56 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     if (!repoPath) return 'Unknown';
     const parts = repoPath.split('/');
     return parts[parts.length - 1] || repoPath;
+  }
+
+  /**
+   * A running job is considered stuck once it has been alive past the
+   * threshold and its progress has been unchanged across at least the
+   * required number of consecutive polls. See top-of-file constants to tune.
+   */
+  isStuck(job: DashboardRow): boolean {
+    if (job.unified.status !== 'running') return false;
+    // SE jobs that are intentionally paused for user input show
+    // status === 'running' but the dashboard labels them "Waiting". Don't
+    // double-surface those as stuck.
+    if (job.seDetail?.waitingForAnswers) return false;
+    // Without any observable progress signal we can't distinguish "stuck"
+    // from "we couldn't read its state" — refuse to flag rather than fire
+    // false alarms during a transient detail-endpoint outage.
+    if (!this.hasObservableSignal(job)) return false;
+    const entry = this.progressHistory.get(this.historyKey(job));
+    if (!entry) return false;
+    const now = Date.now();
+    // Prefer createdAt for the age gate; fall back to firstSeenAt for sources
+    // that don't surface createdAt (e.g. Planning V3 jobs) so they can still
+    // be flagged once the dashboard itself has observed them frozen long
+    // enough.
+    const createdAt = job.unified.createdAt;
+    const createdTs = createdAt ? new Date(createdAt).getTime() : NaN;
+    const ageBasis = Number.isFinite(createdTs) ? createdTs : entry.firstSeenAt;
+    const age = now - ageBasis;
+    if (!Number.isFinite(age) || age <= STUCK_THRESHOLD_MS) return false;
+    if (entry.sampleCount < STUCK_REQUIRED_STILL_POLLS) return false;
+    // Stillness duration gate: the signal must have actually been frozen for
+    // STUCK_STILL_DURATION_MS — otherwise a long-running job that just ticked
+    // its phase would flip to "stuck" on the very next poll.
+    return now - entry.lastChangedAt >= STUCK_STILL_DURATION_MS;
+  }
+
+  getStuckTooltip(job: DashboardRow): string {
+    const entry = this.progressHistory.get(this.historyKey(job));
+    if (!entry) return 'No progress detected — may be stuck';
+    // getTimeAgo returns "Just now" or "Nm ago"/"Nh ago"/"Nd ago"; strip the
+    // trailing " ago" so the tooltip reads "No progress in 40m — may be stuck".
+    // The "Just now" fallback is defense-in-depth: in practice isStuck() only
+    // returns true after STUCK_STILL_DURATION_MS (30min), so a stuck row's
+    // tooltip never legitimately reads "Just now" — but this method is also
+    // exposed publicly, so guard against a caller invoking it for a row that
+    // was recently observed.
+    const ago = this.getTimeAgo(new Date(entry.lastChangedAt).toISOString());
+    if (!ago || ago === 'Just now') return 'No progress detected — may be stuck';
+    const since = ago.replace(/ ago$/, '');
+    return `No progress in ${since} — may be stuck`;
   }
 
   getStatusClass(job: DashboardRow): string {
@@ -515,6 +707,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     const when = this.getTimeAgo(job.unified.createdAt);
     const parts = [`Open ${team} ${type} job for ${subject}`, `status ${status}`];
     if (when) parts.push(`started ${when}`);
+    if (this.isStuck(job)) parts.push('appears stuck');
     return parts.join(', ');
   }
 
@@ -610,7 +803,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   }
 
   trackByJobId(_index: number, job: DashboardRow): string {
-    return `${job.unified.source}:${job.unified.jobId}`;
+    return `${job.unified.source}::${job.unified.jobId}`;
   }
 
   getPhaseColorClass(phase: string): string {

@@ -315,6 +315,29 @@
   }
 }
 
+// Stuck-job affordance: an inline warning glyph rendered next to the
+// "Started" cell when isStuck(job) is true. Combined with the tooltip it
+// gives operators a shape-based (not color-only) signal that a long-running
+// job has stopped advancing.
+.stuck-indicator {
+  color: var(--kh-warning);
+  font-size: 18px;
+  width: 18px;
+  height: 18px;
+  vertical-align: middle;
+  margin-right: var(--kh-space-1);
+  animation: kh-stuck-pulse 2s ease-in-out infinite;
+}
+
+@keyframes kh-stuck-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stuck-indicator { animation: none; opacity: 1; }
+}
+
 // ── Column Widths ───────────────────────────────────────────────────────────
 // Widths are hints — `table-layout: auto` lets columns shrink so the
 // table fits the viewport without horizontal scroll on a 15" MacBook.

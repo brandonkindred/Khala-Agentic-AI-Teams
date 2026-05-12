@@ -404,7 +404,383 @@ describe('JobsDashboardComponent', () => {
 
   it('trackByJobId returns composite key', () => {
     const job = { unified: { source: 'se', jobId: 'j1' } } as any;
-    expect(component.trackByJobId(0, job)).toBe('se:j1');
+    expect(component.trackByJobId(0, job)).toBe('se::j1');
+  });
+
+  describe('stuck-job detection', () => {
+    const STUCK_MS = 2 * 60 * 60 * 1000;
+    const STILL_MS = 30 * 60 * 1000;
+    const PAST_STILL_MS = STILL_MS + 60_000;
+    const oldCreatedAt = () => new Date(Date.now() - STUCK_MS - 60_000).toISOString();
+    const youngCreatedAt = () => new Date(Date.now() - 60_000).toISOString();
+    const waitPastStillness = () => vi.setSystemTime(new Date(Date.now() + PAST_STILL_MS));
+
+    const makeJob = (
+      status: string,
+      jobId: string,
+      createdAt: string,
+      progress: number | null = null,
+    ) =>
+      ({
+        unified: {
+          source: 'software_engineering',
+          jobId,
+          status,
+          createdAt,
+          label: 'job',
+          progress,
+        },
+        seDetail: undefined,
+      }) as any;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-12T12:00:00Z'));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const record = (rows: any[]) => (component as any).recordProgressSamples(rows);
+
+    it('is false when status is not running, even after threshold elapsed', () => {
+      const job = makeJob('failed', 'j1', oldCreatedAt(), 50);
+      record([job]);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+    });
+
+    it('is false when running but younger than threshold', () => {
+      const job = makeJob('running', 'j1', youngCreatedAt(), 10);
+      record([job]);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+    });
+
+    it('is false after one unchanged poll, true after the second once stillness elapses', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+      // Even a second unchanged poll arriving 40s later must not flip the
+      // row to "stuck" — the stillness gate guards against that.
+      vi.setSystemTime(new Date(Date.now() + 40_000));
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+      waitPastStillness();
+      expect(component.isStuck(job)).toBe(true);
+    });
+
+    it('is not stuck within STUCK_STILL_DURATION_MS of the last signal change', () => {
+      const old = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([old]);
+      record([old]); // sampleCount = 2 but stillness ≈ 0
+      expect(component.isStuck(old)).toBe(false);
+      // 29 minutes — still under the 30-minute stillness threshold.
+      vi.setSystemTime(new Date(Date.now() + STILL_MS - 60_000));
+      record([old]);
+      expect(component.isStuck(old)).toBe(false);
+    });
+
+    it('flips to stuck exactly at the stillness boundary', () => {
+      const old = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([old]);
+      // Just under the boundary → still not stuck.
+      vi.setSystemTime(new Date(Date.now() + STILL_MS - 1));
+      record([old]);
+      expect(component.isStuck(old)).toBe(false);
+      // Bump exactly to the boundary → stuck (the gate is `>=`).
+      vi.setSystemTime(new Date(Date.now() + 1));
+      expect(component.isStuck(old)).toBe(true);
+    });
+
+    it('resets when progress changes', () => {
+      const a = makeJob('running', 'j1', oldCreatedAt(), 25);
+      const b = makeJob('running', 'j1', oldCreatedAt(), 35);
+      record([a]);
+      waitPastStillness();
+      record([a]);
+      expect(component.isStuck(a)).toBe(true);
+      record([b]);
+      expect(component.isStuck(b)).toBe(false);
+    });
+
+    it('uses firstSeenAt as age basis when createdAt is missing', () => {
+      const job = makeJob('running', 'j1', '', 10);
+      record([job]);
+      record([job]);
+      // Two polls fired at the same fake-clock instant → firstSeenAt == now,
+      // age == 0, so still not stuck.
+      expect(component.isStuck(job)).toBe(false);
+    });
+
+    it('flags a Planning-V3-style job (no createdAt) after enough observed-poll time', () => {
+      // Planning V3 list endpoint omits created_at, so the row arrives with
+      // createdAt undefined. The dashboard should still be able to flag it
+      // stuck once it has observed the job frozen for STUCK_THRESHOLD_MS+.
+      const makePV3 = (phase: string) => {
+        const job = makeJob('running', 'pv3-1', undefined as unknown as string, null);
+        job.unified.source = 'planning_v3';
+        job.unified.phase = phase;
+        return job;
+      };
+      record([makePV3('drafting')]);
+      // Advance past the threshold while keeping the signal stable.
+      vi.setSystemTime(new Date(Date.now() + STUCK_MS + 60_000));
+      record([makePV3('drafting')]);
+      expect(component.isStuck(makePV3('drafting'))).toBe(true);
+    });
+
+    it('does not flag a Planning-V3 job whose phase is still advancing', () => {
+      const makePV3 = (phase: string) => {
+        const job = makeJob('running', 'pv3-1', undefined as unknown as string, null);
+        job.unified.source = 'planning_v3';
+        job.unified.phase = phase;
+        return job;
+      };
+      record([makePV3('drafting')]);
+      vi.setSystemTime(new Date(Date.now() + STUCK_MS + 60_000));
+      record([makePV3('reviewing')]);
+      // Signal changed → sampleCount resets to 1, firstSeenAt resets to now,
+      // so the age basis is fresh and the row is not flagged.
+      expect(component.isStuck(makePV3('reviewing'))).toBe(false);
+    });
+
+    it('tooltip uses getTimeAgo-style phrasing relative to lastChangedAt', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([job]);
+      // Advance 7 minutes; progress still unchanged in the next sample.
+      vi.setSystemTime(new Date(Date.now() + 7 * 60_000));
+      record([job]);
+      expect(component.getStuckTooltip(job)).toBe('No progress in 7m — may be stuck');
+    });
+
+    it('returns fallback tooltip when no history exists', () => {
+      const job = makeJob('running', 'unseen', oldCreatedAt(), 0);
+      expect(component.getStuckTooltip(job)).toBe('No progress detected — may be stuck');
+    });
+
+    it('prunes history for jobs that disappear from a subsequent poll', () => {
+      const a = makeJob('running', 'j1', oldCreatedAt(), 25);
+      const b = makeJob('running', 'j2', oldCreatedAt(), 50);
+      record([a, b]);
+      const history: Map<string, unknown> = (component as any).progressHistory;
+      expect(history.has('software_engineering::j1')).toBe(true);
+      expect(history.has('software_engineering::j2')).toBe(true);
+      record([a]);
+      expect(history.has('software_engineering::j1')).toBe(true);
+      expect(history.has('software_engineering::j2')).toBe(false);
+    });
+
+    it('aria-label on the row mentions "appears stuck" when stuck', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      job.unified.jobType = 'run_team';
+      record([job]);
+      waitPastStillness();
+      record([job]);
+      expect(component.getJobAriaLabel(job)).toContain('appears stuck');
+    });
+
+    it('does not flag a job whose progress is null but phase keeps changing', () => {
+      const makePhaseJob = (phase: string) => {
+        const job = makeJob('running', 'j1', oldCreatedAt(), null);
+        job.unified.phase = phase;
+        return job;
+      };
+      record([makePhaseJob('setup')]);
+      record([makePhaseJob('planning')]);
+      record([makePhaseJob('execution')]);
+      expect(component.isStuck(makePhaseJob('execution'))).toBe(false);
+    });
+
+    it('flags a job with null progress + frozen phase across enough polls', () => {
+      const makePhaseJob = () => {
+        const job = makeJob('running', 'j1', oldCreatedAt(), null);
+        job.unified.phase = 'execution';
+        return job;
+      };
+      record([makePhaseJob()]);
+      waitPastStillness();
+      record([makePhaseJob()]);
+      expect(component.isStuck(makePhaseJob())).toBe(true);
+    });
+
+    it('resets sampleCount when a failed job is resumed back into running', () => {
+      // Job has been failing in place with identical progress / no phase
+      // change across many polls. When the user resumes it, the next poll
+      // shows it as 'running' again with the same progress and phase. The
+      // resumed running attempt should *not* be flagged stuck on its first
+      // observation just because the fingerprint pre-resume was sticky.
+      const failed = makeJob('failed', 'j1', oldCreatedAt(), 25);
+      record([failed]);
+      record([failed]);
+      record([failed]); // sampleCount = 3 while failed
+
+      const resumed = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([resumed]);
+      expect(component.isStuck(resumed)).toBe(false);
+      // And on a later poll where it's still unchanged and the stillness
+      // duration has elapsed, the running streak satisfies all gates → stuck
+      // (so the heuristic still works post-resume).
+      waitPastStillness();
+      record([resumed]);
+      expect(component.isStuck(resumed)).toBe(true);
+    });
+
+    it('does not flag an SE row whose detail fetch failed (no observable signal)', () => {
+      // fetchSEDetail returned null → seDetail is undefined, progress is null,
+      // phase and statusText are empty. Repeated polls in that state must
+      // not trip the stuck heuristic, even past the age gate.
+      const job = makeJob('running', 'j1', oldCreatedAt(), null);
+      job.seDetail = undefined;
+      delete (job.unified as any).phase;
+      record([job]);
+      record([job]);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+    });
+
+    it('excludes SE jobs waiting for answers even after threshold elapsed', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      job.seDetail = { waitingForAnswers: true, progress: 25 } as any;
+      record([job]);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+    });
+
+    it('does not flag a run_team SE job whose per-team currentTaskId advances', () => {
+      // run_team orchestrator ticks team_progress.current_task_id / microtask
+      // counters while job-level progress/phase stay constant for long
+      // stretches. The fingerprint must capture that motion.
+      const makeRunTeam = (taskId: string, completed: number) => {
+        const job = makeJob('running', 'rt-1', oldCreatedAt(), 40);
+        job.unified.jobType = 'run_team';
+        job.seDetail = {
+          progress: 40,
+          statusText: 'executing',
+          currentPhase: 'execution',
+          teamStatuses: [
+            {
+              teamId: 'backend',
+              label: 'Backend',
+              icon: 'dns',
+              phase: 'coding',
+              phaseLabel: 'Coding',
+              isActive: true,
+              currentTaskId: taskId,
+              microtasksCompleted: completed,
+            },
+          ],
+        } as any;
+        return job;
+      };
+      record([makeRunTeam('task-a', 1)]);
+      waitPastStillness();
+      record([makeRunTeam('task-b', 2)]);
+      // Per-team task advanced → signal flipped → not stuck.
+      expect(component.isStuck(makeRunTeam('task-b', 2))).toBe(false);
+    });
+
+    it('does not flag a run_team SE job whose microtask phase advances within one task', () => {
+      // Within a single task the orchestrator ticks current_microtask /
+      // current_microtask_phase / current_microtask_index / phase_detail
+      // long before microtasks_completed changes. The fingerprint must
+      // capture that motion.
+      const makeRunTeam = (microPhase: string, idx: number) => {
+        const job = makeJob('running', 'rt-1', oldCreatedAt(), 40);
+        job.unified.jobType = 'run_team';
+        job.seDetail = {
+          progress: 40,
+          statusText: 'executing',
+          currentPhase: 'execution',
+          teamStatuses: [
+            {
+              teamId: 'backend',
+              label: 'Backend',
+              icon: 'dns',
+              phase: 'coding',
+              phaseLabel: 'Coding',
+              isActive: true,
+              currentTaskId: 'task-a',
+              microtasksCompleted: 0,
+              currentMicrotask: 'mt-1',
+              currentMicrotaskPhase: microPhase,
+              currentMicrotaskIndex: idx,
+              phaseDetail: `mt:${idx} ${microPhase}`,
+            },
+          ],
+        } as any;
+        return job;
+      };
+      record([makeRunTeam('coding', 0)]);
+      waitPastStillness();
+      record([makeRunTeam('review', 0)]);
+      // Microtask phase advanced → signal flipped → not stuck.
+      expect(component.isStuck(makeRunTeam('review', 0))).toBe(false);
+    });
+
+    it('flags a run_team SE job whose per-team progress is frozen', () => {
+      const makeRunTeam = () => {
+        const job = makeJob('running', 'rt-1', oldCreatedAt(), 40);
+        job.unified.jobType = 'run_team';
+        job.seDetail = {
+          progress: 40,
+          statusText: 'executing',
+          currentPhase: 'execution',
+          teamStatuses: [
+            {
+              teamId: 'backend',
+              label: 'Backend',
+              icon: 'dns',
+              phase: 'coding',
+              phaseLabel: 'Coding',
+              isActive: true,
+              currentTaskId: 'task-a',
+              microtasksCompleted: 1,
+            },
+          ],
+        } as any;
+        return job;
+      };
+      record([makeRunTeam()]);
+      waitPastStillness();
+      record([makeRunTeam()]);
+      expect(component.isStuck(makeRunTeam())).toBe(true);
+    });
+
+    it('renders the stuck glyph with aria-hidden="false" and a non-empty aria-label', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      job.unified.jobType = 'run_team';
+      job.unified.repoPath = '/work/payments-api';
+      record([job]);
+      waitPastStillness();
+      record([job]);
+      component.jobs = [job];
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      const glyph = host.querySelector('.col-time .stuck-indicator') as HTMLElement | null;
+      expect(glyph).toBeTruthy();
+      // mat-icon defaults aria-hidden=true; we must override so SRs announce
+      // the label.
+      expect(glyph?.getAttribute('aria-hidden')).toBe('false');
+      expect(glyph?.getAttribute('role')).toBe('img');
+      expect(glyph?.getAttribute('aria-label')?.length ?? 0).toBeGreaterThan(0);
+    });
+
+    it('renders the row aria-label with "appears stuck" once the row is stuck', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      job.unified.jobType = 'run_team';
+      job.unified.repoPath = '/work/payments-api';
+      record([job]);
+      waitPastStillness();
+      record([job]);
+      component.jobs = [job];
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      const row = host.querySelector('tr.job-row') as HTMLElement | null;
+      expect(row).toBeTruthy();
+      expect(row?.getAttribute('aria-label')).toContain('appears stuck');
+    });
   });
 
   describe('canResumeJob', () => {
