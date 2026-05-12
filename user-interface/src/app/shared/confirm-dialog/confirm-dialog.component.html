@@ -5,15 +5,22 @@
 </mat-dialog-content>
 
 <mat-dialog-actions align="end" class="confirm-dialog__actions">
-  <button mat-button type="button" (click)="cancel()">{{ cancelLabel }}</button>
+  <button
+    mat-button
+    type="button"
+    [attr.cdkFocusInitial]="cancelIsInitiallyFocused ? '' : null"
+    (click)="cancel()"
+  >
+    {{ cancelLabel }}
+  </button>
   <button
     mat-flat-button
     type="button"
     [color]="confirmColor"
     [class.confirm-dialog__confirm--danger]="variant === 'danger'"
     [class.confirm-dialog__confirm--warn]="variant === 'warn'"
+    [attr.cdkFocusInitial]="cancelIsInitiallyFocused ? null : ''"
     (click)="confirm()"
-    cdkFocusInitial
   >
     {{ confirmLabel }}
   </button>

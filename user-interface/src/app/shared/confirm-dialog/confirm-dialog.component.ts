@@ -1,5 +1,4 @@
 import { Component, inject } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import {
   MAT_DIALOG_DATA,
   MatDialogModule,
@@ -20,7 +19,7 @@ export interface ConfirmDialogData {
 @Component({
   selector: 'app-confirm-dialog',
   standalone: true,
-  imports: [CommonModule, MatDialogModule, MatButtonModule],
+  imports: [MatDialogModule, MatButtonModule],
   templateUrl: './confirm-dialog.component.html',
   styleUrl: './confirm-dialog.component.scss',
 })
@@ -42,6 +41,11 @@ export class ConfirmDialogComponent {
 
   get confirmColor(): 'warn' | 'primary' {
     return this.variant === 'danger' ? 'warn' : 'primary';
+  }
+
+  /** True when Cancel should receive initial focus — safer default for destructive prompts. */
+  get cancelIsInitiallyFocused(): boolean {
+    return this.variant === 'danger';
   }
 
   confirm(): void {

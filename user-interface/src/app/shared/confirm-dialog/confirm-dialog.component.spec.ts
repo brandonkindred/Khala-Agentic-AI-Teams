@@ -90,4 +90,20 @@ describe('ConfirmDialogComponent', () => {
     );
     expect(warn).not.toBeNull();
   });
+
+  it('focuses the Cancel button initially for the danger variant', () => {
+    const { fixture } = configure({ title: 't', message: 'm', variant: 'danger' });
+    expect(fixture.componentInstance.cancelIsInitiallyFocused).toBe(true);
+    const buttons = fixture.nativeElement.querySelectorAll('button');
+    expect(buttons[0].hasAttribute('cdkFocusInitial')).toBe(true);
+    expect(buttons[1].hasAttribute('cdkFocusInitial')).toBe(false);
+  });
+
+  it('focuses the Confirm button initially for non-danger variants', () => {
+    const { fixture } = configure({ title: 't', message: 'm', variant: 'warn' });
+    expect(fixture.componentInstance.cancelIsInitiallyFocused).toBe(false);
+    const buttons = fixture.nativeElement.querySelectorAll('button');
+    expect(buttons[0].hasAttribute('cdkFocusInitial')).toBe(false);
+    expect(buttons[1].hasAttribute('cdkFocusInitial')).toBe(true);
+  });
 });

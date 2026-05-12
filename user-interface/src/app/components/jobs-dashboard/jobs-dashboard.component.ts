@@ -6,7 +6,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatDialog } from '@angular/material/dialog';
 import { Subscription, forkJoin, of, timer } from 'rxjs';
 import { switchMap, catchError, map } from 'rxjs/operators';
 import {
@@ -100,7 +100,6 @@ const PHASE_DISPLAY: Record<string, string> = {
     MatIconModule,
     MatButtonModule,
     MatTooltipModule,
-    MatDialogModule,
   ],
   templateUrl: './jobs-dashboard.component.html',
   styleUrl: './jobs-dashboard.component.scss',
@@ -536,11 +535,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   private confirmDestructive(data: ConfirmDialogData) {
     return this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, {
-        data,
-        autoFocus: true,
-        restoreFocus: true,
-      })
+      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
       .afterClosed()
       .pipe(map((result) => result === true));
   }
