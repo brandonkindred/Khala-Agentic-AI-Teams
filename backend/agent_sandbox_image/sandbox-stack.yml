@@ -147,7 +147,14 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-      - seccomp=default
+      # ``seccomp=builtin`` is the explicit form for "apply Docker's
+      # built-in default seccomp profile" (Docker Engine ≥ 20.10). The
+      # other valid forms are ``seccomp=unconfined`` (no filtering) and
+      # ``seccomp=<path-to-profile.json>`` (custom). ``seccomp=default``
+      # is NOT a built-in profile name — Docker would try to load a file
+      # literally called ``default`` and the container would fail to
+      # start, blocking sandbox provisioning at ``docker compose up``.
+      - seccomp=builtin
     pids_limit: 512
     deploy:
       resources:

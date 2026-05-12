@@ -277,6 +277,11 @@ async def test_hardening_flags_applied_to_warm_sandbox() -> None:
     assert cfg["CapDrop"] == ["ALL"]
     sec = cfg.get("SecurityOpt") or []
     assert any("no-new-privileges" in s for s in sec)
+    # The compose template sets ``seccomp=builtin`` to explicitly request
+    # Docker's default built-in profile. ``seccomp=default`` is invalid
+    # (Docker would try to load a file named ``default``); ``builtin`` is
+    # the documented keyword. Inspect surfaces it as ``seccomp=builtin``
+    # in HostConfig.SecurityOpt.
     assert any("seccomp" in s for s in sec)
     assert cfg["Memory"] == 1073741824  # 1 GiB
     assert cfg["PidsLimit"] == 512
