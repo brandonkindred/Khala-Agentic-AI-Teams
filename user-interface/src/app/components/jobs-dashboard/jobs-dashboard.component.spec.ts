@@ -523,14 +523,19 @@ describe('JobsDashboardComponent', () => {
       expect(counts.completed).toBe(0);
     });
 
-    it('statusCounts buckets completed/cancelled → completed', () => {
+    it('statusCounts buckets completed/cancelled/needs_human_review → completed', () => {
+      // `needs_human_review` is the Blogging team's terminal success state
+      // (see TERMINAL_STATUSES in blogging-dashboard.component.ts) — review-
+      // ready posts must surface under Completed, not Active.
       component.jobs = [
         buildRow({ jobId: 'd', status: 'completed' }),
         buildRow({ jobId: 'x', status: 'cancelled' }),
+        buildRow({ jobId: 'r', status: 'needs_human_review', source: 'blogging' }),
       ];
       const counts = component.statusCounts;
-      expect(counts.completed).toBe(2);
-      expect(counts.all).toBe(2);
+      expect(counts.completed).toBe(3);
+      expect(counts.active).toBe(0);
+      expect(counts.all).toBe(3);
     });
 
     it('statusCounts.all always equals total job count', () => {

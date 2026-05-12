@@ -774,6 +774,10 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
         return 'failed';
       case 'completed':
       case 'cancelled':
+      case 'needs_human_review':
+        // Blogging treats `needs_human_review` as a terminal success state
+        // (see `TERMINAL_STATUSES` in `blogging-dashboard.component.ts`), so
+        // these rows should surface under Completed, not Active.
         return 'completed';
       default:
         return 'active';
