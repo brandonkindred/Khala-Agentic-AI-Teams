@@ -114,6 +114,18 @@ const TEAM_FILTER_ORDER: JobSource[] = (Object.keys(SOURCE_DISPLAY) as JobSource
 
 const FILTER_STORAGE_KEY = 'jobs-dashboard-filters-v1';
 
+// Stuck-job detection: a running job is "stuck" once it has been alive longer
+// than STUCK_THRESHOLD_MS and its progress value has been unchanged across at
+// least STUCK_REQUIRED_STILL_POLLS consecutive polls. Tune both here.
+const STUCK_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2h since createdAt
+const STUCK_REQUIRED_STILL_POLLS = 2;
+
+interface ProgressSample {
+  progress: number | null;
+  lastChangedAt: number;
+  sampleCount: number;
+}
+
 interface PersistedFilters {
   status: StatusBucket;
   teams: JobSource[];
@@ -168,6 +180,9 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   private pollSub: Subscription | null = null;
   private readonly POLL_INTERVAL = 20000;
 
+  /** Per-job progress history used by isStuck(). Key = `${source}::${jobId}`. */
+  private progressHistory = new Map<string, ProgressSample>();
+
   ngOnInit(): void {
     this.loadFilters();
     this.startPolling();
@@ -191,12 +206,49 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       )
       .subscribe({
         next: (dashboardRows) => {
+          this.recordProgressSamples(dashboardRows);
           this.jobs = dashboardRows;
           this.loading = false;
           this.error = null;
           this.lastUpdated = new Date();
         },
       });
+  }
+
+  private historyKey(job: DashboardRow): string {
+    return `${job.unified.source}::${job.unified.jobId}`;
+  }
+
+  /**
+   * Update per-job progress history from the latest poll. Resets sampleCount
+   * whenever the progress value changes; otherwise increments it. Prunes
+   * entries for jobs that disappeared from the dashboard.
+   */
+  private recordProgressSamples(rows: DashboardRow[]): void {
+    const now = Date.now();
+    const seen = new Set<string>();
+    for (const job of rows) {
+      const key = this.historyKey(job);
+      seen.add(key);
+      const current = this.getProgress(job);
+      const prev = this.progressHistory.get(key);
+      if (!prev || prev.progress !== current) {
+        this.progressHistory.set(key, {
+          progress: current,
+          lastChangedAt: now,
+          sampleCount: 1,
+        });
+      } else {
+        this.progressHistory.set(key, {
+          progress: prev.progress,
+          lastChangedAt: prev.lastChangedAt,
+          sampleCount: prev.sampleCount + 1,
+        });
+      }
+    }
+    for (const key of this.progressHistory.keys()) {
+      if (!seen.has(key)) this.progressHistory.delete(key);
+    }
   }
 
   /** Fetch from all team list endpoints and merge into sorted DashboardRow[] (seDetail not set yet). */
@@ -421,6 +473,32 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     return parts[parts.length - 1] || repoPath;
   }
 
+  /**
+   * A running job is considered stuck once it has been alive past the
+   * threshold and its progress has been unchanged across at least the
+   * required number of consecutive polls. See top-of-file constants to tune.
+   */
+  isStuck(job: DashboardRow): boolean {
+    if (job.unified.status !== 'running') return false;
+    const createdAt = job.unified.createdAt;
+    if (!createdAt) return false;
+    const age = Date.now() - new Date(createdAt).getTime();
+    if (!Number.isFinite(age) || age <= STUCK_THRESHOLD_MS) return false;
+    const entry = this.progressHistory.get(this.historyKey(job));
+    return !!entry && entry.sampleCount >= STUCK_REQUIRED_STILL_POLLS;
+  }
+
+  getStuckTooltip(job: DashboardRow): string {
+    const entry = this.progressHistory.get(this.historyKey(job));
+    if (!entry) return 'No progress detected — may be stuck';
+    // getTimeAgo returns "Just now" or "Nm ago"/"Nh ago"/"Nd ago"; strip the
+    // trailing " ago" so the tooltip reads "No progress in 40m — may be stuck".
+    const ago = this.getTimeAgo(new Date(entry.lastChangedAt).toISOString());
+    if (!ago || ago === 'Just now') return 'No progress detected — may be stuck';
+    const since = ago.replace(/ ago$/, '');
+    return `No progress in ${since} — may be stuck`;
+  }
+
   getStatusClass(job: DashboardRow): string {
     if (job.seDetail?.waitingForAnswers) return 'status-waiting';
     switch (job.unified.status) {
@@ -515,6 +593,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     const when = this.getTimeAgo(job.unified.createdAt);
     const parts = [`Open ${team} ${type} job for ${subject}`, `status ${status}`];
     if (when) parts.push(`started ${when}`);
+    if (this.isStuck(job)) parts.push('appears stuck');
     return parts.join(', ');
   }
 

@@ -407,6 +407,114 @@ describe('JobsDashboardComponent', () => {
     expect(component.trackByJobId(0, job)).toBe('se:j1');
   });
 
+  describe('stuck-job detection', () => {
+    const STUCK_MS = 2 * 60 * 60 * 1000;
+    const oldCreatedAt = () => new Date(Date.now() - STUCK_MS - 60_000).toISOString();
+    const youngCreatedAt = () => new Date(Date.now() - 60_000).toISOString();
+
+    const makeJob = (
+      status: string,
+      jobId: string,
+      createdAt: string,
+      progress: number | null = null,
+    ) =>
+      ({
+        unified: {
+          source: 'software_engineering',
+          jobId,
+          status,
+          createdAt,
+          label: 'job',
+          progress,
+        },
+        seDetail: undefined,
+      }) as any;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-12T12:00:00Z'));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const record = (rows: any[]) => (component as any).recordProgressSamples(rows);
+
+    it('is false when status is not running, even after threshold elapsed', () => {
+      const job = makeJob('failed', 'j1', oldCreatedAt(), 50);
+      record([job]);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+    });
+
+    it('is false when running but younger than threshold', () => {
+      const job = makeJob('running', 'j1', youngCreatedAt(), 10);
+      record([job]);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+    });
+
+    it('is false after one unchanged poll, true after the second', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+      record([job]);
+      expect(component.isStuck(job)).toBe(true);
+    });
+
+    it('resets when progress changes', () => {
+      const a = makeJob('running', 'j1', oldCreatedAt(), 25);
+      const b = makeJob('running', 'j1', oldCreatedAt(), 35);
+      record([a]);
+      record([a]);
+      expect(component.isStuck(a)).toBe(true);
+      record([b]);
+      expect(component.isStuck(b)).toBe(false);
+    });
+
+    it('treats missing createdAt as not stuck', () => {
+      const job = makeJob('running', 'j1', '', 10);
+      record([job]);
+      record([job]);
+      expect(component.isStuck(job)).toBe(false);
+    });
+
+    it('tooltip uses getTimeAgo-style phrasing relative to lastChangedAt', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([job]);
+      // Advance 7 minutes; progress still unchanged in the next sample.
+      vi.setSystemTime(new Date(Date.now() + 7 * 60_000));
+      record([job]);
+      expect(component.getStuckTooltip(job)).toBe('No progress in 7m — may be stuck');
+    });
+
+    it('returns fallback tooltip when no history exists', () => {
+      const job = makeJob('running', 'unseen', oldCreatedAt(), 0);
+      expect(component.getStuckTooltip(job)).toBe('No progress detected — may be stuck');
+    });
+
+    it('prunes history for jobs that disappear from a subsequent poll', () => {
+      const a = makeJob('running', 'j1', oldCreatedAt(), 25);
+      const b = makeJob('running', 'j2', oldCreatedAt(), 50);
+      record([a, b]);
+      const history: Map<string, unknown> = (component as any).progressHistory;
+      expect(history.has('software_engineering::j1')).toBe(true);
+      expect(history.has('software_engineering::j2')).toBe(true);
+      record([a]);
+      expect(history.has('software_engineering::j1')).toBe(true);
+      expect(history.has('software_engineering::j2')).toBe(false);
+    });
+
+    it('aria-label on the row mentions "appears stuck" when stuck', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      job.unified.jobType = 'run_team';
+      record([job]);
+      record([job]);
+      expect(component.getJobAriaLabel(job)).toContain('appears stuck');
+    });
+  });
+
   describe('canResumeJob', () => {
     const makeJob = (status: string, source = 'software_engineering') =>
       ({ unified: { source, jobId: 'j1', status }, seDetail: null } as any);

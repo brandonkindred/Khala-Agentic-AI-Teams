@@ -175,6 +175,11 @@
                 }
               </td>
               <td class="col-time">
+                @if (isStuck(job)) {
+                  <mat-icon class="stuck-indicator"
+                            [attr.aria-label]="getStuckTooltip(job)"
+                            [matTooltip]="getStuckTooltip(job)">warning_amber</mat-icon>
+                }
                 <span class="time-ago">{{ getTimeAgo(job.unified.createdAt) }}</span>
               </td>
               <td class="col-actions">
