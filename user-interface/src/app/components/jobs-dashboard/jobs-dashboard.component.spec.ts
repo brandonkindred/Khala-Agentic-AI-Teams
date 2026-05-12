@@ -409,8 +409,11 @@ describe('JobsDashboardComponent', () => {
 
   describe('stuck-job detection', () => {
     const STUCK_MS = 2 * 60 * 60 * 1000;
+    const STILL_MS = 30 * 60 * 1000;
+    const PAST_STILL_MS = STILL_MS + 60_000;
     const oldCreatedAt = () => new Date(Date.now() - STUCK_MS - 60_000).toISOString();
     const youngCreatedAt = () => new Date(Date.now() - 60_000).toISOString();
+    const waitPastStillness = () => vi.setSystemTime(new Date(Date.now() + PAST_STILL_MS));
 
     const makeJob = (
       status: string,
@@ -455,18 +458,35 @@ describe('JobsDashboardComponent', () => {
       expect(component.isStuck(job)).toBe(false);
     });
 
-    it('is false after one unchanged poll, true after the second', () => {
+    it('is false after one unchanged poll, true after the second once stillness elapses', () => {
       const job = makeJob('running', 'j1', oldCreatedAt(), 25);
       record([job]);
       expect(component.isStuck(job)).toBe(false);
+      // Even a second unchanged poll arriving 40s later must not flip the
+      // row to "stuck" — the stillness gate guards against that.
+      vi.setSystemTime(new Date(Date.now() + 40_000));
       record([job]);
+      expect(component.isStuck(job)).toBe(false);
+      waitPastStillness();
       expect(component.isStuck(job)).toBe(true);
+    });
+
+    it('is not stuck within STUCK_STILL_DURATION_MS of the last signal change', () => {
+      const old = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([old]);
+      record([old]); // sampleCount = 2 but stillness ≈ 0
+      expect(component.isStuck(old)).toBe(false);
+      // 29 minutes — still under the 30-minute stillness threshold.
+      vi.setSystemTime(new Date(Date.now() + STILL_MS - 60_000));
+      record([old]);
+      expect(component.isStuck(old)).toBe(false);
     });
 
     it('resets when progress changes', () => {
       const a = makeJob('running', 'j1', oldCreatedAt(), 25);
       const b = makeJob('running', 'j1', oldCreatedAt(), 35);
       record([a]);
+      waitPastStillness();
       record([a]);
       expect(component.isStuck(a)).toBe(true);
       record([b]);
@@ -544,6 +564,7 @@ describe('JobsDashboardComponent', () => {
       const job = makeJob('running', 'j1', oldCreatedAt(), 25);
       job.unified.jobType = 'run_team';
       record([job]);
+      waitPastStillness();
       record([job]);
       expect(component.getJobAriaLabel(job)).toContain('appears stuck');
     });
@@ -567,6 +588,7 @@ describe('JobsDashboardComponent', () => {
         return job;
       };
       record([makePhaseJob()]);
+      waitPastStillness();
       record([makePhaseJob()]);
       expect(component.isStuck(makePhaseJob())).toBe(true);
     });
@@ -585,8 +607,10 @@ describe('JobsDashboardComponent', () => {
       const resumed = makeJob('running', 'j1', oldCreatedAt(), 25);
       record([resumed]);
       expect(component.isStuck(resumed)).toBe(false);
-      // And on the next poll where it's still unchanged, the running streak
-      // is now 2 → stuck (so the heuristic still works post-resume).
+      // And on a later poll where it's still unchanged and the stillness
+      // duration has elapsed, the running streak satisfies all gates → stuck
+      // (so the heuristic still works post-resume).
+      waitPastStillness();
       record([resumed]);
       expect(component.isStuck(resumed)).toBe(true);
     });
@@ -617,6 +641,7 @@ describe('JobsDashboardComponent', () => {
       job.unified.jobType = 'run_team';
       job.unified.repoPath = '/work/payments-api';
       record([job]);
+      waitPastStillness();
       record([job]);
       component.jobs = [job];
       fixture.detectChanges();

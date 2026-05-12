@@ -115,10 +115,15 @@ const TEAM_FILTER_ORDER: JobSource[] = (Object.keys(SOURCE_DISPLAY) as JobSource
 const FILTER_STORAGE_KEY = 'jobs-dashboard-filters-v1';
 
 // Stuck-job detection: a running job is "stuck" once it has been alive longer
-// than STUCK_THRESHOLD_MS and its progress value has been unchanged across at
-// least STUCK_REQUIRED_STILL_POLLS consecutive polls. Tune both here.
-const STUCK_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2h since createdAt
-const STUCK_REQUIRED_STILL_POLLS = 2;
+// than STUCK_THRESHOLD_MS, its progress signal has been unchanged across at
+// least STUCK_REQUIRED_STILL_POLLS consecutive polls (anti-blip), AND wall
+// clock has advanced STUCK_STILL_DURATION_MS since the last signal change.
+// The sampleCount gate alone wasn't enough — for any old job, two polls (40s)
+// of unchanged progress would otherwise trip the warning right after a real
+// phase tick. Tune all three here.
+const STUCK_THRESHOLD_MS = 2 * 60 * 60 * 1000;     // 2h since createdAt / firstSeenAt
+const STUCK_REQUIRED_STILL_POLLS = 2;              // unchanged across N polls
+const STUCK_STILL_DURATION_MS = 30 * 60 * 1000;    // 30min since last signal change
 
 interface ProgressSample {
   signal: string;
@@ -527,6 +532,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     if (!this.hasObservableSignal(job)) return false;
     const entry = this.progressHistory.get(this.historyKey(job));
     if (!entry) return false;
+    const now = Date.now();
     // Prefer createdAt for the age gate; fall back to firstSeenAt for sources
     // that don't surface createdAt (e.g. Planning V3 jobs) so they can still
     // be flagged once the dashboard itself has observed them frozen long
@@ -534,9 +540,13 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     const createdAt = job.unified.createdAt;
     const createdTs = createdAt ? new Date(createdAt).getTime() : NaN;
     const ageBasis = Number.isFinite(createdTs) ? createdTs : entry.firstSeenAt;
-    const age = Date.now() - ageBasis;
+    const age = now - ageBasis;
     if (!Number.isFinite(age) || age <= STUCK_THRESHOLD_MS) return false;
-    return entry.sampleCount >= STUCK_REQUIRED_STILL_POLLS;
+    if (entry.sampleCount < STUCK_REQUIRED_STILL_POLLS) return false;
+    // Stillness duration gate: the signal must have actually been frozen for
+    // STUCK_STILL_DURATION_MS — otherwise a long-running job that just ticked
+    // its phase would flip to "stuck" on the very next poll.
+    return now - entry.lastChangedAt >= STUCK_STILL_DURATION_MS;
   }
 
   getStuckTooltip(job: DashboardRow): string {
