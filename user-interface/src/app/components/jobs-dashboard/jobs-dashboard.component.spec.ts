@@ -404,7 +404,7 @@ describe('JobsDashboardComponent', () => {
 
   it('trackByJobId returns composite key', () => {
     const job = { unified: { source: 'se', jobId: 'j1' } } as any;
-    expect(component.trackByJobId(0, job)).toBe('se:j1');
+    expect(component.trackByJobId(0, job)).toBe('se::j1');
   });
 
   describe('stuck-job detection', () => {
@@ -480,6 +480,18 @@ describe('JobsDashboardComponent', () => {
       vi.setSystemTime(new Date(Date.now() + STILL_MS - 60_000));
       record([old]);
       expect(component.isStuck(old)).toBe(false);
+    });
+
+    it('flips to stuck exactly at the stillness boundary', () => {
+      const old = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([old]);
+      // Just under the boundary → still not stuck.
+      vi.setSystemTime(new Date(Date.now() + STILL_MS - 1));
+      record([old]);
+      expect(component.isStuck(old)).toBe(false);
+      // Bump exactly to the boundary → stuck (the gate is `>=`).
+      vi.setSystemTime(new Date(Date.now() + 1));
+      expect(component.isStuck(old)).toBe(true);
     });
 
     it('resets when progress changes', () => {
@@ -753,6 +765,21 @@ describe('JobsDashboardComponent', () => {
       expect(glyph?.getAttribute('aria-hidden')).toBe('false');
       expect(glyph?.getAttribute('role')).toBe('img');
       expect(glyph?.getAttribute('aria-label')?.length ?? 0).toBeGreaterThan(0);
+    });
+
+    it('renders the row aria-label with "appears stuck" once the row is stuck', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      job.unified.jobType = 'run_team';
+      job.unified.repoPath = '/work/payments-api';
+      record([job]);
+      waitPastStillness();
+      record([job]);
+      component.jobs = [job];
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      const row = host.querySelector('tr.job-row') as HTMLElement | null;
+      expect(row).toBeTruthy();
+      expect(row?.getAttribute('aria-label')).toContain('appears stuck');
     });
   });
 

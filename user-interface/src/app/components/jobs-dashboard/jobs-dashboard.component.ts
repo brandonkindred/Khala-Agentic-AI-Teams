@@ -277,7 +277,22 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     const statusText = job.seDetail?.statusText ?? '';
     if (statusText !== '') return true;
     if ((job.seDetail?.currentTask ?? '') !== '') return true;
-    if ((job.seDetail?.teamStatuses ?? []).some((t) => t.phase !== '' || !!t.currentTaskId)) {
+    // Match the set of TeamStatus fields consumed by progressSignal so a row
+    // whose only ticking signal is e.g. currentMicrotaskPhase still counts as
+    // observable and isn't filtered out by the outage guard.
+    const teams = job.seDetail?.teamStatuses ?? [];
+    if (
+      teams.some(
+        (t) =>
+          t.phase !== '' ||
+          !!t.currentTaskId ||
+          t.microtasksCompleted != null ||
+          t.currentMicrotaskIndex != null ||
+          !!t.currentMicrotask ||
+          !!t.currentMicrotaskPhase ||
+          !!t.phaseDetail,
+      )
+    ) {
       return true;
     }
     return false;
@@ -587,6 +602,11 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     if (!entry) return 'No progress detected — may be stuck';
     // getTimeAgo returns "Just now" or "Nm ago"/"Nh ago"/"Nd ago"; strip the
     // trailing " ago" so the tooltip reads "No progress in 40m — may be stuck".
+    // The "Just now" fallback is defense-in-depth: in practice isStuck() only
+    // returns true after STUCK_STILL_DURATION_MS (30min), so a stuck row's
+    // tooltip never legitimately reads "Just now" — but this method is also
+    // exposed publicly, so guard against a caller invoking it for a row that
+    // was recently observed.
     const ago = this.getTimeAgo(new Date(entry.lastChangedAt).toISOString());
     if (!ago || ago === 'Just now') return 'No progress detected — may be stuck';
     const since = ago.replace(/ ago$/, '');
@@ -783,7 +803,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   }
 
   trackByJobId(_index: number, job: DashboardRow): string {
-    return `${job.unified.source}:${job.unified.jobId}`;
+    return `${job.unified.source}::${job.unified.jobId}`;
   }
 
   getPhaseColorClass(phase: string): string {
