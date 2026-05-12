@@ -28,6 +28,46 @@
     </div>
   }
 
+  <div class="jobs-filters" role="toolbar" aria-label="Filter jobs">
+    <div class="status-pills" role="radiogroup" aria-label="Filter by status">
+      @for (bucket of STATUS_BUCKETS; track bucket) {
+        <button type="button"
+                class="filter-pill"
+                [class.active]="selectedStatus === bucket"
+                role="radio"
+                [attr.aria-checked]="selectedStatus === bucket"
+                [attr.tabindex]="selectedStatus === bucket ? 0 : -1"
+                [attr.aria-label]="statusLabel(bucket) + ' (' + statusCounts[bucket] + ' jobs)'"
+                (click)="setStatus(bucket)"
+                (keydown)="onPillKeydown($event, bucket)">
+          <span class="pill-label">{{ statusLabel(bucket) }}</span>
+          <span class="pill-count">{{ statusCounts[bucket] }}</span>
+        </button>
+      }
+    </div>
+    <div class="team-chips" role="group" aria-label="Filter by team">
+      @for (source of TEAM_FILTER_ORDER; track source) {
+        <button type="button"
+                class="team-chip"
+                [class.selected]="selectedTeams.has(source)"
+                [attr.aria-pressed]="selectedTeams.has(source)"
+                [attr.aria-label]="SOURCE_DISPLAY[source].label"
+                (click)="toggleTeam(source)">
+          <mat-icon class="team-chip-icon">{{ SOURCE_DISPLAY[source].icon }}</mat-icon>
+          <span class="team-chip-label">{{ SOURCE_DISPLAY[source].label }}</span>
+        </button>
+      }
+      @if (selectedTeams.size > 0) {
+        <button type="button"
+                class="filter-pill clear-teams"
+                (click)="clearTeams()"
+                aria-label="Show all teams">
+          Clear team filter
+        </button>
+      }
+    </div>
+  </div>
+
   @if (loading && jobs.length === 0) {
     <div class="loading-state">
       <mat-icon class="spinning">sync</mat-icon>
@@ -39,6 +79,18 @@
       <h2>No Active Jobs</h2>
       <p>There are no running or pending jobs at the moment.</p>
       <p class="hint">Start a new job from one of the team dashboards.</p>
+    </div>
+  } @else if (hasFilteredOutJobs) {
+    <div class="empty-state filtered-empty">
+      <mat-icon>filter_alt_off</mat-icon>
+      <h2>No jobs match the current filters</h2>
+      <p>Try selecting a different status or clearing the team filter.</p>
+      <button type="button"
+              class="filter-pill clear-all"
+              (click)="clearAllFilters()"
+              aria-label="Clear all filters">
+        Clear filters
+      </button>
     </div>
   } @else {
     <div class="jobs-table-container">
@@ -55,7 +107,7 @@
           </tr>
         </thead>
         <tbody>
-          @for (job of jobs; track trackByJobId($index, job)) {
+          @for (job of filteredJobs; track trackByJobId($index, job)) {
             <tr class="job-row"
                 [class]="getStatusClass(job)"
                 tabindex="0"
