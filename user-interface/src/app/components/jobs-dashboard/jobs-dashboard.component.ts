@@ -226,29 +226,39 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Fingerprint of all "is the job advancing?" signals: status plus numeric
-   * progress plus phase / status text. Sources without numeric progress (e.g.
-   * founder, generic jobs) still surface phase or statusText changes, and
-   * including the status field guarantees that a transition through any
-   * non-running state (failed/cancelled/interrupted → resume) flips the
-   * fingerprint and resets sampleCount, so a freshly resumed job is never
-   * marked stuck on its first post-resume poll.
+   * Fingerprint of all "is the job advancing?" signals. Includes:
+   *  - `status` so a transition through any non-running state
+   *    (failed/cancelled/interrupted → resume) flips the fingerprint and
+   *    resets sampleCount, preventing a freshly resumed job from being
+   *    marked stuck on its first post-resume poll.
+   *  - `progress`, `phase`, `statusText` — the headline progress fields.
+   *  - SE per-team `phase`, `currentTaskId`, `microtasksCompleted` plus the
+   *    job-level `currentTask`. The SE orchestrator advances work by
+   *    updating task IDs / microtask counters while job-level phase /
+   *    status_text can stay unchanged for long stretches, so without these
+   *    a long-running SE job that is actively progressing through tasks
+   *    would satisfy the stillness gate and be flagged as stuck.
    */
   private progressSignal(job: DashboardRow): string {
     const status = job.unified.status ?? '';
     const progress = this.getProgress(job);
     const phase = job.seDetail?.currentPhase ?? job.unified.phase ?? '';
     const statusText = job.seDetail?.statusText ?? '';
-    return `${status}|${progress ?? 'null'}|${phase}|${statusText}`;
+    const currentTask = job.seDetail?.currentTask ?? '';
+    const teamFp = (job.seDetail?.teamStatuses ?? [])
+      .map((t) => `${t.teamId}=${t.phase}:${t.currentTaskId ?? ''}:${t.microtasksCompleted ?? ''}`)
+      .join(',');
+    return `${status}|${progress ?? 'null'}|${phase}|${statusText}|${currentTask}|${teamFp}`;
   }
 
   /**
    * True only when we have at least one piece of progress information for
-   * this job (numeric progress, a phase, or a status text). When this returns
-   * false (e.g. an SE row whose detail fetch failed so seDetail is null and
-   * nothing else surfaces), we can't honestly distinguish "stuck" from
-   * "couldn't observe" and isStuck() should bail out — otherwise a transient
-   * detail-endpoint outage would mass-surface false stuck warnings.
+   * this job (numeric progress, a phase, a status text, a current task, or
+   * a per-team phase). When this returns false (e.g. an SE row whose detail
+   * fetch failed so seDetail is null and nothing else surfaces), we can't
+   * honestly distinguish "stuck" from "couldn't observe" and isStuck() should
+   * bail out — otherwise a transient detail-endpoint outage would mass-
+   * surface false stuck warnings.
    */
   private hasObservableSignal(job: DashboardRow): boolean {
     if (this.getProgress(job) != null) return true;
@@ -256,6 +266,10 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     if (phase !== '') return true;
     const statusText = job.seDetail?.statusText ?? '';
     if (statusText !== '') return true;
+    if ((job.seDetail?.currentTask ?? '') !== '') return true;
+    if ((job.seDetail?.teamStatuses ?? []).some((t) => t.phase !== '' || !!t.currentTaskId)) {
+      return true;
+    }
     return false;
   }
 
@@ -446,6 +460,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
         statusText: status.status_text,
         currentPhase: status.phase,
         waitingForAnswers: status.waiting_for_answers,
+        currentTask: status.current_task,
         teamProgress: status.team_progress,
       })),
       catchError(() => of(null))
@@ -457,6 +472,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     statusText?: string;
     currentPhase?: string;
     waitingForAnswers?: boolean;
+    currentTask?: string;
     teamProgress?: Record<string, TeamProgressEntry>;
   }): SEDetail {
     return {
@@ -464,6 +480,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       statusText: params.statusText,
       currentPhase: params.currentPhase,
       waitingForAnswers: params.waitingForAnswers,
+      currentTask: params.currentTask,
       teamStatuses: this.buildTeamStatuses(params.teamProgress),
     };
   }
@@ -483,6 +500,8 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
           phase,
           phaseLabel,
           isActive: phase !== 'completed' && phase !== '',
+          currentTaskId: entry.current_task_id,
+          microtasksCompleted: entry.microtasks_completed,
         };
       });
   }

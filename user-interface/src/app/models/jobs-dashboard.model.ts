@@ -48,6 +48,10 @@ export interface TeamStatus {
   phase: string;
   phaseLabel: string;
   isActive: boolean;
+  /** Identifier of the task currently being worked on by this team, if any. */
+  currentTaskId?: string;
+  /** Number of microtasks this team has completed so far. */
+  microtasksCompleted?: number;
 }
 
 /** Extended detail for software-engineering jobs only (from detail API). */
@@ -56,6 +60,8 @@ export interface SEDetail {
   statusText?: string;
   currentPhase?: string;
   waitingForAnswers?: boolean;
+  /** Identifier of the task currently being executed at the job level. */
+  currentTask?: string;
   teamStatuses?: TeamStatus[];
 }
 

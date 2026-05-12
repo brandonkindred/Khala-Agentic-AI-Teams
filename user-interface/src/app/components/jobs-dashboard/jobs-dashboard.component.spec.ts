@@ -636,6 +636,68 @@ describe('JobsDashboardComponent', () => {
       expect(component.isStuck(job)).toBe(false);
     });
 
+    it('does not flag a run_team SE job whose per-team currentTaskId advances', () => {
+      // run_team orchestrator ticks team_progress.current_task_id / microtask
+      // counters while job-level progress/phase stay constant for long
+      // stretches. The fingerprint must capture that motion.
+      const makeRunTeam = (taskId: string, completed: number) => {
+        const job = makeJob('running', 'rt-1', oldCreatedAt(), 40);
+        job.unified.jobType = 'run_team';
+        job.seDetail = {
+          progress: 40,
+          statusText: 'executing',
+          currentPhase: 'execution',
+          teamStatuses: [
+            {
+              teamId: 'backend',
+              label: 'Backend',
+              icon: 'dns',
+              phase: 'coding',
+              phaseLabel: 'Coding',
+              isActive: true,
+              currentTaskId: taskId,
+              microtasksCompleted: completed,
+            },
+          ],
+        } as any;
+        return job;
+      };
+      record([makeRunTeam('task-a', 1)]);
+      waitPastStillness();
+      record([makeRunTeam('task-b', 2)]);
+      // Per-team task advanced → signal flipped → not stuck.
+      expect(component.isStuck(makeRunTeam('task-b', 2))).toBe(false);
+    });
+
+    it('flags a run_team SE job whose per-team progress is frozen', () => {
+      const makeRunTeam = () => {
+        const job = makeJob('running', 'rt-1', oldCreatedAt(), 40);
+        job.unified.jobType = 'run_team';
+        job.seDetail = {
+          progress: 40,
+          statusText: 'executing',
+          currentPhase: 'execution',
+          teamStatuses: [
+            {
+              teamId: 'backend',
+              label: 'Backend',
+              icon: 'dns',
+              phase: 'coding',
+              phaseLabel: 'Coding',
+              isActive: true,
+              currentTaskId: 'task-a',
+              microtasksCompleted: 1,
+            },
+          ],
+        } as any;
+        return job;
+      };
+      record([makeRunTeam()]);
+      waitPastStillness();
+      record([makeRunTeam()]);
+      expect(component.isStuck(makeRunTeam())).toBe(true);
+    });
+
     it('renders the stuck glyph with aria-hidden="false" and a non-empty aria-label', () => {
       const job = makeJob('running', 'j1', oldCreatedAt(), 25);
       job.unified.jobType = 'run_team';
