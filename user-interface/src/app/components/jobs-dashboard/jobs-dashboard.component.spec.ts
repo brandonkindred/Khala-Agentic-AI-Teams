@@ -537,6 +537,26 @@ describe('JobsDashboardComponent', () => {
       expect(component.isStuck(makePhaseJob())).toBe(true);
     });
 
+    it('resets sampleCount when a failed job is resumed back into running', () => {
+      // Job has been failing in place with identical progress / no phase
+      // change across many polls. When the user resumes it, the next poll
+      // shows it as 'running' again with the same progress and phase. The
+      // resumed running attempt should *not* be flagged stuck on its first
+      // observation just because the fingerprint pre-resume was sticky.
+      const failed = makeJob('failed', 'j1', oldCreatedAt(), 25);
+      record([failed]);
+      record([failed]);
+      record([failed]); // sampleCount = 3 while failed
+
+      const resumed = makeJob('running', 'j1', oldCreatedAt(), 25);
+      record([resumed]);
+      expect(component.isStuck(resumed)).toBe(false);
+      // And on the next poll where it's still unchanged, the running streak
+      // is now 2 → stuck (so the heuristic still works post-resume).
+      record([resumed]);
+      expect(component.isStuck(resumed)).toBe(true);
+    });
+
     it('excludes SE jobs waiting for answers even after threshold elapsed', () => {
       const job = makeJob('running', 'j1', oldCreatedAt(), 25);
       job.seDetail = { waitingForAnswers: true, progress: 25 } as any;

@@ -220,17 +220,20 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Fingerprint of all "is the job advancing?" signals: numeric progress plus
-   * phase / status text. Sources without numeric progress (e.g. founder,
-   * generic jobs) still surface phase or statusText changes, so combining
-   * them prevents a row from being flagged stuck when its progress field is
-   * permanently null but its phase ticks forward.
+   * Fingerprint of all "is the job advancing?" signals: status plus numeric
+   * progress plus phase / status text. Sources without numeric progress (e.g.
+   * founder, generic jobs) still surface phase or statusText changes, and
+   * including the status field guarantees that a transition through any
+   * non-running state (failed/cancelled/interrupted → resume) flips the
+   * fingerprint and resets sampleCount, so a freshly resumed job is never
+   * marked stuck on its first post-resume poll.
    */
   private progressSignal(job: DashboardRow): string {
+    const status = job.unified.status ?? '';
     const progress = this.getProgress(job);
     const phase = job.seDetail?.currentPhase ?? job.unified.phase ?? '';
     const statusText = job.seDetail?.statusText ?? '';
-    return `${progress ?? 'null'}|${phase}|${statusText}`;
+    return `${status}|${progress ?? 'null'}|${phase}|${statusText}`;
   }
 
   /**
