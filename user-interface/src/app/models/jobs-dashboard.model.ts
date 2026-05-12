@@ -52,6 +52,14 @@ export interface TeamStatus {
   currentTaskId?: string;
   /** Number of microtasks this team has completed so far. */
   microtasksCompleted?: number;
+  /** Identifier / label of the microtask currently being executed. */
+  currentMicrotask?: string;
+  /** Phase of the current microtask (coding/review/qa/etc.). */
+  currentMicrotaskPhase?: string;
+  /** Zero-based index of the microtask within the current task. */
+  currentMicrotaskIndex?: number;
+  /** Free-form phase detail set by the orchestrator. */
+  phaseDetail?: string;
 }
 
 /** Extended detail for software-engineering jobs only (from detail API). */

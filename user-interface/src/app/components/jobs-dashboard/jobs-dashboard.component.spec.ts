@@ -669,6 +669,44 @@ describe('JobsDashboardComponent', () => {
       expect(component.isStuck(makeRunTeam('task-b', 2))).toBe(false);
     });
 
+    it('does not flag a run_team SE job whose microtask phase advances within one task', () => {
+      // Within a single task the orchestrator ticks current_microtask /
+      // current_microtask_phase / current_microtask_index / phase_detail
+      // long before microtasks_completed changes. The fingerprint must
+      // capture that motion.
+      const makeRunTeam = (microPhase: string, idx: number) => {
+        const job = makeJob('running', 'rt-1', oldCreatedAt(), 40);
+        job.unified.jobType = 'run_team';
+        job.seDetail = {
+          progress: 40,
+          statusText: 'executing',
+          currentPhase: 'execution',
+          teamStatuses: [
+            {
+              teamId: 'backend',
+              label: 'Backend',
+              icon: 'dns',
+              phase: 'coding',
+              phaseLabel: 'Coding',
+              isActive: true,
+              currentTaskId: 'task-a',
+              microtasksCompleted: 0,
+              currentMicrotask: 'mt-1',
+              currentMicrotaskPhase: microPhase,
+              currentMicrotaskIndex: idx,
+              phaseDetail: `mt:${idx} ${microPhase}`,
+            },
+          ],
+        } as any;
+        return job;
+      };
+      record([makeRunTeam('coding', 0)]);
+      waitPastStillness();
+      record([makeRunTeam('review', 0)]);
+      // Microtask phase advanced → signal flipped → not stuck.
+      expect(component.isStuck(makeRunTeam('review', 0))).toBe(false);
+    });
+
     it('flags a run_team SE job whose per-team progress is frozen', () => {
       const makeRunTeam = () => {
         const job = makeJob('running', 'rt-1', oldCreatedAt(), 40);

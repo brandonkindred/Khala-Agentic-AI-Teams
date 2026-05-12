@@ -245,8 +245,18 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     const phase = job.seDetail?.currentPhase ?? job.unified.phase ?? '';
     const statusText = job.seDetail?.statusText ?? '';
     const currentTask = job.seDetail?.currentTask ?? '';
+    // Per-team fingerprint also covers microtask-level fields — the
+    // orchestrator updates current_microtask / current_microtask_phase /
+    // current_microtask_index / phase_detail while a single task moves
+    // through coding/review/QA before microtasks_completed ticks, so we'd
+    // miss real motion if we only watched task IDs and completion counts.
     const teamFp = (job.seDetail?.teamStatuses ?? [])
-      .map((t) => `${t.teamId}=${t.phase}:${t.currentTaskId ?? ''}:${t.microtasksCompleted ?? ''}`)
+      .map(
+        (t) =>
+          `${t.teamId}=${t.phase}:${t.currentTaskId ?? ''}:${t.microtasksCompleted ?? ''}` +
+          `:${t.currentMicrotaskIndex ?? ''}:${t.currentMicrotask ?? ''}` +
+          `:${t.currentMicrotaskPhase ?? ''}:${t.phaseDetail ?? ''}`,
+      )
       .join(',');
     return `${status}|${progress ?? 'null'}|${phase}|${statusText}|${currentTask}|${teamFp}`;
   }
@@ -502,6 +512,10 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
           isActive: phase !== 'completed' && phase !== '',
           currentTaskId: entry.current_task_id,
           microtasksCompleted: entry.microtasks_completed,
+          currentMicrotask: entry.current_microtask,
+          currentMicrotaskPhase: entry.current_microtask_phase,
+          currentMicrotaskIndex: entry.current_microtask_index,
+          phaseDetail: entry.phase_detail,
         };
       });
   }
