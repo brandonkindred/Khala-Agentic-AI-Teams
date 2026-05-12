@@ -177,6 +177,8 @@
               <td class="col-time">
                 @if (isStuck(job)) {
                   <mat-icon class="stuck-indicator"
+                            role="img"
+                            aria-hidden="false"
                             [attr.aria-label]="getStuckTooltip(job)"
                             [matTooltip]="getStuckTooltip(job)">warning_amber</mat-icon>
                 }

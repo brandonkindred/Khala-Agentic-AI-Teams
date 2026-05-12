@@ -513,6 +513,24 @@ describe('JobsDashboardComponent', () => {
       record([job]);
       expect(component.getJobAriaLabel(job)).toContain('appears stuck');
     });
+
+    it('renders the stuck glyph with aria-hidden="false" and a non-empty aria-label', () => {
+      const job = makeJob('running', 'j1', oldCreatedAt(), 25);
+      job.unified.jobType = 'run_team';
+      job.unified.repoPath = '/work/payments-api';
+      record([job]);
+      record([job]);
+      component.jobs = [job];
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      const glyph = host.querySelector('.col-time .stuck-indicator') as HTMLElement | null;
+      expect(glyph).toBeTruthy();
+      // mat-icon defaults aria-hidden=true; we must override so SRs announce
+      // the label.
+      expect(glyph?.getAttribute('aria-hidden')).toBe('false');
+      expect(glyph?.getAttribute('role')).toBe('img');
+      expect(glyph?.getAttribute('aria-label')?.length ?? 0).toBeGreaterThan(0);
+    });
   });
 
   describe('canResumeJob', () => {
