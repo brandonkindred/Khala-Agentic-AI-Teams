@@ -133,6 +133,13 @@ class OrderRequest(BaseModel):
     order_type: OrderType = OrderType.MARKET
     limit_price: Optional[float] = None
     stop_price: Optional[float] = None
+    # Trailing-stop ratchet specifier (#390). Only consulted when
+    # ``order_type == TRAILING_STOP`` (standalone) or when this request was
+    # cloned from a ``StopAttachment`` with ``trail_offset`` set (bracket
+    # child). ``stop_price`` is the initial water mark for standalone
+    # trailing stops; the engine ratchets from there.
+    trail_offset: Optional[float] = None
+    trail_offset_kind: Literal["abs", "bps"] = "abs"
     tif: TimeInForce = TimeInForce.DAY
     reason: str = ""  # free-form annotation; surfaced in logs / fills
     unfilled_policy: Optional[UnfilledPolicy] = None
@@ -156,22 +163,18 @@ class OrderRequest(BaseModel):
         # honors them only as their respective steps of #379 ship. Until
         # those steps land, fail loudly at submission time rather than
         # silently producing never-filled orders.
-        if self.order_type == OrderType.TRAILING_STOP:
-            raise UnsupportedOrderFeatureError(
-                "trailing_stop is not yet supported by the execution engine; "
-                "see #390 (Trading 5/5 Step 8) for runtime support"
-            )
-        # Bracket attachments are runtime-supported as of #389, but the
-        # trailing-stop variant of ``StopAttachment`` is still gated until
-        # #390. Reject at submit time rather than silently materializing as
-        # a fixed STOP — that would backtest a different strategy than the
-        # one the author wrote.
+        #
+        # Trailing-stop runtime support landed with #390. The
+        # standalone ``TRAILING_STOP`` order type and bracketed
+        # ``attached_stop_loss.trail_offset`` are validated by the
+        # shape-consistency checks below (``stop_price`` required for
+        # standalone TRAILING_STOP; non-negative ``trail_offset``).
         if self.attached_stop_loss is not None and self.attached_stop_loss.trail_offset is not None:
-            raise UnsupportedOrderFeatureError(
-                "attached_stop_loss.trail_offset is not yet supported by the "
-                "execution engine; see #390 (Trading 5/5 Step 8) for trailing-stop "
-                "runtime support"
-            )
+            if self.attached_stop_loss.trail_offset < 0:
+                raise ValueError(
+                    "attached_stop_loss.trail_offset must be non-negative, "
+                    f"got {self.attached_stop_loss.trail_offset!r}"
+                )
         # ``parent_order_id`` / ``oco_group_id`` are engine-internal: the
         # bracket materializer in ``FillSimulator`` calls
         # ``OrderBook.submit_attached`` which clones the request with these
@@ -207,8 +210,16 @@ class OrderRequest(BaseModel):
             raise ValueError("limit order requires limit_price")
         if self.order_type == OrderType.STOP and self.stop_price is None:
             raise ValueError("stop order requires stop_price")
-        if self.order_type == OrderType.TRAILING_STOP and self.stop_price is None:
-            raise ValueError("trailing_stop order requires stop_price")
+        if self.order_type == OrderType.TRAILING_STOP:
+            if self.stop_price is None:
+                raise ValueError("trailing_stop order requires stop_price")
+            if self.trail_offset is None:
+                raise ValueError("trailing_stop order requires trail_offset")
+            if self.trail_offset < 0:
+                raise ValueError(
+                    f"trailing_stop order trail_offset must be non-negative, "
+                    f"got {self.trail_offset!r}"
+                )
         if self.tif in (TimeInForce.IOC, TimeInForce.FOK) and self.order_type not in (
             OrderType.MARKET,
             OrderType.LIMIT,
@@ -350,6 +361,8 @@ class StrategyContext:
         order_type: OrderType | str = OrderType.MARKET,
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
+        trail_offset: Optional[float] = None,
+        trail_offset_kind: Literal["abs", "bps"] = "abs",
         tif: TimeInForce | str = TimeInForce.DAY,
         reason: str = "",
         unfilled_policy: Optional[UnfilledPolicy | str] = None,
@@ -380,6 +393,8 @@ class StrategyContext:
             ),
             limit_price=limit_price,
             stop_price=stop_price,
+            trail_offset=trail_offset,
+            trail_offset_kind=trail_offset_kind,
             tif=TimeInForce(tif) if not isinstance(tif, TimeInForce) else tif,
             reason=reason,
             unfilled_policy=(

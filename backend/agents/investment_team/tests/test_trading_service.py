@@ -394,8 +394,8 @@ def test_execution_diagnostic_helpers_cap_events_and_count_rejections() -> None:
 _UNSUPPORTED_FEATURE_STRATEGY_CODE = textwrap.dedent('''\
     """Strategy that bypasses ``submit_order``'s subprocess-side validation
     to exercise the parent's ``UnsupportedOrderFeatureError`` rejection
-    path. Sets ``order_type=trailing_stop`` — still gated in
-    ``OrderRequest.validate_prices`` until #390 (Trading 5/5 Step 8).
+    path. Sets ``parent_order_id`` — still engine-internal and refused at
+    the strategy-side gate in ``OrderRequest.validate_prices``.
     """
     from contract import Strategy
 
@@ -416,9 +416,9 @@ _UNSUPPORTED_FEATURE_STRATEGY_CODE = textwrap.dedent('''\
                     "symbol": bar.symbol,
                     "side": "long",
                     "qty": 1.0,
-                    "order_type": "trailing_stop",
-                    "stop_price": 100.0,
+                    "order_type": "market",
                     "tif": "day",
+                    "parent_order_id": "engine-internal-id",
                 },
             })
 ''')

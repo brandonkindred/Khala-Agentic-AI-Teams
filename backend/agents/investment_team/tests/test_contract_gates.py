@@ -37,10 +37,32 @@ def _base(**overrides) -> OrderRequest:
     return OrderRequest(**kwargs)
 
 
-def test_trailing_stop_is_gated_until_step_8():
-    req = _base(order_type=OrderType.TRAILING_STOP, stop_price=10.0)
-    with pytest.raises(NotImplementedError, match="#390"):
-        req.validate_prices()
+def test_trailing_stop_validates_post_step_8():
+    """``TRAILING_STOP`` is runtime-supported as of #390. The blanket
+    submission-time gate is gone; the remaining shape-consistency checks
+    require ``stop_price`` (initial water mark) and ``trail_offset``."""
+    _base(
+        order_type=OrderType.TRAILING_STOP,
+        stop_price=10.0,
+        trail_offset=1.0,
+    ).validate_prices()
+    _base(
+        order_type=OrderType.TRAILING_STOP,
+        stop_price=10.0,
+        trail_offset=20.0,
+        trail_offset_kind="bps",
+    ).validate_prices()
+    # Missing required fields still rejected.
+    with pytest.raises(ValueError, match="trail_offset"):
+        _base(order_type=OrderType.TRAILING_STOP, stop_price=10.0).validate_prices()
+    with pytest.raises(ValueError, match="stop_price"):
+        _base(order_type=OrderType.TRAILING_STOP, trail_offset=1.0).validate_prices()
+    with pytest.raises(ValueError, match="non-negative"):
+        _base(
+            order_type=OrderType.TRAILING_STOP,
+            stop_price=10.0,
+            trail_offset=-1.0,
+        ).validate_prices()
 
 
 def test_gates_raise_unsupported_order_feature_subclass():
@@ -48,7 +70,7 @@ def test_gates_raise_unsupported_order_feature_subclass():
     ``NotImplementedError``, so streaming_harness only re-classifies real
     gate violations as ``unsupported_feature`` (and lets unrelated
     ``NotImplementedError`` from strategy code stay as ``runtime_error``)."""
-    req = _base(order_type=OrderType.TRAILING_STOP, stop_price=10.0)
+    req = _base(parent_order_id="p-1")
     with pytest.raises(UnsupportedOrderFeatureError):
         req.validate_prices()
 

@@ -24,7 +24,6 @@ from investment_team.trading_service.strategy.contract import (
     OrderSide,
     OrderType,
     TimeInForce,
-    UnsupportedOrderFeatureError,
 )
 
 
@@ -1051,16 +1050,22 @@ def test_submit_attached_rejects_stop_child_without_price() -> None:
     assert book.children_of(parent.order_id) == []
 
 
-def test_submit_attached_rejects_trailing_stop_child() -> None:
-    """TRAILING_STOP is gated until #390 ships — the gate must still fire on
-    bracket children even though strategy-level submit was bypassed.
+def test_submit_attached_rejects_trailing_stop_child_without_trail_offset() -> None:
+    """TRAILING_STOP children are runtime-supported as of #390, but
+    ``submit_attached`` still re-runs ``validate_prices`` so a
+    malformed child (missing ``trail_offset``) is rejected at submit
+    time rather than queued and crashing the simulator later.
     """
     book = OrderBook()
     parent = _bracket_parent(book)
-    with pytest.raises(UnsupportedOrderFeatureError, match="#390"):
+    with pytest.raises(ValueError, match="trail_offset"):
         book.submit_attached(
             _base(
-                side=OrderSide.SHORT, qty=10.0, order_type=OrderType.TRAILING_STOP, stop_price=95.0
+                side=OrderSide.SHORT,
+                qty=10.0,
+                order_type=OrderType.TRAILING_STOP,
+                stop_price=95.0,
+                # trail_offset deliberately omitted
             ),
             submitted_at="2024-01-03",
             submitted_equity=100_000.0,
@@ -1068,6 +1073,22 @@ def test_submit_attached_rejects_trailing_stop_child() -> None:
             oco_group_id="g1",
         )
     assert book.children_of(parent.order_id) == []
+
+    # Well-formed TRAILING_STOP child queues successfully.
+    book.submit_attached(
+        _base(
+            side=OrderSide.SHORT,
+            qty=10.0,
+            order_type=OrderType.TRAILING_STOP,
+            stop_price=95.0,
+            trail_offset=2.0,
+        ),
+        submitted_at="2024-01-03",
+        submitted_equity=100_000.0,
+        parent_order_id=parent.order_id,
+        oco_group_id="g1",
+    )
+    assert len(book.children_of(parent.order_id)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2119,8 +2140,8 @@ def test_requeue_handles_compact_offset_in_regression_check() -> None:
 
 def test_submit_attached_market_rejection_message_lists_supported_types() -> None:
     """The MARKET-rejection message must point callers at types that are
-    actually supported (``LIMIT`` / ``STOP``) — not at ``STOP_LIMIT``
-    (doesn't exist) or ``TRAILING_STOP`` (still gated until #390).
+    actually supported (``LIMIT`` / ``STOP`` / ``TRAILING_STOP``) — not
+    at ``STOP_LIMIT`` (doesn't exist).
     """
     book = OrderBook()
     parent = book.submit(
@@ -2138,8 +2159,8 @@ def test_submit_attached_market_rejection_message_lists_supported_types() -> Non
             oco_group_id="g1",
         )
     msg = str(excinfo.value)
-    assert "LIMIT or STOP" in msg
-    # Make sure we're not pointing callers at non-existent or gated types.
+    assert "LIMIT / STOP / TRAILING_STOP" in msg
+    # Make sure we're not pointing callers at non-existent types.
     assert "STOP_LIMIT" not in msg
 
 

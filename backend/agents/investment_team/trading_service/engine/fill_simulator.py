@@ -210,12 +210,31 @@ class FillSimulator:
             )
             is_entry_side = is_entry or is_partial_entry_continuation
 
+            # Trailing-stop ratchet (#390): refresh ``po.trailing_water`` /
+            # ``po.effective_stop_price`` against this bar BEFORE the
+            # trigger check so a bar that both ratchets the stop and
+            # gaps through the new level triggers at the new level. The
+            # effective-request shim below routes the ratcheted price
+            # into the execution model without touching the immutable
+            # ``request`` or changing the execution-model protocol.
+            self._update_trailing(po, bar)
+            effective_req = (
+                req.model_copy(
+                    update={
+                        "order_type": OrderType.STOP,
+                        "stop_price": po.effective_stop_price,
+                    }
+                )
+                if req.order_type == OrderType.TRAILING_STOP and po.effective_stop_price is not None
+                else req
+            )
+
             # Determine whether this bar triggered the order and at what
             # terms (price, partial-fill fraction, adverse-selection
             # haircut). The execution model encapsulates the (model-
             # dependent) parts; risk gates and money math are simulator-
             # owned below.
-            terms = self.execution_model.compute_fill_terms(req, bar, next_bar)
+            terms = self.execution_model.compute_fill_terms(effective_req, bar, next_bar)
             if terms is None:
                 # IOC / FOK semantics demand cancel-on-this-bar when the
                 # order doesn't trigger (e.g. a LIMIT IOC whose limit
@@ -1218,6 +1237,76 @@ class FillSimulator:
         return expired
 
     # ------------------------------------------------------------------
+    # Trailing-stop ratchet (#390)
+    # ------------------------------------------------------------------
+
+    def _update_trailing(self, po: PendingOrder, bar: Bar) -> None:
+        """Ratchet ``po.trailing_water`` and ``po.effective_stop_price``.
+
+        Runs every bar for any order whose request is a TRAILING_STOP —
+        whether standalone or a materialized bracket child. Early-exits
+        cheaply for the common non-trailing case so golden-parity
+        strategies pay nothing.
+
+        Ratchet direction is governed by the *protected position*, not
+        by the order's own side. A trailing stop is always opposite-side
+        to the position it protects:
+
+        * SHORT TRAILING_STOP closes a LONG → water tracks ``bar.high``
+          (the long position's favorable direction) and ``eff_stop`` sits
+          ``offset`` below it.
+        * LONG TRAILING_STOP closes a SHORT → water tracks ``bar.low``
+          and ``eff_stop`` sits ``offset`` above it.
+
+        An adverse bar leaves prior state untouched (ratchet only moves
+        favorably).
+
+        Initial-water seed chain (first bar after activation):
+        1. ``po.trailing_water`` if already set — the bracket
+           materializer pre-seeds this from the parent's fill price so
+           the first post-entry bar doesn't reset to that bar's extreme.
+        2. ``req.stop_price`` if set — standalone TRAILING_STOP carries
+           an explicit initial water mark via this field.
+        3. ``bar.high`` / ``bar.low`` as a defensive fallback.
+           ``validate_prices`` should have rejected a TRAILING_STOP
+           without ``stop_price`` upstream, but the fallback keeps the
+           helper safe to call against any future caller that bypasses
+           validation.
+        """
+        req = po.request
+        if req.order_type != OrderType.TRAILING_STOP:
+            return
+        if req.trail_offset is None:
+            return  # defensive — validate_prices should have rejected this
+
+        if req.side == OrderSide.SHORT:
+            # Closes a LONG position; ratchet up against bar.high.
+            seed = (
+                po.trailing_water
+                if po.trailing_water is not None
+                else (req.stop_price if req.stop_price is not None else bar.high)
+            )
+            water = max(seed, bar.high)
+        else:
+            # Closes a SHORT position; ratchet down against bar.low.
+            seed = (
+                po.trailing_water
+                if po.trailing_water is not None
+                else (req.stop_price if req.stop_price is not None else bar.low)
+            )
+            water = min(seed, bar.low)
+
+        if req.trail_offset_kind == "abs":
+            offset = req.trail_offset
+        else:  # "bps"
+            offset = water * (req.trail_offset / 10_000.0)
+
+        eff_stop = (water - offset) if req.side == OrderSide.SHORT else (water + offset)
+
+        po.trailing_water = water
+        po.effective_stop_price = eff_stop
+
+    # ------------------------------------------------------------------
     # Bracket / OCO materialization (#389)
     # ------------------------------------------------------------------
 
@@ -1281,15 +1370,28 @@ class FillSimulator:
         req = po.request
         child_side = OrderSide.SHORT if req.side == OrderSide.LONG else OrderSide.LONG
         oco_group_id = f"oco_{po.order_id}"
+        # Seed water for trailing-stop children from the parent's *fill*
+        # price (#390). Reading ``pos.entry_price`` instead of ``bar.high``
+        # avoids resetting the ratchet to the new bar's high on the first
+        # eligible post-entry bar — strategies expect the trail to be
+        # anchored at where they actually entered, not at the next bar's
+        # extreme. ``pos`` is guaranteed to exist whenever this method
+        # runs (the entry path opens the position immediately before
+        # calling us; the abandon path checks explicitly).
+        pos = self.portfolio.positions.get(req.symbol)
+        entry_fill_price = pos.entry_price if pos is not None else None
         if req.attached_stop_loss is not None:
             sl = req.attached_stop_loss
+            is_trailing = sl.trail_offset is not None
             sl_req = OrderRequest(
                 client_order_id=sl.client_order_id or f"{req.client_order_id}_sl",
                 symbol=req.symbol,
                 side=child_side,
                 qty=filled_qty,
-                order_type=OrderType.STOP,
+                order_type=OrderType.TRAILING_STOP if is_trailing else OrderType.STOP,
                 stop_price=sl.stop_price,
+                trail_offset=sl.trail_offset,
+                trail_offset_kind=sl.trail_offset_kind,
                 tif=TimeInForce.GTC,
                 unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
                 reason="bracket_sl",
@@ -1302,6 +1404,22 @@ class FillSimulator:
                 oco_group_id=oco_group_id,
             )
             sl_child.working_against_entry_order_id = po.order_id
+            if is_trailing and entry_fill_price is not None:
+                # Pre-seed the ratchet so the first eligible bar after
+                # entry trails from where we filled (rather than that
+                # bar's high). ``effective_stop_price`` is set so the
+                # initial level is well-defined even before
+                # ``_update_trailing`` first runs against a real bar.
+                sl_child.trailing_water = entry_fill_price
+                if sl.trail_offset_kind == "abs":
+                    offset = sl.trail_offset
+                else:  # "bps"
+                    offset = entry_fill_price * (sl.trail_offset / 10_000.0)
+                sl_child.effective_stop_price = (
+                    entry_fill_price - offset
+                    if req.side == OrderSide.LONG
+                    else entry_fill_price + offset
+                )
         if req.attached_take_profit is not None:
             tp = req.attached_take_profit
             tp_req = OrderRequest(

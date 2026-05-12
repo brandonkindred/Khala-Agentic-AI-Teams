@@ -60,8 +60,13 @@ class PendingOrder:
     cumulative_filled_qty: float = 0.0
     remaining_qty: float = 0.0  # initialized to request.qty in submit()
     twap_slices_remaining: Optional[int] = None
-    effective_stop_price: Optional[float] = None  # live trailing stop (Step 8 / #390)
-    trailing_water: Optional[float] = None  # running high (LONG) / low (SHORT); Step 8
+    # Live trailing-stop state (#390). ``trailing_water`` is the running
+    # high (LONG) / low (SHORT) since activation; ``effective_stop_price``
+    # is ``water ± offset`` and is the price the execution model triggers
+    # against (via the simulator's effective-request shim). Both stay
+    # ``None`` for non-trailing orders.
+    effective_stop_price: Optional[float] = None
+    trailing_water: Optional[float] = None
     armed: bool = True
     # Identity of the position this order is committed to act against,
     # bound at one of three points:
@@ -194,11 +199,11 @@ class OrderBook:
         ``oco_group_id`` to be set on the queued order — the strategy-side
         ``validate_prices()`` gate refuses both fields outright (they are
         engine-internal). All *other* runtime-support gates and shape-consistency
-        checks (LIMIT requires ``limit_price``, STOP requires ``stop_price``,
-        no TRAILING_STOP / IOC / FOK / unfilled_policy until their respective
-        steps ship, no nested attachments) still apply; we re-run
-        ``validate_prices`` on a clone with parent/OCO cleared so we don't
-        re-fire the very gates this method is meant to bypass.
+        checks (LIMIT requires ``limit_price``, STOP / TRAILING_STOP require
+        ``stop_price``, TRAILING_STOP requires ``trail_offset``, no nested
+        attachments) still apply; we re-run ``validate_prices`` on a clone
+        with parent/OCO cleared so we don't re-fire the very gates this
+        method is meant to bypass.
         """
         if not isinstance(parent_order_id, str) or not parent_order_id:
             raise TypeError(
@@ -249,9 +254,9 @@ class OrderBook:
         # error rather than an unintended fill.
         if request.order_type == OrderType.MARKET:
             raise ValueError(
-                "submit_attached child must be LIMIT or STOP, not MARKET — market "
-                "children would fire immediately on the next bar instead of acting as "
-                "protective legs (TRAILING_STOP is gated until #390 / Step 8 lands)"
+                "submit_attached child must be LIMIT / STOP / TRAILING_STOP, "
+                "not MARKET — market children would fire immediately on the "
+                "next bar instead of acting as protective legs"
             )
         attached_request = request.model_copy(
             update={"parent_order_id": parent_order_id, "oco_group_id": oco_group_id}
