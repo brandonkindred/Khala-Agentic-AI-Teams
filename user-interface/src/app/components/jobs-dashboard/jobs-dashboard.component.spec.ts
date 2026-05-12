@@ -473,11 +473,45 @@ describe('JobsDashboardComponent', () => {
       expect(component.isStuck(b)).toBe(false);
     });
 
-    it('treats missing createdAt as not stuck', () => {
+    it('uses firstSeenAt as age basis when createdAt is missing', () => {
       const job = makeJob('running', 'j1', '', 10);
       record([job]);
       record([job]);
+      // Two polls fired at the same fake-clock instant → firstSeenAt == now,
+      // age == 0, so still not stuck.
       expect(component.isStuck(job)).toBe(false);
+    });
+
+    it('flags a Planning-V3-style job (no createdAt) after enough observed-poll time', () => {
+      // Planning V3 list endpoint omits created_at, so the row arrives with
+      // createdAt undefined. The dashboard should still be able to flag it
+      // stuck once it has observed the job frozen for STUCK_THRESHOLD_MS+.
+      const makePV3 = (phase: string) => {
+        const job = makeJob('running', 'pv3-1', undefined as unknown as string, null);
+        job.unified.source = 'planning_v3';
+        job.unified.phase = phase;
+        return job;
+      };
+      record([makePV3('drafting')]);
+      // Advance past the threshold while keeping the signal stable.
+      vi.setSystemTime(new Date(Date.now() + STUCK_MS + 60_000));
+      record([makePV3('drafting')]);
+      expect(component.isStuck(makePV3('drafting'))).toBe(true);
+    });
+
+    it('does not flag a Planning-V3 job whose phase is still advancing', () => {
+      const makePV3 = (phase: string) => {
+        const job = makeJob('running', 'pv3-1', undefined as unknown as string, null);
+        job.unified.source = 'planning_v3';
+        job.unified.phase = phase;
+        return job;
+      };
+      record([makePV3('drafting')]);
+      vi.setSystemTime(new Date(Date.now() + STUCK_MS + 60_000));
+      record([makePV3('reviewing')]);
+      // Signal changed → sampleCount resets to 1, firstSeenAt resets to now,
+      // so the age basis is fresh and the row is not flagged.
+      expect(component.isStuck(makePV3('reviewing'))).toBe(false);
     });
 
     it('tooltip uses getTimeAgo-style phrasing relative to lastChangedAt', () => {

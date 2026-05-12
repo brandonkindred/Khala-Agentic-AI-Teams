@@ -122,6 +122,7 @@ const STUCK_REQUIRED_STILL_POLLS = 2;
 
 interface ProgressSample {
   signal: string;
+  firstSeenAt: number;
   lastChangedAt: number;
   sampleCount: number;
 }
@@ -252,12 +253,14 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       if (!prev || prev.signal !== signal) {
         this.progressHistory.set(key, {
           signal,
+          firstSeenAt: now,
           lastChangedAt: now,
           sampleCount: 1,
         });
       } else {
         this.progressHistory.set(key, {
           signal: prev.signal,
+          firstSeenAt: prev.firstSeenAt,
           lastChangedAt: prev.lastChangedAt,
           sampleCount: prev.sampleCount + 1,
         });
@@ -501,12 +504,18 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     // status === 'running' but the dashboard labels them "Waiting". Don't
     // double-surface those as stuck.
     if (job.seDetail?.waitingForAnswers) return false;
-    const createdAt = job.unified.createdAt;
-    if (!createdAt) return false;
-    const age = Date.now() - new Date(createdAt).getTime();
-    if (!Number.isFinite(age) || age <= STUCK_THRESHOLD_MS) return false;
     const entry = this.progressHistory.get(this.historyKey(job));
-    return !!entry && entry.sampleCount >= STUCK_REQUIRED_STILL_POLLS;
+    if (!entry) return false;
+    // Prefer createdAt for the age gate; fall back to firstSeenAt for sources
+    // that don't surface createdAt (e.g. Planning V3 jobs) so they can still
+    // be flagged once the dashboard itself has observed them frozen long
+    // enough.
+    const createdAt = job.unified.createdAt;
+    const createdTs = createdAt ? new Date(createdAt).getTime() : NaN;
+    const ageBasis = Number.isFinite(createdTs) ? createdTs : entry.firstSeenAt;
+    const age = Date.now() - ageBasis;
+    if (!Number.isFinite(age) || age <= STUCK_THRESHOLD_MS) return false;
+    return entry.sampleCount >= STUCK_REQUIRED_STILL_POLLS;
   }
 
   getStuckTooltip(job: DashboardRow): string {
