@@ -775,9 +775,13 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       case 'completed':
       case 'cancelled':
       case 'needs_human_review':
-        // Blogging treats `needs_human_review` as a terminal success state
-        // (see `TERMINAL_STATUSES` in `blogging-dashboard.component.ts`), so
-        // these rows should surface under Completed, not Active.
+      case 'completed_with_errors':
+        // Terminal "the run finished" bucket — `needs_human_review` is the
+        // Blogging team's terminal success state (see `TERMINAL_STATUSES` in
+        // `blogging-dashboard.component.ts`); `completed_with_errors` is the
+        // Investment Strategy Lab's partial-success terminal state (see
+        // `STRATEGY_LAB_TERMINAL_STATUSES` in `investment_team/api/main.py`).
+        // The Failed pill is reserved for runs that did not finish.
         return 'completed';
       default:
         return 'active';

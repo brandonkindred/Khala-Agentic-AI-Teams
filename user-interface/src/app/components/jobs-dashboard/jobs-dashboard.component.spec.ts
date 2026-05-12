@@ -523,19 +523,22 @@ describe('JobsDashboardComponent', () => {
       expect(counts.completed).toBe(0);
     });
 
-    it('statusCounts buckets completed/cancelled/needs_human_review → completed', () => {
-      // `needs_human_review` is the Blogging team's terminal success state
-      // (see TERMINAL_STATUSES in blogging-dashboard.component.ts) — review-
-      // ready posts must surface under Completed, not Active.
+    it('statusCounts buckets all terminal "finished" statuses → completed', () => {
+      // Terminal "the run finished" bucket. `needs_human_review` is the
+      // Blogging team's review-ready terminal state; `completed_with_errors`
+      // is the Investment Strategy Lab's partial-success terminal state.
+      // Neither should leak into Active.
       component.jobs = [
         buildRow({ jobId: 'd', status: 'completed' }),
         buildRow({ jobId: 'x', status: 'cancelled' }),
         buildRow({ jobId: 'r', status: 'needs_human_review', source: 'blogging' }),
+        buildRow({ jobId: 'e', status: 'completed_with_errors', source: 'investment' }),
       ];
       const counts = component.statusCounts;
-      expect(counts.completed).toBe(3);
+      expect(counts.completed).toBe(4);
       expect(counts.active).toBe(0);
-      expect(counts.all).toBe(3);
+      expect(counts.failed).toBe(0);
+      expect(counts.all).toBe(4);
     });
 
     it('statusCounts.all always equals total job count', () => {
