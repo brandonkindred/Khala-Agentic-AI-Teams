@@ -1,34 +1,18 @@
 """Shared utilities for branding team Strands SDK graphs.
 
 Provides:
-- LLM model configuration
-- Agent factory helpers
+- Agent factory helpers (wired to the centralized LLM service)
 - Conditional-edge callables for phase gating
 """
 
 from __future__ import annotations
 
-import os
 from typing import Any, Optional
 
 from strands import Agent
 
 from branding_team.models import BrandPhase
-
-# ---------------------------------------------------------------------------
-# LLM model configuration
-# ---------------------------------------------------------------------------
-
-DEFAULT_MODEL = "us.anthropic.claude-sonnet-4-20250514"
-
-
-def get_model() -> str:
-    """Return the LLM model string for branding agents.
-
-    Reads ``BRANDING_LLM_MODEL`` env var, falling back to a sensible default.
-    """
-    return os.environ.get("BRANDING_LLM_MODEL", DEFAULT_MODEL)
-
+from llm_service import get_strands_model
 
 # ---------------------------------------------------------------------------
 # Agent factory
@@ -44,6 +28,13 @@ def build_agent(
     description: str = "",
 ) -> Agent:
     """Create a ``strands.Agent`` pre-configured for branding work.
+
+    The backing model is the project's centralized ``LLMClientModel`` resolved
+    via ``get_strands_model("branding")`` — this routes through Ollama (or any
+    configured ``LLM_PROVIDER``) and inherits retries, telemetry, and per-agent
+    model routing (``LLM_MODEL_branding``). Passing a bare model string here
+    would make Strands treat it as a Bedrock model ID and fail with
+    ``NoCredentialsError`` outside AWS.
 
     Parameters
     ----------
@@ -61,7 +52,7 @@ def build_agent(
     kwargs: dict[str, Any] = {
         "name": name,
         "system_prompt": system_prompt,
-        "model": get_model(),
+        "model": get_strands_model("branding"),
         "callback_handler": None,
     }
     if structured_output is not None:
