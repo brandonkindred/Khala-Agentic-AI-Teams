@@ -78,7 +78,6 @@ class HarnessResponse:
     order_bar_indices: List[Optional[int]] = field(default_factory=list)
     cancel_bar_indices: List[Optional[int]] = field(default_factory=list)
     capabilities: Dict[str, Any] = field(default_factory=dict)
-    protocol_version: int = 0
 
 
 class StreamingHarness:
@@ -109,13 +108,9 @@ class StreamingHarness:
         self._proc: Optional[subprocess.Popen] = None
         self._started_at: float = 0.0
         # Filled from the first ``ready`` (issue #377). Empty dict means
-        # no ready has been received yet — treat as per-bar only (no
-        # ``chunked_bars``).
+        # the child predates capability negotiation — treat as per-bar
+        # only (no ``chunked_bars``).
         self._capabilities: Dict[str, Any] = {}
-        # Child's declared protocol version (issue #391). 0 until the
-        # first ``ready`` arrives. Latched on first ready so a child that
-        # mis-reports version on a later ready can't race the observer.
-        self._protocol_version: int = 0
         # Aggregated coverage-probe events from the child (issue #450).
         # ``None`` when probe mode was off or the run never emitted a
         # frame; otherwise a dict ``{"events": [...], "truncated": bool}``.
@@ -243,19 +238,6 @@ class StreamingHarness:
         return bool(self._capabilities.get("chunked_bars"))
 
     @property
-    def protocol_version(self) -> int:
-        """Child's declared strategy-protocol version (issue #391).
-
-        Always ``1`` for strategies running against this release. ``0``
-        means no ``ready`` has been received yet — only meaningful after
-        ``send_start`` has returned. A future v2 harness will accept
-        ``2`` here; today, the child rejects any non-1 declaration at
-        startup, so reaching this getter with a value other than 0 or 1
-        is impossible.
-        """
-        return self._protocol_version
-
-    @property
     def probe_events(self) -> Optional[Dict[str, Any]]:
         """Aggregated coverage-probe events from the child (#450).
 
@@ -344,13 +326,6 @@ class StreamingHarness:
                 if isinstance(caps, dict):
                     self._capabilities = caps
                     resp.capabilities = caps
-                # Protocol version (issue #391). Latch on the first ready
-                # that carries an int; ignore subsequent values so a
-                # mis-reporting child can't race the observer.
-                pv = record.get("protocol_version")
-                if isinstance(pv, int) and self._protocol_version == 0:
-                    self._protocol_version = pv
-                resp.protocol_version = self._protocol_version
                 return resp
             elif kind == "error":
                 etype = record.get("etype", "runtime_error")
@@ -401,32 +376,6 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
         msg = "".join(traceback.format_exception(*sys.exc_info()))
         print(json.dumps({"kind": "error", "etype": "import_error", "message": msg}))
         sys.exit(1)
-
-
-    # Strategy protocol version (issue #391). Strategies that omit the
-    # module-level ``protocol_version`` attribute default to v1; any
-    # explicit declaration other than ``1`` is rejected at startup so a
-    # forward-incompatible strategy can never run silently on an older
-    # harness. A future v2 harness lifts this equality check to a
-    # membership check.
-    _DECLARED_PV = getattr(strategy, "protocol_version", 1)
-    if not isinstance(_DECLARED_PV, int) or isinstance(_DECLARED_PV, bool) or _DECLARED_PV != 1:
-        _pv_msg = (
-            f"strategy declares protocol_version={_DECLARED_PV!r}; "
-            f"this harness only supports protocol_version=1"
-        )
-        # Block on the parent's first message so the rejection arrives
-        # as the response to that round-trip — avoids racing the
-        # parent's stdin write against a fast subprocess exit (which
-        # would surface as ``BrokenPipeError`` and lose this message).
-        try:
-            sys.stdin.readline()
-        except Exception:
-            pass
-        print(json.dumps({"kind": "error", "etype": "protocol_error", "message": _pv_msg}))
-        sys.stdout.flush()
-        sys.exit(1)
-    _PROTOCOL_VERSION = 1
 
 
     def _emit(record):
@@ -574,20 +523,11 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
         return candidates[0]
 
 
-    # Capability set advertised in the first ready (issues #377, #391).
-    # The parent uses this to decide whether it may invoke ``send_bars``
-    # with chunked payloads. The remaining flags enumerate the v1
-    # primitives the harness understands; they document the contract
-    # surface but the harness does not branch on them — any v1
-    # strategy may use any of these features unconditionally. Older
-    # parents that don't read ``capabilities`` simply ignore the field.
-    _CAPABILITIES = {
-        "chunked_bars": True,   # orthogonal — independent of protocol_version
-        "partial_fills": True,
-        "bracket": True,
-        "trailing_stop": True,
-        "ioc_fok": True,
-    }
+    # Capability set advertised in the first ready (issue #377). The
+    # parent uses this to decide whether it may invoke ``send_bars``
+    # with chunked payloads. Older parents that don't read
+    # ``capabilities`` simply ignore the field.
+    _CAPABILITIES = {"chunked_bars": True}
 
 
     def main():
@@ -689,7 +629,7 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
                     # final ready so the parent's _exchange loop sees
                     # them in the same round-trip.
                     _flush_probe_events()
-                    _emit({"kind": "ready", "protocol_version": _PROTOCOL_VERSION, "capabilities": _CAPABILITIES})
+                    _emit({"kind": "ready", "capabilities": _CAPABILITIES})
                     return
                 else:
                     _emit({"kind": "error", "etype": "protocol_error",
@@ -725,7 +665,7 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
             # inspects the *first* ready (e.g. legacy debug tooling) can
             # negotiate, and a parent that re-checks before chunking
             # always sees fresh state.
-            _emit({"kind": "ready", "protocol_version": _PROTOCOL_VERSION, "capabilities": _CAPABILITIES})
+            _emit({"kind": "ready", "capabilities": _CAPABILITIES})
 
 
     def _apply_state(ctx, state, *, is_warmup):
