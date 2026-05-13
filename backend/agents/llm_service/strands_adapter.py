@@ -23,14 +23,16 @@ Design notes
   not stall the event loop.
 * Strands message format is Bedrock-style (``list[Message]`` with
   ``ContentBlock`` items). The adapter flattens these to the OpenAI-compatible
-  chat shape that ``LLMClient.chat_json_round`` accepts.
+  chat shape that ``LLMClient.chat_round`` accepts.
 * Tool specs are translated from Strands ``ToolSpec`` to the OpenAI
   ``{"type": "function", "function": {...}}`` shape used by
-  ``LLMClient.{complete_json,chat_json_round}``.
-* Responses from ``chat_json_round`` are replayed as a short synthetic stream:
+  ``LLMClient.{complete_json,chat_round}``.
+* Responses from ``chat_round`` are replayed as a short synthetic stream:
   ``messageStart`` → one ``contentBlockDelta`` (text or tool use) → ``messageStop``.
   This matches what Strands' ``Agent`` loop expects without requiring the
-  underlying client to actually stream.
+  underlying client to actually stream. ``chat_round`` returns prose (no JSON
+  parsing); the structured-output path is handled separately via
+  ``structured_output`` below.
 """
 
 from __future__ import annotations
@@ -235,10 +237,16 @@ class LLMClientModel(Model):
     ) -> AsyncGenerator[StreamEvent, None]:
         """Run one turn of the backing LLM and synthesize Strands stream events.
 
-        The backing ``LLMClient.chat_json_round`` is called in a worker thread
-        so the event loop stays responsive. The full assistant turn is emitted
-        as a single content delta (text or tool use) — downstream Strands
-        components expect complete blocks, not token-level streaming.
+        The backing ``LLMClient.chat_round`` is called in a worker thread so the
+        event loop stays responsive. The full assistant turn is emitted as a
+        single content delta (text or tool use) — downstream Strands components
+        expect complete blocks, not token-level streaming.
+
+        ``chat_round`` returns raw assistant prose (or a ``__tool_calls__``
+        dict). Using it instead of ``chat_json_round`` is what lets
+        conversational agents (e.g. branding) receive free-form natural-language
+        replies — ``chat_json_round`` forces ``response_format=json_object`` on
+        the LLM and JSON-parses the result, which is wrong for chat.
 
         ``tool_choice`` is accepted for interface compatibility but is not
         forwarded: ``LLMClient`` does not currently expose a tool_choice knob.
@@ -267,7 +275,7 @@ class LLMClientModel(Model):
         )
 
         result = await asyncio.to_thread(
-            self._client.chat_json_round,
+            self._client.chat_round,
             oai_messages,
             temperature=temperature,
             tools=oai_tools,
@@ -301,8 +309,9 @@ class LLMClientModel(Model):
             yield {"messageStop": {"stopReason": "tool_use"}}
             return
 
-        # Plain text / structured response: serialize dict results to JSON so
-        # the caller receives deterministic content.
+        # Plain prose response from ``chat_round``. If a backing client (e.g.
+        # legacy implementations) hands us a dict instead, serialize it so the
+        # downstream Strands consumer still receives deterministic text.
         if isinstance(result, str):
             text = result
         else:

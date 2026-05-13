@@ -207,3 +207,26 @@ class LLMClient(ABC):
         raise LLMPermanentError(
             f"{type(self).__name__} does not implement chat_json_round (required for tool loops)"
         )
+
+    def chat_round(
+        self,
+        messages: list[Dict[str, Any]],
+        *,
+        temperature: float = 0.2,
+        tools: Optional[list] = None,
+        think: bool = False,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Single chat completion round that returns prose (or tool calls).
+
+        Returns either a plain string (assistant message content) or
+        ``{"__tool_calls__": [...]}`` when the model requests tool execution.
+        Unlike ``chat_json_round``, this does NOT request ``response_format=json_object``
+        and does NOT attempt to parse the content as JSON — use it for conversational
+        agents whose replies should be free-form natural language.
+
+        Default implementation: not supported — override in Ollama / Dummy clients.
+        """
+        raise LLMPermanentError(f"{type(self).__name__} does not implement chat_round")

@@ -186,7 +186,9 @@ class DummyLLMClient(LLMClient, Model):
 
         # Route through the existing complete_json pattern matcher for rich responses
         response_data = self.complete_json(user_text, system_prompt=system_prompt)
-        response_text = json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+        response_text = (
+            json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+        )
 
         # Check if Strands is requesting structured output via a tool
         structured_tool_name = None
@@ -225,7 +227,11 @@ class DummyLLMClient(LLMClient, Model):
         yield {
             "messageStop": {"stopReason": "tool_use" if structured_tool_name else "end_turn"},
             "metadata": {
-                "usage": {"inputTokens": len(user_text) // 4, "outputTokens": len(response_text) // 4, "totalTokens": (len(user_text) + len(response_text)) // 4},
+                "usage": {
+                    "inputTokens": len(user_text) // 4,
+                    "outputTokens": len(response_text) // 4,
+                    "totalTokens": (len(user_text) + len(response_text)) // 4,
+                },
                 "metrics": {"latencyMs": 1},
             },
         }
@@ -452,8 +458,7 @@ class DummyLLMClient(LLMClient, Model):
                 ],
             }
         elif (
-            ("execution_order" in lowered or "task_assignments" in lowered)
-            and "tasks" in lowered
+            ("execution_order" in lowered or "task_assignments" in lowered) and "tasks" in lowered
         ) or (
             # Strands-migrated Tech Lead: user prompt has product context
             # while execution_order / initiative → epic → story keywords
@@ -523,9 +528,9 @@ class DummyLLMClient(LLMClient, Model):
                 "spec_compliance_notes": "Code aligns with task requirements.",
                 "suggested_commit_message": "",
             }
-        elif ("code to review" in lowered or "review this code" in lowered or "chunk" in lowered) and (
-            "approved" not in lowered or len(lowered) > 200
-        ):
+        elif (
+            "code to review" in lowered or "review this code" in lowered or "chunk" in lowered
+        ) and ("approved" not in lowered or len(lowered) > 200):
             # Catch-all for code review / chunk review prompts routed through Strands
             return {
                 "approved": True,
@@ -762,6 +767,53 @@ class DummyLLMClient(LLMClient, Model):
                 "plan_version": 1,
             }
         return {"output": "Dummy response", "status": "ok"}
+
+    def chat_round(
+        self,
+        messages: list,
+        *,
+        temperature: float = 0.2,
+        tools: Optional[list] = None,
+        think: bool = False,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Prose chat counterpart to ``chat_json_round``.
+
+        With ``tools`` (especially Strands' ``StructuredOutputTool``), delegates
+        to ``chat_json_round`` so structured-output and tool-loop tests keep
+        working. Without tools, runs the user prompt through the same pattern
+        matcher ``complete_json`` uses and returns the JSON-serialized dict as
+        text — this preserves the dict-shaped fixtures the test suite asserts
+        on, while still exercising the prose-chat code path through the Strands
+        adapter (no ``response_format=json_object`` is forced on the wire).
+        """
+        if tools:
+            return self.chat_json_round(
+                messages,
+                temperature=temperature,
+                tools=tools,
+                think=think,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+        self._request_count += 1
+        system_prompt = None
+        user_prompt = ""
+        for m in messages:
+            if m.get("role") == "system":
+                system_prompt = m.get("content")
+            elif m.get("role") == "user":
+                user_prompt = m.get("content") or ""
+        data = self.complete_json(
+            user_prompt,
+            temperature=temperature,
+            system_prompt=system_prompt,
+            tools=None,
+            think=think,
+            **kwargs,
+        )
+        return json.dumps(data) if isinstance(data, dict) else str(data)
 
     def chat_json_round(
         self,

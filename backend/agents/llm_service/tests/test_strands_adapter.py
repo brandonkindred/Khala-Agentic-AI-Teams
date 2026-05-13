@@ -78,6 +78,30 @@ class _RecordingClient(LLMClient):
         )
         return self.response
 
+    def chat_round(
+        self,
+        messages: list,
+        *,
+        temperature: float = 0.2,
+        tools: Optional[list] = None,
+        think: bool = False,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Any:
+        # The strands adapter calls ``chat_round`` for ``stream()``. We record
+        # the same call shape and return the canned dict; the adapter will
+        # JSON-serialize it to text (matching the existing assertions).
+        self.chat_calls.append(
+            {
+                "messages": messages,
+                "temperature": temperature,
+                "tools": tools,
+                "think": think,
+                "max_tokens": max_tokens,
+            }
+        )
+        return self.response
+
 
 def _drain(gen) -> List[Dict[str, Any]]:
     """Drain a Strands async stream into a list for easy assertions."""
@@ -517,6 +541,9 @@ def test_run_json_via_strands_returns_empty_dict_on_exception() -> None:
 
     class _Broken(DummyLLMClient):
         def chat_json_round(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
+            raise RuntimeError("simulated LLM failure")
+
+        def chat_round(self, *a: Any, **kw: Any) -> Any:  # type: ignore[override]
             raise RuntimeError("simulated LLM failure")
 
         def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]

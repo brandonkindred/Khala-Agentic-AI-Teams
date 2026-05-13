@@ -607,7 +607,9 @@ class OllamaLLMClient(LLMClient):
                                 tool_call_buffers: dict[int, dict] = {}
                                 has_reasoning: bool = False
                                 partial_buf = ""  # buffer for lines split across TCP chunks
-                                usage_data: Optional[Dict[str, Any]] = None  # token usage from final chunk
+                                usage_data: Optional[Dict[str, Any]] = (
+                                    None  # token usage from final chunk
+                                )
                                 for raw_line in response.iter_lines():
                                     if not raw_line:
                                         continue
@@ -628,7 +630,9 @@ class OllamaLLMClient(LLMClient):
                                             except json.JSONDecodeError:
                                                 # Combined still invalid — discard buffer,
                                                 # fall through to try raw_line on its own.
-                                                logger.debug("Discarding unrecoverable partial SSE buffer")
+                                                logger.debug(
+                                                    "Discarding unrecoverable partial SSE buffer"
+                                                )
 
                                     if chunk_data is None:
                                         # Process raw_line normally
@@ -1011,7 +1015,9 @@ class OllamaLLMClient(LLMClient):
                 use_think=think,
             )
         except LLMJsonParseError:
-            self._record_telemetry(status="error", error_type="json_parse", prompt_text=prompt, response_text=content)
+            self._record_telemetry(
+                status="error", error_type="json_parse", prompt_text=prompt, response_text=content
+            )
             # If content starts with '{' but is unparseable, the server likely cut off the
             # response before the JSON was complete (finish_reason="stop" despite truncation).
             # Attempt continuation to recover the rest of the JSON.
@@ -1233,6 +1239,60 @@ class OllamaLLMClient(LLMClient):
             partial_content=accumulated,
             finish_reason="length",
         )
+
+    def chat_round(
+        self,
+        messages: list,
+        *,
+        temperature: float = 0.2,
+        tools: Optional[list] = None,
+        think: bool = False,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """One chat completion round that returns prose (or tool calls).
+
+        See ``LLMClient.chat_round``. Returns either the raw assistant content
+        string or a ``{"__tool_calls__": [...]}`` dict when the model invokes
+        tools. No JSON output is forced and no JSON parsing is attempted on
+        plain content — this is the prose-chat counterpart to
+        ``chat_json_round`` and is what conversational agents (and the Strands
+        adapter's ``stream()``) should use.
+        """
+        max_retries, backoff_base, backoff_max = _parse_retry_config()
+        sem = _get_ollama_semaphore()
+        self._current_caller = _caller_tag()
+        if max_tokens is None:
+            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
+            if env_max:
+                try:
+                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
+                except ValueError:
+                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
+            else:
+                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
+        max_tokens = min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        payload: dict = {
+            "model": self.model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": messages,
+            "think": think,
+        }
+        if tools:
+            payload["tools"] = tools
+        content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+        stripped = (content or "").strip()
+        if stripped.startswith("{") and "__tool_calls__" in stripped:
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict) and "__tool_calls__" in parsed:
+                    self._record_telemetry(status="success")
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        self._record_telemetry(status="success")
+        return content
 
     def chat_json_round(
         self,
