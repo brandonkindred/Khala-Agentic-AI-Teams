@@ -231,6 +231,45 @@ describe('JobsDashboardComponent', () => {
     expect(host.querySelector('td.col-job .job-team')).toBeNull();
   });
 
+  it('renders non-empty status-badge text for every status (WCAG 1.4.1 safety net)', () => {
+    // The 3px left-border row indicator encodes status via colour only and shares
+    // colours across statuses (waiting/interrupted both use --kh-warning,
+    // pending/cancelled both use --kh-border-muted), so the badge text is the
+    // load-bearing non-colour cue. Guard against future refactors silently
+    // dropping that text fallback. See #496.
+    const cases = [
+      { status: 'running', waiting: false, expected: 'Running' },
+      { status: 'pending', waiting: false, expected: 'Pending' },
+      { status: 'completed', waiting: false, expected: 'Completed' },
+      { status: 'failed', waiting: false, expected: 'Failed' },
+      { status: 'cancelled', waiting: false, expected: 'Cancelled' },
+      { status: 'interrupted', waiting: false, expected: 'Interrupted' },
+      { status: 'running', waiting: true, expected: 'Waiting' },
+    ];
+    component.jobs = cases.map(({ status, waiting }, i) => ({
+      unified: {
+        source: 'software_engineering',
+        jobType: 'run_team',
+        jobId: `j${i}`,
+        status,
+        createdAt: new Date().toISOString(),
+        label: 'Run',
+        repoPath: '/work/repo',
+      },
+      seDetail: waiting ? { waitingForAnswers: true } : undefined,
+    }) as any);
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    const badges = Array.from(host.querySelectorAll('.status-badge'));
+    expect(badges.length).toBe(cases.length);
+    const labels = badges.map((b) => (b.textContent ?? '').trim());
+    for (const label of labels) {
+      expect(label.length).toBeGreaterThan(0);
+    }
+    expect(new Set(labels)).toEqual(new Set(cases.map((c) => c.expected)));
+  });
+
   it('navigateToJob navigates with jobId and tab for SE job', () => {
     const job = {
       unified: { source: 'software_engineering', jobType: 'run_team', jobId: 'j1' },
