@@ -20,9 +20,20 @@ for future data in this process at all.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Literal, Optional
+from typing import ClassVar, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+# Current strategy↔harness protocol version. Bumped when the wire format or
+# the set of guaranteed callbacks changes in a way that could surprise a
+# strategy written against an earlier engine build (issue #379, Trading 5/5
+# Step 9 / criterion 9). The default ``Strategy.protocol_version`` is pinned
+# at ``1`` so every existing strategy keeps working unchanged; strategies
+# that want to opt in to v≥2 features (currently: nothing user-visible —
+# the version channel exists so future changes have a graceful migration
+# path) override the class attribute. The harness advertises both values
+# in its capability handshake so the parent can negotiate.
+CURRENT_PROTOCOL_VERSION = 1
 
 
 class OrderSide(str, Enum):
@@ -457,7 +468,21 @@ class Strategy:
 
     Subclasses override the ``on_*`` hooks they care about. The default
     implementations are no-ops so minimal strategies stay terse.
+
+    ``protocol_version`` (issue #379, Trading 5/5 Step 9) is the
+    strategy's declared compatibility level with the engine's
+    strategy↔harness wire protocol. Defaults to ``1`` so every existing
+    strategy keeps working unchanged (legacy mode). The harness echoes
+    the resolved version in its ``ready`` ``capabilities`` payload so the
+    parent ``TradingService`` can negotiate features that were added
+    after v1 without breaking older strategies. Override the class
+    attribute when a strategy is written against a newer protocol level;
+    a strategy declaring a version *higher* than the engine knows about
+    is rejected at handshake with a structured ``contract_error`` so
+    silent forward-compat drift can't ship invisible behaviour gaps.
     """
+
+    protocol_version: ClassVar[int] = 1
 
     def on_start(self, ctx: StrategyContext) -> None:  # noqa: D401 - hook
         """Called once before the first bar."""
