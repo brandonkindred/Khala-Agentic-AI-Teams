@@ -272,6 +272,37 @@ def test_streaming_buffer_carries_initial_capital_before_first_fill() -> None:
     assert curve.equity == [100_000.0, 100_000.0, 100_500.0, 100_600.0]
 
 
+def test_streaming_buffer_overflow_carry_propagates_to_gap_weekday() -> None:
+    """A weekend overflow bar must propagate its equity into a following
+    gap weekday — otherwise the materialized curve moves backward at sort.
+
+    Regression test for a chatgpt-codex-connector review on #518: with
+    preallocated weekdays [Fri, Mon], a stamped Friday, weekend overflow
+    on Sat/Sun, and *no* Monday bar, the old fix forward-filled Mon to
+    the Friday value before merging overflow. After sorting, the curve
+    read ``[Fri=100k, Sat=100.5k, Sun=100.8k, Mon=100k]`` — a backward
+    jump on Monday that ``compute_performance_metrics`` would translate
+    into a bogus negative return.
+    """
+    preallocated = [date_cls(2024, 1, 5), date_cls(2024, 1, 8)]  # Fri, Mon
+    buf = _StreamingEquityBuffer(preallocated, 100_000.0)
+    buf.record("2024-01-05", 100_000.0)  # Fri (in-range)
+    buf.record("2024-01-06", 100_500.0)  # Sat (overflow)
+    buf.record("2024-01-07", 100_800.0)  # Sun (overflow)
+    # No Monday bar — Mon must carry forward from the most recent
+    # *chronological* explicit sample (Sun=100_800.0), not from Fri.
+
+    curve = buf.materialize()
+    assert curve is not None
+    assert curve.dates == [
+        date_cls(2024, 1, 5),
+        date_cls(2024, 1, 6),
+        date_cls(2024, 1, 7),
+        date_cls(2024, 1, 8),
+    ]
+    assert curve.equity == [100_000.0, 100_500.0, 100_800.0, 100_800.0]
+
+
 def test_streaming_buffer_interleaves_overflow_chronologically() -> None:
     """Overflow dates (e.g. weekend crypto bars) merge into the curve in
     chronological position, not appended at the tail.

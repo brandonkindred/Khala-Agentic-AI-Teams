@@ -277,31 +277,31 @@ class _StreamingEquityBuffer:
     def materialize(self) -> Optional[EquityCurve]:
         if not self._filled_indices and not self._overflow:
             return None
-        # Forward-fill preallocated slots so the materialized curve covers
-        # every weekday in ``[start_date, end_date]``, matching
-        # :func:`build_equity_curve_from_trades`. Gap days (market
-        # holidays, missing bars) carry forward the last EOD equity;
-        # weekdays before the first filled slot carry the initial capital.
-        # Without this the streaming and reconstructed curves operate on
-        # different date sets and ``compute_performance_metrics`` produces
-        # different volatility / Sharpe values for the same run.
-        pairs: List[tuple] = []
-        if self._filled_indices:
-            seen = set(self._filled_indices)
-            carry = self._initial_capital
-            for i, d in enumerate(self._dates):
-                if i in seen:
-                    carry = float(self._equity[i])
-                pairs.append((d, carry))
-        # Overflow entries (weekend bars, paper-trade days past
-        # ``end_date``) merge in by date so the curve stays
-        # chronological end-to-end.
+        # Materialize covers every preallocated weekday plus every
+        # overflow date (weekend bars, paper-trade days past
+        # ``end_date``). Forward-fill must operate over the *merged*
+        # chronological sequence: a weekend overflow bar that updates
+        # equity between two weekdays has to propagate into a
+        # following gap weekday, otherwise the curve moves backward
+        # at the sort step (regression caught by
+        # ``test_streaming_buffer_overflow_carry_propagates_to_gap_weekday``).
+        explicit: Dict[date_cls, float] = {
+            self._dates[i]: float(self._equity[i]) for i in self._filled_indices
+        }
         if self._overflow:
-            pairs.extend(self._overflow.items())
-            pairs.sort(key=lambda p: p[0])
+            explicit.update(self._overflow)
+        all_dates = sorted(set(self._dates) | explicit.keys())
+        dates: List[date_cls] = []
+        equity: List[float] = []
+        carry = self._initial_capital
+        for d in all_dates:
+            if d in explicit:
+                carry = explicit[d]
+            dates.append(d)
+            equity.append(carry)
         return EquityCurve(
-            dates=[d for d, _ in pairs],
-            equity=[e for _, e in pairs],
+            dates=dates,
+            equity=equity,
             initial_capital=self._initial_capital,
         )
 
