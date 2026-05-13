@@ -43,6 +43,9 @@ def _fresh_metrics() -> BacktestResult:
         max_drawdown_pct=4.0,
         win_rate_pct=55.0,
         profit_factor=1.6,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
 

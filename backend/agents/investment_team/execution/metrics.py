@@ -94,7 +94,14 @@ def _parse_date(s: str) -> date:
     return date.fromisoformat(s[:10])
 
 
-def _weekday_range(start: date, end: date) -> List[date]:
+def weekday_range(start: date, end: date) -> List[date]:
+    """Inclusive list of weekdays in ``[start, end]``.
+
+    Public since #378 — the streaming equity buffer in
+    :mod:`investment_team.trading_service.service` preallocates against
+    the same date set that :func:`build_equity_curve_from_trades` uses,
+    so the two curves are guaranteed to align on every trading day.
+    """
     out: List[date] = []
     d = start
     while d <= end:
@@ -140,7 +147,7 @@ def build_equity_curve_from_trades(
     if span_end < span_start:
         span_end = span_start
 
-    dates = _weekday_range(span_start, span_end)
+    dates = weekday_range(span_start, span_end)
     if not dates:
         return EquityCurve(dates=[], equity=[], initial_capital=initial_capital)
 
@@ -310,7 +317,7 @@ def compute_performance_metrics(
         #
         # Restricted to ``len == 1`` rather than ``returns.size == 0`` to
         # avoid annualizing from a fully empty curve (e.g. a weekend-only
-        # ``start_date``/``end_date`` window where ``_weekday_range`` drops
+        # ``start_date``/``end_date`` window where ``weekday_range`` drops
         # every day) — that has zero observations to anchor an annualization.
         annualized_log_return = math.log1p(total_return_frac) * TRADING_DAYS_PER_YEAR
         annualized_return_frac = math.expm1(annualized_log_return)

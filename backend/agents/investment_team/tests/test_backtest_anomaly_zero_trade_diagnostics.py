@@ -35,6 +35,9 @@ def _empty_metrics() -> BacktestResult:
         max_drawdown_pct=0.0,
         win_rate_pct=0.0,
         profit_factor=0.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
 
@@ -47,6 +50,9 @@ def _winning_metrics() -> BacktestResult:
         max_drawdown_pct=5.0,
         win_rate_pct=58.0,
         profit_factor=1.6,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
 

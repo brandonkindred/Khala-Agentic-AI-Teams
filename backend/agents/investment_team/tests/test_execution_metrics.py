@@ -467,7 +467,7 @@ def test_metrics_handles_ruined_equity_curve_without_raising():
 
 
 def test_metrics_empty_equity_curve_does_not_annualize_total_return():
-    # Weekend-only span: ``_weekday_range`` drops every day so ``curve.equity``
+    # Weekend-only span: ``weekday_range`` drops every day so ``curve.equity``
     # is empty even though the trade carries non-zero ``net_pnl``. The
     # single-point fallback must NOT fire here — there are zero observations
     # to anchor an annualization, so annualized return must stay 0.0.

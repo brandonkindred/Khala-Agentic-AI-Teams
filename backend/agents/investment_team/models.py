@@ -531,8 +531,8 @@ class BacktestResult(BaseModel):
     max_drawdown_pct: float
     win_rate_pct: float
     profit_factor: float
-    sortino_ratio: float = 0.0
-    calmar_ratio: float = 0.0
+    sortino_ratio: float
+    calmar_ratio: float
     max_drawdown_duration_days: int = 0
     risk_free_rate: float = 0.0
     alpha_pct: Optional[float] = None
@@ -548,8 +548,9 @@ class BacktestResult(BaseModel):
     reject_reason: Optional[str] = None
     execution_diagnostics: Optional[BacktestExecutionDiagnostics] = None
     coverage_report: Optional[CoverageReport] = None
-    # Issue #247 — walk-forward + DSR diagnostics.
-    deflated_sharpe: float = 0.0
+    # Issue #247 — walk-forward + DSR diagnostics. Required as of #378;
+    # callers without a walk-forward run pass 0.0 explicitly.
+    deflated_sharpe: float
     sharpe_ci_low: Optional[float] = None
     sharpe_ci_high: Optional[float] = None
     is_sharpe: Optional[float] = None
@@ -575,11 +576,12 @@ class BacktestResult(BaseModel):
     # cache).
     dataset_fingerprint: Optional[str] = None
 
-    @field_validator(
-        "sortino_ratio", "calmar_ratio", "risk_free_rate", "deflated_sharpe", mode="before"
-    )
+    @field_validator("risk_free_rate", mode="before")
     @classmethod
-    def _coerce_float_none_to_zero(cls, v: object) -> object:
+    def _coerce_risk_free_rate_none_to_zero(cls, v: object) -> object:
+        # Legacy rows may persist ``risk_free_rate`` as ``None``; coerce to
+        # ``0.0`` so they rehydrate. ``sortino_ratio``/``calmar_ratio``/
+        # ``deflated_sharpe`` became required in #378 — no None coercion.
         return 0.0 if v is None else v
 
     @field_validator("max_drawdown_duration_days", mode="before")

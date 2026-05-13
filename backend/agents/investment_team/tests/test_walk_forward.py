@@ -303,6 +303,8 @@ def test_backtest_result_accepts_walk_forward_diagnostics():
         acceptance_reason="all four criteria met",
         regime_results=[{"regime": "vix_q1", "sharpe": 1.1, "beat_benchmark": True}],
         fold_results=[{"fold_index": 0, "oos_sharpe": 0.8}],
+        calmar_ratio=0.0,
+        sortino_ratio=0.0,
     )
     assert r.deflated_sharpe == 0.72
     assert r.oos_trade_count == 42

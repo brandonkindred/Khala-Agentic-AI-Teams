@@ -211,6 +211,9 @@ def test_evaluate_walk_forward_populates_oos_fields():
         max_drawdown_pct=4.0,
         win_rate_pct=55.0,
         profit_factor=1.4,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     market_data = {"AAPL": _stub_bars("AAPL")}
 
@@ -259,6 +262,9 @@ def test_evaluate_walk_forward_with_empty_trades_does_not_crash():
         max_drawdown_pct=0.0,
         win_rate_pct=0.0,
         profit_factor=0.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
     result = orch._evaluate_walk_forward(_spec(), {}, config, trades, base_metrics)
@@ -290,6 +296,9 @@ def test_evaluate_walk_forward_falls_back_when_60_40_unavailable():
         max_drawdown_pct=3.0,
         win_rate_pct=52.0,
         profit_factor=1.2,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
     result = orch._evaluate_walk_forward(
@@ -368,6 +377,8 @@ def test_acceptance_gate_passes_winning_walk_forward_result():
             {"regime": "vix_q3", "beat_benchmark": False},
             {"regime": "vix_q4", "beat_benchmark": False},
         ],
+        calmar_ratio=0.0,
+        sortino_ratio=0.0,
     )
     results = AcceptanceGate().check(res, cfg, n_trials=10)
     assert all(r.passed for r in results)
@@ -403,6 +414,8 @@ def test_acceptance_gate_rejects_overfit_pattern():
             {"regime": "vix_q3", "beat_benchmark": False},
             {"regime": "vix_q4", "beat_benchmark": False},
         ],
+        calmar_ratio=0.0,
+        sortino_ratio=0.0,
     )
     results = AcceptanceGate().check(res, cfg, n_trials=50)
     assert not all(r.passed for r in results)
@@ -514,6 +527,9 @@ def test_is_sharpe_uses_training_segments_not_full_span():
         max_drawdown_pct=4.0,
         win_rate_pct=55.0,
         profit_factor=1.4,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
     # Two trades per month, evenly distributed → at least one IS trade per
@@ -599,6 +615,9 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
         max_drawdown_pct=4.0,
         win_rate_pct=60.0,
         profit_factor=2.4,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     overfit_trades = _trades_across_year(n_per_month=4, base_pnl=80.0)
 

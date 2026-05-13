@@ -40,6 +40,9 @@ def _stub_backtest_result() -> BacktestResult:
         max_drawdown_pct=-3.0,
         win_rate_pct=55.0,
         profit_factor=1.2,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
 

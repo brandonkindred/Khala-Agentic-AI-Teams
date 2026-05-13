@@ -22,6 +22,11 @@ def _backtest_payload() -> dict[str, float]:
         "max_drawdown_pct": 0.0,
         "win_rate_pct": 0.0,
         "profit_factor": 0.0,
+        # #378: sortino_ratio / calmar_ratio / deflated_sharpe are now
+        # required (no Optional defaults, no None coercion).
+        "sortino_ratio": 0.0,
+        "calmar_ratio": 0.0,
+        "deflated_sharpe": 0.0,
     }
 
 
