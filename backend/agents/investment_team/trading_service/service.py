@@ -230,9 +230,12 @@ class _StreamingEquityBuffer:
     trading day wins — matching the previous dict-based contract.
 
     An ``overflow`` dict catches days outside the preallocated range
-    (paper-trade runs that extend past ``config.end_date``, or runs
-    where ``start_date == end_date`` falls on a weekend); those days
-    are appended in sorted order at materialization time.
+    (paper-trade runs that extend past ``config.end_date``, weekend
+    crypto bars inside the configured window, or runs where
+    ``start_date == end_date`` falls on a weekend). At materialization
+    time the in-range slice and the overflow tail are merged into a
+    single chronologically sorted curve so ``compute_performance_metrics``
+    sees adjacent ``(date, equity)`` pairs in time order.
     """
 
     __slots__ = (
@@ -261,8 +264,9 @@ class _StreamingEquityBuffer:
         idx = self._index_by_date.get(day)
         if idx is None:
             # Outside the preallocated range (e.g. live paper-trade past
-            # ``end_date``). Falls back to a dict tail — correctness over
-            # perf on the rare overflow path.
+            # ``end_date``, weekend crypto bars). Falls back to a dict
+            # tail; merged back into chronological order at materialize
+            # time. Correctness over perf on the rare overflow path.
             self._overflow[day] = equity
             return
         if idx not in self._seen_indices:
@@ -273,15 +277,20 @@ class _StreamingEquityBuffer:
     def materialize(self) -> Optional[EquityCurve]:
         if not self._filled_indices and not self._overflow:
             return None
-        dates: List[date_cls] = [self._dates[i] for i in self._filled_indices]
-        equity: List[float] = self._equity[self._filled_indices].tolist()
+        # ``_filled_indices`` is already chronological (bars arrive in
+        # order and ``_dates`` is the chronological weekday list), but
+        # overflow entries may slot in *between* in-range days (e.g.
+        # weekend bars). Merge by sorting the union; the cost is O(D
+        # log D) once per run — D is bounded by trading-day count.
+        pairs: List[tuple] = [
+            (self._dates[i], float(self._equity[i])) for i in self._filled_indices
+        ]
         if self._overflow:
-            for d in sorted(self._overflow):
-                dates.append(d)
-                equity.append(self._overflow[d])
+            pairs.extend(self._overflow.items())
+            pairs.sort(key=lambda p: p[0])
         return EquityCurve(
-            dates=dates,
-            equity=equity,
+            dates=[d for d, _ in pairs],
+            equity=[e for _, e in pairs],
             initial_capital=self._initial_capital,
         )
 

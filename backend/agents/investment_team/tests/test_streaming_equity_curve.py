@@ -203,6 +203,41 @@ def test_streaming_buffer_materialize_returns_none_when_empty() -> None:
     assert buf.materialize() is None
 
 
+def test_streaming_buffer_interleaves_overflow_chronologically() -> None:
+    """Overflow dates (e.g. weekend crypto bars) merge into the curve in
+    chronological position, not appended at the tail.
+
+    Regression test for a chatgpt-codex-connector review on #518: the
+    old materialize() emitted ``[Mon, Tue, Wed, Thu, Fri, Sat, Sun]`` →
+    ``[Mon, Tue, Wed, Thu, Fri] + sorted([Sat, Sun])`` which is already
+    chronological when the overflow lies *after* the in-range slice,
+    but breaks when the overflow lies *between* two in-range days
+    (e.g. a weekend bar between two weeks of weekday bars).
+    """
+    # Preallocate Fri Jan 5 + Mon Jan 8 + Tue Jan 9 (skipping the weekend).
+    preallocated = [date_cls(2024, 1, 5), date_cls(2024, 1, 8), date_cls(2024, 1, 9)]
+    buf = _StreamingEquityBuffer(preallocated, 100_000.0)
+
+    # Stamp the in-range Friday and Tuesday, plus a Saturday that lands
+    # in overflow (Sat Jan 6 is not in the preallocated weekday set).
+    buf.record("2024-01-05", 100.0)
+    buf.record("2024-01-06", 101.0)  # weekend → overflow
+    buf.record("2024-01-08", 102.0)
+    buf.record("2024-01-09", 103.0)
+
+    curve = buf.materialize()
+    assert curve is not None
+    # All four samples must appear in chronological order, with the
+    # Saturday slotted between Friday and the following Monday.
+    assert curve.dates == [
+        date_cls(2024, 1, 5),
+        date_cls(2024, 1, 6),
+        date_cls(2024, 1, 8),
+        date_cls(2024, 1, 9),
+    ]
+    assert curve.equity == [100.0, 101.0, 102.0, 103.0]
+
+
 def test_streaming_curve_matches_between_per_bar_and_chunked_paths() -> None:
     """Acceptance #3: per-bar and chunked replays produce the same EOD curve.
 
