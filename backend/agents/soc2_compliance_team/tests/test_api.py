@@ -4,6 +4,7 @@ Patches the module-level ``_job_manager`` to the in-memory ``fake_job_client``
 fixture so these tests run hermetically in the default ``test-backend`` lane.
 """
 
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +21,9 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def _patched(monkeypatch: pytest.MonkeyPatch, fake_job_client):
     monkeypatch.setattr(api_main, "_job_manager", fake_job_client)
+    # Force the threaded branch in `run_audit` — Temporal isn't available in
+    # unit tests, and `start_audit_workflow` would raise without a client.
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     return fake_job_client
 
 
@@ -42,7 +46,7 @@ def test_run_audit_requires_repo_path() -> None:
     assert r.status_code == 400
 
 
-def test_run_audit_and_poll(tmp_path: Path) -> None:
+def test_run_audit_and_poll(tmp_path: Path, _patched) -> None:
     """POST with valid path returns job_id; status endpoint reports the job."""
     (tmp_path / "file.txt").write_text("x")
 
@@ -56,13 +60,23 @@ def test_run_audit_and_poll(tmp_path: Path) -> None:
         r = client.post("/soc2-audit/run", json={"repo_path": str(tmp_path)})
         assert r.status_code == 200
         data = r.json()
-        assert "job_id" in data
+        job_id = data["job_id"]
         assert data["status"] == "running"
 
-        r = client.get(f"/soc2-audit/status/{data['job_id']}")
+        # Wait for the background thread to finish *while the stub is still
+        # active*, so the real orchestrator path is never reached.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            job = _patched.get_job(job_id)
+            if job and job.get("status") in ("completed", "failed"):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"Audit job {job_id} did not reach a terminal state in 2s")
+
+        r = client.get(f"/soc2-audit/status/{job_id}")
         assert r.status_code == 200
-        # Job may still be running or already completed depending on timing.
-        assert r.json()["status"] in ("pending", "running", "completed", "failed")
+        assert r.json()["status"] == "completed"
 
 
 def test_status_404() -> None:
