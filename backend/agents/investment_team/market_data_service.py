@@ -450,16 +450,33 @@ class MarketDataService:
                     return []
 
                 bars: List[OHLCVBar] = []
+                repairs = 0
                 for v in values:
+                    o = round(float(v["open"]), 4)
+                    h = round(float(v["high"]), 4)
+                    ll = round(float(v["low"]), 4)
+                    c = round(float(v["close"]), 4)
+                    # Normalise OHLC invariants — see _df_to_bars for rationale.
+                    h_fixed = max(o, h, ll, c)
+                    l_fixed = min(o, h, ll, c)
+                    if h_fixed != h or l_fixed != ll:
+                        repairs += 1
                     bars.append(
                         OHLCVBar(
                             date=v["datetime"][:10],
-                            open=round(float(v["open"]), 4),
-                            high=round(float(v["high"]), 4),
-                            low=round(float(v["low"]), 4),
-                            close=round(float(v["close"]), 4),
+                            open=o,
+                            high=h_fixed,
+                            low=l_fixed,
+                            close=c,
                             volume=float(v.get("volume", 0)),
                         )
+                    )
+                if repairs > 0:
+                    logger.warning(
+                        "Twelve Data: repaired OHLC invariants on %d/%d bars for %s",
+                        repairs,
+                        len(bars),
+                        td_symbol,
                     )
                 # Twelve Data returns newest-first; reverse to chronological order
                 bars.reverse()
@@ -617,22 +634,37 @@ class MarketDataService:
                 return []
 
             bars: List[OHLCVBar] = []
+            repairs = 0
             for bar_date in sorted(ts):
                 if bar_date < start_date or bar_date > end_date:
                     continue
                 entry = ts[bar_date]
                 # Alpha Vantage key names vary by endpoint; try common patterns
+                o = round(float(entry.get("1. open", entry.get("1a. open (USD)", 0))), 4)
+                h = round(float(entry.get("2. high", entry.get("2a. high (USD)", 0))), 4)
+                ll = round(float(entry.get("3. low", entry.get("3a. low (USD)", 0))), 4)
+                c = round(float(entry.get("4. close", entry.get("4a. close (USD)", 0))), 4)
+                # Normalise OHLC invariants — see _df_to_bars for rationale.
+                h_fixed = max(o, h, ll, c)
+                l_fixed = min(o, h, ll, c)
+                if h_fixed != h or l_fixed != ll:
+                    repairs += 1
                 bars.append(
                     OHLCVBar(
                         date=bar_date,
-                        open=round(float(entry.get("1. open", entry.get("1a. open (USD)", 0))), 4),
-                        high=round(float(entry.get("2. high", entry.get("2a. high (USD)", 0))), 4),
-                        low=round(float(entry.get("3. low", entry.get("3a. low (USD)", 0))), 4),
-                        close=round(
-                            float(entry.get("4. close", entry.get("4a. close (USD)", 0))), 4
-                        ),
+                        open=o,
+                        high=h_fixed,
+                        low=l_fixed,
+                        close=c,
                         volume=float(entry.get("5. volume", entry.get("5. market cap (USD)", 0))),
                     )
+                )
+            if repairs > 0:
+                logger.warning(
+                    "Alpha Vantage: repaired OHLC invariants on %d/%d bars for %s",
+                    repairs,
+                    len(bars),
+                    symbol,
                 )
             return bars
 
@@ -646,18 +678,44 @@ class MarketDataService:
 
     @staticmethod
     def _df_to_bars(df: object) -> List[OHLCVBar]:
-        """Convert a yfinance DataFrame to a list of OHLCVBar."""
+        """Convert a yfinance DataFrame to a list of OHLCVBar.
+
+        Yahoo Finance daily FX bars (and occasionally other classes) are
+        aggregated from intraday snapshots taken at different counterparties
+        and timestamps, so the reported H/L is not always a strict envelope
+        over O/C. The preflight integrity gate in
+        :mod:`investment_team.execution.data_quality` would (correctly)
+        reject such bars, but strategies that read H/L for breakout / stop
+        signals can't backtest against them either. Normalise the
+        invariants here — ``H = max(O, H, L, C)``, ``L = min(O, H, L, C)`` —
+        so downstream consumers always see coherent bars.
+        """
         bars: List[OHLCVBar] = []
+        repairs = 0
         for idx, row in df.iterrows():  # type: ignore[union-attr]
             bar_date = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+            o = round(float(row["Open"]), 4)
+            h = round(float(row["High"]), 4)
+            ll = round(float(row["Low"]), 4)
+            c = round(float(row["Close"]), 4)
+            h_fixed = max(o, h, ll, c)
+            l_fixed = min(o, h, ll, c)
+            if h_fixed != h or l_fixed != ll:
+                repairs += 1
             bars.append(
                 OHLCVBar(
                     date=bar_date,
-                    open=round(float(row["Open"]), 4),
-                    high=round(float(row["High"]), 4),
-                    low=round(float(row["Low"]), 4),
-                    close=round(float(row["Close"]), 4),
+                    open=o,
+                    high=h_fixed,
+                    low=l_fixed,
+                    close=c,
                     volume=float(row.get("Volume", 0)),
                 )
+            )
+        if repairs > 0:
+            logger.warning(
+                "yfinance: repaired OHLC invariants on %d/%d bars",
+                repairs,
+                len(bars),
             )
         return bars

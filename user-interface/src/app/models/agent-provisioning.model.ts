@@ -1,9 +1,9 @@
 /**
  * Models for the Agent Provisioning Team API.
+ *
+ * Permission tiers were removed (#456): every sandbox is provisioned
+ * with full access on every backing service.
  */
-
-/** Access permission tiers for agent provisioning. */
-export type AccessTier = 'minimal' | 'standard' | 'elevated' | 'full';
 
 /** Phases in the provisioning workflow. */
 export type ProvisioningPhase =
@@ -36,7 +36,6 @@ export const PROVISIONING_PHASES: ProvisioningPhaseDefinition[] = [
 export interface ProvisionRequest {
   agent_id: string;
   manifest_path?: string;
-  access_tier?: AccessTier;
   workspace_path?: string;
 }
 
@@ -92,7 +91,6 @@ export interface ToolOnboardingInfo {
 export interface OnboardingPacket {
   summary: string;
   tools: ToolOnboardingInfo[];
-  access_tier: string;
   environment_variables: Record<string, string>;
 }
 

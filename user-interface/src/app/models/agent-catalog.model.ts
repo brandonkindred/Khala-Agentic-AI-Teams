@@ -3,8 +3,6 @@
  * `backend/agents/agent_registry/models.py`.
  */
 
-import type { AccessTier } from './agent-provisioning.model';
-
 export type InvokeKind = 'http' | 'function' | 'temporal';
 
 export interface IOSchema {
@@ -22,7 +20,6 @@ export interface InvokeSpec {
 
 export interface SandboxSpec {
   manifest_path?: string | null;
-  access_tier?: AccessTier;
 }
 
 export interface SourceInfo {

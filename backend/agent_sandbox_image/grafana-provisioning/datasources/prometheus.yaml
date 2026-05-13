@@ -1,0 +1,12 @@
+# Per-sandbox Grafana datasource provisioning. Wires the sandbox's
+# in-network Prometheus as the default datasource so the user can browse
+# metrics immediately without manual configuration.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

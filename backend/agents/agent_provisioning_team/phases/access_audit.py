@@ -1,18 +1,22 @@
 """
-Access audit phase: Verify least-privilege compliance.
+Access audit phase: Surface the permissions provisioned for each tool.
 
-This is phase 4 of the provisioning workflow.
+Phase 4 of the provisioning workflow. The historical least-privilege /
+tier-validation logic was removed when the tier system was dropped (#456):
+every sandbox is now provisioned with full access, so there is no expected
+tier to validate against. The phase still runs so callers continue to see
+the per-tool ``AccessVerification`` shape (and any provisioner errors that
+showed up during account provisioning), but it no longer fails on
+"over-permissioned" results — over-permissioning is the design intent now.
 """
 
 from typing import Callable, Dict, List, Optional
 
 from ..models import (
     AccessAuditResult,
-    AccessTier,
     AccessVerification,
     ToolProvisionResult,
 )
-from ..shared.access_policy import validate_permissions
 from ..shared.tool_agent_registry import build_default_tool_agents
 from ..shared.tool_manifest import ToolManifest
 from ..tool_agents.base import ToolProvisionerInterface
@@ -26,32 +30,29 @@ def _build_provisioners() -> Dict[str, ToolProvisionerInterface]:
 def run_access_audit(
     agent_id: str,
     tool_results: List[ToolProvisionResult],
-    access_tier: AccessTier,
     manifest: Optional[ToolManifest] = None,
     provisioners: Optional[Dict[str, ToolProvisionerInterface]] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> AccessAuditResult:
-    """
-    Execute the access audit phase.
-
-    Verifies that provisioned access matches the requested tier
-    and doesn't exceed least-privilege requirements.
+    """Audit provisioned access for each tool.
 
     Args:
         agent_id: Unique identifier for the agent
         tool_results: Results from account provisioning phase
-        access_tier: Requested access tier
-        manifest: Tool manifest (optional, for additional validation)
-        provisioners: Provisioner instances for verification
+        manifest: Tool manifest (optional, kept for parity with future per-tool checks)
+        provisioners: Provisioner instances (held for future re-verification)
         progress_callback: Callback for progress updates
 
     Returns:
-        AccessAuditResult with verification results
+        AccessAuditResult — passes whenever every tool succeeded in
+        account provisioning. Failures during provisioning surface as
+        per-tool errors and overall ``passed=False``; permission grants
+        are recorded as-is, not validated against a tier.
     """
-    # NOTE: previously this line was `provisioners or _build_provisioners()`
-    # which discarded the result and left `provs` unbound. The bug meant the
-    # audit phase silently ran without provisioner instances.
-    provs = provisioners if provisioners is not None else build_default_tool_agents()  # noqa: F841 — held for future per-tool re-verification
+    # `provs` is held for future per-tool re-verification hooks; keeping the
+    # parameter avoids churning the orchestrator call site if/when tier-free
+    # auditing grows back.
+    _ = provisioners if provisioners is not None else build_default_tool_agents()
 
     verifications: List[AccessVerification] = []
     all_warnings: List[str] = []
@@ -66,7 +67,6 @@ def run_access_audit(
                 AccessVerification(
                     tool_name=result.tool_name,
                     passed=False,
-                    expected_tier=access_tier.value,
                     actual_permissions=[],
                     errors=[f"Tool provisioning failed: {result.error}"],
                 )
@@ -77,25 +77,13 @@ def run_access_audit(
         if progress_callback:
             progress_callback(f"Auditing {result.tool_name}...")
 
-        passed, warnings = validate_permissions(
-            result.tool_name,
-            access_tier,
-            result.permissions,
+        verifications.append(
+            AccessVerification(
+                tool_name=result.tool_name,
+                passed=True,
+                actual_permissions=result.permissions,
+            )
         )
-
-        verification = AccessVerification(
-            tool_name=result.tool_name,
-            passed=passed,
-            expected_tier=access_tier.value,
-            actual_permissions=result.permissions,
-            warnings=warnings,
-        )
-
-        verifications.append(verification)
-        all_warnings.extend(warnings)
-
-        if not passed:
-            all_errors.append(f"{result.tool_name}: over-permissioned")
 
     if progress_callback:
         progress_callback("Access audit complete")
@@ -104,7 +92,6 @@ def run_access_audit(
 
     return AccessAuditResult(
         passed=overall_passed,
-        tier_requested=access_tier.value,
         verifications=verifications,
         warnings=all_warnings,
         errors=all_errors,
@@ -114,23 +101,10 @@ def run_access_audit(
 def audit_single_tool(
     agent_id: str,
     tool_name: str,
-    expected_tier: AccessTier,
     provisioner: Optional[ToolProvisionerInterface] = None,
 ) -> AccessVerification:
-    """
-    Audit access for a single tool.
-
-    Args:
-        agent_id: Agent identifier
-        tool_name: Tool to audit
-        expected_tier: Expected access tier
-        provisioner: Provisioner instance
-
-    Returns:
-        AccessVerification result
-    """
+    """Re-verify a single tool by delegating to its provisioner."""
     provs = build_default_tool_agents()
-
     provisioner_name = f"{tool_name}_provisioner"
     prov = provisioner or provs.get(provisioner_name)
 
@@ -138,28 +112,18 @@ def audit_single_tool(
         return AccessVerification(
             tool_name=tool_name,
             passed=False,
-            expected_tier=expected_tier.value,
             actual_permissions=[],
             errors=[f"No provisioner found for {tool_name}"],
         )
 
-    return prov.verify_access(agent_id, expected_tier)
+    return prov.verify_access(agent_id)
 
 
 def generate_audit_report(audit_result: AccessAuditResult) -> str:
-    """
-    Generate a human-readable audit report.
-
-    Args:
-        audit_result: The audit result to report on
-
-    Returns:
-        Formatted audit report string
-    """
+    """Generate a human-readable audit report."""
     lines = [
         "# Access Audit Report",
         "",
-        f"**Tier Requested:** {audit_result.tier_requested}",
         f"**Overall Status:** {'PASSED' if audit_result.passed else 'FAILED'}",
         "",
         "## Tool Verifications",
@@ -169,7 +133,6 @@ def generate_audit_report(audit_result: AccessAuditResult) -> str:
     for v in audit_result.verifications:
         status = "✓" if v.passed else "✗"
         lines.append(f"### {status} {v.tool_name}")
-        lines.append(f"- Expected: {v.expected_tier}")
         lines.append(f"- Permissions: {', '.join(v.actual_permissions) or 'none'}")
 
         if v.warnings:

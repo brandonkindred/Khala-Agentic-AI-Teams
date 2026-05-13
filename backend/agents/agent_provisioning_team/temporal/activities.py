@@ -23,7 +23,6 @@ from typing import Any, Dict, List, Optional
 
 from temporalio import activity
 
-from agent_provisioning_team.models import AccessTier
 from agent_provisioning_team.shared import job_store as _js
 
 logger = logging.getLogger(__name__)
@@ -39,12 +38,11 @@ def run_provisioning_activity(
     job_id: str,
     agent_id: str,
     manifest_path: str,
-    access_tier_str: str,
 ) -> None:
-    """Run the provisioning workflow. Converts access_tier_str to AccessTier."""
+    """Run the provisioning workflow."""
     from agent_provisioning_team.api.main import _run_provisioning_background
 
-    _run_provisioning_background(job_id, agent_id, manifest_path, AccessTier(access_tier_str))
+    _run_provisioning_background(job_id, agent_id, manifest_path)
 
 
 # ---------------------------------------------------------------------------
@@ -52,15 +50,14 @@ def run_provisioning_activity(
 # ---------------------------------------------------------------------------
 
 
-def _load_ctx(manifest_path: str, access_tier_str: str):
+def _load_ctx(manifest_path: str):
     """Lazy import to keep the worker's import graph minimal."""
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
     orch = ProvisioningOrchestrator()
     manifest = load_manifest(manifest_path)
-    access_tier = AccessTier(access_tier_str)
-    return orch, manifest, access_tier
+    return orch, manifest
 
 
 def _safe(fn_name: str, *args: Any, **kwargs: Any) -> None:
@@ -88,7 +85,6 @@ def setup_activity_v2(
     job_id: str,
     agent_id: str,
     manifest_path: str,
-    access_tier_str: str,
     prior_setup: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from agent_provisioning_team.phases.setup import run_setup
@@ -111,12 +107,11 @@ def setup_activity_v2(
         progress=5,
         status_text="Creating Docker environment...",
     )
-    orch, manifest, access_tier = _load_ctx(manifest_path, access_tier_str)
+    orch, manifest = _load_ctx(manifest_path)
     activity.heartbeat("setup")
     result = run_setup(
         agent_id=agent_id,
         manifest=manifest,
-        access_tier=access_tier,
         environment_store=orch.environment_store,
         docker_provisioner=orch.tool_agents.get("docker_provisioner"),
     )
@@ -185,14 +180,12 @@ def provision_tool_activity(
     agent_id: str,
     tool_name: str,
     manifest_path: str,
-    access_tier_str: str,
     credentials_dump: Dict[str, Any],
     tools_completed_so_far: int = 0,
     tools_total: int = 0,
 ) -> Dict[str, Any]:
     """Provision a single tool — one activity per tool so fan-out is natural."""
     from agent_provisioning_team.models import GeneratedCredentials
-    from agent_provisioning_team.phases.account_provisioning import _map_access_level_to_tier
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
@@ -216,14 +209,12 @@ def provision_tool_activity(
         raise RuntimeError(f"unknown provisioner {tool.provisioner}")
 
     creds = GeneratedCredentials.model_validate(credentials_dump)
-    tier = _map_access_level_to_tier(tool.access_level, AccessTier(access_tier_str))
 
     activity.heartbeat(f"provisioning {tool_name}")
     result = provisioner.provision(
         agent_id=agent_id,
         config=tool.config,
         credentials=creds,
-        access_tier=tier,
     )
     return result.model_dump()
 
@@ -233,7 +224,6 @@ def audit_activity_v2(
     job_id: str,
     agent_id: str,
     manifest_path: str,
-    access_tier_str: str,
     tool_results_dump: List[Dict[str, Any]],
     prior_audit: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -256,13 +246,11 @@ def audit_activity_v2(
         status_text="Auditing access permissions...",
     )
     manifest = load_manifest(manifest_path)
-    access_tier = AccessTier(access_tier_str)
     tool_results = [ToolProvisionResult.model_validate(t) for t in tool_results_dump]
     activity.heartbeat("access_audit")
     result = run_access_audit(
         agent_id=agent_id,
         tool_results=tool_results,
-        access_tier=access_tier,
         manifest=manifest,
         provisioners=build_default_tool_agents(),
     )
@@ -277,7 +265,6 @@ def documentation_activity_v2(
     job_id: str,
     agent_id: str,
     manifest_path: str,
-    access_tier_str: str,
     credentials_dump: Dict[str, Dict[str, Any]],
     tool_results_dump: List[Dict[str, Any]],
     workspace_path: str,
@@ -304,7 +291,6 @@ def documentation_activity_v2(
         status_text="Generating onboarding documentation...",
     )
     manifest = load_manifest(manifest_path)
-    access_tier = AccessTier(access_tier_str)
     credentials = {k: GeneratedCredentials.model_validate(v) for k, v in credentials_dump.items()}
     tool_results = [ToolProvisionResult.model_validate(t) for t in tool_results_dump]
     activity.heartbeat("documentation")
@@ -313,7 +299,6 @@ def documentation_activity_v2(
         manifest=manifest,
         credentials=credentials,
         tool_results=tool_results,
-        access_tier=access_tier,
         workspace_path=workspace_path,
     )
     payload = {

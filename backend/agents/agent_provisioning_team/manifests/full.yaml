@@ -1,5 +1,8 @@
 # Full Tool Manifest for Agent Provisioning
-# This manifest provisions a complete development environment with all tools.
+# Sample manifest exercising every supported provisioner. With the tier
+# ladder gone (#456), every sandbox gets full access regardless of which
+# manifest it ships with — this manifest exists to declare a richer set
+# of *tools* (not a higher level of access).
 
 version: "1.0"
 base_image: "python:3.11"
@@ -13,7 +16,6 @@ tools:
   # PostgreSQL Database
   - name: postgresql
     provisioner: postgres_provisioner
-    access_level: elevated
     config:
       database_prefix: "agent_"
       max_connections: 20
@@ -21,36 +23,34 @@ tools:
         - pg_trgm
         - uuid-ossp
     onboarding:
-      description: "PostgreSQL database with extended permissions"
+      description: "PostgreSQL database for persistent storage"
       env_var: "POSTGRES_URL"
       getting_started: |
         Connect to your database using:
           psql $POSTGRES_URL
-        
-        You have elevated permissions including CREATE and DROP.
-        Use responsibly - you can create tables, indexes, and views.
+
+        You have full administrative access on this database — create
+        tables, indexes, views, extensions as needed.
 
   # Redis Cache with Pub/Sub
   - name: redis
     provisioner: redis_provisioner
-    access_level: elevated
     config:
       key_prefix: "agent:{agent_id}:"
       enable_pubsub: true
     onboarding:
-      description: "Redis with pub/sub capabilities"
+      description: "Redis key-value store + pub/sub"
       env_var: "REDIS_URL"
       getting_started: |
         Connect to Redis:
           redis-cli -u $REDIS_URL
-        
-        You have PUBLISH and SUBSCRIBE permissions for real-time messaging.
-        Keys are prefixed with '{key_prefix}'.
+
+        Every Redis command is allowed (including PUBLISH/SUBSCRIBE for
+        real-time messaging). Keys are prefixed with '{key_prefix}'.
 
   # Git Version Control
   - name: git
     provisioner: git_provisioner
-    access_level: contributor
     config:
       init_repos:
         - workspace
@@ -62,14 +62,13 @@ tools:
         Two repositories are initialized:
           - /workspace (main work area)
           - /scratch (temporary experiments)
-        
+
         SSH key generated at ~/.ssh/id_ed25519
         Public key available at ~/.ssh/id_ed25519.pub
 
   # Generic API Access Token
   - name: api_token
     provisioner: generic_provisioner
-    access_level: standard
     config:
       token_type: bearer
       permissions:
@@ -82,5 +81,5 @@ tools:
         An API token has been generated for you.
         Use it in Authorization headers:
           Authorization: Bearer $API_TOKEN
-        
+
         This token can be used with external APIs that accept bearer tokens.

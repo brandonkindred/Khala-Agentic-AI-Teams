@@ -8,15 +8,18 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..models import (
-    AccessTier,
     AccessVerification,
     DeprovisionResult,
     GeneratedCredentials,
     ToolProvisionResult,
 )
-from ..shared.access_policy import get_permissions, validate_permissions
 from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner
+
+# Every sandbox is provisioned with full Redis access (#456). The token
+# ``+@all`` is the Redis-ACL form used by ``_build_acl_rules`` to grant
+# every command class.
+_FULL_REDIS_PERMISSIONS: list[str] = ["+@all"]
 
 try:
     import redis
@@ -59,7 +62,6 @@ class RedisProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> ToolProvisionResult:
         """Create a Redis ACL user with key prefix restrictions."""
         if not HAS_REDIS:
@@ -68,9 +70,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
         return self.run_idempotent(
             agent_id,
             credentials=credentials,
-            create=lambda _register: self._do_provision(
-                agent_id, config, credentials, access_tier
-            ),
+            create=lambda _register: self._do_provision(agent_id, config, credentials),
             reuse=lambda existing: self._on_reuse(existing, credentials),
         )
 
@@ -79,7 +79,6 @@ class RedisProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> Tuple[List[str], Dict[str, Any]]:
         key_prefix = config.get("key_prefix", f"agent:{agent_id}:")
         username = credentials.username or f"agent_{agent_id}".replace("-", "_")
@@ -90,7 +89,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
 
         client = self._get_admin_client()
 
-        permissions = get_permissions("redis", access_tier)
+        permissions = list(_FULL_REDIS_PERMISSIONS)
         acl_rules = self._build_acl_rules(permissions, key_prefix)
 
         try:
@@ -165,34 +164,21 @@ class RedisProvisionerTool(BaseToolProvisioner):
 
         return rules
 
-    def verify_access(
-        self,
-        agent_id: str,
-        expected_tier: AccessTier,
-    ) -> AccessVerification:
-        """Verify Redis ACL access for the agent."""
+    def verify_access(self, agent_id: str) -> AccessVerification:
+        """Surface the recorded Redis ACL permissions for the agent."""
         prov_info = self._state.get(agent_id)
 
         if not prov_info:
             return self._make_verification(
                 passed=False,
-                expected_tier=expected_tier,
                 actual_permissions=[],
                 errors=[f"No Redis provisioning found for agent {agent_id}"],
             )
 
-        actual_permissions = prov_info.get("permissions", [])
-        passed, warnings = validate_permissions(
-            "redis",
-            expected_tier,
-            actual_permissions,
-        )
-
+        actual_permissions = prov_info.get("permissions", list(_FULL_REDIS_PERMISSIONS))
         return self._make_verification(
-            passed=passed,
-            expected_tier=expected_tier,
+            passed=True,
             actual_permissions=actual_permissions,
-            warnings=warnings,
         )
 
     def deprovision(self, agent_id: str) -> DeprovisionResult:

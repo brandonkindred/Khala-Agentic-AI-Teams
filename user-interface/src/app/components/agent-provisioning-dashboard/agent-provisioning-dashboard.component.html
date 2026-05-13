@@ -18,8 +18,7 @@
           [teamDescription]="'Provision agent environments with infrastructure'"
           [fields]="[
             {key: 'agent_id', label: 'Agent ID', placeholder: 'Identifier of the agent to provision', required: true},
-            {key: 'manifest_path', label: 'Manifest path', placeholder: 'Path to provisioning manifest'},
-            {key: 'access_tier', label: 'Access tier', placeholder: 'basic, standard, or premium'}
+            {key: 'manifest_path', label: 'Manifest path', placeholder: 'Path to provisioning manifest'}
           ]"
           (workflowLaunched)="onAssistantLaunched($event)"
         />

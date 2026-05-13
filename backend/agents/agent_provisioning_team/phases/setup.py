@@ -7,7 +7,6 @@ This is phase 1 of the provisioning workflow.
 from typing import Any, Callable, Dict, Optional
 
 from ..models import (
-    AccessTier,
     EnvironmentInfo,
     GeneratedCredentials,
     SetupResult,
@@ -20,7 +19,6 @@ from ..tool_agents.docker_provisioner import DockerProvisionerTool
 def run_setup(
     agent_id: str,
     manifest: ToolManifest,
-    access_tier: AccessTier,
     environment_store: Optional[EnvironmentStore] = None,
     docker_provisioner: Optional[DockerProvisionerTool] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
@@ -31,7 +29,6 @@ def run_setup(
     Args:
         agent_id: Unique identifier for the agent
         manifest: Loaded tool manifest
-        access_tier: Requested access tier
         environment_store: Store for tracking environments
         docker_provisioner: Docker provisioner instance
         progress_callback: Optional callback for progress updates
@@ -77,7 +74,6 @@ def run_setup(
         agent_id=agent_id,
         config=docker_config,
         credentials=credentials,
-        access_tier=access_tier,
     )
 
     if not result.success:

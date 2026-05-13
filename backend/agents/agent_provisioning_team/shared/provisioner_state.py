@@ -34,9 +34,11 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-DEFAULT_STATE_DIR = Path(
-    os.environ.get("AGENT_CACHE", ".agent_cache")
-) / "agent_provisioning_team" / "provisioner_state"
+DEFAULT_STATE_DIR = (
+    Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
+    / "agent_provisioning_team"
+    / "provisioner_state"
+)
 
 _PROCESS_LOCK = Lock()
 
@@ -62,9 +64,7 @@ class CompensationRecord:
         try:
             json.dumps(self.payload)
         except (TypeError, ValueError) as e:
-            raise ValueError(
-                f"CompensationRecord payload is not JSON-serializable: {e}"
-            ) from e
+            raise ValueError(f"CompensationRecord payload is not JSON-serializable: {e}") from e
 
     def to_json(self) -> Dict[str, Any]:
         return {"kind": self.kind, "payload": self.payload, "created_at": self.created_at}

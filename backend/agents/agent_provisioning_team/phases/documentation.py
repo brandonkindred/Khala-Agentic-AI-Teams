@@ -8,7 +8,6 @@ from typing import Callable, Dict, List, Optional
 
 from ..anatomy_assets import try_materialize_anatomy_bundle
 from ..models import (
-    AccessTier,
     DocumentationResult,
     GeneratedCredentials,
     OnboardingPacket,
@@ -40,7 +39,6 @@ def run_documentation(
     manifest: ToolManifest,
     credentials: Dict[str, GeneratedCredentials],
     tool_results: List[ToolProvisionResult],
-    access_tier: AccessTier,
     workspace_path: str = "/workspace",
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> DocumentationResult:
@@ -55,7 +53,6 @@ def run_documentation(
         manifest: Loaded tool manifest
         credentials: Generated credentials per tool
         tool_results: Results from account provisioning
-        access_tier: Access tier
         workspace_path: Path to the workspace
         progress_callback: Callback for progress updates
 
@@ -110,14 +107,12 @@ def run_documentation(
     summary = _generate_summary(
         agent_id=agent_id,
         tool_count=len(successful_tools),
-        access_tier=access_tier,
         tool_names=[r.tool_name for r in successful_tools],
     )
 
     onboarding = OnboardingPacket(
         summary=summary,
         tools=tool_docs,
-        access_tier=access_tier.value,
         environment_variables=env_vars,
         anatomy_bundle_path=anatomy_bundle_path,
     )
@@ -134,27 +129,18 @@ def run_documentation(
 def _generate_summary(
     agent_id: str,
     tool_count: int,
-    access_tier: AccessTier,
     tool_names: Optional[List[str]] = None,
 ) -> str:
     """Generate the onboarding summary text.
 
     Calls the LLM client when configured; otherwise returns a deterministic
-    template fallback so the pipeline keeps working until the LLM service
-    integration lands this week.
+    template fallback. Every sandbox is provisioned with full access on
+    every backing service (#456), so the summary doesn't condition on
+    permission level.
     """
-    tier_descriptions = {
-        AccessTier.MINIMAL: "read-only access to resources",
-        AccessTier.STANDARD: "read/write access to your own resources",
-        AccessTier.ELEVATED: "administrative access to your own resources",
-        AccessTier.FULL: "full administrative access",
-    }
-    tier_desc = tier_descriptions.get(access_tier, "standard access")
-
     if _LLM.is_configured:
         prompt = format_onboarding_summary_prompt(
             agent_id=sanitize_prompt_var(agent_id),
-            access_tier=sanitize_prompt_var(access_tier.value),
             tool_names=sanitize_prompt_var(", ".join(tool_names or [])),
         )
         try:
@@ -166,8 +152,9 @@ def _generate_summary(
 
     return (
         f"Your agent environment is ready with {tool_count} tool(s) configured. "
-        f"You have {tier_desc}. "
-        f"Use the environment variables listed below to connect to your tools."
+        f"You have full administrative access to every backing service in your "
+        f"sandbox. Use the environment variables listed below to connect to "
+        f"your tools."
     )
 
 
@@ -235,8 +222,6 @@ def generate_readme(onboarding: OnboardingPacket) -> str:
         "## Overview",
         "",
         onboarding.summary,
-        "",
-        f"**Access Tier:** {onboarding.access_tier}",
         "",
         "## Standard AI agent anatomy",
         "",

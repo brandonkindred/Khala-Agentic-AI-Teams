@@ -124,36 +124,28 @@ On **macOS** with Docker Desktop, container memory is capped by the VM's memory 
 
 When running in this stack, the **khala** service uses the **stack’s Postgres** (database `khala`, user `khala`) via **POSTGRES_HOST=postgres**. The container does not start its own PostgreSQL. The init script in `docker/postgres/init/` creates the `khala` database and user on first run.
 
-### Per-team Postgres isolation (Agent Console sandboxes)
+### Per-sandbox compose stacks (Agent Console)
 
-Agent Console sandboxes run one container per agent, hardened with `--cap-drop=ALL`, `--read-only`, and loopback-bound ports. They receive Postgres credentials **scoped to their team's database**, so an agent from the `blogging` team cannot read `branding` or `software_engineering` data even if it tries.
+Agent Console sandboxes run as **per-sandbox docker compose projects** — each agent invocation gets its own isolated stack containing the agent container, **plus its own Postgres, Temporal, Prometheus, and Grafana**. Nothing in those stacks joins this `khala-stack` compose network, so the agent runs as if it were in a live environment but cannot touch the long-lived services here. (Permission tiers were removed in #456: every sandbox is provisioned with full access on its own services.)
 
-- `docker/postgres/init/04-create-sandbox-team-roles.sh` creates one `sandbox_<team>` role + database per currently-wired team (blogging, software_engineering, planning_v3, branding) on first Postgres boot.
-- Passwords come from `POSTGRES_PASSWORD_SANDBOX_<TEAM>` env vars in `.env`. Leave any of them blank to skip that team — the provisioner falls back to the global `POSTGRES_*` creds in that case (dev convenience).
-- Only runs on **first** Postgres boot (`/docker-entrypoint-initdb.d` is skipped once the data directory is populated). To add teams later, `psql` into the running instance and replay the relevant `CREATE USER`/`CREATE DATABASE`/`GRANT` statements by hand.
+- The compose template lives at `backend/agent_sandbox_image/sandbox-stack.yml`. The provisioner (`backend/agents/agent_provisioning_team/sandbox/provisioner.py`) renders it into `${AGENT_CACHE}/agent_provisioning/sandboxes/stacks/<project>/` and runs `docker compose -p <project> -f <rendered> up -d`.
+- The Postgres password is freshly generated per sandbox; Postgres / Temporal / Prometheus / Grafana speak to one another over the project's private bridge. Only the agent's `8090/tcp` is published to the host on a loopback-bound ephemeral port so the unified API can proxy invokes.
+- Idle sandboxes are torn down with `docker compose down -v` (named volumes go too) after `AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES` (default 5) — no run inherits state from a previous one.
 
-Verify isolation with:
+The legacy `POSTGRES_PASSWORD_SANDBOX_<TEAM>` env vars and the `docker/postgres/init/04-create-sandbox-team-roles.sh` init script are vestigial under this model — they only mattered when sandboxes shared this stack's Postgres. They're harmless if left in place, but new deployments don't need them.
 
-```bash
-docker exec khala-stack-postgres psql -U postgres -c '\du' | grep sandbox_
-docker exec khala-stack-postgres psql -U postgres -c '\l'  | grep sandbox_
-
-# A blogging-team role must not be able to connect to another team's DB:
-docker exec -e PGPASSWORD=$POSTGRES_PASSWORD_SANDBOX_BLOGGING \
-  khala-stack-postgres psql -U sandbox_blogging -d sandbox_software_engineering -c '\dt'
-# Expected: permission denied for database "sandbox_software_engineering"
-```
+Resource cost: each sandbox stack is ~1.5 GB resident and ~30 s cold start. With a 16 GB host, expect roughly 6–8 concurrent sandboxes before swapping; the idle reaper keeps the steady state small.
 
 ### Sandbox secrets
 
-Sandbox containers **never** receive `OLLAMA_API_KEY`, `ANTHROPIC_API_KEY`, or the per-team `POSTGRES_*` credentials via `docker run -e` flags — so they don't appear in `docker inspect` and aren't visible via `docker exec <sandbox> env`.
+Sandbox containers **never** receive `OLLAMA_API_KEY`, `ANTHROPIC_API_KEY`, or the freshly generated `POSTGRES_PASSWORD` via `docker run -e` flags — so they don't appear in `docker inspect` and aren't visible via `docker exec <sandbox> env`.
 
-The provisioner (`backend/agents/agent_provisioning_team/sandbox/provisioner.py`) writes each sandbox's secrets to a per-container `KEY=VALUE` file under `$AGENT_CACHE/agent_provisioning/sandboxes/secrets/<container>.env` on the host, `chmod 0400`, and bind-mounts it read-only at `/run/secrets/sandbox-env`. The in-sandbox entrypoint reads the file into `os.environ` and unlinks the in-sandbox view; the host file is cleaned up when the sandbox is torn down.
+The provisioner writes each sandbox's secrets to a 0400 `KEY=VALUE` file under `${AGENT_CACHE}/agent_provisioning/sandboxes/stacks/<project>/agent.env` on the host and bind-mounts it read-only at `/run/secrets/sandbox-env`. The in-sandbox entrypoint reads the file into `os.environ` and unlinks the in-sandbox view; the host file (and the rest of the per-project directory) is removed when the stack is torn down.
 
 Verify after a run:
 
 ```bash
-sandbox=$(docker ps --format '{{.Names}}' | grep khala-sbx- | head -1)
+sandbox=$(docker ps --format '{{.Names}}' | grep '^khala-sbx-.*-agent$' | head -1)
 docker exec "$sandbox" env | grep -E 'OLLAMA|POSTGRES_PASSWORD|ANTHROPIC'
 # Expected: (no output)
 docker inspect "$sandbox" | jq '.[0].Config.Env' | grep -E 'OLLAMA|POSTGRES_PASSWORD|ANTHROPIC'

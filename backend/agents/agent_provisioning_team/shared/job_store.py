@@ -32,7 +32,6 @@ def create_job(
     job_id: str,
     agent_id: str,
     manifest_path: str,
-    access_tier: str = "standard",
     cache_dir: Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Create a new provisioning job with initial state."""
@@ -40,7 +39,6 @@ def create_job(
     data: Dict[str, Any] = {
         "agent_id": agent_id,
         "manifest_path": manifest_path,
-        "access_tier": access_tier,
         "progress": 0,
         "current_phase": None,
         "current_tool": None,

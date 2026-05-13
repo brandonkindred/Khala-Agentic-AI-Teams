@@ -1,5 +1,7 @@
 # Minimal Tool Manifest for Agent Provisioning
-# This manifest provisions a lightweight environment with basic tools.
+# Smallest sample manifest: only initialises a Git workspace. Every
+# sandbox is provisioned with full access regardless of manifest (#456);
+# "minimal" here means *fewer tools*, not lower access.
 
 version: "1.0"
 base_image: "python:3.11-slim"
@@ -11,7 +13,6 @@ tools:
   # Git Version Control Only
   - name: git
     provisioner: git_provisioner
-    access_level: contributor
     config:
       init_repos:
         - workspace

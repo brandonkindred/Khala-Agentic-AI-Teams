@@ -16,13 +16,12 @@ from .anatomy_assets import get_anatomy_prompt_preamble
 _ONBOARDING_SUMMARY_BODY = """Generate a concise onboarding summary for an AI agent.
 
 Agent ID: {agent_id}
-Access Tier: {access_tier}
 Tools Provisioned: {tool_names}
 
 The summary should:
 1. Welcome the agent to the environment
 2. List the available tools briefly
-3. Mention the access tier and its implications
+3. Note that the agent has full administrative access to every backing service in its sandbox
 4. Point to key environment variables
 
 Keep the summary under 3 sentences.

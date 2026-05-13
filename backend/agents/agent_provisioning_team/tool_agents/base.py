@@ -10,7 +10,6 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from ..models import (
-    AccessTier,
     AccessVerification,
     DeprovisionResult,
     GeneratedCredentials,
@@ -37,7 +36,6 @@ class ToolProvisionerInterface(Protocol):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> ToolProvisionResult:
         """Provision resources for the agent in this tool.
 
@@ -45,7 +43,6 @@ class ToolProvisionerInterface(Protocol):
             agent_id: Unique identifier for the agent
             config: Tool-specific configuration from manifest
             credentials: Pre-generated credentials to use
-            access_tier: Requested access tier
 
         Returns:
             ToolProvisionResult with success status and details
@@ -55,13 +52,11 @@ class ToolProvisionerInterface(Protocol):
     def verify_access(
         self,
         agent_id: str,
-        expected_tier: AccessTier,
     ) -> AccessVerification:
-        """Verify the agent's access matches expected permissions.
+        """Verify the agent's access is in place.
 
         Args:
             agent_id: Agent to verify
-            expected_tier: Expected access tier
 
         Returns:
             AccessVerification result
@@ -103,7 +98,6 @@ class BaseToolProvisioner(ABC):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> ToolProvisionResult:
         """Provision resources for the agent."""
         pass
@@ -112,9 +106,8 @@ class BaseToolProvisioner(ABC):
     def verify_access(
         self,
         agent_id: str,
-        expected_tier: AccessTier,
     ) -> AccessVerification:
-        """Verify agent access matches expected tier."""
+        """Verify agent access is in place."""
         pass
 
     @abstractmethod
@@ -261,7 +254,6 @@ class BaseToolProvisioner(ABC):
     def _make_verification(
         self,
         passed: bool,
-        expected_tier: AccessTier,
         actual_permissions: List[str],
         warnings: Optional[List[str]] = None,
         errors: Optional[List[str]] = None,
@@ -270,7 +262,6 @@ class BaseToolProvisioner(ABC):
         return AccessVerification(
             tool_name=self.tool_name,
             passed=passed,
-            expected_tier=expected_tier.value,
             actual_permissions=actual_permissions,
             warnings=warnings or [],
             errors=errors or [],

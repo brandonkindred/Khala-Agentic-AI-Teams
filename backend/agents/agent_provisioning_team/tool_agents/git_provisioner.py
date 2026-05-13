@@ -10,16 +10,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from ..models import (
-    AccessTier,
     AccessVerification,
     DeprovisionResult,
     GeneratedCredentials,
     ToolProvisionResult,
 )
-from ..shared.access_policy import get_permissions
 from ..shared.provisioner_state import ProvisionerStateStore
 from ..shared.tool_manifest import assert_path_within_base
 from .base import BaseToolProvisioner
+
+# Every sandbox is provisioned with full git access (#456).
+_FULL_GIT_PERMISSIONS: list[str] = ["read", "write", "admin", "delete"]
 
 # Every git subprocess gets bounded wall-clock; unbounded calls could hang the
 # provisioning worker if the git remote or filesystem stalled. Matches the
@@ -41,15 +42,12 @@ class GitProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> ToolProvisionResult:
         """Set up Git for the agent with optional SSH keys and repos."""
         return self.run_idempotent(
             agent_id,
             credentials=credentials,
-            create=lambda _register: self._do_provision(
-                agent_id, config, credentials, access_tier
-            ),
+            create=lambda _register: self._do_provision(agent_id, config, credentials),
             hydrate_extras=("workspace_path", "repos"),
         )
 
@@ -58,7 +56,6 @@ class GitProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
-        access_tier: AccessTier,
     ) -> Tuple[List[str], Dict[str, Any]]:
         workspace_path = config.get("workspace_path", f"{self.workspace_base}/{agent_id}")
         init_repos = config.get("init_repos", ["workspace"])
@@ -99,7 +96,7 @@ class GitProvisionerTool(BaseToolProvisioner):
             if self._init_repo(repo_path):
                 initialized_repos.append(str(repo_path))
 
-        permissions = get_permissions("git", access_tier)
+        permissions = list(_FULL_GIT_PERMISSIONS)
 
         credentials.extra["workspace_path"] = str(workspace)
         credentials.extra["git_config"] = str(git_config_path)
@@ -215,18 +212,13 @@ class GitProvisionerTool(BaseToolProvisioner):
         except subprocess.CalledProcessError:
             return False
 
-    def verify_access(
-        self,
-        agent_id: str,
-        expected_tier: AccessTier,
-    ) -> AccessVerification:
-        """Verify Git access for the agent."""
+    def verify_access(self, agent_id: str) -> AccessVerification:
+        """Verify the agent's Git workspace + repos are still in place."""
         prov_info = self._state.get(agent_id)
 
         if not prov_info:
             return self._make_verification(
                 passed=False,
-                expected_tier=expected_tier,
                 actual_permissions=[],
                 errors=[f"No Git provisioning found for agent {agent_id}"],
             )
@@ -243,12 +235,11 @@ class GitProvisionerTool(BaseToolProvisioner):
             if not git_dir.exists():
                 warnings.append(f"Git repo not initialized: {repo_path}")
 
-        actual_permissions = prov_info.get("permissions", [])
+        actual_permissions = prov_info.get("permissions", list(_FULL_GIT_PERMISSIONS))
         passed = len(errors) == 0
 
         return self._make_verification(
             passed=passed,
-            expected_tier=expected_tier,
             actual_permissions=actual_permissions,
             warnings=warnings,
             errors=errors,

@@ -39,9 +39,9 @@ def test_provision_routes_to_v2_when_temporal_enabled(
     assert resp.status_code == 200
     mock_start.assert_called_once()
     args, kwargs = mock_start.call_args
-    # Positional: (job_id, agent_id, manifest_path, access_tier_str)
+    # Positional: (job_id, agent_id, manifest_path)
     assert args[1] == "t-temporal-1"
-    assert args[3] == "standard"  # AccessTier.STANDARD.value, not the enum
+    assert args[2] == "default.yaml"
     assert kwargs.get("skip_phases") is None
     assert kwargs.get("prior_results") is None
 
@@ -62,7 +62,6 @@ def test_resume_passes_skip_phases_and_prior_results(
         "job_id": "job-resume-1",
         "agent_id": "a1",
         "manifest_path": "default.yaml",
-        "access_tier": "standard",
         "status": "failed",
         "completed_phases": ["setup", "credential_generation"],
         "phase_results": {
@@ -165,12 +164,12 @@ def test_setup_activity_v2_writes_progress_via_update_job() -> None:
         patch.object(
             t_acts,
             "_load_ctx",
-            return_value=(_FakeOrch(), _FakeManifest(), "standard"),
+            return_value=(_FakeOrch(), _FakeManifest()),
         ),
         # activity.heartbeat raises outside a live Temporal context; stub it.
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = t_acts.setup_activity_v2("job-progress-1", "agent-1", "default.yaml", "standard")
+        payload = t_acts.setup_activity_v2("job-progress-1", "agent-1", "default.yaml")
 
     assert payload["success"] is True
     assert recorded_running == ["job-progress-1"]
@@ -200,7 +199,7 @@ def test_setup_activity_v2_restores_prior_snapshot_without_running_setup() -> No
     ):
         prior = {"success": True, "environment": None}
         payload = t_acts.setup_activity_v2(
-            "job-resume", "agent-x", "default.yaml", "standard", prior_setup=prior
+            "job-resume", "agent-x", "default.yaml", prior_setup=prior
         )
 
     assert payload == {"success": True, "environment": None}

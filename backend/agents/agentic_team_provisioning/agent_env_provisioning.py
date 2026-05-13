@@ -94,14 +94,12 @@ def _spawn_provision_thread(
 ) -> None:
     def _run() -> None:
         try:
-            from agent_provisioning_team.models import AccessTier
             from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
             orch = ProvisioningOrchestrator()
             result = orch.run_workflow(
                 agent_id=provisioning_agent_id,
                 manifest_path=_MANIFEST,
-                access_tier=AccessTier.STANDARD,
                 job_updater=None,
             )
             if result.success:
