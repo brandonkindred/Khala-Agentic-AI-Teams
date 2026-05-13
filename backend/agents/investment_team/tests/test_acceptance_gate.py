@@ -45,6 +45,8 @@ def _result(
         is_oos_degradation_pct=is_oos_degradation_pct,
         oos_trade_count=oos_trade_count,
         regime_results=regime_results,
+        calmar_ratio=0.0,
+        sortino_ratio=0.0,
     )
 
 
@@ -102,6 +104,9 @@ def test_missing_fields_emit_single_incomplete_warning():
         max_drawdown_pct=1.0,
         win_rate_pct=50.0,
         profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     results = gate.check(r, _cfg())
     assert len(results) == 1

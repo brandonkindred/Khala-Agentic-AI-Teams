@@ -45,6 +45,9 @@ def _zeroed_metrics() -> BacktestResult:
         max_drawdown_pct=0.0,
         win_rate_pct=0.0,
         profit_factor=0.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
 
@@ -57,6 +60,9 @@ def test_maybe_attach_coverage_report_no_ops_when_gate_off() -> None:
         max_drawdown_pct=2.0,
         win_rate_pct=55.0,
         profit_factor=1.5,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     _maybe_attach_coverage_report(
         metrics=metrics,

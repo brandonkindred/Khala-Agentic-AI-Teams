@@ -164,4 +164,8 @@ def _compute_metrics_daily(
         alpha_pct=m.alpha_pct,
         beta=m.beta,
         information_ratio=m.information_ratio,
+        # #378: DSR is only computed downstream (walk-forward harness);
+        # this single-run constructor defaults to 0.0. The schema now
+        # requires the field, so pass it explicitly.
+        deflated_sharpe=0.0,
     )

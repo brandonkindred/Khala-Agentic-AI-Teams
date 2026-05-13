@@ -393,6 +393,9 @@ def test_backtest_record_captures_strategy_and_metrics() -> None:
             max_drawdown_pct=7.1,
             win_rate_pct=54.2,
             profit_factor=1.24,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
         ),
     )
 
@@ -752,6 +755,9 @@ def test_compare_performance_aligned() -> None:
         max_drawdown_pct=12.0,
         win_rate_pct=55.0,
         profit_factor=1.4,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     paper = BacktestResult(
         total_return_pct=24.0,
@@ -761,6 +767,9 @@ def test_compare_performance_aligned() -> None:
         max_drawdown_pct=14.0,
         win_rate_pct=53.0,
         profit_factor=1.3,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
     comparison = PaperTradingAgent.compare_performance(
@@ -789,6 +798,9 @@ def test_compare_performance_divergent() -> None:
         max_drawdown_pct=12.0,
         win_rate_pct=55.0,
         profit_factor=1.4,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     paper = BacktestResult(
         total_return_pct=5.0,
@@ -798,6 +810,9 @@ def test_compare_performance_divergent() -> None:
         max_drawdown_pct=30.0,
         win_rate_pct=38.0,
         profit_factor=0.8,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
     comparison = PaperTradingAgent.compare_performance(paper, backtest)
@@ -820,6 +835,9 @@ def test_compare_performance_zero_backtest_drawdown() -> None:
         max_drawdown_pct=0.0,
         win_rate_pct=100.0,
         profit_factor=100.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     paper = BacktestResult(
         total_return_pct=9.0,
@@ -829,6 +847,9 @@ def test_compare_performance_zero_backtest_drawdown() -> None:
         max_drawdown_pct=4.0,
         win_rate_pct=95.0,
         profit_factor=90.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
     comparison = PaperTradingAgent.compare_performance(paper, backtest)
@@ -843,6 +864,9 @@ def test_compare_performance_zero_backtest_drawdown() -> None:
         max_drawdown_pct=6.0,
         win_rate_pct=95.0,
         profit_factor=90.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     comparison_bad = PaperTradingAgent.compare_performance(paper_bad, backtest)
     assert comparison_bad.drawdown_aligned is False
@@ -860,6 +884,9 @@ def test_compare_performance_return_absolute_tolerance() -> None:
         max_drawdown_pct=10.0,
         win_rate_pct=55.0,
         profit_factor=1.2,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     paper_close = BacktestResult(
         total_return_pct=9.0,
@@ -869,6 +896,9 @@ def test_compare_performance_return_absolute_tolerance() -> None:
         max_drawdown_pct=12.0,
         win_rate_pct=52.0,
         profit_factor=1.1,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
     comparison = PaperTradingAgent.compare_performance(paper_close, backtest)
@@ -883,6 +913,9 @@ def test_compare_performance_return_absolute_tolerance() -> None:
         max_drawdown_pct=12.0,
         win_rate_pct=52.0,
         profit_factor=1.1,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     comparison_far = PaperTradingAgent.compare_performance(paper_far, backtest)
     # |2.0 - 5.0| = 3.0 > 2.0 → not aligned
@@ -901,6 +934,9 @@ def test_compare_performance_insufficient_sample() -> None:
         max_drawdown_pct=12.0,
         win_rate_pct=55.0,
         profit_factor=1.4,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     paper = BacktestResult(
         total_return_pct=10.0,
@@ -910,6 +946,9 @@ def test_compare_performance_insufficient_sample() -> None:
         max_drawdown_pct=12.0,
         win_rate_pct=55.0,
         profit_factor=1.4,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
     comparison = PaperTradingAgent.compare_performance(
@@ -1167,6 +1206,9 @@ def _backtest_result(*, winning: bool) -> Any:
             max_drawdown_pct=8.0,
             win_rate_pct=60.0,
             profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
         )
     return m.BacktestResult(
         total_return_pct=-5.0,
@@ -1176,6 +1218,9 @@ def _backtest_result(*, winning: bool) -> Any:
         max_drawdown_pct=10.0,
         win_rate_pct=40.0,
         profit_factor=0.5,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
 

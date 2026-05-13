@@ -474,6 +474,9 @@ def _healthy_metrics() -> BacktestResult:
         max_drawdown_pct=3.0,
         win_rate_pct=60.0,
         profit_factor=1.5,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
 

@@ -55,6 +55,9 @@ def _high_sharpe_metrics() -> BacktestResult:
         max_drawdown_pct=4.0,
         win_rate_pct=60.0,
         profit_factor=2.4,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
 
 
@@ -91,6 +94,9 @@ def test_dsr_aware_does_not_affect_other_critical_gates():
         max_drawdown_pct=4.0,
         win_rate_pct=98.0,  # > 95 → critical
         profit_factor=1.4,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     detector = BacktestAnomalyDetector()
     results = detector.check(metrics, _trades(), dsr_aware=True)

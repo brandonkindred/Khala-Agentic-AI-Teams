@@ -32,7 +32,7 @@ from investment_team.trading_service.data_stream.protocol import (
 from investment_team.trading_service.modes.backtest import run_backtest
 from investment_team.trading_service.service import (
     TradingService,
-    _apply_streaming_curve,
+    _StreamingEquityBuffer,
 )
 from investment_team.trading_service.strategy.contract import Bar
 
@@ -192,13 +192,15 @@ def test_streaming_equity_curve_none_on_send_start_failure() -> None:
     assert result.streaming_equity_curve is None
 
 
-def test_apply_streaming_curve_no_op_on_empty_dict() -> None:
-    """Helper: empty EOD dict leaves the curve as ``None`` (idempotent)."""
-    from investment_team.trading_service.service import TradingServiceResult
+def test_streaming_buffer_materialize_returns_none_when_empty() -> None:
+    """The preallocated buffer materializes ``None`` when no bars were stamped.
 
-    result = TradingServiceResult()
-    _apply_streaming_curve(result, {}, 100_000.0)
-    assert result.streaming_equity_curve is None
+    Mirrors the no-op-on-empty contract the old dict-based helper had: aborts
+    before any bar produces ``streaming_equity_curve = None`` rather than an
+    empty :class:`EquityCurve`.
+    """
+    buf = _StreamingEquityBuffer([date_cls(2024, 1, 2), date_cls(2024, 1, 3)], 100_000.0)
+    assert buf.materialize() is None
 
 
 def test_streaming_curve_matches_between_per_bar_and_chunked_paths() -> None:
@@ -253,3 +255,71 @@ def test_streaming_curve_matches_between_per_bar_and_chunked_paths() -> None:
     assert per_bar.dates == chunked.dates
     assert per_bar.equity == pytest.approx(chunked.equity, rel=0, abs=1e-9)
     assert per_bar.initial_capital == chunked.initial_capital
+
+
+def test_streaming_buffer_matches_reconstructed_curve_byte_for_byte() -> None:
+    """Acceptance for #378: streaming buffer == ``build_equity_curve_from_trades``.
+
+    With a no-op strategy and zero costs, the streaming MTM curve and the
+    reconstructed-from-trades curve both reduce to ``[initial_capital] * D``
+    over the same weekday set, so equality is exact — not approximate. The
+    ``np.float64`` slot writes in ``_StreamingEquityBuffer`` produce the same
+    Python ``float`` values as the old ``dict`` path, so this catches any
+    future drift in how the buffer materializes its payload.
+
+    The bar fixture is restricted to weekdays so the streaming buffer's
+    overflow path (weekend dates → tail dict) doesn't fire; both curves
+    align on the same weekday set within the config window.
+    """
+    from investment_team.execution.metrics import (
+        build_equity_curve_from_trades,
+        weekday_range,
+    )
+
+    cfg = BacktestConfig(
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        initial_capital=100_000.0,
+        transaction_cost_bps=0.0,
+        slippage_bps=0.0,
+    )
+    weekdays = weekday_range(
+        date_cls.fromisoformat(cfg.start_date),
+        date_cls.fromisoformat(cfg.end_date),
+    )
+    bars = [
+        OHLCVBar(
+            date=d.isoformat(),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=10_000.0,
+        )
+        for d in weekdays
+    ]
+    spec = StrategySpec(
+        strategy_id="streaming-parity-378",
+        authored_by="378-test",
+        asset_class="stocks",
+        hypothesis="parity",
+        signal_definition="noop",
+        strategy_code=_NOOP_STRATEGY_CODE,
+    )
+
+    res = run_backtest(strategy=spec, config=cfg, market_data={"AAA": bars})
+    streaming = res.service_result.streaming_equity_curve
+    assert streaming is not None, "streaming curve must populate for a successful no-op run"
+
+    reconstructed = build_equity_curve_from_trades(
+        res.trades,
+        cfg.initial_capital,
+        start_date=cfg.start_date,
+        end_date=cfg.end_date,
+    )
+
+    # Byte-for-byte equality on the full weekday set: same dates in the
+    # same order, exact-float equity (no ``pytest.approx``).
+    assert streaming.initial_capital == reconstructed.initial_capital
+    assert streaming.dates == reconstructed.dates
+    assert streaming.equity == reconstructed.equity

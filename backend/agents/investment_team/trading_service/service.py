@@ -18,8 +18,10 @@ from dataclasses import dataclass, field
 from datetime import date as date_cls
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+import numpy as np
+
 from ..execution.bar_safety import LookAheadError
-from ..execution.metrics import EquityCurve
+from ..execution.metrics import EquityCurve, weekday_range
 from ..execution.risk_filter import RiskFilter, RiskLimits
 from ..models import (
     BacktestConfig,
@@ -216,38 +218,72 @@ def _apply_fill_outcome_events(
             )
 
 
-def _record_eod_equity(
-    eod_equity: Dict[date_cls, float],
-    bar_timestamp: str,
-    equity: float,
-) -> None:
-    """Stamp ``equity`` against the calendar day of ``bar_timestamp``.
+class _StreamingEquityBuffer:
+    """Preallocated NumPy buffer for the streaming EOD-equity curve (#378).
 
-    Sub-daily timeframes call this once per bar; the dict overwrites the same
-    key on each subsequent bar of the day, so the *last* MTM value of each
-    trading day wins — which is what the daily-equity metrics engine wants.
+    Replaces the old ``Dict[date, float]`` accumulator with a fixed-size
+    ``np.ndarray`` indexed by the same weekday set that
+    :func:`build_equity_curve_from_trades` uses, so the streaming curve
+    and the reconstructed-from-trades curve align on every trading day.
+
+    Sub-daily bars overwrite the same slot, so the last MTM of each
+    trading day wins — matching the previous dict-based contract.
+
+    An ``overflow`` dict catches days outside the preallocated range
+    (paper-trade runs that extend past ``config.end_date``, or runs
+    where ``start_date == end_date`` falls on a weekend); those days
+    are appended in sorted order at materialization time.
     """
-    eod_equity[date_cls.fromisoformat(bar_timestamp[:10])] = equity
 
-
-def _apply_streaming_curve(
-    result: TradingServiceResult,
-    eod_equity: Dict[date_cls, float],
-    initial_capital: float,
-) -> None:
-    """Materialize the streaming EOD-equity dict onto ``result``.
-
-    No-op when ``eod_equity`` is empty (e.g. the run aborted before any
-    non-warmup bars produced an MTM sample).
-    """
-    if not eod_equity:
-        return
-    sorted_days = sorted(eod_equity)
-    result.streaming_equity_curve = EquityCurve(
-        dates=sorted_days,
-        equity=[eod_equity[d] for d in sorted_days],
-        initial_capital=initial_capital,
+    __slots__ = (
+        "_equity",
+        "_dates",
+        "_index_by_date",
+        "_filled_indices",
+        "_seen_indices",
+        "_initial_capital",
+        "_overflow",
     )
+
+    def __init__(self, expected_days: List[date_cls], initial_capital: float) -> None:
+        self._dates: List[date_cls] = expected_days
+        self._equity: np.ndarray = np.empty(len(expected_days), dtype=np.float64)
+        self._index_by_date: Dict[date_cls, int] = {d: i for i, d in enumerate(expected_days)}
+        # Insertion-ordered (bars arrive chronologically), so no sort
+        # needed at materialize time for the preallocated slice.
+        self._filled_indices: List[int] = []
+        self._seen_indices: set[int] = set()
+        self._initial_capital: float = initial_capital
+        self._overflow: Dict[date_cls, float] = {}
+
+    def record(self, bar_timestamp: str, equity: float) -> None:
+        day = date_cls.fromisoformat(bar_timestamp[:10])
+        idx = self._index_by_date.get(day)
+        if idx is None:
+            # Outside the preallocated range (e.g. live paper-trade past
+            # ``end_date``). Falls back to a dict tail — correctness over
+            # perf on the rare overflow path.
+            self._overflow[day] = equity
+            return
+        if idx not in self._seen_indices:
+            self._filled_indices.append(idx)
+            self._seen_indices.add(idx)
+        self._equity[idx] = equity
+
+    def materialize(self) -> Optional[EquityCurve]:
+        if not self._filled_indices and not self._overflow:
+            return None
+        dates: List[date_cls] = [self._dates[i] for i in self._filled_indices]
+        equity: List[float] = self._equity[self._filled_indices].tolist()
+        if self._overflow:
+            for d in sorted(self._overflow):
+                dates.append(d)
+                equity.append(self._overflow[d])
+        return EquityCurve(
+            dates=dates,
+            equity=equity,
+            initial_capital=self._initial_capital,
+        )
 
 
 def _finalize_diagnostics(result: TradingServiceResult) -> TradingServiceResult:
@@ -401,12 +437,19 @@ class TradingService:
         )
 
         result = TradingServiceResult()
-        # #430: per-trading-day EOD MTM equity, stamped from the run loop's
-        # existing ``portfolio.mark_to_market()`` calls. Declared before the
-        # harness so every return path through ``_apply_streaming_curve``
-        # sees the same ordered dict — even early aborts that produce zero
-        # samples (curve stays ``None``).
-        eod_equity: Dict[date_cls, float] = {}
+        # #430/#378: per-trading-day EOD MTM equity, stamped from the run
+        # loop's existing ``portfolio.mark_to_market()`` calls. The buffer
+        # preallocates a NumPy slot for every weekday in
+        # ``[start_date, end_date]`` so every return path materializes the
+        # same date set; an overflow dict catches paper-trade runs that
+        # extend past ``end_date``. Empty curve stays ``None``.
+        eod_buffer = _StreamingEquityBuffer(
+            weekday_range(
+                date_cls.fromisoformat(self.config.start_date),
+                date_cls.fromisoformat(self.config.end_date),
+            ),
+            self.config.initial_capital,
+        )
 
         chunk_size = self._chunk_size_override
         if chunk_size is None:
@@ -427,7 +470,7 @@ class TradingService:
             except StrategyRuntimeError as exc:
                 result.error = str(exc)
                 result.lookahead_violation = exc.etype == "lookahead_violation"
-                _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+                result.streaming_equity_curve = eod_buffer.materialize()
                 result.probe_events = harness.probe_events
                 return _finalize_diagnostics(result)
 
@@ -454,7 +497,7 @@ class TradingService:
                     result=result,
                     chunk_size=chunk_size,
                     on_trade=on_trade,
-                    eod_equity=eod_equity,
+                    eod_buffer=eod_buffer,
                 )
 
             # We need one-bar lookahead in the fill simulator, so we buffer
@@ -587,7 +630,7 @@ class TradingService:
                         # #430: stamp EOD equity for the streaming curve.
                         # Sub-daily bars overwrite the same calendar-day key,
                         # so the last MTM of each trading day wins.
-                        _record_eod_equity(eod_equity, cur_bar.timestamp, equity)
+                        eod_buffer.record(cur_bar.timestamp, equity)
                         dd = self._risk.check_drawdown(equity, portfolio.peak_equity)
                         if dd.breached:
                             result.terminated_reason = (
@@ -734,17 +777,17 @@ class TradingService:
                 # violation so operators see a single error category.
                 result.error = str(exc)
                 result.lookahead_violation = True
-                _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+                result.streaming_equity_curve = eod_buffer.materialize()
                 result.probe_events = harness.probe_events
                 return _finalize_diagnostics(result)
             except StrategyRuntimeError as exc:
                 result.error = str(exc)
                 result.lookahead_violation = exc.etype == "lookahead_violation"
-                _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+                result.streaming_equity_curve = eod_buffer.materialize()
                 result.probe_events = harness.probe_events
                 return _finalize_diagnostics(result)
 
-        _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+        result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
         return _finalize_diagnostics(result)
 
@@ -770,7 +813,7 @@ class TradingService:
         result: TradingServiceResult,
         chunk_size: int,
         on_trade: Optional[Callable[[TradeRecord], None]],
-        eod_equity: Dict[date_cls, float],
+        eod_buffer: "_StreamingEquityBuffer",
     ) -> TradingServiceResult:
         prev_bar = None
         pending_for_prev: List[OrderRequest] = []
@@ -907,7 +950,7 @@ class TradingService:
                     portfolio.update_last_price(cur_bar.symbol, cur_bar.close)
                     equity = portfolio.mark_to_market()
                     # #430: stamp EOD equity for the streaming curve.
-                    _record_eod_equity(eod_equity, cur_bar.timestamp, equity)
+                    eod_buffer.record(cur_bar.timestamp, equity)
                     dd = self._risk.check_drawdown(equity, portfolio.peak_equity)
                     if dd.breached:
                         result.terminated_reason = (
@@ -1052,17 +1095,17 @@ class TradingService:
         except LookAheadError as exc:
             result.error = str(exc)
             result.lookahead_violation = True
-            _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+            result.streaming_equity_curve = eod_buffer.materialize()
             result.probe_events = harness.probe_events
             return _finalize_diagnostics(result)
         except StrategyRuntimeError as exc:
             result.error = str(exc)
             result.lookahead_violation = exc.etype == "lookahead_violation"
-            _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+            result.streaming_equity_curve = eod_buffer.materialize()
             result.probe_events = harness.probe_events
             return _finalize_diagnostics(result)
 
-        _apply_streaming_curve(result, eod_equity, self.config.initial_capital)
+        result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
         return _finalize_diagnostics(result)
 
