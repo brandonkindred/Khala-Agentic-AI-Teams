@@ -85,8 +85,18 @@ def _bar(symbol: str, ts: str, close: float = 100.0) -> Bar:
 
 def test_streaming_equity_curve_populated_on_noop_run() -> None:
     """A no-op strategy across N daily bars yields N EOD samples at initial capital."""
-    service = TradingService(strategy_code=_NOOP_STRATEGY_CODE, config=_config())
     days = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+    # Pin config to the bar window so ``weekday_range`` matches the
+    # bars exactly — keeps this test focused on the populate-on-noop
+    # contract, not the gap-fill behavior covered by its own test.
+    cfg = BacktestConfig(
+        start_date=days[0],
+        end_date=days[-1],
+        initial_capital=100_000.0,
+        transaction_cost_bps=0.0,
+        slippage_bps=0.0,
+    )
+    service = TradingService(strategy_code=_NOOP_STRATEGY_CODE, config=cfg)
     stream = [BarEvent(bar=_bar("AAA", d), is_warmup=False) for d in days]
     stream.append(EndOfStreamEvent())
 
@@ -109,7 +119,16 @@ def test_streaming_equity_curve_subdaily_keeps_last_mtm_per_day() -> None:
     capital, so the dict ends up with one entry per day regardless of how
     many intraday bars were processed.
     """
-    service = TradingService(strategy_code=_NOOP_STRATEGY_CODE, config=_config())
+    # Pin config to the two-day intraday window so ``weekday_range``
+    # doesn't add gap-fill days that aren't being exercised here.
+    cfg = BacktestConfig(
+        start_date="2024-01-02",
+        end_date="2024-01-03",
+        initial_capital=100_000.0,
+        transaction_cost_bps=0.0,
+        slippage_bps=0.0,
+    )
+    service = TradingService(strategy_code=_NOOP_STRATEGY_CODE, config=cfg)
     intraday_ts = [
         "2024-01-02T09:30:00",
         "2024-01-02T10:00:00",
@@ -201,6 +220,56 @@ def test_streaming_buffer_materialize_returns_none_when_empty() -> None:
     """
     buf = _StreamingEquityBuffer([date_cls(2024, 1, 2), date_cls(2024, 1, 3)], 100_000.0)
     assert buf.materialize() is None
+
+
+def test_streaming_buffer_forward_fills_gap_weekdays() -> None:
+    """Unfilled preallocated weekdays carry forward the last EOD equity.
+
+    Regression test for a chatgpt-codex-connector review on #518: the
+    streaming curve must cover every weekday in ``[start_date, end_date]``
+    so it aligns with ``build_equity_curve_from_trades`` (which forward-
+    fills cash through gaps). Without this, market-holiday days or
+    missing-bar days were silently dropped from the streaming curve and
+    ``compute_performance_metrics`` operated on a different date set than
+    the reconstructed-from-trades path.
+    """
+    # Mon–Fri preallocated. Record only Mon, Wed, Fri (gaps on Tue, Thu).
+    preallocated = [
+        date_cls(2024, 1, 1),
+        date_cls(2024, 1, 2),
+        date_cls(2024, 1, 3),
+        date_cls(2024, 1, 4),
+        date_cls(2024, 1, 5),
+    ]
+    buf = _StreamingEquityBuffer(preallocated, 100_000.0)
+    buf.record("2024-01-01", 100_100.0)
+    buf.record("2024-01-03", 100_300.0)
+    buf.record("2024-01-05", 100_500.0)
+
+    curve = buf.materialize()
+    assert curve is not None
+    assert curve.dates == preallocated
+    # Gap days (Tue, Thu) carry forward the previous EOD value.
+    assert curve.equity == [100_100.0, 100_100.0, 100_300.0, 100_300.0, 100_500.0]
+
+
+def test_streaming_buffer_carries_initial_capital_before_first_fill() -> None:
+    """Weekdays before the first filled slot stamp ``initial_capital``."""
+    preallocated = [
+        date_cls(2024, 1, 1),
+        date_cls(2024, 1, 2),
+        date_cls(2024, 1, 3),
+        date_cls(2024, 1, 4),
+    ]
+    buf = _StreamingEquityBuffer(preallocated, 100_000.0)
+    # Start filling at Wed (the run effectively warms up through Mon-Tue).
+    buf.record("2024-01-03", 100_500.0)
+    buf.record("2024-01-04", 100_600.0)
+
+    curve = buf.materialize()
+    assert curve is not None
+    assert curve.dates == preallocated
+    assert curve.equity == [100_000.0, 100_000.0, 100_500.0, 100_600.0]
 
 
 def test_streaming_buffer_interleaves_overflow_chronologically() -> None:

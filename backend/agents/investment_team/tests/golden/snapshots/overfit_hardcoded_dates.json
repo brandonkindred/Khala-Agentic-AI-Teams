@@ -281,7 +281,7 @@
     "risk_free_rate": 0.04,
     "sharpe_ci_high": null,
     "sharpe_ci_low": null,
-    "sharpe_ratio": -47.66,
+    "sharpe_ratio": -48.61,
     "signals_per_bar": 0.009921,
     "sortino_ratio": -50.1,
     "terminated_reason": null,

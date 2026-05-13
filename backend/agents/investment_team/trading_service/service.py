@@ -277,14 +277,25 @@ class _StreamingEquityBuffer:
     def materialize(self) -> Optional[EquityCurve]:
         if not self._filled_indices and not self._overflow:
             return None
-        # ``_filled_indices`` is already chronological (bars arrive in
-        # order and ``_dates`` is the chronological weekday list), but
-        # overflow entries may slot in *between* in-range days (e.g.
-        # weekend bars). Merge by sorting the union; the cost is O(D
-        # log D) once per run — D is bounded by trading-day count.
-        pairs: List[tuple] = [
-            (self._dates[i], float(self._equity[i])) for i in self._filled_indices
-        ]
+        # Forward-fill preallocated slots so the materialized curve covers
+        # every weekday in ``[start_date, end_date]``, matching
+        # :func:`build_equity_curve_from_trades`. Gap days (market
+        # holidays, missing bars) carry forward the last EOD equity;
+        # weekdays before the first filled slot carry the initial capital.
+        # Without this the streaming and reconstructed curves operate on
+        # different date sets and ``compute_performance_metrics`` produces
+        # different volatility / Sharpe values for the same run.
+        pairs: List[tuple] = []
+        if self._filled_indices:
+            seen = set(self._filled_indices)
+            carry = self._initial_capital
+            for i, d in enumerate(self._dates):
+                if i in seen:
+                    carry = float(self._equity[i])
+                pairs.append((d, carry))
+        # Overflow entries (weekend bars, paper-trade days past
+        # ``end_date``) merge in by date so the curve stays
+        # chronological end-to-end.
         if self._overflow:
             pairs.extend(self._overflow.items())
             pairs.sort(key=lambda p: p[0])
