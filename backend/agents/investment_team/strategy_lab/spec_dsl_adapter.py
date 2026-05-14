@@ -64,20 +64,23 @@ _INDICATOR_NAMES = (
     "vwap",
 )
 
-# Token: either a price field, a number (int or decimal), or
-# ``name(arg1[,arg2,...])`` / bare ``name`` for the indicators above.
-# Longest names come first so ``macd_signal`` matches before ``macd``.
-# Each underscore in the indicator name is allowed to appear as ``-`` or
-# ``_`` so hyphenated aliases (``macd-signal``) parse identically to the
+# Token: either a price field, a number (int / decimal / leading-dot decimal /
+# scientific), or ``name(arg1[,arg2,...])`` / bare ``name`` for the indicators
+# above.  Longest names come first so ``macd_signal`` matches before ``macd``.
+# Each underscore in the indicator name is allowed to appear as ``-`` or ``_``
+# so hyphenated aliases (``macd-signal``) parse identically to the
 # underscored form.
 _INDICATOR_NAME_PAT = "|".join(name.replace("_", "[-_]") for name in _INDICATOR_NAMES)
+_NUMBER_PAT = r"-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
 _TOKEN_PAT = (
     r"(?:" + _INDICATOR_NAME_PAT + r")\s*\([^)]*\)"
     r"|(?:close|high|low|open|volume|hl2|ohlc4)\b"
     r"|(?:" + _INDICATOR_NAME_PAT + r")\b"
-    r"|-?\d+(?:\.\d+)?"
+    r"|" + _NUMBER_PAT
 )
-_OP_PAT = r"(>=|<=|==|>|<|crosses?\s+above|crosses?\s+below)"
+# ``cross(?:es)?`` matches singular `cross` and plural `crosses` (the previous
+# ``crosses?`` matched only `crosse`/`crosses` — never bare `cross`).
+_OP_PAT = r"(>=|<=|==|>|<|cross(?:es)?\s+above|cross(?:es)?\s+below)"
 
 _PREDICATE_RE = re.compile(
     rf"^\s*({_TOKEN_PAT})\s*{_OP_PAT}\s*({_TOKEN_PAT})\s*$",
@@ -138,7 +141,12 @@ def _parse_call_args(
 ) -> tuple[list[int | float], str | None] | None:
     if not raw.strip():
         return [], None
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    # Don't filter empty slots: ``sma(,20)`` / ``macd(12,,9)`` would silently
+    # shift positional values to the wrong parameters.  Any empty slot is a
+    # malformed call.
+    parts = [p.strip() for p in raw.split(",")]
+    if any(not p for p in parts):
+        return None
     positional_tokens: list[str] = []
     source: str | None = None
     saw_kwarg = False
@@ -297,10 +305,11 @@ def _normalise_op(op_text: str) -> str | None:
     op_text = op_text.strip().lower()
     if op_text in _OP_MAP:
         return _OP_MAP[op_text]
-    # ``crosses above`` / ``cross above`` (and below)
-    if re.match(r"crosses?\s+above", op_text):
+    # ``crosses above`` / ``cross above`` (and below) — note ``crosses?`` only
+    # matches ``crosse``/``crosses``, so we use ``cross(?:es)?`` for both forms.
+    if re.match(r"cross(?:es)?\s+above", op_text):
         return "cross_above"
-    if re.match(r"crosses?\s+below", op_text):
+    if re.match(r"cross(?:es)?\s+below", op_text):
         return "cross_below"
     return None
 

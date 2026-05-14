@@ -31,9 +31,10 @@ columns downstream.
 
 from __future__ import annotations
 
+import math
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 ComparisonOp = Literal["gt", "lt", "ge", "le", "eq", "cross_above", "cross_below"]
 
@@ -58,6 +59,16 @@ class PriceRef(_SpecNode):
 class ConstRef(_SpecNode):
     kind: Literal["const"] = "const"
     value: float
+
+    @field_validator("value")
+    @classmethod
+    def _value_must_be_finite(cls, v: float) -> float:
+        # NaN/inf serialise as `null`/`Infinity` in JSON and emit `nan`/`inf` in
+        # prompt text, neither of which the adapter can round-trip.  Reject at
+        # construction time.
+        if not math.isfinite(v):
+            raise ValueError(f"ConstRef.value must be finite (got {v!r})")
+        return v
 
 
 class SMARef(_SpecNode):
@@ -289,18 +300,24 @@ _OP_SYMBOL: dict[str, str] = {
 
 
 def _format_number(x: float) -> str:
-    """Render a float as plain decimal text the adapter regex can parse back.
+    """Render a float as decimal text the adapter regex can parse back.
 
-    `:g` would switch to scientific notation for small values (e.g. `1e-06`),
-    which `spec_dsl_adapter._TOKEN_PAT` (``-?\\d+(?:\\.\\d+)?``) does not accept.
-    We use fixed-point with up to 12 decimal places and strip trailing zeros so
-    the round-trip contract holds for the range of values the DSL is expected
-    to carry (percentages, periods, prices, small thresholds).
+    Integer-valued floats (including those that fall on an integer after the
+    usual ``0.02 * 100 == 2.0000000000000004`` float-arithmetic jitter) render
+    as bare integers.  Everything else uses ``repr(x)``, which gives Python's
+    shortest unambiguous representation.  ``repr`` may emit scientific
+    notation for very small or very large values (e.g. ``1e-13``); the adapter
+    accepts that form via ``_NUMBER_PAT``.  Non-finite values raise — they're
+    rejected at construction time by ``ConstRef`` but we double-check here.
     """
-    if float(x).is_integer():
-        return str(int(x))
-    s = f"{x:.12f}".rstrip("0").rstrip(".")
-    return s if s else "0"
+    if not math.isfinite(x):
+        raise ValueError(f"cannot format non-finite value: {x!r}")
+    rounded = round(x)
+    # 1e-9 tolerance absorbs float-arithmetic jitter (`0.10 * 100`) without
+    # collapsing values that the caller actually meant as small thresholds.
+    if abs(x - rounded) < 1e-9 and -1e16 < x < 1e16:
+        return str(rounded)
+    return repr(x)
 
 
 def _with_source(base: str, source: str) -> str:

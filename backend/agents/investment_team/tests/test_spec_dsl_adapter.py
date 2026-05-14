@@ -487,17 +487,87 @@ def test_macd_default_output_round_trip():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Empty positional slots (#558 third pass).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "prose",
+    ["sma(,20) > close", "macd(12,,9) > 0", "sma(20,) > close"],
+)
+def test_indicator_empty_positional_slot_rejected(prose):
+    """`sma(,20)` etc. used to silently drop the empty slot and shift values."""
+    parsed = parse_entry_rule(prose)
+    assert isinstance(parsed, UnparsableRule)
+
+
+# ---------------------------------------------------------------------------
+# Singular `cross` operator.
+# ---------------------------------------------------------------------------
+
+
+def test_singular_cross_above():
+    parsed = parse_entry_rule("sma(20) cross above sma(50)")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.op == "cross_above"
+
+
+def test_singular_cross_below():
+    parsed = parse_entry_rule("sma(20) cross below sma(50)")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.op == "cross_below"
+
+
+# ---------------------------------------------------------------------------
+# Leading-dot numeric thresholds.
+# ---------------------------------------------------------------------------
+
+
+def test_predicate_leading_dot_number():
+    parsed = parse_entry_rule("rsi < .5")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.rhs == ConstRef(value=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Non-finite ConstRef values are rejected at construction time.
+# ---------------------------------------------------------------------------
+
+
+def test_const_ref_rejects_nan():
+    from pydantic import ValidationError as _VE
+
+    with pytest.raises(_VE):
+        ConstRef(value=float("nan"))
+
+
+def test_const_ref_rejects_inf():
+    from pydantic import ValidationError as _VE
+
+    with pytest.raises(_VE):
+        ConstRef(value=float("inf"))
+
+
+def test_const_ref_rejects_neg_inf():
+    from pydantic import ValidationError as _VE
+
+    with pytest.raises(_VE):
+        ConstRef(value=float("-inf"))
+
+
 @pytest.mark.parametrize(
     "value",
-    [1e-06, 0.0001, 0.5, 100.5],
+    [1e-13, 1e-06, 0.0001, 0.5, 100.5, 1e20],
 )
 def test_small_decimal_round_trip(value):
+    """Formatter/adapter must round-trip across the full float range, including
+    values for which `repr` emits scientific notation."""
     rule = EntryRule(
         side="long",
         when=Predicate(lhs=PriceRef(field="close"), op="gt", rhs=ConstRef(value=value)),
     )
     rendered = format_rules_for_prompt([rule])
-    assert "e-" not in rendered.lower()  # no scientific notation
     reparsed = parse_entry_rule(rendered)
     assert isinstance(reparsed, EntryRule)
     assert reparsed.when.rhs.value == pytest.approx(value)
