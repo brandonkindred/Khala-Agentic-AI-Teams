@@ -95,32 +95,38 @@ _TIME_STOP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Positive numeric pattern (no leading sign).  Includes scientific notation
+# so tiny fractions like ``1e-12`` round-trip through the formatter; Pydantic
+# `gt=0` constraints reject negative parses, so we don't need to forbid the
+# minus sign here.
+_POS_NUMBER_PAT = r"(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
+
 _STOP_LOSS_PCT_RE = re.compile(
-    r"\b(?:(trailing[-\s_]?(?:high|low))\s+)?stop[\s_-]?loss[:\s]+(\d+(?:\.\d+)?)\s*%",
+    r"\b(?:(trailing[-\s_]?(?:high|low))\s+)?stop[\s_-]?loss[:\s]+(" + _POS_NUMBER_PAT + r")\s*%",
     re.IGNORECASE,
 )
 _STOP_LOSS_DECIMAL_RE = re.compile(
-    r"\b(?:(trailing[-\s_]?(?:high|low))\s+)?stop[\s_-]?loss[:\s]+(0?\.\d+)\b",
+    r"\b(?:(trailing[-\s_]?(?:high|low))\s+)?stop[\s_-]?loss[:\s]+(" + _POS_NUMBER_PAT + r")",
     re.IGNORECASE,
 )
 
 _TAKE_PROFIT_RE = re.compile(
-    r"\b(?:take[\s_-]?profit|target)[:\s]+(\d+(?:\.\d+)?)\s*%",
+    r"\b(?:take[\s_-]?profit|target)[:\s]+(" + _POS_NUMBER_PAT + r")\s*%",
     re.IGNORECASE,
 )
 
 _FIXED_FRACTION_RE = re.compile(
-    r"\b(?:risk|allocate)\s+(\d+(?:\.\d+)?)\s*%\s+per\s+trade\b",
+    r"\b(?:risk|allocate)\s+(" + _POS_NUMBER_PAT + r")\s*%\s+per\s+trade\b",
     re.IGNORECASE,
 )
 
 _VOL_TARGET_RE = re.compile(
-    r"\bvol(?:atility)?[\s_-]?target\s+(\d+(?:\.\d+)?)\s*%",
+    r"\bvol(?:atility)?[\s_-]?target\s+(" + _POS_NUMBER_PAT + r")\s*%",
     re.IGNORECASE,
 )
 
 _FIXED_NOTIONAL_RE = re.compile(
-    r"\$(\d+(?:\.\d+)?)\s+(?:per\s+trade|notional)",
+    r"\$(" + _POS_NUMBER_PAT + r")\s+(?:per\s+trade|notional)",
     re.IGNORECASE,
 )
 

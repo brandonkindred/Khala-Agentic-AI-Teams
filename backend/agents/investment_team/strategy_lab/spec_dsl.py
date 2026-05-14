@@ -34,7 +34,7 @@ from __future__ import annotations
 import math
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 ComparisonOp = Literal["gt", "lt", "ge", "le", "eq", "cross_above", "cross_below"]
 
@@ -43,6 +43,21 @@ Source = Literal["close", "high", "low", "open", "volume", "hl2", "ohlc4"]
 
 class _SpecNode(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _reject_non_finite_floats(self):
+        """Reject NaN / +inf / -inf for every float field on this node.
+
+        Non-finite floats round-trip badly: ``model_dump_json()`` serialises
+        them as ``null`` / ``Infinity`` (neither of which the adapter parses
+        back), and ``_format_number`` refuses them outright.  Rejecting here
+        keeps the DSL's validation/serialisation contract internally
+        consistent regardless of which numeric field a caller supplies.
+        """
+        for name, value in self.__dict__.items():
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"{type(self).__name__}.{name} must be finite (got {value!r})")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -58,17 +73,8 @@ class PriceRef(_SpecNode):
 
 class ConstRef(_SpecNode):
     kind: Literal["const"] = "const"
+    # Non-finite values are rejected by ``_SpecNode._reject_non_finite_floats``.
     value: float
-
-    @field_validator("value")
-    @classmethod
-    def _value_must_be_finite(cls, v: float) -> float:
-        # NaN/inf serialise as `null`/`Infinity` in JSON and emit `nan`/`inf` in
-        # prompt text, neither of which the adapter can round-trip.  Reject at
-        # construction time.
-        if not math.isfinite(v):
-            raise ValueError(f"ConstRef.value must be finite (got {v!r})")
-        return v
 
 
 class SMARef(_SpecNode):
@@ -308,14 +314,18 @@ def _format_number(x: float) -> str:
     shortest unambiguous representation.  ``repr`` may emit scientific
     notation for very small or very large values (e.g. ``1e-13``); the adapter
     accepts that form via ``_NUMBER_PAT``.  Non-finite values raise — they're
-    rejected at construction time by ``ConstRef`` but we double-check here.
+    rejected at construction time by ``_SpecNode`` but we double-check here.
     """
     if not math.isfinite(x):
         raise ValueError(f"cannot format non-finite value: {x!r}")
     rounded = round(x)
-    # 1e-9 tolerance absorbs float-arithmetic jitter (`0.10 * 100`) without
-    # collapsing values that the caller actually meant as small thresholds.
-    if abs(x - rounded) < 1e-9 and -1e16 < x < 1e16:
+    # Relative-tolerance check absorbs float jitter like 0.10 * 100 →
+    # 10.000000000000002 without collapsing genuinely tiny values:
+    # math.isclose(5e-10, 0, rel_tol=1e-12, abs_tol=0) is False because
+    # rel_tol*max(|5e-10|, 0) = 5e-22 < 5e-10.  The -1e16..1e16 bound keeps
+    # very large floats out of the integer fast path (their decimal form
+    # would lose precision).
+    if math.isclose(x, rounded, rel_tol=1e-12, abs_tol=0) and -1e16 < x < 1e16:
         return str(rounded)
     return repr(x)
 

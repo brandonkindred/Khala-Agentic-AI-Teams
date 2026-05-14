@@ -571,3 +571,80 @@ def test_small_decimal_round_trip(value):
     reparsed = parse_entry_rule(rendered)
     assert isinstance(reparsed, EntryRule)
     assert reparsed.when.rhs.value == pytest.approx(value)
+
+
+# ---------------------------------------------------------------------------
+# Tiny non-zero values must NOT collapse to 0 (#558 fourth pass).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [5e-10, 1e-12, 1e-15])
+def test_tiny_const_not_collapsed_to_zero(value):
+    rendered = format_rules_for_prompt(
+        [
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=PriceRef(field="close"),
+                    op="gt",
+                    rhs=ConstRef(value=value),
+                ),
+            )
+        ]
+    )
+    # Must not collapse to the bare `0` integer.
+    assert not rendered.endswith("> 0")
+    reparsed = parse_entry_rule(rendered)
+    assert isinstance(reparsed, EntryRule)
+    assert reparsed.when.rhs.value == pytest.approx(value)
+
+
+def test_tiny_fixed_fraction_round_trip():
+    rule = FixedFractionSizing(fraction=1e-12)
+    rendered = format_sizing_rule(rule)
+    # Must not collapse to the literal "risk 0% per trade" prose, which the
+    # adapter would round-trip into a Pydantic `gt=0` failure.
+    assert rendered != "risk 0% per trade"
+    reparsed = parse_sizing_rule(rendered)
+    assert isinstance(reparsed, FixedFractionSizing)
+    assert reparsed.fraction == pytest.approx(1e-12)
+
+
+def test_tiny_vol_target_round_trip():
+    rule = VolatilityTargetSizing(target_annual_vol=1e-10)
+    rendered = format_sizing_rule(rule)
+    reparsed = parse_sizing_rule(rendered)
+    assert isinstance(reparsed, VolatilityTargetSizing)
+    assert reparsed.target_annual_vol == pytest.approx(1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Every float-bearing DSL node rejects non-finite values (#558 fourth pass).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda v: StopLossRule(pct=v),
+        lambda v: TakeProfitRule(pct=v),
+        lambda v: FixedFractionSizing(fraction=v),
+        lambda v: VolatilityTargetSizing(target_annual_vol=v),
+        lambda v: FixedNotionalSizing(notional_usd=v),
+    ],
+)
+def test_dsl_nodes_reject_non_finite_floats(factory, bad):
+    from pydantic import ValidationError as _VE
+
+    with pytest.raises(_VE):
+        factory(bad)
+
+
+def test_bollinger_num_std_rejects_non_finite():
+    from pydantic import ValidationError as _VE
+
+    from investment_team.strategy_lab.spec_dsl import BollingerRef
+
+    with pytest.raises(_VE):
+        BollingerRef(num_std=float("inf"))
