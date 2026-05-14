@@ -42,11 +42,14 @@ the exception text + `job_id` so the next grooming sees the gap.
 ## What's deferred to follow-up issues
 
 - Agent Console "Backlog", "Sprints", and "Releases" tabs (Angular).
-- `ARCHITECTURE.md` "Product Delivery Loop" section.
 - Versioning policy beyond date-stamps (semver vs date — issue #371
   explicitly defers this).
 - Temporal-mode plumbing for `sprint_id` runs (Phase 2 raises a 400
   in Temporal mode; same contract here).
+
+For the end-to-end architectural picture (loop diagram + sequence
+diagram + runtime contracts), see
+[`ARCHITECTURE.md` §11 — Product Delivery Loop](../../../ARCHITECTURE.md#11-product-delivery-loop).
 
 ## Schema
 

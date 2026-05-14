@@ -106,6 +106,8 @@ flowchart LR
   quality --> integration
 ```
 
+**Product Delivery loop:** when `POST /api/software-engineering/run-team` is called with `{sprint_id}`, the orchestrator skips Discovery and hydrates `ProductRequirements` from the sprint's planned stories via `_load_requirements_from_sprint`. The Integration phase then fires `_run_release_manager_hook`, which (on a fully-completed sprint) ships a release via `ReleaseManagerAgent` and auto-promotes Integration / DevOps / QA failures into `product_delivery_feedback_items` for the next groom. See [`ARCHITECTURE.md` §11 — Product Delivery Loop](../../../ARCHITECTURE.md#11-product-delivery-loop) and `backend/agents/product_delivery/README.md`.
+
 ### Per-Task Workflow Gates
 
 **Backend:** build verification → code review → acceptance verifier → security → QA → DbC → Tech Lead review → documentation
