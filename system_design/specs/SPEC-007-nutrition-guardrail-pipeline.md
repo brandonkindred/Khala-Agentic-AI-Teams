@@ -728,6 +728,16 @@ Until either mechanism lands, the placeholder owner provides single-
 reviewer gating but does not meet §8.1's two-category requirement; the
 policy is held by reviewer discipline.
 
+**Self-ownership of CODEOWNERS.** The CODEOWNERS file is also assigned
+to the engineering owner (`/.github/CODEOWNERS @brandonkindred` today;
+`@<org>/engineering-leads` once provisioned). Without this rule, a PR
+could strip the `interactions.yaml` line first and a follow-up PR could
+then edit the data with no gate, since CODEOWNERS only protects paths
+it explicitly lists. The supplemental ruleset / status check above must
+also scope to CODEOWNERS edits that touch the `interactions.yaml` rule,
+otherwise a unilateral engineering-side strip could disable the
+clinical-reviewer requirement on the next PR.
+
 ### 8.3 Verification (W13 acceptance)
 
 Open a dummy PR that creates `interactions.yaml` with a single header

@@ -5,6 +5,18 @@
 # Branch protection must enable "Require review from Code Owners" for
 # these rules to be enforced at merge time.
 
+# Self-ownership: changes to this file itself must be approved by a
+# code owner, otherwise a PR could strip a downstream rule and a later
+# PR could then modify the protected file with no gate. GitHub's
+# CODEOWNERS docs explicitly recommend owning this path.
+# TODO(SPEC-007 W13): switch to @<org>/engineering-leads once provisioned.
+# CODEOWNERS meta-edits are engineering's responsibility; the
+# clinical-reviewer requirement on data files is held by the
+# supplemental ruleset / status check described in SPEC-007 §8.2,
+# which MUST also scope to CODEOWNERS edits that touch the
+# `interactions.yaml` rule.
+/.github/CODEOWNERS @brandonkindred
+
 # SPEC-007 W13: nutrition guardrail medication x food interactions data.
 # Policy (SPEC-007 §4.4, §8): every change to interactions.yaml -- including
 # promoting an entry from `flag` to `hard` -- requires sign-off from both
