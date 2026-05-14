@@ -669,3 +669,46 @@ fixture passes.
   ingredients × ~200 bytes of parse metadata = ~2 KB. Acceptable;
   ADR-003 nutrient data will dominate eventually. Compress column
   or archive >90 days if it becomes an issue.
+
+---
+
+## 8. Approval ladder
+
+Sensitive policy artefacts ship under a two-sign-off rule, enforced by
+`.github/CODEOWNERS` plus branch protection ("Require review from Code
+Owners"). The policy is referenced inline at §4.4 (promotion of
+`flag` → `hard`), §5 Phase 4 W13, and §6.8 cutover; this section is the
+single source of truth.
+
+### 8.1 `interactions.yaml`
+
+Any PR that modifies
+`backend/agents/nutrition_meal_planning_team/guardrail/data/interactions.yaml`
+— including the promotion of an entry from `flag` to `hard` per §4.4 —
+requires approval from **both**:
+
+1. **Engineering team lead** — verifies schema correctness, version bump,
+   loader test coverage, and replay-job implications (W12).
+2. **Clinical reviewer** — verifies medical accuracy of the interaction
+   class, severity assignment, and the supporting citation.
+
+Either reviewer can block on either axis; promotions are not
+"engineering-only" or "clinical-only".
+
+### 8.2 CODEOWNERS handles
+
+The current CODEOWNERS entry references the repo owner (`@brandonkindred`)
+as a placeholder for both roles while the engineering-lead and
+clinical-reviewer GitHub teams are stood up. The placeholder is annotated
+with `TODO(SPEC-007 W13)` so the handover is visible. Once the teams
+exist, replace the placeholder with two distinct owners on the same line
+so GitHub's "Require review from Code Owners" branch protection forces
+sign-off from both categories.
+
+### 8.3 Verification (W13 acceptance)
+
+Open a dummy PR that creates `interactions.yaml` with a single header
+comment (W3 will replace this with the real content). The PR's
+"Reviewers" sidebar must surface the CODEOWNERS-required reviewer before
+merge, and a non-owner approval alone must not be sufficient to merge
+once branch protection is configured.

@@ -1,0 +1,17 @@
+# .github/CODEOWNERS
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-customization/customizing-your-repository/about-code-owners
+#
+# Required reviewers for sensitive policy artefacts.
+# Branch protection must enable "Require review from Code Owners" for
+# these rules to be enforced at merge time.
+
+# SPEC-007 W13: nutrition guardrail medication x food interactions data.
+# Policy (SPEC-007 §4.4, §8): every change to interactions.yaml -- including
+# promoting an entry from `flag` to `hard` -- requires sign-off from both
+# the engineering team lead and a clinical reviewer.
+#
+# TODO(SPEC-007 W13): replace @brandonkindred with two distinct handles
+# once the engineering-lead and clinical-reviewer GitHub teams are
+# provisioned. Target form (one line, two owners):
+#   backend/agents/nutrition_meal_planning_team/guardrail/data/interactions.yaml @<org>/engineering-leads @<org>/clinical-reviewers
+backend/agents/nutrition_meal_planning_team/guardrail/data/interactions.yaml @brandonkindred
