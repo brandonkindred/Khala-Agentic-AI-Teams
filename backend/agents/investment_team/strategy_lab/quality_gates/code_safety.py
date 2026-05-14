@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .models import QualityGateResult
 
@@ -362,49 +362,72 @@ def _get_call_name(node: ast.Call) -> str:
 _ENGINE_HOOK_METHODS = frozenset({"on_bar", "on_start", "on_fill", "on_end"})
 
 
-def _hook_context_param_name(method: ast.FunctionDef | ast.AsyncFunctionDef) -> Optional[str]:
-    """Return the name of the context parameter for an engine hook, or None.
-
-    Every hook has shape ``(self, ctx, ...)``; the first positional after
-    ``self`` is the engine context. Methods with too few parameters cannot
-    be valid hooks and return ``None``.
-    """
-    if len(method.args.args) < 2:
-        return None
-    return method.args.args[1].arg
-
-
-def _is_submit_order_on_receiver(node: ast.Call, receiver_name: str) -> bool:
-    """True iff ``node`` is ``<receiver_name>.submit_order(...)``."""
-    if not isinstance(node.func, ast.Attribute):
-        return False
-    if node.func.attr != "submit_order":
-        return False
-    receiver = node.func.value
-    return isinstance(receiver, ast.Name) and receiver.id == receiver_name
-
-
 def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
-    """Return every ``<ctx>.submit_order(...)`` call inside an engine hook.
+    """Return every ``submit_order(...)`` call reachable from an engine hook.
 
-    Restricts the AST walk to the four engine-invoked hook methods so
-    ``submit_order`` calls in dead/uninvoked helpers do not satisfy the
-    order-flow gate. For each hook we resolve the context parameter
-    name from its signature, so a strategy that names it ``context``
-    instead of ``ctx`` is still accepted.
+    Engine hooks (``on_bar`` / ``on_start`` / ``on_fill`` / ``on_end``) are
+    the only methods the runtime invokes directly. We:
+
+    1. Walk each hook and record ``<ctx_param>.submit_order(...)`` calls
+       where ``<ctx_param>`` is the hook's second positional parameter
+       (so ``context.submit_order(...)`` is accepted when the hook is
+       declared ``on_bar(self, context, bar)``).
+    2. Follow ``self.<method>(...)`` calls from each hook into other
+       methods of the same class — strategies routinely factor order
+       placement into helpers (e.g. ``self._enter(ctx, bar)``). In each
+       reachable helper, we treat any ``<param>.submit_order(...)`` call
+       on a positional parameter of that helper as a real order
+       submission, since the hook is the only entry point and any
+       parameter is plausibly the engine context threaded through.
+
+    A simple worklist with a ``visited`` set handles mutual recursion;
+    helpers never invoked from a hook (or transitively from one) are
+    still ignored, which is what we want.
     """
-    calls: List[ast.Call] = []
+    methods_by_name: Dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     for node in ast.iter_child_nodes(cls):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            methods_by_name[node.name] = node
+
+    calls: List[ast.Call] = []
+    visited: set[str] = set()
+    worklist: List[ast.FunctionDef | ast.AsyncFunctionDef] = [
+        m for name, m in methods_by_name.items() if name in _ENGINE_HOOK_METHODS
+    ]
+
+    while worklist:
+        method = worklist.pop()
+        if method.name in visited:
             continue
-        if node.name not in _ENGINE_HOOK_METHODS:
-            continue
-        ctx_name = _hook_context_param_name(node)
-        if ctx_name is None:
-            continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Call) and _is_submit_order_on_receiver(sub, ctx_name):
+        visited.add(method.name)
+
+        # Accepted receiver names for this method: every positional param
+        # except ``self``. For hooks the engine guarantees the second
+        # positional is the context; for helpers, any parameter could
+        # carry the threaded-through ctx.
+        param_names = {arg.arg for arg in method.args.args if arg.arg != "self"}
+
+        for sub in ast.walk(method):
+            if not isinstance(sub, ast.Call):
+                continue
+            if (
+                isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "submit_order"
+                and isinstance(sub.func.value, ast.Name)
+                and sub.func.value.id in param_names
+            ):
                 calls.append(sub)
+                continue
+            # Queue ``self.<helper>(...)`` for traversal.
+            if (
+                isinstance(sub.func, ast.Attribute)
+                and isinstance(sub.func.value, ast.Name)
+                and sub.func.value.id == "self"
+            ):
+                helper = methods_by_name.get(sub.func.attr)
+                if helper is not None and helper.name not in visited:
+                    worklist.append(helper)
+
     return calls
 
 

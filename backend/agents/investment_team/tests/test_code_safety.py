@@ -422,3 +422,46 @@ def test_submit_order_in_on_start_satisfies_entry_path() -> None:
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
     assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+def test_submit_order_in_helper_called_from_on_bar_satisfies_order_flow_gate() -> None:
+    """``on_bar`` that delegates to ``self._enter(ctx, bar)`` must be
+    recognised — the helper is reachable from the engine via the hook."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def _enter(self, ctx, bar):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+            def _exit(self, ctx, bar):
+                ctx.submit_order(symbol='X', qty=1, side='FLAT')
+            def on_bar(self, ctx, bar):
+                if bar.close > 100:
+                    self._enter(ctx, bar)
+                else:
+                    self._exit(ctx, bar)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+def test_transitive_helper_submit_orders_are_recognised() -> None:
+    """Helpers called from helpers (transitively reachable from a hook)
+    are still in the engine-reachable call graph and must count. The
+    second submit_order lives two hops away from ``on_bar``."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def _emit_exit(self, ctx):
+                ctx.submit_order(symbol='X', qty=1, side='FLAT')
+            def _trade(self, ctx, bar):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                self._emit_exit(ctx)
+            def on_bar(self, ctx, bar):
+                self._trade(ctx, bar)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
