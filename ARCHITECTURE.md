@@ -600,7 +600,7 @@ sequenceDiagram
         RM-->>SE: skip (sprint not complete)
     end
 
-    Note over FB,Op: Next POST /groom scopes candidate inputs by sprint_id
+    Note over FB,Op: Failures are queryable via GET /feedback (sprint_id-tagged); operator triages them into stories before the next groom
 ```
 
 ### Failure and re-entry
@@ -608,7 +608,7 @@ sequenceDiagram
 Two contracts keep the loop self-healing:
 
 1. **Non-fatal release hook** — `_run_release_manager_hook` wraps `ReleaseManagerAgent.ship()` in `try/except`. Agent exceptions never fail the SE job; instead a `release-manager-error` feedback item is opened with the exception text and `job_id`, surfaced to the next groom.
-2. **Sprint-scoped feedback as seeds** — every failure promoted from Integration / DevOps / QA carries `sprint_id`, so `POST /groom` can filter "feedback this sprint surfaced" as candidate input for the next backlog pass without manual curation.
+2. **Sprint-scoped feedback as queryable signal** — every failure promoted from Integration / DevOps / QA carries `sprint_id`, so it surfaces in `GET /api/product-delivery/feedback?product_id=…&status=open` (and the Agent Console Feedback tab). `POST /groom` itself only reads story rows today — it does not consume feedback automatically — so triaging the new feedback into stories (e.g. via the Feedback tab's "link to story" action) is what feeds the next backlog pass.
 
 Temporal-mode runs currently raise a 400 when `sprint_id` is supplied (same contract as Phase 2/3 — see `product_delivery/README.md`); the in-thread runtime is the only mode wired end-to-end today.
 
