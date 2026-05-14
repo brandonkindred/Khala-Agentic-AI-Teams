@@ -14,4 +14,11 @@
 # once the engineering-lead and clinical-reviewer GitHub teams are
 # provisioned. Target form (one line, two owners):
 #   backend/agents/nutrition_meal_planning_team/guardrail/data/interactions.yaml @<org>/engineering-leads @<org>/clinical-reviewers
+#
+# Important — CODEOWNERS alone does NOT enforce two-category sign-off.
+# With "Require review from Code Owners" enabled, GitHub treats a
+# multi-owner line as "approval from any one of the listed owners is
+# sufficient", so either team alone could clear the gate. SPEC-007 §8.2
+# describes the supplemental mechanism (per-team repository rulesets or
+# a required status check) that closes the gap once the teams exist.
 backend/agents/nutrition_meal_planning_team/guardrail/data/interactions.yaml @brandonkindred

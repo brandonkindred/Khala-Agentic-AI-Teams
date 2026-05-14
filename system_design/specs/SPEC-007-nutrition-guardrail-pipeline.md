@@ -695,15 +695,38 @@ requires approval from **both**:
 Either reviewer can block on either axis; promotions are not
 "engineering-only" or "clinical-only".
 
-### 8.2 CODEOWNERS handles
+### 8.2 CODEOWNERS handles and enforcement gap
 
 The current CODEOWNERS entry references the repo owner (`@brandonkindred`)
 as a placeholder for both roles while the engineering-lead and
 clinical-reviewer GitHub teams are stood up. The placeholder is annotated
-with `TODO(SPEC-007 W13)` so the handover is visible. Once the teams
-exist, replace the placeholder with two distinct owners on the same line
-so GitHub's "Require review from Code Owners" branch protection forces
-sign-off from both categories.
+with `TODO(SPEC-007 W13)` so the handover is visible.
+
+Once the teams exist, replace the placeholder with two distinct owners on
+the same CODEOWNERS line:
+
+```
+backend/agents/nutrition_meal_planning_team/guardrail/data/interactions.yaml @<org>/engineering-leads @<org>/clinical-reviewers
+```
+
+**CODEOWNERS alone does not enforce two-category sign-off.** With
+"Require review from Code Owners" enabled, GitHub treats a multi-owner
+line as "approval from *any one* of the listed owners is sufficient" —
+so either team alone could clear the gate. Closing that gap is part of
+the W13 handover and needs one of:
+
+1. **Per-team repository rulesets (preferred)** — two separate ruleset
+   rules, each requiring at least one approval from a specific team
+   (`@<org>/engineering-leads` and `@<org>/clinical-reviewers`), scoped
+   to PRs that touch `interactions.yaml`. Both rules must be satisfied
+   for the merge button to enable.
+2. **Required status check** — a workflow that fails unless the PR's
+   approvers list intersects both teams; mark the check required in
+   branch protection.
+
+Until either mechanism lands, the placeholder owner provides single-
+reviewer gating but does not meet §8.1's two-category requirement; the
+policy is held by reviewer discipline.
 
 ### 8.3 Verification (W13 acceptance)
 
