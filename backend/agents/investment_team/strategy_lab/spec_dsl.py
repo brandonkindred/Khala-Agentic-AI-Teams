@@ -289,10 +289,18 @@ _OP_SYMBOL: dict[str, str] = {
 
 
 def _format_number(x: float) -> str:
-    """Render a float as the shortest exact-looking decimal we can manage."""
+    """Render a float as plain decimal text the adapter regex can parse back.
+
+    `:g` would switch to scientific notation for small values (e.g. `1e-06`),
+    which `spec_dsl_adapter._TOKEN_PAT` (``-?\\d+(?:\\.\\d+)?``) does not accept.
+    We use fixed-point with up to 12 decimal places and strip trailing zeros so
+    the round-trip contract holds for the range of values the DSL is expected
+    to carry (percentages, periods, prices, small thresholds).
+    """
     if float(x).is_integer():
         return str(int(x))
-    return f"{x:g}"
+    s = f"{x:.12f}".rstrip("0").rstrip(".")
+    return s if s else "0"
 
 
 def _with_source(base: str, source: str) -> str:
@@ -318,7 +326,11 @@ def _format_indicator_ref(ref: IndicatorRef) -> str:
     if isinstance(ref, RSIRef):
         return _with_source(f"rsi({ref.period})", ref.source)
     if isinstance(ref, MACDRef):
-        return _with_source(f"macd_{ref.output}({ref.fast},{ref.slow},{ref.signal})", ref.source)
+        # Default `output="macd"` formats as bare `macd(…)`; otherwise emit
+        # `macd_signal(…)` / `macd_histogram(…)` so the token matches one of
+        # the adapter's recognised indicator names.
+        macd_name = "macd" if ref.output == "macd" else f"macd_{ref.output}"
+        return _with_source(f"{macd_name}({ref.fast},{ref.slow},{ref.signal})", ref.source)
     if isinstance(ref, BollingerRef):
         return _with_source(
             f"bollinger_{ref.band}({ref.period},{_format_number(ref.num_std)})",

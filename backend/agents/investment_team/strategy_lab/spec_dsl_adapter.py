@@ -65,17 +65,17 @@ _INDICATOR_NAMES = (
 )
 
 # Token: either a price field, a number (int or decimal), or
-# ``name(arg1[,arg2,...])`` for the indicators above.  Longest indicator
-# names come first so ``macd_signal`` matches before ``macd``.
-_INDICATOR_NAME_PAT = "|".join(re.escape(name) for name in _INDICATOR_NAMES)
+# ``name(arg1[,arg2,...])`` / bare ``name`` for the indicators above.
+# Longest names come first so ``macd_signal`` matches before ``macd``.
+# Each underscore in the indicator name is allowed to appear as ``-`` or
+# ``_`` so hyphenated aliases (``macd-signal``) parse identically to the
+# underscored form.
+_INDICATOR_NAME_PAT = "|".join(name.replace("_", "[-_]") for name in _INDICATOR_NAMES)
 _TOKEN_PAT = (
-    r"(?:"
-    + _INDICATOR_NAME_PAT
-    + r")\s*\([^)]*\)"
-    + r"|(?:close|high|low|open|volume|hl2|ohlc4)\b"
-    + r"|(?:vwap)\b"
-    + r"|-?\d+(?:\.\d+)?"
-    + r"|(?:rsi)\b"
+    r"(?:" + _INDICATOR_NAME_PAT + r")\s*\([^)]*\)"
+    r"|(?:close|high|low|open|volume|hl2|ohlc4)\b"
+    r"|(?:" + _INDICATOR_NAME_PAT + r")\b"
+    r"|-?\d+(?:\.\d+)?"
 )
 _OP_PAT = r"(>=|<=|==|>|<|crosses?\s+above|crosses?\s+below)"
 
@@ -147,7 +147,7 @@ def _parse_call_args(
             saw_kwarg = True
             k, v = part.split("=", 1)
             k = k.strip().lower()
-            v = v.strip()
+            v = v.strip().lower()  # `SOURCE=OPEN` → `source=open` so the Literal accepts it
             if k != "source" or not allow_source or source is not None:
                 return None
             source = v
@@ -246,7 +246,7 @@ _INDICATOR_CALL_RE = re.compile(
     re.IGNORECASE,
 )
 _BARE_NAME_RE = re.compile(
-    rf"^\s*({_INDICATOR_NAME_PAT}|vwap)\s*$",
+    rf"^\s*({_INDICATOR_NAME_PAT})\s*$",
     re.IGNORECASE,
 )
 
@@ -267,16 +267,21 @@ def _parse_token(tok: str):
     m = _INDICATOR_CALL_RE.match(tok)
     if m:
         try:
-            return _parse_indicator_call(m.group(1).lower(), m.group(2))
+            return _parse_indicator_call(_canonical_name(m.group(1)), m.group(2))
         except (ValueError, ValidationError):
             return None
     m = _BARE_NAME_RE.match(tok)
     if m:
         try:
-            return _parse_indicator_call(m.group(1).lower(), "")
+            return _parse_indicator_call(_canonical_name(m.group(1)), "")
         except (ValueError, ValidationError):
             return None
     return None
+
+
+def _canonical_name(raw: str) -> str:
+    """Lowercase and convert hyphenated indicator aliases to the underscored form."""
+    return raw.lower().replace("-", "_")
 
 
 _OP_MAP = {
@@ -332,12 +337,13 @@ def parse_entry_rule(prose: str) -> EntryRule | UnparsableRule:
 
     Accepts a bare predicate (``"close > sma(20)"``), the formatter's own
     output (``"long when …"`` / ``"short when …"``), or the legacy repo
-    convention (``"enter when …"``).
+    convention (``"enter when …"``, optionally ``"enter long when …"`` /
+    ``"enter short when …"``).
     """
     text = prose.strip()
     side: Literal["long", "short"] = "short" if _SHORT_RE.search(text) else "long"
     body = re.sub(
-        r"^\s*(?:long|short|enter)\s+when\s+",
+        r"^\s*(?:enter\s+)?(?:(?:long|short)\s+)?when\s+",
         "",
         text,
         count=1,

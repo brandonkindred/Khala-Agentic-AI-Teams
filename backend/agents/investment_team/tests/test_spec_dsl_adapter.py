@@ -371,3 +371,133 @@ def test_atr_source_kwarg_rejected():
     """ATR has no `source` field; specifying one must reject."""
     parsed = parse_exit_rule("exit when atr(14, source=open) > 0")
     assert isinstance(parsed, UnparsableRule)
+
+
+# ---------------------------------------------------------------------------
+# Bare default-argument indicators in predicates (#558 second pass).
+# ---------------------------------------------------------------------------
+
+
+def test_predicate_bare_adx():
+    from investment_team.strategy_lab.spec_dsl import ADXRef
+
+    parsed = parse_entry_rule("ADX > 25")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.lhs == ADXRef(period=14)
+    assert parsed.when.rhs == ConstRef(value=25)
+
+
+def test_predicate_bare_macd():
+    from investment_team.strategy_lab.spec_dsl import MACDRef
+
+    parsed = parse_entry_rule("macd > 0")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.lhs == MACDRef()
+    assert parsed.when.rhs == ConstRef(value=0)
+
+
+def test_predicate_bare_stochastic_k():
+    from investment_team.strategy_lab.spec_dsl import StochasticRef
+
+    parsed = parse_entry_rule("stochastic_k < 20")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.lhs == StochasticRef()
+
+
+def test_predicate_bare_sma_stays_unparsable():
+    """SMA/EMA still need an explicit period — bare `sma > x` should fail."""
+    parsed = parse_entry_rule("sma > close")
+    assert isinstance(parsed, UnparsableRule)
+
+
+# ---------------------------------------------------------------------------
+# Enter prefix with explicit side.
+# ---------------------------------------------------------------------------
+
+
+def test_entry_enter_short_when():
+    parsed = parse_entry_rule("enter short when rsi > 70")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.side == "short"
+    assert parsed.when == Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70))
+
+
+def test_entry_enter_long_when():
+    parsed = parse_entry_rule("enter long when close > sma(20)")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.side == "long"
+    assert parsed.when == Predicate(lhs=PriceRef(field="close"), op="gt", rhs=SMARef(period=20))
+
+
+# ---------------------------------------------------------------------------
+# Hyphenated indicator aliases.
+# ---------------------------------------------------------------------------
+
+
+def test_hyphenated_indicator_alias_call():
+    from investment_team.strategy_lab.spec_dsl import MACDRef
+
+    parsed = parse_entry_rule("macd-signal(12,26,9) > 0")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.lhs == MACDRef(fast=12, slow=26, signal=9, output="signal")
+
+
+def test_hyphenated_indicator_alias_bare():
+    from investment_team.strategy_lab.spec_dsl import StochasticRef
+
+    parsed = parse_entry_rule("stochastic-k < 20")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.lhs == StochasticRef()
+
+
+# ---------------------------------------------------------------------------
+# Case-insensitive source value.
+# ---------------------------------------------------------------------------
+
+
+def test_source_kwarg_case_insensitive():
+    parsed = parse_entry_rule("EMA(50, SOURCE=OPEN) > CLOSE")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.lhs == EMARef(period=50, source="open")
+
+
+# ---------------------------------------------------------------------------
+# MACD default-output formatter round-trip.
+# ---------------------------------------------------------------------------
+
+
+def test_macd_default_output_round_trip():
+    from investment_team.strategy_lab.spec_dsl import MACDRef
+
+    rule = EntryRule(
+        side="long",
+        when=Predicate(lhs=MACDRef(), op="gt", rhs=ConstRef(value=0)),
+    )
+    rendered = format_rules_for_prompt([rule])
+    # The default output ("macd") must format as bare `macd(...)`, not
+    # `macd_macd(...)`, otherwise the adapter can't reparse it.
+    assert "macd_macd" not in rendered
+    reparsed = parse_entry_rule(rendered)
+    assert isinstance(reparsed, EntryRule)
+    assert reparsed.when.lhs == MACDRef()
+
+
+# ---------------------------------------------------------------------------
+# Formatter ↔ adapter round-trip for small decimals.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1e-06, 0.0001, 0.5, 100.5],
+)
+def test_small_decimal_round_trip(value):
+    rule = EntryRule(
+        side="long",
+        when=Predicate(lhs=PriceRef(field="close"), op="gt", rhs=ConstRef(value=value)),
+    )
+    rendered = format_rules_for_prompt([rule])
+    assert "e-" not in rendered.lower()  # no scientific notation
+    reparsed = parse_entry_rule(rendered)
+    assert isinstance(reparsed, EntryRule)
+    assert reparsed.when.rhs.value == pytest.approx(value)
