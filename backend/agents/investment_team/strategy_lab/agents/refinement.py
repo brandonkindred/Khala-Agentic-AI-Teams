@@ -43,17 +43,14 @@ Risk limits: {risk_limits}
 
 ## Instructions
 1. Diagnose the root cause from the failure details.
-2. Fix the code (and optionally adjust strategy rules if the failure reveals a design flaw).
+2. Fix the code only. Do NOT alter the strategy spec (entry/exit/sizing
+   rules, risk limits, hypothesis) — spec changes go through ideation,
+   not refinement.
 3. Ensure your fix doesn't re-introduce any previously fixed issues.
 
 Return ONLY a JSON object with no markdown:
 {{
   "strategy_code": "the complete fixed Python code",
-  "entry_rules": ["rule 1", ...],
-  "exit_rules": ["rule 1", ...],
-  "sizing_rules": ["rule 1", ...],
-  "risk_limits": {{"max_position_pct": 5, "stop_loss_pct": 3}},
-  "hypothesis": "hypothesis (unchanged or updated)",
   "changes_made": "1-2 sentence summary of what you changed and why"
 }}
 """

@@ -277,6 +277,52 @@ class StrategyLabOrchestrator:
         metrics = compute_metrics([], config.initial_capital, config.start_date, config.end_date)
         execution_succeeded = False
         market_data: Optional[Dict[str, List[OHLCVBar]]] = None
+        # #547 item 7: track whether the refinement loop exhausted the round
+        # cap so the persisted record's ``status`` is queryable rather than
+        # buried in logs. Set at each of the three break-on-max sites
+        # (validation / execution / evaluation phases).
+        max_rounds_exhausted = False
+
+        # ── Phase 1b: PRE-SYNTHESIS SPEC GATING (#547 item 1) ─────────
+        # Validate the ideation-time spec ONCE before entering the
+        # refinement loop. Refinement is code-only post-#547 item 2, so
+        # the spec cannot drift between rounds; revalidating per round
+        # was redundant. A critical failure here short-circuits the
+        # cycle without ever calling run_strategy_code or fetching
+        # market data.
+        pre_spec_gates = self.strategy_validator.validate(spec)
+        for g in pre_spec_gates:
+            g.refinement_round = -1
+        all_gate_results.extend(pre_spec_gates)
+        pre_synthesis_criticals = [
+            g for g in pre_spec_gates if not g.passed and g.severity == "critical"
+        ]
+        if pre_synthesis_criticals:
+            emit(
+                "coding",
+                {
+                    "sub_phase": "failed",
+                    "phase": "pre_synthesis",
+                    "checks_total": len(pre_spec_gates),
+                    "checks_passed": sum(1 for g in pre_spec_gates if g.passed),
+                },
+            )
+            return self._build_short_circuit_record(
+                spec=spec,
+                config=config,
+                code=code,
+                original_spec=original_spec,
+                original_code=original_code,
+                rationale=rationale,
+                all_gate_results=all_gate_results,
+                refinement_attempts=refinement_attempts,
+                short_circuit_status="failed: spec_validation",
+                short_circuit_reason=(
+                    "Spec validation failed before code synthesis: "
+                    + "; ".join(g.details for g in pre_synthesis_criticals)
+                ),
+                emit=emit,
+            )
 
         # ── Phase 2: CODE REFINEMENT LOOP ─────────────────────────────
         # Iterate up to MAX_CODE_REFINEMENT_ROUNDS, refining the
@@ -288,11 +334,11 @@ class StrategyLabOrchestrator:
         for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
 
-            # ── 2a: VALIDATE (spec + code safety) ────────────────────
+            # ── 2a: VALIDATE (code safety only — spec was validated
+            #       pre-synthesis and is immutable for this cycle, see
+            #       #547 items 1 & 2).
             emit("coding", {"sub_phase": "started", "refinement_round": round_num})
-            spec_gates = self.strategy_validator.validate(spec)
             code_gates = self.code_safety_checker.check(code)
-            round_gate_results.extend(spec_gates)
             round_gate_results.extend(code_gates)
             for g in round_gate_results:
                 g.refinement_round = round_num
@@ -345,6 +391,7 @@ class StrategyLabOrchestrator:
                     logger.warning(
                         "Max code refinement rounds reached on validation for %s", spec.strategy_id
                     )
+                    max_rounds_exhausted = True
                     break
 
             emit(
@@ -428,6 +475,7 @@ class StrategyLabOrchestrator:
                     logger.warning(
                         "Max code refinement rounds reached on execution for %s", spec.strategy_id
                     )
+                    max_rounds_exhausted = True
                     break
 
             # ── 2d: COLLECT TRADES ────────────────────────────────────
@@ -577,6 +625,7 @@ class StrategyLabOrchestrator:
                         "Max code refinement rounds reached on evaluation for %s", spec.strategy_id
                     )
                     execution_succeeded = True  # anomalous but code is correct
+                    max_rounds_exhausted = True
                     break
 
             # All gates passed — code is clean and backtest is sound
@@ -978,6 +1027,19 @@ class StrategyLabOrchestrator:
         # ── Phase 4: RECORD ───────────────────────────────────────────
         now_iso = datetime.now(timezone.utc).isoformat()
 
+        # #547 item 7: queryable cap-exhaustion status. The evaluation-phase
+        # site sets ``execution_succeeded=True`` ("anomalous but code is
+        # correct"), so without this branch those cycles would silently
+        # report ``status="completed"`` despite never reaching a clean
+        # backtest. With the strict reading, all three exhaustion sites now
+        # flip status to ``failed: max_refinement_rounds``.
+        if max_rounds_exhausted:
+            backtest_status = "failed: max_refinement_rounds"
+        elif execution_succeeded:
+            backtest_status = "completed"
+        else:
+            backtest_status = "failed"
+
         backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
         backtest_record = BacktestRecord(
             backtest_id=backtest_id,
@@ -987,7 +1049,7 @@ class StrategyLabOrchestrator:
             submitted_by="strategy_lab_v2",
             submitted_at=now_iso,
             completed_at=now_iso,
-            status="completed" if execution_succeeded else "failed",
+            status=backtest_status,
             result=metrics,
             trades=trades,
         )
@@ -1344,13 +1406,85 @@ class StrategyLabOrchestrator:
 
     @staticmethod
     def _apply_updates(spec: StrategySpec, updates: Dict[str, Any], code: str) -> StrategySpec:
-        """Apply refinement updates to the strategy spec."""
+        """Apply refinement updates: code only.
+
+        The spec (entry/exit/sizing rules, risk limits, hypothesis) is
+        immutable post-ideation (#547 item 2). ``updates`` is kept in the
+        signature because callers still read ``updates['changes_made']``
+        for logging, but no spec fields are merged here.
+        """
         data = spec.model_dump()
-        for key in ("entry_rules", "exit_rules", "sizing_rules", "risk_limits", "hypothesis"):
-            if key in updates:
-                data[key] = updates[key]
         data["strategy_code"] = code
         return StrategySpec.model_validate(data)
+
+    def _build_short_circuit_record(
+        self,
+        *,
+        spec: StrategySpec,
+        config: BacktestConfig,
+        code: str,
+        original_spec: StrategySpec,
+        original_code: str,
+        rationale: str,
+        all_gate_results: List[QualityGateResult],
+        refinement_attempts: List[str],
+        short_circuit_status: str,
+        short_circuit_reason: str,
+        emit: PhaseCallback,
+    ) -> StrategyLabRecord:
+        """Persist a failed cycle that exited before code execution.
+
+        Used by the pre-synthesis spec gate (#547 item 1) so that
+        critical spec failures short-circuit without ever running
+        ``run_strategy_code`` or fetching market data. The record still
+        flows through ``convergence_tracker`` so failed specs influence
+        diversity directives on the next cycle.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        backtest_record = BacktestRecord(
+            backtest_id=f"bt-{uuid.uuid4().hex[:8]}",
+            strategy_id=spec.strategy_id,
+            strategy=spec,
+            config=config,
+            submitted_by="strategy_lab_v2",
+            submitted_at=now_iso,
+            completed_at=now_iso,
+            status=short_circuit_status,
+            result=compute_metrics([], config.initial_capital, config.start_date, config.end_date),
+            trades=[],
+        )
+
+        lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
+        record = StrategyLabRecord(
+            lab_record_id=lab_record_id,
+            strategy=spec,
+            backtest=backtest_record,
+            is_winning=False,
+            strategy_rationale=rationale,
+            analysis_narrative=short_circuit_reason,
+            created_at=now_iso,
+            refinement_rounds=len(refinement_attempts),
+            quality_gate_results=[g.model_dump() for g in all_gate_results],
+            strategy_code=code,
+            original_spec=original_spec,
+            original_code=original_code,
+        )
+
+        self.convergence_tracker.record(spec, all_gate_results)
+
+        emit(
+            "complete",
+            {
+                "record_id": lab_record_id,
+                "is_winning": False,
+                "metrics": backtest_record.result.model_dump(),
+                "refinement_rounds": len(refinement_attempts),
+                "short_circuit": short_circuit_status,
+            },
+        )
+
+        return record
 
     def _fetch_market_data(
         self,
