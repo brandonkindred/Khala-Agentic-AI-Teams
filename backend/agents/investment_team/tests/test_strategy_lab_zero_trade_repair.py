@@ -598,6 +598,60 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
     assert outcome.new_spec.asset_class == "stocks"
 
 
+def test_zero_trade_repair_rejects_spec_updates_failing_post_repair_validator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitelisted spec_updates that pass Pydantic but fail StrategySpecValidator
+    (e.g. ``risk_limits.max_position_pct=99`` — Pydantic-valid but above the
+    25% safe range) must be rejected by the post-repair revalidation gate
+    added for #547 so the spec mutation never bypasses validation."""
+    orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="ENTRY_WITH_NO_EXIT",
+                evidence="entries_filled=4 closed_trades=0",
+                proposed_code=_REPAIRED_CODE,
+                # ``max_position_pct=99`` is Pydantic-valid but the
+                # StrategySpecValidator marks anything outside [1, 25] as
+                # critical (safety_validator.py).
+                proposed_spec_updates={"risk_limits": {"max_position_pct": 99}},
+                changes_made="bumped position size",
+            ),
+        ],
+        sandbox_results=[],  # sandbox MUST NOT be called
+    )
+
+    outcome, events, attempts = _drive_repair(
+        orch,
+        exec_result=StrategyRunResult(
+            success=True,
+            trades=[],
+            execution_diagnostics=_zero_trade_diagnostics(category="ENTRY_WITH_NO_EXIT"),
+        ),
+    )
+
+    assert outcome.committed is False
+    assert outcome.failure_reason == "invalid_spec_after_repair"
+    # The sandbox must not run when the spec validator rejects the proposal.
+    assert sandbox_stub.calls == []
+    assert len(repair_stub.calls) == 1
+
+    assert len(attempts) == 1
+    assert attempts[0].startswith("invalid_spec_after_repair (ENTRY_WITH_NO_EXIT)")
+
+    rejected_event = next(
+        d for _, d in events if d.get("sub_phase") == "zero_trade_repair_rejected"
+    )
+    assert rejected_event["reason"] == "invalid_spec_after_repair"
+    # The post-repair spec gates are returned so the orchestrator can persist
+    # them on the failed-cycle record.
+    gate_names = [g.gate_name for g in outcome.new_gates]
+    assert any(
+        name.startswith("zero_trade_repair_strategy_spec_validator") for name in gate_names
+    ), gate_names
+
+
 def test_zero_trade_repair_no_category_is_defensive_no_op(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

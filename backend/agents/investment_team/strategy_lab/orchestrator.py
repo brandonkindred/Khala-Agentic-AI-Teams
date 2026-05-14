@@ -1278,6 +1278,41 @@ class StrategyLabOrchestrator:
                 failure_reason="invalid_spec_updates",
             )
 
+        # ── Re-validate the spec after repair-driven mutation ────────
+        # The pre-synthesis gate (#547 item 1) only runs once at ideation.
+        # Zero-trade repair may mutate entry/exit/sizing rules, risk_limits,
+        # hypothesis, or signal_definition via the whitelist; those bypass
+        # the gate. A Pydantic-valid risk_limits value (e.g.
+        # max_position_pct=99) can still be a critical spec failure under
+        # StrategySpecValidator. Re-validate before committing.
+        if report.proposed_spec_updates:
+            post_repair_spec_gates = self.strategy_validator.validate(proposed_spec)
+            for g in post_repair_spec_gates:
+                g.refinement_round = round_num
+                g.gate_name = f"zero_trade_repair_{g.gate_name}"
+            spec_criticals = [
+                g for g in post_repair_spec_gates if not g.passed and g.severity == "critical"
+            ]
+            if spec_criticals:
+                zero_trade_attempts.append(
+                    f"invalid_spec_after_repair ({report.root_cause_category}): "
+                    f"{'; '.join(g.details for g in spec_criticals)[:160]}"
+                )
+                emit(
+                    "coding",
+                    {
+                        "sub_phase": "zero_trade_repair_rejected",
+                        "refinement_round": round_num,
+                        "reason": "invalid_spec_after_repair",
+                        "details": "; ".join(g.details for g in spec_criticals)[:400],
+                    },
+                )
+                return _ZeroTradeRepairOutcome(
+                    committed=False,
+                    new_gates=safety_gates + post_repair_spec_gates,
+                    failure_reason="invalid_spec_after_repair",
+                )
+
         repair_exec = run_strategy_code(
             report.proposed_code, market_data, config, strategy=proposed_spec
         )
