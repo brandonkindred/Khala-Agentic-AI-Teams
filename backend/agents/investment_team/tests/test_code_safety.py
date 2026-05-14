@@ -40,7 +40,8 @@ def test_valid_minimal_strategy_passes() -> None:
 
         class MyStrat(Strategy):
             def on_bar(self, ctx, bar):
-                pass
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='FLAT')
     """)
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
@@ -84,7 +85,8 @@ def test_contract_attribute_base_also_recognised() -> None:
 
         class X(contract.Strategy):
             def on_bar(self, ctx, bar):
-                pass
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='FLAT')
     """)
     results = CodeSafetyChecker().check(code)
     assert _critical_details(results) == []
@@ -159,7 +161,8 @@ def test_indicators_import_still_allowed() -> None:
 
         class S(Strategy):
             def on_bar(self, ctx, bar):
-                pass
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='FLAT')
     """)
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
@@ -245,3 +248,53 @@ def test_comment_mentioning_future_close_is_not_flagged() -> None:
     # assert no *lookahead* critical fired.
     criticals = _critical_details(results)
     assert not any("bar.next_" in c or "ctx.future_" in c or "ctx.peek" in c for c in criticals)
+
+
+# ---------------------------------------------------------------------------
+# Order-flow shape (#547 item 4): entry path + exit path required
+# ---------------------------------------------------------------------------
+
+
+def test_no_submit_order_is_critical_no_entry() -> None:
+    """A Strategy that never calls ``ctx.submit_order`` has no entry path."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                pass  # no submit_order — strategy emits zero trades
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no entry path" in c for c in criticals), criticals
+
+
+def test_single_submit_order_is_critical_no_exit() -> None:
+    """A Strategy with only one ``ctx.submit_order`` call has no exit path."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no exit path" in c for c in criticals), criticals
+
+
+def test_two_submit_orders_passes_order_flow_gate() -> None:
+    """Two ``ctx.submit_order`` calls (entry + exit) satisfies the gate."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.close > 100:
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                else:
+                    ctx.submit_order(symbol='X', qty=1, side='FLAT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals

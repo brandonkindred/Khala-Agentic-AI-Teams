@@ -24,6 +24,15 @@ _ASSET_MISMATCH: dict[str, re.Pattern[str]] = {
     "commodities": re.compile(r"\b(earnings|dividend|P/E|EPS|market cap)\b", re.IGNORECASE),
 }
 
+# Recognised indicator/concept vocabulary for the hypothesis-vs-rules
+# consistency gate (#547 item 6). Word-boundary anchored so substrings like
+# "thematic" don't accidentally match "ema".
+_CONCEPT_TERMS = re.compile(
+    r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|breakout|"
+    r"mean\s+reversion|momentum|volatility|volume|vwap|stochastic|adx|obv)\b",
+    re.IGNORECASE,
+)
+
 
 class StrategySpecValidator:
     """Run deterministic checks on a StrategySpec before code execution."""
@@ -123,6 +132,31 @@ class StrategySpecValidator:
                     passed=False,
                     severity="warning",
                     details="Rules reference non-computable data (sentiment, social media, etc.) without a numerical proxy.",
+                )
+            )
+
+        # 8. Hypothesis-vs-rules consistency (#547 item 6). If the hypothesis
+        #    names indicator concepts that no entry/exit rule references (or
+        #    vice versa), the operational spec and the narrative rationale are
+        #    out of sync. Warning only — the refinement prompt can react.
+        hypothesis_text = spec.hypothesis or ""
+        rules_text = " ".join(spec.entry_rules + spec.exit_rules)
+        terms_in_hypothesis = {m.group(0).lower() for m in _CONCEPT_TERMS.finditer(hypothesis_text)}
+        terms_in_rules = {m.group(0).lower() for m in _CONCEPT_TERMS.finditer(rules_text)}
+        orphan_in_hypothesis = terms_in_hypothesis - terms_in_rules
+        orphan_in_rules = terms_in_rules - terms_in_hypothesis
+        if orphan_in_hypothesis or orphan_in_rules:
+            results.append(
+                QualityGateResult(
+                    gate_name=GATE,
+                    passed=False,
+                    severity="warning",
+                    details=(
+                        "Hypothesis/rules consistency: hypothesis mentions "
+                        f"{sorted(orphan_in_hypothesis) or 'nothing'} that rules don't "
+                        f"reference; rules mention {sorted(orphan_in_rules) or 'nothing'} "
+                        "that hypothesis doesn't."
+                    ),
                 )
             )
 

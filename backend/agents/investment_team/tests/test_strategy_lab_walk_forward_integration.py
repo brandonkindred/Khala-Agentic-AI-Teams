@@ -48,7 +48,12 @@ def _spec() -> StrategySpec:
         sizing_rules=["fixed size"],
         risk_limits={},
         speculative=False,
-        strategy_code="from contract import Strategy\n\nclass S(Strategy):\n    def on_bar(self, ctx, bar):\n        pass\n",
+        strategy_code=(
+            "from contract import Strategy\n\nclass S(Strategy):\n"
+            "    def on_bar(self, ctx, bar):\n"
+            "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+            "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
+        ),
     )
 
 
@@ -588,7 +593,12 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
         "risk_limits": {},
         "speculative": False,
     }
-    overfit_code = "from contract import Strategy\n\nclass S(Strategy):\n    def on_bar(self, ctx, bar):\n        pass\n"
+    overfit_code = (
+        "from contract import Strategy\n\nclass S(Strategy):\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
+    )
     monkeypatch.setattr(
         orch.ideation_agent, "run", lambda **kw: (spec_dict, overfit_code, "rationale")
     )

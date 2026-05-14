@@ -249,6 +249,11 @@ class StrategyLabOrchestrator:
             strategy_code=code,
         )
 
+        # Snapshot ideation outputs so reviewers can compare against any
+        # refinement-driven mutation persisted on the final record (#547).
+        original_spec = spec.model_copy(deep=True)
+        original_code = code
+
         # Override generic fee defaults with asset-class-appropriate values
         if config.transaction_cost_bps == 5.0 and config.slippage_bps == 2.0:
             fee_defaults = get_fee_defaults(spec.asset_class)
@@ -999,6 +1004,8 @@ class StrategyLabOrchestrator:
             refinement_rounds=len(refinement_attempts),
             quality_gate_results=[g.model_dump() for g in all_gate_results],
             strategy_code=code,
+            original_spec=original_spec,
+            original_code=original_code,
         )
 
         # Update convergence tracker

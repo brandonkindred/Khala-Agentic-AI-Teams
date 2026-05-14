@@ -489,7 +489,8 @@ def test_alignment_loop_recovers_after_one_fix_and_re_execution() -> None:
         "from contract import Strategy\n\n"
         "class S(Strategy):\n"
         "    def on_bar(self, ctx, bar):\n"
-        "        pass  # fixed\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
     )
     orch, align_stub, sandbox_stub = _make_orchestrator(
         alignment_reports=[
@@ -559,7 +560,8 @@ def test_alignment_loop_caps_at_max_rounds() -> None:
             "from contract import Strategy\n\n"
             "class S(Strategy):\n"
             "    def on_bar(self, ctx, bar):\n"
-            "        pass  # try again\n"
+            "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+            "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
         ),
         predicted_aligned_after_fix=True,
         changes_made="another attempt",
@@ -634,11 +636,14 @@ def test_alignment_loop_breaks_when_re_execution_fails() -> None:
     the last-good ``code`` / ``spec`` / ``trades`` / ``metrics`` intact so
     the persisted record never contains code that was never successfully
     executed for the reported results."""
+    # Body would raise at runtime, but the sandbox is stubbed so we only need
+    # the code to clear the code-safety gate (entry + exit submit_order).
     proposed_code = (
         "from contract import Strategy\n\n"
         "class S(Strategy):\n"
         "    def on_bar(self, ctx, bar):\n"
-        "        raise RuntimeError\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
     )
     orch, align_stub, sandbox_stub = _make_orchestrator(
         alignment_reports=[
@@ -694,7 +699,8 @@ def test_alignment_loop_breaks_on_critical_anomaly_after_rerun() -> None:
         "from contract import Strategy\n\n"
         "class S(Strategy):\n"
         "    def on_bar(self, ctx, bar):\n"
-        "        pass  # breaks everything\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
     )
     orch, align_stub, sandbox_stub = _make_orchestrator(
         alignment_reports=[

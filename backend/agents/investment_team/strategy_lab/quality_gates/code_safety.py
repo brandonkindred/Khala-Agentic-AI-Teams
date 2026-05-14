@@ -284,6 +284,42 @@ class CodeSafetyChecker:
                 )
             )
 
+        # 8. Order-flow shape (#547): every viable strategy must have at least
+        #    one ``ctx.submit_order(...)`` call (entry path) and at least two
+        #    distinct submit_order call sites in the Strategy class (entry +
+        #    exit). One-sided code emits orders without ever closing them and
+        #    wastes a full refinement cycle in the runtime gates.
+        if len(strategy_classes) == 1:
+            submit_calls = [
+                n
+                for n in ast.walk(strategy_classes[0])
+                if isinstance(n, ast.Call) and _get_call_name(n) == "submit_order"
+            ]
+            if len(submit_calls) == 0:
+                results.append(
+                    QualityGateResult(
+                        gate_name=GATE,
+                        passed=False,
+                        severity="critical",
+                        details=(
+                            "No ctx.submit_order call found in the Strategy class — "
+                            "strategy has no entry path and would emit zero trades."
+                        ),
+                    )
+                )
+            elif len(submit_calls) == 1:
+                results.append(
+                    QualityGateResult(
+                        gate_name=GATE,
+                        passed=False,
+                        severity="critical",
+                        details=(
+                            "Only one ctx.submit_order call found — strategy has no "
+                            "exit path. Add a second submit_order to close positions."
+                        ),
+                    )
+                )
+
         if not results:
             results.append(
                 QualityGateResult(
@@ -360,8 +396,9 @@ def _validate_on_bar(cls: ast.ClassDef) -> Optional[str]:
                 f"found {param_count}."
             )
         return None
-    # No on_bar at all — not strictly fatal (base class no-op), but no
-    # orders will be emitted so flag it.
+    # No on_bar override — the base class no-op would emit zero trades, so
+    # this is a critical failure (#547). CodeSafetyChecker.check wraps any
+    # non-None return here as severity="critical".
     return (
         f"{cls.name} does not override on_bar(self, ctx, bar); the base class "
         "no-op will run and the strategy will emit zero trades."

@@ -119,12 +119,14 @@ def _zero_trade_exec_result() -> StrategyRunResult:
 
 # Valid Strategy-subclass code that the safety gate accepts. Body intentionally
 # trivial — we never actually execute it because ``run_strategy_code`` is
-# stubbed via monkeypatch.
+# stubbed via monkeypatch. Entry + exit ``submit_order`` calls satisfy the
+# order-flow-shape gate added in #547.
 _REPAIRED_CODE = (
     "from contract import Strategy\n\n"
     "class S(Strategy):\n"
     "    def on_bar(self, ctx, bar):\n"
-    "        pass  # repaired (test stub)\n"
+    "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+    "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
 )
 
 

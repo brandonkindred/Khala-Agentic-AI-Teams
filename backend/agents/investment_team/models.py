@@ -762,6 +762,14 @@ class StrategyLabRecord(BaseModel):
     refinement_rounds: int = 0
     quality_gate_results: List[Dict[str, Any]] = Field(default_factory=list)
     strategy_code: Optional[str] = None
+    original_spec: Optional[StrategySpec] = Field(
+        default=None,
+        description="Ideation-time spec before any refinement-driven mutation; null on legacy rows.",
+    )
+    original_code: Optional[str] = Field(
+        default=None,
+        description="Ideation-time strategy code before refinement; null on legacy rows.",
+    )
     signal_intelligence_brief: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Signal Intelligence Expert JSON (brief_version, themes, …) or skipped metadata; null for legacy rows.",
