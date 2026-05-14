@@ -6,6 +6,7 @@ import pytest
 
 from investment_team.strategy_lab.spec_dsl import (
     ConstRef,
+    EMARef,
     EntryRule,
     FixedFractionSizing,
     FixedNotionalSizing,
@@ -267,6 +268,8 @@ def test_entry_formatter_round_trip(rule):
     [
         TimeStopRule(n_bars=5),
         StopLossRule(pct=0.03),
+        StopLossRule(pct=0.03, basis="trailing_high"),
+        StopLossRule(pct=0.03, basis="trailing_low"),
         TakeProfitRule(pct=0.05),
         SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70))),
     ],
@@ -274,11 +277,9 @@ def test_entry_formatter_round_trip(rule):
 def test_exit_formatter_round_trip(rule):
     rendered = format_rules_for_prompt([rule])
     reparsed = parse_exit_rule(rendered)
-    # Compare on the model_dump to avoid `note`/default-flag noise.
+    # Compare on the model_dump to avoid `note` default-flag noise.
     assert type(reparsed) is type(rule)
-    assert reparsed.model_dump(exclude={"note", "basis"}) == rule.model_dump(
-        exclude={"note", "basis"}
-    )
+    assert reparsed.model_dump(exclude={"note"}) == rule.model_dump(exclude={"note"})
 
 
 @pytest.mark.parametrize(
@@ -294,3 +295,79 @@ def test_sizing_formatter_round_trip(rule):
     reparsed = parse_sizing_rule(rendered)
     assert type(reparsed) is type(rule)
     assert reparsed.model_dump(exclude={"note"}) == rule.model_dump(exclude={"note"})
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the four bugs raised on PR #558.
+# ---------------------------------------------------------------------------
+
+
+def test_entry_enter_when_legacy_phrasing():
+    """Legacy specs use `enter when …`; the adapter must accept that wording."""
+    parsed = parse_entry_rule("enter when RSI < 30")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.side == "long"
+    assert parsed.when == Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30))
+
+
+def test_indicator_source_preserved_in_round_trip():
+    rule = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=EMARef(period=50, source="open"),
+            op="gt",
+            rhs=PriceRef(field="close"),
+        ),
+    )
+    rendered = format_rules_for_prompt([rule])
+    assert "source=open" in rendered
+    reparsed = parse_entry_rule(rendered)
+    assert isinstance(reparsed, EntryRule)
+    assert reparsed.when.lhs == EMARef(period=50, source="open")
+
+
+def test_indicator_source_kwarg_parses():
+    parsed = parse_entry_rule("ema(50, source=open) > close")
+    assert isinstance(parsed, EntryRule)
+    assert parsed.when.lhs == EMARef(period=50, source="open")
+
+
+def test_trailing_stop_loss_round_trip_high():
+    rule = StopLossRule(pct=0.03, basis="trailing_high")
+    rendered = format_rules_for_prompt([rule])
+    assert rendered == "trailing-high stop loss 3%"
+    reparsed = parse_exit_rule(rendered)
+    assert isinstance(reparsed, StopLossRule)
+    assert reparsed.basis == "trailing_high"
+    assert reparsed.pct == pytest.approx(0.03)
+
+
+def test_trailing_stop_loss_round_trip_low():
+    rule = StopLossRule(pct=0.05, basis="trailing_low")
+    rendered = format_rules_for_prompt([rule])
+    assert rendered == "trailing-low stop loss 5%"
+    reparsed = parse_exit_rule(rendered)
+    assert isinstance(reparsed, StopLossRule)
+    assert reparsed.basis == "trailing_low"
+
+
+def test_indicator_extra_positional_args_rejected():
+    """`sma(20,50) > close` had silently dropped the 50; now → UnparsableRule."""
+    parsed = parse_entry_rule("sma(20,50) > close")
+    assert isinstance(parsed, UnparsableRule)
+
+
+def test_macd_extra_positional_args_rejected():
+    parsed = parse_entry_rule("macd(12,26,9,99) > 0")
+    assert isinstance(parsed, UnparsableRule)
+
+
+def test_indicator_unknown_kwarg_rejected():
+    parsed = parse_entry_rule("sma(20, foo=bar) > close")
+    assert isinstance(parsed, UnparsableRule)
+
+
+def test_atr_source_kwarg_rejected():
+    """ATR has no `source` field; specifying one must reject."""
+    parsed = parse_exit_rule("exit when atr(14, source=open) > 0")
+    assert isinstance(parsed, UnparsableRule)

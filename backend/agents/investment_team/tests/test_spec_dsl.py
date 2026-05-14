@@ -265,6 +265,36 @@ def test_format_stop_loss():
     assert format_rules_for_prompt([StopLossRule(pct=0.03)]) == "stop loss 3%"
 
 
+def test_format_stop_loss_trailing_high():
+    rule = StopLossRule(pct=0.03, basis="trailing_high")
+    assert format_rules_for_prompt([rule]) == "trailing-high stop loss 3%"
+
+
+def test_format_stop_loss_trailing_low():
+    rule = StopLossRule(pct=0.05, basis="trailing_low")
+    assert format_rules_for_prompt([rule]) == "trailing-low stop loss 5%"
+
+
+def test_format_indicator_source_default_omitted():
+    rule = EntryRule(
+        side="long",
+        when=Predicate(lhs=EMARef(period=50), op="gt", rhs=PriceRef(field="close")),
+    )
+    assert format_rules_for_prompt([rule]) == "long when ema(50) > close"
+
+
+def test_format_indicator_source_non_default_emitted():
+    rule = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=EMARef(period=50, source="open"),
+            op="gt",
+            rhs=PriceRef(field="close"),
+        ),
+    )
+    assert format_rules_for_prompt([rule]) == "long when ema(50, source=open) > close"
+
+
 def test_format_take_profit():
     assert format_rules_for_prompt([TakeProfitRule(pct=0.05)]) == "take profit 5%"
 

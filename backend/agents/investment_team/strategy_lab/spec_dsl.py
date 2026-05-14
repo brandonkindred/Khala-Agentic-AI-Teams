@@ -295,21 +295,35 @@ def _format_number(x: float) -> str:
     return f"{x:g}"
 
 
+def _with_source(base: str, source: str) -> str:
+    """Append ``, source=X`` (or ``source=X`` for arg-less calls) when non-default."""
+    if source == "close":
+        return base
+    assert base.endswith(")")
+    inner = base[:-1]
+    if inner.endswith("("):
+        return f"{inner}source={source})"
+    return f"{inner}, source={source})"
+
+
 def _format_indicator_ref(ref: IndicatorRef) -> str:
     if isinstance(ref, PriceRef):
         return ref.field
     if isinstance(ref, ConstRef):
         return _format_number(ref.value)
     if isinstance(ref, SMARef):
-        return f"sma({ref.period})"
+        return _with_source(f"sma({ref.period})", ref.source)
     if isinstance(ref, EMARef):
-        return f"ema({ref.period})"
+        return _with_source(f"ema({ref.period})", ref.source)
     if isinstance(ref, RSIRef):
-        return f"rsi({ref.period})"
+        return _with_source(f"rsi({ref.period})", ref.source)
     if isinstance(ref, MACDRef):
-        return f"macd_{ref.output}({ref.fast},{ref.slow},{ref.signal})"
+        return _with_source(f"macd_{ref.output}({ref.fast},{ref.slow},{ref.signal})", ref.source)
     if isinstance(ref, BollingerRef):
-        return f"bollinger_{ref.band}({ref.period},{_format_number(ref.num_std)})"
+        return _with_source(
+            f"bollinger_{ref.band}({ref.period},{_format_number(ref.num_std)})",
+            ref.source,
+        )
     if isinstance(ref, ATRRef):
         return f"atr({ref.period})"
     if isinstance(ref, ADXRef):
@@ -325,6 +339,12 @@ def _format_predicate(p: Predicate) -> str:
     return f"{_format_indicator_ref(p.lhs)} {_OP_SYMBOL[p.op]} {_format_indicator_ref(p.rhs)}"
 
 
+_STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
+    "trailing_high": "trailing-high ",
+    "trailing_low": "trailing-low ",
+}
+
+
 def _format_rule(
     rule: EntryRule
     | UnparsableRule
@@ -338,7 +358,8 @@ def _format_rule(
     if isinstance(rule, TimeStopRule):
         return f"exit after {rule.n_bars} bars"
     if isinstance(rule, StopLossRule):
-        return f"stop loss {_format_number(rule.pct * 100)}%"
+        prefix = _STOP_LOSS_BASIS_PREFIX.get(rule.basis, "")
+        return f"{prefix}stop loss {_format_number(rule.pct * 100)}%"
     if isinstance(rule, TakeProfitRule):
         return f"take profit {_format_number(rule.pct * 100)}%"
     if isinstance(rule, SignalExitRule):

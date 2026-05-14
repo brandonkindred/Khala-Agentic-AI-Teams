@@ -93,11 +93,11 @@ _TIME_STOP_RE = re.compile(
 )
 
 _STOP_LOSS_PCT_RE = re.compile(
-    r"\bstop[\s_-]?loss[:\s]+(\d+(?:\.\d+)?)\s*%",
+    r"\b(?:(trailing[-\s_]?(?:high|low))\s+)?stop[\s_-]?loss[:\s]+(\d+(?:\.\d+)?)\s*%",
     re.IGNORECASE,
 )
 _STOP_LOSS_DECIMAL_RE = re.compile(
-    r"\bstop[\s_-]?loss[:\s]+(0?\.\d+)\b",
+    r"\b(?:(trailing[-\s_]?(?:high|low))\s+)?stop[\s_-]?loss[:\s]+(0?\.\d+)\b",
     re.IGNORECASE,
 )
 
@@ -122,48 +122,121 @@ _FIXED_NOTIONAL_RE = re.compile(
 )
 
 
-# Per-indicator argument parsers.  Each entry returns the constructed
-# IndicatorRef instance (or raises ValidationError, which the caller
-# catches to emit UnparsableRule).
-def _parse_int_args(raw: str, names: tuple[str, ...]) -> dict:
+# Per-indicator argument parser.  ``_parse_call_args`` splits ``raw`` into
+# positional values and a single optional ``source=X`` kwarg, rejecting:
+#   - extra positional args beyond what the indicator accepts,
+#   - any kwarg other than ``source`` (or any ``source=`` when the indicator
+#     has no ``source`` field),
+#   - positional args appearing after a kwarg,
+#   - non-numeric positional tokens.
+# Returning ``None`` makes the caller emit ``UnparsableRule``.
+def _parse_call_args(
+    raw: str,
+    int_slots: int,
+    float_slots: int = 0,
+    allow_source: bool = True,
+) -> tuple[list[int | float], str | None] | None:
+    if not raw.strip():
+        return [], None
     parts = [p.strip() for p in raw.split(",") if p.strip()]
-    return {name: int(part) for name, part in zip(names, parts)}
+    positional_tokens: list[str] = []
+    source: str | None = None
+    saw_kwarg = False
+    for part in parts:
+        if "=" in part:
+            saw_kwarg = True
+            k, v = part.split("=", 1)
+            k = k.strip().lower()
+            v = v.strip()
+            if k != "source" or not allow_source or source is not None:
+                return None
+            source = v
+        else:
+            if saw_kwarg:
+                return None
+            positional_tokens.append(part)
+
+    if len(positional_tokens) > int_slots + float_slots:
+        return None
+
+    parsed: list[int | float] = []
+    for i, val in enumerate(positional_tokens):
+        try:
+            parsed.append(int(val) if i < int_slots else float(val))
+        except ValueError:
+            return None
+    return parsed, source
 
 
 def _parse_indicator_call(name: str, raw_args: str):
+    def _single_period(cls, require_positional: bool):
+        res = _parse_call_args(raw_args, int_slots=1, allow_source=True)
+        if res is None:
+            return None
+        pos, source = res
+        if require_positional and not pos:
+            return None
+        kwargs: dict = {}
+        if pos:
+            kwargs["period"] = pos[0]
+        if source is not None:
+            kwargs["source"] = source
+        return cls(**kwargs)
+
     if name == "sma":
-        kwargs = _parse_int_args(raw_args, ("period",)) if raw_args.strip() else {}
-        return SMARef(**kwargs) if kwargs else None
+        return _single_period(SMARef, require_positional=True)
     if name == "ema":
-        kwargs = _parse_int_args(raw_args, ("period",)) if raw_args.strip() else {}
-        return EMARef(**kwargs) if kwargs else None
+        return _single_period(EMARef, require_positional=True)
     if name == "rsi":
-        kwargs = _parse_int_args(raw_args, ("period",)) if raw_args.strip() else {}
-        return RSIRef(**kwargs)
+        return _single_period(RSIRef, require_positional=False)
     if name == "atr":
-        kwargs = _parse_int_args(raw_args, ("period",)) if raw_args.strip() else {}
-        return ATRRef(**kwargs)
+        res = _parse_call_args(raw_args, int_slots=1, allow_source=False)
+        if res is None:
+            return None
+        pos, _ = res
+        return ATRRef(**({"period": pos[0]} if pos else {}))
     if name == "adx":
-        kwargs = _parse_int_args(raw_args, ("period",)) if raw_args.strip() else {}
-        return ADXRef(**kwargs)
+        res = _parse_call_args(raw_args, int_slots=1, allow_source=False)
+        if res is None:
+            return None
+        pos, _ = res
+        return ADXRef(**({"period": pos[0]} if pos else {}))
     if name in ("macd", "macd_signal", "macd_histogram"):
         output = name.split("_", 1)[1] if "_" in name else "macd"
-        kwargs = _parse_int_args(raw_args, ("fast", "slow", "signal")) if raw_args.strip() else {}
+        res = _parse_call_args(raw_args, int_slots=3, allow_source=True)
+        if res is None:
+            return None
+        pos, source = res
+        kwargs = dict(zip(("fast", "slow", "signal"), pos))
+        if source is not None:
+            kwargs["source"] = source
         return MACDRef(output=output, **kwargs)  # type: ignore[arg-type]
     if name in ("bollinger", "bollinger_upper", "bollinger_lower", "bollinger_middle"):
         band = name.split("_", 1)[1] if "_" in name else "middle"
-        parts = [p.strip() for p in raw_args.split(",") if p.strip()]
+        res = _parse_call_args(raw_args, int_slots=1, float_slots=1, allow_source=True)
+        if res is None:
+            return None
+        pos, source = res
         kwargs: dict = {}
-        if parts:
-            kwargs["period"] = int(parts[0])
-        if len(parts) >= 2:
-            kwargs["num_std"] = float(parts[1])
+        if pos:
+            kwargs["period"] = pos[0]
+        if len(pos) >= 2:
+            kwargs["num_std"] = pos[1]
+        if source is not None:
+            kwargs["source"] = source
         return BollingerRef(band=band, **kwargs)  # type: ignore[arg-type]
     if name in ("stochastic", "stochastic_k", "stochastic_d"):
         output = name.split("_", 1)[1] if "_" in name else "k"
-        kwargs = _parse_int_args(raw_args, ("k_period", "d_period")) if raw_args.strip() else {}
+        res = _parse_call_args(raw_args, int_slots=2, allow_source=False)
+        if res is None:
+            return None
+        pos, _ = res
+        kwargs = dict(zip(("k_period", "d_period"), pos))
         return StochasticRef(output=output, **kwargs)  # type: ignore[arg-type]
     if name == "vwap":
+        res = _parse_call_args(raw_args, int_slots=0, allow_source=False)
+        if res is None:
+            return None
         return VWAPRef()
     return None
 
@@ -227,6 +300,13 @@ def _normalise_op(op_text: str) -> str | None:
     return None
 
 
+def _basis_from_trail(trail: str | None) -> str:
+    """Map a captured ``trailing-high`` / ``trailing-low`` prefix to a StopLossRule basis."""
+    if trail is None:
+        return "entry_price"
+    return "trailing_high" if "high" in trail.lower() else "trailing_low"
+
+
 def _parse_predicate(prose: str) -> Predicate | None:
     m = _PREDICATE_RE.match(prose)
     if not m:
@@ -248,12 +328,21 @@ def _parse_predicate(prose: str) -> Predicate | None:
 
 
 def parse_entry_rule(prose: str) -> EntryRule | UnparsableRule:
-    """Parse a single entry-rule prose string."""
+    """Parse a single entry-rule prose string.
+
+    Accepts a bare predicate (``"close > sma(20)"``), the formatter's own
+    output (``"long when …"`` / ``"short when …"``), or the legacy repo
+    convention (``"enter when …"``).
+    """
     text = prose.strip()
     side: Literal["long", "short"] = "short" if _SHORT_RE.search(text) else "long"
-    # Strip a leading "long when " / "short when " marker if present so the
-    # remaining text is a pure predicate.
-    body = re.sub(r"^\s*(?:long|short)\s+when\s+", "", text, count=1, flags=re.IGNORECASE)
+    body = re.sub(
+        r"^\s*(?:long|short|enter)\s+when\s+",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
     predicate = _parse_predicate(body)
     if predicate is None:
         return UnparsableRule(prose=text, reason="no pattern matched")
@@ -281,14 +370,14 @@ def parse_exit_rule(prose: str):
     m = _STOP_LOSS_PCT_RE.search(text)
     if m:
         try:
-            return StopLossRule(pct=float(m.group(1)) / 100.0)
+            return StopLossRule(pct=float(m.group(2)) / 100.0, basis=_basis_from_trail(m.group(1)))
         except ValidationError:
             return UnparsableRule(prose=text, reason="stop_loss out of bounds")
 
     m = _STOP_LOSS_DECIMAL_RE.search(text)
     if m:
         try:
-            return StopLossRule(pct=float(m.group(1)))
+            return StopLossRule(pct=float(m.group(2)), basis=_basis_from_trail(m.group(1)))
         except ValidationError:
             return UnparsableRule(prose=text, reason="stop_loss out of bounds")
 
