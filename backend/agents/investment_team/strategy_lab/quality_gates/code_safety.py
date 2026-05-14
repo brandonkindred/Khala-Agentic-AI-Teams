@@ -284,45 +284,51 @@ class CodeSafetyChecker:
                 )
             )
 
-        # 8. Order-flow shape (#547): every viable strategy must have at
-        #    least one ``ctx.submit_order(...)`` call (entry path) and either
-        #    a second ``ctx.submit_order`` (separate exit) or attached
-        #    bracket/OCO legs on the single call (``attached_stop_loss`` /
-        #    ``attached_take_profit``, #389). Calls on other receivers
-        #    (``self.submit_order(...)``, local helpers) are ignored — they
-        #    never reach the runtime engine.
+        # 8. Order-flow shape (#547): every viable strategy must call
+        #    ``ctx.submit_order(...)`` from inside one of the engine-callable
+        #    hook methods (``on_bar``, ``on_start``, ``on_fill``, ``on_end``),
+        #    and must either call it twice (separate entry + exit) or carry
+        #    a non-None ``attached_stop_loss`` / ``attached_take_profit``
+        #    on the single call (bracket / OCO support, #389).
+        #
+        #    * The hook signature determines the receiver name we count
+        #      against — ``on_bar(self, ctx, bar)`` looks for
+        #      ``ctx.submit_order``, ``on_bar(self, context, bar)`` looks
+        #      for ``context.submit_order``. The engine calls hooks
+        #      positionally so the parameter name is the strategy's choice.
+        #    * Helper methods are ignored unless they are themselves engine
+        #      hooks: a ``submit_order`` call sitting in an un-invoked
+        #      helper does not reach the runtime.
         if len(strategy_classes) == 1:
-            ctx_submit_calls = [
-                n
-                for n in ast.walk(strategy_classes[0])
-                if isinstance(n, ast.Call) and _is_ctx_submit_order(n)
-            ]
-            single_call_has_bracket_exit = len(ctx_submit_calls) == 1 and _has_attached_exit_kwarg(
-                ctx_submit_calls[0]
+            hook_calls = _collect_hook_submit_calls(strategy_classes[0])
+            single_call_has_bracket_exit = len(hook_calls) == 1 and _has_attached_exit_kwarg(
+                hook_calls[0]
             )
-            if len(ctx_submit_calls) == 0:
+            if len(hook_calls) == 0:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
                         passed=False,
                         severity="critical",
                         details=(
-                            "No ctx.submit_order call found in the Strategy class — "
-                            "strategy has no entry path and would emit zero trades."
+                            "No ctx.submit_order call found inside on_bar / on_start / "
+                            "on_fill / on_end — strategy has no entry path reachable "
+                            "from the engine and would emit zero trades."
                         ),
                     )
                 )
-            elif len(ctx_submit_calls) == 1 and not single_call_has_bracket_exit:
+            elif len(hook_calls) == 1 and not single_call_has_bracket_exit:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
                         passed=False,
                         severity="critical",
                         details=(
-                            "Only one ctx.submit_order call found and no attached "
-                            "bracket exit (attached_stop_loss / attached_take_profit) "
-                            "— strategy has no exit path. Add a second submit_order "
-                            "or attach a bracket leg to close positions."
+                            "Only one ctx.submit_order call found in the engine hooks "
+                            "and no non-None attached bracket exit (attached_stop_loss "
+                            "/ attached_take_profit) — strategy has no exit path. Add "
+                            "a second submit_order or attach a bracket leg to close "
+                            "positions."
                         ),
                     )
                 )
@@ -349,33 +355,78 @@ def _get_call_name(node: ast.Call) -> str:
     return ""
 
 
-def _is_ctx_submit_order(node: ast.Call) -> bool:
-    """True iff ``node`` is a ``ctx.submit_order(...)`` call.
+# Engine-callable hook method names (``contract.Strategy``). The runtime
+# invokes each positionally, so the parameter NAME the strategy chooses
+# for the context object is the strategy's choice — we read it off the
+# signature rather than hard-coding ``ctx``.
+_ENGINE_HOOK_METHODS = frozenset({"on_bar", "on_start", "on_fill", "on_end"})
 
-    Restricting on the receiver matters: a strategy that defines a helper
-    method ``self.submit_order(...)`` or a local function named
-    ``submit_order`` would otherwise satisfy the order-flow gate without
-    ever reaching the runtime engine.
+
+def _hook_context_param_name(method: ast.FunctionDef | ast.AsyncFunctionDef) -> Optional[str]:
+    """Return the name of the context parameter for an engine hook, or None.
+
+    Every hook has shape ``(self, ctx, ...)``; the first positional after
+    ``self`` is the engine context. Methods with too few parameters cannot
+    be valid hooks and return ``None``.
     """
+    if len(method.args.args) < 2:
+        return None
+    return method.args.args[1].arg
+
+
+def _is_submit_order_on_receiver(node: ast.Call, receiver_name: str) -> bool:
+    """True iff ``node`` is ``<receiver_name>.submit_order(...)``."""
     if not isinstance(node.func, ast.Attribute):
         return False
     if node.func.attr != "submit_order":
         return False
     receiver = node.func.value
-    return isinstance(receiver, ast.Name) and receiver.id == "ctx"
+    return isinstance(receiver, ast.Name) and receiver.id == receiver_name
+
+
+def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
+    """Return every ``<ctx>.submit_order(...)`` call inside an engine hook.
+
+    Restricts the AST walk to the four engine-invoked hook methods so
+    ``submit_order`` calls in dead/uninvoked helpers do not satisfy the
+    order-flow gate. For each hook we resolve the context parameter
+    name from its signature, so a strategy that names it ``context``
+    instead of ``ctx`` is still accepted.
+    """
+    calls: List[ast.Call] = []
+    for node in ast.iter_child_nodes(cls):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name not in _ENGINE_HOOK_METHODS:
+            continue
+        ctx_name = _hook_context_param_name(node)
+        if ctx_name is None:
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and _is_submit_order_on_receiver(sub, ctx_name):
+                calls.append(sub)
+    return calls
 
 
 def _has_attached_exit_kwarg(node: ast.Call) -> bool:
-    """True iff the call passes ``attached_stop_loss`` or ``attached_take_profit``.
+    """True iff the call passes a non-None ``attached_stop_loss`` or
+    ``attached_take_profit``.
 
     Bracket / OCO orders (issue #389) bundle the exit logic onto the entry
     submission, so a single ``ctx.submit_order(..., attached_stop_loss=...)``
-    is a complete entry+exit pair.
+    is a complete entry+exit pair. Explicit ``=None`` literals are
+    excluded — at the AST level ``kw.value`` is always an ``ast.AST``
+    node (e.g. ``ast.Constant(value=None)``), never a Python ``None``,
+    so the older ``kw.value is not None`` check would falsely accept
+    an explicit ``attached_stop_loss=None`` as a real bracket leg.
     """
-    return any(
-        kw.arg in ("attached_stop_loss", "attached_take_profit") and kw.value is not None
-        for kw in node.keywords
-    )
+    for kw in node.keywords:
+        if kw.arg not in ("attached_stop_loss", "attached_take_profit"):
+            continue
+        if isinstance(kw.value, ast.Constant) and kw.value.value is None:
+            continue
+        return True
+    return False
 
 
 def _find_strategy_subclasses(tree: ast.AST) -> List[ast.ClassDef]:

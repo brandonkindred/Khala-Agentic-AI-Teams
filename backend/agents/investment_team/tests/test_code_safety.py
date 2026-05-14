@@ -337,3 +337,88 @@ def test_self_submit_order_does_not_satisfy_order_flow_gate() -> None:
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
     assert any("no entry path" in c for c in criticals), criticals
+
+
+def test_explicit_none_bracket_kwarg_does_not_satisfy_exit() -> None:
+    """``attached_stop_loss=None`` is not a real bracket attachment.
+
+    At the AST layer ``kw.value`` is always an ``ast.AST`` node — never
+    Python ``None`` — so a naive ``kw.value is not None`` check would
+    incorrectly accept the literal ``=None``. The gate must reject this
+    as a one-sided strategy.
+    """
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(
+                    symbol='X',
+                    qty=1,
+                    side='LONG',
+                    attached_stop_loss=None,
+                    attached_take_profit=None,
+                )
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no exit path" in c for c in criticals), criticals
+
+
+def test_on_bar_with_context_param_name_is_accepted() -> None:
+    """``on_bar(self, context, bar)`` is valid — the runtime calls hooks
+    positionally, so the parameter name is the strategy's choice. The
+    gate must accept ``context.submit_order(...)`` against a hook whose
+    second positional parameter is named ``context``."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, context, bar):
+                context.submit_order(symbol='X', qty=1, side='LONG')
+                context.submit_order(symbol='X', qty=1, side='FLAT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+def test_submit_order_in_unused_helper_does_not_satisfy_order_flow_gate() -> None:
+    """``ctx.submit_order(...)`` inside a helper method that ``on_bar``
+    never calls cannot reach the runtime engine. Walking the whole class
+    body would falsely accept it; the gate must scan only engine hooks
+    (``on_bar`` / ``on_start`` / ``on_fill`` / ``on_end``)."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def _unused_helper(self, ctx, bar):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='FLAT')
+
+            def on_bar(self, ctx, bar):
+                pass  # engine calls this, but it never emits orders
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no entry path" in c for c in criticals), criticals
+
+
+def test_submit_order_in_on_start_satisfies_entry_path() -> None:
+    """The engine calls ``on_start`` / ``on_fill`` / ``on_end`` too, so a
+    strategy that places orders from ``on_start`` (e.g. opening shot) and
+    ``on_fill`` (e.g. exit-on-fill bracket) is a valid two-call shape."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_start(self, ctx):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+            def on_fill(self, ctx, fill):
+                ctx.submit_order(symbol='X', qty=1, side='FLAT')
+            def on_bar(self, ctx, bar):
+                pass
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
