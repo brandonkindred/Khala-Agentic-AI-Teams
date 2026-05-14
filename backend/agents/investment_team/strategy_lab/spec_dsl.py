@@ -15,9 +15,18 @@ House pattern mirrored from
   ``Annotated[Union[...], Field(discriminator="kind")]``.
 - Trailing `Model.model_rebuild()` for forward-ref resolution.
 
-Indicator param bounds and defaults mirror
+Indicator **defaults** mirror
 `backend/agents/investment_team/strategy_lab/executor/indicators.py` exactly
-so the DSL and the runtime helpers can't drift.
+(RSI period=14, MACD 12/26/9, Bollinger 20/2.0, etc.).
+
+Indicator **bound style** (e.g. `ge=2, le=400`) mirrors the existing house
+factor DSL at `strategy_lab/factors/models.py`. The runtime helpers in
+`executor/indicators.py` themselves accept any positive integer — the
+coverage-probe registry there only enforces positive-int /
+positive-float-for-``num_std``. We apply the same sanity caps the factor
+DSL applies so degenerate spec payloads (`period=0`, `period=10000`) are
+rejected at validation time rather than silently producing all-NaN
+columns downstream.
 """
 
 from __future__ import annotations

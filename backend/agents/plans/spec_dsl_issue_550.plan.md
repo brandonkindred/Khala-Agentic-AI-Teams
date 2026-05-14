@@ -55,11 +55,25 @@ Module structure, top-to-bottom:
 4. `Source = Literal["close","high","low","open","volume","hl2","ohlc4"]`
    (default `"close"`). Restricted set per #537.
 5. `_SpecNode(BaseModel)` base — `extra="forbid"`.
-6. **IndicatorRef union** (discriminator `"kind"`). Param bounds MUST
-   match `strategy_lab/executor/indicators.py` exactly. Source of
-   truth bounds:
+6. **IndicatorRef union** (discriminator `"kind"`). Two distinct
+   sources of truth, since they live in different files:
 
-   | DSL node       | kind            | params (bounds, defaults) — must mirror `executor/indicators.py` |
+   - **Defaults** mirror
+     `strategy_lab/executor/indicators.py` exactly — RSI `period=14`,
+     MACD `fast=12 / slow=26 / signal=9`, Bollinger `period=20 /
+     num_std=2.0`, Stochastic `k_period=14 / d_period=3`, ATR/ADX
+     `period=14`.
+   - **Bound style** (`ge=2, le=400` etc.) mirrors the existing house
+     factor DSL at `strategy_lab/factors/models.py:53-101`. The
+     runtime helpers themselves accept any positive integer (the
+     coverage-probe registry at
+     `strategy_lab/executor/indicators.py:217-266` only enforces
+     positive-int / positive-float-for-`num_std`); we apply
+     sanity caps in the DSL the same way `factors/models.py` does,
+     so a spec authored at e.g. `period=10000` is rejected before it
+     reaches the runtime.
+
+   | DSL node       | kind            | params (defaults from `executor/indicators.py`; bound style from `factors/models.py`) |
    |----------------|-----------------|------------------------------------------------------------------|
    | `PriceRef`     | `"price"`       | `field: Source = "close"`                                        |
    | `ConstRef`     | `"const"`       | `value: float`                                                   |
@@ -76,6 +90,13 @@ Module structure, top-to-bottom:
    Note on `BollingerRef.num_std`: the `executor/indicators.py` registry
    marks `num_std` as a `float_kwargs` member, so it must be a positive
    float (`gt=0`); we mirror that here verbatim.
+
+   Why bounds at all when the runtime doesn't enforce them: the same
+   reason `factors/models.py` does — to reject obviously-broken spec
+   payloads (`period=0`, `period=10000`) at validation time rather
+   than letting pandas produce all-NaN columns silently. The chosen
+   caps are generous (≥200 for most, ≥400 for SMA/EMA) and match the
+   factor DSL exactly so the two stay in sync.
 
    Tuple-returning indicators (`MACDRef`, `BollingerRef`, `StochasticRef`)
    pick the scalar to expose via the literal `output` / `band` field as
