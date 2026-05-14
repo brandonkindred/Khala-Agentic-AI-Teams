@@ -532,7 +532,7 @@ The loop is driven by three agents and one orchestrator hook:
 - **ProductOwnerAgent** (`product_delivery/product_owner_agent/agent.py`): runs `POST /api/product-delivery/groom`, scores backlog items via WSJF or RICE with per-item rationale, and (when `persist=true`) writes scores back to the store.
 - **SprintPlannerAgent** (`product_delivery/sprint_planner_agent/agent.py`): runs `POST /api/product-delivery/sprints/{id}/plan`, performing capacity-aware greedy selection of scored stories into the sprint via `select_sprint_scope` (no LLM).
 - **SE Orchestrator with `sprint_id`** (`software_engineering_team/orchestrator.py`, `_load_requirements_from_sprint`): when `POST /api/software-engineering/run-team` is called with `{sprint_id}`, the orchestrator skips spec parsing and the Product Requirements Analyst, hydrates `ProductRequirements` directly from the sprint's planned stories + acceptance criteria, and stores `sprint_id` + `story_ids` in job metadata.
-- **ReleaseManagerAgent** (`product_delivery/release_manager_agent/agent.py`): triggered by the Integration-phase hook `_run_release_manager_hook` in the SE orchestrator. On a sprint run where every planned story has reached a terminal status, the agent writes `plan/releases/<version>.md` via the technical-writer release-notes agent, inserts a `product_delivery_releases` row, and promotes Integration / DevOps / QA failures into `product_delivery_feedback_items` tagged with the sprint id.
+- **ReleaseManagerAgent** (`product_delivery/release_manager_agent/agent.py`): triggered by the SE orchestrator's release hook `_maybe_ship_sprint_release` (`orchestrator.py`), called after the Integration phase. On a sprint run where every planned story has reached a terminal status, the agent writes `plan/releases/<version>.md` via the technical-writer release-notes agent, inserts a `product_delivery_releases` row, and promotes Integration-phase failures (`int_result.issues`) into `product_delivery_feedback_items` tagged with the sprint id. **Today this hook is only reached on the legacy SE pipeline path** — the default `use_coding_team=True` runtime completes the SE job before the Integration block, so release shipping does not currently fire on the default path. See "Known limitations" below.
 
 ### The loop
 
@@ -552,9 +552,9 @@ flowchart TB
         Discovery --> Design --> Execution --> Integration
     end
 
-    Release["ReleaseManagerAgent\n_run_release_manager_hook\n(post-Integration)"]
+    Release["ReleaseManagerAgent\n_maybe_ship_sprint_release\n(post-Integration; legacy SE path only)"]
     Notes["plan/releases/<version>.md\n+ product_delivery_releases row"]
-    Feedback["Auto-feedback\nIntegration/DevOps/QA failures →\nproduct_delivery_feedback_items\n(tagged with sprint_id)"]
+    Feedback["Auto-feedback\nIntegration-phase failures →\nproduct_delivery_feedback_items\n(tagged with sprint_id)"]
 
     Backlog --> Groom --> Plan --> Run --> Discovery
     Integration --> Release
@@ -591,11 +591,11 @@ sequenceDiagram
     SE->>Pipe: Discovery → Design → Execution → Integration
     Pipe-->>SE: phase outputs / failures
 
-    SE->>RM: _run_release_manager_hook
+    SE->>RM: _maybe_ship_sprint_release (legacy SE path only)
     alt all planned stories terminal
         RM->>RM: write plan/releases/<version>.md
         RM->>PD: insert product_delivery_releases
-        RM->>FB: promote Integration/DevOps/QA failures (sprint_id tagged)
+        RM->>FB: promote Integration-phase failures (sprint_id tagged)
     else open stories remain
         RM-->>SE: skip (sprint not complete)
     end
@@ -605,12 +605,16 @@ sequenceDiagram
 
 ### Failure and re-entry
 
-Two contracts keep the loop self-healing:
+Two contracts keep the loop self-healing on the path where the hook actually fires:
 
-1. **Non-fatal release hook** — `_run_release_manager_hook` wraps `ReleaseManagerAgent.ship()` in `try/except`. Agent exceptions never fail the SE job; instead a `release-manager-error` feedback item is opened with the exception text and `job_id`, surfaced to the next groom.
-2. **Sprint-scoped feedback as queryable signal** — every failure promoted from Integration / DevOps / QA carries `sprint_id`, so it surfaces in `GET /api/product-delivery/feedback?product_id=…&status=open` (and the Agent Console Feedback tab). `POST /groom` itself only reads story rows today — it does not consume feedback automatically — so triaging the new feedback into stories (e.g. via the Feedback tab's "link to story" action) is what feeds the next backlog pass.
+1. **Non-fatal release hook** — `_maybe_ship_sprint_release` wraps `ReleaseManagerAgent.ship()` in `try/except`. Agent exceptions never fail the SE job; instead a `release-manager-error` feedback item is opened with the exception text and `job_id`, visible to operators reviewing feedback before the next groom.
+2. **Sprint-scoped feedback as queryable signal** — every Integration-phase failure promoted by the hook carries `sprint_id`, so it surfaces in `GET /api/product-delivery/feedback?product_id=…&status=open` (and the Agent Console Feedback tab). `POST /groom` itself only reads story rows today — it does not consume feedback automatically — so triaging the new feedback into stories (e.g. via the Feedback tab's "link to story" action) is what feeds the next backlog pass.
 
-Temporal-mode runs currently raise a 400 when `sprint_id` is supplied (same contract as Phase 2/3 — see `product_delivery/README.md`); the in-thread runtime is the only mode wired end-to-end today.
+### Known limitations
+
+- **Default SE path skips the release hook.** The SE orchestrator defaults to `use_coding_team=True` and returns immediately after `run_coding_team_orchestrator`, before reaching the Integration block where `_maybe_ship_sprint_release` is called. Today the documented release-shipping flow only fires on the legacy SE path (`use_coding_team=False`). Wiring the coding_team path to invoke the release hook is tracked as follow-up work.
+- **Only Integration failures auto-promote.** The hook passes only `integration_issues=int_result.issues` to `ReleaseManagerAgent.ship()`. The agent itself accepts `qa_failures` / `devops_failures` arguments, but the SE call site does not supply them today, so DevOps and QA failures are not currently turned into sprint-tagged feedback items.
+- **Temporal mode unsupported for `sprint_id` runs.** `POST /run-team` raises a 400 when `sprint_id` is supplied with `TEMPORAL_ADDRESS` set (same contract as Phase 2/3 — see `product_delivery/README.md`); the in-thread runtime is the only mode wired end-to-end today.
 
 ---
 

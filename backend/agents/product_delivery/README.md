@@ -30,9 +30,12 @@ If every planned story has reached a terminal status the
    UTC date `YYYY-MM-DD`, with `-N` suffix on collisions).
 3. Records a `product_delivery_releases` row with `notes_path` and
    `shipped_at`.
-4. Promotes Integration / DevOps / QA failures into
-   `product_delivery_feedback_items`, each tagged with `sprint_id`.
-   These rows are queryable via
+4. Promotes Integration-phase failures (passed by the SE hook as
+   `int_result.issues`) into `product_delivery_feedback_items`, each
+   tagged with `sprint_id`. `ReleaseManagerAgent.ship()` itself accepts
+   `qa_failures` and `devops_failures` arguments, but the SE call site
+   only supplies the Integration list today, so DevOps and QA failures
+   are not currently auto-promoted. These rows are queryable via
    `GET /api/product-delivery/feedback?product_id=…&status=open`
    (and the Agent Console Feedback tab); `POST /groom` itself only
    reads story rows today and does not consume feedback automatically,

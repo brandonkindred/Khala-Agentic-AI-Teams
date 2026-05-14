@@ -44,9 +44,11 @@ backend/
                              # + releases tables, sprint_planner_agent, _load_requirements_from_sprint
                              # in the SE orchestrator. Phase 3 (#371): release_manager_agent ships sprint
                              # completion → plan/releases/<version>.md + product_delivery_releases row,
-                             # auto-promotes Integration / DevOps / QA failures into sprint-tagged
-                             # feedback_items so the next /groom sees them as candidate backlog seeds;
-                             # POST/GET /releases routes; SE Integration-phase hook (sprint runs only).
+                             # auto-promotes Integration-phase failures into sprint-tagged
+                             # feedback_items (queryable via GET /feedback; operator triage feeds the
+                             # next groom — POST /groom does not consume feedback automatically);
+                             # POST/GET /releases routes; SE Integration-phase hook (legacy SE path
+                             # only — default use_coding_team=True path currently skips the hook).
     shared_agent_invoke/     # Invoke shim mounted inside the sandbox image; exposes POST /_agents/{id}/invoke
     integrations/            # Shared integration contracts (Google login, Medium, etc.)
     artifact_registry/       # Shared artifact persistence
@@ -207,7 +209,7 @@ The old `/agent-provisioning` route redirects to `/agent-console` for backward c
 
 ### Product Delivery Loop
 
-The `product_delivery` team (`backend/agents/product_delivery/`, mounted at `/api/product-delivery`) wraps the SE 4-phase pipeline in a persistent loop: backlog → grooming (`ProductOwnerAgent`, WSJF/RICE) → sprint planning (`SprintPlannerAgent`, capacity-aware) → SE run with `{sprint_id}` (orchestrator hydrates requirements directly via `_load_requirements_from_sprint`) → Integration-phase release hook (`ReleaseManagerAgent` writes `plan/releases/<version>.md` and a `product_delivery_releases` row, promotes Integration / DevOps / QA failures into sprint-tagged `feedback_items`) → next groom. See `ARCHITECTURE.md` §11 ("Product Delivery Loop") for the sequence diagram and runtime contracts.
+The `product_delivery` team (`backend/agents/product_delivery/`, mounted at `/api/product-delivery`) wraps the SE 4-phase pipeline in a persistent loop: backlog → grooming (`ProductOwnerAgent`, WSJF/RICE) → sprint planning (`SprintPlannerAgent`, capacity-aware) → SE run with `{sprint_id}` (orchestrator hydrates requirements directly via `_load_requirements_from_sprint`) → Integration-phase release hook (`ReleaseManagerAgent` writes `plan/releases/<version>.md` and a `product_delivery_releases` row, promotes Integration-phase failures into sprint-tagged `feedback_items`) → next groom. The release hook (`_maybe_ship_sprint_release`) fires on the legacy SE path today; the default `use_coding_team=True` path completes before reaching it. See `ARCHITECTURE.md` §11 ("Product Delivery Loop") for the sequence diagram, known limitations, and runtime contracts.
 
 ### LLM Integration
 
