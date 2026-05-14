@@ -298,3 +298,42 @@ def test_two_submit_orders_passes_order_flow_gate() -> None:
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
     assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+def test_single_submit_order_with_bracket_exit_passes_order_flow_gate() -> None:
+    """A single ``ctx.submit_order(..., attached_stop_loss=...)`` is a complete
+    entry+bracket-exit pair (issue #389) and must not be flagged."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(
+                    symbol='X',
+                    qty=1,
+                    side='LONG',
+                    attached_stop_loss={'stop_price': 95.0},
+                    attached_take_profit={'limit_price': 110.0},
+                )
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+def test_self_submit_order_does_not_satisfy_order_flow_gate() -> None:
+    """Helper methods named ``self.submit_order`` never reach the runtime
+    engine, so they must NOT count toward the entry/exit requirement."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def submit_order(self, **kw):
+                pass  # internal helper, never calls ctx
+            def on_bar(self, ctx, bar):
+                self.submit_order(symbol='X')
+                self.submit_order(symbol='Y')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no entry path" in c for c in criticals), criticals

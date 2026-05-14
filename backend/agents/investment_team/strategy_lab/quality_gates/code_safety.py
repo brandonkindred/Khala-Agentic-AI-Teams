@@ -284,18 +284,23 @@ class CodeSafetyChecker:
                 )
             )
 
-        # 8. Order-flow shape (#547): every viable strategy must have at least
-        #    one ``ctx.submit_order(...)`` call (entry path) and at least two
-        #    distinct submit_order call sites in the Strategy class (entry +
-        #    exit). One-sided code emits orders without ever closing them and
-        #    wastes a full refinement cycle in the runtime gates.
+        # 8. Order-flow shape (#547): every viable strategy must have at
+        #    least one ``ctx.submit_order(...)`` call (entry path) and either
+        #    a second ``ctx.submit_order`` (separate exit) or attached
+        #    bracket/OCO legs on the single call (``attached_stop_loss`` /
+        #    ``attached_take_profit``, #389). Calls on other receivers
+        #    (``self.submit_order(...)``, local helpers) are ignored — they
+        #    never reach the runtime engine.
         if len(strategy_classes) == 1:
-            submit_calls = [
+            ctx_submit_calls = [
                 n
                 for n in ast.walk(strategy_classes[0])
-                if isinstance(n, ast.Call) and _get_call_name(n) == "submit_order"
+                if isinstance(n, ast.Call) and _is_ctx_submit_order(n)
             ]
-            if len(submit_calls) == 0:
+            single_call_has_bracket_exit = len(ctx_submit_calls) == 1 and _has_attached_exit_kwarg(
+                ctx_submit_calls[0]
+            )
+            if len(ctx_submit_calls) == 0:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
@@ -307,15 +312,17 @@ class CodeSafetyChecker:
                         ),
                     )
                 )
-            elif len(submit_calls) == 1:
+            elif len(ctx_submit_calls) == 1 and not single_call_has_bracket_exit:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
                         passed=False,
                         severity="critical",
                         details=(
-                            "Only one ctx.submit_order call found — strategy has no "
-                            "exit path. Add a second submit_order to close positions."
+                            "Only one ctx.submit_order call found and no attached "
+                            "bracket exit (attached_stop_loss / attached_take_profit) "
+                            "— strategy has no exit path. Add a second submit_order "
+                            "or attach a bracket leg to close positions."
                         ),
                     )
                 )
@@ -340,6 +347,35 @@ def _get_call_name(node: ast.Call) -> str:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
     return ""
+
+
+def _is_ctx_submit_order(node: ast.Call) -> bool:
+    """True iff ``node`` is a ``ctx.submit_order(...)`` call.
+
+    Restricting on the receiver matters: a strategy that defines a helper
+    method ``self.submit_order(...)`` or a local function named
+    ``submit_order`` would otherwise satisfy the order-flow gate without
+    ever reaching the runtime engine.
+    """
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr != "submit_order":
+        return False
+    receiver = node.func.value
+    return isinstance(receiver, ast.Name) and receiver.id == "ctx"
+
+
+def _has_attached_exit_kwarg(node: ast.Call) -> bool:
+    """True iff the call passes ``attached_stop_loss`` or ``attached_take_profit``.
+
+    Bracket / OCO orders (issue #389) bundle the exit logic onto the entry
+    submission, so a single ``ctx.submit_order(..., attached_stop_loss=...)``
+    is a complete entry+exit pair.
+    """
+    return any(
+        kw.arg in ("attached_stop_loss", "attached_take_profit") and kw.value is not None
+        for kw in node.keywords
+    )
 
 
 def _find_strategy_subclasses(tree: ast.AST) -> List[ast.ClassDef]:

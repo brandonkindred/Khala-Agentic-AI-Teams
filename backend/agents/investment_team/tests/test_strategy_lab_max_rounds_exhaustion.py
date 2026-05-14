@@ -131,3 +131,53 @@ def test_execution_phase_exhaustion_sets_max_rounds_status(
 
     assert record.backtest.status == "failed: max_refinement_rounds"
     assert record.is_winning is False
+
+
+def test_evaluation_phase_exhaustion_does_not_mark_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even a high-return anomalous cycle that exhausts the round cap on
+    evaluation must NOT be persisted with is_winning=True (#547 review feedback).
+    Otherwise paper-trading would fire on a 'failed: max_refinement_rounds' record."""
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+    from investment_team.tests.test_strategy_lab_alignment import (
+        _benign_sandbox_trades,
+        _code_exec,
+    )
+
+    orch = StrategyLabOrchestrator()
+    monkeypatch.setattr(orch.ideation_agent, "run", _ideation_returning(_spec_dict(), _VALID_CODE))
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _stub_market_data)
+
+    # Sandbox always succeeds with benign trades — execution itself is fine.
+    def _ok_sandbox(*_a, **_kw):
+        return _code_exec(success=True, raw_trades=_benign_sandbox_trades())
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _ok_sandbox)
+
+    # Refinement is a no-op so the loop keeps hitting the same anomaly.
+    def _stub_refine(**_kw):
+        return {"changes_made": "no-op"}, _VALID_CODE
+
+    monkeypatch.setattr(orch.refinement_agent, "run", _stub_refine)
+
+    # Anomaly detector always reports critical → evaluation-phase exhaustion.
+    def _always_anomalous(*_a, **_kw):
+        return [
+            QualityGateResult(
+                gate_name="backtest_anomaly",
+                passed=False,
+                severity="critical",
+                details="forced anomaly for test",
+            )
+        ]
+
+    monkeypatch.setattr(orch.anomaly_detector, "check", _always_anomalous)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert record.backtest.status == "failed: max_refinement_rounds"
+    # The critical assertion: even if the cycle has trades and metrics
+    # (because the sandbox kept succeeding), is_winning must stay False
+    # because execution_succeeded was never flipped on the exhaustion path.
+    assert record.is_winning is False

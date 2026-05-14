@@ -652,6 +652,61 @@ def test_zero_trade_repair_rejects_spec_updates_failing_post_repair_validator(
     ), gate_names
 
 
+def test_zero_trade_repair_accepted_carries_post_repair_spec_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a repair mutates the spec and the post-repair validator emits
+    only warnings (no criticals), the warnings must reach the accepted
+    outcome's ``new_gates`` so they appear in the persisted
+    ``quality_gate_results``. Previously these were discarded on accept."""
+    orch, _repair_stub, _sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="ENTRY_WITH_NO_EXIT",
+                evidence="entries_filled=4 closed_trades=0",
+                proposed_code=_REPAIRED_CODE,
+                # ``max_drawdown_pct=4`` is below the validator's warning
+                # threshold of 5% (strategy_validator.py:91-102) — warning,
+                # not critical — so the repair is accepted but the gate must
+                # be carried forward.
+                proposed_spec_updates={
+                    "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 4}
+                },
+                changes_made="tightened risk limits",
+            ),
+        ],
+        sandbox_results=[
+            _code_exec(success=True, raw_trades=_benign_sandbox_trades()),
+        ],
+    )
+
+    outcome, _events, _attempts = _drive_repair(
+        orch,
+        exec_result=StrategyRunResult(
+            success=True,
+            trades=[],
+            execution_diagnostics=_zero_trade_diagnostics(category="ENTRY_WITH_NO_EXIT"),
+        ),
+    )
+
+    assert outcome.committed is True
+    # Look for the post-repair validator's warning in the carried gates.
+    spec_gate_names = [g.gate_name for g in outcome.new_gates]
+    assert any(
+        name.startswith("zero_trade_repair_strategy_spec_validator") for name in spec_gate_names
+    ), spec_gate_names
+    # And confirm it is a warning, not critical (else the repair would have
+    # been rejected, not accepted).
+    spec_warnings = [
+        g
+        for g in outcome.new_gates
+        if g.gate_name.startswith("zero_trade_repair_strategy_spec_validator")
+        and g.severity == "warning"
+    ]
+    assert spec_warnings, outcome.new_gates
+
+
 def test_zero_trade_repair_no_category_is_defensive_no_op(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -624,7 +624,12 @@ class StrategyLabOrchestrator:
                     logger.warning(
                         "Max code refinement rounds reached on evaluation for %s", spec.strategy_id
                     )
-                    execution_succeeded = True  # anomalous but code is correct
+                    # Do NOT flip execution_succeeded — even if the code is
+                    # technically correct, the cycle exhausted its rounds on
+                    # an unresolved anomaly. Leaving execution_succeeded=False
+                    # ensures is_winning stays False so paper-trading does
+                    # not fire on a "failed: max_refinement_rounds" record
+                    # (#547 review feedback).
                     max_rounds_exhausted = True
                     break
 
@@ -1284,7 +1289,11 @@ class StrategyLabOrchestrator:
         # hypothesis, or signal_definition via the whitelist; those bypass
         # the gate. A Pydantic-valid risk_limits value (e.g.
         # max_position_pct=99) can still be a critical spec failure under
-        # StrategySpecValidator. Re-validate before committing.
+        # StrategySpecValidator. Re-validate before committing; on accept,
+        # carry the gates forward in ``new_gates`` so warnings (e.g.
+        # hypothesis/rules drift on a repaired spec) reach the persisted
+        # ``quality_gate_results`` rather than being silently dropped.
+        post_repair_spec_gates: List[QualityGateResult] = []
         if report.proposed_spec_updates:
             post_repair_spec_gates = self.strategy_validator.validate(proposed_spec)
             for g in post_repair_spec_gates:
@@ -1341,7 +1350,7 @@ class StrategyLabOrchestrator:
             )
             return _ZeroTradeRepairOutcome(
                 committed=False,
-                new_gates=safety_gates + [failure_gate],
+                new_gates=safety_gates + post_repair_spec_gates + [failure_gate],
                 failure_reason=f"re_execution_failed: {repair_exec.error_type}",
             )
 
@@ -1389,7 +1398,7 @@ class StrategyLabOrchestrator:
             )
             return _ZeroTradeRepairOutcome(
                 committed=False,
-                new_gates=safety_gates + new_anomaly_gates,
+                new_gates=safety_gates + post_repair_spec_gates + new_anomaly_gates,
                 failure_reason="anomaly_after_repair",
             )
 
@@ -1415,7 +1424,7 @@ class StrategyLabOrchestrator:
             new_trades=new_trades,
             new_metrics=new_metrics,
             new_exec_result=repair_exec,
-            new_gates=safety_gates + new_anomaly_gates,
+            new_gates=safety_gates + post_repair_spec_gates + new_anomaly_gates,
             changes_made=change_summary,
         )
 
