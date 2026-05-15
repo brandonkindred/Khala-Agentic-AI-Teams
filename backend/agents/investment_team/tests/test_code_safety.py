@@ -481,6 +481,30 @@ def test_on_bar_entry_with_on_fill_exit_is_critical_no_exit() -> None:
     assert any("no exit path" in c for c in criticals), criticals
 
 
+def test_submit_order_in_invoked_local_closure_satisfies_gate() -> None:
+    """A nested ``def`` inside ``on_bar`` that IS called by name within
+    the same scope is engine-reachable — the closure captures ``ctx`` from
+    the outer frame. Common idiom: ``def enter(): ctx.submit_order(...);
+    enter()``."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                def enter():
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                def exit_position():
+                    ctx.submit_order(symbol='X', qty=1, side='SHORT')
+                if bar.close > 100:
+                    enter()
+                else:
+                    exit_position()
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
 def test_submit_order_in_uninvoked_nested_def_does_not_satisfy_gate() -> None:
     """Nested function bodies declared inside ``on_bar`` only run if the
     enclosing scope calls them. An uninvoked local ``def`` containing

@@ -410,6 +410,27 @@ def _iter_method_body_nodes(method: ast.FunctionDef | ast.AsyncFunctionDef):
             stack.append(child)
 
 
+def _find_nested_def_defs(
+    method: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> Dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Return a name → def map for every nested function defined directly
+    inside ``method``'s body (any depth, but not inside another nested
+    def or class).
+
+    These are local closures: ``def enter(): ctx.submit_order(...)`` style
+    helpers. When the outer scope explicitly calls them by name, the
+    engine reaches their body — so the order-flow walker needs to descend.
+    """
+    local_defs: Dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    # Walk method's body but stop at nested def/class boundaries so we
+    # collect only the immediate closures of this scope (not closures of
+    # closures).
+    for node in _iter_method_body_nodes(method):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            local_defs.setdefault(node.name, node)
+    return local_defs
+
+
 def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
     """Return every ``submit_order(...)`` call reachable from ``on_bar``.
 
@@ -420,20 +441,26 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
     hooks is silently dropped). Limiting the gate's roots to ``on_bar``
     matches the engine's real behaviour.
 
-    The walker also follows ``self.<method>(...)`` edges into other
-    methods of the same class so a strategy that factors order placement
-    into helpers (e.g. ``self._enter(ctx, bar)`` invoked from ``on_bar``)
-    still satisfies the gate.
+    The walker follows three kinds of edges from each reachable scope:
 
-    Walks each method's body but stops at nested ``def`` / ``class`` /
-    ``lambda`` boundaries — an uninvoked local helper inside ``on_bar``
-    that contains ``ctx.submit_order(...)`` is not reachable because
-    Python only creates the function object and never executes its body.
+    * ``self.<method>(...)`` — descends into class methods. The helper
+      has its own parameter list; we relax the receiver check to any
+      non-``self`` positional parameter since the call site can pass
+      the context through any of them.
+    * ``<local_name>(...)`` — descends into local closures defined in
+      the SAME scope (e.g. ``def enter(): ctx.submit_order(...)`` then
+      ``enter()`` inside ``on_bar``). Local closures inherit the outer
+      scope's bindings, so they keep the OUTER scope's receiver names
+      rather than introducing their own (the closure captures ``ctx``
+      from the enclosing frame).
+
+    Walks each scope's body but stops at nested ``def`` / ``class`` /
+    ``lambda`` boundaries — bodies of locally-defined-but-uninvoked
+    helpers are not reachable because Python only creates the function
+    object and never executes the body without a call.
 
     ``on_bar`` is dispatched positionally, so only its second positional
-    parameter is the StrategyContext. Helpers reached via
-    ``self.<method>(...)`` relax to any non-``self`` positional parameter
-    since the call site can pass the context through any of them.
+    parameter is the StrategyContext.
     """
     methods_by_name: Dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     for node in ast.iter_child_nodes(cls):
@@ -441,38 +468,37 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             methods_by_name[node.name] = node
 
     calls: List[ast.Call] = []
-    visited: set[str] = set()
-    # Worklist entries: (method, is_hook). is_hook=True restricts the
-    # accepted receiver to the second positional parameter; helpers
-    # (is_hook=False) accept any non-self positional parameter since the
-    # call site may pass the context through any of them.
-    worklist: List[tuple[ast.FunctionDef | ast.AsyncFunctionDef, bool]] = []
+    # Visited keys on id() so distinct AST nodes don't collide on name.
+    visited_ids: set[int] = set()
+    # Worklist entries: (scope_node, receiver_names). receiver_names is
+    # the set of identifiers we accept as the context receiver inside
+    # this scope's body — for hooks, just the second positional; for
+    # helpers, every non-self positional; for local closures, the
+    # outer scope's receiver_names (captured by closure).
+    worklist: List[tuple[ast.AST, frozenset[str]]] = []
     for name, m in methods_by_name.items():
         if name in _PROCESSED_HOOK_METHODS:
-            worklist.append((m, True))
+            if len(m.args.args) >= 2:
+                worklist.append((m, frozenset({m.args.args[1].arg})))
 
     while worklist:
-        method, is_hook = worklist.pop()
-        if method.name in visited:
+        scope, receiver_names = worklist.pop()
+        if id(scope) in visited_ids:
             continue
-        visited.add(method.name)
+        visited_ids.add(id(scope))
 
-        if is_hook:
-            # Engine hook: only the second positional is the context.
-            # ``bar``/``fill`` siblings do not have ``submit_order``.
-            if len(method.args.args) >= 2:
-                receiver_names = {method.args.args[1].arg}
-            else:
-                receiver_names = set()
-        else:
-            # Helper reached from a hook: accept any positional parameter
-            # except ``self`` — we can't statically track which one was
-            # bound to the context, but any of them could be.
-            receiver_names = {arg.arg for arg in method.args.args if arg.arg != "self"}
+        # Local closures defined directly in this scope — followed only
+        # when their name is invoked below.
+        local_defs = (
+            _find_nested_def_defs(scope)
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
+            else {}
+        )
 
-        for sub in _iter_method_body_nodes(method):
+        for sub in _iter_method_body_nodes(scope):
             if not isinstance(sub, ast.Call):
                 continue
+            # 1. <ctx>.submit_order(...) — the order we count.
             if (
                 isinstance(sub.func, ast.Attribute)
                 and sub.func.attr == "submit_order"
@@ -481,15 +507,27 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             ):
                 calls.append(sub)
                 continue
-            # Queue ``self.<helper>(...)`` for traversal as a helper.
+            # 2. self.<helper>(...) — class method, traversed with its
+            #    own parameter set as the helper receiver names.
             if (
                 isinstance(sub.func, ast.Attribute)
                 and isinstance(sub.func.value, ast.Name)
                 and sub.func.value.id == "self"
             ):
                 helper = methods_by_name.get(sub.func.attr)
-                if helper is not None and helper.name not in visited:
-                    worklist.append((helper, False))
+                if helper is not None and id(helper) not in visited_ids:
+                    helper_receivers = frozenset(
+                        arg.arg for arg in helper.args.args if arg.arg != "self"
+                    )
+                    worklist.append((helper, helper_receivers))
+                continue
+            # 3. <local_name>(...) — closure defined in the same scope.
+            #    Walked with the OUTER scope's receiver_names because the
+            #    closure captures the context binding from this frame.
+            if isinstance(sub.func, ast.Name):
+                local = local_defs.get(sub.func.id)
+                if local is not None and id(local) not in visited_ids:
+                    worklist.append((local, receiver_names))
 
     return calls
 

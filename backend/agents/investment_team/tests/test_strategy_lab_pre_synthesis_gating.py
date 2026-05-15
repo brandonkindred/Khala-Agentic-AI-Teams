@@ -127,3 +127,45 @@ def test_pre_synthesis_validator_persisted_even_on_pass(monkeypatch: pytest.Monk
     assert not any(
         g.get("severity") == "critical" and not g.get("passed") for g in pre_synth_gates
     ), pre_synth_gates
+
+
+def test_missing_strategy_code_does_not_short_circuit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ideation may return an empty ``strategy_code``. That's a
+    code-generation failure that the refinement loop's existing code-
+    safety + regeneration paths are equipped to repair; the pre-synthesis
+    spec gate must NOT short-circuit on it (regressing a previously-
+    recoverable case into an outright failure).
+
+    The validator's ``strategy_code is missing — nothing to execute``
+    critical is excluded from short-circuit eligibility; the cycle
+    proceeds into the refinement loop.
+    """
+    valid_spec_dict_but_no_code = {
+        "asset_class": "stocks",
+        "hypothesis": "RSI signal strategy",
+        "signal_definition": "sig",
+        "entry_rules": ["enter when RSI < 30"],
+        "exit_rules": ["exit when RSI > 70"],
+        "sizing_rules": ["risk 2% per trade"],
+        "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
+        "speculative": False,
+    }
+
+    orch = StrategyLabOrchestrator()
+    # Empty string — triggers the validator's "strategy_code is missing"
+    # critical but the spec itself is otherwise valid.
+    monkeypatch.setattr(
+        orch.ideation_agent,
+        "run",
+        _ideation_returning(valid_spec_dict_but_no_code, ""),
+    )
+    # Short-circuit further down by returning no market data so the cycle
+    # exits cleanly without needing a full sandbox stack.
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", lambda *_a, **_kw: None)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    # The cycle did NOT short-circuit with "failed: spec_validation":
+    # the validator's strategy_code critical was excluded from pre-synth
+    # gating, so we proceeded past it.
+    assert record.backtest.status != "failed: spec_validation", record.backtest.status
