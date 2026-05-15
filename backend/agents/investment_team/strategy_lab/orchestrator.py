@@ -1565,11 +1565,7 @@ class StrategyLabOrchestrator:
             # back to the asset-class default universe otherwise. The
             # ``symbols[:5]`` truncation on the fallback path is removed
             # in #525.
-            if spec.target_symbols:
-                symbols = list(spec.target_symbols)
-            else:
-                symbols = self.market_data_service.get_symbols_for_strategy(spec)
-                symbols = symbols[:5]
+            symbols = self.market_data_service.resolve_strategy_symbols(spec)
             if not symbols:
                 return None
             as_of = (getattr(spec, "audit", None) and spec.audit.data_snapshot_id) or None

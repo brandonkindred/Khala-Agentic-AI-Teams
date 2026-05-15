@@ -242,6 +242,20 @@ class MarketDataService:
         }
         return list(symbol_map.get(asset, STOCK_SYMBOLS))
 
+    def resolve_strategy_symbols(self, strategy: StrategySpec) -> List[str]:
+        """Issue #523 — pick the symbol universe a strategy should trade.
+
+        When ``strategy.target_symbols`` is non-empty it is returned
+        verbatim, so a hypothesis naming QQQ is backtested and paper-traded
+        on QQQ instead of the asset-class default. Otherwise the
+        asset-class default universe is returned, capped at 5 symbols to
+        bound fetch cost — that magic literal is replaced by
+        ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`` in #525.
+        """
+        if strategy.target_symbols:
+            return list(strategy.target_symbols)
+        return self.get_symbols_for_strategy(strategy)[:5]
+
     def fetch_multi_symbol(
         self, symbols: List[str], asset_class: str, days: int = 365
     ) -> Dict[str, List[OHLCVBar]]:
