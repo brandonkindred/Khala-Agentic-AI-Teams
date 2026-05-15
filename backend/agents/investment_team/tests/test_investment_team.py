@@ -1099,6 +1099,141 @@ def test_market_data_service_fetch_multi_symbol_range(tmp_path) -> None:
     assert result["AAPL"][0].close == 153.0
 
 
+def test_strategy_spec_target_symbols_normalization() -> None:
+    """Issue #523 — target_symbols is uppercased, stripped, deduped, preserves order."""
+    spec = StrategySpec(
+        strategy_id="s-norm",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        target_symbols=["qqq", " GLD ", "QQQ", "spy"],
+    )
+    assert spec.target_symbols == ["QQQ", "GLD", "SPY"]
+
+    # default (omitted) is an empty list, preserving backward compat
+    bare = StrategySpec(
+        strategy_id="s-bare",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+    )
+    assert bare.target_symbols == []
+
+    # None coerces to []
+    none_spec = StrategySpec(
+        strategy_id="s-none",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        target_symbols=None,
+    )
+    assert none_spec.target_symbols == []
+
+
+def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
+    """Issue #523 — non-string entries (and non-list values) are rejected."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="s-bad",
+            authored_by="test",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            target_symbols=["AAPL", 42],
+        )
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="s-bad2",
+            authored_by="test",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            target_symbols="AAPL",  # type: ignore[arg-type]
+        )
+
+
+def test_fetch_market_data_uses_target_symbols_when_set() -> None:
+    """Issue #523 — when spec.target_symbols is non-empty, the fetcher receives
+    it verbatim and the asset-class default universe is bypassed."""
+    from unittest.mock import MagicMock
+
+    from agents.investment_team.models import BacktestConfig
+    from agents.investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
+    captured: dict = {}
+
+    def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
+        captured["symbols"] = list(symbols)
+        captured["asset_class"] = asset_class
+        return {sym: ["bar"] for sym in symbols}
+
+    market = MagicMock()
+    market.fetch_multi_symbol_range.side_effect = fake_fetch
+    # If get_symbols_for_strategy were called it would short-circuit the test —
+    # raise to make accidental calls obvious.
+    market.get_symbols_for_strategy.side_effect = AssertionError(
+        "fallback should not be used when target_symbols is set"
+    )
+    orchestrator.market_data_service = market
+
+    spec = StrategySpec(
+        strategy_id="s-tgt",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ trend continuation",
+        signal_definition="s",
+        target_symbols=["QQQ"],
+    )
+    config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
+
+    result = orchestrator._fetch_market_data(spec, config)
+    assert captured["symbols"] == ["QQQ"]
+    assert result == {"QQQ": ["bar"]}
+
+
+def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
+    """Issue #523 — empty target_symbols routes through the asset-class default
+    universe. Current behaviour caps at 5 symbols; #525 will tighten this."""
+    from unittest.mock import MagicMock
+
+    from agents.investment_team.models import BacktestConfig
+    from agents.investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from agents.investment_team.symbols import STOCK_SYMBOLS
+
+    orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
+    captured: dict = {}
+
+    def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
+        captured["symbols"] = list(symbols)
+        return {sym: ["bar"] for sym in symbols}
+
+    market = MagicMock()
+    market.get_symbols_for_strategy.return_value = list(STOCK_SYMBOLS)
+    market.fetch_multi_symbol_range.side_effect = fake_fetch
+    orchestrator.market_data_service = market
+
+    spec = StrategySpec(
+        strategy_id="s-default",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        signal_definition="s",
+    )
+    config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
+
+    orchestrator._fetch_market_data(spec, config)
+    # Sanity: the fallback path uses the default universe (capped to 5 until #525).
+    assert captured["symbols"] == list(STOCK_SYMBOLS[:5])
+
+
 def test_agent_catalog_includes_signal_intelligence_expert() -> None:
     from agents.investment_team.agent_catalog import CORE_AGENTS
 

@@ -47,6 +47,7 @@ Return ONLY a JSON object with no markdown:
   "entry_rules": ["rule 1", "rule 2", "rule 3"],
   "exit_rules": ["exit rule 1", "exit rule 2"],
   "sizing_rules": ["sizing rule 1"],
+  "target_symbols": ["UPPERCASE tickers if your hypothesis names specific ones, e.g. QQQ; else []"],
   "risk_limits": {{"max_position_pct": 5, "stop_loss_pct": 3}},
   "speculative": false,
   "rationale": "Why this strategy and asset class now, given priors and the diversity hint",
