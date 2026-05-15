@@ -616,17 +616,27 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
                         worklist.append((helper, helper_receivers))
                 continue
             # 3. <local_name>(...) — closure defined in the same scope.
-            #    Closures see two sources of context bindings: parameters
-            #    bound at the call site (``def enter(c): ...; enter(ctx)``
-            #    binds ``c`` to ``ctx``) AND outer-scope captures
-            #    (``def enter(): ctx.submit_order(...)`` references the
-            #    enclosing frame's ``ctx``). We union both so either
-            #    pattern is recognised.
+            #    Closures see two sources of context bindings:
+            #    - Parameters bound at the call site (``def enter(c): ...;
+            #      enter(ctx)`` binds ``c`` to ``ctx``).
+            #    - Outer-scope captures (``def enter(): ctx.submit_order(
+            #      ...)`` references the enclosing frame's ``ctx``).
+            #    Captured names are visible only when the closure does
+            #    NOT shadow them with its own parameter — ``def
+            #    enter(ctx): ...; enter(bar)`` rebinds ``ctx`` to ``bar``,
+            #    so the outer ``ctx`` is no longer reachable as a
+            #    receiver inside the closure body.
             if isinstance(sub.func, ast.Name):
                 local = local_defs.get(sub.func.id)
                 if local is not None:
                     call_bound = _resolve_helper_receivers(sub, local, receiver_names)
-                    closure_receivers = receiver_names | call_bound
+                    closure_param_names = frozenset(
+                        arg.arg for arg in local.args.args if arg.arg != "self"
+                    )
+                    # Outer receivers are captured by closure UNLESS a
+                    # parameter of the same name shadows them.
+                    captured = receiver_names - closure_param_names
+                    closure_receivers = captured | call_bound
                     if (id(local), closure_receivers) not in visited_keys:
                         worklist.append((local, closure_receivers))
 
@@ -663,24 +673,33 @@ def _submit_order_side(node: ast.Call) -> Optional[str]:
     return None
 
 
-def _calls_form_entry_exit_pair(calls: List[ast.Call]) -> bool:
-    """True iff the collected submit_order calls plausibly include both an
-    entry and an exit leg.
+def _submit_order_symbol(node: ast.Call) -> Optional[str]:
+    """Best-effort extraction of the ``symbol`` value from a submit_order
+    call. Returns the literal string when the call uses a string Constant,
+    else None when the symbol is computed/dynamic or missing.
 
-    The runtime contract closes a position by submitting an opposite-side
-    order (``LONG`` closes a ``SHORT``, ``SHORT`` closes a ``LONG``) with
-    ``qty == position.qty``. We approximate statically:
+    Dynamic-symbol calls (``symbol=bar.symbol`` etc.) all share the same
+    runtime symbol per ``on_bar`` invocation, so the entry/exit grouping
+    treats them as one logical group (key=None).
+    """
+    for kw in node.keywords:
+        if kw.arg != "symbol":
+            continue
+        if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return kw.value.value
+    return None
 
-    * If any call carries ``attached_stop_loss`` / ``attached_take_profit``
-      (a non-None bracket leg), it brings its own exit.
-    * Otherwise, require both ``LONG`` and ``SHORT`` to appear across the
-      collected calls. Same-side multiplicity (``LONG`` + ``LONG``) is one-
-      sided and fails the gate.
-    * Calls whose side cannot be determined statically (computed expression
-      that picks the direction from position / signal state) are treated
-      optimistically — even a single such call passes, since legitimate
-      strategies route both entry and exit through one call site whose
-      side is a runtime branch.
+
+def _group_forms_entry_exit_pair(calls: List[ast.Call]) -> bool:
+    """True iff a single-symbol group of submit_order calls plausibly
+    contains both an entry and an opposite-side exit leg.
+
+    * Any call carrying a non-None ``attached_stop_loss`` /
+      ``attached_take_profit`` bracket leg satisfies the group on its own.
+    * Otherwise require both ``LONG`` and ``SHORT`` to appear across the
+      group's calls. Same-side multiplicity (``LONG`` + ``LONG``) fails.
+    * Unknown / dynamic side values are treated optimistically — the
+      runtime branch may pick either direction.
     """
     if any(_has_attached_exit_kwarg(c) for c in calls):
         return True
@@ -692,15 +711,30 @@ def _calls_form_entry_exit_pair(calls: List[ast.Call]) -> bool:
             has_unknown = True
         else:
             sides_seen.add(side)
-    # Distinct LONG + SHORT means at least one is opposite-side closing the other.
     if "LONG" in sides_seen and "SHORT" in sides_seen:
         return True
-    # Dynamic side: accept any number of calls (including a single one) that
-    # route entry/exit through a runtime branch — false-failing these is
-    # worse than letting the backtest surface a genuinely one-sided runtime.
     if has_unknown:
         return True
     return False
+
+
+def _calls_form_entry_exit_pair(calls: List[ast.Call]) -> bool:
+    """True iff the collected submit_order calls plausibly form an
+    entry+exit pair on EVERY symbol they target.
+
+    The engine closes positions per-symbol — ``portfolio.positions[bar.symbol]``
+    is looked up against the order's own symbol — so a strategy that
+    opens ``LONG`` on ``"SPY"`` and ``SHORT`` on ``"TLT"`` has two
+    open entries and zero exits, not a balanced pair. The gate groups
+    calls by their literal ``symbol`` value (dynamic / computed symbols
+    share a single "unknown" group, since they all resolve to the same
+    runtime symbol within a single ``on_bar`` invocation) and requires
+    every group to form its own entry+exit pair.
+    """
+    groups: Dict[Optional[str], List[ast.Call]] = {}
+    for c in calls:
+        groups.setdefault(_submit_order_symbol(c), []).append(c)
+    return all(_group_forms_entry_exit_pair(group) for group in groups.values())
 
 
 def _has_attached_exit_kwarg(node: ast.Call) -> bool:

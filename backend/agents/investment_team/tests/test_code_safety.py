@@ -778,6 +778,87 @@ def test_simple_ctx_alias_is_tracked() -> None:
     assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
 
 
+def test_long_on_one_symbol_short_on_another_is_critical_no_exit() -> None:
+    """Pair-trading-style strategy that opens LONG on SPY and SHORT on
+    TLT has two unrelated entries, not an entry+exit pair. The engine
+    closes positions per-symbol (``portfolio.positions[bar.symbol]``),
+    so neither symbol has a real exit and the gate must reject it."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol='SPY', qty=1, side='LONG')
+                ctx.submit_order(symbol='TLT', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no exit path" in c or "no real exit leg" in c for c in criticals), criticals
+
+
+def test_long_and_short_on_same_symbol_passes() -> None:
+    """LONG + SHORT on the SAME literal symbol is a valid entry+exit pair."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.close > 100:
+                    ctx.submit_order(symbol='SPY', qty=1, side='LONG')
+                else:
+                    ctx.submit_order(symbol='SPY', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c or "exit leg" in c for c in criticals), (
+        criticals
+    )
+
+
+def test_dynamic_symbol_groups_together_and_passes() -> None:
+    """``symbol=bar.symbol`` resolves to the same runtime symbol within
+    one ``on_bar`` call, so dynamic-symbol calls share a single group.
+    LONG + SHORT on dynamic symbol passes."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.close > 100:
+                    ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                else:
+                    ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c or "exit leg" in c for c in criticals), (
+        criticals
+    )
+
+
+def test_closure_parameter_shadowing_outer_ctx_is_not_captured() -> None:
+    """A nested closure that names its own parameter ``ctx`` rebinds the
+    name inside the closure scope — the outer ``ctx`` is no longer
+    reachable as a receiver inside. So ``def enter(ctx): ctx.submit_order
+    (...); enter(bar)`` does NOT count as a valid entry (the inner ``ctx``
+    is bound to the Bar at runtime)."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                def enter(ctx):
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                def exit_position(ctx):
+                    ctx.submit_order(symbol='X', qty=1, side='SHORT')
+                enter(bar)
+                exit_position(bar)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no entry path" in c for c in criticals), criticals
+
+
 def test_local_closure_with_parameter_is_bound_at_call_site() -> None:
     """A nested closure that accepts the context as a parameter and is
     invoked with the runtime ctx should have that parameter bound:
