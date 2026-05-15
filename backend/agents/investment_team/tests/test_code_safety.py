@@ -415,13 +415,72 @@ def test_submit_order_in_on_start_satisfies_entry_path() -> None:
             def on_start(self, ctx):
                 ctx.submit_order(symbol='X', qty=1, side='LONG')
             def on_fill(self, ctx, fill):
-                ctx.submit_order(symbol='X', qty=1, side='FLAT')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
             def on_bar(self, ctx, bar):
                 pass
     """)
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
     assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+def test_submit_order_only_in_on_fill_is_critical_no_entry() -> None:
+    """``on_fill`` runs only AFTER a prior fill, so it can't bootstrap a
+    position. A strategy whose only orders sit in ``on_fill`` will never
+    emit anything in practice; the gate must reject it."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                pass  # never emits an entry order
+            def on_fill(self, ctx, fill):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("on_bar or on_start" in c for c in criticals), criticals
+
+
+def test_submit_order_only_in_on_end_is_critical_no_entry() -> None:
+    """``on_end`` runs after the data stream ends and cannot initiate
+    trading. A strategy with all orders in ``on_end`` is a no-op."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                pass
+            def on_end(self, ctx):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("on_bar or on_start" in c for c in criticals), criticals
+
+
+def test_submit_order_in_uninvoked_nested_def_does_not_satisfy_gate() -> None:
+    """Nested function bodies declared inside ``on_bar`` only run if the
+    enclosing scope calls them. An uninvoked local ``def`` containing
+    ``ctx.submit_order(...)`` must NOT count toward the order-flow gate
+    because Python never executes the body of a function it never calls.
+    """
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                def _unused():
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                    ctx.submit_order(symbol='X', qty=1, side='SHORT')
+                # _unused is defined but never invoked, so neither call runs.
+                pass
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no entry path" in c for c in criticals), criticals
 
 
 def test_submit_order_in_helper_called_from_on_bar_satisfies_order_flow_gate() -> None:
