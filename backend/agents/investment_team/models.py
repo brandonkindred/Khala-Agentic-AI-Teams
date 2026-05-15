@@ -200,6 +200,11 @@ class StrategySpec(BaseModel):
     entry_rules: List[str] = Field(default_factory=list)
     exit_rules: List[str] = Field(default_factory=list)
     sizing_rules: List[str] = Field(default_factory=list)
+    # Issue #523 — explicit list of tickers the strategy is designed to
+    # trade. When non-empty, the fetch path uses this list verbatim
+    # instead of the asset-class default universe, so a hypothesis naming
+    # QQQ doesn't get silently backtested on AAPL.
+    target_symbols: List[str] = Field(default_factory=list)
     # Phase 3: risk_limits is validated at spec construction time.  Dicts
     # authored by the LLM (or persisted before this field was typed) are
     # accepted and routed through ``RiskLimits.from_legacy_dict``, which
@@ -219,6 +224,25 @@ class StrategySpec(BaseModel):
         if isinstance(v, dict):
             return RiskLimits.from_legacy_dict(v)
         return v
+
+    @field_validator("target_symbols", mode="before")
+    @classmethod
+    def _normalize_target_symbols(cls, v: Any) -> List[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("target_symbols must be a list of strings")
+        seen: set[str] = set()
+        out: List[str] = []
+        for item in v:
+            if not isinstance(item, str):
+                raise ValueError("target_symbols entries must be strings")
+            sym = item.strip().upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append(sym)
+        return out
 
 
 class ValidationCheck(BaseModel):

@@ -1067,9 +1067,9 @@ def _run_real_data_backtest(
         )
 
     market_service = MarketDataService()
-    symbols = market_service.get_symbols_for_strategy(strategy)
-    # Use top 5 symbols to keep data fetching reasonable
-    symbols = symbols[:5]
+    # Issue #523 — honour explicit target_symbols; otherwise fall back to
+    # the asset-class default universe (capped to 5; #525 removes the cap).
+    symbols = market_service.resolve_strategy_symbols(strategy)
 
     logger.info(
         "Fetching historical data for %s backtest (%s to %s, %d symbols)...",
@@ -1156,9 +1156,10 @@ def _run_paper_trading_step(
     from investment_team.paper_trading_agent import PaperTradingAgent
 
     market_service = MarketDataService()
-    symbols = market_service.get_symbols_for_strategy(strategy)
-    # Match the standalone endpoint: cap at top 5 symbols to bound fetch cost
-    symbols = symbols[:5]
+    # Issue #523 — paper trading must honour the same universe as the
+    # backtest that promoted this spec, otherwise a winning QQQ-only
+    # strategy gets paper-traded against AAPL/MSFT/... .
+    symbols = market_service.resolve_strategy_symbols(strategy)
 
     logger.info(
         "Paper-trading step: fetching %d days of market data for %d symbols (%s) ...",
@@ -2667,7 +2668,8 @@ def _run_paper_trading_background(
 
     try:
         market_service = MarketDataService()
-        symbols = market_service.get_symbols_for_strategy(strategy)[:5]
+        # Issue #523 — match the orchestrator backtest's universe choice.
+        symbols = market_service.resolve_strategy_symbols(strategy)
         logger.info(
             "Paper trade %s: fetching %d days of market data for %d symbols (%s) ...",
             session_id,
@@ -2927,12 +2929,13 @@ def _run_live_paper_trading_background(
         _live_paper_stop_controllers[session_id] = controller
 
     try:
-        # Choose symbols the same way the legacy path does — but only up to the
-        # first few to keep bandwidth bounded during paper trading.
+        # Issue #523 — honour target_symbols when set; otherwise fall back
+        # to the asset-class default universe (capped at 5; #525 removes
+        # the magic cap).
         from investment_team.market_data_service import MarketDataService
 
         market_service = MarketDataService()
-        symbols = market_service.get_symbols_for_strategy(strategy)[:5]
+        symbols = market_service.resolve_strategy_symbols(strategy)
         if not symbols:
             raise RuntimeError("no symbols resolved for strategy")
 

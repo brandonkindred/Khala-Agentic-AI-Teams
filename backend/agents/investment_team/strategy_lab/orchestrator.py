@@ -244,6 +244,7 @@ class StrategyLabOrchestrator:
             entry_rules=strategy_dict.get("entry_rules", []),
             exit_rules=strategy_dict.get("exit_rules", []),
             sizing_rules=strategy_dict.get("sizing_rules", []),
+            target_symbols=strategy_dict.get("target_symbols", []),
             risk_limits=strategy_dict.get("risk_limits", {}),
             speculative=strategy_dict.get("speculative", False),
             strategy_code=code,
@@ -1560,12 +1561,16 @@ class StrategyLabOrchestrator:
         Specs without it use ``None`` (latest).
         """
         try:
-            symbols = self.market_data_service.get_symbols_for_strategy(spec)
+            # Issue #523 — honour explicit target_symbols verbatim; fall
+            # back to the asset-class default universe otherwise. The
+            # ``symbols[:5]`` truncation on the fallback path is removed
+            # in #525.
+            symbols = self.market_data_service.resolve_strategy_symbols(spec)
             if not symbols:
                 return None
             as_of = (getattr(spec, "audit", None) and spec.audit.data_snapshot_id) or None
             data = self.market_data_service.fetch_multi_symbol_range(
-                symbols=symbols[:5],
+                symbols=symbols,
                 asset_class=spec.asset_class,
                 start_date=config.start_date,
                 end_date=config.end_date,

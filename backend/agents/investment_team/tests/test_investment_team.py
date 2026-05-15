@@ -1099,6 +1099,273 @@ def test_market_data_service_fetch_multi_symbol_range(tmp_path) -> None:
     assert result["AAPL"][0].close == 153.0
 
 
+def test_strategy_spec_target_symbols_normalization() -> None:
+    """Issue #523 — target_symbols is uppercased, stripped, deduped, preserves order."""
+    spec = StrategySpec(
+        strategy_id="s-norm",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        target_symbols=["qqq", " GLD ", "QQQ", "spy"],
+    )
+    assert spec.target_symbols == ["QQQ", "GLD", "SPY"]
+
+    # default (omitted) is an empty list, preserving backward compat
+    bare = StrategySpec(
+        strategy_id="s-bare",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+    )
+    assert bare.target_symbols == []
+
+    # None coerces to []
+    none_spec = StrategySpec(
+        strategy_id="s-none",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        target_symbols=None,
+    )
+    assert none_spec.target_symbols == []
+
+
+def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
+    """Issue #523 — non-string entries (and non-list values) are rejected."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="s-bad",
+            authored_by="test",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            target_symbols=["AAPL", 42],
+        )
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="s-bad2",
+            authored_by="test",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            target_symbols="AAPL",  # type: ignore[arg-type]
+        )
+
+
+def test_resolve_strategy_symbols_prefers_target_symbols() -> None:
+    """Issue #523 — resolve_strategy_symbols returns target_symbols verbatim
+    when set, regardless of asset_class."""
+    from agents.investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-tgt",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ trend continuation",
+        signal_definition="s",
+        target_symbols=["QQQ", "GLD"],
+    )
+    assert service.resolve_strategy_symbols(spec) == ["QQQ", "GLD"]
+
+
+def test_classify_symbol_unambiguous_cases() -> None:
+    """Issue #523 — classify_symbol returns the natural asset class for symbols
+    that unambiguously belong to one canonical universe."""
+    from agents.investment_team.symbols import classify_symbol
+
+    assert classify_symbol("BTC") == "crypto"
+    assert classify_symbol("ETH") == "crypto"
+    assert classify_symbol("AAPL") == "stocks"
+    assert classify_symbol("EURUSD=X") == "forex"
+    assert classify_symbol("EURUSD") == "forex"
+    assert classify_symbol("GC=F") == "futures"
+    # Suffix-only fallback (symbol not in any canonical list)
+    assert classify_symbol("BTC-USD") == "crypto"
+    assert classify_symbol("AUDCHF=X") == "forex"
+    assert classify_symbol("RTY=F") == "futures"
+
+
+def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
+    """Issue #523 — cross-asset ETFs and unknown tickers don't get classified
+    so the mismatch warning doesn't false-positive."""
+    from agents.investment_team.symbols import classify_symbol
+
+    # OTHER_SYMBOLS — tradeable as stocks via Yahoo even with non-stock exposure
+    assert classify_symbol("GLD") is None
+    assert classify_symbol("QQQ") is None
+    assert classify_symbol("TLT") is None
+    # Unknown ticker — don't guess
+    assert classify_symbol("NEWCO") is None
+
+
+def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
+    """Issue #523 — a strategy declaring asset_class="stocks" with
+    target_symbols=["BTC"] should emit a warning so the operator sees the
+    mismatch instead of getting an empty fetch silently."""
+    import logging
+
+    from agents.investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-mismatch",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="bitcoin trend follow",
+        signal_definition="s",
+        target_symbols=["BTC"],
+    )
+    with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
+        result = service.resolve_strategy_symbols(spec)
+
+    # The fetch still proceeds against the requested symbols.
+    assert result == ["BTC"]
+    # But the operator sees the diagnostic.
+    assert any(
+        "s-mismatch" in r.message and "BTC" in r.message and "stocks" in r.message
+        for r in caplog.records
+    ), f"expected mismatch warning, got: {[r.message for r in caplog.records]}"
+
+
+def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> None:
+    """Issue #523 — no warning when target_symbols match the declared
+    asset_class, nor for cross-asset ETFs (GLD, QQQ) which deliberately
+    aren't classified to avoid false positives."""
+    import logging
+
+    from agents.investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    aligned = StrategySpec(
+        strategy_id="s-aligned",
+        authored_by="test",
+        asset_class="crypto",
+        hypothesis="BTC trend follow",
+        signal_definition="s",
+        target_symbols=["BTC"],
+    )
+    qqq_stocks = StrategySpec(
+        strategy_id="s-qqq",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ trend continuation",
+        signal_definition="s",
+        target_symbols=["QQQ", "GLD"],
+    )
+    unknown = StrategySpec(
+        strategy_id="s-unknown",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="momentum on a fresh ticker",
+        signal_definition="s",
+        target_symbols=["NEWCO"],
+    )
+    with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
+        service.resolve_strategy_symbols(aligned)
+        service.resolve_strategy_symbols(qqq_stocks)
+        service.resolve_strategy_symbols(unknown)
+
+    assert caplog.records == [], f"unexpected warnings: {[r.message for r in caplog.records]}"
+
+
+def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
+    """Issue #523 — empty target_symbols falls through to the asset-class default
+    universe (capped at 5; #525 tightens this)."""
+    from agents.investment_team.market_data_service import MarketDataService
+    from agents.investment_team.symbols import STOCK_SYMBOLS
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-default",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        signal_definition="s",
+    )
+    assert service.resolve_strategy_symbols(spec) == list(STOCK_SYMBOLS[:5])
+
+
+def test_fetch_market_data_uses_target_symbols_when_set() -> None:
+    """Issue #523 — when spec.target_symbols is non-empty, the fetcher receives
+    it verbatim and the asset-class default universe is bypassed."""
+    from unittest.mock import patch
+
+    from agents.investment_team.market_data_service import MarketDataService
+    from agents.investment_team.models import BacktestConfig
+    from agents.investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
+    orchestrator.market_data_service = MarketDataService()
+    captured: dict = {}
+
+    def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
+        captured["symbols"] = list(symbols)
+        captured["asset_class"] = asset_class
+        return {sym: ["bar"] for sym in symbols}
+
+    spec = StrategySpec(
+        strategy_id="s-tgt",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ trend continuation",
+        signal_definition="s",
+        target_symbols=["QQQ"],
+    )
+    config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
+
+    with patch.object(
+        orchestrator.market_data_service, "fetch_multi_symbol_range", side_effect=fake_fetch
+    ):
+        result = orchestrator._fetch_market_data(spec, config)
+
+    assert captured["symbols"] == ["QQQ"]
+    assert result == {"QQQ": ["bar"]}
+
+
+def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
+    """Issue #523 — empty target_symbols routes through the asset-class default
+    universe. Current behaviour caps at 5 symbols; #525 will tighten this."""
+    from unittest.mock import patch
+
+    from agents.investment_team.market_data_service import MarketDataService
+    from agents.investment_team.models import BacktestConfig
+    from agents.investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from agents.investment_team.symbols import STOCK_SYMBOLS
+
+    orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
+    orchestrator.market_data_service = MarketDataService()
+    captured: dict = {}
+
+    def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
+        captured["symbols"] = list(symbols)
+        return {sym: ["bar"] for sym in symbols}
+
+    spec = StrategySpec(
+        strategy_id="s-default",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        signal_definition="s",
+    )
+    config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
+
+    with patch.object(
+        orchestrator.market_data_service, "fetch_multi_symbol_range", side_effect=fake_fetch
+    ):
+        orchestrator._fetch_market_data(spec, config)
+
+    # Sanity: the fallback path uses the default universe (capped to 5 until #525).
+    assert captured["symbols"] == list(STOCK_SYMBOLS[:5])
+
+
 def test_agent_catalog_includes_signal_intelligence_expert() -> None:
     from agents.investment_team.agent_catalog import CORE_AGENTS
 

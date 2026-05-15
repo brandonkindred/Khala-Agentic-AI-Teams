@@ -25,6 +25,10 @@ Design strategies as a **mixture of signal types**, not a single indicator. Comb
 
 Diversify across: stocks, crypto, forex, options, futures, commodities. Do NOT default to equities unless explicitly directed.
 
+## Target symbols
+
+Whenever your hypothesis or signal definition names specific tickers (e.g. "QQQ trend continuation", "long GLD vs short USO"), populate `target_symbols` in the JSON response with exactly those tickers, uppercase. The backtest engine then fetches and trades that universe verbatim — no asset-class default substitution. Use yfinance-style suffixes when applicable: forex pairs end in `=X` (`EURUSD=X`), futures in `=F` (`GC=F`). If the hypothesis is universe-agnostic ("any liquid US large-cap"), return `[]` and the asset-class default universe is used.
+
 ## Execution model (read this carefully — it's NEW)
 
 You do **NOT** write a batch `run_strategy(data, config)` function anymore. The backtest and paper-trading engines are event-driven: they deliver **one `Bar` at a time** to your strategy's `on_bar(ctx, bar)` method, you decide what order (if any) to submit via `ctx.submit_order(...)`, and the engine decides whether/when/at-what-price it fills.
