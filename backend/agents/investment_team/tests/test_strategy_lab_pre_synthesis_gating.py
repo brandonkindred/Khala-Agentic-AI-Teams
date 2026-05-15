@@ -136,10 +136,14 @@ def test_pre_synthesis_validator_persisted_even_on_pass(monkeypatch: pytest.Monk
     # The orchestrator will then enter the refinement loop. Short-circuit on
     # the first failed code_safety check so the test does not need a full
     # sandbox stack — record stays in scope to assert on the pre-synth gates.
+    # Issue #525 — return a _MarketDataFetch envelope with data=None to
+    # trigger the no-market-data short-circuit.
+    from investment_team.strategy_lab.orchestrator import _MarketDataFetch
+
     monkeypatch.setattr(
         StrategyLabOrchestrator,
         "_fetch_market_data",
-        lambda *_a, **_kw: None,
+        lambda *_a, **_kw: _MarketDataFetch(data=None, requested_symbols=[], fetched_symbols=[]),
     )
 
     record = orch.run_cycle(prior_records=[], config=_config())
@@ -182,8 +186,15 @@ def test_missing_strategy_code_does_not_short_circuit(monkeypatch: pytest.Monkey
         _ideation_returning(valid_spec_dict_but_no_code, ""),
     )
     # Short-circuit further down by returning no market data so the cycle
-    # exits cleanly without needing a full sandbox stack.
-    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", lambda *_a, **_kw: None)
+    # exits cleanly without needing a full sandbox stack. Issue #525 — the
+    # fetch path now returns a _MarketDataFetch envelope.
+    from investment_team.strategy_lab.orchestrator import _MarketDataFetch
+
+    monkeypatch.setattr(
+        StrategyLabOrchestrator,
+        "_fetch_market_data",
+        lambda *_a, **_kw: _MarketDataFetch(data=None, requested_symbols=[], fetched_symbols=[]),
+    )
 
     record = orch.run_cycle(prior_records=[], config=_config())
 

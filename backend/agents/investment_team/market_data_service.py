@@ -42,6 +42,30 @@ logger = logging.getLogger(__name__)
 
 _ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
 
+_DEFAULT_MAX_UNIVERSE_SYMBOLS = 10
+
+
+def _max_universe_symbols() -> int:
+    """Issue #525 — env-var ceiling on the asset-class default universe.
+
+    Replaces the previous magic literal ``5``. Invalid values fall back to
+    ``_DEFAULT_MAX_UNIVERSE_SYMBOLS`` with a warning. Values < 1 are clamped
+    to 1 so the fetch path is never asked to resolve an empty universe.
+    """
+    raw = os.getenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS")
+    if not raw:
+        return _DEFAULT_MAX_UNIVERSE_SYMBOLS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS=%r; using default %d",
+            raw,
+            _DEFAULT_MAX_UNIVERSE_SYMBOLS,
+        )
+        return _DEFAULT_MAX_UNIVERSE_SYMBOLS
+    return max(1, value)
+
 
 class OHLCVBar(BaseModel):
     """A single OHLCV price bar."""
@@ -249,9 +273,10 @@ class MarketDataService:
         When ``strategy.target_symbols`` is non-empty it is returned
         verbatim, so a hypothesis naming QQQ is backtested and paper-traded
         on QQQ instead of the asset-class default. Otherwise the
-        asset-class default universe is returned, capped at 5 symbols to
-        bound fetch cost — that magic literal is replaced by
-        ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`` in #525.
+        asset-class default universe is returned, capped by
+        ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`` (default 10). When the cap
+        actually truncates the universe a ``logger.warning`` is emitted
+        so the slice is never silent (#525).
 
         When the declared ``asset_class`` doesn't match the natural class
         of a target symbol (e.g. ``asset_class="stocks"`` +
@@ -263,7 +288,21 @@ class MarketDataService:
         if strategy.target_symbols:
             self._warn_on_asset_class_mismatch(strategy)
             return list(strategy.target_symbols)
-        return self.get_symbols_for_strategy(strategy)[:5]
+        default = self.get_symbols_for_strategy(strategy)
+        cap = _max_universe_symbols()
+        if len(default) > cap:
+            logger.warning(
+                "Strategy %s: asset-class default universe (%d symbols) "
+                "exceeds STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS=%d; truncating "
+                "to first %d. Set spec.target_symbols to opt out of the "
+                "default universe entirely.",
+                strategy.strategy_id,
+                len(default),
+                cap,
+                cap,
+            )
+            return default[:cap]
+        return default
 
     def _warn_on_asset_class_mismatch(self, strategy: StrategySpec) -> None:
         declared = normalize_asset_class(strategy.asset_class)
