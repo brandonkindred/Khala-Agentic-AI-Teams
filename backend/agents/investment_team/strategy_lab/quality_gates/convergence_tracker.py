@@ -204,12 +204,27 @@ class ConvergenceTracker:
 
     @staticmethod
     def _strategy_signature(spec: StrategySpec) -> Set[str]:
-        """Compute a set of hashable tokens representing the strategy's core identity."""
+        """Compute a set of hashable tokens representing the strategy's core identity.
+
+        Issue #551/#552: rule fields are now structured DSL nodes. We hash a
+        canonical-JSON view (sort_keys, no whitespace) of each rule so the
+        token set is deterministic and stable across runs without depending
+        on dict ordering. The shape is intentionally narrower than
+        ``model_dump_json`` — only ``kind`` + the field values — but Pydantic
+        already enforces the schema and ``sort_keys=True`` makes it
+        reproducible.
+        """
+        import json
+
         tokens: Set[str] = set()
         tokens.add(f"ac:{spec.asset_class.lower()}")
-        for rule in sorted(spec.entry_rules):
+
+        def _canon(rule) -> str:
+            return json.dumps(rule.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+
+        for rule in sorted((_canon(r) for r in spec.entry_rules)):
             tokens.add(f"entry:{hashlib.sha256(rule.encode()).hexdigest()[:12]}")
-        for rule in sorted(spec.exit_rules):
+        for rule in sorted((_canon(r) for r in spec.exit_rules)):
             tokens.add(f"exit:{hashlib.sha256(rule.encode()).hexdigest()[:12]}")
         return tokens
 

@@ -30,6 +30,13 @@ from investment_team.models import (
     StrategyLabRecord,
     StrategySpec,
 )
+from investment_team.strategy_lab.spec_dsl import (
+    ConstRef,
+    EntryRule,
+    Predicate,
+    PriceRef,
+    TimeStopRule,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -44,8 +51,17 @@ def _make_record(record_id: str) -> StrategyLabRecord:
         asset_class="equities",
         hypothesis="test hypothesis",
         signal_definition="test signal",
-        entry_rules=[f"entry-{record_id}"],
-        exit_rules=[f"exit-{record_id}"],
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=PriceRef(),
+                    op="gt",
+                    rhs=ConstRef(value=float(abs(hash(record_id)) % 100)),
+                ),
+            )
+        ],
+        exit_rules=[TimeStopRule(n_bars=max(1, abs(hash(record_id)) % 100))],
     )
     backtest = BacktestRecord(
         backtest_id=f"bt-{record_id}",

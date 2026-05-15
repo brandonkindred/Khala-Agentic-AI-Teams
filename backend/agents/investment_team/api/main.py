@@ -412,9 +412,12 @@ class CreateStrategyRequest(BaseModel):
     asset_class: str = Field(..., description="Primary asset class")
     hypothesis: str = Field(..., description="Investment hypothesis")
     signal_definition: str = Field(..., description="Signal definition")
-    entry_rules: List[str] = Field(default_factory=list)
-    exit_rules: List[str] = Field(default_factory=list)
-    sizing_rules: List[str] = Field(default_factory=list)
+    # Issue #551/#554: rule fields are structured DSL nodes. Accept the raw
+    # dict shape from JSON and let Pydantic dispatch to the discriminated
+    # unions on the downstream StrategySpec construction.
+    entry_rules: List[Dict[str, Any]] = Field(default_factory=list)
+    exit_rules: List[Dict[str, Any]] = Field(default_factory=list)
+    sizing: Optional[Dict[str, Any]] = Field(default=None)
     risk_limits: Dict[str, Any] = Field(default_factory=dict)
     speculative: bool = Field(default=False)
 
@@ -677,6 +680,7 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
     """Create a new investment strategy specification."""
     strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
 
+    sizing_payload = request.sizing or {"kind": "fixed_fraction", "fraction": 0.02}
     strategy = StrategySpec(
         strategy_id=strategy_id,
         authored_by=request.authored_by,
@@ -685,7 +689,7 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
         signal_definition=request.signal_definition,
         entry_rules=request.entry_rules,
         exit_rules=request.exit_rules,
-        sizing_rules=request.sizing_rules,
+        sizing=sizing_payload,
         risk_limits=request.risk_limits,
         speculative=request.speculative,
     )
@@ -1260,9 +1264,14 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         asset_class=_normalize_strategy_lab_asset_class(strategy_data.get("asset_class")),
         hypothesis=str(strategy_data.get("hypothesis", "")),
         signal_definition=str(strategy_data.get("signal_definition", "")),
-        entry_rules=[str(r) for r in (strategy_data.get("entry_rules") or [])],
-        exit_rules=[str(r) for r in (strategy_data.get("exit_rules") or [])],
-        sizing_rules=[str(r) for r in (strategy_data.get("sizing_rules") or [])],
+        # Issue #551/#554: pass structured rule payloads through to
+        # Pydantic; non-dict / non-DSL items are discarded so a malformed
+        # ideation LLM response doesn't crash the cycle.
+        entry_rules=[r for r in (strategy_data.get("entry_rules") or []) if isinstance(r, dict)],
+        exit_rules=[r for r in (strategy_data.get("exit_rules") or []) if isinstance(r, dict)],
+        sizing=strategy_data.get("sizing")
+        if isinstance(strategy_data.get("sizing"), dict)
+        else {"kind": "fixed_fraction", "fraction": 0.02},
         risk_limits=strategy_data.get("risk_limits") or {},
         speculative=bool(strategy_data.get("speculative", False)),
     )

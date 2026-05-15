@@ -10,6 +10,13 @@ from __future__ import annotations
 
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+from investment_team.strategy_lab.spec_dsl import (
+    ConstRef,
+    EntryRule,
+    Predicate,
+    RSIRef,
+    SignalExitRule,
+)
 
 
 def _spec() -> StrategySpec:
@@ -19,9 +26,14 @@ def _spec() -> StrategySpec:
         asset_class="stocks",
         hypothesis="RSI mean reversion",
         signal_definition="sig",
-        entry_rules=["enter when RSI < 30"],
-        exit_rules=["exit when RSI > 70"],
-        sizing_rules=["risk 2% per trade"],
+        entry_rules=[
+            EntryRule(
+                side="long", when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30))
+            )
+        ],
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)))
+        ],
         risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
         speculative=False,
         strategy_code="# original code",
@@ -44,7 +56,7 @@ def test_apply_updates_swaps_code_only() -> None:
 
     assert result.entry_rules == original.entry_rules
     assert result.exit_rules == original.exit_rules
-    assert result.sizing_rules == original.sizing_rules
+    assert result.sizing == original.sizing
     assert result.hypothesis == original.hypothesis
     assert result.risk_limits == original.risk_limits
     assert result.strategy_code == "# refined code"

@@ -32,6 +32,14 @@ from investment_team.strategy_lab.orchestrator import (
     _ZeroTradeRepairOutcome,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.spec_dsl import (
+    ConstRef,
+    EntryRule,
+    Predicate,
+    RSIRef,
+    SignalExitRule,
+    TimeStopRule,
+)
 from investment_team.tests.test_strategy_lab_alignment import (
     _benign_sandbox_trades,
     _code_exec,
@@ -61,9 +69,14 @@ def _spec() -> StrategySpec:
         asset_class="stocks",
         hypothesis="hyp",
         signal_definition="sig",
-        entry_rules=["enter when RSI < 30"],
-        exit_rules=["exit when RSI > 70"],
-        sizing_rules=["risk 2% per trade"],
+        entry_rules=[
+            EntryRule(
+                side="long", when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30))
+            )
+        ],
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)))
+        ],
         risk_limits={"max_position_pct": 5},
         speculative=False,
         strategy_code=(
@@ -570,7 +583,7 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
                 evidence="entries_filled=4 closed_trades=0",
                 proposed_code=_REPAIRED_CODE,
                 proposed_spec_updates={
-                    "exit_rules": ["exit after 10 bars (added time stop)"],
+                    "exit_rules": [TimeStopRule(n_bars=10, note="added time stop").model_dump()],
                     # Off-list keys MUST NOT mutate the spec.
                     "strategy_id": "hijacked",
                     "asset_class": "crypto",
@@ -592,7 +605,7 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
     assert outcome.committed is True
     assert outcome.new_spec is not None
     # Whitelisted update applied …
-    assert outcome.new_spec.exit_rules == ["exit after 10 bars (added time stop)"]
+    assert outcome.new_spec.exit_rules == [TimeStopRule(n_bars=10, note="added time stop")]
     # … and off-list mutations were silently dropped.
     assert outcome.new_spec.strategy_id == "strat-zt-repair-test"
     assert outcome.new_spec.asset_class == "stocks"

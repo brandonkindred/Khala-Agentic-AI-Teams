@@ -1,13 +1,14 @@
 from typing import Any, Dict, List
 
 import pytest
-from agents.investment_team.agents import (
+
+from investment_team.agents import (
     AgentIdentity,
     FinancialAdvisorAgent,
     PolicyGuardianAgent,
     PromotionGateAgent,
 )
-from agents.investment_team.models import (
+from investment_team.models import (
     IPS,
     AdvisorSessionStatus,
     AdvisorTopic,
@@ -35,8 +36,16 @@ from agents.investment_team.models import (
     ValidationReport,
     ValidationStatus,
 )
-from agents.investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
-from agents.investment_team.tool_agents.web_interfaces import (
+from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
+from investment_team.strategy_lab.spec_dsl import (
+    ConstRef,
+    EntryRule,
+    Predicate,
+    PriceRef,
+    SignalExitRule,
+    TimeStopRule,
+)
+from investment_team.tool_agents.web_interfaces import (
     BrowserType,
     InvestmentWebInterfaceCoordinator,
     WebAgentConfig,
@@ -340,13 +349,13 @@ def test_web_interface_coordinator_logs_out_when_action_fails() -> None:
 
 
 def test_agent_catalog_includes_global_risk_manager() -> None:
-    from agents.investment_team.agent_catalog import CORE_AGENTS
+    from investment_team.agent_catalog import CORE_AGENTS
 
     assert any(agent.name == "Global Risk Manager Agent" for agent in CORE_AGENTS)
 
 
 def test_spec_models_parse_minimal_promotion_decision() -> None:
-    from agents.investment_team.spec_models import PromotionDecisionV1
+    from investment_team.spec_models import PromotionDecisionV1
 
     decision = PromotionDecisionV1(
         decision_id="d-1",
@@ -373,8 +382,12 @@ def test_backtest_record_captures_strategy_and_metrics() -> None:
         asset_class="equities",
         hypothesis="mean reversion",
         signal_definition="z-score",
-        entry_rules=["z < -2"],
-        exit_rules=["z > -0.5"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="lt", rhs=ConstRef(value=-2)))
+        ],
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=-0.5)))
+        ],
     )
 
     record = BacktestRecord(
@@ -573,7 +586,7 @@ def test_advisor_session_inactive_after_completion() -> None:
 
 
 def test_agent_catalog_includes_financial_advisor() -> None:
-    from agents.investment_team.agent_catalog import CORE_AGENTS
+    from investment_team.agent_catalog import CORE_AGENTS
 
     assert any(agent.name == "Financial Advisor Agent" for agent in CORE_AGENTS)
 
@@ -584,7 +597,7 @@ def test_agent_catalog_includes_financial_advisor() -> None:
 
 
 def test_date_diff_days() -> None:
-    from agents.investment_team.trade_simulator import date_diff_days
+    from investment_team.trade_simulator import date_diff_days
 
     assert date_diff_days("2023-01-01", "2023-12-31") == 364
     assert date_diff_days("2026-01-01", "2026-01-08") == 7
@@ -593,7 +606,7 @@ def test_date_diff_days() -> None:
 
 
 def test_compute_metrics_from_trades() -> None:
-    from agents.investment_team.trade_simulator import compute_metrics
+    from investment_team.trade_simulator import compute_metrics
 
     trades = [
         TradeRecord(
@@ -658,7 +671,7 @@ def test_compute_metrics_from_trades() -> None:
 
 
 def test_compute_metrics_empty_trades() -> None:
-    from agents.investment_team.trade_simulator import compute_metrics
+    from investment_team.trade_simulator import compute_metrics
 
     result = compute_metrics([], 100000.0, "2023-01-01", "2023-12-31")
 
@@ -674,7 +687,7 @@ def test_compute_metrics_log_return_annualization_over_multi_year_span() -> None
     * 252 / N)`` where ``N`` is the number of trading days the curve spans
     — empirically ~9.0 % for ~630 weekdays, well under the naive 10 %.
     """
-    from agents.investment_team.trade_simulator import compute_metrics
+    from investment_team.trade_simulator import compute_metrics
 
     # Exit on a weekday so the gain actually lands inside the equity curve
     # (`build_equity_curve_from_trades` only stamps weekdays). 2023-06-30
@@ -713,7 +726,7 @@ def test_compute_metrics_log_return_annualization_over_multi_year_span() -> None
 
 
 def test_paper_trading_session_model_creation() -> None:
-    from agents.investment_team.models import (
+    from investment_team.models import (
         PaperTradingSession,
         PaperTradingStatus,
     )
@@ -745,7 +758,7 @@ def test_paper_trading_session_model_creation() -> None:
 
 
 def test_compare_performance_aligned() -> None:
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=25.0,
@@ -788,7 +801,7 @@ def test_compare_performance_aligned() -> None:
 
 
 def test_compare_performance_divergent() -> None:
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=25.0,
@@ -825,7 +838,7 @@ def test_compare_performance_divergent() -> None:
 
 def test_compare_performance_zero_backtest_drawdown() -> None:
     """When backtest drawdown is 0, paper drawdown up to 5% is aligned."""
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=10.0,
@@ -874,7 +887,7 @@ def test_compare_performance_zero_backtest_drawdown() -> None:
 
 def test_compare_performance_return_absolute_tolerance() -> None:
     """Phase 5: all returns use ±2.0pp absolute tolerance now."""
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=12.0,
@@ -924,7 +937,7 @@ def test_compare_performance_return_absolute_tolerance() -> None:
 
 def test_compare_performance_insufficient_sample() -> None:
     """Fewer than 30 paper trades → overall_aligned is always False."""
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=10.0,
@@ -961,7 +974,7 @@ def test_compare_performance_insufficient_sample() -> None:
 
 
 def test_paper_trading_verdict_enum_values() -> None:
-    from agents.investment_team.models import PaperTradingVerdict
+    from investment_team.models import PaperTradingVerdict
 
     assert PaperTradingVerdict.READY_FOR_LIVE.value == "ready_for_live"
     assert PaperTradingVerdict.NOT_PERFORMANT.value == "not_performant"
@@ -973,7 +986,7 @@ def test_paper_trading_verdict_enum_values() -> None:
 
 
 def test_market_data_service_get_symbols_for_strategy() -> None:
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
 
@@ -1001,7 +1014,7 @@ def test_market_data_service_get_symbols_for_strategy() -> None:
 
 
 def test_market_data_service_get_symbols_for_forex() -> None:
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     strategy = StrategySpec(
@@ -1016,7 +1029,7 @@ def test_market_data_service_get_symbols_for_forex() -> None:
 
 
 def test_market_data_service_get_symbols_for_futures() -> None:
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     strategy = StrategySpec(
@@ -1031,7 +1044,7 @@ def test_market_data_service_get_symbols_for_futures() -> None:
 
 
 def test_market_data_service_get_symbols_for_commodities() -> None:
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     strategy = StrategySpec(
@@ -1049,7 +1062,7 @@ def test_market_data_service_fetch_ohlcv_range_routes_by_asset_class() -> None:
     """Verify fetch_ohlcv_range tries Yahoo first for all asset classes via the provider chain."""
     from unittest.mock import patch
 
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
 
@@ -1079,8 +1092,8 @@ def test_market_data_service_fetch_multi_symbol_range(tmp_path) -> None:
     """
     from unittest.mock import patch
 
-    from agents.investment_team.market_data_cache import MarketDataCache
-    from agents.investment_team.market_data_service import MarketDataService, OHLCVBar
+    from investment_team.market_data_cache import MarketDataCache
+    from investment_team.market_data_service import MarketDataService, OHLCVBar
 
     cache = MarketDataCache(cache_root=tmp_path)
     service = MarketDataService(cache=cache)
@@ -1162,7 +1175,7 @@ def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
 def test_resolve_strategy_symbols_prefers_target_symbols() -> None:
     """Issue #523 — resolve_strategy_symbols returns target_symbols verbatim
     when set, regardless of asset_class."""
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     spec = StrategySpec(
@@ -1179,7 +1192,7 @@ def test_resolve_strategy_symbols_prefers_target_symbols() -> None:
 def test_classify_symbol_unambiguous_cases() -> None:
     """Issue #523 — classify_symbol returns the natural asset class for symbols
     that unambiguously belong to one canonical universe."""
-    from agents.investment_team.symbols import classify_symbol
+    from investment_team.symbols import classify_symbol
 
     assert classify_symbol("BTC") == "crypto"
     assert classify_symbol("ETH") == "crypto"
@@ -1196,7 +1209,7 @@ def test_classify_symbol_unambiguous_cases() -> None:
 def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
     """Issue #523 — cross-asset ETFs and unknown tickers don't get classified
     so the mismatch warning doesn't false-positive."""
-    from agents.investment_team.symbols import classify_symbol
+    from investment_team.symbols import classify_symbol
 
     # OTHER_SYMBOLS — tradeable as stocks via Yahoo even with non-stock exposure
     assert classify_symbol("GLD") is None
@@ -1212,7 +1225,7 @@ def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
     mismatch instead of getting an empty fetch silently."""
     import logging
 
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     spec = StrategySpec(
@@ -1241,7 +1254,7 @@ def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> 
     aren't classified to avoid false positives."""
     import logging
 
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     aligned = StrategySpec(
@@ -1279,8 +1292,8 @@ def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> 
 def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
     """Issue #523 — empty target_symbols falls through to the asset-class default
     universe (capped at 5; #525 tightens this)."""
-    from agents.investment_team.market_data_service import MarketDataService
-    from agents.investment_team.symbols import STOCK_SYMBOLS
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.symbols import STOCK_SYMBOLS
 
     service = MarketDataService()
     spec = StrategySpec(
@@ -1298,9 +1311,9 @@ def test_fetch_market_data_uses_target_symbols_when_set() -> None:
     it verbatim and the asset-class default universe is bypassed."""
     from unittest.mock import patch
 
-    from agents.investment_team.market_data_service import MarketDataService
-    from agents.investment_team.models import BacktestConfig
-    from agents.investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.models import BacktestConfig
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 
     orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
     orchestrator.market_data_service = MarketDataService()
@@ -1335,10 +1348,10 @@ def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
     universe. Current behaviour caps at 5 symbols; #525 will tighten this."""
     from unittest.mock import patch
 
-    from agents.investment_team.market_data_service import MarketDataService
-    from agents.investment_team.models import BacktestConfig
-    from agents.investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
-    from agents.investment_team.symbols import STOCK_SYMBOLS
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.models import BacktestConfig
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.symbols import STOCK_SYMBOLS
 
     orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
     orchestrator.market_data_service = MarketDataService()
@@ -1367,7 +1380,7 @@ def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
 
 
 def test_agent_catalog_includes_signal_intelligence_expert() -> None:
-    from agents.investment_team.agent_catalog import CORE_AGENTS
+    from investment_team.agent_catalog import CORE_AGENTS
 
     assert any(agent.name == "Signal Intelligence Expert" for agent in CORE_AGENTS)
 
@@ -1517,9 +1530,10 @@ def _make_lab_record(
         asset_class="equities",
         hypothesis="test",
         signal_definition="sig",
-        entry_rules=["e1"],
-        exit_rules=["x1"],
-        sizing_rules=["s1"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=1)))
+        ],
+        exit_rules=[TimeStopRule(n_bars=1)],
         risk_limits={},
         speculative=False,
     )

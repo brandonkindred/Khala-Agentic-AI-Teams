@@ -149,7 +149,7 @@ _ZERO_TRADE_SPEC_UPDATE_KEYS = frozenset(
     {
         "entry_rules",
         "exit_rules",
-        "sizing_rules",
+        "sizing",
         "risk_limits",
         "hypothesis",
         "signal_definition",
@@ -243,7 +243,7 @@ class StrategyLabOrchestrator:
             signal_definition=strategy_dict.get("signal_definition", ""),
             entry_rules=strategy_dict.get("entry_rules", []),
             exit_rules=strategy_dict.get("exit_rules", []),
-            sizing_rules=strategy_dict.get("sizing_rules", []),
+            sizing=strategy_dict.get("sizing", {"kind": "fixed_fraction", "fraction": 0.02}),
             target_symbols=strategy_dict.get("target_symbols", []),
             risk_limits=strategy_dict.get("risk_limits", {}),
             speculative=strategy_dict.get("speculative", False),

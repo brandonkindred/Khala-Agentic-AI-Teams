@@ -29,6 +29,13 @@ from investment_team.models import (  # noqa: E402
     StrategyLabRecord,
     StrategySpec,
 )
+from investment_team.strategy_lab.spec_dsl import (
+    ConstRef,
+    EntryRule,
+    Predicate,
+    PriceRef,
+    TimeStopRule,
+)
 
 
 def _stub_backtest_result() -> BacktestResult:
@@ -57,9 +64,10 @@ def _make_record(idx: int, config: BacktestConfig) -> StrategyLabRecord:
         asset_class="stocks",
         hypothesis=f"hypothesis #{idx}",
         signal_definition="sig",
-        entry_rules=["e"],
-        exit_rules=["x"],
-        sizing_rules=["s"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)))
+        ],
+        exit_rules=[TimeStopRule(n_bars=5)],
         risk_limits={},
         speculative=False,
     )

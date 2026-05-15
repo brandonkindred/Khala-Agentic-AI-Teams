@@ -15,6 +15,7 @@ from llm_service import get_strands_model
 from .models import StrategyLabRecord, TradeRecord
 from .signal_intelligence_agent import brief_to_prompt_block
 from .signal_intelligence_models import SignalIntelligenceBriefV1
+from .strategy_lab.spec_dsl import format_rules_for_prompt, format_sizing_rule
 from .strategy_lab_context import asset_class_mix_hint, format_prior_results
 
 logger = logging.getLogger(__name__)
@@ -351,16 +352,19 @@ class StrategyIdeationAgent:
         )
 
         simulated_trades_section = _format_simulated_trades_summary(trades)
-        sizing_rules = "; ".join(strategy.sizing_rules) if strategy.sizing_rules else "(none)"
+        # Issue #551/#553: spec rules are structured DSL nodes. Render via
+        # the spec_dsl formatters so prompt text matches the prose form the
+        # LLM learned to read.
+        sizing_text = format_sizing_rule(strategy.sizing) or "(none)"
         risk_limits = strategy.risk_limits.model_dump_json()
 
         common = dict(
             asset_class=strategy.asset_class,
             hypothesis=strategy.hypothesis,
             signal_definition=strategy.signal_definition,
-            entry_rules="; ".join(strategy.entry_rules),
-            exit_rules="; ".join(strategy.exit_rules),
-            sizing_rules=f"{sizing_rules} | risk_limits: {risk_limits}",
+            entry_rules=format_rules_for_prompt(strategy.entry_rules, separator="; "),
+            exit_rules=format_rules_for_prompt(strategy.exit_rules, separator="; "),
+            sizing_rules=f"{sizing_text} | risk_limits: {risk_limits}",
             rationale=rationale,
             annualized_return_pct=result.annualized_return_pct,
             total_return_pct=result.total_return_pct,
@@ -394,8 +398,8 @@ class StrategyIdeationAgent:
             asset_class=strategy.asset_class,
             hypothesis=strategy.hypothesis,
             signal_definition=strategy.signal_definition,
-            entry_rules="; ".join(strategy.entry_rules),
-            exit_rules="; ".join(strategy.exit_rules),
+            entry_rules=format_rules_for_prompt(strategy.entry_rules, separator="; "),
+            exit_rules=format_rules_for_prompt(strategy.exit_rules, separator="; "),
             annualized_return_pct=result.annualized_return_pct,
             total_return_pct=result.total_return_pct,
             sharpe_ratio=result.sharpe_ratio,

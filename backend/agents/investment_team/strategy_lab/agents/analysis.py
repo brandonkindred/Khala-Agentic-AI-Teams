@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from strands import Agent
 
 from ...models import BacktestResult, StrategySpec, TradeRecord
+from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -79,9 +80,9 @@ class AnalysisAgent:
             asset_class=spec.asset_class,
             hypothesis=spec.hypothesis,
             signal_definition=spec.signal_definition,
-            entry_rules=", ".join(spec.entry_rules),
-            exit_rules=", ".join(spec.exit_rules),
-            sizing_rules=", ".join(spec.sizing_rules),
+            entry_rules=format_rules_for_prompt(spec.entry_rules),
+            exit_rules=format_rules_for_prompt(spec.exit_rules),
+            sizing_rules=format_sizing_rule(spec.sizing),
             rationale=rationale,
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,
@@ -115,8 +116,8 @@ class AnalysisAgent:
             asset_class=spec.asset_class,
             hypothesis=spec.hypothesis,
             signal_definition=spec.signal_definition,
-            entry_rules=", ".join(spec.entry_rules),
-            exit_rules=", ".join(spec.exit_rules),
+            entry_rules=format_rules_for_prompt(spec.entry_rules),
+            exit_rules=format_rules_for_prompt(spec.exit_rules),
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,
             sharpe_ratio=metrics.sharpe_ratio,

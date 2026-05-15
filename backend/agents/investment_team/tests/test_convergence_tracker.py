@@ -11,6 +11,13 @@ from investment_team.strategy_lab.quality_gates.convergence_tracker import (
     ConvergenceTracker,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    Predicate,
+    PriceRef,
+    SignalExitRule,
+    SMARef,
+)
 
 
 def _mk_spec(asset_class: str = "stocks") -> StrategySpec:
@@ -20,8 +27,10 @@ def _mk_spec(asset_class: str = "stocks") -> StrategySpec:
         asset_class=asset_class,
         hypothesis="test hypothesis",
         signal_definition="close crosses above SMA(20)",
-        entry_rules=["close > sma(20)"],
-        exit_rules=["close < sma(5)"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)))
+        ],
+        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
     )
 
 

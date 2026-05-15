@@ -6,6 +6,7 @@ import re
 from typing import List
 
 from ...models import StrategySpec
+from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from .models import QualityGateResult
 
 GATE = "strategy_spec_validator"
@@ -110,8 +111,17 @@ class StrategySpecValidator:
                 )
             )
 
-        # 6. Asset-class keyword mismatch
-        all_rules_text = " ".join(spec.entry_rules + spec.exit_rules + spec.sizing_rules)
+        # 6. Asset-class keyword mismatch. Issue #551: spec rule fields are
+        #    structured DSL nodes — render them through the spec_dsl
+        #    formatters to recover a human-readable text view suitable for
+        #    regex matching.
+        all_rules_text = " ".join(
+            [
+                format_rules_for_prompt(spec.entry_rules),
+                format_rules_for_prompt(spec.exit_rules),
+                format_sizing_rule(spec.sizing),
+            ]
+        )
         ac = spec.asset_class.lower()
         pattern = _ASSET_MISMATCH.get(ac)
         if pattern and pattern.search(all_rules_text):
@@ -140,7 +150,12 @@ class StrategySpecValidator:
         #    vice versa), the operational spec and the narrative rationale are
         #    out of sync. Warning only — the refinement prompt can react.
         hypothesis_text = spec.hypothesis or ""
-        rules_text = " ".join(spec.entry_rules + spec.exit_rules)
+        rules_text = " ".join(
+            [
+                format_rules_for_prompt(spec.entry_rules),
+                format_rules_for_prompt(spec.exit_rules),
+            ]
+        )
         terms_in_hypothesis = {m.group(0).lower() for m in _CONCEPT_TERMS.finditer(hypothesis_text)}
         terms_in_rules = {m.group(0).lower() for m in _CONCEPT_TERMS.finditer(rules_text)}
         orphan_in_hypothesis = terms_in_hypothesis - terms_in_rules
