@@ -778,6 +778,71 @@ def test_simple_ctx_alias_is_tracked() -> None:
     assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
 
 
+def test_dynamic_symbol_pairs_with_literal_symbol_passes() -> None:
+    """A generated strategy may enter with ``symbol=bar.symbol`` and exit
+    with a configured literal symbol (or vice versa). On a single-symbol
+    backtest run those calls target the same runtime position, so the
+    gate must treat the dynamic call as augmenting every literal-symbol
+    group rather than splitting them into two failing buckets."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.close > 100:
+                    ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                else:
+                    ctx.submit_order(symbol='SPY', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c or "exit leg" in c for c in criticals), (
+        criticals
+    )
+
+
+def test_call_before_alias_assignment_is_not_credited() -> None:
+    """A ``trade_ctx.submit_order(...)`` call that appears BEFORE the
+    ``trade_ctx = ctx`` assignment must NOT be credited as a runtime
+    order — at that point ``trade_ctx`` either doesn't exist or refers
+    to something else. The flow-sensitive alias tracker only adds the
+    alias to the live receiver set when the assignment is reached."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                # Two submits BEFORE the alias binding — invalid uses
+                # of the unbound name. Should not be credited.
+                trade_ctx.submit_order(symbol='X', qty=1, side='LONG')
+                trade_ctx.submit_order(symbol='X', qty=1, side='SHORT')
+                trade_ctx = ctx  # alias bound AFTER the calls above
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no entry path" in c for c in criticals), criticals
+
+
+def test_call_after_alias_rebound_is_not_credited() -> None:
+    """When the alias name is later reassigned to a non-receiver, calls
+    after the rebind no longer reference the runtime context. The
+    flow-sensitive walker drops the alias from state on rebind."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                trade_ctx = ctx
+                # rebound to a non-receiver before any submit_order calls
+                trade_ctx = bar
+                trade_ctx.submit_order(symbol='X', qty=1, side='LONG')
+                trade_ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no entry path" in c for c in criticals), criticals
+
+
 def test_long_on_one_symbol_short_on_another_is_critical_no_exit() -> None:
     """Pair-trading-style strategy that opens LONG on SPY and SHORT on
     TLT has two unrelated entries, not an entry+exit pair. The engine

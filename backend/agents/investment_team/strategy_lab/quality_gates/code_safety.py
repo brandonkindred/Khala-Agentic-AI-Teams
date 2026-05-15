@@ -410,6 +410,32 @@ def _iter_method_body_nodes(method: ast.FunctionDef | ast.AsyncFunctionDef):
             stack.append(child)
 
 
+def _iter_method_body_in_source_order(scope: ast.AST):
+    """Yield every node in ``scope``'s body in source order, without
+    descending into nested ``def`` / ``class`` / ``lambda`` bodies.
+
+    Unlike :func:`_iter_method_body_nodes` (stack-based, arbitrary
+    pop order), this generator visits parent statements before their
+    children and processes sibling statements in declaration order.
+    The flow-sensitive alias tracker depends on this ordering so a
+    ``trade_ctx = ctx`` assignment updates state BEFORE later
+    ``trade_ctx.submit_order(...)`` calls are visited.
+    """
+    body = getattr(scope, "body", None)
+    if not isinstance(body, list):
+        return
+
+    def visit(node: ast.AST):
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return
+        for child in ast.iter_child_nodes(node):
+            yield from visit(child)
+
+    for stmt in body:
+        yield from visit(stmt)
+
+
 def _find_nested_def_defs(
     method: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> Dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
@@ -530,8 +556,8 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
                 worklist.append((m, frozenset({m.args.args[1].arg})))
 
     while worklist:
-        scope, receiver_names = worklist.pop()
-        visit_key = (id(scope), receiver_names)
+        scope, initial_receivers = worklist.pop()
+        visit_key = (id(scope), initial_receivers)
         if visit_key in visited_keys:
             continue
         visited_keys.add(visit_key)
@@ -544,66 +570,56 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             else {}
         )
 
-        # Expand receiver_names with simple aliases. A strategy may
-        # introduce a local alias before submitting orders:
-        #
-        #     trade_ctx = ctx
-        #     trade_ctx.submit_order(...)
-        #
-        # ``trade_ctx`` and ``ctx`` are interchangeable here — the
-        # binding flows trivially through ``Assign`` / ``AnnAssign``
-        # statements whose RHS is just another Name we already accept.
-        # Iterate to a fixed point so ``a = ctx; b = a`` accepts both.
-        expanded_receivers = set(receiver_names)
-        changed = True
-        while changed:
-            changed = False
-            for node in _iter_method_body_nodes(scope):
-                src_name: Optional[str] = None
-                target_name: Optional[str] = None
-                if (
-                    isinstance(node, ast.Assign)
-                    and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)
-                    and isinstance(node.value, ast.Name)
-                ):
-                    target_name = node.targets[0].id
-                    src_name = node.value.id
-                elif (
-                    isinstance(node, ast.AnnAssign)
-                    and isinstance(node.target, ast.Name)
-                    and isinstance(node.value, ast.Name)
-                ):
-                    target_name = node.target.id
-                    src_name = node.value.id
-                if (
-                    src_name in expanded_receivers
-                    and target_name is not None
-                    and target_name not in expanded_receivers
-                ):
-                    expanded_receivers.add(target_name)
-                    changed = True
-        receiver_names = frozenset(expanded_receivers)
+        # Flow-sensitive walk. ``state`` tracks the currently-live alias
+        # set as we proceed through the scope in source order. The walker
+        # updates it as it encounters ``Assign`` / ``AnnAssign`` events,
+        # so a ``submit_order`` call is credited only when the alias was
+        # bound to a known receiver at or before the call's source
+        # position — calls before a ``trade_ctx = ctx`` assignment, and
+        # calls after a later ``trade_ctx = something_else`` rebind, no
+        # longer pick up the alias.
+        state: set[str] = set(initial_receivers)
 
-        for sub in _iter_method_body_nodes(scope):
+        for sub in _iter_method_body_in_source_order(scope):
+            # Update alias state on simple name-to-name assignments.
+            if (
+                isinstance(sub, ast.Assign)
+                and len(sub.targets) == 1
+                and isinstance(sub.targets[0], ast.Name)
+            ):
+                target = sub.targets[0].id
+                if isinstance(sub.value, ast.Name) and sub.value.id in state:
+                    state.add(target)
+                elif target in state:
+                    # Rebound to a non-receiver expression — drop the alias.
+                    state.discard(target)
+                continue
+            if isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+                target = sub.target.id
+                if isinstance(sub.value, ast.Name) and sub.value.id in state:
+                    state.add(target)
+                elif target in state:
+                    state.discard(target)
+                continue
+
             if not isinstance(sub, ast.Call):
                 continue
+
+            current_receivers = frozenset(state)
+
             # 1. <ctx>.submit_order(...) — the order we count.
             if (
                 isinstance(sub.func, ast.Attribute)
                 and sub.func.attr == "submit_order"
                 and isinstance(sub.func.value, ast.Name)
-                and sub.func.value.id in receiver_names
+                and sub.func.value.id in current_receivers
             ):
                 calls.append(sub)
                 continue
             # 2. self.<helper>(...) — class method. The helper's accepted
             #    receivers are bound to the call-site arguments: only
             #    parameters that received a name from the OUTER scope's
-            #    receiver_names are treated as ctx-bound. Helpers called
-            #    without passing the context (e.g. ``self._trade(bar)``)
-            #    end up with no receivers and a ``submit_order`` on the
-            #    Bar parameter does NOT satisfy the gate.
+            #    live receivers are treated as ctx-bound.
             if (
                 isinstance(sub.func, ast.Attribute)
                 and isinstance(sub.func.value, ast.Name)
@@ -611,7 +627,7 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             ):
                 helper = methods_by_name.get(sub.func.attr)
                 if helper is not None:
-                    helper_receivers = _resolve_helper_receivers(sub, helper, receiver_names)
+                    helper_receivers = _resolve_helper_receivers(sub, helper, current_receivers)
                     if (id(helper), helper_receivers) not in visited_keys:
                         worklist.append((helper, helper_receivers))
                 continue
@@ -620,22 +636,19 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             #    - Parameters bound at the call site (``def enter(c): ...;
             #      enter(ctx)`` binds ``c`` to ``ctx``).
             #    - Outer-scope captures (``def enter(): ctx.submit_order(
-            #      ...)`` references the enclosing frame's ``ctx``).
+            #      ...)`` references the enclosing frame's live receivers).
             #    Captured names are visible only when the closure does
             #    NOT shadow them with its own parameter — ``def
             #    enter(ctx): ...; enter(bar)`` rebinds ``ctx`` to ``bar``,
-            #    so the outer ``ctx`` is no longer reachable as a
-            #    receiver inside the closure body.
+            #    so the outer ``ctx`` is no longer reachable inside.
             if isinstance(sub.func, ast.Name):
                 local = local_defs.get(sub.func.id)
                 if local is not None:
-                    call_bound = _resolve_helper_receivers(sub, local, receiver_names)
+                    call_bound = _resolve_helper_receivers(sub, local, current_receivers)
                     closure_param_names = frozenset(
                         arg.arg for arg in local.args.args if arg.arg != "self"
                     )
-                    # Outer receivers are captured by closure UNLESS a
-                    # parameter of the same name shadows them.
-                    captured = receiver_names - closure_param_names
+                    captured = current_receivers - closure_param_names
                     closure_receivers = captured | call_bound
                     if (id(local), closure_receivers) not in visited_keys:
                         worklist.append((local, closure_receivers))
@@ -725,16 +738,40 @@ def _calls_form_entry_exit_pair(calls: List[ast.Call]) -> bool:
     The engine closes positions per-symbol — ``portfolio.positions[bar.symbol]``
     is looked up against the order's own symbol — so a strategy that
     opens ``LONG`` on ``"SPY"`` and ``SHORT`` on ``"TLT"`` has two
-    open entries and zero exits, not a balanced pair. The gate groups
-    calls by their literal ``symbol`` value (dynamic / computed symbols
-    share a single "unknown" group, since they all resolve to the same
-    runtime symbol within a single ``on_bar`` invocation) and requires
-    every group to form its own entry+exit pair.
+    open entries and zero exits, not a balanced pair.
+
+    Grouping rules:
+
+    * Calls with literal-string ``symbol`` arguments form per-symbol
+      groups (one per distinct literal).
+    * Calls with dynamic / computed / missing ``symbol`` arguments are
+      pooled in a single "unknown" group, since within one ``on_bar``
+      invocation they all resolve to the same runtime symbol.
+    * Dynamic-symbol calls AUGMENT each literal-symbol group's pair
+      check: on a single-symbol run, a generated strategy may enter
+      with ``symbol=bar.symbol`` and exit with ``symbol="SPY"`` (or
+      vice versa), so the dynamic group's calls plausibly target each
+      literal symbol at runtime. Each literal group passes iff
+      ``literal_calls + dynamic_calls`` forms a valid pair.
+    * The dynamic group also passes on its own when no literal groups
+      exist (all calls dynamic).
     """
-    groups: Dict[Optional[str], List[ast.Call]] = {}
+    literal_groups: Dict[str, List[ast.Call]] = {}
+    dynamic_calls: List[ast.Call] = []
     for c in calls:
-        groups.setdefault(_submit_order_symbol(c), []).append(c)
-    return all(_group_forms_entry_exit_pair(group) for group in groups.values())
+        sym = _submit_order_symbol(c)
+        if sym is None:
+            dynamic_calls.append(c)
+        else:
+            literal_groups.setdefault(sym, []).append(c)
+
+    if not literal_groups:
+        return _group_forms_entry_exit_pair(dynamic_calls)
+
+    for group in literal_groups.values():
+        if not _group_forms_entry_exit_pair(group + dynamic_calls):
+            return False
+    return True
 
 
 def _has_attached_exit_kwarg(node: ast.Call) -> bool:
