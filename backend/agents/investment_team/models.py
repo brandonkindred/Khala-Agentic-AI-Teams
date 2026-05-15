@@ -683,6 +683,13 @@ class BacktestRecord(BaseModel):
     result: BacktestResult
     notes: List[str] = Field(default_factory=list)
     trades: List[TradeRecord] = Field(default_factory=list)
+    # Issue #525 — symbol-fetch audit trail. ``requested_symbols`` is what
+    # the orchestrator asked ``MarketDataService.fetch_multi_symbol_range``
+    # to retrieve (post target_symbols / asset-class fallback resolution);
+    # ``fetched_symbols`` is the subset that returned usable bars. Both
+    # default to ``[]`` so older persisted rows deserialize cleanly.
+    requested_symbols: List[str] = Field(default_factory=list)
+    fetched_symbols: List[str] = Field(default_factory=list)
 
 
 class GateCheckResult(BaseModel):

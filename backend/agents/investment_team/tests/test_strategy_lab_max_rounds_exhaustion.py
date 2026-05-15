@@ -84,7 +84,14 @@ def _ideation_returning(d: Dict[str, Any], code: str) -> Any:
 
 
 def _stub_market_data(*_a, **_kw):
-    return {"AAPL": []}
+    # Issue #525 — orchestrator now returns a _MarketDataFetch envelope.
+    from investment_team.strategy_lab.orchestrator import _MarketDataFetch
+
+    return _MarketDataFetch(
+        data={"AAPL": []},
+        requested_symbols=["AAPL"],
+        fetched_symbols=[],
+    )
 
 
 def test_validation_phase_exhaustion_sets_max_rounds_status(

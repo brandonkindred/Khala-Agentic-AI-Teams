@@ -69,6 +69,22 @@ logger = logging.getLogger(__name__)
 
 PhaseCallback = Callable[[str, Dict[str, Any]], None]
 
+
+@dataclass(frozen=True)
+class _MarketDataFetch:
+    """Issue #525 — return envelope for ``_fetch_market_data``.
+
+    Carries the OHLCV payload alongside the audit trail of the symbols the
+    fetch was asked to retrieve and the symbols that actually returned
+    usable bars. Both lists feed ``BacktestRecord`` so reviewers can see
+    when a fetch silently dropped tickers without re-running the cycle.
+    """
+
+    data: Optional[Dict[str, List[OHLCVBar]]]
+    requested_symbols: List[str]
+    fetched_symbols: List[str]
+
+
 MAX_CODE_REFINEMENT_ROUNDS = 50
 # Maximum number of trade-alignment problem-solving rounds. Each round
 # audits the executed trades against the spec and, if misaligned, asks the
@@ -279,6 +295,12 @@ class StrategyLabOrchestrator:
         metrics = compute_metrics([], config.initial_capital, config.start_date, config.end_date)
         execution_succeeded = False
         market_data: Optional[Dict[str, List[OHLCVBar]]] = None
+        # Issue #525 — audit trail of the symbol universe the fetch was
+        # asked to retrieve and the symbols that actually returned bars.
+        # Persisted on ``BacktestRecord`` so reviewers can see when a
+        # fetch silently dropped tickers.
+        requested_symbols: List[str] = []
+        fetched_symbols: List[str] = []
         # #547 item 7: track whether the refinement loop exhausted the round
         # cap so the persisted record's ``status`` is queryable rather than
         # buried in logs. Set at each of the three break-on-max sites
@@ -426,7 +448,13 @@ class StrategyLabOrchestrator:
             # ── 2b: FETCH DATA (once, reuse across rounds) ───────────
             if market_data is None:
                 emit("backtesting", {"sub_phase": "fetching_data"})
-                market_data = self._fetch_market_data(spec, config)
+                fetch = self._fetch_market_data(spec, config)
+                # Issue #525 — record requested/fetched on every cycle,
+                # even when the fetch returns nothing usable, so the
+                # audit trail captures intent on failed runs too.
+                requested_symbols = list(fetch.requested_symbols)
+                fetched_symbols = list(fetch.fetched_symbols)
+                market_data = fetch.data
                 if not market_data:
                     all_gate_results.append(
                         QualityGateResult(
@@ -1076,6 +1104,8 @@ class StrategyLabOrchestrator:
             status=backtest_status,
             result=metrics,
             trades=trades,
+            requested_symbols=requested_symbols,
+            fetched_symbols=fetched_symbols,
         )
 
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
@@ -1553,34 +1583,52 @@ class StrategyLabOrchestrator:
         self,
         spec: StrategySpec,
         config: BacktestConfig,
-    ) -> Optional[Dict[str, List[OHLCVBar]]]:
+    ) -> _MarketDataFetch:
         """Fetch OHLCV data for the strategy's asset class.
 
         Issue #376 — when the strategy spec carries an
         ``audit.data_snapshot_id``, treat it as the ``as_of`` cutoff so
         a re-run of the saved spec replays the exact same snapshot.
         Specs without it use ``None`` (latest).
+
+        Issue #525 — returns a ``_MarketDataFetch`` envelope so the
+        caller can record the requested-vs-fetched symbol audit trail on
+        ``BacktestRecord``. ``data`` is ``None`` when nothing usable came
+        back; ``requested_symbols`` is always populated (even on
+        exception) so the audit trail records intent.
         """
+        # Issue #523 — honour explicit target_symbols verbatim; fall back
+        # to the asset-class default universe (capped by
+        # STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS, default 10) otherwise.
         try:
-            # Issue #523 — honour explicit target_symbols verbatim; fall
-            # back to the asset-class default universe otherwise. The
-            # ``symbols[:5]`` truncation on the fallback path is removed
-            # in #525.
-            symbols = self.market_data_service.resolve_strategy_symbols(spec)
-            if not symbols:
-                return None
+            requested = self.market_data_service.resolve_strategy_symbols(spec)
+        except Exception:
+            logger.exception("Symbol resolution failed for %s", spec.strategy_id)
+            return _MarketDataFetch(data=None, requested_symbols=[], fetched_symbols=[])
+        if not requested:
+            return _MarketDataFetch(data=None, requested_symbols=[], fetched_symbols=[])
+        try:
             as_of = (getattr(spec, "audit", None) and spec.audit.data_snapshot_id) or None
             data = self.market_data_service.fetch_multi_symbol_range(
-                symbols=symbols,
+                symbols=requested,
                 asset_class=spec.asset_class,
                 start_date=config.start_date,
                 end_date=config.end_date,
                 as_of=as_of,
             )
-            return data if data else None
         except Exception:
             logger.exception("Market data fetch failed for %s", spec.asset_class)
-            return None
+            return _MarketDataFetch(
+                data=None,
+                requested_symbols=list(requested),
+                fetched_symbols=[],
+            )
+        fetched = sorted(sym for sym, bars in (data or {}).items() if bars)
+        return _MarketDataFetch(
+            data=data if data else None,
+            requested_symbols=list(requested),
+            fetched_symbols=fetched,
+        )
 
     # ------------------------------------------------------------------
     # Issue #247 — walk-forward + acceptance-gate helpers

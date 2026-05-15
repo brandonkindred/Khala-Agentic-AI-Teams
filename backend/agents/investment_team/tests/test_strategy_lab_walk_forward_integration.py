@@ -622,8 +622,17 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
         orch.alignment_agent, "run", lambda **kw: TradeAlignmentReport(aligned=True, rationale="ok")
     )
     monkeypatch.setattr(orch.analysis_agent, "run", lambda *a, **k: "narrative")
+    # Issue #525 — _fetch_market_data returns a _MarketDataFetch envelope.
+    from investment_team.strategy_lab.orchestrator import _MarketDataFetch
+
     monkeypatch.setattr(
-        orch, "_fetch_market_data", lambda spec, config: {"AAPL": _stub_bars("AAPL")}
+        orch,
+        "_fetch_market_data",
+        lambda spec, config: _MarketDataFetch(
+            data={"AAPL": _stub_bars("AAPL")},
+            requested_symbols=["AAPL"],
+            fetched_symbols=["AAPL"],
+        ),
     )
 
     # Synthesize an "overfit" backtest: high Sharpe (>5) and high
