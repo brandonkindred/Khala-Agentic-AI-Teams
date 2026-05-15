@@ -645,13 +645,20 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * A failed gate is "remedied" if it failed in an earlier refinement round
    * and the final round produced a passing result (i.e. `refinement_rounds > 0`
    * and this gate's round is not the last one that ran).
+   *
+   * Pre-synthesis gates (refinement_round = -1, #547 item 1) are NOT
+   * subject to remediation: refinement is code-only, so a spec-level
+   * warning that fired before the refinement loop is immutable for the
+   * cycle and must not display as fixed when later code refinements run.
    */
   isRemedied(gate: QualityGateResult, record: StrategyLabRecord): boolean {
     if (gate.passed) return false;
+    const gateRound = gate.refinement_round ?? 0;
+    if (gateRound < 0) return false;
     const maxRound = record.refinement_rounds ?? 0;
     if (maxRound === 0) return false;
     // Gate failed in an earlier round — the strategy continued past it
-    return (gate.refinement_round ?? 0) < maxRound;
+    return gateRound < maxRound;
   }
 
   gateIcon(gate: QualityGateResult, record: StrategyLabRecord): string {

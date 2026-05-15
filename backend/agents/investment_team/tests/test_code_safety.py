@@ -501,6 +501,64 @@ def test_dynamic_side_is_treated_optimistically() -> None:
     )
 
 
+def test_single_dynamic_side_call_is_accepted() -> None:
+    """A single ctx.submit_order(..., side=<dynamic>) that routes both entry
+    and exit through one call site (e.g. by inspecting ctx.position state)
+    is a legitimate pattern. The gate must not false-fail it just because
+    the side is not a literal LONG/SHORT."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+        from contract import OrderSide
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                pos = ctx.position(bar.symbol)
+                side = OrderSide.SHORT if pos else OrderSide.LONG
+                ctx.submit_order(symbol=bar.symbol, qty=1, side=side)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c or "exit leg" in c for c in criticals), (
+        criticals
+    )
+
+
+def test_non_order_side_literal_is_treated_as_unknown() -> None:
+    """OrderSide only defines LONG/SHORT. Strings like 'FLAT', 'CLOSE',
+    'BUY', 'SELL' would crash at runtime under OrderSide(side). The gate
+    treats them as unknown sides (not as recognised entry/exit markers),
+    so two same-side LONG calls do NOT slip through because the second
+    happens to be 'FLAT'."""
+    # Two calls both with non-OrderSide literals → both unknown → optimism
+    # rule (any unknown side) accepts. The runtime will surface the real
+    # error.
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol='X', qty=1, side='FLAT')
+                ctx.submit_order(symbol='X', qty=1, side='CLOSE')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    # Both unknown → has_unknown=True → optimism. No "exit leg" critical.
+    assert not any("exit leg" in c for c in criticals), criticals
+
+    # But LONG + LONG (both recognised, same side, no unknown) still fails.
+    bad_code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+    """)
+    bad_results = CodeSafetyChecker().check(bad_code)
+    bad_criticals = _critical_details(bad_results)
+    assert any("no real exit leg" in c for c in bad_criticals), bad_criticals
+
+
 def test_submit_order_on_bar_parameter_does_not_satisfy_gate() -> None:
     """The engine calls hooks positionally — the SECOND positional after
     ``self`` is always the context. A strategy that puts ``submit_order``

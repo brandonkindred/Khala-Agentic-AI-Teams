@@ -328,10 +328,11 @@ class CodeSafetyChecker:
                 else:
                     detail = (
                         "Multiple ctx.submit_order calls found but all use the same "
-                        "side and no bracket exit is attached — strategy has no real "
-                        "exit leg. Closing a position requires submitting the opposite "
-                        "side (LONG↔SHORT/FLAT) or an attached_stop_loss / "
-                        "attached_take_profit bracket leg."
+                        "OrderSide and no bracket exit is attached — strategy has no "
+                        "real exit leg. Closing a position requires submitting the "
+                        "opposite OrderSide (LONG closes SHORT, SHORT closes LONG) or "
+                        "attaching an attached_stop_loss / attached_take_profit "
+                        "bracket leg."
                     )
                 results.append(
                     QualityGateResult(
@@ -454,31 +455,33 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
     return calls
 
 
-# Side values that indicate an entry leg (opens a position).
-_ENTRY_SIDES = frozenset({"LONG", "SHORT", "BUY", "SELL"})
-# Side values that indicate an exit leg (flattens an open position).
-_EXIT_SIDES = frozenset({"FLAT", "CLOSE", "EXIT"})
+# Recognised ``OrderSide`` literal values. The runtime contract
+# (``trading_service.strategy.contract.OrderSide``) defines exactly two
+# enum members — ``LONG`` and ``SHORT`` — and ``StrategyContext.submit_order``
+# coerces with ``OrderSide(side)``. ``FLAT`` / ``CLOSE`` / ``BUY`` / ``SELL``
+# literals would crash at runtime, so they are NOT recognised here; the
+# gate treats them as "unknown" and lets the downstream backtest surface
+# the real validation error.
+_RECOGNISED_SIDES = frozenset({"LONG", "SHORT"})
 
 
 def _submit_order_side(node: ast.Call) -> Optional[str]:
     """Best-effort extraction of the ``side`` value from a submit_order call.
 
-    Returns an upper-cased string when the call uses a recognised literal
-    form, else None when the side is dynamic / can't be determined
-    statically. Handles three forms:
-
-    * Keyword string literal: ``side="LONG"`` → ``"LONG"``.
-    * Keyword enum member: ``side=OrderSide.LONG`` → ``"LONG"``.
-    * Keyword string concatenations or computed values → ``None``.
+    Returns an upper-cased string when the call uses a recognised
+    ``OrderSide`` literal form, else None when the side is dynamic / a
+    non-OrderSide literal / can't be determined statically.
     """
     for kw in node.keywords:
         if kw.arg != "side":
             continue
         val = kw.value
         if isinstance(val, ast.Constant) and isinstance(val.value, str):
-            return val.value.upper()
+            upper = val.value.upper()
+            return upper if upper in _RECOGNISED_SIDES else None
         if isinstance(val, ast.Attribute):
-            return val.attr.upper()
+            upper = val.attr.upper()
+            return upper if upper in _RECOGNISED_SIDES else None
     return None
 
 
@@ -486,18 +489,20 @@ def _calls_form_entry_exit_pair(calls: List[ast.Call]) -> bool:
     """True iff the collected submit_order calls plausibly include both an
     entry and an exit leg.
 
-    The contract closes positions by submitting an opposite-side order
-    with ``qty == position.qty``. We approximate that here statically:
+    The runtime contract closes a position by submitting an opposite-side
+    order (``LONG`` closes a ``SHORT``, ``SHORT`` closes a ``LONG``) with
+    ``qty == position.qty``. We approximate statically:
 
     * If any call carries ``attached_stop_loss`` / ``attached_take_profit``
       (a non-None bracket leg), it brings its own exit.
-    * Otherwise we extract the literal ``side`` from each call and
-      require at least two distinct values. ``LONG`` + ``LONG`` is
-      one-sided and fails the gate; ``LONG`` + ``FLAT`` /
-      ``LONG`` + ``SHORT`` / ``BUY`` + ``CLOSE`` etc. pass.
-    * Calls whose side cannot be determined statically (dynamic
-      expressions) are treated optimistically as "could be either" so
-      they don't false-fail strategies that branch on a signal.
+    * Otherwise, require both ``LONG`` and ``SHORT`` to appear across the
+      collected calls. Same-side multiplicity (``LONG`` + ``LONG``) is one-
+      sided and fails the gate.
+    * Calls whose side cannot be determined statically (computed expression
+      that picks the direction from position / signal state) are treated
+      optimistically — even a single such call passes, since legitimate
+      strategies route both entry and exit through one call site whose
+      side is a runtime branch.
     """
     if any(_has_attached_exit_kwarg(c) for c in calls):
         return True
@@ -509,16 +514,13 @@ def _calls_form_entry_exit_pair(calls: List[ast.Call]) -> bool:
             has_unknown = True
         else:
             sides_seen.add(side)
-    # Distinct-side requirement: at least one entry-like and one exit-like,
-    # or simply two distinct recognised sides (covers BUY/SELL pairs etc.).
-    has_entry = bool(sides_seen & _ENTRY_SIDES)
-    has_exit = bool(sides_seen & _EXIT_SIDES)
-    if has_entry and has_exit:
+    # Distinct LONG + SHORT means at least one is opposite-side closing the other.
+    if "LONG" in sides_seen and "SHORT" in sides_seen:
         return True
-    if len(sides_seen) >= 2:
-        return True
-    # Could be a runtime-decided side — be permissive rather than false-fail.
-    if has_unknown and len(calls) >= 2:
+    # Dynamic side: accept any number of calls (including a single one) that
+    # route entry/exit through a runtime branch — false-failing these is
+    # worse than letting the backtest surface a genuinely one-sided runtime.
+    if has_unknown:
         return True
     return False
 
