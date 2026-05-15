@@ -119,12 +119,14 @@ def _zero_trade_exec_result() -> StrategyRunResult:
 
 # Valid Strategy-subclass code that the safety gate accepts. Body intentionally
 # trivial — we never actually execute it because ``run_strategy_code`` is
-# stubbed via monkeypatch.
+# stubbed via monkeypatch. Entry + exit ``submit_order`` calls satisfy the
+# order-flow-shape gate added in #547.
 _REPAIRED_CODE = (
     "from contract import Strategy\n\n"
     "class S(Strategy):\n"
     "    def on_bar(self, ctx, bar):\n"
-    "        pass  # repaired (test stub)\n"
+    "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+    "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
 )
 
 
@@ -594,6 +596,115 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
     # … and off-list mutations were silently dropped.
     assert outcome.new_spec.strategy_id == "strat-zt-repair-test"
     assert outcome.new_spec.asset_class == "stocks"
+
+
+def test_zero_trade_repair_rejects_spec_updates_failing_post_repair_validator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitelisted spec_updates that pass Pydantic but fail StrategySpecValidator
+    (e.g. ``risk_limits.max_position_pct=99`` — Pydantic-valid but above the
+    25% safe range) must be rejected by the post-repair revalidation gate
+    added for #547 so the spec mutation never bypasses validation."""
+    orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="ENTRY_WITH_NO_EXIT",
+                evidence="entries_filled=4 closed_trades=0",
+                proposed_code=_REPAIRED_CODE,
+                # ``max_position_pct=99`` is Pydantic-valid but the
+                # StrategySpecValidator marks anything outside [1, 25] as
+                # critical (safety_validator.py).
+                proposed_spec_updates={"risk_limits": {"max_position_pct": 99}},
+                changes_made="bumped position size",
+            ),
+        ],
+        sandbox_results=[],  # sandbox MUST NOT be called
+    )
+
+    outcome, events, attempts = _drive_repair(
+        orch,
+        exec_result=StrategyRunResult(
+            success=True,
+            trades=[],
+            execution_diagnostics=_zero_trade_diagnostics(category="ENTRY_WITH_NO_EXIT"),
+        ),
+    )
+
+    assert outcome.committed is False
+    assert outcome.failure_reason == "invalid_spec_after_repair"
+    # The sandbox must not run when the spec validator rejects the proposal.
+    assert sandbox_stub.calls == []
+    assert len(repair_stub.calls) == 1
+
+    assert len(attempts) == 1
+    assert attempts[0].startswith("invalid_spec_after_repair (ENTRY_WITH_NO_EXIT)")
+
+    rejected_event = next(
+        d for _, d in events if d.get("sub_phase") == "zero_trade_repair_rejected"
+    )
+    assert rejected_event["reason"] == "invalid_spec_after_repair"
+    # The post-repair spec gates are returned so the orchestrator can persist
+    # them on the failed-cycle record.
+    gate_names = [g.gate_name for g in outcome.new_gates]
+    assert any(
+        name.startswith("zero_trade_repair_strategy_spec_validator") for name in gate_names
+    ), gate_names
+
+
+def test_zero_trade_repair_accepted_carries_post_repair_spec_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a repair mutates the spec and the post-repair validator emits
+    only warnings (no criticals), the warnings must reach the accepted
+    outcome's ``new_gates`` so they appear in the persisted
+    ``quality_gate_results``. Previously these were discarded on accept."""
+    orch, _repair_stub, _sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="ENTRY_WITH_NO_EXIT",
+                evidence="entries_filled=4 closed_trades=0",
+                proposed_code=_REPAIRED_CODE,
+                # ``max_drawdown_pct=4`` is below the validator's warning
+                # threshold of 5% (strategy_validator.py:91-102) — warning,
+                # not critical — so the repair is accepted but the gate must
+                # be carried forward.
+                proposed_spec_updates={
+                    "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 4}
+                },
+                changes_made="tightened risk limits",
+            ),
+        ],
+        sandbox_results=[
+            _code_exec(success=True, raw_trades=_benign_sandbox_trades()),
+        ],
+    )
+
+    outcome, _events, _attempts = _drive_repair(
+        orch,
+        exec_result=StrategyRunResult(
+            success=True,
+            trades=[],
+            execution_diagnostics=_zero_trade_diagnostics(category="ENTRY_WITH_NO_EXIT"),
+        ),
+    )
+
+    assert outcome.committed is True
+    # Look for the post-repair validator's warning in the carried gates.
+    spec_gate_names = [g.gate_name for g in outcome.new_gates]
+    assert any(
+        name.startswith("zero_trade_repair_strategy_spec_validator") for name in spec_gate_names
+    ), spec_gate_names
+    # And confirm it is a warning, not critical (else the repair would have
+    # been rejected, not accepted).
+    spec_warnings = [
+        g
+        for g in outcome.new_gates
+        if g.gate_name.startswith("zero_trade_repair_strategy_spec_validator")
+        and g.severity == "warning"
+    ]
+    assert spec_warnings, outcome.new_gates
 
 
 def test_zero_trade_repair_no_category_is_defensive_no_op(

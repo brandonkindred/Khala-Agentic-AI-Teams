@@ -487,6 +487,10 @@ export interface StrategyLabRecord {
   refinement_rounds?: number;
   quality_gate_results?: QualityGateResult[];
   strategy_code?: string;
+  /** Ideation-time spec before any refinement-driven mutation; null on legacy rows. */
+  original_spec?: StrategySpec | null;
+  /** Ideation-time strategy code before refinement; null on legacy rows. */
+  original_code?: string | null;
   /** Present on new runs: expert JSON or `{ skipped, skipped_reason }`. Legacy rows: undefined/null. */
   signal_intelligence_brief?: SignalIntelligenceBriefPayload;
 }
