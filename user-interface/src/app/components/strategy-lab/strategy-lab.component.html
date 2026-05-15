@@ -563,7 +563,7 @@
                   <strong>Entry Rules</strong>
                   <ul>
                     @for (rule of record.strategy.entry_rules; track $index) {
-                      <li>{{ rule }}</li>
+                      <li><pre class="rule-json">{{ rule | json }}</pre></li>
                     }
                   </ul>
                 </div>
@@ -571,18 +571,14 @@
                   <strong>Exit Rules</strong>
                   <ul>
                     @for (rule of record.strategy.exit_rules; track $index) {
-                      <li>{{ rule }}</li>
+                      <li><pre class="rule-json">{{ rule | json }}</pre></li>
                     }
                   </ul>
                 </div>
-                @if (record.strategy.sizing_rules.length > 0) {
+                @if (record.strategy.sizing) {
                   <div class="detail-section">
-                    <strong>Sizing Rules</strong>
-                    <ul>
-                      @for (rule of record.strategy.sizing_rules; track $index) {
-                        <li>{{ rule }}</li>
-                      }
-                    </ul>
+                    <strong>Sizing</strong>
+                    <pre class="rule-json">{{ record.strategy.sizing | json }}</pre>
                   </div>
                 }
                 <div class="detail-section">

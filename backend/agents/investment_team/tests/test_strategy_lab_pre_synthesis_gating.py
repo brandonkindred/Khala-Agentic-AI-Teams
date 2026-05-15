@@ -20,6 +20,31 @@ import pytest
 from investment_team.models import BacktestConfig
 from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+from investment_team.strategy_lab.spec_dsl import (
+    ConstRef,
+    EntryRule,
+    Predicate,
+    RSIRef,
+    SignalExitRule,
+    TimeStopRule,
+)
+
+
+def _rsi_entry_dict() -> Dict[str, Any]:
+    return EntryRule(
+        side="long",
+        when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+    ).model_dump()
+
+
+def _rsi_exit_dict() -> Dict[str, Any]:
+    return SignalExitRule(
+        when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
+    ).model_dump()
+
+
+def _time_stop_exit_dict() -> Dict[str, Any]:
+    return TimeStopRule(n_bars=5).model_dump()
 
 
 def _config() -> BacktestConfig:
@@ -58,8 +83,7 @@ def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.Monke
         "hypothesis": "test",
         "signal_definition": "sig",
         "entry_rules": [],  # critical: no entry rules
-        "exit_rules": ["exit"],
-        "sizing_rules": ["risk 2%"],
+        "exit_rules": [_time_stop_exit_dict()],
         "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
         "speculative": False,
     }
@@ -98,9 +122,8 @@ def test_pre_synthesis_validator_persisted_even_on_pass(monkeypatch: pytest.Monk
         "asset_class": "stocks",
         "hypothesis": "RSI signal strategy",
         "signal_definition": "sig",
-        "entry_rules": ["enter when RSI < 30"],
-        "exit_rules": ["exit when RSI > 70"],
-        "sizing_rules": ["risk 2% per trade"],
+        "entry_rules": [_rsi_entry_dict()],
+        "exit_rules": [_rsi_exit_dict()],
         "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
         "speculative": False,
     }
@@ -144,9 +167,8 @@ def test_missing_strategy_code_does_not_short_circuit(monkeypatch: pytest.Monkey
         "asset_class": "stocks",
         "hypothesis": "RSI signal strategy",
         "signal_definition": "sig",
-        "entry_rules": ["enter when RSI < 30"],
-        "exit_rules": ["exit when RSI > 70"],
-        "sizing_rules": ["risk 2% per trade"],
+        "entry_rules": [_rsi_entry_dict()],
+        "exit_rules": [_rsi_exit_dict()],
         "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
         "speculative": False,
     }

@@ -24,6 +24,7 @@ from strands import Agent
 
 from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from ..coverage_probe import format_coverage_report
+from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ _ALLOWED_SPEC_UPDATE_KEYS = frozenset(
     {
         "entry_rules",
         "exit_rules",
-        "sizing_rules",
+        "sizing",
         "risk_limits",
         "hypothesis",
         "signal_definition",
@@ -174,9 +175,9 @@ class ZeroTradeRepairAgent:
             asset_class=spec.asset_class,
             hypothesis=spec.hypothesis,
             signal_definition=spec.signal_definition,
-            entry_rules=", ".join(spec.entry_rules),
-            exit_rules=", ".join(spec.exit_rules),
-            sizing_rules=", ".join(spec.sizing_rules),
+            entry_rules=format_rules_for_prompt(spec.entry_rules),
+            exit_rules=format_rules_for_prompt(spec.exit_rules),
+            sizing_rules=format_sizing_rule(spec.sizing),
             risk_limits=spec.risk_limits.model_dump_json(),
             strategy_code=code,
             zero_trade_category=diagnostics.zero_trade_category,

@@ -31,6 +31,13 @@ from investment_team.strategy_lab.orchestrator import (
     StrategyLabOrchestrator,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.spec_dsl import (
+    ConstRef,
+    EntryRule,
+    Predicate,
+    RSIRef,
+    SignalExitRule,
+)
 from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 
 
@@ -142,9 +149,14 @@ def _spec() -> StrategySpec:
         asset_class="stocks",
         hypothesis="hyp",
         signal_definition="sig",
-        entry_rules=["enter when RSI < 30"],
-        exit_rules=["exit when RSI > 70"],
-        sizing_rules=["risk 2% per trade"],
+        entry_rules=[
+            EntryRule(
+                side="long", when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30))
+            )
+        ],
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)))
+        ],
         risk_limits={"max_position_pct": 5},
         speculative=False,
         strategy_code=(

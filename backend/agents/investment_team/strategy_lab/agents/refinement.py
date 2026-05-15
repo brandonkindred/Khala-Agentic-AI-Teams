@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from strands import Agent
 
 from ...models import BacktestResult, StrategySpec
+from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -97,9 +98,9 @@ class RefinementAgent:
             failure_phase=failure_phase,
             asset_class=spec.asset_class,
             hypothesis=spec.hypothesis,
-            entry_rules=", ".join(spec.entry_rules),
-            exit_rules=", ".join(spec.exit_rules),
-            sizing_rules=", ".join(spec.sizing_rules),
+            entry_rules=format_rules_for_prompt(spec.entry_rules),
+            exit_rules=format_rules_for_prompt(spec.exit_rules),
+            sizing_rules=format_sizing_rule(spec.sizing),
             risk_limits=spec.risk_limits.model_dump_json(),
             strategy_code=code,
             failure_details=failure_details,

@@ -63,6 +63,7 @@ from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.models import QualityGateResult
 from .quality_gates.strategy_validator import StrategySpecValidator
+from .spec_dsl import DEFAULT_SIZING_PAYLOAD
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ _ZERO_TRADE_SPEC_UPDATE_KEYS = frozenset(
     {
         "entry_rules",
         "exit_rules",
-        "sizing_rules",
+        "sizing",
         "risk_limits",
         "hypothesis",
         "signal_definition",
@@ -243,7 +244,7 @@ class StrategyLabOrchestrator:
             signal_definition=strategy_dict.get("signal_definition", ""),
             entry_rules=strategy_dict.get("entry_rules", []),
             exit_rules=strategy_dict.get("exit_rules", []),
-            sizing_rules=strategy_dict.get("sizing_rules", []),
+            sizing=strategy_dict.get("sizing", DEFAULT_SIZING_PAYLOAD),
             target_symbols=strategy_dict.get("target_symbols", []),
             risk_limits=strategy_dict.get("risk_limits", {}),
             speculative=strategy_dict.get("speculative", False),

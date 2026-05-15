@@ -37,6 +37,7 @@ from .models import (
     TradeRecord,
     get_fee_defaults,
 )
+from .strategy_lab.spec_dsl import format_rules_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -379,8 +380,8 @@ class PaperTradingAgent:
             asset_class=strategy.asset_class,
             hypothesis=strategy.hypothesis,
             signal_definition=strategy.signal_definition,
-            entry_rules="; ".join(strategy.entry_rules),
-            exit_rules="; ".join(strategy.exit_rules),
+            entry_rules=format_rules_for_prompt(strategy.entry_rules, separator="; "),
+            exit_rules=format_rules_for_prompt(strategy.exit_rules, separator="; "),
             bt_start=backtest_record.config.start_date,
             bt_end=backtest_record.config.end_date,
             bt_annual_return=bt.annualized_return_pct,

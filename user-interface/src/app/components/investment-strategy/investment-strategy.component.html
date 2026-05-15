@@ -60,32 +60,47 @@
 
         <mat-divider></mat-divider>
 
-        <!-- Trading Rules -->
+        <!-- Trading Rules — structured DSL (issue #551). A visual rule
+             builder is deferred; edit as JSON for now. -->
         <section class="form-section">
-          <h3>Trading Rules</h3>
+          <h3>Trading Rules (structured DSL)</h3>
+
+          @if (rulesError) {
+            <div class="error-banner">
+              <mat-icon>error</mat-icon>
+              <span>{{ rulesError }}</span>
+            </div>
+          }
 
           <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Entry Rules</mat-label>
-            <textarea matInput formControlName="entry_rules" rows="3" placeholder="One rule per line:
-- Buy when RSI < 30 and price above 200-day MA
-- Confirm with volume spike"></textarea>
-            <mat-hint>Define conditions for entering positions</mat-hint>
+            <mat-label>Entry Rules (JSON array of EntryRule)</mat-label>
+            <textarea matInput formControlName="entry_rules_json" rows="6" spellcheck="false" placeholder='[
+  {
+    "kind": "entry",
+    "side": "long",
+    "when": {
+      "lhs": {"kind": "price", "field": "close"},
+      "op": "gt",
+      "rhs": {"kind": "sma", "period": 20}
+    }
+  }
+]'></textarea>
+            <mat-hint>JSON array. See spec_dsl.py for the supported shapes.</mat-hint>
           </mat-form-field>
 
           <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Exit Rules</mat-label>
-            <textarea matInput formControlName="exit_rules" rows="3" placeholder="One rule per line:
-- Sell when RSI > 70
-- Stop loss at 5% below entry"></textarea>
-            <mat-hint>Define conditions for exiting positions</mat-hint>
+            <mat-label>Exit Rules (JSON array of ExitRule)</mat-label>
+            <textarea matInput formControlName="exit_rules_json" rows="6" spellcheck="false" placeholder='[
+  {"kind": "time_stop", "n_bars": 10},
+  {"kind": "stop_loss", "pct": 0.05}
+]'></textarea>
+            <mat-hint>Discriminator field: kind = time_stop | stop_loss | take_profit | signal_exit</mat-hint>
           </mat-form-field>
 
           <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Position Sizing Rules</mat-label>
-            <textarea matInput formControlName="sizing_rules" rows="2" placeholder="One rule per line:
-- Max 2% risk per trade
-- Scale in 25% increments"></textarea>
-            <mat-hint>Define how position sizes are determined</mat-hint>
+            <mat-label>Position Sizing (JSON SizingRule)</mat-label>
+            <textarea matInput formControlName="sizing_json" rows="4" spellcheck="false" placeholder='{"kind": "fixed_fraction", "fraction": 0.02}'></textarea>
+            <mat-hint>Discriminator field: kind = fixed_fraction | volatility_target | fixed_notional</mat-hint>
           </mat-form-field>
         </section>
       </form>

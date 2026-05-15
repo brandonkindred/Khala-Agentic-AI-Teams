@@ -17,6 +17,13 @@ from investment_team.models import (
     StrategyLabRecord,
     StrategySpec,
 )
+from investment_team.strategy_lab.spec_dsl import (
+    ConstRef,
+    EntryRule,
+    Predicate,
+    RSIRef,
+    SignalExitRule,
+)
 from investment_team.trade_simulator import compute_metrics
 
 
@@ -27,9 +34,14 @@ def _spec(strategy_id: str, *, hypothesis: str = "RSI mean reversion") -> Strate
         asset_class="stocks",
         hypothesis=hypothesis,
         signal_definition="sig",
-        entry_rules=["enter when RSI < 30"],
-        exit_rules=["exit when RSI > 70"],
-        sizing_rules=["risk 2% per trade"],
+        entry_rules=[
+            EntryRule(
+                side="long", when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30))
+            )
+        ],
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)))
+        ],
         risk_limits={"max_position_pct": 5},
         speculative=False,
         strategy_code="# code",

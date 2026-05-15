@@ -30,6 +30,14 @@ from investment_team.models import BacktestConfig, BacktestResult, StrategySpec,
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.acceptance_gate import AcceptanceGate
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
+from investment_team.strategy_lab.spec_dsl import (
+    ConstRef,
+    EntryRule,
+    Predicate,
+    PriceRef,
+    SignalExitRule,
+    TimeStopRule,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -43,9 +51,10 @@ def _spec() -> StrategySpec:
         asset_class="stocks",
         hypothesis="hyp",
         signal_definition="sig",
-        entry_rules=["enter on signal"],
-        exit_rules=["exit on opposite"],
-        sizing_rules=["fixed size"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)))
+        ],
+        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=ConstRef(value=0)))],
         risk_limits={},
         speculative=False,
         strategy_code=(
@@ -587,9 +596,13 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
         "asset_class": "stocks",
         "hypothesis": "h",
         "signal_definition": "s",
-        "entry_rules": ["e"],
-        "exit_rules": ["x"],
-        "sizing_rules": [],
+        "entry_rules": [
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)),
+            ).model_dump()
+        ],
+        "exit_rules": [TimeStopRule(n_bars=5).model_dump()],
         "risk_limits": {},
         "speculative": False,
     }

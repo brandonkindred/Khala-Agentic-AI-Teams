@@ -22,6 +22,13 @@ from investment_team.models import (
     BacktestExecutionDiagnostics,
     StrategySpec,
 )
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    Predicate,
+    PriceRef,
+    SignalExitRule,
+    SMARef,
+)
 from investment_team.trading_service.data_stream.historical_replay import (
     HistoricalReplayStream,
 )
@@ -198,8 +205,10 @@ def test_trading_service_runs_sma_strategy_and_produces_trade() -> None:
         asset_class="equity",
         hypothesis="momentum via SMA(5)",
         signal_definition="close vs sma(5)",
-        entry_rules=["close > sma(5)"],
-        exit_rules=["close < sma(5)"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+        ],
+        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 
@@ -571,8 +580,10 @@ def test_diagnostics_emitted_and_accepted_counts_round_trip() -> None:
         asset_class="equity",
         hypothesis="round-trip",
         signal_definition="sma",
-        entry_rules=["close > sma(5)"],
-        exit_rules=["close < sma(5)"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+        ],
+        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 
@@ -796,8 +807,10 @@ def test_run_backtest_attaches_data_quality_report() -> None:
         asset_class="equity",
         hypothesis="momentum via SMA(5)",
         signal_definition="close vs sma(5)",
-        entry_rules=["close > sma(5)"],
-        exit_rules=["close < sma(5)"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+        ],
+        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 
@@ -927,8 +940,10 @@ def test_run_backtest_passes_requeue_default_to_service(monkeypatch) -> None:
         asset_class="equity",
         hypothesis="momentum via SMA(5)",
         signal_definition="close vs sma(5)",
-        entry_rules=["close > sma(5)"],
-        exit_rules=["close < sma(5)"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+        ],
+        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 

@@ -21,6 +21,13 @@ from investment_team.execution.bar_safety import BarSafetyAssertion
 from investment_team.execution.risk_filter import RiskFilter, RiskLimits
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import BacktestConfig, StrategySpec
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    Predicate,
+    PriceRef,
+    SignalExitRule,
+    SMARef,
+)
 from investment_team.trading_service.engine.execution_model import (
     FillTerms,
     OptimisticExecutionModel,
@@ -491,8 +498,10 @@ def test_round_trip_propagates_entry_and_exit_filled_events() -> None:
         asset_class="equity",
         hypothesis="round-trip",
         signal_definition="sma",
-        entry_rules=["close > sma(5)"],
-        exit_rules=["close < sma(5)"],
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+        ],
+        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 
