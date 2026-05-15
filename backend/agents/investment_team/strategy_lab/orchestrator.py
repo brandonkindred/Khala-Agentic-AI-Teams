@@ -30,6 +30,7 @@ from ..execution.metrics import (
     summarize_return_moments,
 )
 from ..execution.regimes import regime_comparison, vix_quartile_subwindows
+from ..execution.risk_filter import _RISK_LIMIT_TIGHTEN_DIRECTION, RiskLimits
 from ..execution.walk_forward import (
     build_purged_walk_forward,
     filter_trades_in_fold_training,
@@ -57,6 +58,7 @@ from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent, ZeroTradeRepairReport
 from .coverage_probe import format_coverage_report, run_coverage_stage, should_run_probes
+from .exceptions import SpecImplementabilityError
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_safety import CodeSafetyChecker
@@ -84,6 +86,22 @@ class _MarketDataFetch:
     requested_symbols: List[str]
     fetched_symbols: List[str]
 
+
+# Refinement output is code-only post-#543. Anything else the LLM emits is
+# logged + discarded by ``_apply_updates``; ``risk_limits`` is the lone
+# exception, handled with tighten-only semantics.
+_REFINEMENT_ALLOWED_KEYS = frozenset({"changes_made"})
+_REFINEMENT_PASSTHROUGH_KEYS = frozenset({"risk_limits"})
+
+# Threshold (per ``failure_phase``) at which repeated spec-mutation attempts
+# from the refinement agent trip ``SpecImplementabilityError`` and route the
+# cycle back to ideation.
+_SPEC_MUTATION_TRIP_THRESHOLD = 3
+
+# Outer-loop cap on how many times ``run_cycle`` re-enters ideation after a
+# ``SpecImplementabilityError``. ``MAX_DESIGN_REENTRIES = 2`` permits the
+# original ideation + 2 re-attempts before short-circuiting.
+MAX_DESIGN_REENTRIES = 2
 
 MAX_CODE_REFINEMENT_ROUNDS = 50
 # Maximum number of trade-alignment problem-solving rounds. Each round
@@ -216,6 +234,11 @@ class StrategyLabOrchestrator:
         self.acceptance_gate = AcceptanceGate()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
+        # Per-failure_phase counter of consecutive refinement rounds where
+        # the LLM emitted stray spec-mutating keys. Reset at the start of
+        # each ``_run_design_attempt`` and tripped when any phase hits
+        # ``_SPEC_MUTATION_TRIP_THRESHOLD``.
+        self._consecutive_spec_mutation_rounds: Dict[str, int] = {}
 
     def run_cycle(
         self,
@@ -227,11 +250,18 @@ class StrategyLabOrchestrator:
     ) -> StrategyLabRecord:
         """Run one full strategy lab cycle: ideate → code → backtest → analyze.
 
+        Wraps ``_run_design_attempt`` in an outer retry loop bounded by
+        ``MAX_DESIGN_REENTRIES`` (#543): when refinement detects the spec
+        is unimplementable (`SpecImplementabilityError`), the cycle
+        re-enters ideation with the failure evidence appended as a
+        convergence directive. On exhaustion, persists a short-circuit
+        record with ``status='failed: spec_unimplementable'``.
+
         Returns a StrategyLabRecord with the final result.
         """
         emit = on_phase or (lambda phase, data: None)
 
-        # Gather convergence directives
+        # Gather convergence directives once — appended to on loopback.
         directives: List[str] = []
         stall_dir = self.convergence_tracker.get_stall_directive()
         if stall_dir:
@@ -240,6 +270,75 @@ class StrategyLabOrchestrator:
         if diversity_dir:
             directives.append(diversity_dir)
         directives.extend(self.convergence_tracker.get_failure_directives())
+
+        last_evidence: Optional[str] = None
+        last_spec: Optional[StrategySpec] = None
+        last_code: str = ""
+        last_failure_phase: Optional[str] = None
+        for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
+            try:
+                return self._run_design_attempt(
+                    prior_records=prior_records,
+                    config=config,
+                    signal_brief=signal_brief,
+                    emit=emit,
+                    exclude_asset_classes=exclude_asset_classes,
+                    directives=directives,
+                )
+            except SpecImplementabilityError as exc:
+                last_evidence = exc.evidence
+                last_spec = exc.last_spec
+                last_code = exc.last_code or ""
+                last_failure_phase = exc.failure_phase
+                if design_attempt >= MAX_DESIGN_REENTRIES:
+                    break
+                emit(
+                    "ideating",
+                    {
+                        "sub_phase": "loopback",
+                        "design_attempt": design_attempt + 1,
+                        "evidence": exc.evidence,
+                        "failure_phase": exc.failure_phase,
+                    },
+                )
+                directives.append(f"PREVIOUS SPEC UNIMPLEMENTABLE: {exc.evidence}")
+
+        # Re-entry budget exhausted — persist a failure record. ``last_spec``
+        # is the spec the most recent refinement attempt was operating on
+        # just before the trip; safe to reuse as the short-circuit spec.
+        assert last_spec is not None and last_evidence is not None
+        return self._build_short_circuit_record(
+            spec=last_spec,
+            config=config,
+            code=last_code,
+            original_spec=last_spec,
+            original_code=last_code,
+            rationale="",
+            all_gate_results=[],
+            refinement_attempts=[],
+            short_circuit_status="failed: spec_unimplementable",
+            short_circuit_reason=(
+                f"Spec unimplementable after {MAX_DESIGN_REENTRIES + 1} design attempts "
+                f"(last failure_phase={last_failure_phase}): {last_evidence}"
+            ),
+            emit=emit,
+        )
+
+    def _run_design_attempt(
+        self,
+        *,
+        prior_records: List[StrategyLabRecord],
+        config: BacktestConfig,
+        signal_brief: Optional[SignalIntelligenceBriefV1],
+        emit: PhaseCallback,
+        exclude_asset_classes: Optional[List[str]],
+        directives: List[str],
+    ) -> StrategyLabRecord:
+        """One design+refinement attempt (#543). May raise
+        ``SpecImplementabilityError`` to signal a need to re-enter
+        ideation; the outer ``run_cycle`` catches and re-routes."""
+        # Reset per-attempt counters so a re-entry starts fresh.
+        self._consecutive_spec_mutation_rounds = {}
 
         # ── Phase 1: IDEATION ──────────────────────────────────────────
         emit("ideating", {"sub_phase": "started"})
@@ -416,7 +515,7 @@ class StrategyLabOrchestrator:
                     updates, code = self._refine(
                         spec, code, "validation", failure_details, None, refinement_attempts
                     )
-                    spec = self._apply_updates(spec, updates, code)
+                    spec = self._apply_updates(spec, updates, code, failure_phase="validation")
                     changes = updates.get("changes_made", "validation fix")
                     refinement_attempts.append(changes)
                     emit(
@@ -506,7 +605,7 @@ class StrategyLabOrchestrator:
                     updates, code = self._refine(
                         spec, code, "execution", failure_details, None, refinement_attempts
                     )
-                    spec = self._apply_updates(spec, updates, code)
+                    spec = self._apply_updates(spec, updates, code, failure_phase="execution")
                     changes = updates.get("changes_made", "execution fix")
                     refinement_attempts.append(changes)
                     emit(
@@ -655,7 +754,7 @@ class StrategyLabOrchestrator:
                         metrics,
                         refinement_attempts,
                     )
-                    spec = self._apply_updates(spec, updates, code)
+                    spec = self._apply_updates(spec, updates, code, failure_phase="evaluation")
                     changes = updates.get("changes_made", "anomaly fix")
                     refinement_attempts.append(changes)
                     emit(
@@ -1498,16 +1597,163 @@ class StrategyLabOrchestrator:
         return StrategySpec.model_validate(data)
 
     @staticmethod
-    def _apply_updates(spec: StrategySpec, updates: Dict[str, Any], code: str) -> StrategySpec:
-        """Apply refinement updates: code only.
+    def _merge_risk_limits_tighten_only(
+        current: RiskLimits, proposed: Any
+    ) -> Tuple[RiskLimits, List[str], List[str]]:
+        """Tighten-only merge of refinement-proposed risk limits (#543).
 
-        The spec (entry/exit/sizing rules, risk limits, hypothesis) is
-        immutable post-ideation (#547 item 2). ``updates`` is kept in the
-        signature because callers still read ``updates['changes_made']``
-        for logging, but no spec fields are merged here.
+        Returns ``(merged_limits, loosened_fields, discarded_unknown_keys)``.
+
+        - ``loosened_fields`` lists fields whose proposed value would loosen
+          the limit (raise an "lower"-direction cap, lower a "higher"-direction
+          floor, or transition ``target_annual_vol`` from ``None`` to a
+          value — which fundamentally changes the sizing model and is
+          treated as loosening).
+        - ``discarded_unknown_keys`` lists fields the caller proposed that
+          either aren't in the ``RiskLimits`` schema or are marked
+          immutable in ``_RISK_LIMIT_TIGHTEN_DIRECTION`` (e.g.
+          ``vol_lookback_days``).
+
+        Callers raise ``SpecImplementabilityError`` when ``loosened_fields``
+        is non-empty; unknown keys are warned but never trip.
+        """
+        loosened: List[str] = []
+        unknown: List[str] = []
+        if not isinstance(proposed, dict):
+            return current, loosened, unknown
+
+        merged_data = current.model_dump()
+        for key, new_value in proposed.items():
+            direction = _RISK_LIMIT_TIGHTEN_DIRECTION.get(key)
+            if direction is None:
+                # Either unknown to RiskLimits or explicitly immutable.
+                unknown.append(key)
+                continue
+
+            current_value = merged_data.get(key)
+
+            # Special-case ``target_annual_vol``: ``None`` means "no vol
+            # target" (flat sizing). Switching to a value or vice-versa
+            # changes the sizing model — treat any None↔value transition
+            # as loosening.
+            if key == "target_annual_vol":
+                if current_value is None and new_value is not None:
+                    loosened.append(key)
+                    continue
+                if current_value is not None and new_value is None:
+                    loosened.append(key)
+                    continue
+
+            try:
+                cmp_current = float(current_value) if current_value is not None else None
+                cmp_new = float(new_value) if new_value is not None else None
+            except (TypeError, ValueError):
+                unknown.append(key)
+                continue
+
+            if cmp_current is None or cmp_new is None:
+                # Already handled above; defensive.
+                continue
+
+            if direction == "lower":
+                if cmp_new < cmp_current:
+                    merged_data[key] = new_value
+                elif cmp_new > cmp_current:
+                    loosened.append(key)
+                # equal: no-op
+            elif direction == "higher":
+                if cmp_new > cmp_current:
+                    merged_data[key] = new_value
+                elif cmp_new < cmp_current:
+                    loosened.append(key)
+                # equal: no-op
+
+        try:
+            merged = RiskLimits.model_validate(merged_data)
+        except Exception:
+            # Validation failed on the merged limits — bail out without
+            # mutating; treat as unknown so caller logs + skips.
+            logger.warning(
+                "Refined risk_limits failed pydantic validation; keeping current limits unchanged."
+            )
+            return current, loosened, list({*unknown, *proposed.keys()} - {"_validation"})
+
+        return merged, loosened, unknown
+
+    def _apply_updates(
+        self,
+        spec: StrategySpec,
+        updates: Dict[str, Any],
+        code: str,
+        failure_phase: Optional[str] = None,
+    ) -> StrategySpec:
+        """Apply refinement updates: code-only, with risk-limits tighten-only carve-out (#543).
+
+        The spec (entry/exit/sizing rules, hypothesis) is immutable
+        post-ideation; ``risk_limits`` may only be tightened. Stray
+        spec-mutating keys are logged and discarded. Repeated stray
+        emissions on the same ``failure_phase`` (≥ ``_SPEC_MUTATION_TRIP_THRESHOLD``
+        in a row) raise ``SpecImplementabilityError`` so the orchestrator
+        can re-route to ideation. Any attempted ``risk_limits`` loosening
+        also raises immediately.
         """
         data = spec.model_dump()
         data["strategy_code"] = code
+
+        stray = set(updates) - _REFINEMENT_ALLOWED_KEYS - _REFINEMENT_PASSTHROUGH_KEYS
+        risk_limits_proposed = updates.get("risk_limits")
+
+        if risk_limits_proposed is not None:
+            merged_limits, loosened, unknown = self._merge_risk_limits_tighten_only(
+                spec.risk_limits, risk_limits_proposed
+            )
+            if loosened:
+                raise SpecImplementabilityError(
+                    evidence=(f"refinement tried to loosen risk_limits fields: {sorted(loosened)}"),
+                    failure_phase=failure_phase,
+                    last_spec=spec,
+                    last_code=code,
+                )
+            if unknown:
+                logger.warning(
+                    "Refinement proposed unknown/immutable risk_limits keys %s; "
+                    "discarding for failure_phase=%s",
+                    sorted(unknown),
+                    failure_phase,
+                )
+            data["risk_limits"] = merged_limits.model_dump()
+
+        if stray:
+            logger.warning(
+                "Refinement discarded spec-mutating keys %s for failure_phase=%s "
+                "(refinement is code-only post-#543).",
+                sorted(stray),
+                failure_phase,
+            )
+            if failure_phase is not None:
+                counter = self._consecutive_spec_mutation_rounds
+                counter[failure_phase] = counter.get(failure_phase, 0) + 1
+                # Reset all other phases — threshold is consecutive within
+                # a single failure_phase, not interleaved.
+                for other in list(counter):
+                    if other != failure_phase:
+                        counter[other] = 0
+                if counter[failure_phase] >= _SPEC_MUTATION_TRIP_THRESHOLD:
+                    raise SpecImplementabilityError(
+                        evidence=(
+                            f"refinement repeatedly attempted spec mutations on "
+                            f"failure_phase={failure_phase}: keys={sorted(stray)} "
+                            f"(round {counter[failure_phase]} of consecutive mutation attempts)"
+                        ),
+                        failure_phase=failure_phase,
+                        last_spec=spec,
+                        last_code=code,
+                    )
+        elif failure_phase is not None:
+            # Clean refinement round on this phase — reset its counter
+            # so future stray emissions start fresh.
+            self._consecutive_spec_mutation_rounds[failure_phase] = 0
+
         return StrategySpec.model_validate(data)
 
     def _build_short_circuit_record(
