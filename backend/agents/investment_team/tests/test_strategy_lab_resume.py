@@ -15,6 +15,7 @@ runs that had ``skipped_cycles > 0`` before failing.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
@@ -45,6 +46,10 @@ from investment_team.strategy_lab.spec_dsl import (
 
 def _make_record(record_id: str) -> StrategyLabRecord:
     """Minimal StrategyLabRecord suitable for the worker's post-cycle bookkeeping."""
+    # Deterministic per-record numeric salt for the DSL fixture — Python's
+    # built-in ``hash`` is PYTHONHASHSEED-randomised so we use sha256 to keep
+    # the fixture stable across processes.
+    record_salt = int.from_bytes(hashlib.sha256(record_id.encode()).digest()[:4], "big")
     strategy = StrategySpec(
         strategy_id=f"strat-{record_id}",
         authored_by="test",
@@ -57,11 +62,11 @@ def _make_record(record_id: str) -> StrategyLabRecord:
                 when=Predicate(
                     lhs=PriceRef(),
                     op="gt",
-                    rhs=ConstRef(value=float(abs(hash(record_id)) % 100)),
+                    rhs=ConstRef(value=float(record_salt % 100)),
                 ),
             )
         ],
-        exit_rules=[TimeStopRule(n_bars=max(1, abs(hash(record_id)) % 100))],
+        exit_rules=[TimeStopRule(n_bars=max(1, record_salt % 100))],
     )
     backtest = BacktestRecord(
         backtest_id=f"bt-{record_id}",

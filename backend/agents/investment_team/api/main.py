@@ -100,6 +100,12 @@ from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.spec_dsl import (
+    DEFAULT_SIZING_PAYLOAD,
+    EntryRule,
+    ExitRule,
+    SizingRule,
+)
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared_observability import init_otel, instrument_fastapi_app
 
@@ -412,12 +418,12 @@ class CreateStrategyRequest(BaseModel):
     asset_class: str = Field(..., description="Primary asset class")
     hypothesis: str = Field(..., description="Investment hypothesis")
     signal_definition: str = Field(..., description="Signal definition")
-    # Issue #551/#554: rule fields are structured DSL nodes. Accept the raw
-    # dict shape from JSON and let Pydantic dispatch to the discriminated
-    # unions on the downstream StrategySpec construction.
-    entry_rules: List[Dict[str, Any]] = Field(default_factory=list)
-    exit_rules: List[Dict[str, Any]] = Field(default_factory=list)
-    sizing: Optional[Dict[str, Any]] = Field(default=None)
+    # Issue #551/#554: rule fields are structured DSL nodes. Typed directly
+    # so FastAPI publishes the discriminated-union schema in OpenAPI and
+    # returns 422 (rather than 500) for malformed input.
+    entry_rules: List[EntryRule] = Field(default_factory=list)
+    exit_rules: List[ExitRule] = Field(default_factory=list)
+    sizing: Optional[SizingRule] = Field(default=None)
     risk_limits: Dict[str, Any] = Field(default_factory=dict)
     speculative: bool = Field(default=False)
 
@@ -680,7 +686,6 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
     """Create a new investment strategy specification."""
     strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
 
-    sizing_payload = request.sizing or {"kind": "fixed_fraction", "fraction": 0.02}
     strategy = StrategySpec(
         strategy_id=strategy_id,
         authored_by=request.authored_by,
@@ -689,7 +694,7 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
         signal_definition=request.signal_definition,
         entry_rules=request.entry_rules,
         exit_rules=request.exit_rules,
-        sizing=sizing_payload,
+        sizing=request.sizing if request.sizing is not None else DEFAULT_SIZING_PAYLOAD,
         risk_limits=request.risk_limits,
         speculative=request.speculative,
     )
@@ -1271,7 +1276,7 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         exit_rules=[r for r in (strategy_data.get("exit_rules") or []) if isinstance(r, dict)],
         sizing=strategy_data.get("sizing")
         if isinstance(strategy_data.get("sizing"), dict)
-        else {"kind": "fixed_fraction", "fraction": 0.02},
+        else DEFAULT_SIZING_PAYLOAD,
         risk_limits=strategy_data.get("risk_limits") or {},
         speculative=bool(strategy_data.get("speculative", False)),
     )

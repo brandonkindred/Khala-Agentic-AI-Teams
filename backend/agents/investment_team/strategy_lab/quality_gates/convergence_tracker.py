@@ -7,6 +7,7 @@ Modeled on the blogging team's FeedbackTracker
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections import Counter
 from typing import List, Optional, Set
@@ -214,8 +215,6 @@ class ConvergenceTracker:
         already enforces the schema and ``sort_keys=True`` makes it
         reproducible.
         """
-        import json
-
         tokens: Set[str] = set()
         tokens.add(f"ac:{spec.asset_class.lower()}")
 

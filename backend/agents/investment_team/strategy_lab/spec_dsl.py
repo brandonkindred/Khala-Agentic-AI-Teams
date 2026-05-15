@@ -287,6 +287,13 @@ ExitRuleAdapter: TypeAdapter = TypeAdapter(ExitRule)
 SizingRuleAdapter: TypeAdapter = TypeAdapter(SizingRule)
 
 
+# Issue #551: default sizing payload used when a producer (API request,
+# ideation LLM output, frontend default) does not supply one. Raw dict so
+# callers can pass it straight to ``StrategySpec(sizing=...)`` and let
+# Pydantic dispatch — equivalent to ``FixedFractionSizing(fraction=0.02)``.
+DEFAULT_SIZING_PAYLOAD: dict = {"kind": "fixed_fraction", "fraction": 0.02}
+
+
 # ---------------------------------------------------------------------------
 # Human-readable formatters.  Outputs are chosen to round-trip through
 # spec_dsl_adapter.parse_* (step 1's adapter), so feeding format_rule's
