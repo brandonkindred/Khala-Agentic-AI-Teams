@@ -287,23 +287,24 @@ class CodeSafetyChecker:
         # 8. Order-flow shape (#547): every viable strategy must call
         #    ``ctx.submit_order(...)`` from inside one of the engine-callable
         #    hook methods (``on_bar``, ``on_start``, ``on_fill``, ``on_end``),
-        #    and must either call it twice (separate entry + exit) or carry
-        #    a non-None ``attached_stop_loss`` / ``attached_take_profit``
-        #    on the single call (bracket / OCO support, #389).
+        #    and the reachable calls must form a real entry+exit pair —
+        #    either two calls with distinct ``side`` values, or a single
+        #    call with a non-None ``attached_stop_loss`` /
+        #    ``attached_take_profit`` (bracket / OCO support, #389).
         #
-        #    * The hook signature determines the receiver name we count
-        #      against — ``on_bar(self, ctx, bar)`` looks for
-        #      ``ctx.submit_order``, ``on_bar(self, context, bar)`` looks
-        #      for ``context.submit_order``. The engine calls hooks
-        #      positionally so the parameter name is the strategy's choice.
-        #    * Helper methods are ignored unless they are themselves engine
-        #      hooks: a ``submit_order`` call sitting in an un-invoked
-        #      helper does not reach the runtime.
+        #    * Engine hooks accept only their second positional parameter
+        #      as the context receiver (``def on_bar(self, ctx, bar):``
+        #      looks for ``ctx.submit_order``; a swapped
+        #      ``def on_bar(self, bar, ctx):`` accepts only ``bar`` and
+        #      its ``submit_order`` would crash at runtime — flagged).
+        #    * Helpers reached via ``self.<method>(...)`` from a hook
+        #      relax the receiver check to any non-``self`` positional
+        #      parameter, since the call site we can't statically resolve
+        #      may pass the context through.
+        #    * Two ``side="LONG"`` calls do not form an entry+exit pair;
+        #      a real exit requires the opposite side or a bracket leg.
         if len(strategy_classes) == 1:
             hook_calls = _collect_hook_submit_calls(strategy_classes[0])
-            single_call_has_bracket_exit = len(hook_calls) == 1 and _has_attached_exit_kwarg(
-                hook_calls[0]
-            )
             if len(hook_calls) == 0:
                 results.append(
                     QualityGateResult(
@@ -317,19 +318,27 @@ class CodeSafetyChecker:
                         ),
                     )
                 )
-            elif len(hook_calls) == 1 and not single_call_has_bracket_exit:
+            elif not _calls_form_entry_exit_pair(hook_calls):
+                if len(hook_calls) == 1:
+                    detail = (
+                        "Only one ctx.submit_order call found in the engine hooks "
+                        "and no non-None attached bracket exit (attached_stop_loss "
+                        "/ attached_take_profit) — strategy has no exit path."
+                    )
+                else:
+                    detail = (
+                        "Multiple ctx.submit_order calls found but all use the same "
+                        "side and no bracket exit is attached — strategy has no real "
+                        "exit leg. Closing a position requires submitting the opposite "
+                        "side (LONG↔SHORT/FLAT) or an attached_stop_loss / "
+                        "attached_take_profit bracket leg."
+                    )
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
                         passed=False,
                         severity="critical",
-                        details=(
-                            "Only one ctx.submit_order call found in the engine hooks "
-                            "and no non-None attached bracket exit (attached_stop_loss "
-                            "/ attached_take_profit) — strategy has no exit path. Add "
-                            "a second submit_order or attach a bracket leg to close "
-                            "positions."
-                        ),
+                        details=detail,
                     )
                 )
 
@@ -368,21 +377,26 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
     Engine hooks (``on_bar`` / ``on_start`` / ``on_fill`` / ``on_end``) are
     the only methods the runtime invokes directly. We:
 
-    1. Walk each hook and record ``<ctx_param>.submit_order(...)`` calls
-       where ``<ctx_param>`` is the hook's second positional parameter
-       (so ``context.submit_order(...)`` is accepted when the hook is
-       declared ``on_bar(self, context, bar)``).
+    1. For each hook, accept ``<ctx>.submit_order(...)`` calls ONLY where
+       ``<ctx>`` is the hook's second positional parameter (after
+       ``self``). Engine hooks are dispatched positionally, so the
+       second positional is unambiguously the StrategyContext;
+       ``bar.submit_order(...)`` or a swapped
+       ``def on_bar(self, bar, ctx): bar.submit_order(...)`` would
+       crash at runtime and must not pass the gate.
     2. Follow ``self.<method>(...)`` calls from each hook into other
        methods of the same class — strategies routinely factor order
        placement into helpers (e.g. ``self._enter(ctx, bar)``). In each
-       reachable helper, we treat any ``<param>.submit_order(...)`` call
-       on a positional parameter of that helper as a real order
-       submission, since the hook is the only entry point and any
-       parameter is plausibly the engine context threaded through.
+       reachable helper we cannot reliably know which parameter carries
+       the threaded-through context (the call site uses positional or
+       keyword args we'd have to track symbolically), so we relax to
+       any non-``self`` positional parameter. This is permissive but
+       sound — the helper is reachable from a hook, and any of its
+       parameters could plausibly carry the context.
 
     A simple worklist with a ``visited`` set handles mutual recursion;
     helpers never invoked from a hook (or transitively from one) are
-    still ignored, which is what we want.
+    still ignored.
     """
     methods_by_name: Dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     for node in ast.iter_child_nodes(cls):
@@ -391,21 +405,30 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
 
     calls: List[ast.Call] = []
     visited: set[str] = set()
-    worklist: List[ast.FunctionDef | ast.AsyncFunctionDef] = [
-        m for name, m in methods_by_name.items() if name in _ENGINE_HOOK_METHODS
+    # Worklist entries: (method, is_hook). is_hook=True restricts the
+    # accepted receiver to the second positional parameter only.
+    worklist: List[tuple[ast.FunctionDef | ast.AsyncFunctionDef, bool]] = [
+        (m, True) for name, m in methods_by_name.items() if name in _ENGINE_HOOK_METHODS
     ]
 
     while worklist:
-        method = worklist.pop()
+        method, is_hook = worklist.pop()
         if method.name in visited:
             continue
         visited.add(method.name)
 
-        # Accepted receiver names for this method: every positional param
-        # except ``self``. For hooks the engine guarantees the second
-        # positional is the context; for helpers, any parameter could
-        # carry the threaded-through ctx.
-        param_names = {arg.arg for arg in method.args.args if arg.arg != "self"}
+        if is_hook:
+            # Engine hook: only the second positional is the context.
+            # ``bar``/``fill`` siblings do not have ``submit_order``.
+            if len(method.args.args) >= 2:
+                receiver_names = {method.args.args[1].arg}
+            else:
+                receiver_names = set()
+        else:
+            # Helper reached from a hook: accept any positional parameter
+            # except ``self`` — we can't statically track which one was
+            # bound to the context, but any of them could be.
+            receiver_names = {arg.arg for arg in method.args.args if arg.arg != "self"}
 
         for sub in ast.walk(method):
             if not isinstance(sub, ast.Call):
@@ -414,11 +437,11 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
                 isinstance(sub.func, ast.Attribute)
                 and sub.func.attr == "submit_order"
                 and isinstance(sub.func.value, ast.Name)
-                and sub.func.value.id in param_names
+                and sub.func.value.id in receiver_names
             ):
                 calls.append(sub)
                 continue
-            # Queue ``self.<helper>(...)`` for traversal.
+            # Queue ``self.<helper>(...)`` for traversal as a helper.
             if (
                 isinstance(sub.func, ast.Attribute)
                 and isinstance(sub.func.value, ast.Name)
@@ -426,9 +449,78 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             ):
                 helper = methods_by_name.get(sub.func.attr)
                 if helper is not None and helper.name not in visited:
-                    worklist.append(helper)
+                    worklist.append((helper, False))
 
     return calls
+
+
+# Side values that indicate an entry leg (opens a position).
+_ENTRY_SIDES = frozenset({"LONG", "SHORT", "BUY", "SELL"})
+# Side values that indicate an exit leg (flattens an open position).
+_EXIT_SIDES = frozenset({"FLAT", "CLOSE", "EXIT"})
+
+
+def _submit_order_side(node: ast.Call) -> Optional[str]:
+    """Best-effort extraction of the ``side`` value from a submit_order call.
+
+    Returns an upper-cased string when the call uses a recognised literal
+    form, else None when the side is dynamic / can't be determined
+    statically. Handles three forms:
+
+    * Keyword string literal: ``side="LONG"`` → ``"LONG"``.
+    * Keyword enum member: ``side=OrderSide.LONG`` → ``"LONG"``.
+    * Keyword string concatenations or computed values → ``None``.
+    """
+    for kw in node.keywords:
+        if kw.arg != "side":
+            continue
+        val = kw.value
+        if isinstance(val, ast.Constant) and isinstance(val.value, str):
+            return val.value.upper()
+        if isinstance(val, ast.Attribute):
+            return val.attr.upper()
+    return None
+
+
+def _calls_form_entry_exit_pair(calls: List[ast.Call]) -> bool:
+    """True iff the collected submit_order calls plausibly include both an
+    entry and an exit leg.
+
+    The contract closes positions by submitting an opposite-side order
+    with ``qty == position.qty``. We approximate that here statically:
+
+    * If any call carries ``attached_stop_loss`` / ``attached_take_profit``
+      (a non-None bracket leg), it brings its own exit.
+    * Otherwise we extract the literal ``side`` from each call and
+      require at least two distinct values. ``LONG`` + ``LONG`` is
+      one-sided and fails the gate; ``LONG`` + ``FLAT`` /
+      ``LONG`` + ``SHORT`` / ``BUY`` + ``CLOSE`` etc. pass.
+    * Calls whose side cannot be determined statically (dynamic
+      expressions) are treated optimistically as "could be either" so
+      they don't false-fail strategies that branch on a signal.
+    """
+    if any(_has_attached_exit_kwarg(c) for c in calls):
+        return True
+    sides_seen: set[str] = set()
+    has_unknown = False
+    for c in calls:
+        side = _submit_order_side(c)
+        if side is None:
+            has_unknown = True
+        else:
+            sides_seen.add(side)
+    # Distinct-side requirement: at least one entry-like and one exit-like,
+    # or simply two distinct recognised sides (covers BUY/SELL pairs etc.).
+    has_entry = bool(sides_seen & _ENTRY_SIDES)
+    has_exit = bool(sides_seen & _EXIT_SIDES)
+    if has_entry and has_exit:
+        return True
+    if len(sides_seen) >= 2:
+        return True
+    # Could be a runtime-decided side — be permissive rather than false-fail.
+    if has_unknown and len(calls) >= 2:
+        return True
+    return False
 
 
 def _has_attached_exit_kwarg(node: ast.Call) -> bool:

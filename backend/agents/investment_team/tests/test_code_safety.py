@@ -446,6 +446,118 @@ def test_submit_order_in_helper_called_from_on_bar_satisfies_order_flow_gate() -
     assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
 
 
+def test_two_same_side_submit_orders_is_critical_no_exit() -> None:
+    """Two ``side='LONG'`` calls do not form an entry+exit pair — both are
+    entries. The gate must reject this as having no exit path."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='Y', qty=1, side='LONG')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no real exit leg" in c or "no exit path" in c for c in criticals), criticals
+
+
+def test_long_and_short_submit_orders_pass_order_flow_gate() -> None:
+    """``side='LONG'`` + ``side='SHORT'`` is a valid entry+opposite-exit pair."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.close > 100:
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                else:
+                    ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c or "exit leg" in c for c in criticals), (
+        criticals
+    )
+
+
+def test_dynamic_side_is_treated_optimistically() -> None:
+    """When the ``side`` is computed at runtime (not a literal), we cannot
+    statically tell whether the pair is one-sided, so we accept the strategy
+    rather than false-fail it. Two calls with dynamic sides pass."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                side = self._pick_side(bar)
+                ctx.submit_order(symbol='X', qty=1, side=side)
+                ctx.submit_order(symbol='Y', qty=1, side=side)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c or "exit leg" in c for c in criticals), (
+        criticals
+    )
+
+
+def test_submit_order_on_bar_parameter_does_not_satisfy_gate() -> None:
+    """The engine calls hooks positionally — the SECOND positional after
+    ``self`` is always the context. A strategy that puts ``submit_order``
+    on the wrong parameter (``bar.submit_order`` when the second positional
+    is ``ctx``) will crash at runtime because ``Bar`` has no submit_order.
+    The gate must reject this rather than accept the misplaced call.
+    """
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                bar.submit_order(symbol='X', qty=1, side='LONG')
+                bar.submit_order(symbol='X', qty=1, side='FLAT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    # ``ctx`` is the accepted receiver for the hook; ``bar.submit_order``
+    # is on the wrong parameter and is ignored, so the gate sees zero
+    # valid calls and emits "no entry path".
+    assert any("no entry path" in c for c in criticals), criticals
+
+
+def test_on_bar_with_swapped_signature_uses_second_positional_as_ctx() -> None:
+    """The engine calls hooks positionally — ``def on_bar(self, bar, ctx)``
+    binds the runtime ctx to the parameter named ``bar`` (second positional).
+    So ``bar.submit_order(...)`` is actually valid runtime code, and the
+    gate must accept it. Conversely, the unused-name parameter ``ctx`` is
+    bound to the Bar object and any ``ctx.submit_order`` would crash."""
+    # Legitimate case: ``bar`` is second positional → it IS the runtime ctx.
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, bar, ctx):
+                bar.submit_order(symbol='X', qty=1, side='LONG')
+                bar.submit_order(symbol='X', qty=1, side='FLAT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+    # Buggy case: same swapped signature but submit_order on ``ctx``, which
+    # is now bound to the Bar object by the engine's positional dispatch.
+    bad_code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, bar, ctx):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='FLAT')
+    """)
+    bad_results = CodeSafetyChecker().check(bad_code)
+    bad_criticals = _critical_details(bad_results)
+    assert any("no entry path" in c for c in bad_criticals), bad_criticals
+
+
 def test_transitive_helper_submit_orders_are_recognised() -> None:
     """Helpers called from helpers (transitively reachable from a hook)
     are still in the engine-reachable call graph and must count. The
