@@ -431,6 +431,50 @@ def _find_nested_def_defs(
     return local_defs
 
 
+def _resolve_helper_receivers(
+    call: ast.Call,
+    helper: ast.FunctionDef | ast.AsyncFunctionDef,
+    outer_receivers: frozenset[str],
+) -> frozenset[str]:
+    """Return the helper parameter names that are bound to the outer
+    scope's context at the call site.
+
+    For ``self._trade(ctx, bar)`` where the outer scope's
+    ``receiver_names`` is ``{"ctx"}``: the first positional after self
+    in ``_trade``'s signature receives ``ctx``, so its name (e.g.
+    ``ctx`` or whatever the helper named that parameter) goes into the
+    returned set. Calls that don't pass any outer-receiver name as an
+    argument end up with an empty set — a ``submit_order`` inside such
+    a helper does NOT satisfy the gate.
+
+    Both positional and keyword arguments are tracked. Star-args /
+    keyword-spreads are ignored (rare in strategy code).
+    """
+    helper_params = [arg.arg for arg in helper.args.args if arg.arg != "self"]
+    bound: set[str] = set()
+
+    # Positional arguments — match against helper params by index.
+    for idx, arg in enumerate(call.args):
+        if idx >= len(helper_params):
+            break
+        if isinstance(arg, ast.Name) and arg.id in outer_receivers:
+            bound.add(helper_params[idx])
+
+    # Keyword arguments — match the parameter the keyword names.
+    for kw in call.keywords:
+        if kw.arg is None:
+            # **kwargs spread — can't statically resolve.
+            continue
+        if (
+            isinstance(kw.value, ast.Name)
+            and kw.value.id in outer_receivers
+            and kw.arg in helper_params
+        ):
+            bound.add(kw.arg)
+
+    return frozenset(bound)
+
+
 def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
     """Return every ``submit_order(...)`` call reachable from ``on_bar``.
 
@@ -507,8 +551,13 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             ):
                 calls.append(sub)
                 continue
-            # 2. self.<helper>(...) — class method, traversed with its
-            #    own parameter set as the helper receiver names.
+            # 2. self.<helper>(...) — class method. The helper's accepted
+            #    receivers are bound to the call-site arguments: only
+            #    parameters that received a name from the OUTER scope's
+            #    receiver_names are treated as ctx-bound. Helpers called
+            #    without passing the context (e.g. ``self._trade(bar)``)
+            #    end up with no receivers and a ``submit_order`` on the
+            #    Bar parameter does NOT satisfy the gate.
             if (
                 isinstance(sub.func, ast.Attribute)
                 and isinstance(sub.func.value, ast.Name)
@@ -516,9 +565,7 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             ):
                 helper = methods_by_name.get(sub.func.attr)
                 if helper is not None and id(helper) not in visited_ids:
-                    helper_receivers = frozenset(
-                        arg.arg for arg in helper.args.args if arg.arg != "self"
-                    )
+                    helper_receivers = _resolve_helper_receivers(sub, helper, receiver_names)
                     worklist.append((helper, helper_receivers))
                 continue
             # 3. <local_name>(...) — closure defined in the same scope.

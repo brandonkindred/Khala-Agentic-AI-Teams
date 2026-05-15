@@ -719,6 +719,66 @@ def test_on_bar_with_swapped_signature_uses_second_positional_as_ctx() -> None:
     assert any("no entry path" in c for c in bad_criticals), bad_criticals
 
 
+def test_helper_receiver_bound_to_call_site_argument_rejects_bar_only() -> None:
+    """The walker must propagate the call-site argument that corresponds
+    to the hook's context — not blindly accept every helper parameter as
+    a possible receiver. ``def _trade(self, bar): bar.submit_order(...)``
+    called as ``self._trade(bar)`` would crash at runtime (bar is the
+    Bar object, not the StrategyContext) and must NOT pass the gate."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def _trade(self, bar):
+                bar.submit_order(symbol='X', qty=1, side='LONG')
+                bar.submit_order(symbol='X', qty=1, side='SHORT')
+            def on_bar(self, ctx, bar):
+                self._trade(bar)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no entry path" in c for c in criticals), criticals
+
+
+def test_helper_receiver_bound_via_keyword_argument() -> None:
+    """When the helper is called with the context as a keyword argument
+    (``self._trade(ctx=ctx, bar=bar)``), the helper's ``ctx`` parameter
+    is correctly bound to the runtime context and ``ctx.submit_order``
+    inside the helper satisfies the gate."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def _trade(self, bar, ctx):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+            def on_bar(self, ctx, bar):
+                self._trade(ctx=ctx, bar=bar)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+def test_helper_with_renamed_ctx_parameter_is_recognised() -> None:
+    """When the helper renames its context parameter (``def _trade(self,
+    my_ctx): my_ctx.submit_order(...)``), passing the hook's ``ctx`` as
+    that positional argument must propagate the binding."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def _trade(self, my_ctx):
+                my_ctx.submit_order(symbol='X', qty=1, side='LONG')
+                my_ctx.submit_order(symbol='X', qty=1, side='SHORT')
+            def on_bar(self, ctx, bar):
+                self._trade(ctx)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
 def test_transitive_helper_submit_orders_are_recognised() -> None:
     """Helpers called from helpers (transitively reachable from a hook)
     are still in the engine-reachable call graph and must count. The
