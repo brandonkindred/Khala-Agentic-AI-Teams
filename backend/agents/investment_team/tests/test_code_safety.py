@@ -778,6 +778,57 @@ def test_simple_ctx_alias_is_tracked() -> None:
     assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
 
 
+def test_local_closure_with_parameter_is_bound_at_call_site() -> None:
+    """A nested closure that accepts the context as a parameter and is
+    invoked with the runtime ctx should have that parameter bound:
+    ``def enter(c): c.submit_order(...); enter(ctx)``. Previously the
+    walker reused the outer receiver names and failed to count
+    ``c.submit_order``."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                def enter(c):
+                    c.submit_order(symbol='X', qty=1, side='LONG')
+                def exit_position(c):
+                    c.submit_order(symbol='X', qty=1, side='SHORT')
+                enter(ctx)
+                exit_position(ctx)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+def test_helper_revisited_with_distinct_bindings() -> None:
+    """When the same helper is invoked twice — once without the context
+    (``self._trade(bar)``) and once with (``self._trade(ctx)``) — the
+    walker must analyse both bindings rather than dedupe on the helper's
+    AST identity. The ctx-bound call's submit_order is what reaches
+    the engine, so the gate must recognise it."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def _trade(self, c):
+                c.submit_order(symbol='X', qty=1, side='LONG')
+                c.submit_order(symbol='X', qty=1, side='SHORT')
+            def on_bar(self, ctx, bar):
+                if bar.close > 100:
+                    # First call binds `c` to `bar` (not in receivers).
+                    self._trade(bar)
+                else:
+                    # Second call binds `c` to `ctx` — the gate must
+                    # recognise this even though _trade has been visited
+                    # once with the empty-binding from the first call.
+                    self._trade(ctx)
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
 def test_chained_ctx_aliases_are_tracked() -> None:
     """Alias chains (``a = ctx; b = a``) propagate at the fixed point."""
     code = textwrap.dedent("""

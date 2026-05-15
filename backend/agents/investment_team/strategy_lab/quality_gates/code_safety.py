@@ -512,13 +512,17 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             methods_by_name[node.name] = node
 
     calls: List[ast.Call] = []
-    # Visited keys on id() so distinct AST nodes don't collide on name.
-    visited_ids: set[int] = set()
+    # Visit key is (id(scope), receiver_names) so a helper called twice
+    # with different bindings (e.g. ``self._trade(bar)`` then
+    # ``self._trade(ctx)``) is analyzed once per distinct binding rather
+    # than getting masked by the first visit.
+    visited_keys: set[tuple[int, frozenset[str]]] = set()
     # Worklist entries: (scope_node, receiver_names). receiver_names is
     # the set of identifiers we accept as the context receiver inside
-    # this scope's body — for hooks, just the second positional; for
-    # helpers, every non-self positional; for local closures, the
-    # outer scope's receiver_names (captured by closure).
+    # this scope's body — for hooks, the second positional; for class
+    # helpers, parameters bound at the call site; for local closures,
+    # call-site-bound parameters PLUS the outer scope's receivers (the
+    # closure also captures them from the enclosing frame).
     worklist: List[tuple[ast.AST, frozenset[str]]] = []
     for name, m in methods_by_name.items():
         if name in _PROCESSED_HOOK_METHODS:
@@ -527,9 +531,10 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
 
     while worklist:
         scope, receiver_names = worklist.pop()
-        if id(scope) in visited_ids:
+        visit_key = (id(scope), receiver_names)
+        if visit_key in visited_keys:
             continue
-        visited_ids.add(id(scope))
+        visited_keys.add(visit_key)
 
         # Local closures defined directly in this scope — followed only
         # when their name is invoked below.
@@ -605,17 +610,25 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
                 and sub.func.value.id == "self"
             ):
                 helper = methods_by_name.get(sub.func.attr)
-                if helper is not None and id(helper) not in visited_ids:
+                if helper is not None:
                     helper_receivers = _resolve_helper_receivers(sub, helper, receiver_names)
-                    worklist.append((helper, helper_receivers))
+                    if (id(helper), helper_receivers) not in visited_keys:
+                        worklist.append((helper, helper_receivers))
                 continue
             # 3. <local_name>(...) — closure defined in the same scope.
-            #    Walked with the OUTER scope's receiver_names because the
-            #    closure captures the context binding from this frame.
+            #    Closures see two sources of context bindings: parameters
+            #    bound at the call site (``def enter(c): ...; enter(ctx)``
+            #    binds ``c`` to ``ctx``) AND outer-scope captures
+            #    (``def enter(): ctx.submit_order(...)`` references the
+            #    enclosing frame's ``ctx``). We union both so either
+            #    pattern is recognised.
             if isinstance(sub.func, ast.Name):
                 local = local_defs.get(sub.func.id)
-                if local is not None and id(local) not in visited_ids:
-                    worklist.append((local, receiver_names))
+                if local is not None:
+                    call_bound = _resolve_helper_receivers(sub, local, receiver_names)
+                    closure_receivers = receiver_names | call_bound
+                    if (id(local), closure_receivers) not in visited_keys:
+                        worklist.append((local, closure_receivers))
 
     return calls
 
