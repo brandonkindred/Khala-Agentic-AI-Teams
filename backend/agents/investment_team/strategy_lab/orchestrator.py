@@ -292,22 +292,27 @@ class StrategyLabOrchestrator:
         # market data.
         #
         # The "strategy_code is missing" critical is excluded from
-        # short-circuit eligibility: that's a code-generation failure
-        # (ideation produced an empty/whitespace strategy_code), and the
-        # refinement loop's existing code-safety + regeneration paths
-        # are equipped to repair it. Short-circuiting on that critical
-        # would regress a previously-recoverable case into an outright
-        # failure.
-        pre_spec_gates = self.strategy_validator.validate(spec)
+        # short-circuit eligibility AND from the persisted gate history:
+        # that's a code-generation failure (ideation produced an empty /
+        # whitespace strategy_code), and the refinement loop's existing
+        # code-safety + regeneration paths are equipped to repair it.
+        # Short-circuiting on that critical would regress a previously-
+        # recoverable case into an outright failure; persisting it would
+        # leave a permanently-unresolved critical on the record (the
+        # generic refinement loop never re-runs StrategySpecValidator),
+        # which would also reach convergence_tracker.record() as an
+        # unresolved spec failure.
+        pre_spec_gates_raw = self.strategy_validator.validate(spec)
+        pre_spec_gates = [
+            g
+            for g in pre_spec_gates_raw
+            if not (g.severity == "critical" and g.details.startswith("strategy_code is missing"))
+        ]
         for g in pre_spec_gates:
             g.refinement_round = -1
         all_gate_results.extend(pre_spec_gates)
         pre_synthesis_criticals = [
-            g
-            for g in pre_spec_gates
-            if not g.passed
-            and g.severity == "critical"
-            and not g.details.startswith("strategy_code is missing")
+            g for g in pre_spec_gates if not g.passed and g.severity == "critical"
         ]
         if pre_synthesis_criticals:
             emit(

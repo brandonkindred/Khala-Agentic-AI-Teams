@@ -539,6 +539,47 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
             else {}
         )
 
+        # Expand receiver_names with simple aliases. A strategy may
+        # introduce a local alias before submitting orders:
+        #
+        #     trade_ctx = ctx
+        #     trade_ctx.submit_order(...)
+        #
+        # ``trade_ctx`` and ``ctx`` are interchangeable here — the
+        # binding flows trivially through ``Assign`` / ``AnnAssign``
+        # statements whose RHS is just another Name we already accept.
+        # Iterate to a fixed point so ``a = ctx; b = a`` accepts both.
+        expanded_receivers = set(receiver_names)
+        changed = True
+        while changed:
+            changed = False
+            for node in _iter_method_body_nodes(scope):
+                src_name: Optional[str] = None
+                target_name: Optional[str] = None
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and isinstance(node.value, ast.Name)
+                ):
+                    target_name = node.targets[0].id
+                    src_name = node.value.id
+                elif (
+                    isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                    and isinstance(node.value, ast.Name)
+                ):
+                    target_name = node.target.id
+                    src_name = node.value.id
+                if (
+                    src_name in expanded_receivers
+                    and target_name is not None
+                    and target_name not in expanded_receivers
+                ):
+                    expanded_receivers.add(target_name)
+                    changed = True
+        receiver_names = frozenset(expanded_receivers)
+
         for sub in _iter_method_body_nodes(scope):
             if not isinstance(sub, ast.Call):
                 continue

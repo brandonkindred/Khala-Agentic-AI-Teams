@@ -760,6 +760,41 @@ def test_helper_receiver_bound_via_keyword_argument() -> None:
     assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
 
 
+def test_simple_ctx_alias_is_tracked() -> None:
+    """A strategy may alias the context before submitting orders. The
+    walker should treat the alias as equivalent to the original
+    receiver name for the rest of the scope's body."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                trade_ctx = ctx
+                trade_ctx.submit_order(symbol='X', qty=1, side='LONG')
+                trade_ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+def test_chained_ctx_aliases_are_tracked() -> None:
+    """Alias chains (``a = ctx; b = a``) propagate at the fixed point."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                a = ctx
+                b = a
+                b.submit_order(symbol='X', qty=1, side='LONG')
+                b.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
 def test_helper_with_renamed_ctx_parameter_is_recognised() -> None:
     """When the helper renames its context parameter (``def _trade(self,
     my_ctx): my_ctx.submit_order(...)``), passing the hook's ``ctx`` as

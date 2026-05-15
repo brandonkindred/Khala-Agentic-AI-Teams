@@ -169,3 +169,15 @@ def test_missing_strategy_code_does_not_short_circuit(monkeypatch: pytest.Monkey
     # the validator's strategy_code critical was excluded from pre-synth
     # gating, so we proceeded past it.
     assert record.backtest.status != "failed: spec_validation", record.backtest.status
+
+    # And the gate must not be persisted as an unresolved critical on
+    # the record — the refinement loop's code-safety + regeneration
+    # paths repair it, so leaving it on the record would create a
+    # permanently-unresolved spec critical (the generic refinement loop
+    # never re-runs StrategySpecValidator). Filter the pre-synth slice.
+    pre_synth_gates = [g for g in record.quality_gate_results if g.get("refinement_round") == -1]
+    assert not any(
+        g.get("severity") == "critical"
+        and g.get("details", "").startswith("strategy_code is missing")
+        for g in pre_synth_gates
+    ), pre_synth_gates
