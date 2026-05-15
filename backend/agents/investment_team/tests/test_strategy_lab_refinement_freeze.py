@@ -343,6 +343,36 @@ class _LoosenOnceRefinementAgent:
         )
 
 
+class _StraySpecRefinementAgent:
+    """Stub that always emits stray spec-mutating keys (no risk-limits
+    loosening). After ``_SPEC_MUTATION_TRIP_THRESHOLD`` consecutive rounds
+    on the same ``failure_phase`` the orchestrator's ``_apply_updates``
+    trips ``SpecImplementabilityError`` via the threshold path."""
+
+    def __init__(self) -> None:
+        self.spec_mutation_history: List[Dict[str, Any]] = []
+        self.call_count = 0
+
+    def run(
+        self,
+        spec: StrategySpec,
+        code: str,
+        failure_phase: str,
+        failure_details: str,
+        metrics: Optional[BacktestResult] = None,
+        prior_attempts: Optional[List[str]] = None,
+    ) -> Tuple[Dict[str, Any], str]:
+        self.call_count += 1
+        return (
+            {
+                "changes_made": f"stray attempt {self.call_count}",
+                "entry_rules": [{"side": "long", "comment": "bogus"}],
+                "hypothesis": "rewritten by LLM",
+            },
+            f"# refined code {self.call_count}",
+        )
+
+
 def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -410,3 +440,70 @@ def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
     assert len(loopback_events) == MAX_DESIGN_REENTRIES
     assert orch.ideation_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
     assert record.backtest.status == "failed: spec_unimplementable"
+
+
+def test_run_cycle_reroutes_on_stray_key_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end coverage for the threshold-trip path (non-risk-limits):
+    when refinement emits stray spec keys for ``_SPEC_MUTATION_TRIP_THRESHOLD``
+    consecutive rounds on the same ``failure_phase``, ``run_cycle``
+    re-enters ideation and ultimately persists a
+    ``failed: spec_unimplementable`` record."""
+    spec = _spec()
+    orch = StrategyLabOrchestrator()
+    orch.ideation_agent = _FakeIdeationAgent(spec)  # type: ignore[assignment]
+    orch.refinement_agent = _StraySpecRefinementAgent()  # type: ignore[assignment]
+
+    monkeypatch.setattr(orch.code_safety_checker, "check", lambda code: [])
+    monkeypatch.setattr(orch.strategy_validator, "validate", lambda s: [])
+
+    # Force every execution to fail so the loop stays in the "execution"
+    # failure_phase and accumulates stray-key rounds against a single
+    # phase counter (the threshold is per-phase consecutive).
+    def _failed_run(
+        code: str, market_data: Any, config: Any, strategy: Any = None
+    ) -> StrategyRunResult:
+        return StrategyRunResult(
+            success=False,
+            error_type="runtime_error",
+            stderr="forced failure for test",
+            stdout="",
+        )
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _failed_run)
+    monkeypatch.setattr(
+        orch,
+        "_fetch_market_data",
+        lambda spec_arg, config_arg: orchestrator_module._MarketDataFetch(
+            data={
+                "SPY": [
+                    OHLCVBar(
+                        symbol="SPY", date="2023-01-01", open=1, high=1, low=1, close=1, volume=1
+                    )
+                ]
+            },
+            requested_symbols=["SPY"],
+            fetched_symbols=["SPY"],
+        ),
+    )
+
+    emitted: List[Tuple[str, Dict[str, Any]]] = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        on_phase=lambda phase, data: emitted.append((phase, data)),
+    )
+
+    loopback_events = [
+        d for phase, d in emitted if phase == "ideating" and d.get("sub_phase") == "loopback"
+    ]
+    assert len(loopback_events) == MAX_DESIGN_REENTRIES
+    # Each loopback's evidence references the threshold-path message, not
+    # risk-limits loosening — confirms we exercised the right code path.
+    for ev in loopback_events:
+        assert "consecutive mutation attempts" in ev["evidence"]
+        assert ev["failure_phase"] == "execution"
+    assert orch.ideation_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
+    assert record.backtest.status == "failed: spec_unimplementable"
+    assert "spec_unimplementable" in record.backtest.status

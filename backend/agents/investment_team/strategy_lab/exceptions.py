@@ -7,7 +7,10 @@ other in via a circular import.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from ..models import StrategySpec
 
 
 class SpecImplementabilityError(Exception):
@@ -21,15 +24,18 @@ class SpecImplementabilityError(Exception):
 
     ``last_spec`` / ``last_code`` carry the just-pre-mutation spec and
     code so the outer loop can build a useful short-circuit record on
-    re-entry exhaustion without re-running ideation.
+    re-entry exhaustion without re-running ideation. Raisers MUST set
+    both — ``run_cycle`` relies on them when building the
+    ``failed: spec_unimplementable`` record.
     """
 
     def __init__(
         self,
         evidence: str,
-        failure_phase: Optional[str] = None,
-        last_spec: Any = None,
-        last_code: Optional[str] = None,
+        *,
+        failure_phase: Optional[str],
+        last_spec: "StrategySpec",
+        last_code: str,
     ) -> None:
         super().__init__(evidence)
         self.evidence = evidence

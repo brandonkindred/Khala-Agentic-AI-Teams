@@ -90,6 +90,12 @@ class _MarketDataFetch:
 # Refinement output is code-only post-#543. Anything else the LLM emits is
 # logged + discarded by ``_apply_updates``; ``risk_limits`` is the lone
 # exception, handled with tighten-only semantics.
+#
+# NOTE: ``RefinementAgent`` enforces the same contract on its side via
+# ``_ALLOWED_OUTPUT_KEYS`` / ``_PASSTHROUGH_FOR_ORCHESTRATOR`` in
+# ``agents/refinement.py``. The duplication is intentional — agent-side
+# narrowing is a first line of defense; orchestrator-side narrowing is
+# authoritative. Keep the two passthrough sets in sync.
 _REFINEMENT_ALLOWED_KEYS = frozenset({"changes_made"})
 _REFINEMENT_PASSTHROUGH_KEYS = frozenset({"risk_limits"})
 
@@ -288,7 +294,7 @@ class StrategyLabOrchestrator:
             except SpecImplementabilityError as exc:
                 last_evidence = exc.evidence
                 last_spec = exc.last_spec
-                last_code = exc.last_code or ""
+                last_code = exc.last_code
                 last_failure_phase = exc.failure_phase
                 if design_attempt >= MAX_DESIGN_REENTRIES:
                     break
@@ -303,10 +309,19 @@ class StrategyLabOrchestrator:
                 )
                 directives.append(f"PREVIOUS SPEC UNIMPLEMENTABLE: {exc.evidence}")
 
-        # Re-entry budget exhausted — persist a failure record. ``last_spec``
-        # is the spec the most recent refinement attempt was operating on
-        # just before the trip; safe to reuse as the short-circuit spec.
-        assert last_spec is not None and last_evidence is not None
+        # Re-entry budget exhausted. The exception's ``last_spec`` /
+        # ``last_code`` carry the just-pre-mutation state from the most
+        # recent ``_apply_updates`` raise. They are required on the
+        # exception type, but guard defensively in case a future raiser
+        # somehow violates the contract — surface a clear runtime error
+        # rather than crashing in ``_build_short_circuit_record`` with a
+        # misleading traceback.
+        if last_spec is None or last_evidence is None:
+            raise RuntimeError(
+                "SpecImplementabilityError raised without last_spec/evidence; "
+                "cannot build short-circuit record. This is a bug in a refinement "
+                "code path; please file an issue with the run logs."
+            )
         return self._build_short_circuit_record(
             spec=last_spec,
             config=config,
@@ -1672,11 +1687,12 @@ class StrategyLabOrchestrator:
             merged = RiskLimits.model_validate(merged_data)
         except Exception:
             # Validation failed on the merged limits — bail out without
-            # mutating; treat as unknown so caller logs + skips.
+            # mutating; surface every proposed key as unknown so the caller
+            # logs the full set and keeps the original limits.
             logger.warning(
                 "Refined risk_limits failed pydantic validation; keeping current limits unchanged."
             )
-            return current, loosened, list({*unknown, *proposed.keys()} - {"_validation"})
+            return current, loosened, sorted(set(unknown) | set(proposed.keys()))
 
         return merged, loosened, unknown
 
@@ -1701,6 +1717,9 @@ class StrategyLabOrchestrator:
         data["strategy_code"] = code
 
         stray = set(updates) - _REFINEMENT_ALLOWED_KEYS - _REFINEMENT_PASSTHROUGH_KEYS
+        # ``risk_limits: null`` is treated as "no change requested" — skip the
+        # tighten-only merge entirely. Because the key is in
+        # ``_REFINEMENT_PASSTHROUGH_KEYS`` it is also not counted as stray.
         risk_limits_proposed = updates.get("risk_limits")
 
         if risk_limits_proposed is not None:
