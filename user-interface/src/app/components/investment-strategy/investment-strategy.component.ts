@@ -20,6 +20,10 @@ import {
   StrategySpec,
   CreateStrategyRequest,
   ValidateStrategyResponse,
+  EntryRule,
+  ExitRule,
+  SizingRule,
+  FixedFractionSizing,
 } from '../../models';
 
 @Component({
@@ -63,13 +67,24 @@ export class InvestmentStrategyComponent implements OnInit {
   currentStrategy: StrategySpec | null = null;
   validationResult: ValidateStrategyResponse | null = null;
 
+  // Issue #551 — the backend's StrategySpec now uses structured DSL types
+  // (EntryRule[], ExitRule[], SizingRule). Building a full visual rule editor
+  // is deferred; for now this component edits the three rule fields as JSON.
+  // The textareas are validated on submit and any parse / schema error is
+  // surfaced inline.
+  readonly defaultEntryRulesJson = '[]';
+  readonly defaultExitRulesJson = '[]';
+  readonly defaultSizingJson = '{\n  "kind": "fixed_fraction",\n  "fraction": 0.02\n}';
+
+  rulesError: string | null = null;
+
   form: FormGroup = this.fb.group({
     asset_class: ['equities', Validators.required],
     hypothesis: ['', Validators.required],
     signal_definition: ['', Validators.required],
-    entry_rules: [''],
-    exit_rules: [''],
-    sizing_rules: [''],
+    entry_rules_json: [this.defaultEntryRulesJson],
+    exit_rules_json: [this.defaultExitRulesJson],
+    sizing_json: [this.defaultSizingJson],
     speculative: [false],
   });
 
@@ -85,9 +100,13 @@ export class InvestmentStrategyComponent implements OnInit {
       asset_class: strategy.asset_class,
       hypothesis: strategy.hypothesis,
       signal_definition: strategy.signal_definition,
-      entry_rules: strategy.entry_rules.join('\n'),
-      exit_rules: strategy.exit_rules.join('\n'),
-      sizing_rules: strategy.sizing_rules.join('\n'),
+      entry_rules_json: JSON.stringify(strategy.entry_rules ?? [], null, 2),
+      exit_rules_json: JSON.stringify(strategy.exit_rules ?? [], null, 2),
+      sizing_json: JSON.stringify(
+        strategy.sizing ?? ({ kind: 'fixed_fraction', fraction: 0.02 } as FixedFractionSizing),
+        null,
+        2,
+      ),
       speculative: strategy.speculative,
     });
   }
@@ -100,17 +119,34 @@ export class InvestmentStrategyComponent implements OnInit {
 
     this.loading = true;
     this.error = null;
+    this.rulesError = null;
 
     const formValue = this.form.value;
+
+    let entryRules: EntryRule[];
+    let exitRules: ExitRule[];
+    let sizing: SizingRule;
+    try {
+      entryRules = this.parseRulesJson<EntryRule[]>(formValue.entry_rules_json, 'entry_rules', []);
+      exitRules = this.parseRulesJson<ExitRule[]>(formValue.exit_rules_json, 'exit_rules', []);
+      sizing = this.parseRulesJson<SizingRule>(formValue.sizing_json, 'sizing', {
+        kind: 'fixed_fraction',
+        fraction: 0.02,
+      } as FixedFractionSizing);
+    } catch (parseErr) {
+      this.loading = false;
+      this.rulesError = (parseErr as Error).message;
+      return;
+    }
 
     const request: CreateStrategyRequest = {
       authored_by: 'ui_user',
       asset_class: formValue.asset_class,
       hypothesis: formValue.hypothesis,
       signal_definition: formValue.signal_definition,
-      entry_rules: this.splitLines(formValue.entry_rules),
-      exit_rules: this.splitLines(formValue.exit_rules),
-      sizing_rules: this.splitLines(formValue.sizing_rules),
+      entry_rules: entryRules,
+      exit_rules: exitRules,
+      sizing,
       speculative: formValue.speculative,
     };
 
@@ -163,8 +199,13 @@ export class InvestmentStrategyComponent implements OnInit {
     return `check-${status}`;
   }
 
-  private splitLines(text: string): string[] {
-    if (!text) return [];
-    return text.split('\n').map(s => s.trim()).filter(s => s);
+  private parseRulesJson<T>(raw: string, field: string, fallback: T): T {
+    const text = (raw ?? '').trim();
+    if (!text) return fallback;
+    try {
+      return JSON.parse(text) as T;
+    } catch (err) {
+      throw new Error(`${field}: invalid JSON — ${(err as Error).message}`);
+    }
   }
 }

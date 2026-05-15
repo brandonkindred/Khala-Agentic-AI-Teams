@@ -166,6 +166,81 @@ export interface PortfolioProposal {
 }
 
 // ---------------------------------------------------------------------------
+// Strategy DSL (mirrors backend/agents/investment_team/strategy_lab/spec_dsl.py,
+// issue #550). Producers must emit the structured shape — the backend
+// (#551) rejects prose strings on input.
+// ---------------------------------------------------------------------------
+
+export type IndicatorSource = 'close' | 'high' | 'low' | 'open' | 'volume' | 'hl2' | 'ohlc4';
+export type ComparisonOp = 'gt' | 'lt' | 'ge' | 'le' | 'eq' | 'cross_above' | 'cross_below';
+
+export interface PriceRef       { kind: 'price'; field?: IndicatorSource; }
+export interface ConstRef       { kind: 'const'; value: number; }
+export interface SMARef         { kind: 'sma'; period: number; source?: IndicatorSource; }
+export interface EMARef         { kind: 'ema'; period: number; source?: IndicatorSource; }
+export interface RSIRef         { kind: 'rsi'; period?: number; source?: IndicatorSource; }
+export interface MACDRef {
+  kind: 'macd';
+  fast?: number;
+  slow?: number;
+  signal?: number;
+  output?: 'macd' | 'signal' | 'histogram';
+  source?: IndicatorSource;
+}
+export interface BollingerRef {
+  kind: 'bollinger';
+  period?: number;
+  num_std?: number;
+  band?: 'upper' | 'middle' | 'lower';
+  source?: IndicatorSource;
+}
+export interface ATRRef         { kind: 'atr'; period?: number; }
+export interface ADXRef         { kind: 'adx'; period?: number; }
+export interface StochasticRef  { kind: 'stochastic'; k_period?: number; d_period?: number; output?: 'k' | 'd'; }
+export interface VWAPRef        { kind: 'vwap'; }
+
+export type IndicatorRef =
+  | PriceRef
+  | ConstRef
+  | SMARef
+  | EMARef
+  | RSIRef
+  | MACDRef
+  | BollingerRef
+  | ATRRef
+  | ADXRef
+  | StochasticRef
+  | VWAPRef;
+
+export interface Predicate {
+  lhs: IndicatorRef;
+  op: ComparisonOp;
+  rhs: IndicatorRef;
+}
+
+export interface EntryRule {
+  kind: 'entry';
+  side?: 'long' | 'short';
+  when: Predicate;
+  note?: string;
+}
+
+export interface TimeStopRule    { kind: 'time_stop'; n_bars: number; note?: string; }
+export interface StopLossRule    { kind: 'stop_loss'; pct: number; basis?: 'entry_price' | 'trailing_high' | 'trailing_low'; note?: string; }
+export interface TakeProfitRule  { kind: 'take_profit'; pct: number; note?: string; }
+export interface SignalExitRule  { kind: 'signal_exit'; when: Predicate; note?: string; }
+export interface UnparsableRule  { kind: 'unparsable'; prose: string; reason?: string; }
+
+export type ExitRule = TimeStopRule | StopLossRule | TakeProfitRule | SignalExitRule | UnparsableRule;
+
+export interface FixedFractionSizing    { kind: 'fixed_fraction'; fraction: number; note?: string; }
+export interface VolatilityTargetSizing { kind: 'volatility_target'; target_annual_vol: number; note?: string; }
+export interface FixedNotionalSizing    { kind: 'fixed_notional'; notional_usd: number; note?: string; }
+export interface UnparsableSizing       { kind: 'unparsable_sizing'; prose: string; reason?: string; }
+
+export type SizingRule = FixedFractionSizing | VolatilityTargetSizing | FixedNotionalSizing | UnparsableSizing;
+
+// ---------------------------------------------------------------------------
 // Strategy Models
 // ---------------------------------------------------------------------------
 
@@ -175,9 +250,9 @@ export interface StrategySpec {
   asset_class: string;
   hypothesis: string;
   signal_definition: string;
-  entry_rules: string[];
-  exit_rules: string[];
-  sizing_rules: string[];
+  entry_rules: EntryRule[];
+  exit_rules: ExitRule[];
+  sizing: SizingRule;
   risk_limits: Record<string, unknown>;
   speculative: boolean;
   strategy_code?: string;
@@ -311,9 +386,9 @@ export interface CreateStrategyRequest {
   asset_class: string;
   hypothesis: string;
   signal_definition: string;
-  entry_rules?: string[];
-  exit_rules?: string[];
-  sizing_rules?: string[];
+  entry_rules?: EntryRule[];
+  exit_rules?: ExitRule[];
+  sizing?: SizingRule;
   risk_limits?: Record<string, unknown>;
   speculative?: boolean;
 }

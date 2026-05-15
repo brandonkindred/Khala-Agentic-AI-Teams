@@ -338,3 +338,101 @@ def test_format_rules_for_prompt_join_separator():
 
 def test_format_rules_for_prompt_empty():
     assert format_rules_for_prompt([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# Issue #551 — StrategySpec wires the DSL types directly. No coercion.
+# ---------------------------------------------------------------------------
+
+
+def _make_structured_strategy_spec():
+    from investment_team.models import StrategySpec
+
+    return StrategySpec(
+        strategy_id="t",
+        authored_by="t",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+            ),
+        ],
+        exit_rules=[TimeStopRule(n_bars=10)],
+        sizing=FixedFractionSizing(fraction=0.02),
+    )
+
+
+def test_strategy_spec_round_trips_structured_dsl():
+    from investment_team.models import StrategySpec
+
+    spec = _make_structured_strategy_spec()
+    assert StrategySpec.model_validate_json(spec.model_dump_json()) == spec
+
+
+def test_strategy_spec_default_sizing_is_fixed_fraction_two_pct():
+    from investment_team.models import StrategySpec
+
+    spec = StrategySpec(
+        strategy_id="t",
+        authored_by="t",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+    )
+    assert isinstance(spec.sizing, FixedFractionSizing)
+    assert spec.sizing.fraction == 0.02
+
+
+def test_strategy_spec_rejects_prose_entry_rules():
+    from investment_team.models import StrategySpec
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="t",
+            authored_by="t",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            entry_rules=["close > sma(20)"],
+        )
+
+
+def test_strategy_spec_rejects_prose_exit_rules():
+    from investment_team.models import StrategySpec
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="t",
+            authored_by="t",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            exit_rules=["exit after 10 bars"],
+        )
+
+
+def test_strategy_spec_rejects_prose_sizing():
+    from investment_team.models import StrategySpec
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="t",
+            authored_by="t",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            sizing="risk 2% per trade",
+        )
+
+
+def test_strategy_spec_has_no_sizing_rules_field():
+    """`sizing_rules` was replaced by the singular `sizing` field; extra=forbid
+    is not set on StrategySpec, but the field name change is part of the API
+    surface and must be observable."""
+    from investment_team.models import StrategySpec
+
+    assert "sizing_rules" not in StrategySpec.model_fields
+    assert "sizing" in StrategySpec.model_fields

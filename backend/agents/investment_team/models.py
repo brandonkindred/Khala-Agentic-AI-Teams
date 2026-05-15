@@ -8,6 +8,12 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .execution.risk_filter import RiskLimits
+from .strategy_lab.spec_dsl import (
+    EntryRule,
+    ExitRule,
+    FixedFractionSizing,
+    SizingRule,
+)
 
 
 class RiskTolerance(str, Enum):
@@ -197,9 +203,13 @@ class StrategySpec(BaseModel):
     asset_class: str
     hypothesis: str
     signal_definition: str
-    entry_rules: List[str] = Field(default_factory=list)
-    exit_rules: List[str] = Field(default_factory=list)
-    sizing_rules: List[str] = Field(default_factory=list)
+    # Issue #551 — entry/exit/sizing are structured DSL nodes. Pydantic
+    # discriminator validation rejects prose ("close > sma(20)") on input;
+    # producers must emit structured. See `strategy_lab/spec_dsl.py` (#550)
+    # for the union definitions.
+    entry_rules: List[EntryRule] = Field(default_factory=list)
+    exit_rules: List[ExitRule] = Field(default_factory=list)
+    sizing: SizingRule = Field(default_factory=lambda: FixedFractionSizing(fraction=0.02))
     # Issue #523 — explicit list of tickers the strategy is designed to
     # trade. When non-empty, the fetch path uses this list verbatim
     # instead of the asset-class default universe, so a hypothesis naming
