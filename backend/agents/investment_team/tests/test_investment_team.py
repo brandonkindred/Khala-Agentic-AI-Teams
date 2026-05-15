@@ -1176,6 +1176,106 @@ def test_resolve_strategy_symbols_prefers_target_symbols() -> None:
     assert service.resolve_strategy_symbols(spec) == ["QQQ", "GLD"]
 
 
+def test_classify_symbol_unambiguous_cases() -> None:
+    """Issue #523 — classify_symbol returns the natural asset class for symbols
+    that unambiguously belong to one canonical universe."""
+    from agents.investment_team.symbols import classify_symbol
+
+    assert classify_symbol("BTC") == "crypto"
+    assert classify_symbol("ETH") == "crypto"
+    assert classify_symbol("AAPL") == "stocks"
+    assert classify_symbol("EURUSD=X") == "forex"
+    assert classify_symbol("EURUSD") == "forex"
+    assert classify_symbol("GC=F") == "futures"
+    # Suffix-only fallback (symbol not in any canonical list)
+    assert classify_symbol("BTC-USD") == "crypto"
+    assert classify_symbol("AUDCHF=X") == "forex"
+    assert classify_symbol("RTY=F") == "futures"
+
+
+def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
+    """Issue #523 — cross-asset ETFs and unknown tickers don't get classified
+    so the mismatch warning doesn't false-positive."""
+    from agents.investment_team.symbols import classify_symbol
+
+    # OTHER_SYMBOLS — tradeable as stocks via Yahoo even with non-stock exposure
+    assert classify_symbol("GLD") is None
+    assert classify_symbol("QQQ") is None
+    assert classify_symbol("TLT") is None
+    # Unknown ticker — don't guess
+    assert classify_symbol("NEWCO") is None
+
+
+def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
+    """Issue #523 — a strategy declaring asset_class="stocks" with
+    target_symbols=["BTC"] should emit a warning so the operator sees the
+    mismatch instead of getting an empty fetch silently."""
+    import logging
+
+    from agents.investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-mismatch",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="bitcoin trend follow",
+        signal_definition="s",
+        target_symbols=["BTC"],
+    )
+    with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
+        result = service.resolve_strategy_symbols(spec)
+
+    # The fetch still proceeds against the requested symbols.
+    assert result == ["BTC"]
+    # But the operator sees the diagnostic.
+    assert any(
+        "s-mismatch" in r.message and "BTC" in r.message and "stocks" in r.message
+        for r in caplog.records
+    ), f"expected mismatch warning, got: {[r.message for r in caplog.records]}"
+
+
+def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> None:
+    """Issue #523 — no warning when target_symbols match the declared
+    asset_class, nor for cross-asset ETFs (GLD, QQQ) which deliberately
+    aren't classified to avoid false positives."""
+    import logging
+
+    from agents.investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    aligned = StrategySpec(
+        strategy_id="s-aligned",
+        authored_by="test",
+        asset_class="crypto",
+        hypothesis="BTC trend follow",
+        signal_definition="s",
+        target_symbols=["BTC"],
+    )
+    qqq_stocks = StrategySpec(
+        strategy_id="s-qqq",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ trend continuation",
+        signal_definition="s",
+        target_symbols=["QQQ", "GLD"],
+    )
+    unknown = StrategySpec(
+        strategy_id="s-unknown",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="momentum on a fresh ticker",
+        signal_definition="s",
+        target_symbols=["NEWCO"],
+    )
+    with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
+        service.resolve_strategy_symbols(aligned)
+        service.resolve_strategy_symbols(qqq_stocks)
+        service.resolve_strategy_symbols(unknown)
+
+    assert caplog.records == [], f"unexpected warnings: {[r.message for r in caplog.records]}"
+
+
 def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
     """Issue #523 — empty target_symbols falls through to the asset-class default
     universe (capped at 5; #525 tightens this)."""

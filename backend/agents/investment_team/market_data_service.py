@@ -32,6 +32,7 @@ from .symbols import (
     FUTURES_SYMBOLS,
     STOCK_SYMBOLS,
     YAHOO_CRYPTO_TICKERS,
+    classify_symbol,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -251,10 +252,36 @@ class MarketDataService:
         asset-class default universe is returned, capped at 5 symbols to
         bound fetch cost — that magic literal is replaced by
         ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`` in #525.
+
+        When the declared ``asset_class`` doesn't match the natural class
+        of a target symbol (e.g. ``asset_class="stocks"`` +
+        ``target_symbols=["BTC"]``), a warning is logged. The fetch still
+        proceeds — operators see the warning instead of a silent empty
+        result. Ambiguous symbols (cross-asset ETFs like GLD, QQQ) are
+        not flagged.
         """
         if strategy.target_symbols:
+            self._warn_on_asset_class_mismatch(strategy)
             return list(strategy.target_symbols)
         return self.get_symbols_for_strategy(strategy)[:5]
+
+    def _warn_on_asset_class_mismatch(self, strategy: StrategySpec) -> None:
+        declared = normalize_asset_class(strategy.asset_class)
+        mismatches: list[tuple[str, str]] = []
+        for sym in strategy.target_symbols:
+            natural = classify_symbol(sym)
+            if natural is not None and natural != declared:
+                mismatches.append((sym, natural))
+        if mismatches:
+            logger.warning(
+                "Strategy %s: target_symbols %s do not match asset_class=%s — "
+                "the %s provider chain will be used and may return no data. "
+                "Update target_symbols or asset_class to align.",
+                strategy.strategy_id,
+                mismatches,
+                declared,
+                declared,
+            )
 
     def fetch_multi_symbol(
         self, symbols: List[str], asset_class: str, days: int = 365
