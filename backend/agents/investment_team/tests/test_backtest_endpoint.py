@@ -84,6 +84,13 @@ class _FakeMarketDataService:
     def get_symbols_for_strategy(self, strategy: StrategySpec) -> List[str]:
         return list(self._market_data.keys())
 
+    def resolve_strategy_symbols(self, strategy: StrategySpec) -> List[str]:
+        # Issue #523 — mirror the real ``MarketDataService.resolve_strategy_symbols``
+        # so endpoint tests honour ``spec.target_symbols`` when set.
+        if strategy.target_symbols:
+            return list(strategy.target_symbols)
+        return self.get_symbols_for_strategy(strategy)[:5]
+
     def fetch_multi_symbol_range(
         self, symbols: List[str], asset_class: str, start: str, end: str
     ) -> Dict[str, List[OHLCVBar]]:
