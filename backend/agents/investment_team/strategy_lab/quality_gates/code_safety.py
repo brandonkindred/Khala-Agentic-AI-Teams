@@ -285,26 +285,32 @@ class CodeSafetyChecker:
             )
 
         # 8. Order-flow shape (#547): every viable strategy must call
-        #    ``ctx.submit_order(...)`` from inside one of the engine-callable
-        #    hook methods (``on_bar``, ``on_start``, ``on_fill``, ``on_end``),
-        #    and the reachable calls must form a real entry+exit pair —
-        #    either two calls with distinct ``side`` values, or a single
-        #    call with a non-None ``attached_stop_loss`` /
-        #    ``attached_take_profit`` (bracket / OCO support, #389).
+        #    ``ctx.submit_order(...)`` from inside ``on_bar`` (directly or
+        #    via a helper invoked from it), and the reachable calls must
+        #    form a real entry+exit pair — either two calls with distinct
+        #    ``side`` values, or a single call with a non-None
+        #    ``attached_stop_loss`` / ``attached_take_profit`` (bracket /
+        #    OCO support, #389).
         #
-        #    * Engine hooks accept only their second positional parameter
-        #      as the context receiver (``def on_bar(self, ctx, bar):``
+        #    * The trading service only processes the ``HarnessResponse``
+        #      from ``send_bar``; ``send_start`` / ``send_fill`` /
+        #      ``send_end`` responses are discarded today, so any
+        #      ``submit_order`` made from those hooks is dropped before
+        #      backtesting. The gate counts only ``on_bar``-reachable
+        #      calls to match the engine's real behaviour.
+        #    * ``on_bar`` accepts only its second positional parameter as
+        #      the context receiver (``def on_bar(self, ctx, bar):``
         #      looks for ``ctx.submit_order``; a swapped
         #      ``def on_bar(self, bar, ctx):`` accepts only ``bar`` and
-        #      its ``submit_order`` would crash at runtime — flagged).
-        #    * Helpers reached via ``self.<method>(...)`` from a hook
+        #      ``ctx.submit_order`` would crash at runtime — flagged).
+        #    * Helpers reached via ``self.<method>(...)`` from ``on_bar``
         #      relax the receiver check to any non-``self`` positional
         #      parameter, since the call site we can't statically resolve
         #      may pass the context through.
         #    * Two ``side="LONG"`` calls do not form an entry+exit pair;
         #      a real exit requires the opposite side or a bracket leg.
         if len(strategy_classes) == 1:
-            hook_calls, has_entry_capable_call = _collect_hook_submit_calls(strategy_classes[0])
+            hook_calls = _collect_hook_submit_calls(strategy_classes[0])
             if len(hook_calls) == 0:
                 results.append(
                     QualityGateResult(
@@ -312,28 +318,12 @@ class CodeSafetyChecker:
                         passed=False,
                         severity="critical",
                         details=(
-                            "No ctx.submit_order call found inside on_bar / on_start / "
-                            "on_fill / on_end — strategy has no entry path reachable "
-                            "from the engine and would emit zero trades."
-                        ),
-                    )
-                )
-            elif not has_entry_capable_call:
-                # All reachable submit_order calls live in on_fill / on_end,
-                # which the runtime only invokes AFTER a prior fill / at
-                # stream end. With no order originating from on_bar /
-                # on_start, the strategy never seeds a position and emits
-                # zero trades.
-                results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        passed=False,
-                        severity="critical",
-                        details=(
-                            "ctx.submit_order calls were found only in on_fill / on_end. "
-                            "Those hooks run after a prior fill / after the data stream "
-                            "and cannot bootstrap a position; the strategy needs at "
-                            "least one submit_order in on_bar or on_start."
+                            "No ctx.submit_order call reachable from on_bar — strategy "
+                            "has no entry path that the engine will process. The "
+                            "trading service only consumes orders submitted from "
+                            "on_bar (responses from on_start / on_fill / on_end are "
+                            "currently dropped), so any submission outside on_bar is "
+                            "silently ignored."
                         ),
                     )
                 )
@@ -384,20 +374,18 @@ def _get_call_name(node: ast.Call) -> str:
     return ""
 
 
-# Engine-callable hook method names (``contract.Strategy``). The runtime
-# invokes each positionally, so the parameter NAME the strategy chooses
-# for the context object is the strategy's choice — we read it off the
-# signature rather than hard-coding ``ctx``.
-_ENGINE_HOOK_METHODS = frozenset({"on_bar", "on_start", "on_fill", "on_end"})
-
-# Hooks that can BOOTSTRAP a position. ``on_bar`` runs on every finalised
-# bar; ``on_start`` runs once before the first bar. ``on_fill`` only runs
-# AFTER a prior order fill (so it can't seed the first order) and
-# ``on_end`` runs after the data stream — neither can initiate trading
-# on its own. The order-flow gate requires at least one ``submit_order``
-# reachable from an entry-capable hook to avoid the false-positive of a
-# strategy whose only orders sit in ``on_fill`` / ``on_end``.
-_ENTRY_CAPABLE_HOOK_METHODS = frozenset({"on_bar", "on_start"})
+# Hook methods whose ``submit_order`` calls actually reach the engine.
+#
+# The streaming harness sends every hook (``on_start`` / ``on_bar`` /
+# ``on_fill`` / ``on_end``) to the strategy subprocess, but the trading
+# service ONLY processes the ``HarnessResponse`` returned from ``send_bar``
+# into pending orders (see ``trading_service/service.py``). The responses
+# from ``send_start`` (line 483-489), ``send_fill`` (line 637-641), and
+# ``send_end`` (line 1114) are discarded, so any ``submit_order`` made
+# from those hooks is dropped before backtesting. The order-flow gate
+# only credits ``on_bar`` calls — matching the engine's real behaviour
+# avoids passing strategies that would silently emit zero trades.
+_PROCESSED_HOOK_METHODS = frozenset({"on_bar"})
 
 
 def _iter_method_body_nodes(method: ast.FunctionDef | ast.AsyncFunctionDef):
@@ -422,27 +410,27 @@ def _iter_method_body_nodes(method: ast.FunctionDef | ast.AsyncFunctionDef):
             stack.append(child)
 
 
-def _collect_hook_submit_calls(cls: ast.ClassDef) -> tuple[List[ast.Call], bool]:
-    """Return reachable ``submit_order(...)`` calls and an entry-reachability flag.
+def _collect_hook_submit_calls(cls: ast.ClassDef) -> List[ast.Call]:
+    """Return every ``submit_order(...)`` call reachable from ``on_bar``.
 
-    Returns a tuple ``(calls, has_entry_capable_call)``:
+    ``on_bar`` is the only engine hook whose ``HarnessResponse`` is
+    actually processed into pending orders by the trading service
+    (``send_start`` / ``send_fill`` / ``send_end`` are called without
+    consuming their responses, so any ``submit_order`` made from those
+    hooks is silently dropped). Limiting the gate's roots to ``on_bar``
+    matches the engine's real behaviour.
 
-    * ``calls`` is every ``submit_order`` call statically reachable from
-      any engine hook (or from a helper invoked transitively via
-      ``self.<method>(...)``).
-    * ``has_entry_capable_call`` is True iff at least one call originates
-      from a hook that can initiate trading — ``on_bar`` or ``on_start``
-      directly, or a helper reachable from one of those hooks.
-      ``on_fill`` and ``on_end`` cannot bootstrap a position on their
-      own; a strategy whose only orders sit in those hooks will never
-      submit anything in practice.
+    The walker also follows ``self.<method>(...)`` edges into other
+    methods of the same class so a strategy that factors order placement
+    into helpers (e.g. ``self._enter(ctx, bar)`` invoked from ``on_bar``)
+    still satisfies the gate.
 
-    Walks the AST but stops at nested function/class boundaries — an
-    uninvoked local ``def`` inside ``on_bar`` containing
-    ``ctx.submit_order(...)`` does NOT satisfy the gate, because Python
-    only creates the function object and never executes its body.
+    Walks each method's body but stops at nested ``def`` / ``class`` /
+    ``lambda`` boundaries — an uninvoked local helper inside ``on_bar``
+    that contains ``ctx.submit_order(...)`` is not reachable because
+    Python only creates the function object and never executes its body.
 
-    Engine hooks are dispatched positionally; only the second positional
+    ``on_bar`` is dispatched positionally, so only its second positional
     parameter is the StrategyContext. Helpers reached via
     ``self.<method>(...)`` relax to any non-``self`` positional parameter
     since the call site can pass the context through any of them.
@@ -454,27 +442,20 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> tuple[List[ast.Call], bool]
 
     calls: List[ast.Call] = []
     visited: set[str] = set()
-    # Worklist entries: (method, is_hook, from_entry_capable_root). is_hook
-    # restricts the accepted receiver to the second positional parameter
-    # only; from_entry_capable_root tracks whether this method is reached
-    # transitively from on_bar / on_start so we can flag the entry path.
-    has_entry_capable_call = False
-    worklist: List[tuple[ast.FunctionDef | ast.AsyncFunctionDef, bool, bool]] = []
+    # Worklist entries: (method, is_hook). is_hook=True restricts the
+    # accepted receiver to the second positional parameter; helpers
+    # (is_hook=False) accept any non-self positional parameter since the
+    # call site may pass the context through any of them.
+    worklist: List[tuple[ast.FunctionDef | ast.AsyncFunctionDef, bool]] = []
     for name, m in methods_by_name.items():
-        if name in _ENGINE_HOOK_METHODS:
-            worklist.append((m, True, name in _ENTRY_CAPABLE_HOOK_METHODS))
+        if name in _PROCESSED_HOOK_METHODS:
+            worklist.append((m, True))
 
     while worklist:
-        method, is_hook, from_entry = worklist.pop()
-        # Multiple roots may reach the same helper. Visit each
-        # (method, from_entry) combination at most once so a helper
-        # reached from both on_bar and on_fill still propagates the
-        # entry-capable flag rather than getting masked by the first
-        # non-entry visit.
-        visit_key = f"{method.name}#{1 if from_entry else 0}"
-        if visit_key in visited:
+        method, is_hook = worklist.pop()
+        if method.name in visited:
             continue
-        visited.add(visit_key)
+        visited.add(method.name)
 
         if is_hook:
             # Engine hook: only the second positional is the context.
@@ -499,8 +480,6 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> tuple[List[ast.Call], bool]
                 and sub.func.value.id in receiver_names
             ):
                 calls.append(sub)
-                if from_entry:
-                    has_entry_capable_call = True
                 continue
             # Queue ``self.<helper>(...)`` for traversal as a helper.
             if (
@@ -509,12 +488,10 @@ def _collect_hook_submit_calls(cls: ast.ClassDef) -> tuple[List[ast.Call], bool]
                 and sub.func.value.id == "self"
             ):
                 helper = methods_by_name.get(sub.func.attr)
-                if helper is not None:
-                    next_key = f"{helper.name}#{1 if from_entry else 0}"
-                    if next_key not in visited:
-                        worklist.append((helper, False, from_entry))
+                if helper is not None and helper.name not in visited:
+                    worklist.append((helper, False))
 
-    return calls, has_entry_capable_call
+    return calls
 
 
 # Recognised ``OrderSide`` literal values. The runtime contract

@@ -404,30 +404,31 @@ def test_submit_order_in_unused_helper_does_not_satisfy_order_flow_gate() -> Non
     assert any("no entry path" in c for c in criticals), criticals
 
 
-def test_submit_order_in_on_start_satisfies_entry_path() -> None:
-    """The engine calls ``on_start`` / ``on_fill`` / ``on_end`` too, so a
-    strategy that places orders from ``on_start`` (e.g. opening shot) and
-    ``on_fill`` (e.g. exit-on-fill bracket) is a valid two-call shape."""
+def test_submit_order_in_on_start_does_not_satisfy_gate() -> None:
+    """``send_start`` is invoked without processing its ``HarnessResponse``
+    in the current trading service, so any ``submit_order`` made from
+    ``on_start`` is dropped before backtesting. The gate must not count
+    those calls — the strategy needs at least one entry call in ``on_bar``.
+    """
     code = textwrap.dedent("""
         from contract import Strategy
 
         class S(Strategy):
             def on_start(self, ctx):
                 ctx.submit_order(symbol='X', qty=1, side='LONG')
-            def on_fill(self, ctx, fill):
                 ctx.submit_order(symbol='X', qty=1, side='SHORT')
             def on_bar(self, ctx, bar):
                 pass
     """)
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
-    assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+    assert any("no entry path" in c for c in criticals), criticals
 
 
 def test_submit_order_only_in_on_fill_is_critical_no_entry() -> None:
-    """``on_fill`` runs only AFTER a prior fill, so it can't bootstrap a
-    position. A strategy whose only orders sit in ``on_fill`` will never
-    emit anything in practice; the gate must reject it."""
+    """``send_fill`` responses are dropped by the trading service today, so
+    orders in ``on_fill`` never reach the engine. A strategy whose only
+    submissions sit there must be rejected."""
     code = textwrap.dedent("""
         from contract import Strategy
 
@@ -440,12 +441,13 @@ def test_submit_order_only_in_on_fill_is_critical_no_entry() -> None:
     """)
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
-    assert any("on_bar or on_start" in c for c in criticals), criticals
+    assert any("no entry path" in c for c in criticals), criticals
 
 
 def test_submit_order_only_in_on_end_is_critical_no_entry() -> None:
-    """``on_end`` runs after the data stream ends and cannot initiate
-    trading. A strategy with all orders in ``on_end`` is a no-op."""
+    """``send_end`` responses are dropped by the trading service today,
+    matching ``send_start`` / ``send_fill``. Orders in ``on_end`` never
+    reach the engine."""
     code = textwrap.dedent("""
         from contract import Strategy
 
@@ -458,7 +460,25 @@ def test_submit_order_only_in_on_end_is_critical_no_entry() -> None:
     """)
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
-    assert any("on_bar or on_start" in c for c in criticals), criticals
+    assert any("no entry path" in c for c in criticals), criticals
+
+
+def test_on_bar_entry_with_on_fill_exit_is_critical_no_exit() -> None:
+    """A common temptation is entry in ``on_bar`` + exit-on-fill in
+    ``on_fill``. The on_fill response is dropped, so only the entry
+    reaches the engine — one-sided, no real exit. Reject."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+            def on_fill(self, ctx, fill):
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("no exit path" in c for c in criticals), criticals
 
 
 def test_submit_order_in_uninvoked_nested_def_does_not_satisfy_gate() -> None:
