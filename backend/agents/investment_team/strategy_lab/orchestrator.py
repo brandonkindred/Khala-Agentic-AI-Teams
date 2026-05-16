@@ -1237,7 +1237,12 @@ class StrategyLabOrchestrator:
                     emit("analyzing", {"sub_phase": sub})
 
                 narrative = self.analysis_agent.run(
-                    spec, metrics, trades, rationale, on_sub_phase=_on_analysis_sub
+                    spec,
+                    metrics,
+                    trades,
+                    rationale,
+                    on_sub_phase=_on_analysis_sub,
+                    is_winning=is_winning,
                 )
                 emit("analyzing", {"sub_phase": "completed", "is_winning": is_winning})
             except Exception:

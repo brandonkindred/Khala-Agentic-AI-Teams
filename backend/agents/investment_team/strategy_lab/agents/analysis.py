@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from strands import Agent
 
@@ -60,15 +60,23 @@ class AnalysisAgent:
         trades: List[TradeRecord],
         rationale: str,
         on_sub_phase: Any = None,
+        is_winning: Optional[bool] = None,
     ) -> str:
         """Produce a polished analysis narrative via draft + self-review.
 
         Args:
             on_sub_phase: Optional callback ``(sub_phase: str) -> None`` for progress.
+            is_winning: Authoritative verdict from the orchestrator. When None,
+                falls back to the legacy metric-only heuristic; callers that
+                resolve ``is_winning`` against the alignment loop / acceptance
+                gate / fallback anomalies (#529) must pass it explicitly so the
+                narrative template and ``outcome_label`` match the persisted
+                ``StrategyLabRecord.is_winning``.
 
         Returns the final narrative string.
         """
-        is_winning = metrics.annualized_return_pct > 8.0
+        if is_winning is None:
+            is_winning = metrics.annualized_return_pct > 8.0
         trades_summary = _format_simulated_trades_summary(trades)
 
         # Phase 1: Draft
