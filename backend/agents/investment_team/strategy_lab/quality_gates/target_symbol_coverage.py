@@ -54,9 +54,10 @@ _KNOWN_TICKERS: frozenset[str] = frozenset(
     )
 )
 
-# Uppercase tokens 2-5 chars; conservative enough to skip common English words
-# while still catching tickers embedded in prose like "buy QQQ when ...".
-_TICKER_RE = re.compile(r"\b([A-Z]{2,5})\b")
+# Uppercase tokens 2-6 chars; conservative enough to skip common English words
+# while still catching tickers embedded in prose like "buy QQQ when ..." and
+# 6-char forex bare names like EURUSD/USDJPY in FOREX_SYMBOLS_BARE.
+_TICKER_RE = re.compile(r"\b([A-Z]{2,6})\b")
 
 
 class TargetSymbolCoverageGate:

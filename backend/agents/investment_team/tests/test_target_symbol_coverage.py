@@ -119,6 +119,19 @@ def test_check_fetch_warns_on_crypto_and_commodity_tickers_too() -> None:
         assert ticker in warnings[0].details
 
 
+def test_check_fetch_warns_on_forex_bare_names() -> None:
+    """6-char forex bare names (EURUSD/USDJPY) must still trigger the warning."""
+    gate = TargetSymbolCoverageGate()
+    spec = _spec(hypothesis="Long EURUSD when USDJPY breaks support.", target_symbols=[])
+
+    results = gate.check_fetch(spec, requested_symbols=["AAPL"], fetched_symbols=["AAPL"])
+
+    warnings = _warnings(results)
+    assert len(warnings) == 1
+    assert "EURUSD" in warnings[0].details
+    assert "USDJPY" in warnings[0].details
+
+
 def test_check_fetch_does_not_warn_when_target_symbols_set_even_if_hypothesis_mentions_ticker() -> (
     None
 ):
