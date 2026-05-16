@@ -1185,4 +1185,37 @@ describe('JobsDashboardComponent', () => {
       expect(jobActionsSpy.delete).not.toHaveBeenCalled();
     });
   });
+
+  describe('live-refresh indicator', () => {
+    it('renders a pulsing live-dot next to the timestamp once lastUpdated is set', () => {
+      component.lastUpdated = new Date();
+      fixture.detectChanges();
+
+      const host = fixture.nativeElement as HTMLElement;
+      const lastUpdated = host.querySelector('.last-updated');
+      expect(lastUpdated).not.toBeNull();
+      // ng-reflect-message is set by MatTooltip in dev builds. Use a substring
+      // match — Angular's reflect-attribute serialization can drop trailing
+      // characters across runtimes, so anchoring on the stable prefix is more
+      // robust than a full string compare.
+      expect(lastUpdated?.getAttribute('ng-reflect-message') ?? '').toContain('Auto-refreshes every 20 second');
+
+      const dot = host.querySelector('.last-updated .live-dot');
+      expect(dot).not.toBeNull();
+      expect(dot?.classList.contains('is-paused')).toBe(false);
+      expect(dot?.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    it('marks the live-dot as paused when the component is in an error state', () => {
+      component.lastUpdated = new Date();
+      component.error = 'boom';
+      fixture.detectChanges();
+
+      const host = fixture.nativeElement as HTMLElement;
+      const dot = host.querySelector('.last-updated .live-dot');
+      expect(dot).not.toBeNull();
+      expect(dot?.classList.contains('is-paused')).toBe(true);
+      expect(component.isPollingActive).toBe(false);
+    });
+  });
 });

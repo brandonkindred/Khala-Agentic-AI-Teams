@@ -189,13 +189,33 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   /** Per-job progress history used by isStuck(). Key = `${source}::${jobId}`. */
   private progressHistory = new Map<string, ProgressSample>();
 
+  /** Tracks whether the browser tab is hidden so the live-refresh dot can
+   *  pause its pulse — polling itself still fires, but the visual signal
+   *  reflects that the user isn't actively watching. */
+  private isTabHidden = false;
+  private readonly onVisibilityChange = (): void => {
+    this.isTabHidden = typeof document !== 'undefined' && document.hidden;
+  };
+
+  /** Drives the live-refresh dot: pulses when true, static when polling
+   *  is effectively suspended (error state or tab hidden). */
+  get isPollingActive(): boolean {
+    return !this.error && !this.isTabHidden;
+  }
+
   ngOnInit(): void {
     this.loadFilters();
     this.startPolling();
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.onVisibilityChange);
+    }
   }
 
   ngOnDestroy(): void {
     this.pollSub?.unsubscribe();
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    }
   }
 
   private startPolling(): void {
