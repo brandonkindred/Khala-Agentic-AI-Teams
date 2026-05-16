@@ -60,6 +60,11 @@ meaningfully diverges from the specification.
    `copy`, `statistics`, `operator`. Do NOT import pandas, numpy, or any
    filesystem / network module — the event-driven contract delivers bars
    one at a time and has no use for a DataFrame.
+   When the spec has non-empty `target_symbols`, your rewrite MUST keep
+   the class-level `UNIVERSE = frozenset({...})` constant (matching
+   `target_symbols`) and the `if bar.symbol not in self.UNIVERSE: return`
+   guard at the top of `on_bar`. Stripping the guard re-introduces the
+   "wrong-symbol on the ledger" failure that this audit is meant to fix.
 5. **PREDICT** — decide whether your fixed code will, when re-executed,
    produce trades that meet every spec rule. Only set
    `predicted_aligned_after_fix` to `true` when you are highly confident.

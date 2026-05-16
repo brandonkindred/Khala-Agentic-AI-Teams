@@ -493,7 +493,7 @@ class StrategyLabOrchestrator:
             #       pre-synthesis and is immutable for this cycle, see
             #       #547 items 1 & 2).
             emit("coding", {"sub_phase": "started", "refinement_round": round_num})
-            code_gates = self.code_safety_checker.check(code)
+            code_gates = self.code_safety_checker.check(code, spec)
             round_gate_results.extend(code_gates)
             for g in round_gate_results:
                 g.refinement_round = round_num
@@ -925,7 +925,7 @@ class StrategyLabOrchestrator:
                 change_summary = report.changes_made or "alignment fix"
 
                 # ── Re-validate code safety on the proposed code ──────
-                safety_gates = self.code_safety_checker.check(proposed_code)
+                safety_gates = self.code_safety_checker.check(proposed_code, proposed_spec)
                 for g in safety_gates:
                     g.refinement_round = align_round
                     g.gate_name = f"alignment_{g.gate_name}"
@@ -1390,7 +1390,7 @@ class StrategyLabOrchestrator:
             return _ZeroTradeRepairOutcome(committed=False, failure_reason="no_proposed_code")
 
         # ── Code-safety gate on the proposed code ────────────────────
-        safety_gates = self.code_safety_checker.check(report.proposed_code)
+        safety_gates = self.code_safety_checker.check(report.proposed_code, spec)
         for g in safety_gates:
             g.refinement_round = round_num
             g.gate_name = f"zero_trade_repair_{g.gate_name}"

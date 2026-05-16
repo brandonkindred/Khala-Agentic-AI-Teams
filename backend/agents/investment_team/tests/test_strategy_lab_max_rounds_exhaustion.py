@@ -107,7 +107,7 @@ def test_validation_phase_exhaustion_sets_max_rounds_status(
 
     monkeypatch.setattr(orch.refinement_agent, "run", _stub_refine)
 
-    def _always_critical(_code: str):
+    def _always_critical(_code: str, _spec=None):
         return [
             QualityGateResult(
                 gate_name="code_safety",
