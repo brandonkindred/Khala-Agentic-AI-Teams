@@ -796,7 +796,7 @@ class StrategyLabRecord(BaseModel):
     lab_record_id: str
     strategy: StrategySpec
     backtest: BacktestRecord
-    is_winning: bool  # annualized_return_pct > 8.0
+    is_winning: bool  # walk-forward acceptance gate (or fallback) AND alignment veto (#247, #529)
     strategy_rationale: str  # why the agent chose this strategy
     analysis_narrative: str  # LLM post-backtest analysis
     created_at: str

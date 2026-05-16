@@ -1293,8 +1293,13 @@ class StrategyLabOrchestrator:
             # delimiter (not ``"; "``, which ``summarize_acceptance_reason``
             # uses internally between failing gates) so downstream parsers
             # can disambiguate the alignment boundary from gate boundaries.
-            if metrics.acceptance_reason and not upstream_admitted:
-                combined = f"{metrics.acceptance_reason} | {reason_suffix}"
+            # Use the stripped form so a whitespace-only upstream reason
+            # (None, "", "   ", "\n") collapses to the alignment suffix
+            # alone — never produces ``"   | alignment_failed: ..."`` with
+            # an empty left side.
+            prior_reason = (metrics.acceptance_reason or "").strip()
+            if prior_reason and not upstream_admitted:
+                combined = f"{prior_reason} | {reason_suffix}"
             else:
                 combined = reason_suffix
             metrics = metrics.model_copy(update={"acceptance_reason": combined})
@@ -1942,6 +1947,20 @@ class StrategyLabOrchestrator:
         """
         now_iso = datetime.now(timezone.utc).isoformat()
 
+        # Mirror the short-circuit cause onto ``acceptance_reason`` so the
+        # persisted record self-documents — consistent with the Gap 4/8/7/9
+        # audit-trail messages set on the main publication path (#529).
+        # ``short_circuit_status`` carries a ``"failed: <cause>"`` prefix at
+        # every current call site; strip it so the resulting field reads
+        # ``"publication_disabled: <cause>"``.
+        short_circuit_metrics = compute_metrics(
+            [], config.initial_capital, config.start_date, config.end_date
+        )
+        status_suffix = short_circuit_status.removeprefix("failed: ") or short_circuit_status
+        short_circuit_metrics = short_circuit_metrics.model_copy(
+            update={"acceptance_reason": f"publication_disabled: {status_suffix}"}
+        )
+
         backtest_record = BacktestRecord(
             backtest_id=f"bt-{uuid.uuid4().hex[:8]}",
             strategy_id=spec.strategy_id,
@@ -1951,7 +1970,7 @@ class StrategyLabOrchestrator:
             submitted_at=now_iso,
             completed_at=now_iso,
             status=short_circuit_status,
-            result=compute_metrics([], config.initial_capital, config.start_date, config.end_date),
+            result=short_circuit_metrics,
             trades=[],
         )
 
