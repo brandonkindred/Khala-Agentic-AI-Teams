@@ -25,6 +25,7 @@ formatters is caught by this test.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -108,7 +109,9 @@ def _render_alignment_system() -> str:
     return (_PROMPT_DIR / "alignment_system.md").read_text(encoding="utf-8")
 
 
-_RENDERERS: dict[str, tuple[str, callable]] = {
+_PromptRenderer = Callable[[], str]
+
+_RENDERERS: dict[str, tuple[str, _PromptRenderer]] = {
     "prompt_analysis_win.txt": ("analysis_win", _render_win),
     "prompt_analysis_lose.txt": ("analysis_lose", _render_lose),
     "prompt_alignment_system.txt": ("alignment_system", _render_alignment_system),
@@ -117,11 +120,10 @@ _RENDERERS: dict[str, tuple[str, callable]] = {
 
 @pytest.mark.parametrize(
     "golden_filename,label,renderer",
-    [(f, label, fn) for f, (label, fn) in _RENDERERS.items()],
-    ids=[label for _, (label, _) in _RENDERERS.items()],
+    [pytest.param(filename, label, fn, id=label) for filename, (label, fn) in _RENDERERS.items()],
 )
 def test_rendered_prompt_matches_golden(
-    golden_filename: str, label: str, renderer: callable
+    golden_filename: str, label: str, renderer: _PromptRenderer
 ) -> None:
     """Rendered prompt MUST match the on-disk golden byte-for-byte.
 
@@ -139,11 +141,13 @@ def test_rendered_prompt_matches_golden(
 @pytest.mark.parametrize(
     "label,renderer",
     [
-        ("analysis_win", _render_win),
-        ("analysis_lose", _render_lose),
+        pytest.param("analysis_win", _render_win, id="analysis_win"),
+        pytest.param("analysis_lose", _render_lose, id="analysis_lose"),
     ],
 )
-def test_analysis_prompts_have_intended_not_enforced_label(label: str, renderer: callable) -> None:
+def test_analysis_prompts_have_intended_not_enforced_label(
+    label: str, renderer: _PromptRenderer
+) -> None:
     """Issue #528: prose rules must be labelled as intent, not enforced behaviour."""
     rendered = renderer()
     assert "may not all be machine-enforced" in rendered, (
@@ -176,12 +180,14 @@ def test_alignment_prompt_splits_enforced_and_aspirational() -> None:
 @pytest.mark.parametrize(
     "label,renderer",
     [
-        ("analysis_win", _render_win),
-        ("analysis_lose", _render_lose),
-        ("alignment_system", _render_alignment_system),
+        pytest.param("analysis_win", _render_win, id="analysis_win"),
+        pytest.param("analysis_lose", _render_lose, id="analysis_lose"),
+        pytest.param("alignment_system", _render_alignment_system, id="alignment_system"),
     ],
 )
-def test_prompts_do_not_use_mandatory_or_hard_rule_phrasing(label: str, renderer: callable) -> None:
+def test_prompts_do_not_use_mandatory_or_hard_rule_phrasing(
+    label: str, renderer: _PromptRenderer
+) -> None:
     """Issue #528: drop 'mandatory' / 'hard rule' phrasing across all three prompts."""
     rendered = renderer().lower()
     forbidden = ["mandatory", "hard rule", "hard-enforced"]
@@ -190,6 +196,22 @@ def test_prompts_do_not_use_mandatory_or_hard_rule_phrasing(label: str, renderer
         f"{label} prompt still contains forbidden phrasing {offenders} "
         "(issue #528 — prose rules are not engine-enforced)."
     )
+
+
+def test_alignment_prompt_keeps_severity_and_rule_type_enums_intact() -> None:
+    """Issue #528 stops short of touching the alignment JSON schema. The
+    severity/rule_type enums must stay exactly as the orchestrator's parsers
+    expect, otherwise alignment-loop tests start failing. Guard the literal
+    enum strings inside the JSON example block.
+    """
+    rendered = _render_alignment_system()
+    assert '"severity": "info" | "warning" | "critical"' in rendered, (
+        "alignment_system.md must keep the severity enum as info|warning|critical."
+    )
+    assert (
+        '"rule_type": "entry_rules" | "exit_rules" | "sizing_rules" | '
+        '"risk_limits" | "universe" | "direction"' in rendered
+    ), "alignment_system.md must keep the rule_type enum unchanged."
 
 
 def test_alignment_prompt_drops_all_count_as_misalignment() -> None:

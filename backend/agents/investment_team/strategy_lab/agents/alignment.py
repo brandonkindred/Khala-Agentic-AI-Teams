@@ -131,6 +131,10 @@ class TradeAlignmentAgent:
         loop on a malformed LLM response (the fallback rationale records the
         parse error).
         """
+        # Loaded raw on purpose — alignment_system.md contains literal `{...}`
+        # in the `UNIVERSE = frozenset({...})` example, so it must not pass
+        # through `str.format`. The user template (`_ALIGNMENT_USER_TEMPLATE`)
+        # is what carries the placeholders that get formatted below.
         system_prompt = (_PROMPT_DIR / "alignment_system.md").read_text(encoding="utf-8")
 
         prior_text = (
