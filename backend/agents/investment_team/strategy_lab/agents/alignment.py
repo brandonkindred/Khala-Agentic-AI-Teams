@@ -58,6 +58,13 @@ class TradeAlignmentReport(BaseModel):
     changes_made: str = ""
 
 
+class AlignmentAuditError(Exception):
+    """Raised by :class:`TradeAlignmentAgent` when the LLM call or its
+    response parsing fails. The orchestrator catches this in
+    ``_run_alignment_audit`` so the audit can be retried, and falls closed
+    (``aligned=False``) once retries are exhausted (issue #531)."""
+
+
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
@@ -126,10 +133,10 @@ class TradeAlignmentAgent:
     ) -> TradeAlignmentReport:
         """Run one alignment audit round.
 
-        Returns a :class:`TradeAlignmentReport`. On parser failure the report
-        falls back to ``aligned=True`` so the orchestrator does not infinite-
-        loop on a malformed LLM response (the fallback rationale records the
-        parse error).
+        Returns a :class:`TradeAlignmentReport`. On LLM transport failure or
+        unparseable JSON, raises :class:`AlignmentAuditError`; the
+        orchestrator's ``_run_alignment_audit`` wrapper handles retries and
+        the fail-closed default (issue #531).
         """
         # Loaded raw on purpose — alignment_system.md contains literal `{...}`
         # in the `UNIVERSE = frozenset({...})` example, so it must not pass
@@ -175,14 +182,8 @@ class TradeAlignmentAgent:
             result = agent(user_prompt)
             parsed = _extract_json(str(result))
         except Exception as exc:
-            logger.exception("Alignment agent failed to produce parseable JSON")
-            return TradeAlignmentReport(
-                aligned=True,
-                rationale=(
-                    "Alignment audit skipped: LLM response could not be parsed "
-                    f"({exc}). Treating trades as aligned to avoid infinite loop."
-                ),
-            )
+            logger.warning("Alignment agent failed to produce parseable JSON: %s", exc)
+            raise AlignmentAuditError(f"{type(exc).__name__}: {exc}") from exc
 
         return _coerce_report(parsed, fallback_code=code)
 

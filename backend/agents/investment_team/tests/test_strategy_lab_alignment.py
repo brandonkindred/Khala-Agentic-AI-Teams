@@ -21,6 +21,7 @@ from investment_team.models import (
     TradeRecord,
 )
 from investment_team.strategy_lab.agents.alignment import (
+    AlignmentAuditError,
     AlignmentIssue,
     TradeAlignmentReport,
     _coerce_report,
@@ -816,16 +817,27 @@ def test_alignment_loop_breaks_on_unsafe_proposed_code() -> None:
     assert final_trades is original_trades
 
 
-def test_alignment_audit_recovers_from_agent_exception() -> None:
-    """A raised exception inside the agent collapses to ``aligned=True`` so
-    the orchestrator does not stall."""
+def test_alignment_audit_fails_closed_on_unexpected_agent_exception(
+    monkeypatch,
+) -> None:
+    """Issue #531. An unexpected (non-``AlignmentAuditError``) exception
+    inside the agent must NOT silently default ``aligned=True``. The audit
+    fails closed (``aligned=False``, ``proposed_code=None``) so the
+    orchestrator's ``no_proposed_fix`` exit fires and the run is not waved
+    through."""
+    monkeypatch.delenv("STRATEGY_LAB_ALIGNMENT_RETRIES", raising=False)
 
     class _BoomAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
         def run(self, **_kwargs: Any) -> TradeAlignmentReport:
+            self.calls += 1
             raise RuntimeError("LLM transport blew up")
 
     orch = StrategyLabOrchestrator()
-    orch.alignment_agent = _BoomAgent()  # type: ignore[assignment]
+    agent = _BoomAgent()
+    orch.alignment_agent = agent  # type: ignore[assignment]
 
     report = orch._run_alignment_audit(
         spec=_spec(),
@@ -834,8 +846,177 @@ def test_alignment_audit_recovers_from_agent_exception() -> None:
         metrics=_metrics(),
         prior_attempts=[],
     )
-    assert report.aligned is True
-    assert "alignment audit skipped" in report.rationale.lower()
+    assert report.aligned is False
+    assert report.proposed_code is None
+    assert "fail-closed" in report.rationale.lower()
+    assert "RuntimeError" in report.rationale
+    # Non-AlignmentAuditError → surfaced immediately, no retries
+    assert agent.calls == 1
+
+
+def test_alignment_audit_retries_then_succeeds(monkeypatch) -> None:
+    """Issue #531. A transient ``AlignmentAuditError`` (parse / transport
+    failure) is retried; if a later attempt returns a valid report, that
+    report is what the orchestrator sees."""
+    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")
+
+    success_report = TradeAlignmentReport(aligned=True, rationale="parsed on retry")
+
+    class _FlakyAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, **_kwargs: Any) -> TradeAlignmentReport:
+            self.calls += 1
+            if self.calls == 1:
+                raise AlignmentAuditError("ValueError: malformed JSON")
+            return success_report
+
+    orch = StrategyLabOrchestrator()
+    agent = _FlakyAgent()
+    orch.alignment_agent = agent  # type: ignore[assignment]
+
+    report = orch._run_alignment_audit(
+        spec=_spec(),
+        code="code",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        prior_attempts=[],
+    )
+    assert report is success_report
+    assert agent.calls == 2
+
+
+def test_alignment_audit_retries_exhausted_fails_closed(monkeypatch) -> None:
+    """Issue #531. When every retry raises ``AlignmentAuditError``, the
+    audit returns ``aligned=False`` with the underlying error recorded in
+    the rationale (audit trail)."""
+    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")
+
+    class _AlwaysBoomAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, **_kwargs: Any) -> TradeAlignmentReport:
+            self.calls += 1
+            raise AlignmentAuditError("ValueError: malformed JSON")
+
+    orch = StrategyLabOrchestrator()
+    agent = _AlwaysBoomAgent()
+    orch.alignment_agent = agent  # type: ignore[assignment]
+
+    report = orch._run_alignment_audit(
+        spec=_spec(),
+        code="code",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        prior_attempts=[],
+    )
+    assert report.aligned is False
+    assert report.proposed_code is None
+    assert "fail-closed" in report.rationale.lower()
+    assert "AlignmentAuditError" in report.rationale
+    assert "malformed JSON" in report.rationale
+    # default(2) retries → 3 total attempts
+    assert agent.calls == 3
+
+
+def test_alignment_audit_respects_zero_retry_env(monkeypatch) -> None:
+    """Issue #531. ``STRATEGY_LAB_ALIGNMENT_RETRIES=0`` means one attempt
+    total, then immediate fail-closed."""
+    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_RETRIES", "0")
+
+    class _AlwaysBoomAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, **_kwargs: Any) -> TradeAlignmentReport:
+            self.calls += 1
+            raise AlignmentAuditError("ValueError: malformed JSON")
+
+    orch = StrategyLabOrchestrator()
+    agent = _AlwaysBoomAgent()
+    orch.alignment_agent = agent  # type: ignore[assignment]
+
+    report = orch._run_alignment_audit(
+        spec=_spec(),
+        code="code",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        prior_attempts=[],
+    )
+    assert report.aligned is False
+    assert agent.calls == 1
+
+
+def test_alignment_agent_raises_on_unparseable_response(monkeypatch) -> None:
+    """Issue #531. ``TradeAlignmentAgent.run`` raises ``AlignmentAuditError``
+    when the LLM response cannot be parsed — it no longer fails open."""
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+
+    class _StubStrandsAgent:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def __call__(self, _prompt: str) -> str:
+            return "not json at all"
+
+    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(
+        alignment_module,
+        "get_strands_model",
+        lambda _role: None,
+    )
+
+    agent = alignment_module.TradeAlignmentAgent()
+    import pytest
+
+    with pytest.raises(AlignmentAuditError) as exc_info:
+        agent.run(
+            spec=_spec(),
+            code="code-v0",
+            trades=_trade_records(),
+            metrics=_metrics(),
+            prior_attempts=None,
+        )
+    # The original parse error is chained via ``raise ... from exc``
+    assert exc_info.value.__cause__ is not None
+
+
+def test_alignment_audit_loop_records_failure_when_retries_exhausted(
+    monkeypatch,
+) -> None:
+    """End-to-end through ``_drive_alignment_loop``: a persistent audit
+    failure now exits the loop via ``no_proposed_fix`` (because the fail-
+    closed report has ``proposed_code=None``) rather than aligning. This
+    is the behavior the broader #537 work depends on."""
+    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_RETRIES", "0")
+
+    class _AlwaysBoomAgent:
+        def run(self, **_kwargs: Any) -> TradeAlignmentReport:
+            raise AlignmentAuditError("LLM down")
+
+    orch = StrategyLabOrchestrator()
+    orch.alignment_agent = _AlwaysBoomAgent()  # type: ignore[assignment]
+    orch._test_sandbox = _StubSandbox([])  # type: ignore[attr-defined]
+
+    events, gates, _code, _trades, _metrics_out, _spec_out = _drive_alignment_loop(
+        orch,
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+    )
+
+    align_subs = [d["sub_phase"] for p, d in events if p == "aligning"]
+    assert align_subs == ["evaluating", "not_aligned", "no_proposed_fix"]
+    # The trade_alignment gate records the failure, not a pass.
+    align_gates = [g for g in gates if g.gate_name == "trade_alignment"]
+    assert len(align_gates) == 1
+    assert align_gates[0].passed is False
+    assert align_gates[0].severity == "critical"
 
 
 # ---------------------------------------------------------------------------
