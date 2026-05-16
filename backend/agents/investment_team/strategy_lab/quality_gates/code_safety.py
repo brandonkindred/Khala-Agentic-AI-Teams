@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .models import QualityGateResult
 
@@ -105,7 +105,16 @@ _LOOKAHEAD_PATTERNS = [
 class CodeSafetyChecker:
     """Scan generated strategy code for unsafe patterns before subprocess execution."""
 
-    def check(self, code: str) -> List[QualityGateResult]:
+    def check(self, code: str, spec: Any = None) -> List[QualityGateResult]:
+        """Run all code-safety rules against ``code``.
+
+        ``spec`` is the active ``StrategySpec`` when available; it's used by
+        the symbol-universe rule (#524) to verify that the generated module
+        contains a ``UNIVERSE`` constant and a ``bar.symbol not in
+        self.UNIVERSE: return`` guard whenever ``spec.target_symbols`` is
+        non-empty. Other rules ignore ``spec``; passing ``None`` (the
+        default) keeps the legacy call sites and tests behaving as before.
+        """
         results: List[QualityGateResult] = []
 
         # 1. Parse the code
@@ -351,6 +360,49 @@ class CodeSafetyChecker:
                         details=detail,
                     )
                 )
+
+        # 9. Symbol-universe guard (#524). When ``spec.target_symbols`` is
+        #    non-empty, the generated module MUST declare a class-level
+        #    ``UNIVERSE`` set/frozenset and guard ``on_bar`` with
+        #    ``if bar.symbol not in self.UNIVERSE: return``. The historical
+        #    replay stream interleaves bars across every fetched symbol;
+        #    without this guard a permissive predicate trades whichever
+        #    ticker fires first, not the one named in the hypothesis.
+        if spec is not None and getattr(spec, "target_symbols", None):
+            if len(strategy_classes) == 1:
+                strategy_cls = strategy_classes[0]
+                if not _has_universe_constant(strategy_cls):
+                    results.append(
+                        QualityGateResult(
+                            gate_name=GATE,
+                            passed=False,
+                            severity="critical",
+                            details=(
+                                "Spec has non-empty target_symbols but the strategy "
+                                "class is missing a UNIVERSE = frozenset({...}) (or "
+                                "set/tuple) class-level constant. Without UNIVERSE + "
+                                "an `if bar.symbol not in self.UNIVERSE: return` guard "
+                                "at the top of on_bar, the historical replay stream "
+                                "will feed bars for every fetched symbol to the "
+                                "signal logic and trades will land on the wrong asset."
+                            ),
+                        )
+                    )
+                elif not _has_universe_guard_in_on_bar(strategy_cls):
+                    results.append(
+                        QualityGateResult(
+                            gate_name=GATE,
+                            passed=False,
+                            severity="critical",
+                            details=(
+                                "Strategy defines UNIVERSE but on_bar is missing the "
+                                "`if bar.symbol not in self.UNIVERSE: return` guard. "
+                                "Without the early-exit, the historical replay stream "
+                                "will deliver bars for every fetched symbol and the "
+                                "signal logic will trade tickers outside target_symbols."
+                            ),
+                        )
+                    )
 
         if not results:
             results.append(
@@ -874,3 +926,114 @@ _COMMENTS_AND_STRINGS = re.compile(
 def _strip_comments_and_strings(code: str) -> str:
     """Replace comments and string literals with whitespace-equivalent placeholders."""
     return _COMMENTS_AND_STRINGS.sub(lambda m: " " * len(m.group()), code)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Issue #524 — symbol-universe guard detection
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _has_universe_constant(cls: ast.ClassDef) -> bool:
+    """True iff ``cls`` declares a class-level ``UNIVERSE`` bound to a
+    ``frozenset``/``set``/``tuple`` literal (or a set/list/tuple displayed
+    literal).
+
+    The boilerplate uses ``UNIVERSE = frozenset({"QQQ"})`` but LLMs vary —
+    ``set(...)``, ``{"QQQ"}`` (set literal), ``("QQQ",)``, and ``["QQQ"]``
+    are all accepted because the runtime guard only requires ``in``-able
+    membership. An empty literal is fine — when ``target_symbols`` is
+    non-empty the generation contract should produce a non-empty set, but
+    the gate's job is structural presence, not content equality (#526
+    will gate the runtime trade-vs-target match).
+    """
+    for node in ast.iter_child_nodes(cls):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "UNIVERSE":
+                    return _is_collection_literal_expr(node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == "UNIVERSE":
+                return node.value is not None and _is_collection_literal_expr(node.value)
+    return False
+
+
+_COLLECTION_BUILDERS = frozenset({"frozenset", "set", "tuple", "list"})
+
+
+def _is_collection_literal_expr(value: ast.AST) -> bool:
+    """True iff ``value`` is a set/list/tuple display or a call to one of
+    the recognised collection builders (``frozenset(...)``, ``set(...)``,
+    ``tuple(...)``, ``list(...)``).
+    """
+    if isinstance(value, (ast.Set, ast.List, ast.Tuple)):
+        return True
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+        return value.func.id in _COLLECTION_BUILDERS
+    return False
+
+
+def _has_universe_guard_in_on_bar(cls: ast.ClassDef) -> bool:
+    """True iff ``on_bar`` contains an early-exit of the shape
+    ``if <name>.symbol not in self.UNIVERSE: return`` somewhere in its
+    top-level body.
+
+    Only ``on_bar`` is checked — the engine guards bar dispatch, so the
+    other hooks don't need the same predicate. The receiver-name on the
+    left is intentionally not pinned to ``bar``: the engine dispatches
+    positionally and ``on_bar(self, ctx, my_bar)`` is also valid. We
+    accept ``self.UNIVERSE`` and bare ``UNIVERSE`` on the right.
+    """
+    for node in ast.iter_child_nodes(cls):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != "on_bar":
+            continue
+        for stmt in node.body:
+            if _is_universe_guard_stmt(stmt):
+                return True
+        return False
+    return False
+
+
+def _is_universe_guard_stmt(stmt: ast.AST) -> bool:
+    """True iff ``stmt`` matches ``if <Name>.symbol not in {self.,}UNIVERSE: return``."""
+    if not isinstance(stmt, ast.If):
+        return False
+    test = stmt.test
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return False
+    if not isinstance(test.ops[0], ast.NotIn):
+        return False
+    # Left side: <Name>.symbol
+    left = test.left
+    if not (
+        isinstance(left, ast.Attribute)
+        and left.attr == "symbol"
+        and isinstance(left.value, ast.Name)
+    ):
+        return False
+    # Right side: self.UNIVERSE or UNIVERSE
+    right = test.comparators[0]
+    if isinstance(right, ast.Attribute):
+        if not (
+            right.attr == "UNIVERSE"
+            and isinstance(right.value, ast.Name)
+            and right.value.id == "self"
+        ):
+            return False
+    elif isinstance(right, ast.Name):
+        if right.id != "UNIVERSE":
+            return False
+    else:
+        return False
+    # Body must contain a ``return`` (bare or ``return None``) as the first
+    # statement. ``return None`` is semantically identical to a bare
+    # ``return`` and some lint styles prefer it; both are accepted.
+    if not stmt.body:
+        return False
+    first = stmt.body[0]
+    if not isinstance(first, ast.Return):
+        return False
+    if first.value is None:
+        return True
+    return isinstance(first.value, ast.Constant) and first.value.value is None

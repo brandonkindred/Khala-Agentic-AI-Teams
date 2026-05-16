@@ -68,6 +68,20 @@ prompt — prose strings will be rejected.
   "rationale": "Why this strategy and asset class now, given priors and the diversity hint",
   "strategy_code": "COMPLETE Python module defining exactly one subclass of contract.Strategy (see system prompt for the template)"
 }}
+
+## Symbol universe binding (mandatory)
+
+`target_symbols` and the strategy code's class-level `UNIVERSE` constant
+MUST match exactly. When `target_symbols` is non-empty:
+
+  * `UNIVERSE = frozenset({{...same tickers, uppercase...}})` at class scope
+  * `if bar.symbol not in self.UNIVERSE: return` as the first statement
+    after the `ctx.is_warmup` guard in `on_bar`
+
+When `target_symbols` is `[]`, set `UNIVERSE = frozenset()` AND remove the
+guard so the asset-class default universe is fully eligible. A mismatch
+between `target_symbols` and `UNIVERSE` is rejected by the code-safety gate
+and forces a refinement round.
 """
 
 

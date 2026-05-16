@@ -1030,3 +1030,200 @@ def test_transitive_helper_submit_orders_are_recognised() -> None:
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
     assert not any("entry path" in c or "exit path" in c for c in criticals), criticals
+
+
+# ---------------------------------------------------------------------------
+# Issue #524 — symbol-universe guard required when spec.target_symbols set
+# ---------------------------------------------------------------------------
+
+
+class _StubSpec:
+    """Minimal duck-typed spec for the universe-guard rule.
+
+    The real ``StrategySpec`` pulls in pydantic + dsl modules; the rule
+    only reads ``getattr(spec, 'target_symbols', None)`` so a stub keeps
+    these tests free of heavy imports.
+    """
+
+    def __init__(self, target_symbols):
+        self.target_symbols = target_symbols
+
+
+def test_universe_guard_required_when_target_symbols_set() -> None:
+    """Spec with non-empty target_symbols + code with UNIVERSE + guard passes."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"GLD"})
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert not any("UNIVERSE" in c for c in criticals), criticals
+
+
+def test_missing_universe_constant_is_critical_when_target_symbols_set() -> None:
+    """Spec with non-empty target_symbols + code missing UNIVERSE → critical."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert any("missing a UNIVERSE" in c for c in criticals), criticals
+
+
+def test_missing_guard_in_on_bar_is_critical_when_target_symbols_set() -> None:
+    """UNIVERSE present but no guard at the top of on_bar → critical."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"GLD"})
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert any("missing the" in c and "UNIVERSE" in c for c in criticals), criticals
+
+
+def test_universe_guard_not_required_when_target_symbols_empty() -> None:
+    """Universe-agnostic spec (target_symbols=[]) does not require UNIVERSE."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec([]))
+    criticals = _critical_details(results)
+    assert not any("UNIVERSE" in c for c in criticals), criticals
+
+
+def test_universe_guard_not_required_when_spec_omitted() -> None:
+    """Legacy callers passing only ``code`` (no spec) keep the old behaviour."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert not any("UNIVERSE" in c for c in criticals), criticals
+
+
+def test_universe_guard_accepts_set_literal_constant() -> None:
+    """``UNIVERSE = {"GLD"}`` (set display) is also accepted — the runtime
+    membership test only needs an ``in``-able collection."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = {"GLD"}
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert not any("UNIVERSE" in c for c in criticals), criticals
+
+
+def test_universe_guard_accepts_renamed_bar_parameter() -> None:
+    """The engine dispatches on_bar positionally — the second positional
+    after self IS the runtime context, the third IS the Bar. Strategies
+    that rename ``bar`` (e.g. ``def on_bar(self, ctx, b)``) still satisfy
+    the gate as long as the guard uses that name."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"GLD"})
+            def on_bar(self, ctx, b):
+                if b.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=b.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=b.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert not any("UNIVERSE" in c for c in criticals), criticals
+
+
+def test_universe_guard_accepts_return_none_form() -> None:
+    """Lint-style ``return None`` is semantically identical to a bare
+    ``return``; both must satisfy the structural gate."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"GLD"})
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return None
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert not any("UNIVERSE" in c for c in criticals), criticals
+
+
+def test_universe_guard_with_non_return_body_is_critical() -> None:
+    """A guard whose body falls through to the signal logic (``pass`` or
+    any non-``return`` statement) does not actually short-circuit and must
+    be rejected, even when the if-test is structurally correct."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"GLD"})
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    pass  # falls through to the signal logic — useless guard
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert any("missing the" in c and "UNIVERSE" in c for c in criticals), criticals
+
+
+def test_empty_universe_passes_structural_gate_with_non_empty_target_symbols() -> None:
+    """When ``target_symbols`` is non-empty, an empty ``UNIVERSE =
+    frozenset()`` still passes the structural gate — the gate's job is
+    presence, not content equality. The runtime would then reject every
+    bar and the BacktestAnomalyDetector / #526 TargetSymbolCoverageGate
+    would catch the resulting zero-trade or wrong-symbol outcome."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset()
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert not any("UNIVERSE" in c for c in criticals), criticals

@@ -105,6 +105,8 @@ Diversify across: stocks, crypto, forex, options, futures, commodities. Do NOT d
 
 Whenever your hypothesis or signal definition names specific tickers (e.g. "QQQ trend continuation", "long GLD vs short USO"), populate `target_symbols` in the JSON response with exactly those tickers, uppercase. The backtest engine then fetches and trades that universe verbatim — no asset-class default substitution. Use yfinance-style suffixes when applicable: forex pairs end in `=X` (`EURUSD=X`), futures in `=F` (`GC=F`). If the hypothesis is universe-agnostic ("any liquid US large-cap"), return `[]` and the asset-class default universe is used.
 
+**The strategy code MUST mirror `target_symbols` as a class-level `UNIVERSE = frozenset({...})` constant and guard `on_bar` with `if bar.symbol not in self.UNIVERSE: return` immediately after the warm-up check.** The backtest stream interleaves bars across every fetched symbol — without this guard, a permissive predicate on a different ticker in the fetched universe will silently produce trades on the wrong asset. If `target_symbols` is `[]` (universe-agnostic), set `UNIVERSE = frozenset()` AND remove the guard, so every fetched symbol is eligible.
+
 ## Execution model (read this carefully — it's NEW)
 
 You do **NOT** write a batch `run_strategy(data, config)` function anymore. The backtest and paper-trading engines are event-driven: they deliver **one `Bar` at a time** to your strategy's `on_bar(ctx, bar)` method, you decide what order (if any) to submit via `ctx.submit_order(...)`, and the engine decides whether/when/at-what-price it fills.
@@ -127,6 +129,12 @@ class MyStrategy(Strategy):
     # ── TUNING KNOBS ──────────────────────────────────────
     WINDOW = 20          # max indicator lookback you'll need
     POSITION_PCT = 0.06  # 6% of equity per position
+    # ── SYMBOL UNIVERSE ───────────────────────────────────
+    # MUST mirror the JSON ``target_symbols`` field exactly. Use
+    # ``frozenset()`` (empty) only when ``target_symbols == []`` AND you
+    # remove the symbol guard below; otherwise the guard would reject every
+    # bar.
+    UNIVERSE = frozenset({"QQQ"})  # ← replace with your target_symbols
 
     def on_start(self, ctx):
         """Optional one-shot init before the first bar."""
@@ -141,6 +149,14 @@ class MyStrategy(Strategy):
         submit orders — the engine drops them.
         """
         if ctx.is_warmup:
+            return
+
+        # ── SYMBOL UNIVERSE GUARD ─────────────────────────
+        # The historical replay stream interleaves bars across every fetched
+        # symbol; without this guard a generic predicate trades whichever
+        # ticker fires first, not the one named in the hypothesis. Keep this
+        # line whenever ``UNIVERSE`` is non-empty.
+        if bar.symbol not in self.UNIVERSE:
             return
 
         history = ctx.history(bar.symbol, self.WINDOW)
@@ -194,7 +210,7 @@ class MyStrategy(Strategy):
         pass
 ```
 
-Replace the `<YOUR ... HERE>` sections. Do NOT modify the class structure, the `on_bar` signature, the warm-up guard, or the import line.
+Replace the `<YOUR ... HERE>` sections. Do NOT modify the class structure, the `on_bar` signature, the warm-up guard, the symbol-universe guard, or the import line. The `UNIVERSE` constant MUST match the JSON `target_symbols` field exactly (uppercase tickers, same set); the only exception is `target_symbols == []`, in which case set `UNIVERSE = frozenset()` AND remove the guard so every fetched bar is eligible.
 
 ## Available API on `ctx` (read-only state + order mutators)
 

@@ -89,6 +89,12 @@ together tell you where in the lifecycle execution stopped.
    `collections`, `itertools`, `functools`, `typing`, `dataclasses`,
    `enum`, `abc`, `re`, `copy`, `statistics`, `operator`. Do NOT import
    pandas, numpy, or any filesystem / network module.
+   When the spec has non-empty `target_symbols`, your rewrite MUST keep
+   the class-level `UNIVERSE = frozenset({...})` constant (matching
+   `target_symbols`) and the `if bar.symbol not in self.UNIVERSE: return`
+   guard at the top of `on_bar`. Removing the guard to "increase orders"
+   is exactly the wrong fix — it produces trades on tickers the strategy
+   was never meant to touch and will fail the symbol-universe gate.
 4. **PREDICT** — estimate the change in order count and trade count your
    fix should produce. These predictions are sanity checks for the
    orchestrator's re-backtest gate; conservative integers are fine

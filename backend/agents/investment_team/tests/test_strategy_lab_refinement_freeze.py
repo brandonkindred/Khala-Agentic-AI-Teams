@@ -388,7 +388,7 @@ def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
     monkeypatch.setattr(
         orch.code_safety_checker,
         "check",
-        lambda code: [],
+        lambda code, spec=None: [],
     )
     # Pre-synthesis spec validator passes.
     monkeypatch.setattr(
@@ -455,7 +455,7 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
     orch.ideation_agent = _FakeIdeationAgent(spec)  # type: ignore[assignment]
     orch.refinement_agent = _StraySpecRefinementAgent()  # type: ignore[assignment]
 
-    monkeypatch.setattr(orch.code_safety_checker, "check", lambda code: [])
+    monkeypatch.setattr(orch.code_safety_checker, "check", lambda code, spec=None: [])
     monkeypatch.setattr(orch.strategy_validator, "validate", lambda s: [])
 
     # Force every execution to fail so the loop stays in the "execution"
