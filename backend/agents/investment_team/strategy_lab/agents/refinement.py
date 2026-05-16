@@ -18,6 +18,14 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+# Refinement output is code-only (#543). ``strategy_code`` is consumed
+# separately; ``changes_made`` is logged. Any other top-level key in the
+# LLM payload is dropped with a warning. ``risk_limits`` is passed through
+# to the orchestrator, which applies tighten-only semantics (see
+# ``orchestrator._merge_risk_limits_tighten_only``).
+_ALLOWED_OUTPUT_KEYS = frozenset({"changes_made"})
+_PASSTHROUGH_FOR_ORCHESTRATOR = frozenset({"risk_limits"})
+
 _REFINEMENT_USER_TEMPLATE = """\
 Fix the following trading strategy code that failed {failure_phase}.
 
@@ -60,6 +68,13 @@ Return ONLY a JSON object with no markdown:
 class RefinementAgent:
     """Refine strategy code based on quality gate or execution failures."""
 
+    def __init__(self) -> None:
+        # Audit trail of every refinement round where the LLM emitted
+        # spec-mutating keys. Used by tests and surfaceable in logs to
+        # diagnose prompt drift. Each entry: {"failure_phase": str,
+        # "keys": list[str]}.
+        self.spec_mutation_history: List[Dict[str, Any]] = []
+
     def run(
         self,
         spec: StrategySpec,
@@ -73,6 +88,11 @@ class RefinementAgent:
 
         Returns:
             (updated_fields_dict, updated_code)
+
+        ``updated_fields_dict`` is narrowed to ``{"changes_made"}`` plus an
+        optional ``"risk_limits"`` passthrough (the orchestrator applies
+        tighten-only semantics). Any other top-level keys in the LLM
+        response are logged and discarded.
         """
         system_prompt = (_PROMPT_DIR / "refinement_system.md").read_text(encoding="utf-8")
 
@@ -119,7 +139,25 @@ class RefinementAgent:
         parsed = _extract_json(str(result))
 
         updated_code = parsed.pop("strategy_code", code)
-        return parsed, updated_code
+
+        stray = set(parsed) - _ALLOWED_OUTPUT_KEYS - _PASSTHROUGH_FOR_ORCHESTRATOR
+        if stray:
+            logger.warning(
+                "RefinementAgent emitted spec-mutating keys %s for failure_phase=%s; "
+                "discarding (refinement is code-only post-#543).",
+                sorted(stray),
+                failure_phase,
+            )
+            self.spec_mutation_history.append(
+                {"failure_phase": failure_phase, "keys": sorted(stray)}
+            )
+
+        narrowed: Dict[str, Any] = {
+            k: parsed[k]
+            for k in (_ALLOWED_OUTPUT_KEYS | _PASSTHROUGH_FOR_ORCHESTRATOR)
+            if k in parsed
+        }
+        return narrowed, updated_code
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
