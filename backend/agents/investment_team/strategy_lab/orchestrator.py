@@ -1485,7 +1485,7 @@ class StrategyLabOrchestrator:
         # hiccups).
         assert last_exc is not None, "loop ran at least once; last_exc must be set"
         logger.error(
-            "Alignment audit failed after %d attempts; failing closed: %s",
+            "Alignment audit error after %d attempts; failing closed: %s",
             retries + 1,
             last_exc,
         )

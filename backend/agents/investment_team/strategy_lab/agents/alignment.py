@@ -182,12 +182,12 @@ class TradeAlignmentAgent:
             result = agent(user_prompt)
             parsed = _extract_json(str(result))
         except Exception as exc:
-            # WARNING (not ERROR) because these are expected transient
-            # hiccups; the orchestrator's ``_run_alignment_audit`` retries
-            # this exception type before escalating. ``exc_info=True``
-            # preserves the stack trace for debugging the underlying cause
-            # (specific parse error / transport failure).
-            logger.warning(
+            # DEBUG (not WARNING) because the orchestrator's
+            # ``_run_alignment_audit`` already logs each retry attempt at
+            # WARNING with the retry context — duplicating that here would
+            # be noisy. ``exc_info=True`` preserves the underlying stack
+            # trace for those who turn DEBUG on to investigate the cause.
+            logger.debug(
                 "Alignment agent failed to produce parseable JSON: %s",
                 exc,
                 exc_info=True,
