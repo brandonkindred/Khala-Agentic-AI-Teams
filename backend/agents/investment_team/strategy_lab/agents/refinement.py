@@ -54,10 +54,11 @@ Risk limits: {risk_limits}
 1. Diagnose the root cause from the failure details.
 2. Fix the code only. Do NOT alter the strategy spec (entry/exit/sizing
    rules, risk limits, hypothesis) — spec changes go through ideation,
-   not refinement.
+   not refinement. The rules above are rendered text views of structured
+   DSL objects; do NOT emit them back in your response.
 3. Ensure your fix doesn't re-introduce any previously fixed issues.
 
-Return ONLY a JSON object with no markdown:
+Return ONLY a JSON object with no markdown — exactly these two keys:
 {{
   "strategy_code": "the complete fixed Python code",
   "changes_made": "1-2 sentence summary of what you changed and why"

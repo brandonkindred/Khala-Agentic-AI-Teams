@@ -98,8 +98,39 @@ If the proposed fix requires a small spec change (e.g. a too-tight
 `entry_rules` or a missing `exit_rules` clause), you may also return a
 `proposed_spec_updates` object containing only the rule fields you are
 adjusting. Do not invent new keys; the orchestrator will only honour
-`entry_rules`, `exit_rules`, `sizing_rules`, `risk_limits`, `hypothesis`,
+`entry_rules`, `exit_rules`, `sizing`, `risk_limits`, `hypothesis`,
 and `signal_definition`.
+
+When `proposed_spec_updates` includes rule-shaped keys, the values MUST
+be the structured DSL objects (every rule carries a `kind` discriminator)
+— the parser rejects prose strings. The rule shapes the orchestrator
+accepts (mirrored from `spec_dsl.py`) are:
+
+```json
+{
+  "entry_rules": [{
+    "kind": "entry", "side": "long",
+    "when": {"lhs": {"kind": "rsi", "period": 14},
+             "op": "lt",
+             "rhs": {"kind": "const", "value": 30}}
+  }],
+  "exit_rules": [
+    {"kind": "signal_exit",
+     "when": {"lhs": {"kind": "rsi", "period": 14},
+              "op": "gt",
+              "rhs": {"kind": "const", "value": 70}}},
+    {"kind": "time_stop", "n_bars": 10}
+  ],
+  "sizing": {"kind": "fixed_fraction", "fraction": 0.02}
+}
+```
+
+Indicator `kind`s accepted: `price`, `const`, `sma`, `ema`, `rsi`, `macd`,
+`bollinger`, `atr`, `adx`, `stochastic`, `vwap`. Comparison `op`s
+accepted: `gt`, `lt`, `ge`, `le`, `eq`, `cross_above`, `cross_below`.
+Exit-rule `kind`s accepted: `time_stop`, `stop_loss`, `take_profit`,
+`signal_exit`. Sizing `kind`s accepted: `fixed_fraction`,
+`volatility_target`, `fixed_notional`.
 
 If the diagnostics do not give you enough evidence to propose a code
 change you are confident in, return `proposed_code: null` and explain

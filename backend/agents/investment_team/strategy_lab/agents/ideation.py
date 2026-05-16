@@ -14,6 +14,7 @@ from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block
 from ...signal_intelligence_models import SignalIntelligenceBriefV1
 from ...strategy_lab_context import asset_class_mix_hint, format_prior_results
+from ._parse_helpers import StrategySpecParseError, validate_structured_rules
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -39,14 +40,28 @@ Follow your decomposed reasoning process: ANALYZE → HYPOTHESIZE → DESIGN →
 
 Each prior entry includes outcome, metrics, rationale, and post-backtest analysis. Generate a strategy that **differs** from prior ones and learns from their failures.
 
-Return ONLY a JSON object with no markdown:
+Return ONLY a JSON object with no markdown. `entry_rules`, `exit_rules`,
+and `sizing` MUST be the structured DSL objects described in the system
+prompt — prose strings will be rejected.
+
 {{
   "asset_class": "stocks" | "crypto" | "forex" | "options" | "futures" | "commodities",
   "hypothesis": "1-3 sentence investment thesis tying multiple signals to edge",
   "signal_definition": "Describe the ensemble of signals and how they combine",
-  "entry_rules": ["rule 1", "rule 2", "rule 3"],
-  "exit_rules": ["exit rule 1", "exit rule 2"],
-  "sizing_rules": ["sizing rule 1"],
+  "entry_rules": [
+    {{"kind": "entry", "side": "long",
+      "when": {{"lhs": {{"kind": "rsi", "period": 14}},
+                "op": "lt",
+                "rhs": {{"kind": "const", "value": 30}}}}}}
+  ],
+  "exit_rules": [
+    {{"kind": "signal_exit",
+      "when": {{"lhs": {{"kind": "rsi", "period": 14}},
+                "op": "gt",
+                "rhs": {{"kind": "const", "value": 70}}}}}},
+    {{"kind": "time_stop", "n_bars": 10}}
+  ],
+  "sizing": {{"kind": "fixed_fraction", "fraction": 0.02}},
   "target_symbols": ["UPPERCASE tickers if your hypothesis names specific ones, e.g. QQQ; else []"],
   "risk_limits": {{"max_position_pct": 5, "stop_loss_pct": 3}},
   "speculative": false,
@@ -117,6 +132,15 @@ class IdeationAgent:
 
         strategy_code = parsed.pop("strategy_code", "")
         rationale = parsed.pop("rationale", "")
+
+        # Fail loud if the LLM emitted prose / legacy-shaped rules. The
+        # orchestrator's StrategySpec(...) call would otherwise raise a
+        # less actionable pydantic error far from the ideation site.
+        try:
+            validate_structured_rules(parsed)
+        except StrategySpecParseError as exc:
+            logger.warning("Ideation LLM emitted invalid rule shape: %s", exc)
+            raise
 
         return parsed, strategy_code, rationale
 
