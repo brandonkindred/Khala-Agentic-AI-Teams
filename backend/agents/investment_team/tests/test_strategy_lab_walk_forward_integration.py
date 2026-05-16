@@ -938,7 +938,17 @@ def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monke
         g for g in record.quality_gate_results if g.get("gate_name") == "trade_alignment"
     ]
     assert alignment_gates and all(g["passed"] is False for g in alignment_gates)
-    assert "alignment_failed" in (record.backtest.result.acceptance_reason or "")
+    reason = record.backtest.result.acceptance_reason or ""
+    assert "alignment_failed" in reason
+    # Bug 1 symmetry on the fallback path: the anomaly recheck admitted
+    # the run (no criticals + return > threshold), so its
+    # ``"walk_forward_fallback_passed: ..."`` summary is no longer
+    # truthful once alignment vetoes. The augmentation block must
+    # REPLACE it (using ``upstream_admitted``) rather than append.
+    assert "walk_forward_fallback_passed" not in reason, (
+        "fallback success summary must be replaced (not appended) when "
+        "alignment vetoes a fallback-admitted run."
+    )
     assert captured_analysis_kwargs.get("is_winning") is False, (
         "orchestrator must pass is_winning=False on the walk-forward fallback path too (Gap 6)."
     )
@@ -1032,9 +1042,143 @@ def test_legacy_walk_forward_disabled_cannot_publish(monkeypatch):
     # publish through the removed legacy path.
     assert record.analysis_narrative
     # Gap 4: the persisted record must explain why publication was
-    # blocked. Without this entry, a user sees ``is_winning=False`` with
-    # no audit-trail field describing the cause.
-    assert (
-        record.backtest.result.acceptance_reason
-        == "publication_disabled: walk_forward_enabled=False"
+    # blocked. Permissive substring match so future wording tweaks
+    # (e.g. adding remediation guidance) don't break the test —
+    # the structural prefix is the contract.
+    reason = record.backtest.result.acceptance_reason or ""
+    assert "publication_disabled" in reason and "walk_forward_enabled=False" in reason, (
+        f"expected publication_disabled / walk_forward_enabled=False in {reason!r}"
+    )
+
+
+def _raise_walk_forward(*_args, **_kwargs):
+    raise RuntimeError("walk-forward fold construction failed (synthetic)")
+
+
+def test_walk_forward_fallback_rejected_records_acceptance_reason(monkeypatch):
+    """Gap 7: when the walk-forward fallback rejects via a critical
+    anomaly (e.g. upgraded ``Sharpe > 5.0``), the persisted
+    ``acceptance_reason`` must mirror that rejection — a consumer
+    reading the field alone shouldn't have to know to grep
+    ``quality_gate_results`` for ``fallback_`` entries."""
+
+    from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult as _QGR
+
+    orch = _orchestrator(_StubMarketDataService())
+
+    monkeypatch.setattr(orch, "_evaluate_walk_forward", _raise_walk_forward)
+
+    # ``anomaly_detector.check`` is called twice in this flow: once
+    # inside the refinement loop with ``dsr_aware=True`` (because
+    # ``walk_forward_enabled=True``), and again on the fallback path
+    # with ``dsr_aware=False``. We only want a critical to surface on
+    # the second call; on the first, the loop would otherwise refine
+    # forever and exhaust ``MAX_CODE_REFINEMENT_ROUNDS``.
+    def _anomaly_stub(*_a, **kw):
+        if kw.get("dsr_aware", False):
+            return []  # refinement-time: pass through
+        return [
+            _QGR(
+                gate_name="sharpe_sane",
+                passed=False,
+                severity="critical",
+                details="Sharpe ratio 6.40 > 5.0 (overfit suspect)",
+            )
+        ]
+
+    monkeypatch.setattr(orch.anomaly_detector, "check", _anomaly_stub)
+
+    _wire_run_cycle_stubs(
+        orch,
+        monkeypatch,
+        alignment_aligned=True,
+        alignment_rationale="trades match spec",
+    )
+
+    config = _config(walk_forward_enabled=True)
+    record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
+
+    assert record.is_winning is False
+    reason = record.backtest.result.acceptance_reason or ""
+    assert reason.startswith("walk_forward_fallback_rejected:"), (
+        f"expected walk_forward_fallback_rejected prefix in {reason!r}"
+    )
+    assert "Sharpe ratio 6.40" in reason
+
+
+def test_walk_forward_fallback_passed_records_provenance(monkeypatch):
+    """Gap 9: when the walk-forward fallback admits a run (no critical
+    anomalies, return above threshold, alignment passes), the
+    persisted ``acceptance_reason`` must record that provenance so
+    the audit trail distinguishes a primary-acceptance-gate winner
+    from a fallback-admitted winner."""
+
+    from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult as _QGR
+
+    orch = _orchestrator(_StubMarketDataService())
+
+    monkeypatch.setattr(orch, "_evaluate_walk_forward", _raise_walk_forward)
+    # Anomalies all info-severity — fallback_criticals stays empty.
+    monkeypatch.setattr(
+        orch.anomaly_detector,
+        "check",
+        lambda *a, **kw: [
+            _QGR(gate_name="sharpe_sane", passed=True, severity="info", details="ok")
+        ],
+    )
+
+    _wire_run_cycle_stubs(
+        orch,
+        monkeypatch,
+        alignment_aligned=True,
+        alignment_rationale="trades match spec",
+    )
+
+    config = _config(walk_forward_enabled=True)
+    record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
+
+    assert record.is_winning is True
+    reason = record.backtest.result.acceptance_reason or ""
+    assert "walk_forward_fallback_passed" in reason, (
+        f"expected fallback-passed provenance in {reason!r}"
+    )
+
+
+def test_no_trades_produced_records_acceptance_reason(monkeypatch):
+    """Gap 8: a run that drives ``execution_succeeded=True`` with zero
+    trades (e.g. when the upstream gates have been stubbed out, or in
+    production when an alignment-loop fix produces an empty ledger)
+    can't publish — walk-forward and alignment both require trades.
+    The persisted ``acceptance_reason`` must explain this rather than
+    leave an empty field."""
+
+    from investment_team.models import StrategyLabRecord
+
+    orch = _orchestrator(_StubMarketDataService())
+
+    # Bypass the gates that normally veto zero-trade runs during
+    # refinement so we can drive ``execution_succeeded=True`` with
+    # ``trades=[]`` and exercise the Gap 8 else-branch entry path.
+    monkeypatch.setattr(orch.target_symbol_coverage_gate, "check_trades", lambda *a, **k: [])
+    monkeypatch.setattr(orch.anomaly_detector, "check", lambda *a, **kw: [])
+
+    _wire_run_cycle_stubs(
+        orch,
+        monkeypatch,
+        # ``alignment_aligned`` is irrelevant — the alignment loop is
+        # skipped when ``trades`` is empty.
+        alignment_aligned=True,
+        alignment_rationale="n/a",
+        trades_override=[],
+    )
+
+    config = _config(walk_forward_enabled=True)
+    record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
+
+    assert record.is_winning is False
+    reason = record.backtest.result.acceptance_reason or ""
+    assert "publication_disabled" in reason and "no trades produced" in reason, (
+        f"expected publication_disabled / no trades produced in {reason!r}"
     )

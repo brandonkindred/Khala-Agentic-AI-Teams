@@ -1179,9 +1179,18 @@ class StrategyLabOrchestrator:
         # annualized-return scalar with no DSR correction is not a
         # publication gate. Runs configured without walk-forward still
         # execute and generate a narrative, but cannot be marked winning.
-        acceptance_passed = bool(acceptance_results) and all(r.passed for r in acceptance_results)
+        # ``upstream_admitted`` records whether the upstream publication
+        # gate (walk-forward acceptance, or its anomaly-recheck fallback)
+        # said "admit". It feeds the alignment-augmentation block below:
+        # a success-style ``acceptance_reason`` becomes stale the moment
+        # alignment vetoes a run, so we REPLACE it; a failure-style
+        # reason captures a real co-cause and is PRESERVED with the
+        # alignment cause appended.
+        upstream_admitted = False
         if acceptance_results:
+            acceptance_passed = all(r.passed for r in acceptance_results)
             is_winning = execution_succeeded and acceptance_passed and trades_aligned
+            upstream_admitted = acceptance_passed
         elif walk_forward_failed and execution_succeeded:
             fallback_anomalies = self.anomaly_detector.check(
                 metrics,
@@ -1192,36 +1201,61 @@ class StrategyLabOrchestrator:
             fallback_criticals = [
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
             ]
-            is_winning = (
-                metrics.annualized_return_pct > WINNING_THRESHOLD
-                and not fallback_criticals
-                and trades_aligned
-            )
+            return_ok = metrics.annualized_return_pct > WINNING_THRESHOLD
+            is_winning = return_ok and not fallback_criticals and trades_aligned
+            upstream_admitted = return_ok and not fallback_criticals
             if fallback_criticals:
                 # Surface the upgraded severities so the persisted
                 # gate-result history reflects the true rejection reason.
                 for g in fallback_anomalies:
                     g.gate_name = f"fallback_{g.gate_name}"
                 all_gate_results.extend(fallback_anomalies)
-        else:
-            is_winning = False
-            # Gap-4 audit trail: ``walk_forward_enabled=False`` runs still
-            # execute and generate a narrative but cannot publish through
-            # the removed legacy path (#529). Without this entry, the
-            # persisted record would show ``is_winning=False`` with no
-            # ``acceptance_reason`` explaining why. Only set when the run
-            # actually completed — execution failures already log their
-            # own gate details and ``acceptance_reason`` would mislead.
-            if (
-                execution_succeeded
-                and trades
-                and not config.walk_forward_enabled
-                and not metrics.acceptance_reason
-            ):
+            # Gap 7 / 9: mirror the fallback gate's own verdict onto
+            # ``acceptance_reason`` so consumers don't have to grep
+            # ``quality_gate_results`` for ``fallback_`` prefixes to see
+            # why publication was admitted or rejected. The augmentation
+            # block below uses ``upstream_admitted`` to decide whether
+            # to replace this message (alignment vetoes a "passed"
+            # verdict) or to append (both gates fired their own reasons).
+            if upstream_admitted:
                 metrics = metrics.model_copy(
                     update={
-                        "acceptance_reason": ("publication_disabled: walk_forward_enabled=False")
+                        "acceptance_reason": "walk_forward_fallback_passed: anomaly recheck clean"
                     }
+                )
+            else:
+                fallback_reasons: List[str] = []
+                if fallback_criticals:
+                    fallback_reasons.append("; ".join(g.details for g in fallback_criticals))
+                if not return_ok:
+                    fallback_reasons.append(
+                        f"annualized_return {metrics.annualized_return_pct:.2f}% <= "
+                        f"{WINNING_THRESHOLD:g}% threshold"
+                    )
+                metrics = metrics.model_copy(
+                    update={
+                        "acceptance_reason": (
+                            "walk_forward_fallback_rejected: " + "; ".join(fallback_reasons)
+                        )
+                    }
+                )
+        else:
+            is_winning = False
+            # Gap 4 / 8: self-document why publication was blocked on
+            # each else-branch entry path. Without this, the persisted
+            # record shows ``is_winning=False`` with an empty
+            # ``acceptance_reason``. The no-trades case is checked first
+            # because it's the more proximate cause when both conditions
+            # hold (a run with no trades cannot publish regardless of
+            # ``walk_forward_enabled``). Execution-failure paths are
+            # handled by the elif-narrative branch in Phase 3 instead.
+            if execution_succeeded and not trades:
+                metrics = metrics.model_copy(
+                    update={"acceptance_reason": "publication_disabled: no trades produced"}
+                )
+            elif execution_succeeded and trades and not config.walk_forward_enabled:
+                metrics = metrics.model_copy(
+                    update={"acceptance_reason": "publication_disabled: walk_forward_enabled=False"}
                 )
 
         # Surface the alignment-failure cause on ``acceptance_reason`` so
@@ -1242,16 +1276,17 @@ class StrategyLabOrchestrator:
                 reason_suffix = f"alignment_failed: {rationale}"
             else:
                 reason_suffix = "alignment_failed: trades did not implement strategy spec"
-            # When the acceptance gate fully passed, its ``"all four
-            # criteria met"`` summary is no longer truthful (we're rejecting
-            # on alignment grounds). Replace rather than append so the audit
-            # trail isn't self-contradictory. When the acceptance gate had
-            # its own failure reasons, keep them and add the alignment
+            # When the upstream gate admitted the run (acceptance fully
+            # passed, or fallback anomaly recheck clean), its success
+            # summary is no longer truthful — alignment is now the
+            # rejection cause. Replace rather than append so the audit
+            # trail isn't self-contradictory. When the upstream gate
+            # itself rejected, keep its reason and add the alignment
             # cause — both are real rejection causes. Use a ``" | "``
             # delimiter (not ``"; "``, which ``summarize_acceptance_reason``
             # uses internally between failing gates) so downstream parsers
             # can disambiguate the alignment boundary from gate boundaries.
-            if metrics.acceptance_reason and not acceptance_passed:
+            if metrics.acceptance_reason and not upstream_admitted:
                 combined = f"{metrics.acceptance_reason} | {reason_suffix}"
             else:
                 combined = reason_suffix
