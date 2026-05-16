@@ -876,6 +876,17 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
         "orchestrator must pass is_winning=False to AnalysisAgent.run when "
         "alignment vetoes the publication (PR #573 review follow-up)."
     )
+    # PR #573 round-4 regression guard: the alignment-augmentation block
+    # used to bind a local ``rationale`` that shadowed the strategy
+    # rationale, corrupting both the analysis prompt and
+    # ``StrategyLabRecord.strategy_rationale`` on every alignment-failure
+    # path. The ideation stub returns ``"rationale"`` as the strategy
+    # rationale; if the shadowing comes back, ``record.strategy_rationale``
+    # would be ``"entries fire before signal triggers"`` instead.
+    assert record.strategy_rationale == "rationale", (
+        "alignment-augmentation must not shadow the strategy rationale "
+        f"(got {record.strategy_rationale!r})."
+    )
 
 
 def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monkeypatch):
@@ -952,6 +963,12 @@ def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monke
     assert captured_analysis_kwargs.get("is_winning") is False, (
         "orchestrator must pass is_winning=False on the walk-forward fallback path too (Gap 6)."
     )
+    # PR #573 round-4 regression guard (rationale-shadowing). See the
+    # parallel assertion in the acceptance-path test for the full story.
+    assert record.strategy_rationale == "rationale", (
+        "alignment-augmentation must not shadow the strategy rationale "
+        f"(got {record.strategy_rationale!r})."
+    )
 
 
 def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
@@ -1011,6 +1028,11 @@ def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
         f"expected ' | alignment_failed:' boundary in {reason!r}"
     )
     assert "entries fire on wrong symbol" in reason
+    # PR #573 round-4 regression guard (rationale-shadowing).
+    assert record.strategy_rationale == "rationale", (
+        "alignment-augmentation must not shadow the strategy rationale "
+        f"(got {record.strategy_rationale!r})."
+    )
 
 
 def test_legacy_walk_forward_disabled_cannot_publish(monkeypatch):

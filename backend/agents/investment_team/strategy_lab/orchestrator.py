@@ -1271,9 +1271,16 @@ class StrategyLabOrchestrator:
         # ``alignment_failed`` suffix would be misleading.
         if execution_succeeded and trades and alignment_reports and not trades_aligned:
             last_report = alignment_reports[-1]
-            rationale = (last_report.rationale or "").strip()
-            if rationale:
-                reason_suffix = f"alignment_failed: {rationale}"
+            # NOTE: do NOT name this ``rationale`` — that shadows the
+            # strategy-rationale string bound earlier from the ideation
+            # agent (and used positionally when calling
+            # ``self.analysis_agent.run`` plus persisted on
+            # ``StrategyLabRecord.strategy_rationale``). Shadowing would
+            # silently corrupt both the analysis prompt and the audit
+            # record on every alignment-failure path.
+            align_rationale = (last_report.rationale or "").strip()
+            if align_rationale:
+                reason_suffix = f"alignment_failed: {align_rationale}"
             else:
                 reason_suffix = "alignment_failed: trades did not implement strategy spec"
             # When the upstream gate admitted the run (acceptance fully
