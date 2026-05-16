@@ -38,9 +38,26 @@
     gap: var(--kh-space-3);
 
     .last-updated {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--kh-space-2);
       font-size: var(--kh-text-xs);
       color: var(--kh-text-secondary);
       font-family: var(--kh-font-mono);
+    }
+
+    .live-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--kh-success);
+      animation: kh-pulse-live 2s ease-in-out infinite;
+      flex-shrink: 0;
+
+      &.is-paused {
+        animation: none;
+        opacity: 0.45;
+      }
     }
   }
 }
@@ -334,8 +351,14 @@
   50%      { opacity: 1; }
 }
 
+@keyframes kh-pulse-live {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .stuck-indicator { animation: none; opacity: 1; }
+  .live-dot        { animation: none; opacity: 1; }
 }
 
 // ── Column Widths ───────────────────────────────────────────────────────────

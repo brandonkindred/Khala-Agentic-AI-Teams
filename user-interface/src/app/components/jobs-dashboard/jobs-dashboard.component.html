@@ -6,7 +6,10 @@
     </div>
     <div class="header-actions">
       @if (lastUpdated) {
-        <span class="last-updated">Updated {{ lastUpdated | date:'shortTime' }}</span>
+        <span class="last-updated" matTooltip="Auto-refreshes every 20 seconds">
+          <span class="live-dot" [class.is-paused]="!isPollingActive" aria-hidden="true"></span>
+          Updated {{ lastUpdated | date:'shortTime' }}
+        </span>
       }
       <button mat-icon-button (click)="refresh()" [disabled]="loading" matTooltip="Refresh jobs" aria-label="Refresh jobs">
         <mat-icon [class.spinning]="loading">refresh</mat-icon>
