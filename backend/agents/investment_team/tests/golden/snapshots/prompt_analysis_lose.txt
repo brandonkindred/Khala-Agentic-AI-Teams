@@ -1,25 +1,26 @@
 Draft a rigorous analysis of this LOSING swing-trading strategy (annualized return below 8% threshold).
 
 ## Strategy (definition under test)
-Asset class: {asset_class}
-Hypothesis: {hypothesis}
-Signal: {signal_definition}
-Intended entry rules (as authored — may not all be machine-enforced): {entry_rules}
-Intended exit rules (as authored — may not all be machine-enforced): {exit_rules}
-Sizing / risk: {sizing_rules}
-Rationale for testing: {rationale}
+Asset class: equity
+Hypothesis: Trend-followers profit when SMA(20) crosses above SMA(50).
+Signal: SMA(20) > SMA(50)
+Intended entry rules (as authored — may not all be machine-enforced): long when sma(20) > sma(50)
+Intended exit rules (as authored — may not all be machine-enforced): exit after 10 bars, stop loss 2%
+Sizing / risk: risk 1% per trade
+Rationale for testing: Validate SMA-cross trend following on the equity sleeve.
 
 ## Aggregated backtest metrics
-Annualized return: {annualized_return_pct:.1f}%
-Total return: {total_return_pct:.1f}%
-Sharpe ratio: {sharpe_ratio:.2f}
-Max drawdown: {max_drawdown_pct:.1f}%
-Win rate: {win_rate_pct:.1f}%
-Profit factor: {profit_factor:.2f}
-Volatility: {volatility_pct:.1f}%
+Annualized return: 3.1%
+Total return: 4.2%
+Sharpe ratio: 0.42
+Max drawdown: 18.7%
+Win rate: 38.0%
+Profit factor: 0.95
+Volatility: 22.4%
 
 ## Simulated trade ledger (evidence)
-{simulated_trades_section}
+Trade 1: BUY AAA on 2024-01-15 @ 100.00, SELL on 2024-01-25 @ 102.50 (+2.5%)
+Trade 2: BUY BBB on 2024-02-01 @ 50.00, SELL on 2024-02-11 @ 49.00 (-2.0%)
 
 ## Instructions
 The entry/exit rules above are prose specifications, not engine-enforced behaviour — do not assert that trades "violated" them; instead describe whether trade behaviour was consistent with the intent.
@@ -28,4 +29,4 @@ Use the trade-level evidence where it supports your reasoning.
 Write 5-8 sentences. Be specific about *why* this strategy underperformed.
 
 Return ONLY JSON with no markdown:
-{{"draft_narrative": "your draft analysis"}}
+{"draft_narrative": "your draft analysis"}
