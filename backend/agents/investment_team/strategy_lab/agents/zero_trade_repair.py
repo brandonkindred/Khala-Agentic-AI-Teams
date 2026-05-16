@@ -25,6 +25,7 @@ from strands import Agent
 from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from ..coverage_probe import format_coverage_report
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+from ._parse_helpers import StrategySpecParseError, validate_structured_rules
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -263,6 +264,20 @@ def _coerce_report(
     proposed_spec_updates: Optional[Dict[str, Any]]
     if isinstance(raw_spec_updates, dict):
         whitelisted = {k: v for k, v in raw_spec_updates.items() if k in _ALLOWED_SPEC_UPDATE_KEYS}
+        # Reject prose / invalid structure on the rule-shaped keys so the
+        # orchestrator does not propagate a malformed dict into
+        # `_apply_updates`. The whitelist still gates which fields make it
+        # through (#530); validation only runs on rule-shaped values.
+        try:
+            validate_structured_rules(whitelisted)
+        except StrategySpecParseError as exc:
+            logger.warning(
+                "Zero-trade repair emitted invalid structured rule shape; dropping "
+                "proposed_spec_updates so the orchestrator falls back to generic "
+                "refinement: %s",
+                exc,
+            )
+            whitelisted = {}
         proposed_spec_updates = whitelisted or None
     else:
         proposed_spec_updates = None

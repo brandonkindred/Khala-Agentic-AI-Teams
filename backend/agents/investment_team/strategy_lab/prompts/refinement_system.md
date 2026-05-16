@@ -17,6 +17,12 @@ risk limits) is immutable here — if the failure reveals a design flaw in
 the spec itself, surface it in `changes_made`; spec changes are done by
 ideation, not refinement.
 
+The spec's `entry_rules`, `exit_rules`, and `sizing` are now structured DSL
+objects (every rule carries a `kind` discriminator). They are shown in this
+prompt rendered as readable text for context only — do NOT emit them back.
+The orchestrator drops any top-level key other than `strategy_code` and
+`changes_made` with a warning.
+
 ## Common failure types and how to handle them
 
 ### Code execution errors (syntax, import, runtime)

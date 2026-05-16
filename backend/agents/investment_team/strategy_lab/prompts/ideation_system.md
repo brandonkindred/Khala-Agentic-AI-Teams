@@ -21,6 +21,82 @@ Design strategies as a **mixture of signal types**, not a single indicator. Comb
 - **Mean reversion**: RSI, Bollinger Bands, Stochastic oscillator
 - **Volatility regime**: ATR expansion/contraction, VIX-based filters (if applicable)
 
+## Strategy spec output shape — STRUCTURED DSL (mandatory)
+
+`entry_rules`, `exit_rules`, and `sizing` are **structured discriminated objects** — not prose strings. Every rule object MUST carry a `kind` field; the parser rejects bare strings with a pydantic `ValidationError` and the cycle is discarded.
+
+### Indicator catalogue
+
+Every indicator reference is an object with a `kind` discriminator. The accepted kinds and their parameter shapes mirror `spec_dsl.IndicatorRef` exactly:
+
+| `kind` | Required params | Defaults / optional |
+|---|---|---|
+| `price` | — | `field`: one of `close` / `high` / `low` / `open` / `volume` / `hl2` / `ohlc4` (default `close`) |
+| `const` | `value: float` | — |
+| `sma` | `period: int` (2-400) | `source` (default `close`) |
+| `ema` | `period: int` (2-400) | `source` (default `close`) |
+| `rsi` | — | `period: int` (2-200, default 14), `source` (default `close`) |
+| `macd` | — | `fast` (default 12), `slow` (default 26), `signal` (default 9), `output` ∈ {macd, signal, histogram} (default `macd`), `source` (default `close`) |
+| `bollinger` | — | `period` (default 20, 5-200), `num_std` (default 2.0, >0), `band` ∈ {upper, middle, lower} (default `middle`), `source` (default `close`) |
+| `atr` | — | `period` (default 14, 2-200) |
+| `adx` | — | `period` (default 14, 2-200) |
+| `stochastic` | — | `k_period` (default 14), `d_period` (default 3), `output` ∈ {k, d} (default `k`) |
+| `vwap` | — | — |
+
+### Rule kinds
+
+- **`entry_rules`**: list of objects with `{"kind": "entry", "side": "long"|"short", "when": Predicate, "note": str}`.
+- **`exit_rules`**: list of one or more of:
+  - `{"kind": "time_stop", "n_bars": int>0, "note": str}` — exit after N bars.
+  - `{"kind": "stop_loss", "pct": 0<float<=1.0, "basis": "entry_price"|"trailing_high"|"trailing_low", "note": str}` — note `pct` is a fraction (`0.03` = 3%), not a percent.
+  - `{"kind": "take_profit", "pct": float>0, "note": str}` — `pct` is a fraction.
+  - `{"kind": "signal_exit", "when": Predicate, "note": str}`.
+- **`sizing`** (single object, not a list):
+  - `{"kind": "fixed_fraction", "fraction": 0<float<=1.0, "note": str}` — fraction is `0.02` for 2% per trade.
+  - `{"kind": "volatility_target", "target_annual_vol": float>0, "note": str}`.
+  - `{"kind": "fixed_notional", "notional_usd": float>0, "note": str}`.
+
+A `Predicate` is `{"lhs": IndicatorRef, "op": op, "rhs": IndicatorRef}` where `op ∈ {gt, lt, ge, le, eq, cross_above, cross_below}`. **Both sides are IndicatorRefs** — to compare against a constant, use `{"kind": "const", "value": 30}` on the right.
+
+### Worked structured example (mean-reversion RSI strategy)
+
+```json
+{
+  "asset_class": "stocks",
+  "hypothesis": "...",
+  "signal_definition": "...",
+  "entry_rules": [{
+    "kind": "entry", "side": "long",
+    "when": {"lhs": {"kind": "rsi", "period": 14},
+             "op": "lt",
+             "rhs": {"kind": "const", "value": 30}}
+  }],
+  "exit_rules": [
+    {"kind": "signal_exit",
+     "when": {"lhs": {"kind": "rsi", "period": 14},
+              "op": "gt",
+              "rhs": {"kind": "const", "value": 70}}},
+    {"kind": "time_stop", "n_bars": 10}
+  ],
+  "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
+  "risk_limits": {"max_position_pct": 5},
+  "rationale": "...",
+  "strategy_code": "..."
+}
+```
+
+### Negative example — do NOT emit
+
+```json
+{
+  "entry_rules": ["close > sma(20)"],
+  "exit_rules": ["exit after 10 bars"],
+  "sizing_rules": ["risk 2% per trade"]
+}
+```
+
+Prose strings (the shape above) and the legacy `sizing_rules` list-of-strings are both rejected by the parser. The orchestrator will discard the ideation cycle and ask for a redo.
+
 ## Asset class diversity
 
 Diversify across: stocks, crypto, forex, options, futures, commodities. Do NOT default to equities unless explicitly directed.
