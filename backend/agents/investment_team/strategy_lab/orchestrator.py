@@ -1179,10 +1179,9 @@ class StrategyLabOrchestrator:
         # annualized-return scalar with no DSR correction is not a
         # publication gate. Runs configured without walk-forward still
         # execute and generate a narrative, but cannot be marked winning.
+        acceptance_passed = bool(acceptance_results) and all(r.passed for r in acceptance_results)
         if acceptance_results:
-            is_winning = (
-                execution_succeeded and all(r.passed for r in acceptance_results) and trades_aligned
-            )
+            is_winning = execution_succeeded and acceptance_passed and trades_aligned
         elif walk_forward_failed and execution_succeeded:
             fallback_anomalies = self.anomaly_detector.check(
                 metrics,
@@ -1206,14 +1205,31 @@ class StrategyLabOrchestrator:
                 all_gate_results.extend(fallback_anomalies)
         else:
             is_winning = False
+            # Gap-4 audit trail: ``walk_forward_enabled=False`` runs still
+            # execute and generate a narrative but cannot publish through
+            # the removed legacy path (#529). Without this entry, the
+            # persisted record would show ``is_winning=False`` with no
+            # ``acceptance_reason`` explaining why. Only set when the run
+            # actually completed — execution failures already log their
+            # own gate details and ``acceptance_reason`` would mislead.
+            if (
+                execution_succeeded
+                and trades
+                and not config.walk_forward_enabled
+                and not metrics.acceptance_reason
+            ):
+                metrics = metrics.model_copy(
+                    update={
+                        "acceptance_reason": ("publication_disabled: walk_forward_enabled=False")
+                    }
+                )
 
         # Surface the alignment-failure cause on ``acceptance_reason`` so
         # the audit trail explains why publication was blocked even when
         # the acceptance gate / threshold otherwise passed (#529). The
         # ``trade_alignment`` QualityGateResult already lives in
         # ``all_gate_results`` (appended per alignment round above); this
-        # mirrors the signal onto ``BacktestResult.acceptance_reason``
-        # without overwriting any prior walk-forward acceptance summary.
+        # mirrors the signal onto ``BacktestResult.acceptance_reason``.
         # ``alignment_reports`` is in the guard so we only attribute the
         # rejection to alignment when the audit actually ran — the loop is
         # skipped entirely when ``market_data is None``, in which case
@@ -1221,15 +1237,24 @@ class StrategyLabOrchestrator:
         # ``alignment_failed`` suffix would be misleading.
         if execution_succeeded and trades and alignment_reports and not trades_aligned:
             last_report = alignment_reports[-1]
-            if last_report.rationale:
-                reason_suffix = f"alignment_failed: {last_report.rationale}"
+            rationale = (last_report.rationale or "").strip()
+            if rationale:
+                reason_suffix = f"alignment_failed: {rationale}"
             else:
                 reason_suffix = "alignment_failed: trades did not implement strategy spec"
-            combined = (
-                f"{metrics.acceptance_reason}; {reason_suffix}"
-                if metrics.acceptance_reason
-                else reason_suffix
-            )
+            # When the acceptance gate fully passed, its ``"all four
+            # criteria met"`` summary is no longer truthful (we're rejecting
+            # on alignment grounds). Replace rather than append so the audit
+            # trail isn't self-contradictory. When the acceptance gate had
+            # its own failure reasons, keep them and add the alignment
+            # cause — both are real rejection causes. Use a ``" | "``
+            # delimiter (not ``"; "``, which ``summarize_acceptance_reason``
+            # uses internally between failing gates) so downstream parsers
+            # can disambiguate the alignment boundary from gate boundaries.
+            if metrics.acceptance_reason and not acceptance_passed:
+                combined = f"{metrics.acceptance_reason} | {reason_suffix}"
+            else:
+                combined = reason_suffix
             metrics = metrics.model_copy(update={"acceptance_reason": combined})
 
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────

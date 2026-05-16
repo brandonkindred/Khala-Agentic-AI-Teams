@@ -145,9 +145,12 @@ class AcceptanceGate:
 def summarize_acceptance_reason(results: List[QualityGateResult]) -> str:
     """Human-readable summary of the composite gate outcome.
 
-    Returns ``"all four criteria met"`` on full pass; otherwise a
-    comma-separated list of the failing sub-gate detail strings.
+    Returns ``"no acceptance gates evaluated"`` for an empty input (no
+    gates were run), ``"all four criteria met"`` on full pass, or a
+    semicolon-joined list of the failing sub-gate detail strings.
     """
+    if not results:
+        return "no acceptance gates evaluated"
     fails = [r for r in results if not r.passed]
     if not fails:
         return "all four criteria met"

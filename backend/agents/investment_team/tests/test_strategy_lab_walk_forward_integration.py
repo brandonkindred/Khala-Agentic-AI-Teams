@@ -862,6 +862,14 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
     reason = record.backtest.result.acceptance_reason or ""
     assert "alignment_failed" in reason
     assert "entries fire before signal triggers" in reason
+    # When the acceptance gate fully passed but alignment vetoed, the
+    # ``"all four criteria met"`` summary is no longer truthful — the
+    # alignment cause must REPLACE it, not appear alongside it (Bug 1).
+    assert "all four criteria met" not in reason, (
+        "acceptance_reason must not contradict itself: when acceptance "
+        "fully passed but alignment vetoed, the alignment cause replaces "
+        "the now-stale 'all four criteria met' summary."
+    )
     # The orchestrator must thread the resolved verdict through so the
     # narrative template + outcome_label match the persisted record.
     assert captured_analysis_kwargs.get("is_winning") is False, (
@@ -910,6 +918,18 @@ def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monke
         alignment_rationale="trades hit wrong symbol",
     )
 
+    # Pin the orchestrator → AnalysisAgent wiring on this branch too
+    # (Gap 6): the call site is shared, so a regression on either path
+    # is the same root cause, but defensive duplication makes the
+    # failure mode obvious from either test.
+    captured_analysis_kwargs: dict = {}
+
+    def _recording_analysis(*_args, **kwargs):
+        captured_analysis_kwargs.update(kwargs)
+        return "narrative"
+
+    monkeypatch.setattr(orch.analysis_agent, "run", _recording_analysis)
+
     config = _config(walk_forward_enabled=True)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
 
@@ -919,13 +939,79 @@ def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monke
     ]
     assert alignment_gates and all(g["passed"] is False for g in alignment_gates)
     assert "alignment_failed" in (record.backtest.result.acceptance_reason or "")
+    assert captured_analysis_kwargs.get("is_winning") is False, (
+        "orchestrator must pass is_winning=False on the walk-forward fallback path too (Gap 6)."
+    )
+
+
+def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
+    """#529 / PR #573 Bug 1: when the acceptance gate has real failure
+    reasons AND alignment also fails, both must survive on the audit
+    trail joined with ``" | "`` so a downstream parser can disambiguate
+    the alignment boundary from ``summarize_acceptance_reason``'s
+    internal ``"; "`` joiner."""
+
+    from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+
+    orch = _orchestrator(_StubMarketDataService())
+
+    monkeypatch.setattr(
+        orch, "_evaluate_walk_forward", lambda spec, md, cfg, trades, metrics: metrics
+    )
+    # Acceptance gate returns two failing entries — their ``details``
+    # strings get joined with ``"; "`` by ``summarize_acceptance_reason``.
+    monkeypatch.setattr(
+        orch.acceptance_gate,
+        "check",
+        lambda metrics, config, n_trials: [
+            QualityGateResult(
+                gate_name="oos_deflated_sharpe",
+                passed=False,
+                severity="critical",
+                details="DSR below threshold",
+            ),
+            QualityGateResult(
+                gate_name="oos_trade_count",
+                passed=False,
+                severity="critical",
+                details="trade count below floor",
+            ),
+        ],
+    )
+
+    _wire_run_cycle_stubs(
+        orch,
+        monkeypatch,
+        alignment_aligned=False,
+        alignment_rationale="entries fire on wrong symbol",
+    )
+
+    config = _config(walk_forward_enabled=True)
+    record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
+
+    assert record.is_winning is False
+    reason = record.backtest.result.acceptance_reason or ""
+    # Both acceptance failures preserved (joined internally with "; ")
+    assert "DSR below threshold" in reason
+    assert "trade count below floor" in reason
+    # Alignment cause appended after a " | " boundary so the categories
+    # are distinguishable.
+    assert " | alignment_failed:" in reason, (
+        f"expected ' | alignment_failed:' boundary in {reason!r}"
+    )
+    assert "entries fire on wrong symbol" in reason
 
 
 def test_legacy_walk_forward_disabled_cannot_publish(monkeypatch):
     """#529: the legacy ``walk_forward_enabled=False`` publication path
     was removed. A run that skips walk-forward (still permitted to
     execute) cannot be marked winning even when alignment passes and
-    annualized return clears the old WINNING_THRESHOLD."""
+    annualized return clears the old WINNING_THRESHOLD.
+
+    Gap 4: the audit trail must explain WHY publication was blocked —
+    a record with ``is_winning=False`` and ``acceptance_reason=None``
+    leaves a user guessing."""
 
     from investment_team.models import StrategyLabRecord
 
@@ -945,3 +1031,10 @@ def test_legacy_walk_forward_disabled_cannot_publish(monkeypatch):
     # Narrative still generated — the run isn't a failure, it just can't
     # publish through the removed legacy path.
     assert record.analysis_narrative
+    # Gap 4: the persisted record must explain why publication was
+    # blocked. Without this entry, a user sees ``is_winning=False`` with
+    # no audit-trail field describing the cause.
+    assert (
+        record.backtest.result.acceptance_reason
+        == "publication_disabled: walk_forward_enabled=False"
+    )
