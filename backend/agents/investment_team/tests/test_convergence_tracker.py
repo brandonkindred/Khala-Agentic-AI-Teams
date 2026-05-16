@@ -253,11 +253,11 @@ def _spec_with_entries(entry_rules, asset_class: str = "stocks") -> StrategySpec
     )
 
 
-def test_strategy_signature_is_stable_across_construction_order():
-    """Two specs whose ``entry_rules`` list contains the same rules in
-    different order canonicalise to the same token set — guaranteed by the
-    ``sorted((_canon(r) for r in spec.entry_rules))`` pass plus
-    ``sort_keys=True`` inside ``_canon``."""
+def test_strategy_signature_invariant_to_entry_list_order():
+    """``_strategy_signature`` is invariant to the position of rules within
+    ``entry_rules`` — guaranteed by the use of a ``Set`` for the returned
+    tokens (and reinforced by the ``sorted((_canon(r) for r in ...))`` pass
+    inside the helper)."""
     rule_a = EntryRule(
         side="long",
         when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
@@ -271,6 +271,28 @@ def test_strategy_signature_is_stable_across_construction_order():
     sig_ba = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_b, rule_a]))
 
     assert sig_ab == sig_ba
+
+
+def test_strategy_signature_canonicalises_across_distinct_equivalent_rules():
+    """Two structurally identical rules built as separate Python objects
+    must produce the same token. This is the property ``sort_keys=True``
+    inside ``_canon`` exists to defend: a future change to dict-ordering
+    semantics in Pydantic or stdlib ``json`` must not silently
+    desynchronise the signature."""
+    rule_v1 = EntryRule(
+        side="long",
+        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+    )
+    rule_v2 = EntryRule(
+        side="long",
+        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+    )
+    assert rule_v1 is not rule_v2
+
+    sig_1 = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_v1]))
+    sig_2 = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_v2]))
+
+    assert sig_1 == sig_2
 
 
 def test_strategy_signature_differs_when_rule_payload_differs():
