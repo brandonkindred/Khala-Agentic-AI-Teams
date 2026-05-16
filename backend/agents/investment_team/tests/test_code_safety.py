@@ -1166,3 +1166,64 @@ def test_universe_guard_accepts_renamed_bar_parameter() -> None:
     results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
     criticals = _critical_details(results)
     assert not any("UNIVERSE" in c for c in criticals), criticals
+
+
+def test_universe_guard_accepts_return_none_form() -> None:
+    """Lint-style ``return None`` is semantically identical to a bare
+    ``return``; both must satisfy the structural gate."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"GLD"})
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return None
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert not any("UNIVERSE" in c for c in criticals), criticals
+
+
+def test_universe_guard_with_non_return_body_is_critical() -> None:
+    """A guard whose body falls through to the signal logic (``pass`` or
+    any non-``return`` statement) does not actually short-circuit and must
+    be rejected, even when the if-test is structurally correct."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"GLD"})
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    pass  # falls through to the signal logic — useless guard
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert any("missing the" in c and "UNIVERSE" in c for c in criticals), criticals
+
+
+def test_empty_universe_passes_structural_gate_with_non_empty_target_symbols() -> None:
+    """When ``target_symbols`` is non-empty, an empty ``UNIVERSE =
+    frozenset()`` still passes the structural gate — the gate's job is
+    presence, not content equality. The runtime would then reject every
+    bar and the BacktestAnomalyDetector / #526 TargetSymbolCoverageGate
+    would catch the resulting zero-trade or wrong-symbol outcome."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset()
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='LONG')
+                ctx.submit_order(symbol=bar.symbol, qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code, _StubSpec(["GLD"]))
+    criticals = _critical_details(results)
+    assert not any("UNIVERSE" in c for c in criticals), criticals

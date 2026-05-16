@@ -1026,8 +1026,14 @@ def _is_universe_guard_stmt(stmt: ast.AST) -> bool:
             return False
     else:
         return False
-    # Body must contain a bare ``return`` (no value) as the first statement.
+    # Body must contain a ``return`` (bare or ``return None``) as the first
+    # statement. ``return None`` is semantically identical to a bare
+    # ``return`` and some lint styles prefer it; both are accepted.
     if not stmt.body:
         return False
     first = stmt.body[0]
-    return isinstance(first, ast.Return) and first.value is None
+    if not isinstance(first, ast.Return):
+        return False
+    if first.value is None:
+        return True
+    return isinstance(first.value, ast.Constant) and first.value.value is None
