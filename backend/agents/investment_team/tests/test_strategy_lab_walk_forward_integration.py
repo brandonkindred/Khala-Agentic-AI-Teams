@@ -686,3 +686,243 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
         g.get("severity") == "critical" and "Sharpe ratio" in g.get("details", "")
         for g in fallback_gates
     )
+
+
+# ---------------------------------------------------------------------------
+# #529 — alignment-loop failure forces is_winning=False
+# ---------------------------------------------------------------------------
+
+
+def _wire_run_cycle_stubs(
+    orch: StrategyLabOrchestrator,
+    monkeypatch,
+    *,
+    alignment_aligned: bool,
+    alignment_rationale: str = "ok",
+    metrics: Optional[BacktestResult] = None,
+    trades_override: Optional[List[TradeRecord]] = None,
+) -> None:
+    """Common stub wiring for end-to-end ``run_cycle`` tests below.
+
+    Bypasses every LLM- or sandbox-touching call site so the orchestrator
+    falls through to the is_winning resolution block with a deterministic
+    set of inputs.
+    """
+    from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
+    from investment_team.strategy_lab.orchestrator import _MarketDataFetch
+
+    spec_dict = {
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": [
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)),
+            ).model_dump()
+        ],
+        "exit_rules": [TimeStopRule(n_bars=5).model_dump()],
+        "risk_limits": {},
+        "speculative": False,
+    }
+    code = (
+        "from contract import Strategy\n\nclass S(Strategy):\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
+    )
+    monkeypatch.setattr(orch.ideation_agent, "run", lambda **kw: (spec_dict, code, "rationale"))
+    monkeypatch.setattr(orch.refinement_agent, "run", lambda **kw: ({"changes_made": "x"}, code))
+    monkeypatch.setattr(
+        orch.alignment_agent,
+        "run",
+        lambda **kw: TradeAlignmentReport(
+            aligned=alignment_aligned, rationale=alignment_rationale, proposed_code=None
+        ),
+    )
+    monkeypatch.setattr(orch.analysis_agent, "run", lambda *a, **k: "narrative")
+    monkeypatch.setattr(
+        orch,
+        "_fetch_market_data",
+        lambda spec, config: _MarketDataFetch(
+            data={"AAPL": _stub_bars("AAPL")},
+            requested_symbols=["AAPL"],
+            fetched_symbols=["AAPL"],
+        ),
+    )
+
+    sample_trades = (
+        trades_override
+        if trades_override is not None
+        else _trades_across_year(n_per_month=4, base_pnl=80.0)
+    )
+    sample_metrics = (
+        metrics
+        if metrics is not None
+        else BacktestResult(
+            total_return_pct=18.0,
+            annualized_return_pct=15.0,
+            volatility_pct=8.0,
+            sharpe_ratio=1.4,
+            max_drawdown_pct=4.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
+        )
+    )
+
+    class _StubExecResult:
+        def __init__(self):
+            self.success = True
+            self.trades = sample_trades
+            self.execution_time_seconds = 0.01
+            self.error_type = None
+            self.stderr = ""
+            self.execution_diagnostics = None
+
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.orchestrator.run_strategy_code",
+        lambda *a, **k: _StubExecResult(),
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.orchestrator.compute_metrics",
+        lambda *a, **k: sample_metrics,
+    )
+
+
+def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch):
+    """#529: even when the walk-forward acceptance gate passes every check,
+    a final alignment report with ``aligned=False`` must veto publication.
+    The audit trail keeps the ``trade_alignment`` gate (passed=False) on
+    ``quality_gate_results`` and surfaces ``alignment_failed`` on
+    ``acceptance_reason`` for downstream consumers."""
+
+    from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+
+    orch = _orchestrator(_StubMarketDataService())
+
+    # Stub the acceptance gate to return all-passing (so alignment is the
+    # only veto in play). Also stub walk-forward evaluation to leave the
+    # metrics untouched so we don't have to construct a full OOS payload.
+    monkeypatch.setattr(
+        orch, "_evaluate_walk_forward", lambda spec, md, cfg, trades, metrics: metrics
+    )
+    monkeypatch.setattr(
+        orch.acceptance_gate,
+        "check",
+        lambda metrics, config, n_trials: [
+            QualityGateResult(
+                gate_name="oos_deflated_sharpe",
+                passed=True,
+                severity="info",
+                details="DSR passes",
+            ),
+            QualityGateResult(
+                gate_name="is_oos_degradation",
+                passed=True,
+                severity="info",
+                details="IS->OOS within tolerance",
+            ),
+        ],
+    )
+
+    _wire_run_cycle_stubs(
+        orch,
+        monkeypatch,
+        alignment_aligned=False,
+        alignment_rationale="entries fire before signal triggers",
+    )
+
+    config = _config(walk_forward_enabled=True)
+    record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
+
+    assert record.is_winning is False
+    alignment_gates = [
+        g for g in record.quality_gate_results if g.get("gate_name") == "trade_alignment"
+    ]
+    assert alignment_gates, "trade_alignment gate must appear in quality_gate_results"
+    assert all(g["passed"] is False for g in alignment_gates)
+    assert record.analysis_narrative  # narrative still generated for context
+    reason = record.backtest.result.acceptance_reason or ""
+    assert "alignment_failed" in reason
+    assert "entries fire before signal triggers" in reason
+
+
+def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monkeypatch):
+    """#529: the walk-forward fallback branch (entered when
+    ``_evaluate_walk_forward`` raised) must also honour the alignment
+    veto. Even with annualized return > WINNING_THRESHOLD and no critical
+    anomalies, ``is_winning`` is False when alignment fails."""
+
+    from investment_team.models import StrategyLabRecord
+
+    orch = _orchestrator(_StubMarketDataService())
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("walk-forward fold construction failed (synthetic)")
+
+    monkeypatch.setattr(orch, "_evaluate_walk_forward", _raise)
+
+    # Stub anomaly detector to return only info-severity (no critical) so
+    # the fallback branch would have marked is_winning=True absent the
+    # alignment check.
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult as _QGR
+
+    monkeypatch.setattr(
+        orch.anomaly_detector,
+        "check",
+        lambda *a, **kw: [
+            _QGR(
+                gate_name="sharpe_sane",
+                passed=True,
+                severity="info",
+                details="ok",
+            )
+        ],
+    )
+
+    _wire_run_cycle_stubs(
+        orch,
+        monkeypatch,
+        alignment_aligned=False,
+        alignment_rationale="trades hit wrong symbol",
+    )
+
+    config = _config(walk_forward_enabled=True)
+    record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
+
+    assert record.is_winning is False
+    alignment_gates = [
+        g for g in record.quality_gate_results if g.get("gate_name") == "trade_alignment"
+    ]
+    assert alignment_gates and all(g["passed"] is False for g in alignment_gates)
+    assert "alignment_failed" in (record.backtest.result.acceptance_reason or "")
+
+
+def test_legacy_walk_forward_disabled_cannot_publish(monkeypatch):
+    """#529: the legacy ``walk_forward_enabled=False`` publication path
+    was removed. A run that skips walk-forward (still permitted to
+    execute) cannot be marked winning even when alignment passes and
+    annualized return clears the old WINNING_THRESHOLD."""
+
+    from investment_team.models import StrategyLabRecord
+
+    orch = _orchestrator(_StubMarketDataService())
+
+    _wire_run_cycle_stubs(
+        orch,
+        monkeypatch,
+        alignment_aligned=True,
+        alignment_rationale="trades match spec",
+    )
+
+    config = _config(walk_forward_enabled=False)
+    record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
+
+    assert record.is_winning is False
+    # Narrative still generated — the run isn't a failure, it just can't
+    # publish through the removed legacy path.
+    assert record.analysis_narrative

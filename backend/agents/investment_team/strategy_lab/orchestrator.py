@@ -117,10 +117,13 @@ MAX_CODE_REFINEMENT_ROUNDS = 50
 # through the sandbox for a fresh backtest. The cap prevents runaway loops
 # when the agent cannot converge.
 MAX_ALIGNMENT_ROUNDS = 10
-# Legacy single-window acceptance threshold. Issue #247 replaced this with
-# the composite ``AcceptanceGate`` (OOS DSR + IS→OOS degradation + OOS trade
-# count + regime beats); ``WINNING_THRESHOLD`` is now only consulted as a
-# fallback when ``BacktestConfig.walk_forward_enabled`` is False.
+# Single-window annualized-return floor consulted only when the walk-forward
+# acceptance gate is unavailable (i.e. ``_evaluate_walk_forward`` raised and
+# we drop into the fallback path). Issue #247 replaced this scalar with the
+# composite ``AcceptanceGate`` (OOS DSR + IS→OOS degradation + OOS trade
+# count + regime beats) on the primary publication path, and #529 removed
+# the legacy ``walk_forward_enabled=False`` branch that previously used this
+# threshold as a publication gate.
 WINNING_THRESHOLD = 8.0
 
 # Cap on `last_order_events` included in the refinement-prompt diagnostics
@@ -1155,7 +1158,14 @@ class StrategyLabOrchestrator:
                 walk_forward_failed = True
 
         # ── Resolve is_winning ────────────────────────────────────────
-        # Walk-forward path: composite gate is authoritative.
+        # Publication requires (a) the walk-forward acceptance gate (or
+        # its overfit-recheck fallback) AND (b) trade-alignment
+        # convergence (``trades_aligned``, #529). A strategy whose final
+        # ``TradeAlignmentReport.aligned`` is False — because the loop hit
+        # ``MAX_ALIGNMENT_ROUNDS`` or broke early with no proposed fix —
+        # cannot be marked winning regardless of metrics, since the
+        # executed trades do not implement the strategy spec.
+        #
         # Walk-forward fallback: anomaly checks during refinement ran with
         # ``dsr_aware=True``, which downgraded the ``Sharpe > 5.0`` flag
         # from critical to warning on the assumption that the OOS DSR
@@ -1163,11 +1173,16 @@ class StrategyLabOrchestrator:
         # anomaly checks with ``dsr_aware=False`` and reject if any
         # critical fires — otherwise an obvious overfit could still be
         # marked winning on annualized return alone.
-        # Legacy path (``walk_forward_enabled=False``): unchanged
-        # ``WINNING_THRESHOLD`` comparison; the refinement loop already
-        # ran with ``dsr_aware=False`` so no re-check is needed.
+        #
+        # The legacy ``walk_forward_enabled=False`` single-window
+        # ``WINNING_THRESHOLD`` branch was removed (#529): a bare
+        # annualized-return scalar with no DSR correction is not a
+        # publication gate. Runs configured without walk-forward still
+        # execute and generate a narrative, but cannot be marked winning.
         if acceptance_results:
-            is_winning = execution_succeeded and all(r.passed for r in acceptance_results)
+            is_winning = (
+                execution_succeeded and all(r.passed for r in acceptance_results) and trades_aligned
+            )
         elif walk_forward_failed and execution_succeeded:
             fallback_anomalies = self.anomaly_detector.check(
                 metrics,
@@ -1179,7 +1194,9 @@ class StrategyLabOrchestrator:
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
             ]
             is_winning = (
-                metrics.annualized_return_pct > WINNING_THRESHOLD and not fallback_criticals
+                metrics.annualized_return_pct > WINNING_THRESHOLD
+                and not fallback_criticals
+                and trades_aligned
             )
             if fallback_criticals:
                 # Surface the upgraded severities so the persisted
@@ -1188,7 +1205,27 @@ class StrategyLabOrchestrator:
                     g.gate_name = f"fallback_{g.gate_name}"
                 all_gate_results.extend(fallback_anomalies)
         else:
-            is_winning = execution_succeeded and metrics.annualized_return_pct > WINNING_THRESHOLD
+            is_winning = False
+
+        # Surface the alignment-failure cause on ``acceptance_reason`` so
+        # the audit trail explains why publication was blocked even when
+        # the acceptance gate / threshold otherwise passed (#529). The
+        # ``trade_alignment`` QualityGateResult already lives in
+        # ``all_gate_results`` (appended per alignment round above); this
+        # mirrors the signal onto ``BacktestResult.acceptance_reason``
+        # without overwriting any prior walk-forward acceptance summary.
+        if execution_succeeded and trades and not trades_aligned:
+            last_report = alignment_reports[-1] if alignment_reports else None
+            if last_report is not None and last_report.rationale:
+                reason_suffix = f"alignment_failed: {last_report.rationale}"
+            else:
+                reason_suffix = "alignment_failed: trades did not implement strategy spec"
+            combined = (
+                f"{metrics.acceptance_reason}; {reason_suffix}"
+                if metrics.acceptance_reason
+                else reason_suffix
+            )
+            metrics = metrics.model_copy(update={"acceptance_reason": combined})
 
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────
         narrative = ""
