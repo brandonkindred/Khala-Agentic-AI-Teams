@@ -117,10 +117,13 @@ MAX_CODE_REFINEMENT_ROUNDS = 50
 # through the sandbox for a fresh backtest. The cap prevents runaway loops
 # when the agent cannot converge.
 MAX_ALIGNMENT_ROUNDS = 10
-# Legacy single-window acceptance threshold. Issue #247 replaced this with
-# the composite ``AcceptanceGate`` (OOS DSR + IS→OOS degradation + OOS trade
-# count + regime beats); ``WINNING_THRESHOLD`` is now only consulted as a
-# fallback when ``BacktestConfig.walk_forward_enabled`` is False.
+# Single-window annualized-return floor consulted only when the walk-forward
+# acceptance gate is unavailable (i.e. ``_evaluate_walk_forward`` raised and
+# we drop into the fallback path). Issue #247 replaced this scalar with the
+# composite ``AcceptanceGate`` (OOS DSR + IS→OOS degradation + OOS trade
+# count + regime beats) on the primary publication path, and #529 removed
+# the legacy ``walk_forward_enabled=False`` branch that previously used this
+# threshold as a publication gate.
 WINNING_THRESHOLD = 8.0
 
 # Cap on `last_order_events` included in the refinement-prompt diagnostics
@@ -1155,7 +1158,14 @@ class StrategyLabOrchestrator:
                 walk_forward_failed = True
 
         # ── Resolve is_winning ────────────────────────────────────────
-        # Walk-forward path: composite gate is authoritative.
+        # Publication requires (a) the walk-forward acceptance gate (or
+        # its overfit-recheck fallback) AND (b) trade-alignment
+        # convergence (``trades_aligned``, #529). A strategy whose final
+        # ``TradeAlignmentReport.aligned`` is False — because the loop hit
+        # ``MAX_ALIGNMENT_ROUNDS`` or broke early with no proposed fix —
+        # cannot be marked winning regardless of metrics, since the
+        # executed trades do not implement the strategy spec.
+        #
         # Walk-forward fallback: anomaly checks during refinement ran with
         # ``dsr_aware=True``, which downgraded the ``Sharpe > 5.0`` flag
         # from critical to warning on the assumption that the OOS DSR
@@ -1163,11 +1173,24 @@ class StrategyLabOrchestrator:
         # anomaly checks with ``dsr_aware=False`` and reject if any
         # critical fires — otherwise an obvious overfit could still be
         # marked winning on annualized return alone.
-        # Legacy path (``walk_forward_enabled=False``): unchanged
-        # ``WINNING_THRESHOLD`` comparison; the refinement loop already
-        # ran with ``dsr_aware=False`` so no re-check is needed.
+        #
+        # The legacy ``walk_forward_enabled=False`` single-window
+        # ``WINNING_THRESHOLD`` branch was removed (#529): a bare
+        # annualized-return scalar with no DSR correction is not a
+        # publication gate. Runs configured without walk-forward still
+        # execute and generate a narrative, but cannot be marked winning.
+        # ``upstream_admitted`` records whether the upstream publication
+        # gate (walk-forward acceptance, or its anomaly-recheck fallback)
+        # said "admit". It feeds the alignment-augmentation block below:
+        # a success-style ``acceptance_reason`` becomes stale the moment
+        # alignment vetoes a run, so we REPLACE it; a failure-style
+        # reason captures a real co-cause and is PRESERVED with the
+        # alignment cause appended.
+        upstream_admitted = False
         if acceptance_results:
-            is_winning = execution_succeeded and all(r.passed for r in acceptance_results)
+            acceptance_passed = all(r.passed for r in acceptance_results)
+            is_winning = execution_succeeded and acceptance_passed and trades_aligned
+            upstream_admitted = acceptance_passed
         elif walk_forward_failed and execution_succeeded:
             fallback_anomalies = self.anomaly_detector.check(
                 metrics,
@@ -1178,17 +1201,108 @@ class StrategyLabOrchestrator:
             fallback_criticals = [
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
             ]
-            is_winning = (
-                metrics.annualized_return_pct > WINNING_THRESHOLD and not fallback_criticals
-            )
+            return_ok = metrics.annualized_return_pct > WINNING_THRESHOLD
+            is_winning = return_ok and not fallback_criticals and trades_aligned
+            upstream_admitted = return_ok and not fallback_criticals
             if fallback_criticals:
                 # Surface the upgraded severities so the persisted
                 # gate-result history reflects the true rejection reason.
                 for g in fallback_anomalies:
                     g.gate_name = f"fallback_{g.gate_name}"
                 all_gate_results.extend(fallback_anomalies)
+            # Gap 7 / 9: mirror the fallback gate's own verdict onto
+            # ``acceptance_reason`` so consumers don't have to grep
+            # ``quality_gate_results`` for ``fallback_`` prefixes to see
+            # why publication was admitted or rejected. The augmentation
+            # block below uses ``upstream_admitted`` to decide whether
+            # to replace this message (alignment vetoes a "passed"
+            # verdict) or to append (both gates fired their own reasons).
+            if upstream_admitted:
+                metrics = metrics.model_copy(
+                    update={
+                        "acceptance_reason": "walk_forward_fallback_passed: anomaly recheck clean"
+                    }
+                )
+            else:
+                fallback_reasons: List[str] = []
+                if fallback_criticals:
+                    fallback_reasons.append("; ".join(g.details for g in fallback_criticals))
+                if not return_ok:
+                    fallback_reasons.append(
+                        f"annualized_return {metrics.annualized_return_pct:.2f}% <= "
+                        f"{WINNING_THRESHOLD:g}% threshold"
+                    )
+                metrics = metrics.model_copy(
+                    update={
+                        "acceptance_reason": (
+                            "walk_forward_fallback_rejected: " + "; ".join(fallback_reasons)
+                        )
+                    }
+                )
         else:
-            is_winning = execution_succeeded and metrics.annualized_return_pct > WINNING_THRESHOLD
+            is_winning = False
+            # Gap 4 / 8: self-document why publication was blocked on
+            # each else-branch entry path. Without this, the persisted
+            # record shows ``is_winning=False`` with an empty
+            # ``acceptance_reason``. The no-trades case is checked first
+            # because it's the more proximate cause when both conditions
+            # hold (a run with no trades cannot publish regardless of
+            # ``walk_forward_enabled``). Execution-failure paths are
+            # handled by the elif-narrative branch in Phase 3 instead.
+            if execution_succeeded and not trades:
+                metrics = metrics.model_copy(
+                    update={"acceptance_reason": "publication_disabled: no trades produced"}
+                )
+            elif execution_succeeded and trades and not config.walk_forward_enabled:
+                metrics = metrics.model_copy(
+                    update={"acceptance_reason": "publication_disabled: walk_forward_enabled=False"}
+                )
+
+        # Surface the alignment-failure cause on ``acceptance_reason`` so
+        # the audit trail explains why publication was blocked even when
+        # the acceptance gate / threshold otherwise passed (#529). The
+        # ``trade_alignment`` QualityGateResult already lives in
+        # ``all_gate_results`` (appended per alignment round above); this
+        # mirrors the signal onto ``BacktestResult.acceptance_reason``.
+        # ``alignment_reports`` is in the guard so we only attribute the
+        # rejection to alignment when the audit actually ran — the loop is
+        # skipped entirely when ``market_data is None``, in which case
+        # ``trades_aligned`` is False for unrelated reasons and an
+        # ``alignment_failed`` suffix would be misleading.
+        if execution_succeeded and trades and alignment_reports and not trades_aligned:
+            last_report = alignment_reports[-1]
+            # NOTE: do NOT name this ``rationale`` — that shadows the
+            # strategy-rationale string bound earlier from the ideation
+            # agent (and used positionally when calling
+            # ``self.analysis_agent.run`` plus persisted on
+            # ``StrategyLabRecord.strategy_rationale``). Shadowing would
+            # silently corrupt both the analysis prompt and the audit
+            # record on every alignment-failure path.
+            align_rationale = (last_report.rationale or "").strip()
+            if align_rationale:
+                reason_suffix = f"alignment_failed: {align_rationale}"
+            else:
+                reason_suffix = "alignment_failed: trades did not implement strategy spec"
+            # When the upstream gate admitted the run (acceptance fully
+            # passed, or fallback anomaly recheck clean), its success
+            # summary is no longer truthful — alignment is now the
+            # rejection cause. Replace rather than append so the audit
+            # trail isn't self-contradictory. When the upstream gate
+            # itself rejected, keep its reason and add the alignment
+            # cause — both are real rejection causes. Use a ``" | "``
+            # delimiter (not ``"; "``, which ``summarize_acceptance_reason``
+            # uses internally between failing gates) so downstream parsers
+            # can disambiguate the alignment boundary from gate boundaries.
+            # Use the stripped form so a whitespace-only upstream reason
+            # (None, "", "   ", "\n") collapses to the alignment suffix
+            # alone — never produces ``"   | alignment_failed: ..."`` with
+            # an empty left side.
+            prior_reason = (metrics.acceptance_reason or "").strip()
+            if prior_reason and not upstream_admitted:
+                combined = f"{prior_reason} | {reason_suffix}"
+            else:
+                combined = reason_suffix
+            metrics = metrics.model_copy(update={"acceptance_reason": combined})
 
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────
         narrative = ""
@@ -1200,7 +1314,12 @@ class StrategyLabOrchestrator:
                     emit("analyzing", {"sub_phase": sub})
 
                 narrative = self.analysis_agent.run(
-                    spec, metrics, trades, rationale, on_sub_phase=_on_analysis_sub
+                    spec,
+                    metrics,
+                    trades,
+                    rationale,
+                    on_sub_phase=_on_analysis_sub,
+                    is_winning=is_winning,
                 )
                 emit("analyzing", {"sub_phase": "completed", "is_winning": is_winning})
             except Exception:
@@ -1828,6 +1947,20 @@ class StrategyLabOrchestrator:
         """
         now_iso = datetime.now(timezone.utc).isoformat()
 
+        # Mirror the short-circuit cause onto ``acceptance_reason`` so the
+        # persisted record self-documents — consistent with the Gap 4/8/7/9
+        # audit-trail messages set on the main publication path (#529).
+        # ``short_circuit_status`` carries a ``"failed: <cause>"`` prefix at
+        # every current call site; strip it so the resulting field reads
+        # ``"publication_disabled: <cause>"``.
+        short_circuit_metrics = compute_metrics(
+            [], config.initial_capital, config.start_date, config.end_date
+        )
+        status_suffix = short_circuit_status.removeprefix("failed: ") or short_circuit_status
+        short_circuit_metrics = short_circuit_metrics.model_copy(
+            update={"acceptance_reason": f"publication_disabled: {status_suffix}"}
+        )
+
         backtest_record = BacktestRecord(
             backtest_id=f"bt-{uuid.uuid4().hex[:8]}",
             strategy_id=spec.strategy_id,
@@ -1837,7 +1970,7 @@ class StrategyLabOrchestrator:
             submitted_at=now_iso,
             completed_at=now_iso,
             status=short_circuit_status,
-            result=compute_metrics([], config.initial_capital, config.start_date, config.end_date),
+            result=short_circuit_metrics,
             trades=[],
         )
 

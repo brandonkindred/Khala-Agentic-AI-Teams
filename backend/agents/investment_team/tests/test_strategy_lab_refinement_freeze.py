@@ -440,6 +440,14 @@ def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
     assert len(loopback_events) == MAX_DESIGN_REENTRIES
     assert orch.ideation_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
     assert record.backtest.status == "failed: spec_unimplementable"
+    # PR #573 round-5 Note 2: short-circuit records must populate
+    # ``acceptance_reason`` so a reader of the persisted record sees
+    # the rejection cause without having to inspect ``status`` or
+    # ``quality_gate_results`` separately.
+    ar = record.backtest.result.acceptance_reason or ""
+    assert "publication_disabled" in ar and "spec_unimplementable" in ar, (
+        f"expected publication_disabled / spec_unimplementable in {ar!r}"
+    )
 
 
 def test_run_cycle_reroutes_on_stray_key_threshold(
@@ -507,3 +515,9 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
     assert orch.ideation_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
     assert record.backtest.status == "failed: spec_unimplementable"
     assert "spec_unimplementable" in record.backtest.status
+    # PR #573 round-5 Note 2: short-circuit records must populate
+    # ``acceptance_reason`` for the same audit-trail reason.
+    ar = record.backtest.result.acceptance_reason or ""
+    assert "publication_disabled" in ar and "spec_unimplementable" in ar, (
+        f"expected publication_disabled / spec_unimplementable in {ar!r}"
+    )
