@@ -52,7 +52,7 @@ from ..models import (
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
-from .agents.alignment import TradeAlignmentAgent, TradeAlignmentReport
+from .agents.alignment import AlignmentAuditError, TradeAlignmentAgent, TradeAlignmentReport
 from .agents.analysis import AnalysisAgent
 from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
@@ -1437,25 +1437,66 @@ class StrategyLabOrchestrator:
         metrics: BacktestResult,
         prior_attempts: List[str],
     ) -> TradeAlignmentReport:
-        """Call the alignment agent. Failures fall back to ``aligned=True`` so
-        the orchestrator does not stall on a transient LLM error."""
+        """Call the alignment agent with retries on transient errors.
+
+        On ``AlignmentAuditError`` (LLM transport / JSON parse failure),
+        retries up to ``STRATEGY_LAB_ALIGNMENT_RETRIES`` times (default 2),
+        then falls **closed** with ``aligned=False`` so the orchestrator's
+        ``no_proposed_fix`` exit fires and a misaligned strategy whose
+        audit happens to throw is not silently waved through (issue #531).
+        The rationale captures the underlying error for the audit trail.
+        """
         try:
-            return self.alignment_agent.run(
-                spec=spec,
-                code=code,
-                trades=trades,
-                metrics=metrics,
-                prior_attempts=prior_attempts,
-            )
-        except Exception as exc:
-            logger.exception("Alignment agent raised; treating trades as aligned")
-            return TradeAlignmentReport(
-                aligned=True,
-                rationale=(
-                    "Alignment audit skipped: alignment agent raised "
-                    f"{type(exc).__name__}. Treating trades as aligned to avoid stalling."
-                ),
-            )
+            retries = max(int(os.environ.get("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")), 0)
+        except ValueError:
+            retries = 2
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            try:
+                return self.alignment_agent.run(
+                    spec=spec,
+                    code=code,
+                    trades=trades,
+                    metrics=metrics,
+                    prior_attempts=prior_attempts,
+                )
+            except AlignmentAuditError as exc:
+                last_exc = exc
+                logger.warning(
+                    "Alignment audit attempt %d/%d failed: %s",
+                    attempt + 1,
+                    retries + 1,
+                    exc,
+                )
+            except Exception as exc:
+                # Unexpected error from the agent (not a transport / parse
+                # failure). Don't retry — surface immediately, fail closed.
+                logger.exception("Alignment agent raised unexpected error; failing closed")
+                return TradeAlignmentReport(
+                    aligned=False,
+                    proposed_code=None,
+                    rationale=(f"Alignment audit error (fail-closed): {type(exc).__name__}: {exc}"),
+                )
+
+        # All retries exhausted — emit a terminal ERROR so ops alerting
+        # rules keyed on ERROR-level logs still fire (the per-attempt
+        # WARNING above is intentionally low-severity for transient
+        # hiccups).
+        assert last_exc is not None, "loop ran at least once; last_exc must be set"
+        logger.error(
+            "Alignment audit error after %d attempts; failing closed: %s",
+            retries + 1,
+            last_exc,
+        )
+        return TradeAlignmentReport(
+            aligned=False,
+            proposed_code=None,
+            rationale=(
+                f"Alignment audit error after {retries + 1} attempts (fail-closed): "
+                f"{type(last_exc).__name__}: {last_exc}"
+            ),
+        )
 
     def _run_zero_trade_repair(
         self,
