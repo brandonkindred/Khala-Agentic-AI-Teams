@@ -65,6 +65,7 @@ from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.models import QualityGateResult
 from .quality_gates.strategy_validator import StrategySpecValidator
+from .quality_gates.target_symbol_coverage import TargetSymbolCoverageGate
 from .spec_dsl import DEFAULT_SIZING_PAYLOAD
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,7 @@ class StrategyLabOrchestrator:
         self.code_safety_checker = CodeSafetyChecker()
         self.anomaly_detector = BacktestAnomalyDetector()
         self.acceptance_gate = AcceptanceGate()
+        self.target_symbol_coverage_gate = TargetSymbolCoverageGate()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
         # Per-failure_phase counter of consecutive refinement rounds where
@@ -590,6 +592,19 @@ class StrategyLabOrchestrator:
                     },
                 )
 
+                # Issue #526 — fail closed if the fetched universe doesn't
+                # include the spec's target_symbols. Code refinement can't
+                # fix this (the data simply isn't there), so we break out
+                # the same way the no-market-data branch above does.
+                fetch_coverage_gates = self.target_symbol_coverage_gate.check_fetch(
+                    spec, requested_symbols, fetched_symbols
+                )
+                for g in fetch_coverage_gates:
+                    g.refinement_round = round_num
+                all_gate_results.extend(fetch_coverage_gates)
+                if any(not g.passed and g.severity == "critical" for g in fetch_coverage_gates):
+                    break
+
             # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
             emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
             exec_result = run_strategy_code(code, market_data, config, strategy=spec)
@@ -645,6 +660,19 @@ class StrategyLabOrchestrator:
             # no-op here. Kept the same ``trades`` variable name so the
             # rest of the loop is untouched.
             trades = exec_result.trades
+
+            # Issue #526 — fail closed when the ledger contains symbols
+            # outside spec.target_symbols. Uses ``max_rounds_exhausted`` to
+            # leave ``execution_succeeded=False`` so ``is_winning`` stays
+            # False at the acceptance gate (same precedent as the
+            # max-refinement-rounds anomaly branch below).
+            trade_coverage_gates = self.target_symbol_coverage_gate.check_trades(spec, trades)
+            for g in trade_coverage_gates:
+                g.refinement_round = round_num
+            all_gate_results.extend(trade_coverage_gates)
+            if any(not g.passed and g.severity == "critical" for g in trade_coverage_gates):
+                max_rounds_exhausted = True
+                break
 
             emit(
                 "backtesting",
