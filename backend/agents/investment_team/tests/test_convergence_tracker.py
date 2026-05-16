@@ -230,3 +230,74 @@ def test_merge_from_lowers_dsr_on_subsequent_cycle():
         "Expected post-merge DSR to deflate further once sibling trial "
         f"counts are visible; got pre={dsr_pre_merge:.6f} post={dsr_post_merge:.6f}"
     )
+
+
+# ----------------------------------------------------------------------
+# Issue #552 — _strategy_signature determinism under the structured DSL.
+# ----------------------------------------------------------------------
+
+
+def _spec_with_entries(entry_rules, asset_class: str = "stocks") -> StrategySpec:
+    return StrategySpec(
+        strategy_id="s1",
+        authored_by="test",
+        asset_class=asset_class,
+        hypothesis="test hypothesis",
+        signal_definition="sig",
+        entry_rules=entry_rules,
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)),
+            ),
+        ],
+    )
+
+
+def test_strategy_signature_is_stable_across_construction_order():
+    """Two specs whose ``entry_rules`` list contains the same rules in
+    different order canonicalise to the same token set — guaranteed by the
+    ``sorted((_canon(r) for r in spec.entry_rules))`` pass plus
+    ``sort_keys=True`` inside ``_canon``."""
+    rule_a = EntryRule(
+        side="long",
+        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+    )
+    rule_b = EntryRule(
+        side="long",
+        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=50)),
+    )
+
+    sig_ab = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_a, rule_b]))
+    sig_ba = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_b, rule_a]))
+
+    assert sig_ab == sig_ba
+
+
+def test_strategy_signature_differs_when_rule_payload_differs():
+    """A meaningful payload change — ``SMARef(period=20)`` vs
+    ``SMARef(period=50)`` — must produce a different entry token. Guards
+    against an over-aggressive canonicalisation that collapses distinct
+    rules."""
+    rule_20 = EntryRule(
+        side="long",
+        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+    )
+    rule_50 = EntryRule(
+        side="long",
+        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=50)),
+    )
+
+    sig_20 = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_20]))
+    sig_50 = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_50]))
+
+    assert sig_20 != sig_50
+
+
+def test_strategy_signature_includes_asset_class_token():
+    """``_strategy_signature`` emits an ``ac:<lower>`` token. Two specs with
+    identical rules but different asset classes must differ exactly in that
+    token."""
+    sig_stocks = ConvergenceTracker._strategy_signature(_mk_spec("stocks"))
+    sig_crypto = ConvergenceTracker._strategy_signature(_mk_spec("crypto"))
+
+    assert sig_stocks ^ sig_crypto == {"ac:stocks", "ac:crypto"}
