@@ -1476,16 +1476,24 @@ class StrategyLabOrchestrator:
                 return TradeAlignmentReport(
                     aligned=False,
                     proposed_code=None,
-                    rationale=(
-                        f"Alignment audit failed (fail-closed): {type(exc).__name__}: {exc}"
-                    ),
+                    rationale=(f"Alignment audit error (fail-closed): {type(exc).__name__}: {exc}"),
                 )
 
+        # All retries exhausted — emit a terminal ERROR so ops alerting
+        # rules keyed on ERROR-level logs still fire (the per-attempt
+        # WARNING above is intentionally low-severity for transient
+        # hiccups).
+        assert last_exc is not None, "loop ran at least once; last_exc must be set"
+        logger.error(
+            "Alignment audit failed after %d attempts; failing closed: %s",
+            retries + 1,
+            last_exc,
+        )
         return TradeAlignmentReport(
             aligned=False,
             proposed_code=None,
             rationale=(
-                f"Alignment audit failed after {retries + 1} attempts (fail-closed): "
+                f"Alignment audit error after {retries + 1} attempts (fail-closed): "
                 f"{type(last_exc).__name__}: {last_exc}"
             ),
         )

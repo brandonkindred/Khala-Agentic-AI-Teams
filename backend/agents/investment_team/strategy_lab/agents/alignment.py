@@ -182,7 +182,16 @@ class TradeAlignmentAgent:
             result = agent(user_prompt)
             parsed = _extract_json(str(result))
         except Exception as exc:
-            logger.warning("Alignment agent failed to produce parseable JSON: %s", exc)
+            # WARNING (not ERROR) because these are expected transient
+            # hiccups; the orchestrator's ``_run_alignment_audit`` retries
+            # this exception type before escalating. ``exc_info=True``
+            # preserves the stack trace for debugging the underlying cause
+            # (specific parse error / transport failure).
+            logger.warning(
+                "Alignment agent failed to produce parseable JSON: %s",
+                exc,
+                exc_info=True,
+            )
             raise AlignmentAuditError(f"{type(exc).__name__}: {exc}") from exc
 
         return _coerce_report(parsed, fallback_code=code)
