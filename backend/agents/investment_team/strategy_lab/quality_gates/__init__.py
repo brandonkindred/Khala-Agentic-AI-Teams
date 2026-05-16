@@ -6,6 +6,7 @@ from .code_safety import CodeSafetyChecker
 from .convergence_tracker import ConvergenceTracker
 from .models import QualityGateResult
 from .strategy_validator import StrategySpecValidator
+from .target_symbol_coverage import TargetSymbolCoverageGate
 
 __all__ = [
     "AcceptanceGate",
@@ -14,5 +15,6 @@ __all__ = [
     "ConvergenceTracker",
     "QualityGateResult",
     "StrategySpecValidator",
+    "TargetSymbolCoverageGate",
     "summarize_acceptance_reason",
 ]
