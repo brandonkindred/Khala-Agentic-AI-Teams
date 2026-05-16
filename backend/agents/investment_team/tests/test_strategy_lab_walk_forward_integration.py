@@ -836,6 +836,19 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
         alignment_rationale="entries fire before signal triggers",
     )
 
+    # Pin the orchestrator → AnalysisAgent wiring (PR #573 review): if the
+    # call ever drops the ``is_winning`` kwarg the narrative would silently
+    # re-derive WINNING from metrics. The wide-stub above (``lambda *a, **k:
+    # "narrative"``) would happily absorb that regression, so capture and
+    # assert the kwarg directly here.
+    captured_analysis_kwargs: dict = {}
+
+    def _recording_analysis(*_args, **kwargs):
+        captured_analysis_kwargs.update(kwargs)
+        return "narrative"
+
+    monkeypatch.setattr(orch.analysis_agent, "run", _recording_analysis)
+
     config = _config(walk_forward_enabled=True)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
 
@@ -849,6 +862,12 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
     reason = record.backtest.result.acceptance_reason or ""
     assert "alignment_failed" in reason
     assert "entries fire before signal triggers" in reason
+    # The orchestrator must thread the resolved verdict through so the
+    # narrative template + outcome_label match the persisted record.
+    assert captured_analysis_kwargs.get("is_winning") is False, (
+        "orchestrator must pass is_winning=False to AnalysisAgent.run when "
+        "alignment vetoes the publication (PR #573 review follow-up)."
+    )
 
 
 def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monkeypatch):

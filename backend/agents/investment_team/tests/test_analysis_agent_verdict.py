@@ -8,11 +8,21 @@ the alignment loop, the walk-forward acceptance gate, or the removal of the
 legacy ``walk_forward_enabled=False`` publication path can all veto. The
 caller now threads the resolved verdict in, and this test pins that the agent
 honours it instead of looking at the metric.
+
+Robustness notes:
+- Template selection is verified by spying on ``Path.read_text`` to record
+  which prompt file was opened — this survives wording edits to
+  ``analysis_win.md`` / ``analysis_lose.md`` (the goldens in
+  ``test_analysis_alignment_prompts.py`` pin the actual content).
+- ``Outcome label: <LABEL>`` is asserted against the rendered self-review
+  prompt; that placeholder lives in ``analysis.py`` itself (the
+  ``_SELF_REVIEW_PROMPT`` constant), not in a drifting template.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, List
 
 from investment_team.models import BacktestResult, StrategySpec
@@ -63,21 +73,18 @@ def _high_return_metrics() -> BacktestResult:
     )
 
 
-class _RecordingAgent:
-    """Stand-in for ``strands.Agent``. Records every prompt it is called with
-    and returns a JSON-shaped string the production code can parse."""
+class _Recorder:
+    """Per-test recorder for prompts sent to the stubbed ``strands.Agent``
+    and prompt-file basenames read by the analysis module."""
 
-    instances: List["_RecordingAgent"] = []
-    call_count = 0
-
-    def __init__(self, *_: Any, **__: Any) -> None:
+    def __init__(self) -> None:
         self.prompts: List[str] = []
-        _RecordingAgent.instances.append(self)
+        self.read_files: List[str] = []
+        self._call_count = 0
 
-    def __call__(self, prompt: str) -> str:
-        self.prompts.append(prompt)
-        _RecordingAgent.call_count += 1
-        if _RecordingAgent.call_count == 1:
+    def render_response(self) -> str:
+        self._call_count += 1
+        if self._call_count == 1:
             return json.dumps({"draft_narrative": "draft body"})
         return json.dumps(
             {
@@ -87,15 +94,32 @@ class _RecordingAgent:
         )
 
 
-def _install_recording_agent(monkeypatch) -> None:
-    _RecordingAgent.instances = []
-    _RecordingAgent.call_count = 0
-    monkeypatch.setattr(analysis_module, "Agent", _RecordingAgent)
+def _install_recorder(monkeypatch) -> _Recorder:
+    """Patch ``strands.Agent``, the strands model factory, and
+    ``Path.read_text`` so the test can capture prompt text + template
+    selection without hitting the LLM. Returns the live recorder."""
+
+    rec = _Recorder()
+
+    class _StubAgent:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            rec.prompts.append(prompt)
+            return rec.render_response()
+
+    monkeypatch.setattr(analysis_module, "Agent", _StubAgent)
     monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
 
+    original_read_text = Path.read_text
 
-def _all_prompts() -> str:
-    return "\n\n".join(p for inst in _RecordingAgent.instances for p in inst.prompts)
+    def _spy_read_text(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        rec.read_files.append(self.name)
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _spy_read_text)
+    return rec
 
 
 def test_analysis_agent_honours_explicit_is_winning_false_on_high_return(monkeypatch):
@@ -104,7 +128,7 @@ def test_analysis_agent_honours_explicit_is_winning_false_on_high_return(monkeyp
     LOSING template + ``outcome_label="LOSING"`` so the narrative cannot tell
     users the strategy won."""
 
-    _install_recording_agent(monkeypatch)
+    rec = _install_recorder(monkeypatch)
 
     AnalysisAgent().run(
         _spec(),
@@ -114,18 +138,19 @@ def test_analysis_agent_honours_explicit_is_winning_false_on_high_return(monkeyp
         is_winning=False,
     )
 
-    prompts = _all_prompts()
-    # The draft template selected must be the losing one. Its checked-in
-    # opening line is the simplest cross-prompt sentinel.
-    assert "LOSING swing-trading strategy" in prompts, (
-        "AnalysisAgent must use analysis_lose.md when is_winning=False is "
+    # Template selection: the LOSING file must have been read; the WINNING
+    # file must NOT. This is robust to wording edits in either template.
+    assert "analysis_lose.md" in rec.read_files, (
+        "AnalysisAgent must read analysis_lose.md when is_winning=False is "
         "forced by the orchestrator (issue #529 follow-up)."
     )
-    assert "WINNING swing-trading strategy" not in prompts, (
-        "AnalysisAgent must NOT use analysis_win.md when is_winning=False is "
+    assert "analysis_win.md" not in rec.read_files, (
+        "AnalysisAgent must NOT read analysis_win.md when is_winning=False is "
         "forced by the orchestrator (issue #529 follow-up)."
     )
-    # Self-review's outcome_label must agree.
+    # The outcome_label placeholder lives in analysis.py's _SELF_REVIEW_PROMPT
+    # constant, so this stays stable even if the template files are reworded.
+    prompts = "\n\n".join(rec.prompts)
     assert "Outcome label: LOSING" in prompts
     assert "Outcome label: WINNING" not in prompts
 
@@ -135,7 +160,7 @@ def test_analysis_agent_honours_explicit_is_winning_true_on_low_return(monkeypat
     narrative must use the WINNING template even if metrics alone would
     have rendered LOSING."""
 
-    _install_recording_agent(monkeypatch)
+    rec = _install_recorder(monkeypatch)
 
     low_return = _high_return_metrics().model_copy(
         update={"annualized_return_pct": 3.0, "total_return_pct": 3.5}
@@ -149,9 +174,11 @@ def test_analysis_agent_honours_explicit_is_winning_true_on_low_return(monkeypat
         is_winning=True,
     )
 
-    prompts = _all_prompts()
-    assert "WINNING swing-trading strategy" in prompts
+    assert "analysis_win.md" in rec.read_files
+    assert "analysis_lose.md" not in rec.read_files
+    prompts = "\n\n".join(rec.prompts)
     assert "Outcome label: WINNING" in prompts
+    assert "Outcome label: LOSING" not in prompts
 
 
 def test_analysis_agent_falls_back_to_metric_heuristic_when_unset(monkeypatch):
@@ -159,7 +186,7 @@ def test_analysis_agent_falls_back_to_metric_heuristic_when_unset(monkeypatch):
     metric-based derivation is preserved (no behaviour change for callers
     that haven't migrated)."""
 
-    _install_recording_agent(monkeypatch)
+    rec = _install_recorder(monkeypatch)
 
     AnalysisAgent().run(
         _spec(),
@@ -168,6 +195,7 @@ def test_analysis_agent_falls_back_to_metric_heuristic_when_unset(monkeypatch):
         rationale="rationale",
     )
 
-    prompts = _all_prompts()
-    assert "WINNING swing-trading strategy" in prompts
+    assert "analysis_win.md" in rec.read_files
+    assert "analysis_lose.md" not in rec.read_files
+    prompts = "\n\n".join(rec.prompts)
     assert "Outcome label: WINNING" in prompts

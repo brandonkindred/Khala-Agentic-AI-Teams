@@ -1214,9 +1214,14 @@ class StrategyLabOrchestrator:
         # ``all_gate_results`` (appended per alignment round above); this
         # mirrors the signal onto ``BacktestResult.acceptance_reason``
         # without overwriting any prior walk-forward acceptance summary.
-        if execution_succeeded and trades and not trades_aligned:
-            last_report = alignment_reports[-1] if alignment_reports else None
-            if last_report is not None and last_report.rationale:
+        # ``alignment_reports`` is in the guard so we only attribute the
+        # rejection to alignment when the audit actually ran — the loop is
+        # skipped entirely when ``market_data is None``, in which case
+        # ``trades_aligned`` is False for unrelated reasons and an
+        # ``alignment_failed`` suffix would be misleading.
+        if execution_succeeded and trades and alignment_reports and not trades_aligned:
+            last_report = alignment_reports[-1]
+            if last_report.rationale:
                 reason_suffix = f"alignment_failed: {last_report.rationale}"
             else:
                 reason_suffix = "alignment_failed: trades did not implement strategy spec"
