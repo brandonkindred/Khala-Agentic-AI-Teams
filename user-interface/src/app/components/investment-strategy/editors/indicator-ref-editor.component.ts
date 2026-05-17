@@ -13,6 +13,7 @@ import {
   IndicatorName,
   IndicatorParamSpec,
 } from '../../../models';
+import { integerValidator } from './strategy-validators';
 
 @Component({
   selector: 'app-indicator-ref-editor',
@@ -77,6 +78,7 @@ export class IndicatorRefEditorComponent implements OnInit, OnDestroy {
         if (p.min !== undefined) validators.push(Validators.min(p.min));
         if (p.max !== undefined) validators.push(Validators.max(p.max));
       }
+      if (p.kind === 'int') validators.push(integerValidator);
       paramsGroup.addControl(p.key, new FormControl(initial, validators));
     }
 

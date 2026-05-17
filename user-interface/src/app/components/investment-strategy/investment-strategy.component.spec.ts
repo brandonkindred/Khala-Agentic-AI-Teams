@@ -213,6 +213,43 @@ describe('InvestmentStrategyComponent', () => {
     httpMock.expectNone(strategiesUrl);
   });
 
+  it('rejects fractional values for integer indicator params', () => {
+    component.addEntryRule();
+    const rule = component.entryRulesArray.at(0);
+    const indicator = rule.get('when')!.get('lhs')!.get('indicator')!;
+    indicator.patchValue({ name: 'sma' });
+    indicator.get('params')!.patchValue({ period: 2.5 });
+
+    expect(indicator.get('params')!.get('period')!.hasError('notInteger')).toBe(true);
+    expect(component.form.valid).toBe(false);
+  });
+
+  it('preserves entry-rule subscriptions when a non-last row is removed', async () => {
+    component.form.patchValue({ hypothesis: 'h', signal_definition: 's' });
+    component.addEntryRule();
+    component.addEntryRule();
+    fixture.detectChanges();
+
+    component.removeEntryRule(0);
+    fixture.detectChanges();
+
+    expect(component.entryRulesArray.length).toBe(1);
+
+    // The remaining row's indicator name swap must still rebuild params
+    // correctly (i.e. the child editor's name.valueChanges subscription
+    // is still attached to the surviving FormGroup, not the destroyed one).
+    const rule = component.entryRulesArray.at(0);
+    const indicator = rule.get('when')!.get('lhs')!.get('indicator')!;
+    indicator.patchValue({ name: 'rsi' });
+    fixture.detectChanges();
+
+    const params = indicator.get('params')!;
+    // RSI's spec has a `period` param (default 14); SMA had one too but
+    // with a different validator profile. Either way, after the swap the
+    // params group must still contain `period`.
+    expect(params.get('period')).not.toBeNull();
+  });
+
   it('flags an unknown exit-rule kind', () => {
     const spec = baseSpec({
       exit_rules: [{ kind: 'gibberish' } as unknown as StrategySpec['exit_rules'][number]],

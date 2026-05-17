@@ -83,7 +83,7 @@
               <mat-icon>add</mat-icon> Add entry rule
             </button>
           </div>
-          @for (ctrl of entryRulesArray.controls; track $index; let i = $index) {
+          @for (ctrl of entryRulesArray.controls; track ctrl; let i = $index) {
             <app-entry-rule-editor
               class="rule-card"
               [group]="ctrl"
@@ -102,7 +102,7 @@
               <mat-icon>add</mat-icon> Add exit rule
             </button>
           </div>
-          @for (ctrl of exitRulesArray.controls; track $index; let i = $index) {
+          @for (ctrl of exitRulesArray.controls; track ctrl; let i = $index) {
             <app-exit-rule-editor
               class="rule-card"
               [group]="ctrl"

@@ -41,6 +41,7 @@ import {
 import { EntryRuleEditorComponent } from './editors/entry-rule-editor.component';
 import { ExitRuleEditorComponent } from './editors/exit-rule-editor.component';
 import { SizingEditorComponent } from './editors/sizing-editor.component';
+import { integerValidator } from './editors/strategy-validators';
 
 const ALLOWED_EXIT_KINDS: ReadonlySet<string> = new Set(EXIT_RULE_KINDS);
 const ALLOWED_SIZING_KINDS: ReadonlySet<string> = new Set(SIZING_KINDS);
@@ -166,6 +167,7 @@ export class InvestmentStrategyComponent implements OnInit {
         if (p.min !== undefined) validators.push(Validators.min(p.min));
         if (p.max !== undefined) validators.push(Validators.max(p.max));
       }
+      if (p.kind === 'int') validators.push(integerValidator);
       paramsGroup.addControl(p.key, new FormControl(value, validators));
     }
     const sourceCtrl = new FormControl(initial?.source ?? 'close');
