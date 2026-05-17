@@ -18,6 +18,13 @@
         </div>
       }
 
+      @if (hasPrefillErrors) {
+        <div class="error-banner" data-testid="prefill-errors-banner">
+          <mat-icon>error</mat-icon>
+          <span>Cannot edit this strategy — unsupported rule shape: {{ prefillErrors.join(', ') }}</span>
+        </div>
+      }
+
       <form [formGroup]="form">
         <!-- Strategy Definition -->
         <section class="form-section">
@@ -33,12 +40,21 @@
               </mat-select>
             </mat-form-field>
 
-            <div class="toggle-container">
-              <mat-slide-toggle formControlName="speculative">
-                Speculative Strategy
-              </mat-slide-toggle>
-              <span class="toggle-hint">Higher risk strategies subject to IPS sleeve caps</span>
-            </div>
+            <mat-form-field appearance="outline">
+              <mat-label>Timeframe</mat-label>
+              <mat-select formControlName="timeframe">
+                @for (tf of timeframeOptions; track tf) {
+                  <mat-option [value]="tf">{{ tf }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+          </div>
+
+          <div class="toggle-container">
+            <mat-slide-toggle formControlName="speculative">
+              Speculative Strategy
+            </mat-slide-toggle>
+            <span class="toggle-hint">Higher risk strategies subject to IPS sleeve caps</span>
           </div>
 
           <mat-form-field appearance="outline" class="full-width">
@@ -60,48 +76,47 @@
 
         <mat-divider></mat-divider>
 
-        <!-- Trading Rules — structured DSL (issue #551). A visual rule
-             builder is deferred; edit as JSON for now. -->
         <section class="form-section">
-          <h3>Trading Rules (structured DSL)</h3>
-
-          @if (rulesError) {
-            <div class="error-banner">
-              <mat-icon>error</mat-icon>
-              <span>{{ rulesError }}</span>
-            </div>
+          <div class="section-header">
+            <h3>Entry Rules</h3>
+            <button mat-stroked-button type="button" (click)="addEntryRule()">
+              <mat-icon>add</mat-icon> Add entry rule
+            </button>
+          </div>
+          @for (ctrl of entryRulesArray.controls; track ctrl; let i = $index) {
+            <app-entry-rule-editor
+              class="rule-card"
+              [group]="ctrl"
+              [index]="i"
+              (remove)="removeEntryRule(i)"
+            />
           }
+        </section>
 
-          <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Entry Rules (JSON array of EntryRule)</mat-label>
-            <textarea matInput formControlName="entry_rules_json" rows="6" spellcheck="false" placeholder='[
-  {
-    "kind": "entry",
-    "side": "long",
-    "when": {
-      "lhs": {"kind": "price", "field": "close"},
-      "op": "gt",
-      "rhs": {"kind": "sma", "period": 20}
-    }
-  }
-]'></textarea>
-            <mat-hint>JSON array. See spec_dsl.py for the supported shapes.</mat-hint>
-          </mat-form-field>
+        <mat-divider></mat-divider>
 
-          <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Exit Rules (JSON array of ExitRule)</mat-label>
-            <textarea matInput formControlName="exit_rules_json" rows="6" spellcheck="false" placeholder='[
-  {"kind": "time_stop", "n_bars": 10},
-  {"kind": "stop_loss", "pct": 0.05}
-]'></textarea>
-            <mat-hint>Discriminator field: kind = time_stop | stop_loss | take_profit | signal_exit</mat-hint>
-          </mat-form-field>
+        <section class="form-section">
+          <div class="section-header">
+            <h3>Exit Rules</h3>
+            <button mat-stroked-button type="button" (click)="addExitRule()">
+              <mat-icon>add</mat-icon> Add exit rule
+            </button>
+          </div>
+          @for (ctrl of exitRulesArray.controls; track ctrl; let i = $index) {
+            <app-exit-rule-editor
+              class="rule-card"
+              [group]="ctrl"
+              [index]="i"
+              (remove)="removeExitRule(i)"
+            />
+          }
+        </section>
 
-          <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Position Sizing (JSON SizingRule)</mat-label>
-            <textarea matInput formControlName="sizing_json" rows="4" spellcheck="false" placeholder='{"kind": "fixed_fraction", "fraction": 0.02}'></textarea>
-            <mat-hint>Discriminator field: kind = fixed_fraction | volatility_target | fixed_notional</mat-hint>
-          </mat-form-field>
+        <mat-divider></mat-divider>
+
+        <section class="form-section">
+          <h3>Position Sizing</h3>
+          <app-sizing-editor [group]="sizingGroup" />
         </section>
       </form>
 
@@ -183,7 +198,7 @@
 
     <mat-card-actions align="end">
       @if (!currentStrategy) {
-        <button mat-raised-button color="primary" (click)="createStrategy()" [disabled]="loading || form.invalid">
+        <button mat-raised-button color="primary" (click)="createStrategy()" [disabled]="loading || form.invalid || hasPrefillErrors">
           @if (loading) {
             Creating...
           } @else {

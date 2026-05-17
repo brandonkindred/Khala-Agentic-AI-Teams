@@ -1,0 +1,34 @@
+<div class="predicate-side" [formGroup]="group">
+  <mat-form-field appearance="outline" class="side-kind-field">
+    <mat-label>{{ label }} type</mat-label>
+    <mat-select formControlName="side_kind">
+      <mat-option value="indicator">Indicator</mat-option>
+      <mat-option value="bar_field">Bar field</mat-option>
+      @if (allowNumber) {
+        <mat-option value="number">Constant</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  @switch (sideKind) {
+    @case ('indicator') {
+      <app-indicator-ref-editor [group]="indicatorGroup" />
+    }
+    @case ('bar_field') {
+      <mat-form-field appearance="outline" class="bar-field">
+        <mat-label>bar field</mat-label>
+        <mat-select formControlName="bar_field">
+          @for (b of barFields; track b) {
+            <mat-option [value]="b">{{ b }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    }
+    @case ('number') {
+      <mat-form-field appearance="outline" class="number-field">
+        <mat-label>value</mat-label>
+        <input matInput type="number" step="any" formControlName="number_val" />
+      </mat-form-field>
+    }
+  }
+</div>

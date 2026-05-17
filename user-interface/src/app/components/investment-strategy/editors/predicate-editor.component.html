@@ -1,0 +1,14 @@
+<div class="predicate-editor" [formGroup]="group">
+  <app-predicate-side-editor [group]="lhsGroup" [allowNumber]="false" label="LHS" />
+
+  <mat-form-field appearance="outline" class="op-field">
+    <mat-label>op</mat-label>
+    <mat-select formControlName="op">
+      @for (o of opOptions; track o.value) {
+        <mat-option [value]="o.value">{{ o.label }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  <app-predicate-side-editor [group]="rhsGroup" [allowNumber]="true" label="RHS" />
+</div>

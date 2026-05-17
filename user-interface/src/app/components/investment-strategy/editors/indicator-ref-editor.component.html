@@ -1,0 +1,48 @@
+<div class="indicator-editor" [formGroup]="group">
+  <mat-form-field appearance="outline" class="name-field">
+    <mat-label>Indicator</mat-label>
+    <mat-select formControlName="name">
+      @for (n of indicatorNames; track n) {
+        <mat-option [value]="n">{{ n }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  <div class="params-row" formGroupName="params">
+    @for (p of paramsFor(currentName()); track p.key) {
+      @if (p.kind === 'enum') {
+        <mat-form-field appearance="outline" class="param-field">
+          <mat-label>{{ p.key }}</mat-label>
+          <mat-select [formControlName]="p.key">
+            @for (opt of p.options ?? []; track opt) {
+              <mat-option [value]="opt">{{ opt }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      } @else {
+        <mat-form-field appearance="outline" class="param-field">
+          <mat-label>{{ p.key }}</mat-label>
+          <input
+            matInput
+            type="number"
+            [min]="p.min ?? null"
+            [max]="p.max ?? null"
+            [step]="p.kind === 'float' ? 'any' : 1"
+            [formControlName]="p.key"
+          />
+        </mat-form-field>
+      }
+    }
+  </div>
+
+  @if (allowsSource()) {
+    <mat-form-field appearance="outline" class="source-field">
+      <mat-label>source</mat-label>
+      <mat-select formControlName="source">
+        @for (s of sourceOptions; track s) {
+          <mat-option [value]="s">{{ s }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+  }
+</div>

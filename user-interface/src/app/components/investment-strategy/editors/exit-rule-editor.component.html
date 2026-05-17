@@ -1,0 +1,60 @@
+<div class="exit-rule-row" [formGroup]="group">
+  <div class="rule-header">
+    <span class="rule-index">#{{ index + 1 }}</span>
+    <mat-form-field appearance="outline" class="kind-field">
+      <mat-label>kind</mat-label>
+      <mat-select formControlName="kind">
+        @for (k of kindOptions; track k) {
+          <mat-option [value]="k">{{ k }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+    <button
+      mat-icon-button
+      color="warn"
+      type="button"
+      class="remove-btn"
+      aria-label="Remove exit rule"
+      (click)="remove.emit()"
+    >
+      <mat-icon>delete</mat-icon>
+    </button>
+  </div>
+
+  @switch (currentKind) {
+    @case ('time_stop') {
+      <mat-form-field appearance="outline" class="num-field">
+        <mat-label>n_bars</mat-label>
+        <input matInput type="number" min="1" step="1" formControlName="n_bars" />
+      </mat-form-field>
+    }
+    @case ('stop_loss') {
+      <mat-form-field appearance="outline" class="num-field">
+        <mat-label>pct (0–1)</mat-label>
+        <input matInput type="number" min="0" max="1" step="0.001" formControlName="pct" />
+      </mat-form-field>
+      <mat-form-field appearance="outline" class="basis-field">
+        <mat-label>basis</mat-label>
+        <mat-select formControlName="basis">
+          @for (b of basisOptions; track b) {
+            <mat-option [value]="b">{{ b }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    }
+    @case ('take_profit') {
+      <mat-form-field appearance="outline" class="num-field">
+        <mat-label>pct</mat-label>
+        <input matInput type="number" min="0" step="0.001" formControlName="pct" />
+      </mat-form-field>
+    }
+    @case ('signal_exit') {
+      <app-predicate-editor [group]="whenGroup" />
+    }
+  }
+
+  <mat-form-field appearance="outline" class="note-field">
+    <mat-label>note (optional)</mat-label>
+    <input matInput formControlName="note" />
+  </mat-form-field>
+</div>

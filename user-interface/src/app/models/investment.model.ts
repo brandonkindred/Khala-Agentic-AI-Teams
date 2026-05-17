@@ -166,61 +166,136 @@ export interface PortfolioProposal {
 }
 
 // ---------------------------------------------------------------------------
-// Strategy DSL (mirrors backend/agents/investment_team/strategy_lab/spec_dsl.py,
-// issue #550). Producers must emit the structured shape — the backend
-// (#551) rejects prose strings on input.
+// Strategy DSL (mirrors backend/agents/investment_team/strategy_lab/spec_dsl.py).
+// Wire-format types: IndicatorRef has the same { name, params, source } shape
+// as the Python Pydantic class. Predicate sides accept either a structured
+// IndicatorRef, a bar-field literal string, or (rhs only) a numeric constant.
 // ---------------------------------------------------------------------------
 
 export type IndicatorSource = 'close' | 'high' | 'low' | 'open' | 'volume' | 'hl2' | 'ohlc4';
-export type ComparisonOp = 'gt' | 'lt' | 'ge' | 'le' | 'eq' | 'cross_above' | 'cross_below';
 
-export interface PriceRef       { kind: 'price'; field?: IndicatorSource; }
-export interface ConstRef       { kind: 'const'; value: number; }
-export interface SMARef         { kind: 'sma'; period: number; source?: IndicatorSource; }
-export interface EMARef         { kind: 'ema'; period: number; source?: IndicatorSource; }
-export interface RSIRef         { kind: 'rsi'; period?: number; source?: IndicatorSource; }
-export interface MACDRef {
-  kind: 'macd';
-  fast?: number;
-  slow?: number;
-  signal?: number;
-  output?: 'macd' | 'signal' | 'histogram';
+export type ComparisonOp = '<' | '>' | '<=' | '>=' | '==' | 'cross_above' | 'cross_below';
+
+export const COMPARISON_OP_OPTIONS: { value: ComparisonOp; label: string }[] = [
+  { value: '<', label: '<' },
+  { value: '>', label: '>' },
+  { value: '<=', label: '<=' },
+  { value: '>=', label: '>=' },
+  { value: '==', label: '==' },
+  { value: 'cross_above', label: 'crosses above' },
+  { value: 'cross_below', label: 'crosses below' },
+];
+
+export type IndicatorName =
+  | 'sma'
+  | 'ema'
+  | 'rsi'
+  | 'macd'
+  | 'bollinger'
+  | 'atr'
+  | 'adx'
+  | 'stochastic'
+  | 'vwap';
+
+export const INDICATOR_NAME_OPTIONS: IndicatorName[] = [
+  'sma', 'ema', 'rsi', 'macd', 'bollinger', 'atr', 'adx', 'stochastic', 'vwap',
+];
+
+export type IndicatorParamValue = number | string;
+
+export interface IndicatorRef {
+  name: IndicatorName;
+  params: Record<string, IndicatorParamValue>;
   source?: IndicatorSource;
 }
-export interface BollingerRef {
-  kind: 'bollinger';
-  period?: number;
-  num_std?: number;
-  band?: 'upper' | 'middle' | 'lower';
-  source?: IndicatorSource;
-}
-export interface ATRRef         { kind: 'atr'; period?: number; }
-export interface ADXRef         { kind: 'adx'; period?: number; }
-export interface StochasticRef  { kind: 'stochastic'; k_period?: number; d_period?: number; output?: 'k' | 'd'; }
-export interface VWAPRef        { kind: 'vwap'; }
 
-export type IndicatorRef =
-  | PriceRef
-  | ConstRef
-  | SMARef
-  | EMARef
-  | RSIRef
-  | MACDRef
-  | BollingerRef
-  | ATRRef
-  | ADXRef
-  | StochasticRef
-  | VWAPRef;
+export type BarFieldRef = 'bar.close' | 'bar.high' | 'bar.low' | 'bar.volume';
+
+export const BAR_FIELD_OPTIONS: BarFieldRef[] = ['bar.close', 'bar.high', 'bar.low', 'bar.volume'];
+
+export const INDICATOR_SOURCE_OPTIONS: IndicatorSource[] = [
+  'close', 'high', 'low', 'open', 'volume', 'hl2', 'ohlc4',
+];
+
+// Mirrors _INDICATOR_PARAM_SPECS in spec_dsl.py — kept in sync because the form
+// needs to know per-indicator which params to render, their bounds, and whether
+// the source override is accepted.
+export interface IndicatorParamSpec {
+  key: string;
+  required: boolean;
+  default?: number | string;
+  kind: 'int' | 'float' | 'enum';
+  min?: number;
+  max?: number;
+  options?: string[];
+}
+
+export interface IndicatorSpec {
+  name: IndicatorName;
+  allowSource: boolean;
+  params: IndicatorParamSpec[];
+}
+
+export const INDICATOR_SPECS: Record<IndicatorName, IndicatorSpec> = {
+  sma: {
+    name: 'sma', allowSource: true,
+    params: [{ key: 'period', required: true, kind: 'int', min: 2, max: 400 }],
+  },
+  ema: {
+    name: 'ema', allowSource: true,
+    params: [{ key: 'period', required: true, kind: 'int', min: 2, max: 400 }],
+  },
+  rsi: {
+    name: 'rsi', allowSource: true,
+    params: [{ key: 'period', required: false, default: 14, kind: 'int', min: 2, max: 200 }],
+  },
+  macd: {
+    name: 'macd', allowSource: true,
+    params: [
+      { key: 'fast', required: false, default: 12, kind: 'int', min: 2, max: 200 },
+      { key: 'slow', required: false, default: 26, kind: 'int', min: 3, max: 400 },
+      { key: 'signal', required: false, default: 9, kind: 'int', min: 2, max: 100 },
+      { key: 'output', required: false, default: 'macd', kind: 'enum', options: ['macd', 'signal', 'histogram'] },
+    ],
+  },
+  bollinger: {
+    name: 'bollinger', allowSource: true,
+    params: [
+      { key: 'period', required: false, default: 20, kind: 'int', min: 5, max: 200 },
+      { key: 'num_std', required: false, default: 2.0, kind: 'float', min: 0.000001 },
+      { key: 'band', required: false, default: 'middle', kind: 'enum', options: ['upper', 'middle', 'lower'] },
+    ],
+  },
+  atr: {
+    name: 'atr', allowSource: false,
+    params: [{ key: 'period', required: false, default: 14, kind: 'int', min: 2, max: 200 }],
+  },
+  adx: {
+    name: 'adx', allowSource: false,
+    params: [{ key: 'period', required: false, default: 14, kind: 'int', min: 2, max: 200 }],
+  },
+  stochastic: {
+    name: 'stochastic', allowSource: false,
+    params: [
+      { key: 'k_period', required: false, default: 14, kind: 'int', min: 2, max: 200 },
+      { key: 'd_period', required: false, default: 3, kind: 'int', min: 1, max: 100 },
+      { key: 'output', required: false, default: 'k', kind: 'enum', options: ['k', 'd'] },
+    ],
+  },
+  vwap: { name: 'vwap', allowSource: false, params: [] },
+};
+
+export type PredicateSide = IndicatorRef | BarFieldRef;
 
 export interface Predicate {
-  lhs: IndicatorRef;
+  lhs: PredicateSide;
   op: ComparisonOp;
-  rhs: IndicatorRef;
+  rhs: PredicateSide | number;
 }
 
 export interface EntryRule {
   kind: 'entry';
-  side?: 'long' | 'short';
+  side: 'long' | 'short';
   when: Predicate;
   note?: string;
 }
@@ -229,16 +304,30 @@ export interface TimeStopRule    { kind: 'time_stop'; n_bars: number; note?: str
 export interface StopLossRule    { kind: 'stop_loss'; pct: number; basis?: 'entry_price' | 'trailing_high' | 'trailing_low'; note?: string; }
 export interface TakeProfitRule  { kind: 'take_profit'; pct: number; note?: string; }
 export interface SignalExitRule  { kind: 'signal_exit'; when: Predicate; note?: string; }
-export interface UnparsableRule  { kind: 'unparsable'; prose: string; reason?: string; }
 
-export type ExitRule = TimeStopRule | StopLossRule | TakeProfitRule | SignalExitRule | UnparsableRule;
+export type ExitRule = TimeStopRule | StopLossRule | TakeProfitRule | SignalExitRule;
+
+export const EXIT_RULE_KINDS = ['time_stop', 'stop_loss', 'take_profit', 'signal_exit'] as const;
+export type ExitRuleKind = typeof EXIT_RULE_KINDS[number];
+
+export type StopLossBasis = 'entry_price' | 'trailing_high' | 'trailing_low';
+
+export const STOP_LOSS_BASIS_OPTIONS: StopLossBasis[] = [
+  'entry_price', 'trailing_high', 'trailing_low',
+];
 
 export interface FixedFractionSizing    { kind: 'fixed_fraction'; fraction: number; note?: string; }
 export interface VolatilityTargetSizing { kind: 'volatility_target'; target_annual_vol: number; note?: string; }
 export interface FixedNotionalSizing    { kind: 'fixed_notional'; notional_usd: number; note?: string; }
-export interface UnparsableSizing       { kind: 'unparsable_sizing'; prose: string; reason?: string; }
 
-export type SizingRule = FixedFractionSizing | VolatilityTargetSizing | FixedNotionalSizing | UnparsableSizing;
+export type SizingRule = FixedFractionSizing | VolatilityTargetSizing | FixedNotionalSizing;
+
+export const SIZING_KINDS = ['fixed_fraction', 'volatility_target', 'fixed_notional'] as const;
+export type SizingKind = typeof SIZING_KINDS[number];
+
+export type StrategyTimeframe = '1m' | '5m' | '15m' | '1h' | '1d';
+
+export const STRATEGY_TIMEFRAME_OPTIONS: StrategyTimeframe[] = ['1m', '5m', '15m', '1h', '1d'];
 
 // ---------------------------------------------------------------------------
 // Strategy Models
@@ -250,12 +339,16 @@ export interface StrategySpec {
   asset_class: string;
   hypothesis: string;
   signal_definition: string;
+  timeframe: StrategyTimeframe;
   entry_rules: EntryRule[];
   exit_rules: ExitRule[];
   sizing: SizingRule;
+  target_symbols: string[];
   risk_limits: Record<string, unknown>;
   speculative: boolean;
   strategy_code?: string;
+  requires_redesign: boolean;
+  unparsed_rules: string[];
   audit: AuditContext;
 }
 
@@ -386,6 +479,7 @@ export interface CreateStrategyRequest {
   asset_class: string;
   hypothesis: string;
   signal_definition: string;
+  timeframe: StrategyTimeframe;
   entry_rules?: EntryRule[];
   exit_rules?: ExitRule[];
   sizing?: SizingRule;

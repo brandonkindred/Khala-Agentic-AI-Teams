@@ -96,6 +96,73 @@
   }
 }
 
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+
+  h3 {
+    margin: 0;
+  }
+}
+
+.rule-card {
+  display: block;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
+
+  .rule-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+
+    .rule-index {
+      font-weight: 600;
+      color: rgba(0, 0, 0, 0.6);
+      min-width: 32px;
+    }
+
+    .remove-btn {
+      margin-left: auto;
+    }
+  }
+
+  .predicate-editor,
+  .predicate-side,
+  .indicator-editor {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .params-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .note-field {
+    width: 100%;
+  }
+}
+
+.sizing-editor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-start;
+
+  .note-field {
+    flex: 1 1 100%;
+  }
+}
+
 .validation-panel {
   margin-top: 16px;
 
