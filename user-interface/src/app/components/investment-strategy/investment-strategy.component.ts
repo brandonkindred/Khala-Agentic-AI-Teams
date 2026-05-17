@@ -464,12 +464,18 @@ export class InvestmentStrategyComponent implements OnInit {
     }
     const indicator = raw['indicator'] as Record<string, unknown>;
     const params = { ...(indicator['params'] as Record<string, unknown>) };
-    // Cast string numerics to numbers for int/float params per the spec registry.
     const name = indicator['name'] as IndicatorName;
     const spec = INDICATOR_SPECS[name];
     for (const p of spec?.params ?? []) {
-      if (p.kind !== 'enum' && params[p.key] !== null && params[p.key] !== undefined) {
-        params[p.key] = Number(params[p.key]);
+      const v = params[p.key];
+      // Drop blank optional params so the backend applies its own default;
+      // otherwise {period: null} fails the Pydantic int|float|str validator.
+      if (v === null || v === undefined || v === '') {
+        delete params[p.key];
+        continue;
+      }
+      if (p.kind !== 'enum') {
+        params[p.key] = Number(v);
       }
     }
     return {

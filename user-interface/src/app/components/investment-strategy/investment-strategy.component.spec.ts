@@ -282,6 +282,46 @@ describe('InvestmentStrategyComponent', () => {
     expect(component.form.valid).toBe(false);
   });
 
+  it('drops blank optional indicator params from the wire payload', async () => {
+    component.form.patchValue({ hypothesis: 'h', signal_definition: 's' });
+    component.addEntryRule();
+    // Mount the child editor so its name.valueChanges subscription rebuilds
+    // params for RSI (where `period` is optional) instead of leaving the
+    // default SMA shape (where `period` is required).
+    fixture.detectChanges();
+
+    const rule = component.entryRulesArray.at(0);
+    const lhs = rule.get('when')!.get('lhs')!;
+    lhs.patchValue({ side_kind: 'indicator' });
+    const indicator = lhs.get('indicator')!;
+    indicator.patchValue({ name: 'rsi' });
+    fixture.detectChanges();
+
+    // User clears the optional `period` field. The control passes validation
+    // (no required validator) but {period: null} would be rejected by the
+    // backend's int|float|str Pydantic validator if the serializer let it
+    // through.
+    indicator.get('params')!.patchValue({ period: null });
+
+    const rhs = rule.get('when')!.get('rhs')!;
+    rhs.patchValue({ side_kind: 'number', number_val: 30 });
+
+    expect(component.form.valid).toBe(true);
+
+    await component.createStrategy();
+    const req = httpMock.expectOne(strategiesUrl);
+    const lhsPayload = req.request.body.entry_rules[0].when.lhs;
+    expect(lhsPayload.name).toBe('rsi');
+    expect(lhsPayload.params).toEqual({});
+    expect('period' in lhsPayload.params).toBe(false);
+
+    req.flush({
+      strategy_id: 'strat-drop',
+      strategy: baseSpec({ strategy_id: 'strat-drop' }),
+      message: 'ok',
+    });
+  });
+
   it('flags an unknown exit-rule kind', () => {
     const spec = baseSpec({
       exit_rules: [{ kind: 'gibberish' } as unknown as StrategySpec['exit_rules'][number]],
