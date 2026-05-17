@@ -541,6 +541,64 @@ def test_zero_trade_repair_invalid_spec_updates_falls_through(
     assert rejected_event["reason"] == "invalid_spec_updates"
 
 
+def test_zero_trade_repair_invalid_spec_updates_still_carries_dropped_keys_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #530: when the proposal both (a) has off-list keys the agent
+    already filtered AND (b) the surviving ``risk_limits`` is malformed
+    enough to raise ``ValidationError`` in ``_apply_zero_trade_spec_updates``,
+    the early-return path must still surface the
+    ``zero_trade_repair_dropped_spec_keys`` audit gate. Previously the
+    ValidationError path returned ``new_gates=safety_gates`` only and the
+    dropped-keys gate was lost — the warning fired but the audit trail
+    was missing from ``quality_gate_results``."""
+    orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="ENTRY_WITH_NO_EXIT",
+                evidence="entries_filled=4 closed_trades=0",
+                proposed_code=_REPAIRED_CODE,
+                # ``risk_limits`` as a bare string → Pydantic
+                # ValidationError when ``_apply_zero_trade_spec_updates``
+                # tries to coerce into ``RiskLimits``.
+                proposed_spec_updates={"risk_limits": "loosen drawdown please"},
+                # Agent-pre-filtered keys that should still be surfaced
+                # on the rejected run's quality gates.
+                dropped_spec_update_keys=["entry_rules", "hypothesis"],
+                changes_made="malformed risk_limits plus filtered drift",
+            ),
+        ],
+        sandbox_results=[],  # sandbox MUST NOT be called
+    )
+
+    outcome, events, attempts = _drive_repair(
+        orch,
+        exec_result=StrategyRunResult(
+            success=True,
+            trades=[],
+            execution_diagnostics=_zero_trade_diagnostics(category="ENTRY_WITH_NO_EXIT"),
+        ),
+    )
+
+    assert outcome.committed is False
+    assert outcome.failure_reason == "invalid_spec_updates"
+    assert sandbox_stub.calls == []
+
+    # The dropped-keys gate is preserved on the rejected outcome so the
+    # persisted ``quality_gate_results`` still reflects the attempted
+    # off-list mutation.
+    dropped_gates = [
+        g for g in outcome.new_gates if g.gate_name == "zero_trade_repair_dropped_spec_keys"
+    ]
+    assert len(dropped_gates) == 1, outcome.new_gates
+    gate = dropped_gates[0]
+    assert gate.severity == "warning"
+    assert gate.passed is False
+    for key in ("entry_rules", "hypothesis"):
+        assert key in gate.details
+
+
 def test_zero_trade_repair_agent_exception_falls_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

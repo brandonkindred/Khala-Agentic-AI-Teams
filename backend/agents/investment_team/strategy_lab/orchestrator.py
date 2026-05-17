@@ -1620,6 +1620,7 @@ class StrategyLabOrchestrator:
                 if k not in _ZERO_TRADE_SPEC_UPDATE_KEYS
             }
         )
+        dropped_keys_gates: List[QualityGateResult] = []
         if dropped_spec_keys:
             logger.warning(
                 "Zero-trade repair discarded spec-mutating keys %s for round=%s "
@@ -1628,6 +1629,22 @@ class StrategyLabOrchestrator:
                 dropped_spec_keys,
                 round_num,
             )
+            # #530: build the gate once so every early-return path carries
+            # it forward (the ValidationError path below would otherwise
+            # drop the audit trail even though the warning was logged).
+            dropped_keys_gates = [
+                QualityGateResult(
+                    gate_name="zero_trade_repair_dropped_spec_keys",
+                    passed=False,
+                    severity="warning",
+                    details=(
+                        "Zero-trade repair proposed off-list spec keys "
+                        f"{dropped_spec_keys}; dropped per #530 "
+                        "(risk_limits only)."
+                    ),
+                    refinement_round=round_num,
+                )
+            ]
 
         # ── Fresh backtest of the proposed code ──────────────────────
         try:
@@ -1656,7 +1673,7 @@ class StrategyLabOrchestrator:
             )
             return _ZeroTradeRepairOutcome(
                 committed=False,
-                new_gates=safety_gates,
+                new_gates=safety_gates + dropped_keys_gates,
                 failure_reason="invalid_spec_updates",
             )
 
@@ -1676,23 +1693,11 @@ class StrategyLabOrchestrator:
             for g in post_repair_spec_gates:
                 g.refinement_round = round_num
                 g.gate_name = f"zero_trade_repair_{g.gate_name}"
-        if dropped_spec_keys:
-            # #530: surface the dropped keys as a warning gate so the
-            # persisted ``quality_gate_results`` records the attempted
-            # spec mutation even when no whitelisted key was present.
-            post_repair_spec_gates.append(
-                QualityGateResult(
-                    gate_name="zero_trade_repair_dropped_spec_keys",
-                    passed=False,
-                    severity="warning",
-                    details=(
-                        "Zero-trade repair proposed off-list spec keys "
-                        f"{dropped_spec_keys}; dropped per #530 "
-                        "(risk_limits only)."
-                    ),
-                    refinement_round=round_num,
-                )
-            )
+        # #530: extend with the pre-built dropped-keys gate so the
+        # persisted ``quality_gate_results`` records the attempted spec
+        # mutation even when no whitelisted key was present (same gate
+        # object the ValidationError early-return carries forward).
+        post_repair_spec_gates.extend(dropped_keys_gates)
         spec_criticals = [
             g for g in post_repair_spec_gates if not g.passed and g.severity == "critical"
         ]
