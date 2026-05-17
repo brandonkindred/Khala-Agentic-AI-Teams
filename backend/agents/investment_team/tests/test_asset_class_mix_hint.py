@@ -18,10 +18,8 @@ from investment_team.models import (
     StrategySpec,
 )
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
     Predicate,
-    PriceRef,
     TimeStopRule,
 )
 from investment_team.strategy_lab_context import asset_class_mix_hint
@@ -50,9 +48,8 @@ def _record(asset_class: str) -> StrategyLabRecord:
         asset_class=asset_class,
         hypothesis="h",
         signal_definition="sig",
-        entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)))
-        ],
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
         exit_rules=[TimeStopRule(n_bars=5)],
         risk_limits={},
         speculative=False,

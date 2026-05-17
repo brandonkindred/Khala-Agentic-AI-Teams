@@ -360,6 +360,7 @@ def test_streaming_curve_matches_between_per_bar_and_chunked_paths() -> None:
         asset_class="stocks",
         hypothesis="parity",
         signal_definition="noop",
+        timeframe="1d",
         strategy_code=_NOOP_STRATEGY_CODE,
     )
     cfg = BacktestConfig(
@@ -439,6 +440,7 @@ def test_streaming_buffer_matches_reconstructed_curve_byte_for_byte() -> None:
         asset_class="stocks",
         hypothesis="parity",
         signal_definition="noop",
+        timeframe="1d",
         strategy_code=_NOOP_STRATEGY_CODE,
     )
 

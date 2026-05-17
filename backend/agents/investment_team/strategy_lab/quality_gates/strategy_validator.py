@@ -130,15 +130,19 @@ class StrategySpecValidator:
                 )
             )
 
-        # 6. Asset-class keyword mismatch. Issue #551: spec rule fields are
-        #    structured DSL nodes — render them through the spec_dsl
+        # 6. Asset-class keyword mismatch. Issue #551/#537: spec rule fields
+        #    are structured DSL nodes — render them through the spec_dsl
         #    formatters to recover a human-readable text view suitable for
-        #    regex matching.
+        #    regex matching. Unparseable prose now lives in
+        #    ``spec.unparsed_rules`` (#537 replaced the discriminator
+        #    variants) and is folded into the same scan so prose that
+        #    escaped the adapter is still caught.
         all_rules_text = " ".join(
             [
                 format_rules_for_prompt(spec.entry_rules),
                 format_rules_for_prompt(spec.exit_rules),
                 format_sizing_rule(spec.sizing),
+                " ".join(spec.unparsed_rules),
             ]
         )
         ac = spec.asset_class.lower()

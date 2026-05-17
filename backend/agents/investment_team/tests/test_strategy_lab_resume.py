@@ -32,10 +32,8 @@ from investment_team.models import (
     StrategySpec,
 )
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
     Predicate,
-    PriceRef,
     TimeStopRule,
 )
 
@@ -56,13 +54,14 @@ def _make_record(record_id: str) -> StrategyLabRecord:
         asset_class="equities",
         hypothesis="test hypothesis",
         signal_definition="test signal",
+        timeframe="1d",
         entry_rules=[
             EntryRule(
                 side="long",
                 when=Predicate(
-                    lhs=PriceRef(),
-                    op="gt",
-                    rhs=ConstRef(value=float(record_salt % 100)),
+                    lhs="bar.close",
+                    op=">",
+                    rhs=float(record_salt % 100),
                 ),
             )
         ],

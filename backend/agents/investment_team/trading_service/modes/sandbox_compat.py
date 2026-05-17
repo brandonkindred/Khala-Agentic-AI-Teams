@@ -84,6 +84,9 @@ def run_strategy_code(
             asset_class="equity",
             hypothesis="",
             signal_definition="",
+            # Issue #537: synthetic ad-hoc specs run against daily bars by
+            # default — the compat shim never resolves a specific timeframe.
+            timeframe="1d",
             entry_rules=[],
             exit_rules=[],
             strategy_code=strategy_code,

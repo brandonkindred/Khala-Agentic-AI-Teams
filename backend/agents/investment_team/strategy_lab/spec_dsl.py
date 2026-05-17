@@ -1,44 +1,68 @@
-"""Structured `StrategySpec` DSL (issue #550, step 1 of 8 from #537).
+"""Structured `StrategySpec` DSL — issue #537 literal schema.
 
-This module defines a typed, machine-readable replacement for today's
-`StrategySpec.entry_rules: list[str]` / `exit_rules: list[str]` /
-`sizing_rules: list[str]` (`backend/agents/investment_team/models.py:194-210`).
-Nothing wires `StrategySpec` to these types yet — that is step 2 of #537 and
-intentionally out of scope here. This module is a pure addition.
+This module defines a typed, machine-readable replacement for prose
+`entry_rules: list[str]` / `exit_rules: list[str]` / `sizing_rules:
+list[str]`. The schema mirrors the proposed shape in
+`https://github.com/brandonkindred/Khala-Agentic-AI-Teams/issues/537`:
 
-House pattern mirrored from
-`backend/agents/investment_team/strategy_lab/factors/models.py`:
+- `IndicatorRef` is a single flat class — `name` selects the indicator,
+  `params` carries the (typed) per-indicator arguments, `source`
+  selects the bar field. Per-indicator required/optional/bounds
+  validation lives in a registry-backed `model_validator`.
+- `Predicate.op` uses the symbol literals (``"<"``, ``">"``, …).
+- `Predicate.lhs` is either an `IndicatorRef` or a
+  ``Literal["bar.close","bar.high","bar.low","bar.volume"]`` bar-field
+  reference. `Predicate.rhs` additionally accepts a plain ``float``.
+- `EntryRule`, `ExitRule`, and `SizingRule` discriminated unions use
+  `kind` exactly as before. Unparseable inputs are surfaced at the
+  spec level via `StrategySpec.requires_redesign` + `unparsed_rules`,
+  not as discriminator variants.
 
-- `_SpecNode(BaseModel)` base with `extra="forbid"`.
-- Every concrete node carries a `Literal[...]` `kind` discriminator.
-- Top-level unions written as
-  ``Annotated[Union[...], Field(discriminator="kind")]``.
-- Trailing `Model.model_rebuild()` for forward-ref resolution.
-
-Indicator **defaults** mirror
-`backend/agents/investment_team/strategy_lab/executor/indicators.py` exactly
-(RSI period=14, MACD 12/26/9, Bollinger 20/2.0, etc.).
-
-Indicator **bound style** (e.g. `ge=2, le=400`) mirrors the existing house
+Indicator bound style (``ge=2, le=400``) mirrors the existing house
 factor DSL at `strategy_lab/factors/models.py`. The runtime helpers in
 `executor/indicators.py` themselves accept any positive integer — the
-coverage-probe registry there only enforces positive-int /
-positive-float-for-``num_std``. We apply the same sanity caps the factor
-DSL applies so degenerate spec payloads (`period=0`, `period=10000`) are
-rejected at validation time rather than silently producing all-NaN
-columns downstream.
+sanity caps here reject degenerate spec payloads (``period=0``,
+``period=10000``) that would silently produce all-NaN columns
+downstream.
+
+Persisted-payload migration: this module is intentionally strict and
+does not coerce legacy shapes. ``StrategySpec.model_validator(mode="before")``
+in `models.py` handles the in-flight rewriter for legacy payloads and
+the `from_prose` function at the bottom of this module provides a
+top-level entry point for callers that own raw prose specs.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Annotated, Literal, Union
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-ComparisonOp = Literal["gt", "lt", "ge", "le", "eq", "cross_above", "cross_below"]
+# Issue #537: comparison ops are the literal symbols, not name aliases.
+ComparisonOp = Literal["<", ">", "<=", ">=", "==", "cross_above", "cross_below"]
 
 Source = Literal["close", "high", "low", "open", "volume", "hl2", "ohlc4"]
+
+# Bar-field price references. `lhs` may name any of these; `rhs` cannot
+# reference "bar.volume" (semantic comparison against a volume on the
+# right side is rarely meaningful and unsupported here).
+PriceRefLiteral = Literal["bar.close", "bar.high", "bar.low", "bar.volume"]
+ExitPriceRefLiteral = Literal["bar.close", "bar.high", "bar.low"]
+
+IndicatorName = Literal[
+    "sma",
+    "ema",
+    "rsi",
+    "macd",
+    "bollinger",
+    "atr",
+    "adx",
+    "stochastic",
+    "vwap",
+]
+
+_PRICE_REF_LITERALS: frozenset[str] = frozenset({"bar.close", "bar.high", "bar.low", "bar.volume"})
 
 
 class _SpecNode(BaseModel):
@@ -49,9 +73,9 @@ class _SpecNode(BaseModel):
         """Reject NaN / +inf / -inf for every float field on this node.
 
         Non-finite floats round-trip badly: ``model_dump_json()`` serialises
-        them as ``null`` / ``Infinity`` (neither of which the adapter parses
-        back), and ``_format_number`` refuses them outright.  Rejecting here
-        keeps the DSL's validation/serialisation contract internally
+        them as ``null`` / ``Infinity`` (neither of which downstream parsers
+        accept), and ``_format_number`` refuses them outright.  Rejecting
+        here keeps the DSL's validation/serialisation contract internally
         consistent regardless of which numeric field a caller supplies.
         """
         for name, value in self.__dict__.items():
@@ -61,94 +85,169 @@ class _SpecNode(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# IndicatorRef union — discriminator "kind".  Bounds mirror
-# strategy_lab/executor/indicators.py.
+# Per-indicator param registry. Each entry describes the params an indicator
+# accepts; the registry is consulted by `IndicatorRef._validate_params` to
+# enforce required keys, default fill-ins on optional keys, and per-param
+# type/bounds. This is the per-indicator validation the issue-text shape
+# (``params: dict[str, float | int | str]``) cannot enforce at the type level.
 # ---------------------------------------------------------------------------
 
 
-class PriceRef(_SpecNode):
-    kind: Literal["price"] = "price"
-    field: Source = "close"
+def _int_in(lo: int, hi: int):
+    def check(value: Any) -> None:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"must be int (got {type(value).__name__})")
+        if not (lo <= value <= hi):
+            raise ValueError(f"must be in [{lo}, {hi}] (got {value})")
+
+    return check
 
 
-class ConstRef(_SpecNode):
-    kind: Literal["const"] = "const"
-    # Non-finite values are rejected by ``_SpecNode._reject_non_finite_floats``.
-    value: float
+def _float_gt(threshold: float):
+    def check(value: Any) -> None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"must be numeric (got {type(value).__name__})")
+        if not (math.isfinite(float(value)) and float(value) > threshold):
+            raise ValueError(f"must be > {threshold} (got {value})")
+
+    return check
 
 
-class SMARef(_SpecNode):
-    kind: Literal["sma"] = "sma"
-    period: int = Field(ge=2, le=400)
+def _one_of(*allowed: str):
+    allowed_set = set(allowed)
+
+    def check(value: Any) -> None:
+        if value not in allowed_set:
+            raise ValueError(f"must be one of {sorted(allowed_set)} (got {value!r})")
+
+    return check
+
+
+# Each entry: required[key] = validator; optional[key] = (default, validator).
+# ``allow_source`` mirrors the previous per-class behaviour: ATR/ADX/Stochastic
+# do not accept a ``source`` override (they read OHLC directly).
+_INDICATOR_PARAM_SPECS: dict[str, dict[str, Any]] = {
+    "sma": {
+        "required": {"period": _int_in(2, 400)},
+        "optional": {},
+        "allow_source": True,
+    },
+    "ema": {
+        "required": {"period": _int_in(2, 400)},
+        "optional": {},
+        "allow_source": True,
+    },
+    "rsi": {
+        "required": {},
+        "optional": {"period": (14, _int_in(2, 200))},
+        "allow_source": True,
+    },
+    "macd": {
+        "required": {},
+        "optional": {
+            "fast": (12, _int_in(2, 200)),
+            "slow": (26, _int_in(3, 400)),
+            "signal": (9, _int_in(2, 100)),
+            "output": ("macd", _one_of("macd", "signal", "histogram")),
+        },
+        "allow_source": True,
+    },
+    "bollinger": {
+        "required": {},
+        "optional": {
+            "period": (20, _int_in(5, 200)),
+            "num_std": (2.0, _float_gt(0)),
+            "band": ("middle", _one_of("upper", "middle", "lower")),
+        },
+        "allow_source": True,
+    },
+    "atr": {
+        "required": {},
+        "optional": {"period": (14, _int_in(2, 200))},
+        "allow_source": False,
+    },
+    "adx": {
+        "required": {},
+        "optional": {"period": (14, _int_in(2, 200))},
+        "allow_source": False,
+    },
+    "stochastic": {
+        "required": {},
+        "optional": {
+            "k_period": (14, _int_in(2, 200)),
+            "d_period": (3, _int_in(1, 100)),
+            "output": ("k", _one_of("k", "d")),
+        },
+        "allow_source": False,
+    },
+    "vwap": {
+        "required": {},
+        "optional": {},
+        "allow_source": False,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# IndicatorRef — flat shape per issue #537. The `name` field selects the
+# indicator; `params` is a dict whose accepted keys/values are governed by
+# `_INDICATOR_PARAM_SPECS`. `params` is widened to `float | int | str` (vs.
+# the issue's literal `float | int`) so the existing `macd.output`,
+# `bollinger.band`, `stochastic.output` selectors keep working — these are
+# discrete-choice params, not free strings.
+# ---------------------------------------------------------------------------
+
+
+class IndicatorRef(_SpecNode):
+    name: IndicatorName
+    params: dict[str, Union[int, float, str]] = Field(default_factory=dict)
     source: Source = "close"
 
+    @model_validator(mode="after")
+    def _validate_params(self):
+        spec = _INDICATOR_PARAM_SPECS[self.name]
+        required: dict[str, Any] = spec["required"]
+        optional: dict[str, Any] = spec["optional"]
+        allow_source: bool = spec["allow_source"]
 
-class EMARef(_SpecNode):
-    kind: Literal["ema"] = "ema"
-    period: int = Field(ge=2, le=400)
-    source: Source = "close"
+        for key, check in required.items():
+            if key not in self.params:
+                raise ValueError(f"indicator {self.name!r} requires param {key!r}")
+            check(self.params[key])
 
+        for key, value in self.params.items():
+            if key in required:
+                continue
+            if key not in optional:
+                allowed = sorted(set(required) | set(optional))
+                raise ValueError(
+                    f"indicator {self.name!r} got unexpected param {key!r}; allowed: {allowed}"
+                )
+            _default, check = optional[key]
+            check(value)
 
-class RSIRef(_SpecNode):
-    kind: Literal["rsi"] = "rsi"
-    period: int = Field(default=14, ge=2, le=200)
-    source: Source = "close"
+        if not allow_source and self.source != "close":
+            raise ValueError(f"indicator {self.name!r} does not accept a 'source' override")
 
+        # Fill in defaults for any optional params that weren't supplied so
+        # constructed nodes are self-describing — e.g. ``IndicatorRef(name="rsi")``
+        # is equivalent post-construction to
+        # ``IndicatorRef(name="rsi", params={"period": 14})``. Two IndicatorRefs
+        # with the same effective configuration compare equal regardless of
+        # whether the caller passed the default explicitly.
+        for key, (default, _check) in optional.items():
+            self.params.setdefault(key, default)
 
-class MACDRef(_SpecNode):
-    kind: Literal["macd"] = "macd"
-    fast: int = Field(default=12, ge=2, le=200)
-    slow: int = Field(default=26, ge=3, le=400)
-    signal: int = Field(default=9, ge=2, le=100)
-    output: Literal["macd", "signal", "histogram"] = "macd"
-    source: Source = "close"
+        return self
 
-
-class BollingerRef(_SpecNode):
-    kind: Literal["bollinger"] = "bollinger"
-    period: int = Field(default=20, ge=5, le=200)
-    num_std: float = Field(default=2.0, gt=0)
-    band: Literal["upper", "middle", "lower"] = "middle"
-    source: Source = "close"
-
-
-class ATRRef(_SpecNode):
-    kind: Literal["atr"] = "atr"
-    period: int = Field(default=14, ge=2, le=200)
-
-
-class ADXRef(_SpecNode):
-    kind: Literal["adx"] = "adx"
-    period: int = Field(default=14, ge=2, le=200)
-
-
-class StochasticRef(_SpecNode):
-    kind: Literal["stochastic"] = "stochastic"
-    k_period: int = Field(default=14, ge=2, le=200)
-    d_period: int = Field(default=3, ge=1, le=100)
-    output: Literal["k", "d"] = "k"
-
-
-class VWAPRef(_SpecNode):
-    kind: Literal["vwap"] = "vwap"
-
-
-IndicatorRef = Annotated[
-    Union[
-        PriceRef,
-        ConstRef,
-        SMARef,
-        EMARef,
-        RSIRef,
-        MACDRef,
-        BollingerRef,
-        ATRRef,
-        ADXRef,
-        StochasticRef,
-        VWAPRef,
-    ],
-    Field(discriminator="kind"),
-]
+    def param(self, key: str, default: Any = None) -> Any:
+        """Return ``params[key]`` if set, else the registry default, else ``default``."""
+        if key in self.params:
+            return self.params[key]
+        spec = _INDICATOR_PARAM_SPECS[self.name]
+        if key in spec["optional"]:
+            return spec["optional"][key][0]
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -156,10 +255,32 @@ IndicatorRef = Annotated[
 # ---------------------------------------------------------------------------
 
 
+PredicateLhs = Union[IndicatorRef, PriceRefLiteral]
+PredicateRhs = Union[IndicatorRef, PriceRefLiteral, float]
+
+
 class Predicate(_SpecNode):
-    lhs: IndicatorRef
+    lhs: PredicateLhs
     op: ComparisonOp
-    rhs: IndicatorRef
+    # ``rhs`` is intentionally widened beyond the issue's
+    # ``ExitPriceRefLiteral`` to accept ``"bar.volume"`` symmetrically with
+    # ``lhs``. Comparing volume against indicators is uncommon but supported
+    # for symmetry. Floats are accepted only on the rhs.
+    rhs: PredicateRhs
+
+    @model_validator(mode="after")
+    def _validate_sides(self):
+        if isinstance(self.lhs, str) and self.lhs not in _PRICE_REF_LITERALS:
+            raise ValueError(
+                f"Predicate.lhs string must be one of {sorted(_PRICE_REF_LITERALS)}; "
+                f"got {self.lhs!r}"
+            )
+        if isinstance(self.rhs, str) and self.rhs not in _PRICE_REF_LITERALS:
+            raise ValueError(
+                f"Predicate.rhs string must be one of {sorted(_PRICE_REF_LITERALS)} "
+                f"or a float; got {self.rhs!r}"
+            )
+        return self
 
 
 class EntryRule(_SpecNode):
@@ -169,18 +290,10 @@ class EntryRule(_SpecNode):
     note: str = ""
 
 
-class UnparsableRule(_SpecNode):
-    """Shared variant used in entry or exit slots when prose can't be parsed."""
-
-    kind: Literal["unparsable"] = "unparsable"
-    prose: str
-    reason: str = ""
-
-
-EntryRuleUnion = Annotated[
-    Union[EntryRule, UnparsableRule],
-    Field(discriminator="kind"),
-]
+# Back-compat alias — earlier the entry union included an Unparsable variant.
+# Issue #537 lifts unparseable handling to the spec level; this alias keeps
+# import sites unchanged.
+EntryRuleUnion = EntryRule
 
 
 class TimeStopRule(_SpecNode):
@@ -209,13 +322,17 @@ class SignalExitRule(_SpecNode):
 
 
 ExitRule = Annotated[
-    Union[TimeStopRule, StopLossRule, TakeProfitRule, SignalExitRule, UnparsableRule],
+    Union[TimeStopRule, StopLossRule, TakeProfitRule, SignalExitRule],
     Field(discriminator="kind"),
 ]
 
 
 # ---------------------------------------------------------------------------
-# SizingRule union.
+# SizingRule union. Kept as a typed union (vs. the issue's flat
+# ``{kind, params}`` shape) so the existing typed call sites in the
+# orchestrator/ideation continue to validate at the type level. The
+# user-listed scope only required reshaping ``IndicatorRef`` and
+# ``Predicate``; the sizing union was not included.
 # ---------------------------------------------------------------------------
 
 
@@ -237,38 +354,16 @@ class FixedNotionalSizing(_SpecNode):
     note: str = ""
 
 
-class UnparsableSizing(_SpecNode):
-    kind: Literal["unparsable_sizing"] = "unparsable_sizing"
-    prose: str
-    reason: str = ""
-
-
 SizingRule = Annotated[
-    Union[
-        FixedFractionSizing,
-        VolatilityTargetSizing,
-        FixedNotionalSizing,
-        UnparsableSizing,
-    ],
+    Union[FixedFractionSizing, VolatilityTargetSizing, FixedNotionalSizing],
     Field(discriminator="kind"),
 ]
 
 
 # Resolve forward refs so union members are usable from outside the module.
-PriceRef.model_rebuild()
-ConstRef.model_rebuild()
-SMARef.model_rebuild()
-EMARef.model_rebuild()
-RSIRef.model_rebuild()
-MACDRef.model_rebuild()
-BollingerRef.model_rebuild()
-ATRRef.model_rebuild()
-ADXRef.model_rebuild()
-StochasticRef.model_rebuild()
-VWAPRef.model_rebuild()
+IndicatorRef.model_rebuild()
 Predicate.model_rebuild()
 EntryRule.model_rebuild()
-UnparsableRule.model_rebuild()
 TimeStopRule.model_rebuild()
 StopLossRule.model_rebuild()
 TakeProfitRule.model_rebuild()
@@ -276,13 +371,12 @@ SignalExitRule.model_rebuild()
 FixedFractionSizing.model_rebuild()
 VolatilityTargetSizing.model_rebuild()
 FixedNotionalSizing.model_rebuild()
-UnparsableSizing.model_rebuild()
 
 
 # TypeAdapters expose discriminator dispatch for callers that need to
 # validate a raw dict without pre-selecting the concrete class.
 IndicatorRefAdapter: TypeAdapter = TypeAdapter(IndicatorRef)
-EntryRuleAdapter: TypeAdapter = TypeAdapter(EntryRuleUnion)
+EntryRuleAdapter: TypeAdapter = TypeAdapter(EntryRule)
 ExitRuleAdapter: TypeAdapter = TypeAdapter(ExitRule)
 SizingRuleAdapter: TypeAdapter = TypeAdapter(SizingRule)
 
@@ -295,43 +389,28 @@ DEFAULT_SIZING_PAYLOAD: dict = {"kind": "fixed_fraction", "fraction": 0.02}
 
 
 # ---------------------------------------------------------------------------
-# Human-readable formatters.  Outputs are chosen to round-trip through
-# spec_dsl_adapter.parse_* (step 1's adapter), so feeding format_rule's
-# output back into the adapter returns an equal structured rule.
+# Human-readable formatters. Outputs are chosen to round-trip through
+# spec_dsl_adapter.parse_*, so feeding _format_rule's output back into the
+# adapter returns an equal structured rule.
 # ---------------------------------------------------------------------------
 
 
 _OP_SYMBOL: dict[str, str] = {
-    "gt": ">",
-    "lt": "<",
-    "ge": ">=",
-    "le": "<=",
-    "eq": "==",
+    "<": "<",
+    ">": ">",
+    "<=": "<=",
+    ">=": ">=",
+    "==": "==",
     "cross_above": "crosses above",
     "cross_below": "crosses below",
 }
 
 
 def _format_number(x: float) -> str:
-    """Render a float as decimal text the adapter regex can parse back.
-
-    Integer-valued floats (including those that fall on an integer after the
-    usual ``0.02 * 100 == 2.0000000000000004`` float-arithmetic jitter) render
-    as bare integers.  Everything else uses ``repr(x)``, which gives Python's
-    shortest unambiguous representation.  ``repr`` may emit scientific
-    notation for very small or very large values (e.g. ``1e-13``); the adapter
-    accepts that form via ``_NUMBER_PAT``.  Non-finite values raise — they're
-    rejected at construction time by ``_SpecNode`` but we double-check here.
-    """
+    """Render a float as decimal text the adapter regex can parse back."""
     if not math.isfinite(x):
         raise ValueError(f"cannot format non-finite value: {x!r}")
     rounded = round(x)
-    # Relative-tolerance check absorbs float jitter like 0.10 * 100 →
-    # 10.000000000000002 without collapsing genuinely tiny values:
-    # math.isclose(5e-10, 0, rel_tol=1e-12, abs_tol=0) is False because
-    # rel_tol*max(|5e-10|, 0) = 5e-22 < 5e-10.  The -1e16..1e16 bound keeps
-    # very large floats out of the integer fast path (their decimal form
-    # would lose precision).
     if math.isclose(x, rounded, rel_tol=1e-12, abs_tol=0) and -1e16 < x < 1e16:
         return str(rounded)
     return repr(x)
@@ -349,40 +428,56 @@ def _with_source(base: str, source: str) -> str:
 
 
 def _format_indicator_ref(ref: IndicatorRef) -> str:
-    if isinstance(ref, PriceRef):
-        return ref.field
-    if isinstance(ref, ConstRef):
-        return _format_number(ref.value)
-    if isinstance(ref, SMARef):
-        return _with_source(f"sma({ref.period})", ref.source)
-    if isinstance(ref, EMARef):
-        return _with_source(f"ema({ref.period})", ref.source)
-    if isinstance(ref, RSIRef):
-        return _with_source(f"rsi({ref.period})", ref.source)
-    if isinstance(ref, MACDRef):
-        # Default `output="macd"` formats as bare `macd(…)`; otherwise emit
-        # `macd_signal(…)` / `macd_histogram(…)` so the token matches one of
-        # the adapter's recognised indicator names.
-        macd_name = "macd" if ref.output == "macd" else f"macd_{ref.output}"
-        return _with_source(f"{macd_name}({ref.fast},{ref.slow},{ref.signal})", ref.source)
-    if isinstance(ref, BollingerRef):
-        return _with_source(
-            f"bollinger_{ref.band}({ref.period},{_format_number(ref.num_std)})",
-            ref.source,
-        )
-    if isinstance(ref, ATRRef):
-        return f"atr({ref.period})"
-    if isinstance(ref, ADXRef):
-        return f"adx({ref.period})"
-    if isinstance(ref, StochasticRef):
-        return f"stochastic_{ref.output}({ref.k_period},{ref.d_period})"
-    if isinstance(ref, VWAPRef):
+    name = ref.name
+    if name == "sma":
+        base = f"sma({ref.param('period')})"
+        return _with_source(base, ref.source)
+    if name == "ema":
+        base = f"ema({ref.param('period')})"
+        return _with_source(base, ref.source)
+    if name == "rsi":
+        base = f"rsi({ref.param('period')})"
+        return _with_source(base, ref.source)
+    if name == "macd":
+        output = ref.param("output")
+        macd_name = "macd" if output == "macd" else f"macd_{output}"
+        base = f"{macd_name}({ref.param('fast')},{ref.param('slow')},{ref.param('signal')})"
+        return _with_source(base, ref.source)
+    if name == "bollinger":
+        period = ref.param("period")
+        num_std = float(ref.param("num_std"))
+        band = ref.param("band")
+        base = f"bollinger_{band}({period},{_format_number(num_std)})"
+        return _with_source(base, ref.source)
+    if name == "atr":
+        return f"atr({ref.param('period')})"
+    if name == "adx":
+        return f"adx({ref.param('period')})"
+    if name == "stochastic":
+        output = ref.param("output")
+        return f"stochastic_{output}({ref.param('k_period')},{ref.param('d_period')})"
+    if name == "vwap":
         return "vwap()"
-    raise TypeError(f"unknown IndicatorRef variant: {type(ref).__name__}")
+    raise TypeError(f"unknown IndicatorRef name: {name!r}")
+
+
+def _format_side(side: Union[IndicatorRef, str, int, float]) -> str:
+    """Render one side of a `Predicate` for the prose formatter."""
+    if isinstance(side, IndicatorRef):
+        return _format_indicator_ref(side)
+    if isinstance(side, str):
+        if side in _PRICE_REF_LITERALS:
+            return side.split(".", 1)[1]  # "bar.close" -> "close"
+        raise ValueError(f"unexpected string side: {side!r}")
+    if isinstance(side, bool):
+        raise TypeError("boolean is not a valid predicate side")
+    if isinstance(side, (int, float)):
+        return _format_number(float(side))
+    raise TypeError(f"unknown predicate side type: {type(side).__name__}")
 
 
 def _format_predicate(p: Predicate) -> str:
-    return f"{_format_indicator_ref(p.lhs)} {_OP_SYMBOL[p.op]} {_format_indicator_ref(p.rhs)}"
+    return f"{_format_side(p.lhs)} {_OP_SYMBOL[p.op]} {_format_side(p.rhs)}"
 
 
 _STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
@@ -392,12 +487,7 @@ _STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
 
 
 def _format_rule(
-    rule: EntryRule
-    | UnparsableRule
-    | TimeStopRule
-    | StopLossRule
-    | TakeProfitRule
-    | SignalExitRule,
+    rule: Union[EntryRule, TimeStopRule, StopLossRule, TakeProfitRule, SignalExitRule],
 ) -> str:
     if isinstance(rule, EntryRule):
         return f"{rule.side} when {_format_predicate(rule.when)}"
@@ -410,8 +500,6 @@ def _format_rule(
         return f"take profit {_format_number(rule.pct * 100)}%"
     if isinstance(rule, SignalExitRule):
         return f"exit when {_format_predicate(rule.when)}"
-    if isinstance(rule, UnparsableRule):
-        return rule.prose
     raise TypeError(f"unknown rule variant: {type(rule).__name__}")
 
 
@@ -421,13 +509,110 @@ def format_rules_for_prompt(rules, separator: str = ", ") -> str:
 
 
 def format_sizing_rule(sizing) -> str:
-    """Render a structured sizing rule back into the prose forms the adapter parses."""
+    """Render a structured sizing rule back into prose the adapter parses."""
     if isinstance(sizing, FixedFractionSizing):
         return f"risk {_format_number(sizing.fraction * 100)}% per trade"
     if isinstance(sizing, VolatilityTargetSizing):
         return f"vol-target {_format_number(sizing.target_annual_vol * 100)}%"
     if isinstance(sizing, FixedNotionalSizing):
         return f"${_format_number(sizing.notional_usd)} per trade"
-    if isinstance(sizing, UnparsableSizing):
-        return sizing.prose
     raise TypeError(f"unknown SizingRule variant: {type(sizing).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# from_prose — top-level entry point for legacy prose specs.
+#
+# The issue text proposes ``spec_dsl.from_prose(spec_legacy)`` as the
+# single-call migration. Returns a structured `StrategySpec` where rules
+# that couldn't be parsed are stashed in ``unparsed_rules`` and
+# ``requires_redesign`` is set so the design agent re-runs.
+# ---------------------------------------------------------------------------
+
+
+def from_prose(spec_legacy: Any) -> Any:
+    """Best-effort migrate a legacy prose-shaped spec to the structured DSL.
+
+    Accepts a ``dict`` (with ``entry_rules: list[str]``, ``exit_rules:
+    list[str]``, and either ``sizing_rules: list[str]`` or ``sizing: str``),
+    or any object with a ``model_dump()`` method. Unparseable rules are
+    dropped from the rule lists, their raw prose appended to
+    ``unparsed_rules``, and ``requires_redesign=True`` is set. Missing
+    ``timeframe`` defaults to ``"1d"`` in this legacy path only — fresh
+    callers must declare it explicitly.
+
+    Returns a freshly validated ``StrategySpec``.
+    """
+    # Local import to avoid an import cycle through `models.py`.
+    from ..models import StrategySpec
+    from . import spec_dsl_adapter
+
+    if isinstance(spec_legacy, dict):
+        payload: dict = dict(spec_legacy)
+    elif hasattr(spec_legacy, "model_dump"):
+        payload = spec_legacy.model_dump()
+    else:
+        raise TypeError(
+            f"from_prose expected a dict or BaseModel; got {type(spec_legacy).__name__}"
+        )
+
+    unparsed: list[str] = list(payload.get("unparsed_rules") or [])
+    requires_redesign = bool(payload.get("requires_redesign", False))
+
+    # entry_rules
+    raw_entries = payload.get("entry_rules") or []
+    new_entries: list[dict] = []
+    for raw in raw_entries:
+        if isinstance(raw, str):
+            parsed = spec_dsl_adapter.parse_entry_rule(raw)
+            if parsed is None:
+                unparsed.append(raw)
+                requires_redesign = True
+            else:
+                new_entries.append(parsed.model_dump())
+        else:
+            new_entries.append(raw)
+    payload["entry_rules"] = new_entries
+
+    # exit_rules
+    raw_exits = payload.get("exit_rules") or []
+    new_exits: list[dict] = []
+    for raw in raw_exits:
+        if isinstance(raw, str):
+            parsed = spec_dsl_adapter.parse_exit_rule(raw)
+            if parsed is None:
+                unparsed.append(raw)
+                requires_redesign = True
+            else:
+                new_exits.append(parsed.model_dump())
+        else:
+            new_exits.append(raw)
+    payload["exit_rules"] = new_exits
+
+    # sizing — accept legacy ``sizing_rules: list[str]`` or ``sizing: str``.
+    if "sizing_rules" in payload:
+        sizing_list = payload.pop("sizing_rules") or []
+        if sizing_list and all(isinstance(s, str) for s in sizing_list):
+            parsed = spec_dsl_adapter.parse_sizing_list(sizing_list)
+            if parsed is None:
+                unparsed.extend(sizing_list)
+                requires_redesign = True
+                payload["sizing"] = dict(DEFAULT_SIZING_PAYLOAD)
+            else:
+                payload["sizing"] = parsed.model_dump()
+    if isinstance(payload.get("sizing"), str):
+        parsed = spec_dsl_adapter.parse_sizing_rule(payload["sizing"])
+        if parsed is None:
+            unparsed.append(payload["sizing"])
+            requires_redesign = True
+            payload["sizing"] = dict(DEFAULT_SIZING_PAYLOAD)
+        else:
+            payload["sizing"] = parsed.model_dump()
+
+    payload["unparsed_rules"] = unparsed
+    payload["requires_redesign"] = requires_redesign
+
+    # Legacy specs predate the required ``timeframe`` field; default to
+    # daily so the migration path is non-fatal.
+    payload.setdefault("timeframe", "1d")
+
+    return StrategySpec.model_validate(payload)

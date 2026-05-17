@@ -155,6 +155,7 @@ def _spec(code: str, sid: str = "phase4") -> StrategySpec:
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         strategy_code=code,
     )
 

@@ -24,10 +24,9 @@ from investment_team.models import (
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
+    IndicatorRef,
     Predicate,
-    PriceRef,
     SignalExitRule,
-    SMARef,
 )
 from investment_team.trading_service.data_stream.historical_replay import (
     HistoricalReplayStream,
@@ -200,15 +199,27 @@ def test_trading_service_runs_sma_strategy_and_produces_trade() -> None:
     _uptrend_then_down_bars(market_data)
 
     strategy = StrategySpec(
+        timeframe="1d",
         strategy_id="strat-sma-1",
         authored_by="tests",
         asset_class="equity",
         hypothesis="momentum via SMA(5)",
         signal_definition="close vs sma(5)",
         entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
+            )
         ],
-        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                )
+            )
+        ],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 
@@ -242,6 +253,7 @@ def test_trading_service_surfaces_lookahead_violation() -> None:
     _uptrend_then_down_bars(market_data)
 
     strategy = StrategySpec(
+        timeframe="1d",
         strategy_id="strat-peeker-1",
         authored_by="tests",
         asset_class="equity",
@@ -278,6 +290,7 @@ def test_zero_trade_result_gets_no_orders_emitted_category() -> None:
         asset_class="equity",
         hypothesis="no-op",
         signal_definition="none",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_NOOP_STRATEGY_CODE,
@@ -357,6 +370,7 @@ def test_runtime_error_return_path_includes_finalized_diagnostics() -> None:
         asset_class="equity",
         hypothesis="runtime error",
         signal_definition="raise",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_BROKEN_BAR_STRATEGY_CODE,
@@ -580,10 +594,22 @@ def test_diagnostics_emitted_and_accepted_counts_round_trip() -> None:
         asset_class="equity",
         hypothesis="round-trip",
         signal_definition="sma",
+        timeframe="1d",
         entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
+            )
         ],
-        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                )
+            )
+        ],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 
@@ -620,6 +646,7 @@ def test_diagnostics_unsupported_feature_records_rejection() -> None:
         asset_class="equity",
         hypothesis="unsupported feature",
         signal_definition="parent_order_id",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_UNSUPPORTED_FEATURE_STRATEGY_CODE,
@@ -653,6 +680,7 @@ def test_diagnostics_malformed_order_records_rejection_and_continues() -> None:
         asset_class="equity",
         hypothesis="malformed payload",
         signal_definition="missing fields",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_MALFORMED_ORDER_STRATEGY_CODE,
@@ -706,6 +734,7 @@ def test_diagnostics_end_of_stream_unfilled_recorded() -> None:
         asset_class="equity",
         hypothesis="end-of-stream",
         signal_definition="late market",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_LATE_MARKET_ORDER_STRATEGY_CODE,
@@ -764,6 +793,7 @@ def test_diagnostics_last_order_events_capped_at_twenty() -> None:
         asset_class="equity",
         hypothesis="noisy",
         signal_definition="emit every bar",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_NOISY_ORDER_STRATEGY_CODE,
@@ -785,6 +815,7 @@ def test_run_backtest_without_strategy_code_raises() -> None:
         asset_class="equity",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         strategy_code=None,
     )
     with pytest.raises(ValueError, match="strategy_code is required"):
@@ -802,15 +833,27 @@ def test_run_backtest_attaches_data_quality_report() -> None:
     _uptrend_then_down_bars(market_data)
 
     strategy = StrategySpec(
+        timeframe="1d",
         strategy_id="strat-sma-dq-1",
         authored_by="tests",
         asset_class="equity",
         hypothesis="momentum via SMA(5)",
         signal_definition="close vs sma(5)",
         entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
+            )
         ],
-        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                )
+            )
+        ],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 
@@ -836,6 +879,7 @@ def test_run_backtest_strict_fails_on_ohlc_violation() -> None:
         asset_class="equity",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         strategy_code=_SMA_STRATEGY_CODE,
     )
 
@@ -935,15 +979,27 @@ def test_run_backtest_passes_requeue_default_to_service(monkeypatch) -> None:
     _uptrend_then_down_bars(market_data)
 
     strategy = StrategySpec(
+        timeframe="1d",
         strategy_id="strat-sma-385-backtest",
         authored_by="tests",
         asset_class="equity",
         hypothesis="momentum via SMA(5)",
         signal_definition="close vs sma(5)",
         entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
+            )
         ],
-        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                )
+            )
+        ],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 

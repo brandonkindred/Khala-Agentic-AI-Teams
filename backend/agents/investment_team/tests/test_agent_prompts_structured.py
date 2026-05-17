@@ -31,11 +31,10 @@ from investment_team.strategy_lab.agents.ideation import IdeationAgent
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
 from investment_team.strategy_lab.agents.zero_trade_repair import ZeroTradeRepairAgent
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
     EntryRuleAdapter,
+    IndicatorRef,
     Predicate,
-    RSIRef,
     SignalExitRule,
 )
 
@@ -60,9 +59,9 @@ def _structured_entry_rule_dict() -> dict:
         "kind": "entry",
         "side": "long",
         "when": {
-            "lhs": {"kind": "rsi", "period": 14},
-            "op": "lt",
-            "rhs": {"kind": "const", "value": 30},
+            "lhs": {"name": "rsi", "params": {"period": 14}},
+            "op": "<",
+            "rhs": 30,
         },
     }
 
@@ -71,9 +70,9 @@ def _structured_signal_exit_rule_dict() -> dict:
     return {
         "kind": "signal_exit",
         "when": {
-            "lhs": {"kind": "rsi", "period": 14},
-            "op": "gt",
-            "rhs": {"kind": "const", "value": 70},
+            "lhs": {"name": "rsi", "params": {"period": 14}},
+            "op": ">",
+            "rhs": 70,
         },
     }
 
@@ -90,14 +89,17 @@ def _spec() -> StrategySpec:
         asset_class="stocks",
         hypothesis="RSI mean reversion",
         signal_definition="sig",
+        timeframe="1d",
         entry_rules=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
             )
         ],
         exit_rules=[
-            SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)))
+            SignalExitRule(
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70)
+            )
         ],
         risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
         speculative=False,

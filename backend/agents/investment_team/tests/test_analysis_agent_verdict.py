@@ -29,10 +29,8 @@ from investment_team.models import BacktestResult, StrategySpec
 from investment_team.strategy_lab.agents import analysis as analysis_module
 from investment_team.strategy_lab.agents.analysis import AnalysisAgent
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
     Predicate,
-    PriceRef,
     TimeStopRule,
 )
 
@@ -44,10 +42,11 @@ def _spec() -> StrategySpec:
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         entry_rules=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)),
+                when=Predicate(lhs="bar.close", op=">", rhs=0),
             )
         ],
         exit_rules=[TimeStopRule(n_bars=5)],

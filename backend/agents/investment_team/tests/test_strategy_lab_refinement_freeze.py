@@ -38,10 +38,9 @@ from investment_team.strategy_lab.orchestrator import (
     StrategyLabOrchestrator,
 )
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
+    IndicatorRef,
     Predicate,
-    RSIRef,
     SignalExitRule,
 )
 from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
@@ -70,14 +69,17 @@ def _spec(strategy_id: str = "strat-freeze-test") -> StrategySpec:
         asset_class="stocks",
         hypothesis="RSI mean reversion baseline",
         signal_definition="sig",
+        timeframe="1d",
         entry_rules=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
             )
         ],
         exit_rules=[
-            SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)))
+            SignalExitRule(
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70)
+            )
         ],
         risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
         speculative=False,

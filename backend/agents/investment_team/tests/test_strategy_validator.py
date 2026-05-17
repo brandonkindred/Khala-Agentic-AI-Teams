@@ -15,17 +15,11 @@ from investment_team.strategy_lab.quality_gates.strategy_validator import (
     StrategySpecValidator,
 )
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
-    MACDRef,
+    IndicatorRef,
     Predicate,
-    PriceRef,
-    RSIRef,
     SignalExitRule,
-    SMARef,
     TimeStopRule,
-    UnparsableRule,
-    UnparsableSizing,
 )
 
 
@@ -43,6 +37,7 @@ def _spec(
         asset_class=asset_class,
         hypothesis=hypothesis,
         signal_definition="sig",
+        timeframe="1d",
         entry_rules=entry,
         exit_rules=exit_,
         risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
@@ -77,12 +72,12 @@ def test_validator_rejects_options_asset_class() -> None:
         entry=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
             ),
         ],
         exit_=[
             SignalExitRule(
-                when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70),
             ),
         ],
         asset_class="options",
@@ -102,12 +97,12 @@ def test_validator_rejects_options_via_normalize_alias() -> None:
         entry=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
             ),
         ],
         exit_=[
             SignalExitRule(
-                when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70),
             ),
         ],
         asset_class="  OPTIONS  ",
@@ -125,12 +120,16 @@ def test_validator_does_not_reject_supported_asset_classes() -> None:
             entry=[
                 EntryRule(
                     side="long",
-                    when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+                    when=Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30
+                    ),
                 ),
             ],
             exit_=[
                 SignalExitRule(
-                    when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
+                    when=Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70
+                    ),
                 ),
             ],
             asset_class=ac,
@@ -153,7 +152,9 @@ def test_hypothesis_term_missing_from_rules_emits_warning() -> None:
         entry=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+                ),
             ),
         ],
         exit_=[TimeStopRule(n_bars=5)],
@@ -172,12 +173,12 @@ def test_rules_term_missing_from_hypothesis_emits_warning() -> None:
         entry=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=MACDRef(), op="gt", rhs=ConstRef(value=0)),
+                when=Predicate(lhs=IndicatorRef(name="macd"), op=">", rhs=0),
             ),
         ],
         exit_=[
             SignalExitRule(
-                when=Predicate(lhs=MACDRef(), op="lt", rhs=ConstRef(value=0)),
+                when=Predicate(lhs=IndicatorRef(name="macd"), op="<", rhs=0),
             ),
         ],
     )
@@ -195,12 +196,12 @@ def test_aligned_hypothesis_and_rules_emit_no_consistency_warning() -> None:
         entry=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
             ),
         ],
         exit_=[
             SignalExitRule(
-                when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70),
             ),
         ],
     )
@@ -220,7 +221,7 @@ def test_no_recognised_terms_emits_no_consistency_warning() -> None:
         entry=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)),
+                when=Predicate(lhs="bar.close", op=">", rhs=0),
             ),
         ],
         exit_=[TimeStopRule(n_bars=5)],
@@ -237,7 +238,7 @@ def test_word_boundary_prevents_thematic_matching_ema() -> None:
         entry=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)),
+                when=Predicate(lhs="bar.close", op=">", rhs=0),
             ),
         ],
         exit_=[TimeStopRule(n_bars=5)],
@@ -248,76 +249,67 @@ def test_word_boundary_prevents_thematic_matching_ema() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Issue #552 — keyword/non-computable scans on structured rules.
+# Issue #552/#537 — keyword/non-computable scans cover unparseable prose.
 #
-# Under the DSL (#551) the asset-class mismatch and non-computable keyword
-# scans only see free text through ``UnparsableRule.prose`` /
-# ``UnparsableSizing.prose`` — the only escape hatches for prose that
-# survived the migration. ``StrategySpec.entry_rules`` is typed
-# ``List[EntryRule]`` (no prose escape hatch on entries), so the prose
-# surface to exercise is ``exit_rules`` (its union admits ``UnparsableRule``)
-# and ``sizing`` (its union admits ``UnparsableSizing``).
+# After #537 unparseable rules live as raw strings on
+# ``StrategySpec.unparsed_rules`` (the previous ``UnparsableRule`` /
+# ``UnparsableSizing`` discriminator variants were dropped). The
+# validator folds ``unparsed_rules`` into the same text view as the
+# structured rules so an asset-class-mismatched or non-computable
+# keyword in legacy prose is still caught.
 # ---------------------------------------------------------------------------
 
 
-def test_asset_class_mismatch_fires_on_unparsable_exit_rule_prose() -> None:
-    """Equity keyword 'dividend' in an ``UnparsableRule.prose`` exit rule on
-    a forex spec is surfaced by ``format_rules_for_prompt`` and trips the
-    asset-class mismatch scan."""
-    spec = _spec(
-        hypothesis="trend follow on currency pairs",
+def _spec_with_unparsed(
+    *, unparsed_rules: list[str], asset_class: str, hypothesis: str
+) -> StrategySpec:
+    return _spec(
+        hypothesis=hypothesis,
         entry=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+                ),
             ),
         ],
-        exit_=[UnparsableRule(prose="exit on dividend ex-date", reason="prose")],
+        exit_=[TimeStopRule(n_bars=5)],
+        asset_class=asset_class,
+    ).model_copy(update={"unparsed_rules": unparsed_rules, "requires_redesign": True})
+
+
+def test_asset_class_mismatch_fires_on_unparsed_exit_rule_prose() -> None:
+    """Equity keyword 'dividend' in `unparsed_rules` on a forex spec
+    trips the asset-class mismatch scan."""
+    spec = _spec_with_unparsed(
+        unparsed_rules=["exit on dividend ex-date"],
         asset_class="forex",
+        hypothesis="trend follow on currency pairs",
     )
     results = StrategySpecValidator().validate(spec)
     warnings = _warnings(results)
     assert any("mismatched with asset class 'forex'" in w for w in warnings), warnings
 
 
-def test_asset_class_mismatch_fires_on_unparsable_sizing_prose() -> None:
-    """Equity keyword 'EPS' in ``UnparsableSizing.prose`` on a crypto spec
-    is surfaced by ``format_sizing_rule`` and trips the asset-class mismatch
-    scan."""
-    spec = _spec(
-        hypothesis="momentum on majors",
-        entry=[
-            EntryRule(
-                side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
-            ),
-        ],
-        exit_=[TimeStopRule(n_bars=5)],
+def test_asset_class_mismatch_fires_on_unparsed_sizing_prose() -> None:
+    """Equity keyword 'EPS' on a crypto spec trips the asset-class mismatch scan."""
+    spec = _spec_with_unparsed(
+        unparsed_rules=["size by EPS growth"],
         asset_class="crypto",
-        sizing=UnparsableSizing(prose="size by EPS growth", reason="prose"),
+        hypothesis="momentum on majors",
     )
     results = StrategySpecValidator().validate(spec)
     warnings = _warnings(results)
     assert any("mismatched with asset class 'crypto'" in w for w in warnings), warnings
 
 
-def test_non_computable_keyword_fires_on_unparsable_exit_rule_prose() -> None:
+def test_non_computable_keyword_fires_on_unparsed_exit_rule_prose() -> None:
     """A prose exit rule referencing 'twitter sentiment' trips the
     non-computable-data warning regardless of asset class."""
-    spec = _spec(
+    spec = _spec_with_unparsed(
+        unparsed_rules=["exit when twitter sentiment turns negative"],
+        asset_class="stocks",
         hypothesis="mean reversion on retail flow",
-        entry=[
-            EntryRule(
-                side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
-            ),
-        ],
-        exit_=[
-            UnparsableRule(
-                prose="exit when twitter sentiment turns negative",
-                reason="prose",
-            ),
-        ],
     )
     results = StrategySpecValidator().validate(spec)
     warnings = _warnings(results)
@@ -334,12 +326,16 @@ def test_structured_rules_do_not_trigger_keyword_scans() -> None:
         entry=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+                ),
             ),
         ],
         exit_=[
             SignalExitRule(
-                when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)),
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
             ),
         ],
         asset_class="forex",

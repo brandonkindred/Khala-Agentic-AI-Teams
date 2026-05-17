@@ -23,10 +23,9 @@ from investment_team.market_data_service import OHLCVBar
 from investment_team.models import BacktestConfig, StrategySpec
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
+    IndicatorRef,
     Predicate,
-    PriceRef,
     SignalExitRule,
-    SMARef,
 )
 from investment_team.trading_service.engine.execution_model import (
     FillTerms,
@@ -498,10 +497,22 @@ def test_round_trip_propagates_entry_and_exit_filled_events() -> None:
         asset_class="equity",
         hypothesis="round-trip",
         signal_definition="sma",
+        timeframe="1d",
         entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=5)))
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
+            )
         ],
-        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                )
+            )
+        ],
         strategy_code=_SMA_STRATEGY_CODE,
     )
 
@@ -530,6 +541,7 @@ def test_same_side_addon_propagates_rejection_to_diagnostics() -> None:
         asset_class="equity",
         hypothesis="same-side suppression",
         signal_definition="double-long",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_DOUBLE_LONG_STRATEGY_CODE,
@@ -575,6 +587,7 @@ def test_fill_side_rejection_propagates_end_to_end() -> None:
         asset_class="equity",
         hypothesis="fill-side rejection",
         signal_definition="sma",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_SMA_STRATEGY_CODE,
