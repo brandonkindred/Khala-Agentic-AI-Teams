@@ -29,7 +29,7 @@ _IDEATION_SYSTEM = (
     "You combine several signal families (price/volatility, macro, sentiment, corporate events) into coherent rules. "
     "You explicitly reason about information not in raw OHLCV: news and social sentiment, issuer filings, "
     "macro and micro structure, liquidity regimes, and confounding drivers that backtests may omit. "
-    "You diversify across asset classes (stocks, crypto, forex, options, futures, commodities) rather than "
+    "You diversify across asset classes (stocks, crypto, forex, futures, commodities) rather than "
     "defaulting to equities."
 )
 
@@ -56,7 +56,7 @@ Name which confounders you are leaning on and how they interact with price signa
 Each prior entry includes outcome, metrics, rationale, and post-backtest analysis. Generate a strategy that **differs** from prior ones and learns from their failures.
 Return ONLY a JSON object with no markdown:
 {{
-  "asset_class": "stocks" | "crypto" | "forex" | "options" | "futures" | "commodities",
+  "asset_class": "stocks" | "crypto" | "forex" | "futures" | "commodities",
   "hypothesis": "1-3 sentence investment thesis tying multiple signals to edge",
   "signal_definition": "Describe the **ensemble** of signals (e.g. price filter + macro gate + sentiment/filings trigger) and how they combine (AND/OR, scoring, veto rules)",
   "signal_sources": ["list of families used, e.g. price_action, macro_rates, news_sentiment, filings, social_sentiment, cross_asset"],

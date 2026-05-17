@@ -58,6 +58,89 @@ def _warnings(results) -> list[str]:
     return [r.details for r in results if r.severity == "warning" and not r.passed]
 
 
+def _critical(results) -> list[str]:
+    return [r.details for r in results if r.severity == "critical" and not r.passed]
+
+
+# ---------------------------------------------------------------------------
+# Issue #535 — 'options' asset class must be rejected at the validator
+# gate. Strategy Lab has no option-chain data, Greeks, or contract
+# execution model, so silently treating options as equities produced
+# meaningless backtest metrics.
+# ---------------------------------------------------------------------------
+
+
+def test_validator_rejects_options_asset_class() -> None:
+    """asset_class='options' fails a critical gate with an explanatory message."""
+    spec = _spec(
+        hypothesis="Buy ATM puts on SPY when VIX > 25.",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+            ),
+        ],
+        exit_=[
+            SignalExitRule(
+                when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
+            ),
+        ],
+        asset_class="options",
+    )
+    results = StrategySpecValidator().validate(spec)
+    critical = _critical(results)
+    assert any("options" in c.lower() and "not yet supported" in c.lower() for c in critical), (
+        f"Expected a critical gate rejecting options, got: {critical}"
+    )
+
+
+def test_validator_rejects_options_via_normalize_alias() -> None:
+    """An LLM that emits a canonical 'options' label (uppercase, whitespace)
+    is still rejected — the gate runs after ``normalize_asset_class``."""
+    spec = _spec(
+        hypothesis="Buy ATM puts on SPY when VIX > 25.",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+            ),
+        ],
+        exit_=[
+            SignalExitRule(
+                when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
+            ),
+        ],
+        asset_class="  OPTIONS  ",
+    )
+    results = StrategySpecValidator().validate(spec)
+    assert any("options" in c.lower() for c in _critical(results)), _critical(results)
+
+
+def test_validator_does_not_reject_supported_asset_classes() -> None:
+    """Supported asset classes (stocks, crypto, forex, futures, commodities)
+    must not trip the #535 options gate."""
+    for ac in ("stocks", "crypto", "forex", "futures", "commodities"):
+        spec = _spec(
+            hypothesis="RSI mean reversion",
+            entry=[
+                EntryRule(
+                    side="long",
+                    when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+                ),
+            ],
+            exit_=[
+                SignalExitRule(
+                    when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
+                ),
+            ],
+            asset_class=ac,
+        )
+        results = StrategySpecValidator().validate(spec)
+        assert not any("options" in c.lower() for c in _critical(results)), (
+            f"asset_class={ac!r} unexpectedly tripped the options gate: {_critical(results)}"
+        )
+
+
 def test_hypothesis_term_missing_from_rules_emits_warning() -> None:
     """Hypothesis names RSI; rules use SMA → consistency warning fires.
 

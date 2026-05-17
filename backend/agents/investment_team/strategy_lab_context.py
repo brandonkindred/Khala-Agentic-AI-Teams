@@ -71,7 +71,7 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
     if not records:
         return (
             "No prior lab strategies. Choose **asset_class** from "
-            "stocks, crypto, forex, options, futures, or commodities with similar frequency over time — "
+            "stocks, crypto, forex, futures, or commodities with similar frequency over time — "
             "do **not** default to stocks; pick the class that best fits your multi-signal story."
         )
 
@@ -97,7 +97,7 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
     if stock_share > 0.35 and n_sample >= 2:
         parts.append(
             "Equities are relatively heavy in this window — **strongly prefer** "
-            "crypto, forex, options, futures, or commodities for this run if you can state coherent rules."
+            "crypto, forex, futures, or commodities for this run if you can state coherent rules."
         )
     parts.append(
         "Underrepresented line(s) to favor when ties: "

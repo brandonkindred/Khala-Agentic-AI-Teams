@@ -6,6 +6,7 @@ import re
 from typing import List
 
 from ...models import StrategySpec
+from ...strategy_lab_context import normalize_asset_class
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from .models import QualityGateResult
 
@@ -40,6 +41,24 @@ class StrategySpecValidator:
 
     def validate(self, spec: StrategySpec) -> List[QualityGateResult]:
         results: List[QualityGateResult] = []
+
+        # 0. Asset class supported (#535). 'options' has no chain data,
+        #    Greeks, or contract execution model — reject before
+        #    market-data fetch silently treats it as equities.
+        if normalize_asset_class(spec.asset_class) == "options":
+            results.append(
+                QualityGateResult(
+                    gate_name=GATE,
+                    passed=False,
+                    severity="critical",
+                    details=(
+                        "Asset class 'options' is not yet supported — no "
+                        "option-chain data, Greeks, or contract execution "
+                        "model is available. Choose stocks, crypto, forex, "
+                        "futures, or commodities."
+                    ),
+                )
+            )
 
         # 1. Entry rules present
         if not spec.entry_rules:

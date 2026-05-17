@@ -1059,6 +1059,31 @@ def test_market_data_service_get_symbols_for_commodities() -> None:
     assert "GLD" in symbols
 
 
+def test_market_data_service_get_symbols_for_options_returns_empty() -> None:
+    """#535: 'options' must NOT silently fall back to stock symbols.
+
+    The StrategySpecValidator rejects options upstream as a critical gate
+    failure; the empty list returned here is defense-in-depth so any code
+    path that skips the validator gets an empty universe (and a downstream
+    failure) instead of silently-wrong equity data.
+    """
+    from investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    options_strategy = StrategySpec(
+        strategy_id="s-opt",
+        authored_by="test",
+        asset_class="options",
+        hypothesis="h",
+        signal_definition="s",
+    )
+    symbols = service.get_symbols_for_strategy(options_strategy)
+    assert symbols == [], (
+        f"options must return empty universe, got {symbols} "
+        "(silent fallback to STOCK_SYMBOLS is the bug from #535)"
+    )
+
+
 def test_market_data_service_fetch_ohlcv_range_routes_by_asset_class() -> None:
     """Verify fetch_ohlcv_range tries Yahoo first for all asset classes via the provider chain."""
     from unittest.mock import patch

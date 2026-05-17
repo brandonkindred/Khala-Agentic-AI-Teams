@@ -257,13 +257,18 @@ class MarketDataService:
     def get_symbols_for_strategy(self, strategy: StrategySpec) -> List[str]:
         """Return relevant symbols based on the strategy's asset class."""
         asset = normalize_asset_class(strategy.asset_class)
-        symbol_map = {
+        symbol_map: dict[str, list[str]] = {
             "crypto": CRYPTO_SYMBOLS,
             "stocks": STOCK_SYMBOLS,
-            "options": STOCK_SYMBOLS,
             "forex": FOREX_SYMBOLS,
             "futures": FUTURES_SYMBOLS,
             "commodities": COMMODITY_SYMBOLS,
+            # #535: 'options' is not yet supported — no option-chain data,
+            # Greeks, or contract execution model. StrategySpecValidator
+            # rejects it as a critical gate failure before this runs; the
+            # empty list here is defense-in-depth for any path that skips
+            # the validator.
+            "options": [],
         }
         return list(symbol_map.get(asset, STOCK_SYMBOLS))
 
