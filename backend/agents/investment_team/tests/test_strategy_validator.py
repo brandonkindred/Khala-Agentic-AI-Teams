@@ -316,6 +316,31 @@ def test_non_computable_keyword_fires_on_unparsed_exit_rule_prose() -> None:
     assert any("non-computable data" in w for w in warnings), warnings
 
 
+def test_hypothesis_consistency_scans_unparsed_rules() -> None:
+    """Issue #537: indicator concepts that appear only in `unparsed_rules`
+    still satisfy the hypothesis-vs-rules consistency check, matching the
+    pre-#537 behavior where unparseable prose was rendered through the
+    formatters."""
+    spec = _spec(
+        hypothesis="RSI mean reversion strategy",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+                ),
+            ),
+        ],
+        exit_=[TimeStopRule(n_bars=5)],
+    ).model_copy(update={"unparsed_rules": ["exit when rsi(14) > 70"], "requires_redesign": True})
+    results = StrategySpecValidator().validate(spec)
+    warnings = _warnings(results)
+    consistency_warnings = [w for w in warnings if "Hypothesis/rules consistency" in w]
+    # 'rsi' is mentioned in both hypothesis and unparsed_rules → not an orphan.
+    # The warning may still fire for 'sma'/'mean reversion' but must NOT cite 'rsi'.
+    assert not any("'rsi'" in w for w in consistency_warnings), consistency_warnings
+
+
 def test_structured_rules_do_not_trigger_keyword_scans() -> None:
     """Negative case: purely structured rules format to text like
     ``long when close > sma(20)`` / ``risk 2% per trade``, none of which
