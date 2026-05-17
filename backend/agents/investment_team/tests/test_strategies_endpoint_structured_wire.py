@@ -1,0 +1,89 @@
+"""End-to-end structured-wire smoke for issue #557.
+
+Verifies the contract step 8 of the #537 migration calls out:
+- A structured ``StrategySpec`` POST to ``/strategies`` returns 200 and
+  echoes the structured shape.
+- Prose-shaped ``entry_rules`` / ``exit_rules`` / ``sizing`` payloads
+  return HTTP 422 (Pydantic discriminator rejection).
+
+Uses ``TestClient`` against the FastAPI app with the persistence dict
+swapped for an in-memory ``dict`` so the test doesn't need the job
+service or Postgres.
+"""
+
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture(scope="module")
+def client(monkeypatch_module) -> TestClient:
+    from investment_team.api import main as api_main
+
+    monkeypatch_module.setattr(api_main, "_strategies", {})
+    return TestClient(api_main.app)
+
+
+@pytest.fixture(scope="module")
+def monkeypatch_module():
+    from _pytest.monkeypatch import MonkeyPatch
+
+    mp = MonkeyPatch()
+    yield mp
+    mp.undo()
+
+
+_STRUCTURED_BODY = {
+    "authored_by": "smoke-test",
+    "asset_class": "stocks",
+    "hypothesis": "sma crossover",
+    "signal_definition": "close > sma(20)",
+    "timeframe": "1d",
+    "entry_rules": [
+        {
+            "kind": "entry",
+            "side": "long",
+            "when": {
+                "lhs": "bar.close",
+                "op": ">",
+                "rhs": {"name": "sma", "params": {"period": 20}},
+            },
+        }
+    ],
+    "exit_rules": [{"kind": "time_stop", "n_bars": 10}],
+    "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
+}
+
+
+def test_structured_strategy_post_round_trips(client: TestClient) -> None:
+    response = client.post("/strategies", json=_STRUCTURED_BODY)
+    assert response.status_code == 200, response.text
+
+    strategy = response.json()["strategy"]
+    assert strategy["entry_rules"][0]["kind"] == "entry"
+    assert strategy["entry_rules"][0]["side"] == "long"
+    assert strategy["entry_rules"][0]["when"]["lhs"] == "bar.close"
+    assert strategy["exit_rules"][0]["kind"] == "time_stop"
+    assert strategy["exit_rules"][0]["n_bars"] == 10
+    assert strategy["sizing"]["kind"] == "fixed_fraction"
+    assert strategy["sizing"]["fraction"] == 0.02
+
+
+@pytest.mark.parametrize(
+    "field, prose_value",
+    [
+        ("entry_rules", ["close > sma(20)"]),
+        ("exit_rules", ["exit after 10 bars"]),
+        ("sizing", "risk 2% per trade"),
+    ],
+)
+def test_prose_strategy_post_rejected_with_422(
+    client: TestClient, field: str, prose_value: object
+) -> None:
+    body = dict(_STRUCTURED_BODY)
+    body[field] = prose_value
+
+    response = client.post("/strategies", json=body)
+
+    assert response.status_code == 422, response.text
