@@ -45,7 +45,7 @@ and `sizing` MUST be the structured DSL objects described in the system
 prompt — prose strings will be rejected.
 
 {{
-  "asset_class": "stocks" | "crypto" | "forex" | "options" | "futures" | "commodities",
+  "asset_class": "stocks" | "crypto" | "forex" | "futures" | "commodities",
   "hypothesis": "1-3 sentence investment thesis tying multiple signals to edge",
   "signal_definition": "Describe the ensemble of signals and how they combine",
   "entry_rules": [
