@@ -190,16 +190,15 @@ def _format_execution_diagnostics(
 # Spec keys honoured when applying ``ZeroTradeRepairReport.proposed_spec_updates``.
 # Mirrors the agent-side whitelist so the orchestrator silently drops any
 # off-list keys an LLM might invent.
-_ZERO_TRADE_SPEC_UPDATE_KEYS = frozenset(
-    {
-        "entry_rules",
-        "exit_rules",
-        "sizing",
-        "risk_limits",
-        "hypothesis",
-        "signal_definition",
-    }
-)
+#
+# #530: narrowed to ``risk_limits`` only. The repair agent must fix the
+# **code**, not weaken the **spec** — letting it rewrite entry/exit/sizing
+# rules, the hypothesis, or the signal_definition is the formal mechanism
+# by which a thesis silently mutates across refinement rounds to "make
+# trades happen". Off-list keys are dropped with a ``logger.warning`` and
+# a ``zero_trade_repair_dropped_spec_keys`` quality gate so the drift is
+# visible in the persisted ``quality_gate_results``.
+_ZERO_TRADE_SPEC_UPDATE_KEYS = frozenset({"risk_limits"})
 
 
 @dataclass
@@ -1603,6 +1602,50 @@ class StrategyLabOrchestrator:
                 failure_reason="unsafe_code",
             )
 
+        # ── Surface any off-list spec keys the agent tried to mutate ─
+        # #530: the orchestrator's whitelist is now ``{"risk_limits"}``.
+        # In production the agent's own filter has already stripped
+        # off-list keys before we see them and recorded the names on
+        # ``report.dropped_spec_update_keys``; in tests or via future
+        # bypasses, keys may still be present on ``proposed_spec_updates``.
+        # Union both sources so the warning and the
+        # ``zero_trade_repair_dropped_spec_keys`` quality gate fire in both
+        # flows and the drift is auditable on the persisted
+        # ``quality_gate_results``.
+        dropped_spec_keys: List[str] = sorted(
+            set(report.dropped_spec_update_keys)
+            | {
+                k
+                for k in (report.proposed_spec_updates or {})
+                if k not in _ZERO_TRADE_SPEC_UPDATE_KEYS
+            }
+        )
+        dropped_keys_gates: List[QualityGateResult] = []
+        if dropped_spec_keys:
+            logger.warning(
+                "Zero-trade repair discarded spec-mutating keys %s for round=%s "
+                "(post-#530 repair may only adjust risk_limits; fix the code, "
+                "not the spec).",
+                dropped_spec_keys,
+                round_num,
+            )
+            # #530: build the gate once so every early-return path carries
+            # it forward (the ValidationError path below would otherwise
+            # drop the audit trail even though the warning was logged).
+            dropped_keys_gates = [
+                QualityGateResult(
+                    gate_name="zero_trade_repair_dropped_spec_keys",
+                    passed=False,
+                    severity="warning",
+                    details=(
+                        "Zero-trade repair proposed off-list spec keys "
+                        f"{dropped_spec_keys}; dropped per #530 "
+                        "(risk_limits only)."
+                    ),
+                    refinement_round=round_num,
+                )
+            ]
+
         # ── Fresh backtest of the proposed code ──────────────────────
         try:
             proposed_spec = self._apply_zero_trade_spec_updates(
@@ -1630,19 +1673,19 @@ class StrategyLabOrchestrator:
             )
             return _ZeroTradeRepairOutcome(
                 committed=False,
-                new_gates=safety_gates,
+                new_gates=safety_gates + dropped_keys_gates,
                 failure_reason="invalid_spec_updates",
             )
 
         # ── Re-validate the spec after repair-driven mutation ────────
         # The pre-synthesis gate (#547 item 1) only runs once at ideation.
-        # Zero-trade repair may mutate entry/exit/sizing rules, risk_limits,
-        # hypothesis, or signal_definition via the whitelist; those bypass
-        # the gate. A Pydantic-valid risk_limits value (e.g.
+        # Post-#530, zero-trade repair may only mutate ``risk_limits`` via
+        # the whitelist; that single mutation still bypasses the
+        # pre-synthesis gate. A Pydantic-valid risk_limits value (e.g.
         # max_position_pct=99) can still be a critical spec failure under
         # StrategySpecValidator. Re-validate before committing; on accept,
-        # carry the gates forward in ``new_gates`` so warnings (e.g.
-        # hypothesis/rules drift on a repaired spec) reach the persisted
+        # carry the gates forward in ``new_gates`` so warnings (e.g. tight
+        # drawdown limits on a repaired spec) reach the persisted
         # ``quality_gate_results`` rather than being silently dropped.
         post_repair_spec_gates: List[QualityGateResult] = []
         if report.proposed_spec_updates:
@@ -1650,28 +1693,33 @@ class StrategyLabOrchestrator:
             for g in post_repair_spec_gates:
                 g.refinement_round = round_num
                 g.gate_name = f"zero_trade_repair_{g.gate_name}"
-            spec_criticals = [
-                g for g in post_repair_spec_gates if not g.passed and g.severity == "critical"
-            ]
-            if spec_criticals:
-                zero_trade_attempts.append(
-                    f"invalid_spec_after_repair ({report.root_cause_category}): "
-                    f"{'; '.join(g.details for g in spec_criticals)[:160]}"
-                )
-                emit(
-                    "coding",
-                    {
-                        "sub_phase": "zero_trade_repair_rejected",
-                        "refinement_round": round_num,
-                        "reason": "invalid_spec_after_repair",
-                        "details": "; ".join(g.details for g in spec_criticals)[:400],
-                    },
-                )
-                return _ZeroTradeRepairOutcome(
-                    committed=False,
-                    new_gates=safety_gates + post_repair_spec_gates,
-                    failure_reason="invalid_spec_after_repair",
-                )
+        # #530: extend with the pre-built dropped-keys gate so the
+        # persisted ``quality_gate_results`` records the attempted spec
+        # mutation even when no whitelisted key was present (same gate
+        # object the ValidationError early-return carries forward).
+        post_repair_spec_gates.extend(dropped_keys_gates)
+        spec_criticals = [
+            g for g in post_repair_spec_gates if not g.passed and g.severity == "critical"
+        ]
+        if spec_criticals:
+            zero_trade_attempts.append(
+                f"invalid_spec_after_repair ({report.root_cause_category}): "
+                f"{'; '.join(g.details for g in spec_criticals)[:160]}"
+            )
+            emit(
+                "coding",
+                {
+                    "sub_phase": "zero_trade_repair_rejected",
+                    "refinement_round": round_num,
+                    "reason": "invalid_spec_after_repair",
+                    "details": "; ".join(g.details for g in spec_criticals)[:400],
+                },
+            )
+            return _ZeroTradeRepairOutcome(
+                committed=False,
+                new_gates=safety_gates + post_repair_spec_gates,
+                failure_reason="invalid_spec_after_repair",
+            )
 
         repair_exec = run_strategy_code(
             report.proposed_code, market_data, config, strategy=proposed_spec
@@ -1787,10 +1835,10 @@ class StrategyLabOrchestrator:
 
         Restricts merges to :data:`_ZERO_TRADE_SPEC_UPDATE_KEYS` so an
         off-list LLM hallucination cannot rewrite arbitrary spec fields.
-        Unlike :meth:`_apply_updates` (which is shared with the generic
-        refinement agent and only knows the legacy refinement keys),
-        this helper also honours ``signal_definition`` because the
-        repair agent's prompt includes it in the whitelist.
+        Post-#530 the whitelist is ``{"risk_limits"}`` — the repair agent
+        must fix the **code**, not weaken the **spec**. Off-list keys are
+        surfaced as a ``zero_trade_repair_dropped_spec_keys`` gate by the
+        caller; this helper only applies what is allowed.
         """
         data = spec.model_dump()
         for key in _ZERO_TRADE_SPEC_UPDATE_KEYS:

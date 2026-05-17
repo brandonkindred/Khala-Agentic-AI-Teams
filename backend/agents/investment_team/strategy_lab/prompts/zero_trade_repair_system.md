@@ -100,43 +100,32 @@ together tell you where in the lifecycle execution stopped.
    orchestrator's re-backtest gate; conservative integers are fine
    (e.g. `+5` orders, `+3` trades).
 
-If the proposed fix requires a small spec change (e.g. a too-tight
-`entry_rules` or a missing `exit_rules` clause), you may also return a
-`proposed_spec_updates` object containing only the rule fields you are
-adjusting. Do not invent new keys; the orchestrator will only honour
-`entry_rules`, `exit_rules`, `sizing`, `risk_limits`, `hypothesis`,
-and `signal_definition`.
+**Do not weaken the spec to make trades happen.** Loosening
+`entry_rules`, removing an `exit_rules` clause, broadening `sizing`,
+rewording `hypothesis`, or rewriting `signal_definition` is exactly the
+wrong fix — it lets the strategy quietly drift away from its original
+thesis across refinement rounds. Those keys are **not** honoured by the
+orchestrator; if you emit them they will be silently dropped and a
+quality-gate warning will be raised. Fix the **code** instead.
 
-When `proposed_spec_updates` includes rule-shaped keys, the values MUST
-be the structured DSL objects (every rule carries a `kind` discriminator)
-— the parser rejects prose strings. The rule shapes the orchestrator
-accepts (mirrored from `spec_dsl.py`) are:
+The only spec key you may adjust is `risk_limits`, and only when the
+**diagnostics** show the current limits are actually responsible for
+the zero-trade outcome (e.g. `orders_rejected` with a
+`risk_gate:max_drawdown` reason against an overly tight
+`max_drawdown_pct`). When you do propose a `risk_limits` update, return
+the FULL replacement object — for example:
 
 ```json
 {
-  "entry_rules": [{
-    "kind": "entry", "side": "long",
-    "when": {"lhs": {"kind": "rsi", "period": 14},
-             "op": "lt",
-             "rhs": {"kind": "const", "value": 30}}
-  }],
-  "exit_rules": [
-    {"kind": "signal_exit",
-     "when": {"lhs": {"kind": "rsi", "period": 14},
-              "op": "gt",
-              "rhs": {"kind": "const", "value": 70}}},
-    {"kind": "time_stop", "n_bars": 10}
-  ],
-  "sizing": {"kind": "fixed_fraction", "fraction": 0.02}
+  "risk_limits": {
+    "max_position_pct": 5,
+    "max_drawdown_pct": 10
+  }
 }
 ```
 
-Indicator `kind`s accepted: `price`, `const`, `sma`, `ema`, `rsi`, `macd`,
-`bollinger`, `atr`, `adx`, `stochastic`, `vwap`. Comparison `op`s
-accepted: `gt`, `lt`, `ge`, `le`, `eq`, `cross_above`, `cross_below`.
-Exit-rule `kind`s accepted: `time_stop`, `stop_loss`, `take_profit`,
-`signal_exit`. Sizing `kind`s accepted: `fixed_fraction`,
-`volatility_target`, `fixed_notional`.
+The orchestrator will only honour `risk_limits`; any other key in
+`proposed_spec_updates` is silently dropped and logged.
 
 If the diagnostics do not give you enough evidence to propose a code
 change you are confident in, return `proposed_code: null` and explain
@@ -165,4 +154,6 @@ Return ONLY a JSON object with no markdown:
 - When you cannot diagnose the failure, set `proposed_code: null` and
   explain the gap; the orchestrator will fall back to generic refinement.
 - `proposed_spec_updates`, when non-null, MUST contain only the
-  whitelisted keys above; the orchestrator silently drops any other key.
+  `risk_limits` key (post-#530); the orchestrator silently drops every
+  other key and emits a `zero_trade_repair_dropped_spec_keys` warning
+  gate on the run.

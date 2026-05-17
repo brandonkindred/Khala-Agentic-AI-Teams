@@ -347,11 +347,16 @@ def _zero_trade_payload(*, proposed_spec_updates=None) -> str:
     return json.dumps(payload)
 
 
-def test_zero_trade_repair_accepts_structured_spec_updates(
+def test_zero_trade_repair_accepts_risk_limits_spec_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Structured ``proposed_spec_updates`` survives the repair agent intact."""
+    """Post-#530 only ``risk_limits`` survives the repair agent's whitelist;
+    rule-shaped keys (which would mutate the strategy thesis) are silently
+    dropped before they reach the orchestrator."""
     spec_updates = {
+        "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
+        # Rule-shaped keys MUST be dropped — they represent the thesis
+        # and zero-trade repair may not weaken them.
         "entry_rules": [_structured_entry_rule_dict()],
         "exit_rules": [_structured_signal_exit_rule_dict()],
     }
@@ -363,52 +368,24 @@ def test_zero_trade_repair_accepts_structured_spec_updates(
         diagnostics=_zero_trade_diagnostics(),
     )
 
-    assert report.proposed_spec_updates == spec_updates
+    assert report.proposed_spec_updates == {
+        "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10}
+    }
     assert report.proposed_code == "# repaired code"
+    assert report.dropped_spec_update_keys == sorted(["entry_rules", "exit_rules"])
 
 
-def test_zero_trade_repair_drops_prose_spec_updates(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_zero_trade_repair_drops_off_list_rule_spec_updates(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prose-shaped ``proposed_spec_updates`` is dropped (orchestrator falls
-    through to generic refinement) but ``proposed_code`` survives."""
+    """Rule-shaped ``proposed_spec_updates`` keys are off-list post-#530 and
+    are silently filtered at the agent before they reach the orchestrator.
+    With no whitelisted key remaining, the field collapses to ``None`` but
+    the dropped keys are recorded so the orchestrator can still surface a
+    warning + quality gate on the production agent-to-orchestrator flow."""
     spec_updates = {
         "entry_rules": ["close > sma(20)"],
         "exit_rules": ["exit after 10 bars"],
-    }
-    _patch_zero_trade_repair(monkeypatch, _zero_trade_payload(proposed_spec_updates=spec_updates))
-
-    with caplog.at_level(
-        logging.WARNING,
-        logger="investment_team.strategy_lab.agents.zero_trade_repair",
-    ):
-        report = ZeroTradeRepairAgent().run(
-            spec=_spec(),
-            code="# original",
-            diagnostics=_zero_trade_diagnostics(),
-        )
-
-    assert report.proposed_spec_updates is None
-    assert report.proposed_code == "# repaired code"
-    assert any("invalid structured rule shape" in rec.message for rec in caplog.records)
-
-
-def test_zero_trade_repair_drops_invalid_structured_spec_updates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Structured-but-invalid (unknown indicator bound violation) is dropped."""
-    spec_updates = {
-        "entry_rules": [
-            {
-                "kind": "entry",
-                "side": "long",
-                "when": {
-                    "lhs": {"kind": "rsi", "period": 1},  # below the ge=2 bound
-                    "op": "lt",
-                    "rhs": {"kind": "const", "value": 30},
-                },
-            }
-        ]
     }
     _patch_zero_trade_repair(monkeypatch, _zero_trade_payload(proposed_spec_updates=spec_updates))
 
@@ -419,3 +396,31 @@ def test_zero_trade_repair_drops_invalid_structured_spec_updates(
     )
 
     assert report.proposed_spec_updates is None
+    assert report.proposed_code == "# repaired code"
+    assert report.dropped_spec_update_keys == sorted(["entry_rules", "exit_rules"])
+
+
+def test_zero_trade_repair_drops_thesis_spec_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thesis-defining keys (``hypothesis``, ``signal_definition``, ``sizing``)
+    are off-list post-#530 and dropped at the agent. The committed report
+    surfaces only the whitelisted ``risk_limits`` mutation, and records the
+    dropped keys on ``dropped_spec_update_keys`` so the orchestrator can
+    persist a warning + quality gate."""
+    spec_updates = {
+        "hypothesis": "rewritten thesis",
+        "signal_definition": "loosened",
+        "sizing": {"kind": "fixed_fraction", "fraction": 0.5},
+        "risk_limits": {"max_position_pct": 5},
+    }
+    _patch_zero_trade_repair(monkeypatch, _zero_trade_payload(proposed_spec_updates=spec_updates))
+
+    report = ZeroTradeRepairAgent().run(
+        spec=_spec(),
+        code="# original",
+        diagnostics=_zero_trade_diagnostics(),
+    )
+
+    assert report.proposed_spec_updates == {"risk_limits": {"max_position_pct": 5}}
+    assert report.dropped_spec_update_keys == sorted(["hypothesis", "signal_definition", "sizing"])
