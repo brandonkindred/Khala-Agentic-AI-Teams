@@ -250,6 +250,38 @@ describe('InvestmentStrategyComponent', () => {
     expect(params.get('period')).not.toBeNull();
   });
 
+  it('keeps the form valid after adding a time_stop exit rule', async () => {
+    component.form.patchValue({ hypothesis: 'h', signal_definition: 's' });
+    component.addExitRule();
+    fixture.detectChanges();
+
+    // The exit rule defaults to time_stop with n_bars=10. The nested `when`
+    // predicate would otherwise mark the form invalid via its required SMA
+    // params; it must be disabled when kind != signal_exit.
+    expect(component.form.valid).toBe(true);
+
+    await component.createStrategy();
+    const req = httpMock.expectOne(strategiesUrl);
+    expect(req.request.body.exit_rules).toEqual([{ kind: 'time_stop', n_bars: 10 }]);
+    req.flush({
+      strategy_id: 'strat-ts',
+      strategy: baseSpec({ strategy_id: 'strat-ts' }),
+      message: 'ok',
+    });
+  });
+
+  it('rejects fractional n_bars on time_stop exit rules', () => {
+    component.form.patchValue({ hypothesis: 'h', signal_definition: 's' });
+    component.addExitRule();
+    fixture.detectChanges();
+
+    const rule = component.exitRulesArray.at(0);
+    rule.get('n_bars')!.setValue(1.5);
+
+    expect(rule.get('n_bars')!.hasError('notInteger')).toBe(true);
+    expect(component.form.valid).toBe(false);
+  });
+
   it('flags an unknown exit-rule kind', () => {
     const spec = baseSpec({
       exit_rules: [{ kind: 'gibberish' } as unknown as StrategySpec['exit_rules'][number]],

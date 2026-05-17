@@ -268,7 +268,7 @@ export class InvestmentStrategyComponent implements OnInit {
     const basis = initial && initial.kind === 'stop_loss' ? (initial.basis ?? 'entry_price') : 'entry_price';
     const whenSeed = initial && initial.kind === 'signal_exit' ? initial.when : undefined;
 
-    return this.fb.group({
+    const group = this.fb.group({
       kind: [kind, Validators.required],
       n_bars: [nBars],
       pct: [pct],
@@ -276,6 +276,15 @@ export class InvestmentStrategyComponent implements OnInit {
       when: this.buildPredicateGroup(whenSeed),
       note: [initial?.note ?? ''],
     });
+
+    // The `when` predicate is only relevant to signal_exit. For other kinds
+    // it carries default required IndicatorRef params that would otherwise
+    // keep the form invalid (and the submit button disabled).
+    if (kind !== 'signal_exit') {
+      group.get('when')!.disable({ emitEvent: false });
+    }
+
+    return group;
   }
 
   buildSizingGroup(initial?: SizingRule): FormGroup {

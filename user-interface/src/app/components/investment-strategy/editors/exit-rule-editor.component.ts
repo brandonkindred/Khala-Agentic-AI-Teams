@@ -10,6 +10,7 @@ import { Subscription } from 'rxjs';
 
 import { EXIT_RULE_KINDS, ExitRuleKind, STOP_LOSS_BASIS_OPTIONS } from '../../../models';
 import { PredicateEditorComponent } from './predicate-editor.component';
+import { integerValidator } from './strategy-validators';
 
 @Component({
   selector: 'app-exit-rule-editor',
@@ -73,7 +74,8 @@ export class ExitRuleEditorComponent implements OnInit, OnDestroy {
 
     switch (kind) {
       case 'time_stop':
-        this.setValidators('n_bars', [Validators.required, Validators.min(1)]);
+        // n_bars is declared as `int` on the backend; reject 1.5 client-side.
+        this.setValidators('n_bars', [Validators.required, Validators.min(1), integerValidator]);
         break;
       case 'stop_loss':
         this.setValidators('pct', [Validators.required, Validators.min(0.0000001), Validators.max(1.0)]);
@@ -85,6 +87,16 @@ export class ExitRuleEditorComponent implements OnInit, OnDestroy {
       case 'signal_exit':
         // Nested predicate child components own their own validation.
         break;
+    }
+
+    // The nested `when` predicate is only serialized for signal_exit; its
+    // default IndicatorRef params have required fields that would otherwise
+    // keep the form invalid.
+    const whenGroup = this.group.get('when');
+    if (whenGroup) {
+      const opts = { emitEvent: false };
+      if (kind === 'signal_exit') whenGroup.enable(opts);
+      else whenGroup.disable(opts);
     }
   }
 }
