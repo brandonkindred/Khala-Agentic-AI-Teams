@@ -19,6 +19,14 @@ _CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
     "commodities",
 )
 
+# Asset classes the LLM is allowed to choose for new strategies (#535).
+# 'options' is canonical (so ``normalize_asset_class`` preserves it for the
+# validator gate to reject) but not a valid ideation target, so it's
+# excluded from prompt counts and underrepresented-class steering.
+_PROMPT_ASSET_CLASSES: tuple[str, ...] = tuple(
+    c for c in _CANONICAL_ASSET_CLASSES if c != "options"
+)
+
 
 def normalize_asset_class(ac: object) -> str:
     """Map any asset-class string variant to one of the canonical labels.
@@ -77,7 +85,11 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
 
     ordered = sorted(records, key=lambda x: x.created_at)
     sample = ordered[-tail:] if len(ordered) > tail else ordered
-    counts = {c: 0 for c in _CANONICAL_ASSET_CLASSES}
+    # #535: count only asset classes the LLM may still target. 'options' is
+    # rejected by StrategySpecValidator, so leaving it in the count dict
+    # would push it into ``underrep`` whenever no options strategies have
+    # run and steer the LLM toward a guaranteed-failure choice.
+    counts = {c: 0 for c in _PROMPT_ASSET_CLASSES}
     for r in sample:
         k = normalize_asset_class(r.strategy.asset_class)
         if k in counts:
