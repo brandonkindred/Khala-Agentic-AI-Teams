@@ -425,19 +425,31 @@ def _indicator_dict_is_legacy(value: Any) -> bool:
 
 
 def _migrate_indicator_side(value: Any) -> Any:
-    """Migrate one side of a Predicate from legacy to issue-#537 shape."""
+    """Migrate one side of a Predicate from legacy to issue-#537 shape.
+
+    Non-dict values (strings like ``"bar.close"``, floats) pass through
+    unchanged. Dicts already in the new shape (``{"name": ..., "params":
+    ...}`` — no legacy ``kind`` discriminator) also pass through so a
+    mixed-state payload doesn't silently drop hand-migrated rules.
+    Returns ``None`` only when the value is a legacy ``PriceRef`` whose
+    field isn't representable in the new schema (``open`` / ``hl2`` /
+    ``ohlc4``) — that's the signal for the caller to drop the rule and
+    stash the original prose in ``unparsed_rules``.
+    """
     if not isinstance(value, dict):
         return value
     kind = value.get("kind")
+    if kind is None or kind not in _LEGACY_INDICATOR_KINDS:
+        # Already new-shape (``{"name": ...}``) or unknown discriminator —
+        # let Pydantic surface any real validation error downstream.
+        return value
     if kind == "price":
         field = value.get("field", "close")
         if field in {"close", "high", "low", "volume"}:
             return f"bar.{field}"
         # ``hl2`` / ``ohlc4`` / ``open`` were addressable on the legacy
         # PriceRef but the issue-#537 literal set only includes the four
-        # above. Fall back to a synthetic IndicatorRef on the "open" case
-        # (treat as SMA(2) over open? no — surface as unparseable).
-        # Returning ``None`` here signals the caller to drop the rule.
+        # above. Returning ``None`` signals the caller to drop the rule.
         return None
     if kind == "const":
         try:
@@ -465,8 +477,10 @@ def _migrate_indicator_side(value: Any) -> Any:
     if kind == "stochastic":
         params = {k: v for k, v in value.items() if k in {"k_period", "d_period", "output"}}
         return {"name": "stochastic", "params": params}
-    # Unknown legacy kind — caller will route to unparsed_rules.
-    return None
+    # Unreachable: every entry in ``_LEGACY_INDICATOR_KINDS`` has a branch
+    # above. Defensive fall-through — pass through so Pydantic surfaces the
+    # error rather than silently dropping the rule.
+    return value
 
 
 def _migrate_predicate(predicate: Any) -> Optional[dict]:

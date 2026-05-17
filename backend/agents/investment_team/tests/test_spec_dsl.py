@@ -571,6 +571,51 @@ def test_strategy_spec_legacy_sizing_rules_field_migrates():
     assert spec.sizing.fraction == 0.02
 
 
+def test_strategy_spec_mixed_legacy_and_new_shape_rules_both_survive():
+    """Regression: a payload with structural legacy markers in one rule
+    must not drop sibling rules that are already in the new shape."""
+    from investment_team.models import StrategySpec
+
+    payload = {
+        "strategy_id": "mixed",
+        "authored_by": "test",
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": [
+            # legacy-shape (triggers _migrate_legacy_payload)
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "lhs": {"kind": "price", "field": "close"},
+                    "op": "gt",
+                    "rhs": {"kind": "sma", "period": 20},
+                },
+            },
+            # already-new-shape — must pass through unchanged
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "lhs": "bar.close",
+                    "op": ">",
+                    "rhs": {"name": "rsi", "params": {"period": 14}},
+                },
+            },
+        ],
+        "exit_rules": [],
+    }
+    spec = StrategySpec.model_validate(payload)
+    assert len(spec.entry_rules) == 2
+    assert spec.unparsed_rules == []
+    assert spec.requires_redesign is False
+    assert isinstance(spec.entry_rules[0].when.rhs, IndicatorRef)
+    assert spec.entry_rules[0].when.rhs.name == "sma"
+    assert isinstance(spec.entry_rules[1].when.rhs, IndicatorRef)
+    assert spec.entry_rules[1].when.rhs.name == "rsi"
+
+
 # ---------------------------------------------------------------------------
 # Issue #537 — `from_prose` top-level adapter.
 # ---------------------------------------------------------------------------
