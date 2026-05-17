@@ -716,6 +716,79 @@ def test_zero_trade_repair_drops_off_list_spec_keys_protects_thesis(
         assert key in msg
 
 
+def test_zero_trade_repair_surfaces_agent_filtered_drops_in_production_flow(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #530 (codex review follow-up): in the real production flow the
+    agent's ``_coerce_report`` strips off-list keys from ``proposed_spec_updates``
+    before the report reaches the orchestrator, so the orchestrator never sees
+    raw drift on ``proposed_spec_updates``. The orchestrator must still emit
+    the ``logger.warning`` and the ``zero_trade_repair_dropped_spec_keys`` gate
+    by reading ``report.dropped_spec_update_keys`` populated by the agent —
+    otherwise the visibility added in #530 only fires in tests with stubs."""
+    pre_repair_spec = _spec()
+
+    orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="ENTRY_WITH_NO_EXIT",
+                evidence="entries_filled=4 closed_trades=0",
+                proposed_code=_REPAIRED_CODE,
+                # ``proposed_spec_updates`` is what the production agent
+                # would return after its own filter ran — only the
+                # whitelisted ``risk_limits`` survived. The off-list keys
+                # are reported separately via ``dropped_spec_update_keys``.
+                proposed_spec_updates=None,
+                dropped_spec_update_keys=["entry_rules", "hypothesis", "sizing"],
+                changes_made="risk_limits tweak only after agent filter",
+            ),
+        ],
+        sandbox_results=[
+            _code_exec(success=True, raw_trades=_benign_sandbox_trades()),
+        ],
+    )
+
+    with caplog.at_level(
+        "WARNING",
+        logger="investment_team.strategy_lab.orchestrator",
+    ):
+        outcome, _events, _attempts = _drive_repair(
+            orch,
+            spec=pre_repair_spec,
+            exec_result=StrategyRunResult(
+                success=True,
+                trades=[],
+                execution_diagnostics=_zero_trade_diagnostics(category="ENTRY_WITH_NO_EXIT"),
+            ),
+        )
+
+    assert outcome.committed is True
+    assert outcome.new_spec is not None
+    # No off-list mutation reached the committed spec.
+    assert outcome.new_spec.hypothesis == pre_repair_spec.hypothesis
+    assert outcome.new_spec.entry_rules == pre_repair_spec.entry_rules
+    assert outcome.new_spec.sizing == pre_repair_spec.sizing
+
+    # Even though ``proposed_spec_updates`` was already sanitised by the
+    # agent, the orchestrator surfaces what was dropped.
+    dropped_gates = [
+        g for g in outcome.new_gates if g.gate_name == "zero_trade_repair_dropped_spec_keys"
+    ]
+    assert len(dropped_gates) == 1, outcome.new_gates
+    gate = dropped_gates[0]
+    assert gate.severity == "warning"
+    assert gate.passed is False
+    for key in ("entry_rules", "hypothesis", "sizing"):
+        assert key in gate.details
+
+    drop_logs = [
+        rec for rec in caplog.records if "discarded spec-mutating keys" in rec.getMessage()
+    ]
+    assert drop_logs, [rec.getMessage() for rec in caplog.records]
+
+
 def test_zero_trade_repair_rejects_spec_updates_failing_post_repair_validator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

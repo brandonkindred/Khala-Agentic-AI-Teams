@@ -1604,11 +1604,21 @@ class StrategyLabOrchestrator:
 
         # ── Surface any off-list spec keys the agent tried to mutate ─
         # #530: the orchestrator's whitelist is now ``{"risk_limits"}``.
-        # If the agent (or a future LLM that bypasses the agent filter)
-        # still proposes other keys, log a warning and append a quality
-        # gate so the drop is auditable in ``quality_gate_results``.
+        # In production the agent's own filter has already stripped
+        # off-list keys before we see them and recorded the names on
+        # ``report.dropped_spec_update_keys``; in tests or via future
+        # bypasses, keys may still be present on ``proposed_spec_updates``.
+        # Union both sources so the warning and the
+        # ``zero_trade_repair_dropped_spec_keys`` quality gate fire in both
+        # flows and the drift is auditable on the persisted
+        # ``quality_gate_results``.
         dropped_spec_keys: List[str] = sorted(
-            k for k in (report.proposed_spec_updates or {}) if k not in _ZERO_TRADE_SPEC_UPDATE_KEYS
+            set(report.dropped_spec_update_keys)
+            | {
+                k
+                for k in (report.proposed_spec_updates or {})
+                if k not in _ZERO_TRADE_SPEC_UPDATE_KEYS
+            }
         )
         if dropped_spec_keys:
             logger.warning(

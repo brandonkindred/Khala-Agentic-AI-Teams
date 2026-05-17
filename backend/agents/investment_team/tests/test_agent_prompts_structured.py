@@ -372,6 +372,7 @@ def test_zero_trade_repair_accepts_risk_limits_spec_update(
         "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10}
     }
     assert report.proposed_code == "# repaired code"
+    assert report.dropped_spec_update_keys == sorted(["entry_rules", "exit_rules"])
 
 
 def test_zero_trade_repair_drops_off_list_rule_spec_updates(
@@ -379,7 +380,9 @@ def test_zero_trade_repair_drops_off_list_rule_spec_updates(
 ) -> None:
     """Rule-shaped ``proposed_spec_updates`` keys are off-list post-#530 and
     are silently filtered at the agent before they reach the orchestrator.
-    With no whitelisted key remaining, the field collapses to ``None``."""
+    With no whitelisted key remaining, the field collapses to ``None`` but
+    the dropped keys are recorded so the orchestrator can still surface a
+    warning + quality gate on the production agent-to-orchestrator flow."""
     spec_updates = {
         "entry_rules": ["close > sma(20)"],
         "exit_rules": ["exit after 10 bars"],
@@ -394,6 +397,7 @@ def test_zero_trade_repair_drops_off_list_rule_spec_updates(
 
     assert report.proposed_spec_updates is None
     assert report.proposed_code == "# repaired code"
+    assert report.dropped_spec_update_keys == sorted(["entry_rules", "exit_rules"])
 
 
 def test_zero_trade_repair_drops_thesis_spec_updates(
@@ -401,7 +405,9 @@ def test_zero_trade_repair_drops_thesis_spec_updates(
 ) -> None:
     """Thesis-defining keys (``hypothesis``, ``signal_definition``, ``sizing``)
     are off-list post-#530 and dropped at the agent. The committed report
-    surfaces only the whitelisted ``risk_limits`` mutation."""
+    surfaces only the whitelisted ``risk_limits`` mutation, and records the
+    dropped keys on ``dropped_spec_update_keys`` so the orchestrator can
+    persist a warning + quality gate."""
     spec_updates = {
         "hypothesis": "rewritten thesis",
         "signal_definition": "loosened",
@@ -417,3 +423,4 @@ def test_zero_trade_repair_drops_thesis_spec_updates(
     )
 
     assert report.proposed_spec_updates == {"risk_limits": {"max_position_pct": 5}}
+    assert report.dropped_spec_update_keys == sorted(["hypothesis", "signal_definition", "sizing"])

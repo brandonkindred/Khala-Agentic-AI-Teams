@@ -66,6 +66,13 @@ class ZeroTradeRepairReport(BaseModel):
     expected_trade_count_change: int = 0
     changes_made: str = ""
     proposed_spec_updates: Optional[Dict[str, Any]] = Field(default=None)
+    # #530: keys the agent filtered out of ``proposed_spec_updates`` before
+    # returning. Populated by ``_coerce_report`` so the orchestrator can
+    # surface a ``logger.warning`` + ``zero_trade_repair_dropped_spec_keys``
+    # quality gate even when the agent strips off-list drift in production
+    # (otherwise the visibility added in #530 would only fire when the agent
+    # is stubbed in tests).
+    dropped_spec_update_keys: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -259,8 +266,17 @@ def _coerce_report(
 
     raw_spec_updates = parsed.get("proposed_spec_updates")
     proposed_spec_updates: Optional[Dict[str, Any]]
+    dropped_spec_update_keys: List[str] = []
     if isinstance(raw_spec_updates, dict):
         whitelisted = {k: v for k, v in raw_spec_updates.items() if k in _ALLOWED_SPEC_UPDATE_KEYS}
+        # #530: record what the agent filtered so the orchestrator can
+        # surface it via logger.warning + a quality gate. Without this,
+        # the production agent-to-orchestrator flow would silently drop
+        # the drift because the orchestrator only sees the sanitized
+        # report.
+        dropped_spec_update_keys = sorted(
+            k for k in raw_spec_updates if k not in _ALLOWED_SPEC_UPDATE_KEYS
+        )
         # Reject prose / invalid structure on the rule-shaped keys so the
         # orchestrator does not propagate a malformed dict into
         # `_apply_updates`. The whitelist still gates which fields make it
@@ -295,6 +311,7 @@ def _coerce_report(
         expected_trade_count_change=_coerce_int(parsed.get("expected_trade_count_change", 0)),
         changes_made=str(parsed.get("changes_made", "")).strip(),
         proposed_spec_updates=proposed_spec_updates,
+        dropped_spec_update_keys=dropped_spec_update_keys,
     )
 
 
