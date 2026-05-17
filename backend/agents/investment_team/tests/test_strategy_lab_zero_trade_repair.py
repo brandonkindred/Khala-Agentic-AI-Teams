@@ -493,7 +493,7 @@ def test_zero_trade_repair_invalid_spec_updates_falls_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A whitelisted ``proposed_spec_updates`` key with the wrong shape
-    (e.g. ``entry_rules`` as a string) must be rejected as a
+    (e.g. ``risk_limits`` as a bare string) must be rejected as a
     not-committed outcome — the helper must NOT let the resulting
     Pydantic ``ValidationError`` abort the entire Strategy Lab cycle."""
     orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
@@ -503,11 +503,11 @@ def test_zero_trade_repair_invalid_spec_updates_falls_through(
                 root_cause_category="ENTRY_WITH_NO_EXIT",
                 evidence="entries_filled=4 closed_trades=0",
                 proposed_code=_REPAIRED_CODE,
-                # ``entry_rules`` must be a list[str]; a bare string is
-                # the realistic LLM error mode that previously crashed
-                # the cycle.
-                proposed_spec_updates={"entry_rules": "exit after 5 bars"},
-                changes_made="malformed entry_rules",
+                # Post-#530, ``risk_limits`` is the only whitelisted key.
+                # A bare string is the realistic LLM error mode that
+                # previously crashed the cycle.
+                proposed_spec_updates={"risk_limits": "loosen drawdown please"},
+                changes_made="malformed risk_limits",
             ),
         ],
         sandbox_results=[],  # sandbox MUST NOT be called
@@ -574,7 +574,8 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
 ) -> None:
     """Whitelisted ``proposed_spec_updates`` flow into the committed spec;
     off-list keys are silently dropped so an LLM hallucination cannot
-    rewrite arbitrary fields."""
+    rewrite arbitrary fields. Post-#530 the whitelist is ``risk_limits``
+    only."""
     orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
         monkeypatch,
         repair_reports=[
@@ -583,12 +584,13 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
                 evidence="entries_filled=4 closed_trades=0",
                 proposed_code=_REPAIRED_CODE,
                 proposed_spec_updates={
+                    "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
+                    # Off-list keys MUST NOT mutate the spec (#530).
                     "exit_rules": [TimeStopRule(n_bars=10, note="added time stop").model_dump()],
-                    # Off-list keys MUST NOT mutate the spec.
                     "strategy_id": "hijacked",
                     "asset_class": "crypto",
                 },
-                changes_made="added time-stop exit",
+                changes_made="loosened drawdown limit",
             ),
         ],
         sandbox_results=[
@@ -605,10 +607,113 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
     assert outcome.committed is True
     assert outcome.new_spec is not None
     # Whitelisted update applied …
-    assert outcome.new_spec.exit_rules == [TimeStopRule(n_bars=10, note="added time stop")]
-    # … and off-list mutations were silently dropped.
+    assert outcome.new_spec.risk_limits.max_position_pct == 5
+    assert outcome.new_spec.risk_limits.max_drawdown_pct == 10
+    # … and off-list mutations were silently dropped (rule + immutable keys).
+    original_exit_rules = _spec().exit_rules
+    assert outcome.new_spec.exit_rules == original_exit_rules
     assert outcome.new_spec.strategy_id == "strat-zt-repair-test"
     assert outcome.new_spec.asset_class == "stocks"
+    # And a dropped-keys quality gate was surfaced on the committed run.
+    dropped_gates = [
+        g for g in outcome.new_gates if g.gate_name == "zero_trade_repair_dropped_spec_keys"
+    ]
+    assert dropped_gates, outcome.new_gates
+    assert dropped_gates[0].severity == "warning"
+    assert dropped_gates[0].passed is False
+    assert "exit_rules" in dropped_gates[0].details
+    assert "strategy_id" in dropped_gates[0].details
+    assert "asset_class" in dropped_gates[0].details
+
+
+def test_zero_trade_repair_drops_off_list_spec_keys_protects_thesis(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #530: when the repair agent proposes ``hypothesis``,
+    ``entry_rules`` (or any other thesis-defining key), those mutations
+    MUST be dropped silently — never reach the committed spec — and the
+    drop MUST be surfaced as a warning gate plus a ``logger.warning`` so
+    the thesis cannot quietly mutate across refinement rounds."""
+    pre_repair_spec = _spec()
+
+    orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="ENTRY_WITH_NO_EXIT",
+                evidence="entries_filled=4 closed_trades=0",
+                proposed_code=_REPAIRED_CODE,
+                # All of these MUST be dropped — only ``risk_limits`` is
+                # honoured post-#530.
+                proposed_spec_updates={
+                    "hypothesis": "QQQ → TSLA bait",
+                    "signal_definition": "loosened",
+                    "entry_rules": [
+                        EntryRule(
+                            side="long",
+                            when=Predicate(
+                                lhs=RSIRef(period=14),
+                                op="lt",
+                                rhs=ConstRef(value=90),
+                            ),
+                        ).model_dump()
+                    ],
+                    "exit_rules": [TimeStopRule(n_bars=10, note="x").model_dump()],
+                    "sizing": {"kind": "fixed_fraction", "fraction": 0.5},
+                },
+                changes_made="attempted to rewrite the thesis",
+            ),
+        ],
+        sandbox_results=[
+            _code_exec(success=True, raw_trades=_benign_sandbox_trades()),
+        ],
+    )
+
+    with caplog.at_level(
+        "WARNING",
+        logger="investment_team.strategy_lab.orchestrator",
+    ):
+        outcome, _events, _attempts = _drive_repair(
+            orch,
+            spec=pre_repair_spec,
+            exec_result=StrategyRunResult(
+                success=True,
+                trades=[],
+                execution_diagnostics=_zero_trade_diagnostics(category="ENTRY_WITH_NO_EXIT"),
+            ),
+        )
+
+    assert outcome.committed is True
+    assert outcome.new_spec is not None
+    # Thesis-defining keys are NEVER overwritten by zero-trade repair.
+    assert outcome.new_spec.hypothesis == pre_repair_spec.hypothesis
+    assert outcome.new_spec.signal_definition == pre_repair_spec.signal_definition
+    assert outcome.new_spec.entry_rules == pre_repair_spec.entry_rules
+    assert outcome.new_spec.exit_rules == pre_repair_spec.exit_rules
+    assert outcome.new_spec.sizing == pre_repair_spec.sizing
+    # risk_limits was untouched by the proposal so it must also be unchanged.
+    assert outcome.new_spec.risk_limits == pre_repair_spec.risk_limits
+
+    # The dropped-keys gate is surfaced on the committed run.
+    dropped_gates = [
+        g for g in outcome.new_gates if g.gate_name == "zero_trade_repair_dropped_spec_keys"
+    ]
+    assert len(dropped_gates) == 1, outcome.new_gates
+    gate = dropped_gates[0]
+    assert gate.severity == "warning"
+    assert gate.passed is False
+    for key in ("hypothesis", "signal_definition", "entry_rules", "exit_rules", "sizing"):
+        assert key in gate.details
+
+    # And the logger.warning fired with the dropped keys.
+    drop_logs = [
+        rec for rec in caplog.records if "discarded spec-mutating keys" in rec.getMessage()
+    ]
+    assert drop_logs, [rec.getMessage() for rec in caplog.records]
+    msg = drop_logs[0].getMessage()
+    for key in ("hypothesis", "signal_definition", "entry_rules", "exit_rules", "sizing"):
+        assert key in msg
 
 
 def test_zero_trade_repair_rejects_spec_updates_failing_post_repair_validator(

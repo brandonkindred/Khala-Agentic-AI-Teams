@@ -35,16 +35,13 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # Spec keys the orchestrator will honour from a ZeroTradeRepairReport's
 # ``proposed_spec_updates``. Anything else is silently dropped — the
 # specialized repair agent must not invent fields.
-_ALLOWED_SPEC_UPDATE_KEYS = frozenset(
-    {
-        "entry_rules",
-        "exit_rules",
-        "sizing",
-        "risk_limits",
-        "hypothesis",
-        "signal_definition",
-    }
-)
+#
+# #530: narrowed to ``risk_limits`` only. The repair agent must fix the
+# **code**, not weaken the **spec**. Rule-shaped keys (entry/exit/sizing),
+# the hypothesis, and the signal_definition stay locked at this stage so
+# a "make trades happen" LLM cannot quietly mutate the thesis. The
+# orchestrator additionally logs and gates off-list proposals.
+_ALLOWED_SPEC_UPDATE_KEYS = frozenset({"risk_limits"})
 
 # Cap on `last_order_events` included in the repair prompt. The model
 # already trims to 20; 10 is enough signal for the LLM to spot the
