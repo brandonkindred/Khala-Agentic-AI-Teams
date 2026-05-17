@@ -13,10 +13,9 @@ from investment_team.strategy_lab.quality_gates.convergence_tracker import (
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
+    IndicatorRef,
     Predicate,
-    PriceRef,
     SignalExitRule,
-    SMARef,
 )
 
 
@@ -27,10 +26,22 @@ def _mk_spec(asset_class: str = "stocks") -> StrategySpec:
         asset_class=asset_class,
         hypothesis="test hypothesis",
         signal_definition="close crosses above SMA(20)",
+        timeframe="1d",
         entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)))
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+                ),
+            )
         ],
-        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)))],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                )
+            )
+        ],
     )
 
 
@@ -244,10 +255,13 @@ def _spec_with_entries(entry_rules, asset_class: str = "stocks") -> StrategySpec
         asset_class=asset_class,
         hypothesis="test hypothesis",
         signal_definition="sig",
+        timeframe="1d",
         entry_rules=entry_rules,
         exit_rules=[
             SignalExitRule(
-                when=Predicate(lhs=PriceRef(), op="lt", rhs=SMARef(period=5)),
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
             ),
         ],
     )
@@ -260,11 +274,15 @@ def test_strategy_signature_invariant_to_entry_list_order():
     inside the helper)."""
     rule_a = EntryRule(
         side="long",
-        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+        ),
     )
     rule_b = EntryRule(
         side="long",
-        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=50)),
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 50})
+        ),
     )
 
     sig_ab = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_a, rule_b]))
@@ -281,11 +299,15 @@ def test_strategy_signature_canonicalises_across_distinct_equivalent_rules():
     desynchronise the signature."""
     rule_v1 = EntryRule(
         side="long",
-        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+        ),
     )
     rule_v2 = EntryRule(
         side="long",
-        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+        ),
     )
     assert rule_v1 is not rule_v2
 
@@ -296,17 +318,21 @@ def test_strategy_signature_canonicalises_across_distinct_equivalent_rules():
 
 
 def test_strategy_signature_differs_when_rule_payload_differs():
-    """A meaningful payload change — ``SMARef(period=20)`` vs
-    ``SMARef(period=50)`` — must produce a different entry token. Guards
+    """A meaningful payload change — ``IndicatorRef(name="sma", params={"period": 20})`` vs
+    ``IndicatorRef(name="sma", params={"period": 50})`` — must produce a different entry token. Guards
     against an over-aggressive canonicalisation that collapses distinct
     rules."""
     rule_20 = EntryRule(
         side="long",
-        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+        ),
     )
     rule_50 = EntryRule(
         side="long",
-        when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=50)),
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 50})
+        ),
     )
 
     sig_20 = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_20]))

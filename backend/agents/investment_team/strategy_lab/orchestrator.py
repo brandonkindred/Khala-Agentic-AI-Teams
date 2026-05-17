@@ -376,6 +376,9 @@ class StrategyLabOrchestrator:
             asset_class=strategy_dict.get("asset_class", "stocks"),
             hypothesis=strategy_dict.get("hypothesis", ""),
             signal_definition=strategy_dict.get("signal_definition", ""),
+            # Issue #537: ideation must declare a timeframe. Default to "1d"
+            # if the LLM forgot the field — the prompt makes it mandatory.
+            timeframe=strategy_dict.get("timeframe") or "1d",
             entry_rules=strategy_dict.get("entry_rules", []),
             exit_rules=strategy_dict.get("exit_rules", []),
             sizing=strategy_dict.get("sizing", DEFAULT_SIZING_PAYLOAD),

@@ -9,7 +9,7 @@ import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -418,7 +418,12 @@ class CreateStrategyRequest(BaseModel):
     asset_class: str = Field(..., description="Primary asset class")
     hypothesis: str = Field(..., description="Investment hypothesis")
     signal_definition: str = Field(..., description="Signal definition")
-    # Issue #551/#554: rule fields are structured DSL nodes. Typed directly
+    # Issue #537: every spec must declare the bar timeframe it was designed
+    # against — required, no default.
+    timeframe: Literal["1m", "5m", "15m", "1h", "1d"] = Field(
+        ..., description="Bar timeframe the strategy was designed against"
+    )
+    # Issue #551/#554/#537: rule fields are structured DSL nodes. Typed directly
     # so FastAPI publishes the discriminated-union schema in OpenAPI and
     # returns 422 (rather than 500) for malformed input.
     entry_rules: List[EntryRule] = Field(default_factory=list)
@@ -692,6 +697,7 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
         asset_class=request.asset_class,
         hypothesis=request.hypothesis,
         signal_definition=request.signal_definition,
+        timeframe=request.timeframe,
         entry_rules=request.entry_rules,
         exit_rules=request.exit_rules,
         sizing=request.sizing if request.sizing is not None else DEFAULT_SIZING_PAYLOAD,
@@ -1269,6 +1275,11 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         asset_class=_normalize_strategy_lab_asset_class(strategy_data.get("asset_class")),
         hypothesis=str(strategy_data.get("hypothesis", "")),
         signal_definition=str(strategy_data.get("signal_definition", "")),
+        # Issue #537: ideation must declare a timeframe. Default to "1d"
+        # only when the LLM forgot the field — the prompt makes it
+        # mandatory; this fallback keeps the cycle alive rather than
+        # forcing a re-run for a clearly-resolvable omission.
+        timeframe=strategy_data.get("timeframe") or "1d",
         # Issue #551/#554: pass structured rule payloads through to
         # Pydantic; non-dict / non-DSL items are discarded so a malformed
         # ideation LLM response doesn't crash the cycle.

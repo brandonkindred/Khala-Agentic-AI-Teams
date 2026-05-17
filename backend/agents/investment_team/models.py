@@ -5,10 +5,11 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .execution.risk_filter import RiskLimits
 from .strategy_lab.spec_dsl import (
+    DEFAULT_SIZING_PAYLOAD,
     EntryRule,
     ExitRule,
     FixedFractionSizing,
@@ -203,10 +204,22 @@ class StrategySpec(BaseModel):
     asset_class: str
     hypothesis: str
     signal_definition: str
-    # Issue #551 — entry/exit/sizing are structured DSL nodes. Pydantic
+    # Issue #537 — bar timeframe the strategy was designed against. Required;
+    # no default. Fresh callers (``CreateStrategyRequest``, ideation, the
+    # orchestrator) declare this explicitly. Persisted pre-#537 records lack
+    # the field — those that carry structural legacy markers (old op names,
+    # typed ``IndicatorRef`` dicts, ``sizing_rules`` list, ``unparsable``
+    # variants) are migrated to ``"1d"`` in-flight by
+    # ``_migrate_legacy_payload``. Minimal-shape persisted records that
+    # carry no markers AND no timeframe (e.g. empty rules with default
+    # sizing) must be rewritten by
+    # ``investment_team.scripts.backfill_strategy_specs`` before deploy —
+    # they will not deserialise otherwise.
+    timeframe: Literal["1m", "5m", "15m", "1h", "1d"]
+    # Issue #551/#537 — entry/exit/sizing are structured DSL nodes. Pydantic
     # discriminator validation rejects prose ("close > sma(20)") on input;
-    # producers must emit structured. See `strategy_lab/spec_dsl.py` (#550)
-    # for the union definitions.
+    # producers must emit structured. See `strategy_lab/spec_dsl.py` for the
+    # union definitions.
     entry_rules: List[EntryRule] = Field(default_factory=list)
     exit_rules: List[ExitRule] = Field(default_factory=list)
     sizing: SizingRule = Field(default_factory=lambda: FixedFractionSizing(fraction=0.02))
@@ -222,7 +235,86 @@ class StrategySpec(BaseModel):
     risk_limits: RiskLimits = Field(default_factory=RiskLimits)
     speculative: bool = False
     strategy_code: Optional[str] = None
+    # Issue #537 — surface for rules that couldn't be parsed by ``from_prose``
+    # / the legacy-payload rewriter. When non-empty, ``requires_redesign``
+    # is set so the design agent re-routes the spec to ideation.
+    requires_redesign: bool = False
+    unparsed_rules: List[str] = Field(default_factory=list)
     audit: AuditContext = Field(default_factory=AuditContext)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_payload(cls, data: Any) -> Any:
+        """Rewrite pre-#537 payload shapes to the current schema.
+
+        Detects legacy markers (old op names ``"gt"``/``"lt"``/…, typed
+        indicator dicts with ``"kind": "sma"`` etc., the discontinued
+        ``UnparsableRule`` discriminator, the renamed ``sizing_rules`` list,
+        a missing ``timeframe``) and rewrites them in-flight so persisted
+        specs and partway-migrated callers continue to deserialise. Fresh
+        callers that don't hit any legacy marker pass through untouched —
+        a missing ``timeframe`` then raises a normal required-field error.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        is_legacy = _looks_like_legacy_payload(data)
+        if not is_legacy:
+            return data
+
+        payload: dict = dict(data)
+        unparsed: List[str] = list(payload.get("unparsed_rules") or [])
+        requires_redesign = bool(payload.get("requires_redesign", False))
+
+        # 1. entry_rules — migrate indicator shape, op names, drop unparsables.
+        new_entries: List[Any] = []
+        for raw in payload.get("entry_rules") or []:
+            migrated, prose = _migrate_entry_rule(raw)
+            if migrated is not None:
+                new_entries.append(migrated)
+            if prose is not None:
+                unparsed.append(prose)
+                requires_redesign = True
+        payload["entry_rules"] = new_entries
+
+        # 2. exit_rules — same migration; drop legacy unparsable variants.
+        new_exits: List[Any] = []
+        for raw in payload.get("exit_rules") or []:
+            migrated, prose = _migrate_exit_rule(raw)
+            if migrated is not None:
+                new_exits.append(migrated)
+            if prose is not None:
+                unparsed.append(prose)
+                requires_redesign = True
+        payload["exit_rules"] = new_exits
+
+        # 3. sizing — collapse legacy ``sizing_rules`` list and drop
+        # ``unparsable_sizing`` variants.
+        if "sizing_rules" in payload:
+            sizing_list = payload.pop("sizing_rules") or []
+            from .strategy_lab.spec_dsl_adapter import parse_sizing_list
+
+            if sizing_list and all(isinstance(s, str) for s in sizing_list):
+                parsed = parse_sizing_list(sizing_list)
+                if parsed is None:
+                    unparsed.extend(sizing_list)
+                    requires_redesign = True
+                    payload.setdefault("sizing", dict(DEFAULT_SIZING_PAYLOAD))
+                else:
+                    payload["sizing"] = parsed.model_dump()
+        sizing_value = payload.get("sizing")
+        if isinstance(sizing_value, dict) and sizing_value.get("kind") == "unparsable_sizing":
+            unparsed.append(str(sizing_value.get("prose", "")))
+            requires_redesign = True
+            payload["sizing"] = dict(DEFAULT_SIZING_PAYLOAD)
+
+        # 4. timeframe — legacy specs predate the field; default to daily
+        # so persisted records deserialise without manual surgery.
+        payload.setdefault("timeframe", "1d")
+
+        payload["unparsed_rules"] = unparsed
+        payload["requires_redesign"] = requires_redesign
+        return payload
 
     @field_validator("risk_limits", mode="before")
     @classmethod
@@ -253,6 +345,195 @@ class StrategySpec(BaseModel):
             seen.add(sym)
             out.append(sym)
         return out
+
+
+# ---------------------------------------------------------------------------
+# Issue #537 — legacy-payload migration helpers. These run only in
+# ``StrategySpec._migrate_legacy_payload`` (mode="before") when a payload
+# shows pre-#537 markers. Fresh payloads bypass this path entirely.
+# ---------------------------------------------------------------------------
+
+
+_LEGACY_INDICATOR_KINDS = frozenset(
+    {
+        "price",
+        "const",
+        "sma",
+        "ema",
+        "rsi",
+        "macd",
+        "bollinger",
+        "atr",
+        "adx",
+        "stochastic",
+        "vwap",
+    }
+)
+_LEGACY_OP_MAP = {
+    "gt": ">",
+    "lt": "<",
+    "ge": ">=",
+    "le": "<=",
+    "eq": "==",
+}
+_LEGACY_UNPARSABLE_KINDS = frozenset({"unparsable", "unparsable_sizing"})
+
+
+def _looks_like_legacy_payload(data: dict) -> bool:
+    """Heuristic — does this payload carry pre-#537 structural markers?
+
+    Returns True if any of the following structural pre-#537 markers are
+    present (a missing ``timeframe`` alone is NOT counted — fresh callers
+    that forget the required field get the standard pydantic error):
+    - a top-level ``sizing_rules`` list (renamed to ``sizing`` post-#554);
+    - any rule with the legacy ``kind="unparsable"`` discriminator;
+    - sizing with the legacy ``kind="unparsable_sizing"`` discriminator;
+    - any indicator dict carrying a legacy ``kind`` discriminator;
+    - any predicate op naming the legacy string aliases (``"gt"``, ``"lt"``…).
+    """
+    if "sizing_rules" in data:
+        return True
+    sizing = data.get("sizing")
+    if isinstance(sizing, dict) and sizing.get("kind") == "unparsable_sizing":
+        return True
+    for slot in ("entry_rules", "exit_rules"):
+        rules = data.get(slot) or []
+        if not isinstance(rules, list):
+            continue
+        for raw in rules:
+            if _rule_dict_is_legacy(raw):
+                return True
+    return False
+
+
+def _rule_dict_is_legacy(rule: Any) -> bool:
+    if not isinstance(rule, dict):
+        return False
+    if rule.get("kind") in _LEGACY_UNPARSABLE_KINDS:
+        return True
+    when = rule.get("when")
+    if isinstance(when, dict):
+        if when.get("op") in _LEGACY_OP_MAP:
+            return True
+        if _indicator_dict_is_legacy(when.get("lhs")) or _indicator_dict_is_legacy(when.get("rhs")):
+            return True
+    return False
+
+
+def _indicator_dict_is_legacy(value: Any) -> bool:
+    return isinstance(value, dict) and "kind" in value and value["kind"] in _LEGACY_INDICATOR_KINDS
+
+
+def _migrate_indicator_side(value: Any) -> Any:
+    """Migrate one side of a Predicate from legacy to issue-#537 shape.
+
+    Non-dict values (strings like ``"bar.close"``, floats) pass through
+    unchanged. Dicts already in the new shape (``{"name": ..., "params":
+    ...}`` — no legacy ``kind`` discriminator) also pass through so a
+    mixed-state payload doesn't silently drop hand-migrated rules.
+    Returns ``None`` only when the value is a legacy ``PriceRef`` whose
+    field isn't representable in the new schema (``open`` / ``hl2`` /
+    ``ohlc4``) — that's the signal for the caller to drop the rule and
+    stash the original prose in ``unparsed_rules``.
+    """
+    if not isinstance(value, dict):
+        return value
+    kind = value.get("kind")
+    if kind is None or kind not in _LEGACY_INDICATOR_KINDS:
+        # Already new-shape (``{"name": ...}``) or unknown discriminator —
+        # let Pydantic surface any real validation error downstream.
+        return value
+    if kind == "price":
+        field = value.get("field", "close")
+        if field in {"close", "high", "low", "volume"}:
+            return f"bar.{field}"
+        # ``hl2`` / ``ohlc4`` / ``open`` were addressable on the legacy
+        # PriceRef but the issue-#537 literal set only includes the four
+        # above. Returning ``None`` signals the caller to drop the rule.
+        return None
+    if kind == "const":
+        try:
+            return float(value.get("value", 0.0))
+        except (TypeError, ValueError):
+            return None
+    if kind in {"sma", "ema", "rsi", "atr", "adx", "vwap"}:
+        params: dict = {k: v for k, v in value.items() if k not in {"kind", "source"}}
+        out: dict = {"name": kind, "params": params}
+        if "source" in value:
+            out["source"] = value["source"]
+        return out
+    if kind == "macd":
+        params = {k: v for k, v in value.items() if k in {"fast", "slow", "signal", "output"}}
+        out = {"name": "macd", "params": params}
+        if "source" in value:
+            out["source"] = value["source"]
+        return out
+    if kind == "bollinger":
+        params = {k: v for k, v in value.items() if k in {"period", "num_std", "band"}}
+        out = {"name": "bollinger", "params": params}
+        if "source" in value:
+            out["source"] = value["source"]
+        return out
+    if kind == "stochastic":
+        params = {k: v for k, v in value.items() if k in {"k_period", "d_period", "output"}}
+        return {"name": "stochastic", "params": params}
+    # Unreachable: every entry in ``_LEGACY_INDICATOR_KINDS`` has a branch
+    # above. Defensive fall-through — pass through so Pydantic surfaces the
+    # error rather than silently dropping the rule.
+    return value
+
+
+def _migrate_predicate(predicate: Any) -> Optional[dict]:
+    if not isinstance(predicate, dict):
+        return None
+    lhs = _migrate_indicator_side(predicate.get("lhs"))
+    rhs = _migrate_indicator_side(predicate.get("rhs"))
+    if lhs is None or rhs is None:
+        return None
+    op = predicate.get("op")
+    op = _LEGACY_OP_MAP.get(op, op)
+    return {"lhs": lhs, "op": op, "rhs": rhs}
+
+
+def _migrate_entry_rule(rule: Any) -> tuple[Optional[Any], Optional[str]]:
+    """Returns (migrated_rule, prose_to_stash). At most one is non-None."""
+    if not isinstance(rule, dict):
+        return rule, None
+    if rule.get("kind") == "unparsable":
+        return None, str(rule.get("prose", ""))
+    if "when" not in rule:
+        return rule, None
+    when = _migrate_predicate(rule["when"])
+    if when is None:
+        return None, _describe_rule(rule)
+    new_rule = dict(rule)
+    new_rule["when"] = when
+    return new_rule, None
+
+
+def _migrate_exit_rule(rule: Any) -> tuple[Optional[Any], Optional[str]]:
+    if not isinstance(rule, dict):
+        return rule, None
+    if rule.get("kind") == "unparsable":
+        return None, str(rule.get("prose", ""))
+    if "when" not in rule:
+        return rule, None
+    when = _migrate_predicate(rule["when"])
+    if when is None:
+        return None, _describe_rule(rule)
+    new_rule = dict(rule)
+    new_rule["when"] = when
+    return new_rule, None
+
+
+def _describe_rule(rule: dict) -> str:
+    """Render a rule dict for the unparsed_rules stash — best-effort."""
+    try:
+        import json
+
+        return json.dumps(rule, default=str, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return str(rule)
 
 
 class ValidationCheck(BaseModel):

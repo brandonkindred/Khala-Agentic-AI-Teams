@@ -1,4 +1,4 @@
-"""Tests for the spec_dsl module (issue #550, step 1 of 8 from #537)."""
+"""Tests for the spec_dsl module (issue #537 literal schema)."""
 
 from __future__ import annotations
 
@@ -6,54 +6,41 @@ import pytest
 from pydantic import ValidationError
 
 from investment_team.strategy_lab.spec_dsl import (
-    ADXRef,
-    ATRRef,
-    BollingerRef,
-    ConstRef,
-    EMARef,
+    DEFAULT_SIZING_PAYLOAD,
     EntryRule,
     EntryRuleAdapter,
     ExitRuleAdapter,
     FixedFractionSizing,
     FixedNotionalSizing,
+    IndicatorRef,
     IndicatorRefAdapter,
-    MACDRef,
     Predicate,
-    PriceRef,
-    RSIRef,
     SignalExitRule,
     SizingRuleAdapter,
-    SMARef,
-    StochasticRef,
     StopLossRule,
     TakeProfitRule,
     TimeStopRule,
-    UnparsableRule,
-    UnparsableSizing,
     VolatilityTargetSizing,
-    VWAPRef,
     format_rules_for_prompt,
     format_sizing_rule,
+    from_prose,
 )
 
 # ---------------------------------------------------------------------------
-# Round-trip serialisation per union member.
+# Round-trip serialisation per indicator name.
 # ---------------------------------------------------------------------------
 
 
 _INDICATOR_FIXTURES = [
-    PriceRef(field="close"),
-    PriceRef(field="high"),
-    ConstRef(value=30),
-    SMARef(period=20),
-    EMARef(period=50, source="open"),
-    RSIRef(period=14),
-    MACDRef(fast=12, slow=26, signal=9, output="signal"),
-    BollingerRef(period=20, num_std=2.0, band="upper"),
-    ATRRef(period=14),
-    ADXRef(period=14),
-    StochasticRef(k_period=14, d_period=3, output="k"),
-    VWAPRef(),
+    IndicatorRef(name="sma", params={"period": 20}),
+    IndicatorRef(name="ema", params={"period": 50}, source="open"),
+    IndicatorRef(name="rsi", params={"period": 14}),
+    IndicatorRef(name="macd", params={"fast": 12, "slow": 26, "signal": 9, "output": "signal"}),
+    IndicatorRef(name="bollinger", params={"period": 20, "num_std": 2.0, "band": "upper"}),
+    IndicatorRef(name="atr", params={"period": 14}),
+    IndicatorRef(name="adx", params={"period": 14}),
+    IndicatorRef(name="stochastic", params={"k_period": 14, "d_period": 3, "output": "k"}),
+    IndicatorRef(name="vwap"),
 ]
 
 
@@ -67,15 +54,13 @@ def test_indicator_round_trip(model):
 def test_entry_rule_round_trip():
     rule = EntryRule(
         side="long",
-        when=Predicate(lhs=PriceRef(field="close"), op="gt", rhs=SMARef(period=20)),
+        when=Predicate(
+            lhs="bar.close",
+            op=">",
+            rhs=IndicatorRef(name="sma", params={"period": 20}),
+        ),
         note="trend-follow",
     )
-    rebuilt = EntryRuleAdapter.validate_json(rule.model_dump_json())
-    assert rebuilt == rule
-
-
-def test_unparsable_entry_round_trip():
-    rule = UnparsableRule(prose="enter on vibes", reason="no pattern matched")
     rebuilt = EntryRuleAdapter.validate_json(rule.model_dump_json())
     assert rebuilt == rule
 
@@ -87,8 +72,9 @@ def test_unparsable_entry_round_trip():
         StopLossRule(pct=0.03),
         StopLossRule(pct=0.03, basis="trailing_high"),
         TakeProfitRule(pct=0.05),
-        SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70))),
-        UnparsableRule(prose="exit on vibes"),
+        SignalExitRule(
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0)
+        ),
     ],
 )
 def test_exit_rule_round_trip(rule):
@@ -102,7 +88,6 @@ def test_exit_rule_round_trip(rule):
         FixedFractionSizing(fraction=0.02),
         VolatilityTargetSizing(target_annual_vol=0.10),
         FixedNotionalSizing(notional_usd=50000),
-        UnparsableSizing(prose="size based on confidence"),
     ],
 )
 def test_sizing_round_trip(rule):
@@ -111,14 +96,16 @@ def test_sizing_round_trip(rule):
 
 
 # ---------------------------------------------------------------------------
-# Discriminator dispatch — raw dicts route to the right concrete class.
+# Discriminator / type-dispatch — raw dicts route to the right concrete class.
 # ---------------------------------------------------------------------------
 
 
-def test_indicator_discriminator_dispatch():
-    assert isinstance(IndicatorRefAdapter.validate_python({"kind": "rsi"}), RSIRef)
-    assert isinstance(IndicatorRefAdapter.validate_python({"kind": "sma", "period": 20}), SMARef)
-    assert isinstance(IndicatorRefAdapter.validate_python({"kind": "macd"}), MACDRef)
+def test_indicator_dispatch():
+    ref = IndicatorRefAdapter.validate_python({"name": "rsi", "params": {"period": 14}})
+    assert isinstance(ref, IndicatorRef) and ref.name == "rsi"
+
+    ref = IndicatorRefAdapter.validate_python({"name": "sma", "params": {"period": 20}})
+    assert isinstance(ref, IndicatorRef) and ref.name == "sma"
 
 
 def test_entry_discriminator_dispatch():
@@ -126,14 +113,15 @@ def test_entry_discriminator_dispatch():
         "kind": "entry",
         "side": "long",
         "when": {
-            "lhs": {"kind": "price", "field": "close"},
-            "op": "gt",
-            "rhs": {"kind": "sma", "period": 20},
+            "lhs": "bar.close",
+            "op": ">",
+            "rhs": {"name": "sma", "params": {"period": 20}},
         },
     }
     parsed = EntryRuleAdapter.validate_python(payload)
     assert isinstance(parsed, EntryRule)
-    assert isinstance(parsed.when.rhs, SMARef)
+    assert isinstance(parsed.when.rhs, IndicatorRef)
+    assert parsed.when.rhs.name == "sma"
 
 
 def test_exit_discriminator_dispatch():
@@ -145,10 +133,6 @@ def test_exit_discriminator_dispatch():
         ExitRuleAdapter.validate_python({"kind": "stop_loss", "pct": 0.03}),
         StopLossRule,
     )
-    assert isinstance(
-        ExitRuleAdapter.validate_python({"kind": "unparsable", "prose": "..."}),
-        UnparsableRule,
-    )
 
 
 def test_sizing_discriminator_dispatch():
@@ -156,40 +140,52 @@ def test_sizing_discriminator_dispatch():
         SizingRuleAdapter.validate_python({"kind": "fixed_fraction", "fraction": 0.02}),
         FixedFractionSizing,
     )
-    assert isinstance(
-        SizingRuleAdapter.validate_python({"kind": "unparsable_sizing", "prose": "x"}),
-        UnparsableSizing,
-    )
 
 
 # ---------------------------------------------------------------------------
-# Bounds-violation tests.
+# Per-indicator bounds & params — registry-backed `_validate_params`.
 # ---------------------------------------------------------------------------
 
 
 def test_sma_period_lower_bound():
     with pytest.raises(ValidationError):
-        SMARef(period=1)
+        IndicatorRef(name="sma", params={"period": 1})
 
 
 def test_sma_period_upper_bound():
     with pytest.raises(ValidationError):
-        SMARef(period=401)
+        IndicatorRef(name="sma", params={"period": 401})
 
 
 def test_rsi_period_upper_bound():
     with pytest.raises(ValidationError):
-        RSIRef(period=201)
+        IndicatorRef(name="rsi", params={"period": 201})
 
 
 def test_bollinger_num_std_must_be_positive():
     with pytest.raises(ValidationError):
-        BollingerRef(period=20, num_std=-1)
+        IndicatorRef(name="bollinger", params={"period": 20, "num_std": -1})
 
 
 def test_macd_fast_lower_bound():
     with pytest.raises(ValidationError):
-        MACDRef(fast=1)
+        IndicatorRef(name="macd", params={"fast": 1})
+
+
+def test_sma_requires_period():
+    with pytest.raises(ValidationError):
+        IndicatorRef(name="sma", params={})
+
+
+def test_indicator_rejects_unknown_param():
+    with pytest.raises(ValidationError):
+        IndicatorRef(name="rsi", params={"period": 14, "foo": 1})
+
+
+def test_indicator_rejects_source_when_disallowed():
+    # ATR / ADX / Stochastic / VWAP do not accept a `source` override.
+    with pytest.raises(ValidationError):
+        IndicatorRef(name="atr", params={"period": 14}, source="open")
 
 
 def test_stop_loss_negative_pct():
@@ -210,10 +206,35 @@ def test_take_profit_negative_pct():
 def test_predicate_unknown_op():
     with pytest.raises(ValidationError):
         Predicate(
-            lhs=PriceRef(field="close"),
+            lhs="bar.close",
             op="bogus",  # type: ignore[arg-type]
-            rhs=SMARef(period=20),
+            rhs=IndicatorRef(name="sma", params={"period": 20}),
         )
+
+
+def test_predicate_legacy_op_rejected():
+    # Issue #537: ops are symbol literals (">", "<", …) — the legacy
+    # "gt"/"lt" name aliases are no longer accepted on direct construction.
+    with pytest.raises(ValidationError):
+        Predicate(
+            lhs="bar.close",
+            op="gt",  # type: ignore[arg-type]
+            rhs=IndicatorRef(name="sma", params={"period": 20}),
+        )
+
+
+def test_predicate_lhs_unknown_literal_rejected():
+    with pytest.raises(ValidationError):
+        Predicate(
+            lhs="bar.spread",  # type: ignore[arg-type]
+            op=">",
+            rhs=IndicatorRef(name="sma", params={"period": 20}),
+        )
+
+
+def test_predicate_rhs_accepts_float():
+    p = Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0)
+    assert p.rhs == 30.0
 
 
 def test_time_stop_must_be_positive():
@@ -228,12 +249,7 @@ def test_fixed_fraction_upper_bound():
 
 def test_extra_field_is_forbidden():
     with pytest.raises(ValidationError):
-        RSIRef.model_validate({"kind": "rsi", "period": 14, "foo": 1})
-
-
-def test_missing_required_const_value():
-    with pytest.raises(ValidationError):
-        ConstRef.model_validate({"kind": "const"})
+        IndicatorRef.model_validate({"name": "rsi", "params": {"period": 14}, "foo": 1})
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +260,9 @@ def test_missing_required_const_value():
 def test_format_entry_close_gt_sma():
     rule = EntryRule(
         side="long",
-        when=Predicate(lhs=PriceRef(field="close"), op="gt", rhs=SMARef(period=20)),
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+        ),
     )
     assert format_rules_for_prompt([rule]) == "long when close > sma(20)"
 
@@ -252,7 +270,7 @@ def test_format_entry_close_gt_sma():
 def test_format_entry_rsi_lt_30():
     rule = EntryRule(
         side="long",
-        when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
     )
     assert format_rules_for_prompt([rule]) == "long when rsi(14) < 30"
 
@@ -278,7 +296,9 @@ def test_format_stop_loss_trailing_low():
 def test_format_indicator_source_default_omitted():
     rule = EntryRule(
         side="long",
-        when=Predicate(lhs=EMARef(period=50), op="gt", rhs=PriceRef(field="close")),
+        when=Predicate(
+            lhs=IndicatorRef(name="ema", params={"period": 50}), op=">", rhs="bar.close"
+        ),
     )
     assert format_rules_for_prompt([rule]) == "long when ema(50) > close"
 
@@ -287,9 +307,9 @@ def test_format_indicator_source_non_default_emitted():
     rule = EntryRule(
         side="long",
         when=Predicate(
-            lhs=EMARef(period=50, source="open"),
-            op="gt",
-            rhs=PriceRef(field="close"),
+            lhs=IndicatorRef(name="ema", params={"period": 50}, source="open"),
+            op=">",
+            rhs="bar.close",
         ),
     )
     assert format_rules_for_prompt([rule]) == "long when ema(50, source=open) > close"
@@ -300,12 +320,10 @@ def test_format_take_profit():
 
 
 def test_format_signal_exit_rsi_gt_70():
-    rule = SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)))
+    rule = SignalExitRule(
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0)
+    )
     assert format_rules_for_prompt([rule]) == "exit when rsi(14) > 70"
-
-
-def test_format_unparsable_returns_prose():
-    assert format_rules_for_prompt([UnparsableRule(prose="enter on vibes")]) == "enter on vibes"
 
 
 def test_format_sizing_fixed_fraction():
@@ -318,13 +336,6 @@ def test_format_sizing_volatility_target():
 
 def test_format_sizing_fixed_notional():
     assert format_sizing_rule(FixedNotionalSizing(notional_usd=50000)) == "$50000 per trade"
-
-
-def test_format_sizing_unparsable_returns_prose():
-    assert (
-        format_sizing_rule(UnparsableSizing(prose="size up on confidence"))
-        == "size up on confidence"
-    )
 
 
 def test_format_rules_for_prompt_join_separator():
@@ -341,7 +352,7 @@ def test_format_rules_for_prompt_empty():
 
 
 # ---------------------------------------------------------------------------
-# Issue #551 — StrategySpec wires the DSL types directly. No coercion.
+# Issue #537 — `StrategySpec` wires the DSL types and requires `timeframe`.
 # ---------------------------------------------------------------------------
 
 
@@ -354,10 +365,13 @@ def _make_structured_strategy_spec():
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         entry_rules=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=SMARef(period=20)),
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+                ),
             ),
         ],
         exit_rules=[TimeStopRule(n_bars=10)],
@@ -381,6 +395,7 @@ def test_strategy_spec_default_sizing_is_fixed_fraction_two_pct():
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     assert isinstance(spec.sizing, FixedFractionSizing)
     assert spec.sizing.fraction == 0.02
@@ -396,6 +411,7 @@ def test_strategy_spec_rejects_prose_entry_rules():
             asset_class="stocks",
             hypothesis="h",
             signal_definition="s",
+            timeframe="1d",
             entry_rules=["close > sma(20)"],
         )
 
@@ -410,6 +426,7 @@ def test_strategy_spec_rejects_prose_exit_rules():
             asset_class="stocks",
             hypothesis="h",
             signal_definition="s",
+            timeframe="1d",
             exit_rules=["exit after 10 bars"],
         )
 
@@ -424,15 +441,219 @@ def test_strategy_spec_rejects_prose_sizing():
             asset_class="stocks",
             hypothesis="h",
             signal_definition="s",
+            timeframe="1d",
             sizing="risk 2% per trade",
         )
 
 
 def test_strategy_spec_has_no_sizing_rules_field():
-    """`sizing_rules` was replaced by the singular `sizing` field; extra=forbid
-    is not set on StrategySpec, but the field name change is part of the API
-    surface and must be observable."""
     from investment_team.models import StrategySpec
 
     assert "sizing_rules" not in StrategySpec.model_fields
     assert "sizing" in StrategySpec.model_fields
+
+
+# ---------------------------------------------------------------------------
+# Issue #537 — timeframe required, legacy payload migration.
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_spec_timeframe_required_when_no_legacy_markers():
+    from investment_team.models import StrategySpec
+
+    with pytest.raises(ValidationError) as exc_info:
+        StrategySpec(
+            strategy_id="t",
+            authored_by="t",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            # no timeframe; no legacy markers either
+        )
+    errors = exc_info.value.errors()
+    assert any(e["loc"] == ("timeframe",) for e in errors)
+
+
+@pytest.mark.parametrize("tf", ["1m", "5m", "15m", "1h", "1d"])
+def test_strategy_spec_accepts_each_timeframe_literal(tf):
+    from investment_team.models import StrategySpec
+
+    spec = StrategySpec(
+        strategy_id="t",
+        authored_by="t",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe=tf,
+    )
+    assert spec.timeframe == tf
+
+
+def test_strategy_spec_rejects_unknown_timeframe():
+    from investment_team.models import StrategySpec
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="t",
+            authored_by="t",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            timeframe="7d",  # type: ignore[arg-type]
+        )
+
+
+def test_strategy_spec_legacy_payload_migrates_in_place():
+    """Legacy persisted shape — typed IndicatorRef + 'gt' op + no timeframe — rewrites in-flight."""
+    from investment_team.models import StrategySpec
+
+    legacy = {
+        "strategy_id": "legacy-1",
+        "authored_by": "test",
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": [
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "lhs": {"kind": "price", "field": "close"},
+                    "op": "gt",
+                    "rhs": {"kind": "sma", "period": 20},
+                },
+            }
+        ],
+        "exit_rules": [{"kind": "time_stop", "n_bars": 10}],
+        "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
+    }
+    spec = StrategySpec.model_validate(legacy)
+    assert spec.timeframe == "1d"
+    assert spec.entry_rules[0].when.lhs == "bar.close"
+    assert spec.entry_rules[0].when.op == ">"
+    assert isinstance(spec.entry_rules[0].when.rhs, IndicatorRef)
+    assert spec.entry_rules[0].when.rhs.name == "sma"
+
+
+def test_strategy_spec_legacy_unparsable_rule_routed_to_unparsed():
+    from investment_team.models import StrategySpec
+
+    legacy = {
+        "strategy_id": "legacy-unparseable",
+        "authored_by": "test",
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": [{"kind": "unparsable", "prose": "enter on vibes"}],
+        "exit_rules": [],
+    }
+    spec = StrategySpec.model_validate(legacy)
+    assert spec.entry_rules == []
+    assert spec.requires_redesign is True
+    assert "enter on vibes" in spec.unparsed_rules
+
+
+def test_strategy_spec_legacy_sizing_rules_field_migrates():
+    from investment_team.models import StrategySpec
+
+    legacy = {
+        "strategy_id": "legacy-sizing",
+        "authored_by": "test",
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": [],
+        "exit_rules": [],
+        "sizing_rules": ["risk 2% per trade"],
+    }
+    spec = StrategySpec.model_validate(legacy)
+    assert isinstance(spec.sizing, FixedFractionSizing)
+    assert spec.sizing.fraction == 0.02
+
+
+def test_strategy_spec_mixed_legacy_and_new_shape_rules_both_survive():
+    """Regression: a payload with structural legacy markers in one rule
+    must not drop sibling rules that are already in the new shape."""
+    from investment_team.models import StrategySpec
+
+    payload = {
+        "strategy_id": "mixed",
+        "authored_by": "test",
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": [
+            # legacy-shape (triggers _migrate_legacy_payload)
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "lhs": {"kind": "price", "field": "close"},
+                    "op": "gt",
+                    "rhs": {"kind": "sma", "period": 20},
+                },
+            },
+            # already-new-shape — must pass through unchanged
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "lhs": "bar.close",
+                    "op": ">",
+                    "rhs": {"name": "rsi", "params": {"period": 14}},
+                },
+            },
+        ],
+        "exit_rules": [],
+    }
+    spec = StrategySpec.model_validate(payload)
+    assert len(spec.entry_rules) == 2
+    assert spec.unparsed_rules == []
+    assert spec.requires_redesign is False
+    assert isinstance(spec.entry_rules[0].when.rhs, IndicatorRef)
+    assert spec.entry_rules[0].when.rhs.name == "sma"
+    assert isinstance(spec.entry_rules[1].when.rhs, IndicatorRef)
+    assert spec.entry_rules[1].when.rhs.name == "rsi"
+
+
+# ---------------------------------------------------------------------------
+# Issue #537 — `from_prose` top-level adapter.
+# ---------------------------------------------------------------------------
+
+
+def test_from_prose_parses_clean_legacy_spec():
+    legacy = {
+        "strategy_id": "prose-1",
+        "authored_by": "test",
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": ["close > sma(20)"],
+        "exit_rules": ["exit after 10 bars"],
+        "sizing_rules": ["risk 2% per trade"],
+    }
+    spec = from_prose(legacy)
+    assert spec.timeframe == "1d"
+    assert spec.requires_redesign is False
+    assert spec.unparsed_rules == []
+    assert spec.entry_rules[0].when.lhs == "bar.close"
+
+
+def test_from_prose_flags_requires_redesign_on_unparseable():
+    legacy = {
+        "strategy_id": "prose-bad",
+        "authored_by": "test",
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": ["enter on vibes", "close > sma(20)"],
+        "exit_rules": [],
+    }
+    spec = from_prose(legacy)
+    assert spec.requires_redesign is True
+    assert "enter on vibes" in spec.unparsed_rules
+    assert len(spec.entry_rules) == 1  # only the parseable one
+
+
+def test_default_sizing_payload_is_two_pct():
+    assert DEFAULT_SIZING_PAYLOAD == {"kind": "fixed_fraction", "fraction": 0.02}

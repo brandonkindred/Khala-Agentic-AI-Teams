@@ -190,6 +190,7 @@ def _strategy(code: str) -> StrategySpec:
         asset_class="crypto",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=code,
@@ -399,6 +400,7 @@ def test_stocks_asset_class_routes_to_equities_provider() -> None:
         asset_class="stocks",  # ← the key: legacy label, not "equities"
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_ALTERNATING_STRATEGY,
@@ -507,6 +509,7 @@ def test_missing_strategy_code_raises() -> None:
                 asset_class="crypto",
                 hypothesis="h",
                 signal_definition="s",
+                timeframe="1d",
                 strategy_code=None,
             ),
             backtest_config=_btc_config(),

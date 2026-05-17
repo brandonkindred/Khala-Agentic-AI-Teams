@@ -21,10 +21,9 @@ from investment_team.models import BacktestConfig
 from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
+    IndicatorRef,
     Predicate,
-    RSIRef,
     SignalExitRule,
     TimeStopRule,
 )
@@ -33,13 +32,13 @@ from investment_team.strategy_lab.spec_dsl import (
 def _rsi_entry_dict() -> Dict[str, Any]:
     return EntryRule(
         side="long",
-        when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30)),
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
     ).model_dump()
 
 
 def _rsi_exit_dict() -> Dict[str, Any]:
     return SignalExitRule(
-        when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70),
     ).model_dump()
 
 

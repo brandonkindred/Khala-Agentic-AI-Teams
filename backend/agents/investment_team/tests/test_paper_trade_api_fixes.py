@@ -86,6 +86,7 @@ def _make_session(session_id: str, status: PaperTradingStatus) -> PaperTradingSe
             asset_class="crypto",
             hypothesis="h",
             signal_definition="s",
+            timeframe="1d",
         ),
         status=status,
         initial_capital=100_000.0,

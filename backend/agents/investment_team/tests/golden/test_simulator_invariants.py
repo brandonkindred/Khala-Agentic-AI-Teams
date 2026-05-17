@@ -107,6 +107,7 @@ def _config() -> BacktestConfig:
 
 def _spec(code: str, *, strategy_id: str = "hyp") -> StrategySpec:
     return StrategySpec(
+        timeframe="1d",
         strategy_id=strategy_id,
         authored_by="hypothesis",
         asset_class="stocks",

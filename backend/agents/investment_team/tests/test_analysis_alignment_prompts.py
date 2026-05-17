@@ -34,8 +34,8 @@ from investment_team.strategy_lab.agents.analysis import _PROMPT_DIR
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     FixedFractionSizing,
+    IndicatorRef,
     Predicate,
-    SMARef,
     StopLossRule,
     TimeStopRule,
     format_rules_for_prompt,
@@ -54,9 +54,9 @@ def _render_inputs() -> dict[str, object]:
     entry = EntryRule(
         side="long",
         when=Predicate(
-            lhs=SMARef(period=20),
-            op="gt",
-            rhs=SMARef(period=50),
+            lhs=IndicatorRef(name="sma", params={"period": 20}),
+            op=">",
+            rhs=IndicatorRef(name="sma", params={"period": 50}),
         ),
     )
     exits = [TimeStopRule(n_bars=10), StopLossRule(pct=0.02)]

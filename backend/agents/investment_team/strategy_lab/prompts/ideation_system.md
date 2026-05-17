@@ -23,16 +23,20 @@ Design strategies as a **mixture of signal types**, not a single indicator. Comb
 
 ## Strategy spec output shape — STRUCTURED DSL (mandatory)
 
-`entry_rules`, `exit_rules`, and `sizing` are **structured discriminated objects** — not prose strings. Every rule object MUST carry a `kind` field; the parser rejects bare strings with a pydantic `ValidationError` and the cycle is discarded.
+`entry_rules`, `exit_rules`, and `sizing` are **structured discriminated objects** — not prose strings. Every rule object MUST carry a `kind` field; the parser rejects bare strings with a pydantic `ValidationError` and the cycle is discarded. `timeframe` is also REQUIRED — declare the bar timeframe your strategy was designed against: one of `"1m"`, `"5m"`, `"15m"`, `"1h"`, `"1d"`.
 
 ### Indicator catalogue
 
-Every indicator reference is an object with a `kind` discriminator. The accepted kinds and their parameter shapes mirror `spec_dsl.IndicatorRef` exactly:
+An **`IndicatorRef`** is a flat object with `name`, `params`, and an optional `source` field:
 
-| `kind` | Required params | Defaults / optional |
+```json
+{"name": "<indicator>", "params": {...}, "source": "close"}
+```
+
+The accepted `name` values and their parameter schemas:
+
+| `name` | Required params | Defaults / optional |
 |---|---|---|
-| `price` | — | `field`: one of `close` / `high` / `low` / `open` / `volume` / `hl2` / `ohlc4` (default `close`) |
-| `const` | `value: float` | — |
 | `sma` | `period: int` (2-400) | `source` (default `close`) |
 | `ema` | `period: int` (2-400) | `source` (default `close`) |
 | `rsi` | — | `period: int` (2-200, default 14), `source` (default `close`) |
@@ -42,6 +46,8 @@ Every indicator reference is an object with a `kind` discriminator. The accepted
 | `adx` | — | `period` (default 14, 2-200) |
 | `stochastic` | — | `k_period` (default 14), `d_period` (default 3), `output` ∈ {k, d} (default `k`) |
 | `vwap` | — | — |
+
+Bare bar fields are addressed by the string literals `"bar.close"`, `"bar.high"`, `"bar.low"`, `"bar.volume"` (used as `Predicate.lhs` / `Predicate.rhs` directly — no wrapper object).
 
 ### Rule kinds
 
@@ -56,7 +62,11 @@ Every indicator reference is an object with a `kind` discriminator. The accepted
   - `{"kind": "volatility_target", "target_annual_vol": float>0, "note": str}`.
   - `{"kind": "fixed_notional", "notional_usd": float>0, "note": str}`.
 
-A `Predicate` is `{"lhs": IndicatorRef, "op": op, "rhs": IndicatorRef}` where `op ∈ {gt, lt, ge, le, eq, cross_above, cross_below}`. **Both sides are IndicatorRefs** — to compare against a constant, use `{"kind": "const", "value": 30}` on the right.
+A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
+
+- `op ∈ {"<", ">", "<=", ">=", "==", "cross_above", "cross_below"}` (the literal symbol, not name aliases).
+- `lhs` is either an `IndicatorRef` or one of the bar-field literals `"bar.close"` / `"bar.high"` / `"bar.low"` / `"bar.volume"`.
+- `rhs` is either an `IndicatorRef`, a bar-field literal (same four), or a plain numeric constant (e.g. `30`, `70.0`).
 
 ### Worked structured example (mean-reversion RSI strategy)
 
@@ -65,17 +75,18 @@ A `Predicate` is `{"lhs": IndicatorRef, "op": op, "rhs": IndicatorRef}` where `o
   "asset_class": "stocks",
   "hypothesis": "...",
   "signal_definition": "...",
+  "timeframe": "1d",
   "entry_rules": [{
     "kind": "entry", "side": "long",
-    "when": {"lhs": {"kind": "rsi", "period": 14},
-             "op": "lt",
-             "rhs": {"kind": "const", "value": 30}}
+    "when": {"lhs": {"name": "rsi", "params": {"period": 14}},
+             "op": "<",
+             "rhs": 30}
   }],
   "exit_rules": [
     {"kind": "signal_exit",
-     "when": {"lhs": {"kind": "rsi", "period": 14},
-              "op": "gt",
-              "rhs": {"kind": "const", "value": 70}}},
+     "when": {"lhs": {"name": "rsi", "params": {"period": 14}},
+              "op": ">",
+              "rhs": 70}},
     {"kind": "time_stop", "n_bars": 10}
   ],
   "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
@@ -95,7 +106,7 @@ A `Predicate` is `{"lhs": IndicatorRef, "op": op, "rhs": IndicatorRef}` where `o
 }
 ```
 
-Prose strings (the shape above) and the legacy `sizing_rules` list-of-strings are both rejected by the parser. The orchestrator will discard the ideation cycle and ask for a redo.
+Prose strings, the legacy `sizing_rules` list-of-strings, and the pre-#537 `{"kind": "sma", "period": 20}` / `{"kind": "const", "value": 30}` indicator shapes are all rejected by the parser. The orchestrator will discard the ideation cycle and ask for a redo.
 
 ## Asset class diversity
 

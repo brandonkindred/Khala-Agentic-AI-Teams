@@ -1,25 +1,19 @@
-"""Tests for the spec_dsl_adapter module (issue #550, step 1 of 8 from #537)."""
+"""Tests for the spec_dsl_adapter module (issue #537 literal schema)."""
 
 from __future__ import annotations
 
 import pytest
 
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
-    EMARef,
     EntryRule,
     FixedFractionSizing,
     FixedNotionalSizing,
+    IndicatorRef,
     Predicate,
-    PriceRef,
-    RSIRef,
     SignalExitRule,
-    SMARef,
     StopLossRule,
     TakeProfitRule,
     TimeStopRule,
-    UnparsableRule,
-    UnparsableSizing,
     VolatilityTargetSizing,
     format_rules_for_prompt,
     format_sizing_rule,
@@ -32,6 +26,19 @@ from investment_team.strategy_lab.spec_dsl_adapter import (
     parse_sizing_rule,
 )
 
+
+def _sma(period: int) -> IndicatorRef:
+    return IndicatorRef(name="sma", params={"period": period})
+
+
+def _ema(period: int, source: str = "close") -> IndicatorRef:
+    return IndicatorRef(name="ema", params={"period": period}, source=source)
+
+
+def _rsi(period: int = 14) -> IndicatorRef:
+    return IndicatorRef(name="rsi", params={"period": period})
+
+
 # ---------------------------------------------------------------------------
 # Entry-rule patterns.
 # ---------------------------------------------------------------------------
@@ -41,35 +48,33 @@ def test_entry_close_gt_sma():
     parsed = parse_entry_rule("close > sma(20)")
     assert isinstance(parsed, EntryRule)
     assert parsed.side == "long"
-    assert parsed.when == Predicate(lhs=PriceRef(field="close"), op="gt", rhs=SMARef(period=20))
+    assert parsed.when == Predicate(lhs="bar.close", op=">", rhs=_sma(20))
 
 
 def test_entry_rsi_lt_30():
     parsed = parse_entry_rule("RSI < 30")
     assert isinstance(parsed, EntryRule)
-    assert parsed.when == Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30))
+    assert parsed.when == Predicate(lhs=_rsi(), op="<", rhs=30.0)
 
 
 def test_entry_short_when_rsi_gt_70():
     parsed = parse_entry_rule("short when rsi(14) > 70")
     assert isinstance(parsed, EntryRule)
     assert parsed.side == "short"
-    assert parsed.when == Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70))
+    assert parsed.when == Predicate(lhs=_rsi(14), op=">", rhs=70.0)
 
 
 def test_entry_crosses_above():
     parsed = parse_entry_rule("sma(20) crosses above sma(50)")
     assert isinstance(parsed, EntryRule)
     assert parsed.when.op == "cross_above"
-    assert parsed.when.lhs == SMARef(period=20)
-    assert parsed.when.rhs == SMARef(period=50)
+    assert parsed.when.lhs == _sma(20)
+    assert parsed.when.rhs == _sma(50)
 
 
-def test_entry_unparsable():
+def test_entry_unparsable_returns_none():
     parsed = parse_entry_rule("enter on bullish momentum")
-    assert isinstance(parsed, UnparsableRule)
-    assert parsed.prose == "enter on bullish momentum"
-    assert parsed.reason == "no pattern matched"
+    assert parsed is None
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +85,7 @@ def test_entry_unparsable():
 def test_exit_when_rsi_gt_70():
     parsed = parse_exit_rule("exit when RSI > 70")
     assert isinstance(parsed, SignalExitRule)
-    assert parsed.when == Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70))
+    assert parsed.when == Predicate(lhs=_rsi(14), op=">", rhs=70.0)
 
 
 @pytest.mark.parametrize(
@@ -125,10 +130,9 @@ def test_exit_take_profit(prose, expected_pct):
     assert parsed.pct == pytest.approx(expected_pct)
 
 
-def test_exit_unparsable():
+def test_exit_unparsable_returns_none():
     parsed = parse_exit_rule("vibes")
-    assert isinstance(parsed, UnparsableRule)
-    assert parsed.prose == "vibes"
+    assert parsed is None
 
 
 # ---------------------------------------------------------------------------
@@ -178,10 +182,9 @@ def test_sizing_fixed_notional(prose, expected_usd):
     assert parsed.notional_usd == pytest.approx(expected_usd)
 
 
-def test_sizing_unparsable():
+def test_sizing_unparsable_returns_none():
     parsed = parse_sizing_rule("size up if confident")
-    assert isinstance(parsed, UnparsableSizing)
-    assert parsed.prose == "size up if confident"
+    assert parsed is None
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +196,7 @@ def test_parse_rule_list_entry():
     parsed = parse_rule_list(["close > sma(20)", "vibes"], kind="entry")
     assert len(parsed) == 2
     assert isinstance(parsed[0], EntryRule)
-    assert isinstance(parsed[1], UnparsableRule)
+    assert parsed[1] is None
 
 
 def test_parse_rule_list_exit():
@@ -202,11 +205,8 @@ def test_parse_rule_list_exit():
     assert isinstance(parsed[1], TimeStopRule)
 
 
-def test_sizing_list_empty():
-    parsed = parse_sizing_list([])
-    assert isinstance(parsed, UnparsableSizing)
-    assert parsed.prose == ""
-    assert parsed.reason == "empty"
+def test_sizing_list_empty_returns_none():
+    assert parse_sizing_list([]) is None
 
 
 def test_sizing_list_single():
@@ -231,10 +231,8 @@ def test_sizing_list_collapse_skips_unparsable_then_chooses():
     assert "max 5% gross" in parsed.note
 
 
-def test_sizing_list_all_unparsable():
-    parsed = parse_sizing_list(["foo", "bar"])
-    assert isinstance(parsed, UnparsableSizing)
-    assert parsed.prose == "foo; bar"
+def test_sizing_list_all_unparsable_returns_none():
+    assert parse_sizing_list(["foo", "bar"]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -245,14 +243,8 @@ def test_sizing_list_all_unparsable():
 @pytest.mark.parametrize(
     "rule",
     [
-        EntryRule(
-            side="long",
-            when=Predicate(lhs=PriceRef(field="close"), op="gt", rhs=SMARef(period=20)),
-        ),
-        EntryRule(
-            side="short",
-            when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)),
-        ),
+        EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=_sma(20))),
+        EntryRule(side="short", when=Predicate(lhs=_rsi(14), op=">", rhs=70.0)),
     ],
 )
 def test_entry_formatter_round_trip(rule):
@@ -271,13 +263,12 @@ def test_entry_formatter_round_trip(rule):
         StopLossRule(pct=0.03, basis="trailing_high"),
         StopLossRule(pct=0.03, basis="trailing_low"),
         TakeProfitRule(pct=0.05),
-        SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70))),
+        SignalExitRule(when=Predicate(lhs=_rsi(14), op=">", rhs=70.0)),
     ],
 )
 def test_exit_formatter_round_trip(rule):
     rendered = format_rules_for_prompt([rule])
     reparsed = parse_exit_rule(rendered)
-    # Compare on the model_dump to avoid `note` default-flag noise.
     assert type(reparsed) is type(rule)
     assert reparsed.model_dump(exclude={"note"}) == rule.model_dump(exclude={"note"})
 
@@ -298,7 +289,7 @@ def test_sizing_formatter_round_trip(rule):
 
 
 # ---------------------------------------------------------------------------
-# Regression tests for the four bugs raised on PR #558.
+# Regression tests carried forward from PR #558.
 # ---------------------------------------------------------------------------
 
 
@@ -307,29 +298,25 @@ def test_entry_enter_when_legacy_phrasing():
     parsed = parse_entry_rule("enter when RSI < 30")
     assert isinstance(parsed, EntryRule)
     assert parsed.side == "long"
-    assert parsed.when == Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30))
+    assert parsed.when == Predicate(lhs=_rsi(14), op="<", rhs=30.0)
 
 
 def test_indicator_source_preserved_in_round_trip():
     rule = EntryRule(
         side="long",
-        when=Predicate(
-            lhs=EMARef(period=50, source="open"),
-            op="gt",
-            rhs=PriceRef(field="close"),
-        ),
+        when=Predicate(lhs=_ema(50, source="open"), op=">", rhs="bar.close"),
     )
     rendered = format_rules_for_prompt([rule])
     assert "source=open" in rendered
     reparsed = parse_entry_rule(rendered)
     assert isinstance(reparsed, EntryRule)
-    assert reparsed.when.lhs == EMARef(period=50, source="open")
+    assert reparsed.when.lhs == _ema(50, source="open")
 
 
 def test_indicator_source_kwarg_parses():
     parsed = parse_entry_rule("ema(50, source=open) > close")
     assert isinstance(parsed, EntryRule)
-    assert parsed.when.lhs == EMARef(period=50, source="open")
+    assert parsed.when.lhs == _ema(50, source="open")
 
 
 def test_trailing_stop_loss_round_trip_high():
@@ -352,62 +339,55 @@ def test_trailing_stop_loss_round_trip_low():
 
 
 def test_indicator_extra_positional_args_rejected():
-    """`sma(20,50) > close` had silently dropped the 50; now → UnparsableRule."""
-    parsed = parse_entry_rule("sma(20,50) > close")
-    assert isinstance(parsed, UnparsableRule)
+    """`sma(20,50) > close` had silently dropped the 50; now → None."""
+    assert parse_entry_rule("sma(20,50) > close") is None
 
 
 def test_macd_extra_positional_args_rejected():
-    parsed = parse_entry_rule("macd(12,26,9,99) > 0")
-    assert isinstance(parsed, UnparsableRule)
+    assert parse_entry_rule("macd(12,26,9,99) > 0") is None
 
 
 def test_indicator_unknown_kwarg_rejected():
-    parsed = parse_entry_rule("sma(20, foo=bar) > close")
-    assert isinstance(parsed, UnparsableRule)
+    assert parse_entry_rule("sma(20, foo=bar) > close") is None
 
 
 def test_atr_source_kwarg_rejected():
     """ATR has no `source` field; specifying one must reject."""
-    parsed = parse_exit_rule("exit when atr(14, source=open) > 0")
-    assert isinstance(parsed, UnparsableRule)
+    assert parse_exit_rule("exit when atr(14, source=open) > 0") is None
 
 
 # ---------------------------------------------------------------------------
-# Bare default-argument indicators in predicates (#558 second pass).
+# Bare default-argument indicators in predicates.
 # ---------------------------------------------------------------------------
 
 
 def test_predicate_bare_adx():
-    from investment_team.strategy_lab.spec_dsl import ADXRef
-
     parsed = parse_entry_rule("ADX > 25")
     assert isinstance(parsed, EntryRule)
-    assert parsed.when.lhs == ADXRef(period=14)
-    assert parsed.when.rhs == ConstRef(value=25)
+    assert parsed.when.lhs == IndicatorRef(name="adx", params={"period": 14})
+    assert parsed.when.rhs == 25.0
 
 
 def test_predicate_bare_macd():
-    from investment_team.strategy_lab.spec_dsl import MACDRef
-
     parsed = parse_entry_rule("macd > 0")
     assert isinstance(parsed, EntryRule)
-    assert parsed.when.lhs == MACDRef()
-    assert parsed.when.rhs == ConstRef(value=0)
+    assert parsed.when.lhs == IndicatorRef(
+        name="macd", params={"fast": 12, "slow": 26, "signal": 9, "output": "macd"}
+    )
+    assert parsed.when.rhs == 0.0
 
 
 def test_predicate_bare_stochastic_k():
-    from investment_team.strategy_lab.spec_dsl import StochasticRef
-
     parsed = parse_entry_rule("stochastic_k < 20")
     assert isinstance(parsed, EntryRule)
-    assert parsed.when.lhs == StochasticRef()
+    assert parsed.when.lhs == IndicatorRef(
+        name="stochastic", params={"k_period": 14, "d_period": 3, "output": "k"}
+    )
 
 
 def test_predicate_bare_sma_stays_unparsable():
     """SMA/EMA still need an explicit period — bare `sma > x` should fail."""
-    parsed = parse_entry_rule("sma > close")
-    assert isinstance(parsed, UnparsableRule)
+    assert parse_entry_rule("sma > close") is None
 
 
 # ---------------------------------------------------------------------------
@@ -419,14 +399,14 @@ def test_entry_enter_short_when():
     parsed = parse_entry_rule("enter short when rsi > 70")
     assert isinstance(parsed, EntryRule)
     assert parsed.side == "short"
-    assert parsed.when == Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70))
+    assert parsed.when == Predicate(lhs=_rsi(14), op=">", rhs=70.0)
 
 
 def test_entry_enter_long_when():
     parsed = parse_entry_rule("enter long when close > sma(20)")
     assert isinstance(parsed, EntryRule)
     assert parsed.side == "long"
-    assert parsed.when == Predicate(lhs=PriceRef(field="close"), op="gt", rhs=SMARef(period=20))
+    assert parsed.when == Predicate(lhs="bar.close", op=">", rhs=_sma(20))
 
 
 # ---------------------------------------------------------------------------
@@ -435,19 +415,19 @@ def test_entry_enter_long_when():
 
 
 def test_hyphenated_indicator_alias_call():
-    from investment_team.strategy_lab.spec_dsl import MACDRef
-
     parsed = parse_entry_rule("macd-signal(12,26,9) > 0")
     assert isinstance(parsed, EntryRule)
-    assert parsed.when.lhs == MACDRef(fast=12, slow=26, signal=9, output="signal")
+    assert parsed.when.lhs == IndicatorRef(
+        name="macd", params={"fast": 12, "slow": 26, "signal": 9, "output": "signal"}
+    )
 
 
 def test_hyphenated_indicator_alias_bare():
-    from investment_team.strategy_lab.spec_dsl import StochasticRef
-
     parsed = parse_entry_rule("stochastic-k < 20")
     assert isinstance(parsed, EntryRule)
-    assert parsed.when.lhs == StochasticRef()
+    assert parsed.when.lhs == IndicatorRef(
+        name="stochastic", params={"k_period": 14, "d_period": 3, "output": "k"}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +438,7 @@ def test_hyphenated_indicator_alias_bare():
 def test_source_kwarg_case_insensitive():
     parsed = parse_entry_rule("EMA(50, SOURCE=OPEN) > CLOSE")
     assert isinstance(parsed, EntryRule)
-    assert parsed.when.lhs == EMARef(period=50, source="open")
+    assert parsed.when.lhs == _ema(50, source="open")
 
 
 # ---------------------------------------------------------------------------
@@ -467,28 +447,19 @@ def test_source_kwarg_case_insensitive():
 
 
 def test_macd_default_output_round_trip():
-    from investment_team.strategy_lab.spec_dsl import MACDRef
-
-    rule = EntryRule(
-        side="long",
-        when=Predicate(lhs=MACDRef(), op="gt", rhs=ConstRef(value=0)),
-    )
+    macd = IndicatorRef(name="macd", params={"fast": 12, "slow": 26, "signal": 9, "output": "macd"})
+    rule = EntryRule(side="long", when=Predicate(lhs=macd, op=">", rhs=0.0))
     rendered = format_rules_for_prompt([rule])
     # The default output ("macd") must format as bare `macd(...)`, not
     # `macd_macd(...)`, otherwise the adapter can't reparse it.
     assert "macd_macd" not in rendered
     reparsed = parse_entry_rule(rendered)
     assert isinstance(reparsed, EntryRule)
-    assert reparsed.when.lhs == MACDRef()
+    assert reparsed.when.lhs == macd
 
 
 # ---------------------------------------------------------------------------
-# Formatter ↔ adapter round-trip for small decimals.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Empty positional slots (#558 third pass).
+# Empty positional slots.
 # ---------------------------------------------------------------------------
 
 
@@ -498,8 +469,7 @@ def test_macd_default_output_round_trip():
 )
 def test_indicator_empty_positional_slot_rejected(prose):
     """`sma(,20)` etc. used to silently drop the empty slot and shift values."""
-    parsed = parse_entry_rule(prose)
-    assert isinstance(parsed, UnparsableRule)
+    assert parse_entry_rule(prose) is None
 
 
 # ---------------------------------------------------------------------------
@@ -527,33 +497,12 @@ def test_singular_cross_below():
 def test_predicate_leading_dot_number():
     parsed = parse_entry_rule("rsi < .5")
     assert isinstance(parsed, EntryRule)
-    assert parsed.when.rhs == ConstRef(value=0.5)
+    assert parsed.when.rhs == 0.5
 
 
 # ---------------------------------------------------------------------------
-# Non-finite ConstRef values are rejected at construction time.
+# Formatter ↔ adapter round-trip across the full float range.
 # ---------------------------------------------------------------------------
-
-
-def test_const_ref_rejects_nan():
-    from pydantic import ValidationError as _VE
-
-    with pytest.raises(_VE):
-        ConstRef(value=float("nan"))
-
-
-def test_const_ref_rejects_inf():
-    from pydantic import ValidationError as _VE
-
-    with pytest.raises(_VE):
-        ConstRef(value=float("inf"))
-
-
-def test_const_ref_rejects_neg_inf():
-    from pydantic import ValidationError as _VE
-
-    with pytest.raises(_VE):
-        ConstRef(value=float("-inf"))
 
 
 @pytest.mark.parametrize(
@@ -561,42 +510,26 @@ def test_const_ref_rejects_neg_inf():
     [1e-13, 1e-06, 0.0001, 0.5, 100.5, 1e20],
 )
 def test_small_decimal_round_trip(value):
-    """Formatter/adapter must round-trip across the full float range, including
-    values for which `repr` emits scientific notation."""
     rule = EntryRule(
         side="long",
-        when=Predicate(lhs=PriceRef(field="close"), op="gt", rhs=ConstRef(value=value)),
+        when=Predicate(lhs="bar.close", op=">", rhs=float(value)),
     )
     rendered = format_rules_for_prompt([rule])
     reparsed = parse_entry_rule(rendered)
     assert isinstance(reparsed, EntryRule)
-    assert reparsed.when.rhs.value == pytest.approx(value)
-
-
-# ---------------------------------------------------------------------------
-# Tiny non-zero values must NOT collapse to 0 (#558 fourth pass).
-# ---------------------------------------------------------------------------
+    assert reparsed.when.rhs == pytest.approx(value)
 
 
 @pytest.mark.parametrize("value", [5e-10, 1e-12, 1e-15])
 def test_tiny_const_not_collapsed_to_zero(value):
     rendered = format_rules_for_prompt(
-        [
-            EntryRule(
-                side="long",
-                when=Predicate(
-                    lhs=PriceRef(field="close"),
-                    op="gt",
-                    rhs=ConstRef(value=value),
-                ),
-            )
-        ]
+        [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=float(value)))]
     )
     # Must not collapse to the bare `0` integer.
     assert not rendered.endswith("> 0")
     reparsed = parse_entry_rule(rendered)
     assert isinstance(reparsed, EntryRule)
-    assert reparsed.when.rhs.value == pytest.approx(value)
+    assert reparsed.when.rhs == pytest.approx(value)
 
 
 def test_tiny_fixed_fraction_round_trip():
@@ -619,7 +552,7 @@ def test_tiny_vol_target_round_trip():
 
 
 # ---------------------------------------------------------------------------
-# Every float-bearing DSL node rejects non-finite values (#558 fourth pass).
+# Every float-bearing DSL node rejects non-finite values.
 # ---------------------------------------------------------------------------
 
 
@@ -644,7 +577,5 @@ def test_dsl_nodes_reject_non_finite_floats(factory, bad):
 def test_bollinger_num_std_rejects_non_finite():
     from pydantic import ValidationError as _VE
 
-    from investment_team.strategy_lab.spec_dsl import BollingerRef
-
     with pytest.raises(_VE):
-        BollingerRef(num_std=float("inf"))
+        IndicatorRef(name="bollinger", params={"num_std": float("inf")})

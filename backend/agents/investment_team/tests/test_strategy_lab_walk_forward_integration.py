@@ -31,10 +31,8 @@ from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.acceptance_gate import AcceptanceGate
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
     Predicate,
-    PriceRef,
     SignalExitRule,
     TimeStopRule,
 )
@@ -51,10 +49,9 @@ def _spec() -> StrategySpec:
         asset_class="stocks",
         hypothesis="hyp",
         signal_definition="sig",
-        entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)))
-        ],
-        exit_rules=[SignalExitRule(when=Predicate(lhs=PriceRef(), op="lt", rhs=ConstRef(value=0)))],
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
+        exit_rules=[SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=0))],
         risk_limits={},
         speculative=False,
         strategy_code=(
@@ -599,7 +596,7 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
         "entry_rules": [
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)),
+                when=Predicate(lhs="bar.close", op=">", rhs=0),
             ).model_dump()
         ],
         "exit_rules": [TimeStopRule(n_bars=5).model_dump()],
@@ -718,7 +715,7 @@ def _wire_run_cycle_stubs(
         "entry_rules": [
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)),
+                when=Predicate(lhs="bar.close", op=">", rhs=0),
             ).model_dump()
         ],
         "exit_rules": [TimeStopRule(n_bars=5).model_dump()],

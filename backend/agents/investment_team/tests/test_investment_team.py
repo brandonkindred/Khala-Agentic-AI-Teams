@@ -39,10 +39,8 @@ from investment_team.models import (
 )
 from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
     Predicate,
-    PriceRef,
     SignalExitRule,
     TimeStopRule,
 )
@@ -134,6 +132,7 @@ def test_promotion_gate_requires_human_approval_for_live() -> None:
         asset_class="equities",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     decision = PromotionGateAgent().decide(
         strategy=strategy,
@@ -166,6 +165,7 @@ def test_promotion_gate_revises_when_validation_strategy_mismatch() -> None:
         asset_class="equities",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     validation = _sample_validation()
     validation.strategy_id = "other"
@@ -383,12 +383,9 @@ def test_backtest_record_captures_strategy_and_metrics() -> None:
         asset_class="equities",
         hypothesis="mean reversion",
         signal_definition="z-score",
-        entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="lt", rhs=ConstRef(value=-2)))
-        ],
-        exit_rules=[
-            SignalExitRule(when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=-0.5)))
-        ],
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op="<", rhs=-2))],
+        exit_rules=[SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=-0.5))],
     )
 
     record = BacktestRecord(
@@ -741,6 +738,7 @@ def test_paper_trading_session_model_creation() -> None:
             asset_class="stocks",
             hypothesis="mean reversion",
             signal_definition="RSI oversold bounce",
+            timeframe="1d",
         ),
         status=PaperTradingStatus.COMPLETED,
         initial_capital=100000.0,
@@ -997,6 +995,7 @@ def test_market_data_service_get_symbols_for_strategy() -> None:
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(stock_strategy)
     assert "AAPL" in symbols
@@ -1008,6 +1007,7 @@ def test_market_data_service_get_symbols_for_strategy() -> None:
         asset_class="crypto",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(crypto_strategy)
     assert "BTC" in symbols
@@ -1024,6 +1024,7 @@ def test_market_data_service_get_symbols_for_forex() -> None:
         asset_class="forex",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(strategy)
     assert any("=X" in s for s in symbols)
@@ -1039,6 +1040,7 @@ def test_market_data_service_get_symbols_for_futures() -> None:
         asset_class="futures",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(strategy)
     assert any("=F" in s for s in symbols)
@@ -1054,6 +1056,7 @@ def test_market_data_service_get_symbols_for_commodities() -> None:
         asset_class="commodities",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(strategy)
     assert "GLD" in symbols
@@ -1076,6 +1079,7 @@ def test_market_data_service_get_symbols_for_options_returns_empty() -> None:
         asset_class="options",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(options_strategy)
     assert symbols == [], (
@@ -1146,6 +1150,7 @@ def test_strategy_spec_target_symbols_normalization() -> None:
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=["qqq", " GLD ", "QQQ", "spy"],
     )
     assert spec.target_symbols == ["QQQ", "GLD", "SPY"]
@@ -1157,6 +1162,7 @@ def test_strategy_spec_target_symbols_normalization() -> None:
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     assert bare.target_symbols == []
 
@@ -1167,6 +1173,7 @@ def test_strategy_spec_target_symbols_normalization() -> None:
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=None,
     )
     assert none_spec.target_symbols == []
@@ -1184,6 +1191,7 @@ def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
             asset_class="stocks",
             hypothesis="h",
             signal_definition="s",
+            timeframe="1d",
             target_symbols=["AAPL", 42],
         )
 
@@ -1194,6 +1202,7 @@ def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
             asset_class="stocks",
             hypothesis="h",
             signal_definition="s",
+            timeframe="1d",
             target_symbols="AAPL",  # type: ignore[arg-type]
         )
 
@@ -1210,6 +1219,7 @@ def test_resolve_strategy_symbols_prefers_target_symbols() -> None:
         asset_class="stocks",
         hypothesis="QQQ trend continuation",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=["QQQ", "GLD"],
     )
     assert service.resolve_strategy_symbols(spec) == ["QQQ", "GLD"]
@@ -1260,6 +1270,7 @@ def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
         asset_class="stocks",
         hypothesis="bitcoin trend follow",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=["BTC"],
     )
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
@@ -1289,6 +1300,7 @@ def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> 
         asset_class="crypto",
         hypothesis="BTC trend follow",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=["BTC"],
     )
     qqq_stocks = StrategySpec(
@@ -1297,6 +1309,7 @@ def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> 
         asset_class="stocks",
         hypothesis="QQQ trend continuation",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=["QQQ", "GLD"],
     )
     unknown = StrategySpec(
@@ -1305,6 +1318,7 @@ def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> 
         asset_class="stocks",
         hypothesis="momentum on a fresh ticker",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=["NEWCO"],
     )
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
@@ -1328,6 +1342,7 @@ def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
         asset_class="stocks",
         hypothesis="generic large-cap momentum",
         signal_definition="s",
+        timeframe="1d",
     )
     # STOCK_SYMBOLS has 10 entries; the default cap is 10 so nothing is dropped.
     assert service.resolve_strategy_symbols(spec) == list(STOCK_SYMBOLS)
@@ -1349,6 +1364,7 @@ def test_resolve_strategy_symbols_respects_max_universe_env_var(monkeypatch, cap
         asset_class="stocks",
         hypothesis="generic large-cap momentum",
         signal_definition="s",
+        timeframe="1d",
     )
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
         result = service.resolve_strategy_symbols(spec)
@@ -1376,6 +1392,7 @@ def test_resolve_strategy_symbols_invalid_env_var_falls_back(monkeypatch, caplog
         asset_class="stocks",
         hypothesis="generic large-cap momentum",
         signal_definition="s",
+        timeframe="1d",
     )
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
         result = service.resolve_strategy_symbols(spec)
@@ -1401,6 +1418,7 @@ def test_resolve_strategy_symbols_no_warning_when_under_cap(caplog) -> None:
         asset_class="stocks",
         hypothesis="generic large-cap momentum",
         signal_definition="s",
+        timeframe="1d",
     )
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
         service.resolve_strategy_symbols(spec)
@@ -1425,6 +1443,7 @@ def test_resolve_strategy_symbols_stable_across_universe_reordering(
         asset_class="stocks",
         hypothesis="generic large-cap momentum",
         signal_definition="s",
+        timeframe="1d",
     )
     baseline = set(service.resolve_strategy_symbols(spec))
 
@@ -1464,6 +1483,7 @@ def test_fetch_market_data_uses_target_symbols_when_set() -> None:
         asset_class="stocks",
         hypothesis="QQQ trend continuation",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=["QQQ"],
     )
     config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
@@ -1503,6 +1523,7 @@ def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
         asset_class="stocks",
         hypothesis="generic large-cap momentum",
         signal_definition="s",
+        timeframe="1d",
     )
     config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
 
@@ -1539,6 +1560,7 @@ def test_fetch_market_data_records_dropped_symbols() -> None:
         asset_class="stocks",
         hypothesis="momentum",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=["AAPL", "MSFT"],
     )
     config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
@@ -1573,6 +1595,7 @@ def test_fetch_market_data_records_intent_on_provider_exception() -> None:
         asset_class="stocks",
         hypothesis="momentum",
         signal_definition="s",
+        timeframe="1d",
         target_symbols=["AAPL", "MSFT"],
     )
     config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
@@ -1602,6 +1625,7 @@ def test_backtest_record_persists_symbol_audit_fields() -> None:
         asset_class="stocks",
         hypothesis="momentum",
         signal_definition="s",
+        timeframe="1d",
     )
     record = BacktestRecord(
         backtest_id="bt-rt",
@@ -1792,9 +1816,8 @@ def _make_lab_record(
         asset_class="equities",
         hypothesis="test",
         signal_definition="sig",
-        entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=1)))
-        ],
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=1))],
         exit_rules=[TimeStopRule(n_bars=1)],
         risk_limits={},
         speculative=False,

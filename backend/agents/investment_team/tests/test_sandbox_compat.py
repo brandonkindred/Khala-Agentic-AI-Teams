@@ -39,6 +39,7 @@ def _strategy() -> StrategySpec:
         asset_class="equity",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code="# unused — run_backtest is patched in tests below\n",

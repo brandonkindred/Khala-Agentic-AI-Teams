@@ -130,15 +130,19 @@ class StrategySpecValidator:
                 )
             )
 
-        # 6. Asset-class keyword mismatch. Issue #551: spec rule fields are
-        #    structured DSL nodes — render them through the spec_dsl
+        # 6. Asset-class keyword mismatch. Issue #551/#537: spec rule fields
+        #    are structured DSL nodes — render them through the spec_dsl
         #    formatters to recover a human-readable text view suitable for
-        #    regex matching.
+        #    regex matching. Unparseable prose now lives in
+        #    ``spec.unparsed_rules`` (#537 replaced the discriminator
+        #    variants) and is folded into the same scan so prose that
+        #    escaped the adapter is still caught.
         all_rules_text = " ".join(
             [
                 format_rules_for_prompt(spec.entry_rules),
                 format_rules_for_prompt(spec.exit_rules),
                 format_sizing_rule(spec.sizing),
+                " ".join(spec.unparsed_rules),
             ]
         )
         ac = spec.asset_class.lower()
@@ -168,11 +172,15 @@ class StrategySpecValidator:
         #    names indicator concepts that no entry/exit rule references (or
         #    vice versa), the operational spec and the narrative rationale are
         #    out of sync. Warning only — the refinement prompt can react.
+        #    Issue #537: ``unparsed_rules`` is part of the rule surface for
+        #    this scan — pre-migration legacy specs may carry indicator
+        #    mentions in there.
         hypothesis_text = spec.hypothesis or ""
         rules_text = " ".join(
             [
                 format_rules_for_prompt(spec.entry_rules),
                 format_rules_for_prompt(spec.exit_rules),
+                " ".join(spec.unparsed_rules),
             ]
         )
         terms_in_hypothesis = {m.group(0).lower() for m in _CONCEPT_TERMS.finditer(hypothesis_text)}

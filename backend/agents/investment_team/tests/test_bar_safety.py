@@ -267,6 +267,7 @@ def test_end_to_end_round_trip_strategy_never_triggers_safety() -> None:
         asset_class="stocks",
         hypothesis="invariant",
         signal_definition="invariant",
+        timeframe="1d",
         strategy_code=ROUND_TRIP_CODE,
     )
     config = BacktestConfig(

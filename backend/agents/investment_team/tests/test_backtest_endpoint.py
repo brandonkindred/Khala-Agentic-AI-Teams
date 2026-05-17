@@ -32,7 +32,6 @@ from investment_team.models import (
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     Predicate,
-    PriceRef,
     SignalExitRule,
 )
 
@@ -48,17 +47,14 @@ def _sample_strategy(*, code: str | None) -> StrategySpec:
         asset_class="equity",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         entry_rules=[
             EntryRule(
                 side="long",
-                when=Predicate(lhs=PriceRef(field="high"), op="gt", rhs=PriceRef(field="low")),
+                when=Predicate(lhs="bar.high", op=">", rhs="bar.low"),
             )
         ],
-        exit_rules=[
-            SignalExitRule(
-                when=Predicate(lhs=PriceRef(field="low"), op="gt", rhs=PriceRef(field="high"))
-            )
-        ],
+        exit_rules=[SignalExitRule(when=Predicate(lhs="bar.low", op=">", rhs="bar.high"))],
         strategy_code=code,
     )
 

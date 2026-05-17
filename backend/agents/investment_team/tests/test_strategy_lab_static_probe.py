@@ -10,10 +10,9 @@ from investment_team.models import (
 )
 from investment_team.strategy_lab.coverage_probe import run_static_probe
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
+    IndicatorRef,
     Predicate,
-    RSIRef,
     SignalExitRule,
 )
 
@@ -25,13 +24,17 @@ def _spec(strategy_code: str | None, *, max_position_pct: float = 6.0) -> Strate
         asset_class="stocks",
         hypothesis="hyp",
         signal_definition="sig",
+        timeframe="1d",
         entry_rules=[
             EntryRule(
-                side="long", when=Predicate(lhs=RSIRef(period=14), op="lt", rhs=ConstRef(value=30))
+                side="long",
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
             )
         ],
         exit_rules=[
-            SignalExitRule(when=Predicate(lhs=RSIRef(period=14), op="gt", rhs=ConstRef(value=70)))
+            SignalExitRule(
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70)
+            )
         ],
         risk_limits={"max_position_pct": max_position_pct},
         speculative=False,

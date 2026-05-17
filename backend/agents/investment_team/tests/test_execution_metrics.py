@@ -104,6 +104,7 @@ def _spec(asset_class: str) -> StrategySpec:
         asset_class=asset_class,
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
 
 

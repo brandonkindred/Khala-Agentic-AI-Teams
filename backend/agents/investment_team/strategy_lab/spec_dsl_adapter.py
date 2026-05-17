@@ -1,41 +1,30 @@
-"""Regex-based prose → spec_dsl adapter (issue #550, step 1 of 8 from #537).
+"""Regex-based prose → spec_dsl adapter (issue #537 literal schema).
 
 Pure regex; no LLM; no Pydantic-side-effects beyond constructing DSL nodes.
-First-match-wins ordering. Unmatched prose returns the shared ``UnparsableRule``
-variant (or ``UnparsableSizing`` in the sizing slot) so callers can route the
-ungroomed text back to a redesign loop.
+First-match-wins ordering. Unmatched prose returns ``None`` so the caller
+(``spec_dsl.from_prose`` / ``StrategySpec`` legacy-payload rewriter) can
+stash the raw text in ``unparsed_rules`` and set ``requires_redesign=True``
+on the spec.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import ValidationError
 
 from .spec_dsl import (
-    ADXRef,
-    ATRRef,
-    BollingerRef,
-    ConstRef,
-    EMARef,
     EntryRule,
     FixedFractionSizing,
     FixedNotionalSizing,
-    MACDRef,
+    IndicatorRef,
     Predicate,
-    PriceRef,
-    RSIRef,
     SignalExitRule,
-    SMARef,
-    StochasticRef,
     StopLossRule,
     TakeProfitRule,
     TimeStopRule,
-    UnparsableRule,
-    UnparsableSizing,
     VolatilityTargetSizing,
-    VWAPRef,
 )
 
 # ---------------------------------------------------------------------------
@@ -66,7 +55,7 @@ _INDICATOR_NAMES = (
 
 # Token: either a price field, a number (int / decimal / leading-dot decimal /
 # scientific), or ``name(arg1[,arg2,...])`` / bare ``name`` for the indicators
-# above.  Longest names come first so ``macd_signal`` matches before ``macd``.
+# above. Longest names come first so ``macd_signal`` matches before ``macd``.
 # Each underscore in the indicator name is allowed to appear as ``-`` or ``_``
 # so hyphenated aliases (``macd-signal``) parse identically to the
 # underscored form.
@@ -78,8 +67,7 @@ _TOKEN_PAT = (
     r"|(?:" + _INDICATOR_NAME_PAT + r")\b"
     r"|" + _NUMBER_PAT
 )
-# ``cross(?:es)?`` matches singular `cross` and plural `crosses` (the previous
-# ``crosses?`` matched only `crosse`/`crosses` — never bare `cross`).
+# ``cross(?:es)?`` matches singular `cross` and plural `crosses`.
 _OP_PAT = r"(>=|<=|==|>|<|cross(?:es)?\s+above|cross(?:es)?\s+below)"
 
 _PREDICATE_RE = re.compile(
@@ -95,7 +83,7 @@ _TIME_STOP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Positive numeric pattern (no leading sign).  Includes scientific notation
+# Positive numeric pattern (no leading sign). Includes scientific notation
 # so tiny fractions like ``1e-12`` round-trip through the formatter; Pydantic
 # `gt=0` constraints reject negative parses, so we don't need to forbid the
 # minus sign here.
@@ -131,37 +119,34 @@ _FIXED_NOTIONAL_RE = re.compile(
 )
 
 
-# Per-indicator argument parser.  ``_parse_call_args`` splits ``raw`` into
+# Per-indicator argument parser. ``_parse_call_args`` splits ``raw`` into
 # positional values and a single optional ``source=X`` kwarg, rejecting:
 #   - extra positional args beyond what the indicator accepts,
 #   - any kwarg other than ``source`` (or any ``source=`` when the indicator
 #     has no ``source`` field),
 #   - positional args appearing after a kwarg,
 #   - non-numeric positional tokens.
-# Returning ``None`` makes the caller emit ``UnparsableRule``.
+# Returning ``None`` makes the caller emit nothing (caller stashes prose).
 def _parse_call_args(
     raw: str,
     int_slots: int,
     float_slots: int = 0,
     allow_source: bool = True,
-) -> tuple[list[int | float], str | None] | None:
+) -> Optional[tuple[list, Optional[str]]]:
     if not raw.strip():
         return [], None
-    # Don't filter empty slots: ``sma(,20)`` / ``macd(12,,9)`` would silently
-    # shift positional values to the wrong parameters.  Any empty slot is a
-    # malformed call.
     parts = [p.strip() for p in raw.split(",")]
     if any(not p for p in parts):
         return None
     positional_tokens: list[str] = []
-    source: str | None = None
+    source: Optional[str] = None
     saw_kwarg = False
     for part in parts:
         if "=" in part:
             saw_kwarg = True
             k, v = part.split("=", 1)
             k = k.strip().lower()
-            v = v.strip().lower()  # `SOURCE=OPEN` → `source=open` so the Literal accepts it
+            v = v.strip().lower()
             if k != "source" or not allow_source or source is not None:
                 return None
             source = v
@@ -173,7 +158,7 @@ def _parse_call_args(
     if len(positional_tokens) > int_slots + float_slots:
         return None
 
-    parsed: list[int | float] = []
+    parsed: list = []
     for i, val in enumerate(positional_tokens):
         try:
             parsed.append(int(val) if i < int_slots else float(val))
@@ -182,76 +167,87 @@ def _parse_call_args(
     return parsed, source
 
 
-def _parse_indicator_call(name: str, raw_args: str):
-    def _single_period(cls, require_positional: bool):
+def _build_indicator(name: str, params: dict, source: Optional[str]) -> Optional[IndicatorRef]:
+    kwargs: dict = {"name": name, "params": params}
+    if source is not None:
+        kwargs["source"] = source
+    try:
+        return IndicatorRef(**kwargs)
+    except (ValueError, ValidationError):
+        return None
+
+
+def _parse_indicator_call(name: str, raw_args: str) -> Optional[IndicatorRef]:
+    if name == "sma":
         res = _parse_call_args(raw_args, int_slots=1, allow_source=True)
         if res is None:
             return None
         pos, source = res
-        if require_positional and not pos:
+        if not pos:
             return None
-        kwargs: dict = {}
-        if pos:
-            kwargs["period"] = pos[0]
-        if source is not None:
-            kwargs["source"] = source
-        return cls(**kwargs)
-
-    if name == "sma":
-        return _single_period(SMARef, require_positional=True)
+        return _build_indicator("sma", {"period": pos[0]}, source)
     if name == "ema":
-        return _single_period(EMARef, require_positional=True)
+        res = _parse_call_args(raw_args, int_slots=1, allow_source=True)
+        if res is None:
+            return None
+        pos, source = res
+        if not pos:
+            return None
+        return _build_indicator("ema", {"period": pos[0]}, source)
     if name == "rsi":
-        return _single_period(RSIRef, require_positional=False)
+        res = _parse_call_args(raw_args, int_slots=1, allow_source=True)
+        if res is None:
+            return None
+        pos, source = res
+        params: dict = {"period": pos[0]} if pos else {}
+        return _build_indicator("rsi", params, source)
     if name == "atr":
         res = _parse_call_args(raw_args, int_slots=1, allow_source=False)
         if res is None:
             return None
         pos, _ = res
-        return ATRRef(**({"period": pos[0]} if pos else {}))
+        return _build_indicator("atr", {"period": pos[0]} if pos else {}, None)
     if name == "adx":
         res = _parse_call_args(raw_args, int_slots=1, allow_source=False)
         if res is None:
             return None
         pos, _ = res
-        return ADXRef(**({"period": pos[0]} if pos else {}))
+        return _build_indicator("adx", {"period": pos[0]} if pos else {}, None)
     if name in ("macd", "macd_signal", "macd_histogram"):
         output = name.split("_", 1)[1] if "_" in name else "macd"
         res = _parse_call_args(raw_args, int_slots=3, allow_source=True)
         if res is None:
             return None
         pos, source = res
-        kwargs = dict(zip(("fast", "slow", "signal"), pos))
-        if source is not None:
-            kwargs["source"] = source
-        return MACDRef(output=output, **kwargs)  # type: ignore[arg-type]
+        params = dict(zip(("fast", "slow", "signal"), pos))
+        params["output"] = output
+        return _build_indicator("macd", params, source)
     if name in ("bollinger", "bollinger_upper", "bollinger_lower", "bollinger_middle"):
         band = name.split("_", 1)[1] if "_" in name else "middle"
         res = _parse_call_args(raw_args, int_slots=1, float_slots=1, allow_source=True)
         if res is None:
             return None
         pos, source = res
-        kwargs: dict = {}
+        params = {"band": band}
         if pos:
-            kwargs["period"] = pos[0]
+            params["period"] = pos[0]
         if len(pos) >= 2:
-            kwargs["num_std"] = pos[1]
-        if source is not None:
-            kwargs["source"] = source
-        return BollingerRef(band=band, **kwargs)  # type: ignore[arg-type]
+            params["num_std"] = pos[1]
+        return _build_indicator("bollinger", params, source)
     if name in ("stochastic", "stochastic_k", "stochastic_d"):
         output = name.split("_", 1)[1] if "_" in name else "k"
         res = _parse_call_args(raw_args, int_slots=2, allow_source=False)
         if res is None:
             return None
         pos, _ = res
-        kwargs = dict(zip(("k_period", "d_period"), pos))
-        return StochasticRef(output=output, **kwargs)  # type: ignore[arg-type]
+        params = dict(zip(("k_period", "d_period"), pos))
+        params["output"] = output
+        return _build_indicator("stochastic", params, None)
     if name == "vwap":
         res = _parse_call_args(raw_args, int_slots=0, allow_source=False)
         if res is None:
             return None
-        return VWAPRef()
+        return _build_indicator("vwap", {}, None)
     return None
 
 
@@ -266,30 +262,37 @@ _BARE_NAME_RE = re.compile(
 
 
 def _parse_token(tok: str):
-    """Return an IndicatorRef-compatible node, or ``None`` if unparseable."""
+    """Return one of:
+
+    - an ``IndicatorRef`` instance, when the token names an indicator;
+    - the bar-field literal string (``"bar.close"`` etc.) when the token
+      is a bare price field — these are valid lhs/rhs values for
+      ``Predicate`` directly;
+    - a bare ``float`` for numeric tokens (valid only on the rhs);
+    - ``None`` when the token can't be parsed.
+    """
     tok = tok.strip()
     if not tok:
         return None
     low = tok.lower()
     if low in _PRICE_FIELDS:
-        return PriceRef(field=low)  # type: ignore[arg-type]
-    # bare number
+        # Bar volume / hl2 / ohlc4 don't have a Predicate-level literal
+        # form — they're addressable via an IndicatorRef-like wrapper, but
+        # the issue's literal schema only permits "bar.close"/"bar.high"/
+        # "bar.low"/"bar.volume". For everything else, signal unparseable.
+        if low in {"close", "high", "low", "volume"}:
+            return f"bar.{low}"
+        return None
     try:
-        return ConstRef(value=float(tok))
+        return float(tok)
     except ValueError:
         pass
     m = _INDICATOR_CALL_RE.match(tok)
     if m:
-        try:
-            return _parse_indicator_call(_canonical_name(m.group(1)), m.group(2))
-        except (ValueError, ValidationError):
-            return None
+        return _parse_indicator_call(_canonical_name(m.group(1)), m.group(2))
     m = _BARE_NAME_RE.match(tok)
     if m:
-        try:
-            return _parse_indicator_call(_canonical_name(m.group(1)), "")
-        except (ValueError, ValidationError):
-            return None
+        return _parse_indicator_call(_canonical_name(m.group(1)), "")
     return None
 
 
@@ -298,21 +301,10 @@ def _canonical_name(raw: str) -> str:
     return raw.lower().replace("-", "_")
 
 
-_OP_MAP = {
-    ">": "gt",
-    "<": "lt",
-    ">=": "ge",
-    "<=": "le",
-    "==": "eq",
-}
-
-
-def _normalise_op(op_text: str) -> str | None:
+def _normalise_op(op_text: str) -> Optional[str]:
     op_text = op_text.strip().lower()
-    if op_text in _OP_MAP:
-        return _OP_MAP[op_text]
-    # ``crosses above`` / ``cross above`` (and below) — note ``crosses?`` only
-    # matches ``crosse``/``crosses``, so we use ``cross(?:es)?`` for both forms.
+    if op_text in {">", "<", ">=", "<=", "=="}:
+        return op_text
     if re.match(r"cross(?:es)?\s+above", op_text):
         return "cross_above"
     if re.match(r"cross(?:es)?\s+below", op_text):
@@ -320,14 +312,14 @@ def _normalise_op(op_text: str) -> str | None:
     return None
 
 
-def _basis_from_trail(trail: str | None) -> str:
+def _basis_from_trail(trail: Optional[str]) -> str:
     """Map a captured ``trailing-high`` / ``trailing-low`` prefix to a StopLossRule basis."""
     if trail is None:
         return "entry_price"
     return "trailing_high" if "high" in trail.lower() else "trailing_low"
 
 
-def _parse_predicate(prose: str) -> Predicate | None:
+def _parse_predicate(prose: str) -> Optional[Predicate]:
     m = _PREDICATE_RE.match(prose)
     if not m:
         return None
@@ -336,8 +328,12 @@ def _parse_predicate(prose: str) -> Predicate | None:
     rhs = _parse_token(m.group(3))
     if lhs is None or op is None or rhs is None:
         return None
+    # lhs cannot be a bare float in the new schema — issue #537 reserves
+    # float rhs as the only "numeric literal" position.
+    if isinstance(lhs, float):
+        return None
     try:
-        return Predicate(lhs=lhs, op=op, rhs=rhs)  # type: ignore[arg-type]
+        return Predicate(lhs=lhs, op=op, rhs=rhs)
     except ValidationError:
         return None
 
@@ -347,13 +343,11 @@ def _parse_predicate(prose: str) -> Predicate | None:
 # ---------------------------------------------------------------------------
 
 
-def parse_entry_rule(prose: str) -> EntryRule | UnparsableRule:
+def parse_entry_rule(prose: str) -> Optional[EntryRule]:
     """Parse a single entry-rule prose string.
 
-    Accepts a bare predicate (``"close > sma(20)"``), the formatter's own
-    output (``"long when …"`` / ``"short when …"``), or the legacy repo
-    convention (``"enter when …"``, optionally ``"enter long when …"`` /
-    ``"enter short when …"``).
+    Returns ``None`` when no pattern matches; the caller is responsible
+    for stashing the raw prose into ``StrategySpec.unparsed_rules``.
     """
     text = prose.strip()
     side: Literal["long", "short"] = "short" if _SHORT_RE.search(text) else "long"
@@ -366,12 +360,16 @@ def parse_entry_rule(prose: str) -> EntryRule | UnparsableRule:
     )
     predicate = _parse_predicate(body)
     if predicate is None:
-        return UnparsableRule(prose=text, reason="no pattern matched")
+        return None
     return EntryRule(side=side, when=predicate)
 
 
 def parse_exit_rule(prose: str):
-    """Parse a single exit-rule prose string; returns one of the ExitRule union members."""
+    """Parse a single exit-rule prose string.
+
+    Returns one of the ExitRule union members, or ``None`` when no
+    pattern matches (caller stashes the prose).
+    """
     text = prose.strip()
 
     m = _TIME_STOP_RE.match(text)
@@ -379,46 +377,50 @@ def parse_exit_rule(prose: str):
         try:
             return TimeStopRule(n_bars=int(m.group(1)))
         except ValidationError:
-            return UnparsableRule(prose=text, reason="time_stop out of bounds")
+            return None
 
     m = _EXIT_WHEN_RE.match(text)
     if m:
         predicate = _parse_predicate(m.group(1))
         if predicate is not None:
             return SignalExitRule(when=predicate)
-        return UnparsableRule(prose=text, reason="exit predicate not recognised")
+        return None
 
     m = _STOP_LOSS_PCT_RE.search(text)
     if m:
         try:
             return StopLossRule(pct=float(m.group(2)) / 100.0, basis=_basis_from_trail(m.group(1)))
         except ValidationError:
-            return UnparsableRule(prose=text, reason="stop_loss out of bounds")
+            return None
 
     m = _STOP_LOSS_DECIMAL_RE.search(text)
     if m:
         try:
             return StopLossRule(pct=float(m.group(2)), basis=_basis_from_trail(m.group(1)))
         except ValidationError:
-            return UnparsableRule(prose=text, reason="stop_loss out of bounds")
+            return None
 
     m = _TAKE_PROFIT_RE.search(text)
     if m:
         try:
             return TakeProfitRule(pct=float(m.group(1)) / 100.0)
         except ValidationError:
-            return UnparsableRule(prose=text, reason="take_profit out of bounds")
+            return None
 
     # Bare predicate in the exit slot is treated as a SignalExitRule.
     predicate = _parse_predicate(text)
     if predicate is not None:
         return SignalExitRule(when=predicate)
 
-    return UnparsableRule(prose=text, reason="no pattern matched")
+    return None
 
 
 def parse_sizing_rule(prose: str):
-    """Parse a single sizing-rule prose string; returns one of the SizingRule union members."""
+    """Parse a single sizing-rule prose string.
+
+    Returns one of the SizingRule union members, or ``None`` when no
+    pattern matches (caller stashes the prose).
+    """
     text = prose.strip()
 
     m = _FIXED_FRACTION_RE.search(text)
@@ -426,27 +428,27 @@ def parse_sizing_rule(prose: str):
         try:
             return FixedFractionSizing(fraction=float(m.group(1)) / 100.0)
         except ValidationError:
-            return UnparsableSizing(prose=text, reason="fixed_fraction out of bounds")
+            return None
 
     m = _VOL_TARGET_RE.search(text)
     if m:
         try:
             return VolatilityTargetSizing(target_annual_vol=float(m.group(1)) / 100.0)
         except ValidationError:
-            return UnparsableSizing(prose=text, reason="vol_target out of bounds")
+            return None
 
     m = _FIXED_NOTIONAL_RE.search(text)
     if m:
         try:
             return FixedNotionalSizing(notional_usd=float(m.group(1)))
         except ValidationError:
-            return UnparsableSizing(prose=text, reason="fixed_notional out of bounds")
+            return None
 
-    return UnparsableSizing(prose=text, reason="no pattern matched")
+    return None
 
 
 def parse_rule_list(prose_list: list[str], kind: Literal["entry", "exit"]) -> list:
-    """Map a legacy list[str] of rules to a list of structured rules."""
+    """Map a legacy list[str] of rules to a list of structured rules or ``None``."""
     parser = parse_entry_rule if kind == "entry" else parse_exit_rule
     return [parser(p) for p in prose_list]
 
@@ -454,13 +456,12 @@ def parse_rule_list(prose_list: list[str], kind: Literal["entry", "exit"]) -> li
 def parse_sizing_list(prose_list: list[str]):
     """Collapse a legacy list[str] of sizing rules to a single structured rule.
 
-    Multiple entries: first parsable wins; remaining entries are concatenated
-    into the chosen variant's ``note`` field.  All-unparsable returns
-    ``UnparsableSizing`` covering every input joined by ``"; "``.
-    Empty list returns ``UnparsableSizing(prose="", reason="empty")``.
+    Multiple entries: first parseable wins; remaining entries are concatenated
+    into the chosen variant's ``note`` field. All-unparseable returns
+    ``None``. Empty list also returns ``None``.
     """
     if not prose_list:
-        return UnparsableSizing(prose="", reason="empty")
+        return None
     if len(prose_list) == 1:
         return parse_sizing_rule(prose_list[0])
 
@@ -468,16 +469,13 @@ def parse_sizing_list(prose_list: list[str]):
     leftovers: list[str] = []
     for entry in prose_list:
         parsed = parse_sizing_rule(entry)
-        if chosen is None and not isinstance(parsed, UnparsableSizing):
+        if chosen is None and parsed is not None:
             chosen = parsed
         else:
             leftovers.append(entry)
 
     if chosen is None:
-        return UnparsableSizing(
-            prose="; ".join(p.strip() for p in prose_list),
-            reason="no pattern matched",
-        )
+        return None
 
     note = "; ".join(p.strip() for p in leftovers)
     return chosen.model_copy(update={"note": note})

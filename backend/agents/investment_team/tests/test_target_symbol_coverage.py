@@ -20,6 +20,7 @@ def _spec(
         asset_class="stocks",
         hypothesis=hypothesis,
         signal_definition="sig",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},

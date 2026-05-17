@@ -24,10 +24,8 @@ from investment_team.market_data_cache import (
 )
 from investment_team.market_data_service import OHLCVBar
 from investment_team.strategy_lab.spec_dsl import (
-    ConstRef,
     EntryRule,
     Predicate,
-    PriceRef,
     TimeStopRule,
 )
 
@@ -118,9 +116,8 @@ def test_backtest_result_fingerprint_stable_across_runs(tmp_path: Path) -> None:
         asset_class="stocks",
         hypothesis="trivial",
         signal_definition="hold-forever",
-        entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs=PriceRef(), op="gt", rhs=ConstRef(value=0)))
-        ],
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
         exit_rules=[TimeStopRule(n_bars=10000)],
         strategy_code=textwrap.dedent(
             """

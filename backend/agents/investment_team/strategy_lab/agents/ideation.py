@@ -42,23 +42,25 @@ Each prior entry includes outcome, metrics, rationale, and post-backtest analysi
 
 Return ONLY a JSON object with no markdown. `entry_rules`, `exit_rules`,
 and `sizing` MUST be the structured DSL objects described in the system
-prompt — prose strings will be rejected.
+prompt — prose strings will be rejected. `timeframe` is REQUIRED and
+must be one of `"1m"`, `"5m"`, `"15m"`, `"1h"`, `"1d"`.
 
 {{
   "asset_class": "stocks" | "crypto" | "forex" | "futures" | "commodities",
   "hypothesis": "1-3 sentence investment thesis tying multiple signals to edge",
   "signal_definition": "Describe the ensemble of signals and how they combine",
+  "timeframe": "1d",
   "entry_rules": [
     {{"kind": "entry", "side": "long",
-      "when": {{"lhs": {{"kind": "rsi", "period": 14}},
-                "op": "lt",
-                "rhs": {{"kind": "const", "value": 30}}}}}}
+      "when": {{"lhs": {{"name": "rsi", "params": {{"period": 14}}}},
+                "op": "<",
+                "rhs": 30}}}}
   ],
   "exit_rules": [
     {{"kind": "signal_exit",
-      "when": {{"lhs": {{"kind": "rsi", "period": 14}},
-                "op": "gt",
-                "rhs": {{"kind": "const", "value": 70}}}}}},
+      "when": {{"lhs": {{"name": "rsi", "params": {{"period": 14}}}},
+                "op": ">",
+                "rhs": 70}}}},
     {{"kind": "time_stop", "n_bars": 10}}
   ],
   "sizing": {{"kind": "fixed_fraction", "fraction": 0.02}},
