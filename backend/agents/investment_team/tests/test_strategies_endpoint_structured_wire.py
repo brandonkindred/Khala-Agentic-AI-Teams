@@ -87,3 +87,27 @@ def test_prose_strategy_post_rejected_with_422(
     response = client.post("/strategies", json=body)
 
     assert response.status_code == 422, response.text
+
+
+@pytest.mark.parametrize(
+    "legacy_field, legacy_value",
+    [
+        ("sizing_rules", ["risk 2% per trade"]),
+        ("unparsed_rules", ["enter on vibes"]),
+        ("requires_redesign", True),
+    ],
+)
+def test_legacy_field_names_rejected_with_422(
+    client: TestClient, legacy_field: str, legacy_value: object
+) -> None:
+    """Stale-client payloads carrying legacy/internal field names hit
+    ``extra='forbid'`` on ``CreateStrategyRequest`` and are rejected at
+    the HTTP boundary instead of being silently dropped (which would let
+    a legacy ``sizing_rules`` payload fall back to default sizing and
+    return 200 with the wrong sizing rule)."""
+    body = dict(_STRUCTURED_BODY)
+    body[legacy_field] = legacy_value
+
+    response = client.post("/strategies", json=body)
+
+    assert response.status_code == 422, response.text

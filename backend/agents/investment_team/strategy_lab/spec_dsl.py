@@ -1,10 +1,5 @@
 """Structured `StrategySpec` DSL — issue #537 literal schema.
 
-This module defines a typed, machine-readable replacement for prose
-`entry_rules: list[str]` / `exit_rules: list[str]` / `sizing_rules:
-list[str]`. The schema mirrors the proposed shape in
-`https://github.com/brandonkindred/Khala-Agentic-AI-Teams/issues/537`:
-
 - `IndicatorRef` is a single flat class — `name` selects the indicator,
   `params` carries the (typed) per-indicator arguments, `source`
   selects the bar field. Per-indicator required/optional/bounds
@@ -13,23 +8,9 @@ list[str]`. The schema mirrors the proposed shape in
 - `Predicate.lhs` is either an `IndicatorRef` or a
   ``Literal["bar.close","bar.high","bar.low","bar.volume"]`` bar-field
   reference. `Predicate.rhs` additionally accepts a plain ``float``.
-- `EntryRule`, `ExitRule`, and `SizingRule` discriminated unions use
-  `kind` exactly as before. Unparseable inputs are surfaced at the
-  spec level via `StrategySpec.requires_redesign` + `unparsed_rules`,
-  not as discriminator variants.
-
-Indicator bound style (``ge=2, le=400``) mirrors the existing house
-factor DSL at `strategy_lab/factors/models.py`. The runtime helpers in
-`executor/indicators.py` themselves accept any positive integer — the
-sanity caps here reject degenerate spec payloads (``period=0``,
-``period=10000``) that would silently produce all-NaN columns
-downstream.
-
-Persisted-payload migration: this module is intentionally strict and
-does not coerce legacy shapes. ``StrategySpec.model_validator(mode="before")``
-in `models.py` handles the in-flight rewriter for legacy payloads and
-the `from_prose` function at the bottom of this module provides a
-top-level entry point for callers that own raw prose specs.
+- `EntryRule`, `ExitRule`, and `SizingRule` are discriminated unions on
+  `kind`. Prose strings are not accepted as rule values — Pydantic
+  discriminator validation raises on prose input.
 """
 
 from __future__ import annotations
@@ -389,9 +370,8 @@ DEFAULT_SIZING_PAYLOAD: dict = {"kind": "fixed_fraction", "fraction": 0.02}
 
 
 # ---------------------------------------------------------------------------
-# Human-readable formatters. Outputs are chosen to round-trip through
-# spec_dsl_adapter.parse_*, so feeding _format_rule's output back into the
-# adapter returns an equal structured rule.
+# Human-readable formatters. Render structured rules to prose for LLM
+# prompts. Not a parser — the DSL is the only accepted input shape.
 # ---------------------------------------------------------------------------
 
 
@@ -519,100 +499,3 @@ def format_sizing_rule(sizing) -> str:
     raise TypeError(f"unknown SizingRule variant: {type(sizing).__name__}")
 
 
-# ---------------------------------------------------------------------------
-# from_prose — top-level entry point for legacy prose specs.
-#
-# The issue text proposes ``spec_dsl.from_prose(spec_legacy)`` as the
-# single-call migration. Returns a structured `StrategySpec` where rules
-# that couldn't be parsed are stashed in ``unparsed_rules`` and
-# ``requires_redesign`` is set so the design agent re-runs.
-# ---------------------------------------------------------------------------
-
-
-def from_prose(spec_legacy: Any) -> Any:
-    """Best-effort migrate a legacy prose-shaped spec to the structured DSL.
-
-    Accepts a ``dict`` (with ``entry_rules: list[str]``, ``exit_rules:
-    list[str]``, and either ``sizing_rules: list[str]`` or ``sizing: str``),
-    or any object with a ``model_dump()`` method. Unparseable rules are
-    dropped from the rule lists, their raw prose appended to
-    ``unparsed_rules``, and ``requires_redesign=True`` is set. Missing
-    ``timeframe`` defaults to ``"1d"`` in this legacy path only — fresh
-    callers must declare it explicitly.
-
-    Returns a freshly validated ``StrategySpec``.
-    """
-    # Local import to avoid an import cycle through `models.py`.
-    from ..models import StrategySpec
-    from . import spec_dsl_adapter
-
-    if isinstance(spec_legacy, dict):
-        payload: dict = dict(spec_legacy)
-    elif hasattr(spec_legacy, "model_dump"):
-        payload = spec_legacy.model_dump()
-    else:
-        raise TypeError(
-            f"from_prose expected a dict or BaseModel; got {type(spec_legacy).__name__}"
-        )
-
-    unparsed: list[str] = list(payload.get("unparsed_rules") or [])
-    requires_redesign = bool(payload.get("requires_redesign", False))
-
-    # entry_rules
-    raw_entries = payload.get("entry_rules") or []
-    new_entries: list[dict] = []
-    for raw in raw_entries:
-        if isinstance(raw, str):
-            parsed = spec_dsl_adapter.parse_entry_rule(raw)
-            if parsed is None:
-                unparsed.append(raw)
-                requires_redesign = True
-            else:
-                new_entries.append(parsed.model_dump())
-        else:
-            new_entries.append(raw)
-    payload["entry_rules"] = new_entries
-
-    # exit_rules
-    raw_exits = payload.get("exit_rules") or []
-    new_exits: list[dict] = []
-    for raw in raw_exits:
-        if isinstance(raw, str):
-            parsed = spec_dsl_adapter.parse_exit_rule(raw)
-            if parsed is None:
-                unparsed.append(raw)
-                requires_redesign = True
-            else:
-                new_exits.append(parsed.model_dump())
-        else:
-            new_exits.append(raw)
-    payload["exit_rules"] = new_exits
-
-    # sizing — accept legacy ``sizing_rules: list[str]`` or ``sizing: str``.
-    if "sizing_rules" in payload:
-        sizing_list = payload.pop("sizing_rules") or []
-        if sizing_list and all(isinstance(s, str) for s in sizing_list):
-            parsed = spec_dsl_adapter.parse_sizing_list(sizing_list)
-            if parsed is None:
-                unparsed.extend(sizing_list)
-                requires_redesign = True
-                payload["sizing"] = dict(DEFAULT_SIZING_PAYLOAD)
-            else:
-                payload["sizing"] = parsed.model_dump()
-    if isinstance(payload.get("sizing"), str):
-        parsed = spec_dsl_adapter.parse_sizing_rule(payload["sizing"])
-        if parsed is None:
-            unparsed.append(payload["sizing"])
-            requires_redesign = True
-            payload["sizing"] = dict(DEFAULT_SIZING_PAYLOAD)
-        else:
-            payload["sizing"] = parsed.model_dump()
-
-    payload["unparsed_rules"] = unparsed
-    payload["requires_redesign"] = requires_redesign
-
-    # Legacy specs predate the required ``timeframe`` field; default to
-    # daily so the migration path is non-fatal.
-    payload.setdefault("timeframe", "1d")
-
-    return StrategySpec.model_validate(payload)

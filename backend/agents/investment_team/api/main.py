@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from investment_team.agents import (
     AgentIdentity,
@@ -414,18 +414,17 @@ class ValidateProposalResponse(BaseModel):
 
 
 class CreateStrategyRequest(BaseModel):
+    # Reject stale-client payloads (e.g. legacy ``sizing_rules: [...]``) at
+    # the HTTP boundary with 422 rather than silently dropping them.
+    model_config = ConfigDict(extra="forbid")
+
     authored_by: str = Field(..., description="Agent or user ID who authored the strategy")
     asset_class: str = Field(..., description="Primary asset class")
     hypothesis: str = Field(..., description="Investment hypothesis")
     signal_definition: str = Field(..., description="Signal definition")
-    # Issue #537: every spec must declare the bar timeframe it was designed
-    # against — required, no default.
     timeframe: Literal["1m", "5m", "15m", "1h", "1d"] = Field(
         ..., description="Bar timeframe the strategy was designed against"
     )
-    # Issue #551/#554/#537: rule fields are structured DSL nodes. Typed directly
-    # so FastAPI publishes the discriminated-union schema in OpenAPI and
-    # returns 422 (rather than 500) for malformed input.
     entry_rules: List[EntryRule] = Field(default_factory=list)
     exit_rules: List[ExitRule] = Field(default_factory=list)
     sizing: Optional[SizingRule] = Field(default=None)
