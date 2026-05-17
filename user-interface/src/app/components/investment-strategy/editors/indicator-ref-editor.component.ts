@@ -31,7 +31,10 @@ export class IndicatorRefEditorComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     const nameCtrl = this.group.get('name');
     if (!nameCtrl) return;
-    this.applyForName(nameCtrl.value as IndicatorName);
+    // Do NOT call applyForName here — the parent's buildIndicatorGroup()
+    // has already seeded the params controls from the prefill payload, and
+    // applyForName would wipe those seeds in favour of spec defaults.
+    // Only react to user-driven name changes from here on.
     this.nameSub = nameCtrl.valueChanges.subscribe((name: IndicatorName) => {
       this.applyForName(name);
     });

@@ -222,15 +222,21 @@ export class InvestmentStrategyComponent implements OnInit {
       indicator?.enable(opts);
       barField?.disable(opts);
       number?.disable(opts);
+      number?.clearValidators();
     } else if (kind === 'bar_field') {
       indicator?.disable(opts);
       barField?.enable(opts);
       number?.disable(opts);
+      number?.clearValidators();
     } else if (kind === 'number') {
       indicator?.disable(opts);
       barField?.disable(opts);
       number?.enable(opts);
+      // Blank constants must block submit; without this, Number(null) → 0
+      // silently lands as a 0-valued predicate threshold.
+      number?.setValidators([Validators.required]);
     }
+    number?.updateValueAndValidity(opts);
   }
 
   buildPredicateGroup(initial?: Predicate): FormGroup {

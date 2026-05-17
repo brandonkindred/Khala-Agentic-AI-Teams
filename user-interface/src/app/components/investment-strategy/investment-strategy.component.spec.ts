@@ -171,6 +171,48 @@ describe('InvestmentStrategyComponent', () => {
     httpMock.expectNone(strategiesUrl);
   });
 
+  it('preserves prefilled indicator params (does not reset to spec defaults)', () => {
+    const spec = baseSpec({
+      entry_rules: [
+        {
+          kind: 'entry',
+          side: 'long',
+          when: {
+            lhs: { name: 'rsi', params: { period: 7 }, source: 'close' },
+            op: '<',
+            rhs: 30,
+          },
+        },
+      ],
+    });
+
+    component.populateForm(spec);
+    fixture.detectChanges();
+
+    expect(component.hasPrefillErrors).toBe(false);
+    const indicator = component.entryRulesArray
+      .at(0)
+      .get('when')!
+      .get('lhs')!
+      .get('indicator')!;
+    expect(indicator.get('name')!.value).toBe('rsi');
+    expect(indicator.get('params')!.get('period')!.value).toBe(7);
+  });
+
+  it('blocks submit when an RHS constant is left blank', async () => {
+    component.form.patchValue({ hypothesis: 'h', signal_definition: 's' });
+    component.addEntryRule();
+    const rule = component.entryRulesArray.at(0);
+    const rhs = rule.get('when')!.get('rhs')!;
+    rhs.patchValue({ side_kind: 'number', number_val: null });
+
+    expect(rule.valid).toBe(false);
+    expect(component.form.valid).toBe(false);
+
+    await component.createStrategy();
+    httpMock.expectNone(strategiesUrl);
+  });
+
   it('flags an unknown exit-rule kind', () => {
     const spec = baseSpec({
       exit_rules: [{ kind: 'gibberish' } as unknown as StrategySpec['exit_rules'][number]],
