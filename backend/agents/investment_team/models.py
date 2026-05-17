@@ -204,9 +204,17 @@ class StrategySpec(BaseModel):
     asset_class: str
     hypothesis: str
     signal_definition: str
-    # Issue #537 — bar timeframe the strategy was designed against. Required.
-    # No default: callers must declare what they're trading on. Legacy persisted
-    # specs are migrated to ``"1d"`` by the ``_migrate_legacy_payload`` rewriter.
+    # Issue #537 — bar timeframe the strategy was designed against. Required;
+    # no default. Fresh callers (``CreateStrategyRequest``, ideation, the
+    # orchestrator) declare this explicitly. Persisted pre-#537 records lack
+    # the field — those that carry structural legacy markers (old op names,
+    # typed ``IndicatorRef`` dicts, ``sizing_rules`` list, ``unparsable``
+    # variants) are migrated to ``"1d"`` in-flight by
+    # ``_migrate_legacy_payload``. Minimal-shape persisted records that
+    # carry no markers AND no timeframe (e.g. empty rules with default
+    # sizing) must be rewritten by
+    # ``investment_team.scripts.backfill_strategy_specs`` before deploy —
+    # they will not deserialise otherwise.
     timeframe: Literal["1m", "5m", "15m", "1h", "1d"]
     # Issue #551/#537 — entry/exit/sizing are structured DSL nodes. Pydantic
     # discriminator validation rejects prose ("close > sma(20)") on input;
