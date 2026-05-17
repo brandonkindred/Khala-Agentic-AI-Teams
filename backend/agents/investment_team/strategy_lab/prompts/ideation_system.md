@@ -99,7 +99,7 @@ Prose strings (the shape above) and the legacy `sizing_rules` list-of-strings ar
 
 ## Asset class diversity
 
-Diversify across: stocks, crypto, forex, options, futures, commodities. Do NOT default to equities unless explicitly directed.
+Diversify across: stocks, crypto, forex, futures, commodities. Do NOT default to equities unless explicitly directed. The `options` asset class is rejected by the validator (no option-chain data, Greeks, or contract execution model yet) — do not choose it.
 
 ## Target symbols
 
