@@ -119,6 +119,20 @@ def _default_universe_for(asset_class: str) -> List[str]:
     return out
 
 
+def _canonicalize_ticker(symbol: str) -> str:
+    # Strip Yahoo provider suffixes so bare aliases compare equal to their
+    # provider-form counterparts. Post: returns an upper-cased string with no
+    # `=F` / `=X` suffix.
+    assert isinstance(symbol, str), "symbol must be a str"
+    s = symbol.upper()
+    for suffix in ("=F", "=X"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    assert not s.endswith(("=F", "=X")), "canonical form must not retain a provider suffix"
+    return s
+
+
 def _default_market_sample_provider(symbol: str) -> float:
     # Pre: symbol is a non-empty string.
     assert isinstance(symbol, str) and symbol, "symbol must be a non-empty str"
@@ -212,13 +226,18 @@ class SpecReadinessGate:
         assert isinstance(spec, StrategySpec)
         assert phase in _VALID_PHASES
 
-        named = {m.group(0).upper() for m in _SYMBOL_REGEX.finditer(spec.hypothesis or "")}
-        targets = {s.upper() for s in spec.target_symbols}
+        named_raw = {m.group(0).upper() for m in _SYMBOL_REGEX.finditer(spec.hypothesis or "")}
+        targets_raw = {s.upper() for s in spec.target_symbols}
+        # Compare on the canonical (suffix-stripped) form so `ES` ≡ `ES=F` and
+        # `EURUSD` ≡ `EURUSD=X` — the spec is implementable either way; the
+        # downstream fetcher resolves the provider form when needed.
+        named_canon = {_canonicalize_ticker(s) for s in named_raw}
+        targets_canon = {_canonicalize_ticker(s) for s in targets_raw}
 
         out: List[QualityGateResult] = []
-        if not named and not targets:
+        if not named_canon and not targets_canon:
             pass  # asset-class default universe will be used
-        elif named and not targets:
+        elif named_canon and not targets_canon:
             out.append(
                 QualityGateResult(
                     gate_name=GATE,
@@ -226,15 +245,16 @@ class SpecReadinessGate:
                     passed=False,
                     severity="critical",
                     details=(
-                        f"Hypothesis names symbol(s) {sorted(named)} but "
+                        f"Hypothesis names symbol(s) {sorted(named_raw)} but "
                         "target_symbols is empty — backtest universe would not "
                         "include the symbols the strategy is about."
                     ),
                 )
             )
         else:
-            missing = named - targets
-            if missing:
+            missing_canon = named_canon - targets_canon
+            if missing_canon:
+                missing_raw = sorted(s for s in named_raw if _canonicalize_ticker(s) in missing_canon)
                 out.append(
                     QualityGateResult(
                         gate_name=GATE,
@@ -242,8 +262,8 @@ class SpecReadinessGate:
                         passed=False,
                         severity="critical",
                         details=(
-                            f"Hypothesis names symbol(s) {sorted(missing)} not "
-                            f"present in target_symbols {sorted(targets)}."
+                            f"Hypothesis names symbol(s) {missing_raw} not "
+                            f"present in target_symbols {sorted(targets_raw)}."
                         ),
                     )
                 )

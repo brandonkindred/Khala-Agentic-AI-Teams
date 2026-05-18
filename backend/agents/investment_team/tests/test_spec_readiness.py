@@ -136,6 +136,34 @@ def test_rule1_catches_forex_ticker_mismatch() -> None:
     assert any("EURUSD=X" in c for c in critical), critical
 
 
+def test_rule1_canonicalizes_bare_futures_against_provider_suffix() -> None:
+    """``ES`` in hypothesis matches ``ES=F`` in target_symbols — same symbol."""
+    spec = _spec(
+        hypothesis="Trade ES gaps on Monday mornings.",
+        target_symbols=["ES=F"],
+        asset_class="futures",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    rule1_failures = [
+        c for c in _critical(results) if "target_symbols" in c or "Hypothesis names symbol" in c
+    ]
+    assert not rule1_failures, rule1_failures
+
+
+def test_rule1_canonicalizes_bare_forex_against_provider_suffix() -> None:
+    """``EURUSD`` in hypothesis matches ``EURUSD=X`` in target_symbols."""
+    spec = _spec(
+        hypothesis="EURUSD tends to revert intraday.",
+        target_symbols=["EURUSD=X"],
+        asset_class="forex",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    rule1_failures = [
+        c for c in _critical(results) if "target_symbols" in c or "Hypothesis names symbol" in c
+    ]
+    assert not rule1_failures, rule1_failures
+
+
 def test_rule1_passes_when_no_symbols_in_hypothesis_and_no_targets() -> None:
     spec = _spec(
         hypothesis="RSI(14) below 30 signals long entry.",
