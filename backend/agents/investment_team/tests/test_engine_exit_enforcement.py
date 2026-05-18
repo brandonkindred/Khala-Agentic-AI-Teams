@@ -265,15 +265,19 @@ def test_no_exit_rules_leaves_position_open_at_end_of_run() -> None:
     )
 
 
-def test_strategy_emitted_close_dedupes_engine_firing_same_bar() -> None:
-    """If the strategy already submits an opposite-side close on the bar the
-    engine rule would fire, the engine must not stack a duplicate close
-    onto ``pending_for_prev``. Asserts exactly one exit-emission diagnostic
-    per round trip rather than two.
+def test_strategy_emitted_close_does_not_skip_engine_emission() -> None:
+    """When the strategy submits a same-bar full-market close on the bar the
+    engine rule fires, BOTH orders queue. On next bar the order book
+    submits in order; whichever fills first closes the position, and the
+    other order's stale-continuation guard (engine via binding, strategy
+    via ``existing_pos is None``) drops the survivor. The engine
+    therefore records its emission in ``exit_rule_firings`` (emitted, not
+    necessarily filled) — the fill side is what matters for actual
+    position closure.
     """
     strategy_with_self_exit = textwrap.dedent(
         '''\
-        """Enter long once, exit on bar 4 — same bar a TimeStopRule(n_bars=3) fires."""
+        """Enter long once, exit on bar 3 — same bar a TimeStopRule(n_bars=2) fires."""
         from contract import OrderSide, OrderType, Strategy
 
 
@@ -312,7 +316,7 @@ def test_strategy_emitted_close_dedupes_engine_firing_same_bar() -> None:
                 ),
             )
         ],
-        exit_rules=[TimeStopRule(n_bars=3)],
+        exit_rules=[TimeStopRule(n_bars=2)],
         strategy_code=strategy_with_self_exit,
     )
 
@@ -320,11 +324,13 @@ def test_strategy_emitted_close_dedupes_engine_firing_same_bar() -> None:
 
     assert run.service_result.error is None, run.service_result.error
     diag = run.service_result.execution_diagnostics
-    # At most one closed trade in this synthetic — and zero engine firings,
-    # because the strategy's own exit was queued first and the engine deduped.
-    assert diag.exit_rule_firings.get("time_stop", 0) == 0, (
-        "engine should have deduped against the strategy's own exit on the "
-        f"same bar; firings={diag.exit_rule_firings}"
+    # Engine emits its close — robustness against participation/IOC/FOK
+    # clipping of the strategy's market order. The fill simulator's
+    # stale-continuation guard drops whichever of the two orders arrives
+    # against an already-closed position.
+    assert diag.exit_rule_firings.get("time_stop", 0) >= 1, (
+        f"engine should emit even when strategy also submits a same-bar close; "
+        f"firings={diag.exit_rule_firings}"
     )
 
 

@@ -1324,31 +1324,30 @@ class TradingService:
         """Evaluate ``self._exit_rules`` against the current bar and emit
         synthetic close orders for any triggered rule.
 
-        Dedup rules of thumb:
-        * Sum the strategy's same-bar opposite-side **market** qty in
-          ``pending_for_prev`` for this symbol. Limit / stop / trailing
-          orders are NOT counted — they aren't guaranteed to fill on the
-          next bar, so treating them as "covering" would let a strategy
-          dodge engine enforcement with a price-far-from-market limit
-          order that never fills. The engine's structured rule fires
-          regardless and the strategy's separate limit hangs out on the
-          book until it triggers (or expires).
-        * Sum any in-flight engine-emitted market exits on the order book
-          the same way; if those already cover the open qty, no new
-          emission. Engine exits are always market, so the same
-          guaranteed-fill assumption applies.
-        * Partial coverage emits an engine close sized at
-          ``pos.qty - covered_qty`` rather than skipping entirely, so a
-          1-share decoration order can't suppress a structured rule on
-          the remaining qty.
+        Dedup model: the engine always emits at the position's full open
+        qty and lets the fill simulator + the position-identity binding
+        handle the rest. Specifically:
+
+        * Engine orders carry ``working_against_entry_order_id`` via
+          ``engine_exit_bindings`` (see the bar-loop submit step). If a
+          same-bar strategy order closes the position first on the next
+          bar, the fill simulator's stale-continuation guard drops the
+          engine close before it falls through to ``_fill_entry``.
+        * If the strategy's same-bar order is partial / clipped (FOK
+          rejection, IOC drop, participation cap, REQUEUE_NEXT_BAR
+          residual), the engine close sits behind it in submission order
+          and ``_fill_exit`` clips ``req.qty`` to ``existing_pos.qty`` —
+          residual exposure gets closed on the same bar rather than
+          waiting for the rule to fire again.
+        * The one explicit guard is on in-flight engine markets: if a
+          prior bar's engine exit is still pending (e.g. REQUEUE residual
+          across bars), skip re-emission so the order book doesn't
+          accumulate redundant engine markets while bars_held keeps
+          growing.
 
         Engine-emitted orders carry ``reason="engine_exit:<rule_kind>"`` so
         the conformance gate can count them off the order-lifecycle event
-        stream. The engine binds each emission to the targeted Position's
-        ``entry_order_id`` via ``engine_exit_bindings`` so the fill
-        simulator's stale-continuation guard drops the close when a prior
-        strategy exit closes the position first. Returns the updated
-        ``engine_order_seq``.
+        stream. Returns the updated ``engine_order_seq``.
         """
         sym = cur_bar.symbol
         if sym not in position_tracker:
@@ -1360,18 +1359,10 @@ class TradingService:
         tracked = position_tracker[sym]
         tracked_side: str = tracked.side
 
-        # Compute already-covered close qty from (a) the strategy's
-        # same-bar opposite-side **market** orders and (b) in-flight
-        # engine market exits on the order book. Non-market orders aren't
-        # guaranteed to fill on the next bar, so they don't count as
-        # coverage and the engine emits its market close regardless.
-        covered_qty = 0.0
-        for req in pending_for_prev:
-            if req.symbol != sym or req.order_type != OrderType.MARKET:
-                continue
-            req_side = "long" if req.side == OrderSide.LONG else "short"
-            if req_side != tracked_side:
-                covered_qty += req.qty
+        # Skip if a prior bar's engine market exit is still pending on the
+        # book — it will fire when the fill simulator can fill it, and we
+        # don't want to stack redundant engine markets while bars_held
+        # keeps growing across bars.
         for po in order_book.pending_for_symbol(sym):
             po_req = po.request
             if po_req.order_type != OrderType.MARKET:
@@ -1380,10 +1371,7 @@ class TradingService:
             if po_side != tracked_side and (po_req.reason or "").startswith(
                 ENGINE_EXIT_REASON_PREFIX
             ):
-                covered_qty += po_req.qty
-        if covered_qty >= pos.qty:
-            return engine_order_seq
-        engine_close_qty = pos.qty - covered_qty
+                return engine_order_seq
 
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
@@ -1404,7 +1392,7 @@ class TradingService:
                 client_order_id=f"e{engine_order_seq}",
                 symbol=intent.symbol,
                 side=close_side,
-                qty=engine_close_qty,
+                qty=pos.qty,
                 order_type=OrderType.MARKET,
                 tif=TimeInForce.DAY,
                 reason=f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}",

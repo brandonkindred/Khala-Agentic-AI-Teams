@@ -232,18 +232,21 @@ def _populate_tracker_and_portfolio() -> tuple[Dict[str, _TrackedPosition], Port
     return tracker, portfolio, order_book
 
 
-def test_dedup_ignores_limit_close_far_from_market() -> None:
-    """A strategy's full-size limit close far from market is not guaranteed
-    to fill — it must NOT suppress the engine's market emission. Otherwise
-    the rule is silently skipped while the limit hangs and the position
-    stays open past the structured-exit threshold.
+def test_engine_always_emits_at_full_position_qty() -> None:
+    """The engine always emits its close at ``pos.qty`` and lets the fill
+    simulator handle dedup against any strategy same-bar close. This
+    keeps enforcement robust against participation-cap clipping and
+    FOK/IOC rejection on the strategy's own order — see the docstring
+    of ``_maybe_emit_engine_exits``.
+
+    Far-from-market limit close from the strategy: not guaranteed to
+    fill, so the engine emits its full-size market close regardless.
     """
     svc = _service(exit_rules=[TimeStopRule(n_bars=10)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar()
     result = TradingServiceResult()
 
-    # Strategy emits a far-from-market LIMIT sell for 100 shares.
     pending = [
         OrderRequest(
             client_order_id="c1",
@@ -251,13 +254,11 @@ def test_dedup_ignores_limit_close_far_from_market() -> None:
             side=OrderSide.SHORT,
             qty=100.0,
             order_type=OrderType.LIMIT,
-            limit_price=200.0,  # well above; won't fill on next bar
+            limit_price=200.0,
             tif=TimeInForce.DAY,
             reason="strategy_limit_exit",
         )
     ]
-    engine_exit_bindings: Dict[str, str] = {}
-
     svc._maybe_emit_engine_exits(
         cur_bar=bar,
         position_tracker=tracker,
@@ -266,20 +267,25 @@ def test_dedup_ignores_limit_close_far_from_market() -> None:
         order_book=order_book,
         result=result,
         engine_order_seq=0,
-        engine_exit_bindings=engine_exit_bindings,
+        engine_exit_bindings={},
     )
-
-    # Engine MUST still emit its market close — the limit isn't guaranteed.
     engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
     assert len(engine_orders) == 1
     assert engine_orders[0].qty == 100.0
     assert engine_orders[0].order_type == OrderType.MARKET
-    assert result.execution_diagnostics.exit_rule_firings.get("time_stop") == 1
 
 
-def test_dedup_skips_engine_emission_on_full_market_strategy_close() -> None:
-    """Full-size market close from strategy on the same bar → engine
-    emission is redundant and must be skipped.
+def test_engine_emits_even_when_strategy_submits_full_market_close() -> None:
+    """A strategy full-size market close is not a coverage guarantee —
+    it can be FOK-rejected, IOC-clipped, or participation-cap-clipped at
+    fill time. The engine emits its full-qty market regardless; the fill
+    simulator's stale-continuation guard (via binding) drops the engine
+    close at fill time if the strategy's order fully closed the position
+    first, and clips the engine close to the residual qty otherwise.
+
+    This swaps the pre-fix expectation (engine skipped on full market
+    cover) for the post-fix expectation (always emit; let the fill
+    simulator handle the rest).
     """
     svc = _service(exit_rules=[TimeStopRule(n_bars=10)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
@@ -307,10 +313,52 @@ def test_dedup_skips_engine_emission_on_full_market_strategy_close() -> None:
         engine_order_seq=0,
         engine_exit_bindings={},
     )
-
-    # No engine emission — strategy fully covered the close.
     engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
-    assert engine_orders == []
+    assert len(engine_orders) == 1
+    assert engine_orders[0].qty == 100.0
+    assert result.execution_diagnostics.exit_rule_firings.get("time_stop") == 1
+
+
+def test_engine_skips_when_prior_engine_exit_still_pending() -> None:
+    """A prior bar's engine market exit (e.g. ``REQUEUE_NEXT_BAR`` residual
+    that didn't fully fill on the next bar) is still pending on the order
+    book. The engine must NOT re-emit while it's still in flight —
+    otherwise every subsequent bar where ``bars_held >= n_bars`` stacks
+    another engine market, polluting the book and the diagnostics.
+    """
+    svc = _service(exit_rules=[TimeStopRule(n_bars=10)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar()
+    result = TradingServiceResult()
+
+    # Simulate a prior bar's engine exit sitting on the book.
+    prior_engine_exit = OrderRequest(
+        client_order_id="e1",
+        symbol="AAA",
+        side=OrderSide.SHORT,
+        qty=100.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        reason=f"{ENGINE_EXIT_REASON_PREFIX}time_stop",
+    )
+    order_book.submit(
+        prior_engine_exit, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0
+    )
+
+    pending: list[OrderRequest] = []
+    svc._maybe_emit_engine_exits(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+        engine_order_seq=1,
+        engine_exit_bindings={},
+    )
+
+    # No new engine emission — the prior one is still in flight.
+    assert pending == []
     assert result.execution_diagnostics.exit_rule_firings == {}
 
 
