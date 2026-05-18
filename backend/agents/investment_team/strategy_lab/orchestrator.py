@@ -63,6 +63,7 @@ from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
+from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult
 from .quality_gates.strategy_validator import StrategySpecValidator
 from .quality_gates.target_symbol_coverage import TargetSymbolCoverageGate
@@ -221,6 +222,38 @@ class _ZeroTradeRepairOutcome:
     new_gates: List[QualityGateResult] = field(default_factory=list)
     failure_reason: str = ""
     changes_made: str = ""
+
+
+def _apply_veto_to_acceptance_reason(
+    metrics: BacktestResult,
+    suffix: str,
+    *,
+    upstream_admitted: bool,
+) -> tuple[BacktestResult, bool]:
+    """Stamp a publication veto's cause onto ``metrics.acceptance_reason``.
+
+    Both the conformance veto (#527) and the alignment veto (#529)
+    follow the same shape: replace a stale success-style upstream
+    reason; append to a real upstream rejection. Returns the updated
+    ``metrics`` and ``False`` for the new ``upstream_admitted``, so a
+    subsequent veto on the same run appends to this one rather than
+    overwriting it.
+
+    The delimiter is ``" | "`` (not ``"; "`` which
+    :func:`summarize_acceptance_reason` uses between failing gates)
+    so downstream parsers can disambiguate the veto boundary from
+    gate-internal boundaries.
+
+    Whitespace-only upstream reasons (``None``, ``""``, ``"   "``)
+    collapse to the suffix alone — never produces
+    ``"   | <suffix>"`` with an empty left side.
+    """
+    prior = (metrics.acceptance_reason or "").strip()
+    if prior and not upstream_admitted:
+        combined = f"{prior} | {suffix}"
+    else:
+        combined = suffix
+    return metrics.model_copy(update={"acceptance_reason": combined}), False
 
 
 class StrategyLabOrchestrator:
@@ -844,6 +877,15 @@ class StrategyLabOrchestrator:
         alignment_attempts: List[str] = []
         alignment_reports: List[TradeAlignmentReport] = []
 
+        # Issue #527 — engine-side enforcement of structured ``exit_rules``
+        # has a deterministic conformance gate that runs once the trade
+        # ledger is settled. It runs AFTER the alignment loop because
+        # alignment re-execution can replace ``trades`` / ``metrics`` with
+        # a new ledger that has different conformance characteristics —
+        # running before alignment would leave us evaluating a stale run.
+        # See the gate invocation just before the ``is_winning``
+        # resolution below.
+
         if execution_succeeded and trades and market_data is not None:
             for align_round in range(MAX_ALIGNMENT_ROUNDS):
                 emit(
@@ -1159,6 +1201,27 @@ class StrategyLabOrchestrator:
                 acceptance_reason = None
                 walk_forward_failed = True
 
+        # ── Exit-rule conformance ─────────────────────────────────────
+        # Issue #527 — deterministic check that the engine actually
+        # enforced ``spec.exit_rules`` against the FINAL trade ledger
+        # (post-alignment-loop). Critical failure vetoes ``is_winning``
+        # below; results are appended to ``all_gate_results`` for the
+        # persisted record.
+        exit_rule_conformance_passed = True
+        if execution_succeeded and trades:
+            conformance_gate = ExitRuleConformanceGate()
+            conformance_results = conformance_gate.check(
+                exit_rules=spec.exit_rules,
+                trades=trades,
+                diagnostics=metrics.execution_diagnostics,
+                config=config,
+                timeframe=spec.timeframe,
+            )
+            all_gate_results.extend(conformance_results)
+            exit_rule_conformance_passed = not any(
+                (not r.passed) and r.severity == "critical" for r in conformance_results
+            )
+
         # ── Resolve is_winning ────────────────────────────────────────
         # Publication requires (a) the walk-forward acceptance gate (or
         # its overfit-recheck fallback) AND (b) trade-alignment
@@ -1191,7 +1254,12 @@ class StrategyLabOrchestrator:
         upstream_admitted = False
         if acceptance_results:
             acceptance_passed = all(r.passed for r in acceptance_results)
-            is_winning = execution_succeeded and acceptance_passed and trades_aligned
+            is_winning = (
+                execution_succeeded
+                and acceptance_passed
+                and trades_aligned
+                and exit_rule_conformance_passed
+            )
             upstream_admitted = acceptance_passed
         elif walk_forward_failed and execution_succeeded:
             fallback_anomalies = self.anomaly_detector.check(
@@ -1204,7 +1272,12 @@ class StrategyLabOrchestrator:
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
             ]
             return_ok = metrics.annualized_return_pct > WINNING_THRESHOLD
-            is_winning = return_ok and not fallback_criticals and trades_aligned
+            is_winning = (
+                return_ok
+                and not fallback_criticals
+                and trades_aligned
+                and exit_rule_conformance_passed
+            )
             upstream_admitted = return_ok and not fallback_criticals
             if fallback_criticals:
                 # Surface the upgraded severities so the persisted
@@ -1260,17 +1333,45 @@ class StrategyLabOrchestrator:
                     update={"acceptance_reason": "publication_disabled: walk_forward_enabled=False"}
                 )
 
-        # Surface the alignment-failure cause on ``acceptance_reason`` so
-        # the audit trail explains why publication was blocked even when
-        # the acceptance gate / threshold otherwise passed (#529). The
-        # ``trade_alignment`` QualityGateResult already lives in
-        # ``all_gate_results`` (appended per alignment round above); this
-        # mirrors the signal onto ``BacktestResult.acceptance_reason``.
-        # ``alignment_reports`` is in the guard so we only attribute the
-        # rejection to alignment when the audit actually ran — the loop is
-        # skipped entirely when ``market_data is None``, in which case
-        # ``trades_aligned`` is False for unrelated reasons and an
-        # ``alignment_failed`` suffix would be misleading.
+        # ── Publication vetoes ────────────────────────────────────────
+        # Surface each veto's cause on ``acceptance_reason`` so the
+        # audit trail explains why publication was blocked even when
+        # the upstream acceptance gate otherwise passed. Vetoes stack:
+        # the first to fire is treated as the upstream rejection by the
+        # second, so a multi-gate failure preserves both causes.
+        #
+        # Helper :func:`_apply_veto_to_acceptance_reason` codifies the
+        # "replace stale success, append real rejection" rule so adding
+        # a future veto is one new call here rather than another copy
+        # of the mutation shape.
+        #
+        # Each veto's ``execution_succeeded and trades`` precondition
+        # ensures the alignment / conformance verdicts are meaningful —
+        # both gates need a non-empty trade ledger to evaluate.
+        # ``alignment_reports`` is in the alignment guard so we only
+        # attribute the rejection to alignment when the audit actually
+        # ran (skipped when ``market_data is None``).
+
+        # Issue #527 — conformance veto.
+        if execution_succeeded and trades and not exit_rule_conformance_passed:
+            conformance_criticals = [
+                r
+                for r in all_gate_results
+                if r.gate_name == "exit_rule_conformance"
+                and not r.passed
+                and r.severity == "critical"
+            ]
+            detail = "; ".join(r.details for r in conformance_criticals)
+            suffix = (
+                f"exit_rule_conformance_failed: {detail}"
+                if detail
+                else "exit_rule_conformance_failed: engine enforcement leaked"
+            )
+            metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
+                metrics, suffix, upstream_admitted=upstream_admitted
+            )
+
+        # Issue #529 — alignment veto.
         if execution_succeeded and trades and alignment_reports and not trades_aligned:
             last_report = alignment_reports[-1]
             # NOTE: do NOT name this ``rationale`` — that shadows the
@@ -1281,30 +1382,14 @@ class StrategyLabOrchestrator:
             # silently corrupt both the analysis prompt and the audit
             # record on every alignment-failure path.
             align_rationale = (last_report.rationale or "").strip()
-            if align_rationale:
-                reason_suffix = f"alignment_failed: {align_rationale}"
-            else:
-                reason_suffix = "alignment_failed: trades did not implement strategy spec"
-            # When the upstream gate admitted the run (acceptance fully
-            # passed, or fallback anomaly recheck clean), its success
-            # summary is no longer truthful — alignment is now the
-            # rejection cause. Replace rather than append so the audit
-            # trail isn't self-contradictory. When the upstream gate
-            # itself rejected, keep its reason and add the alignment
-            # cause — both are real rejection causes. Use a ``" | "``
-            # delimiter (not ``"; "``, which ``summarize_acceptance_reason``
-            # uses internally between failing gates) so downstream parsers
-            # can disambiguate the alignment boundary from gate boundaries.
-            # Use the stripped form so a whitespace-only upstream reason
-            # (None, "", "   ", "\n") collapses to the alignment suffix
-            # alone — never produces ``"   | alignment_failed: ..."`` with
-            # an empty left side.
-            prior_reason = (metrics.acceptance_reason or "").strip()
-            if prior_reason and not upstream_admitted:
-                combined = f"{prior_reason} | {reason_suffix}"
-            else:
-                combined = reason_suffix
-            metrics = metrics.model_copy(update={"acceptance_reason": combined})
+            suffix = (
+                f"alignment_failed: {align_rationale}"
+                if align_rationale
+                else "alignment_failed: trades did not implement strategy spec"
+            )
+            metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
+                metrics, suffix, upstream_admitted=upstream_admitted
+            )
 
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────
         narrative = ""

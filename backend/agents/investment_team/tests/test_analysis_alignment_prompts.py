@@ -37,7 +37,7 @@ from investment_team.strategy_lab.spec_dsl import (
     IndicatorRef,
     Predicate,
     StopLossRule,
-    TimeStopRule,
+    TakeProfitRule,
     format_rules_for_prompt,
     format_sizing_rule,
 )
@@ -59,7 +59,7 @@ def _render_inputs() -> dict[str, object]:
             rhs=IndicatorRef(name="sma", params={"period": 50}),
         ),
     )
-    exits = [TimeStopRule(n_bars=10), StopLossRule(pct=0.02)]
+    exits = [TakeProfitRule(pct=0.05), StopLossRule(pct=0.02)]
     sizing = FixedFractionSizing(fraction=0.01)
     return {
         "asset_class": "equity",
@@ -145,25 +145,38 @@ def test_rendered_prompt_matches_golden(
         pytest.param("analysis_lose", _render_lose, id="analysis_lose"),
     ],
 )
-def test_analysis_prompts_have_intended_not_enforced_label(
+def test_analysis_prompts_label_entry_intent_and_exit_enforcement(
     label: str, renderer: _PromptRenderer
 ) -> None:
-    """Issue #528: prose rules must be labelled as intent, not enforced behaviour."""
+    """Issue #527: entry rules stay 'intended' prose; exit rules became
+    engine-enforced once the structured DSL got wired into the bar loop.
+    Issue #528's 'Intended entry rules' / 'may not all be machine-enforced'
+    framing survives on the entry half so the LLM still doesn't police
+    prose entry intent as a mandatory rule.
+    """
     rendered = renderer()
-    assert "may not all be machine-enforced" in rendered, (
-        f"{label} prompt must label entry/exit rules as 'may not all be "
-        "machine-enforced' (issue #528)."
-    )
     assert "Intended entry rules" in rendered, (
-        f"{label} prompt must use 'Intended entry rules' (issue #528)."
+        f"{label} prompt must label entry rules as 'Intended entry rules' "
+        "(carry-over from issue #528)."
     )
-    assert "Intended exit rules" in rendered, (
-        f"{label} prompt must use 'Intended exit rules' (issue #528)."
+    assert "may not all be machine-enforced" in rendered, (
+        f"{label} prompt must still label entry rules as 'may not all be "
+        "machine-enforced' (carry-over from issue #528)."
+    )
+    assert "Engine-enforced exit rules" in rendered, (
+        f"{label} prompt must label exit rules as 'Engine-enforced exit rules' "
+        "(issue #527 — structured exit rules are now applied by the parent "
+        "engine every bar)."
     )
 
 
 def test_alignment_prompt_splits_enforced_and_aspirational() -> None:
-    """Issue #528: alignment prompt must distinguish enforced vs aspirational rules."""
+    """Issue #528 introduced the enforced vs aspirational split. Issue #527
+    promotes structured ``exit_rules`` from the aspirational side into the
+    enforced section; both section headers must remain so the LLM still
+    sees the two-bucket framing for the rules that *are* aspirational
+    (entry intent, SignalExitRule).
+    """
     rendered = _render_alignment_system()
     assert "Enforced rules" in rendered, (
         "alignment_system.md must introduce 'Enforced rules' section (issue #528)."
@@ -174,6 +187,25 @@ def test_alignment_prompt_splits_enforced_and_aspirational() -> None:
     # Severity guidance above the JSON output must reserve `critical` for enforced rules.
     assert "Reserve `severity: critical`" in rendered, (
         "alignment_system.md must reserve `severity: critical` for enforced rules (issue #528)."
+    )
+
+
+def test_alignment_prompt_marks_exit_rules_engine_enforced() -> None:
+    """Issue #527: alignment prompt must describe ``exit_rules`` as engine-
+    enforced rather than aspirational prose. Guards the prompt's role-in-
+    pipeline framing so the LLM doesn't down-weight critical exit-rule
+    violations the deterministic conformance gate flags.
+    """
+    rendered = _render_alignment_system()
+    assert (
+        "engine evaluates after every bar" in rendered or "evaluates after every bar" in rendered
+    ), (
+        "alignment_system.md must state the engine evaluates structured exit "
+        "rules every bar (issue #527)."
+    )
+    assert "exit_rule_conformance" in rendered, (
+        "alignment_system.md must reference the deterministic "
+        "``exit_rule_conformance`` gate (issue #527)."
     )
 
 

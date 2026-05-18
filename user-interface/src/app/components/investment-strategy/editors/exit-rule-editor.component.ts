@@ -10,7 +10,6 @@ import { Subscription } from 'rxjs';
 
 import { EXIT_RULE_KINDS, ExitRuleKind, STOP_LOSS_BASIS_OPTIONS } from '../../../models';
 import { PredicateEditorComponent } from './predicate-editor.component';
-import { integerValidator } from './strategy-validators';
 
 @Component({
   selector: 'app-exit-rule-editor',
@@ -55,7 +54,7 @@ export class ExitRuleEditorComponent implements OnInit, OnDestroy {
   }
 
   get currentKind(): ExitRuleKind {
-    return (this.group.get('kind')?.value ?? 'time_stop') as ExitRuleKind;
+    return (this.group.get('kind')?.value ?? 'stop_loss') as ExitRuleKind;
   }
 
   private setValidators(name: string, validators: ValidatorFn[]): void {
@@ -68,15 +67,10 @@ export class ExitRuleEditorComponent implements OnInit, OnDestroy {
   private applyForKind(kind: ExitRuleKind): void {
     // Clear everything first, then apply per kind. Numeric fields keep their
     // value across kind switches (cheap; harmless).
-    this.setValidators('n_bars', []);
     this.setValidators('pct', []);
     this.setValidators('basis', []);
 
     switch (kind) {
-      case 'time_stop':
-        // n_bars is declared as `int` on the backend; reject 1.5 client-side.
-        this.setValidators('n_bars', [Validators.required, Validators.min(1), integerValidator]);
-        break;
       case 'stop_loss':
         this.setValidators('pct', [Validators.required, Validators.min(0.0000001), Validators.max(1.0)]);
         this.setValidators('basis', [Validators.required]);

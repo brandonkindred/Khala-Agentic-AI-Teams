@@ -22,12 +22,6 @@
   </div>
 
   @switch (currentKind) {
-    @case ('time_stop') {
-      <mat-form-field appearance="outline" class="num-field">
-        <mat-label>n_bars</mat-label>
-        <input matInput type="number" min="1" step="1" formControlName="n_bars" />
-      </mat-form-field>
-    }
     @case ('stop_loss') {
       <mat-form-field appearance="outline" class="num-field">
         <mat-label>pct (0–1)</mat-label>

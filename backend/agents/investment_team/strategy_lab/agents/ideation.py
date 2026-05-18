@@ -61,7 +61,7 @@ must be one of `"1m"`, `"5m"`, `"15m"`, `"1h"`, `"1d"`.
       "when": {{"lhs": {{"name": "rsi", "params": {{"period": 14}}}},
                 "op": ">",
                 "rhs": 70}}}},
-    {{"kind": "time_stop", "n_bars": 10}}
+    {{"kind": "stop_loss", "pct": 0.03}}
   ],
   "sizing": {{"kind": "fixed_fraction", "fraction": 0.02}},
   "target_symbols": ["UPPERCASE tickers if your hypothesis names specific ones, e.g. QQQ; else []"],

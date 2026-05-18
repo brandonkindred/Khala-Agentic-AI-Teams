@@ -20,7 +20,7 @@ from investment_team.models import (
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     Predicate,
-    TimeStopRule,
+    StopLossRule,
 )
 from investment_team.strategy_lab_context import asset_class_mix_hint
 
@@ -50,7 +50,7 @@ def _record(asset_class: str) -> StrategyLabRecord:
         signal_definition="sig",
         timeframe="1d",
         entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
-        exit_rules=[TimeStopRule(n_bars=5)],
+        exit_rules=[StopLossRule(pct=0.03)],
         risk_limits={},
         speculative=False,
     )

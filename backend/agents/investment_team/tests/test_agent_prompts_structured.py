@@ -194,7 +194,7 @@ def test_ideation_accepts_structured_rules(monkeypatch: pytest.MonkeyPatch) -> N
     """The structured-DSL shape round-trips through ``IdeationAgent.run``."""
     payload = _ideation_payload(
         entry_rules=[_structured_entry_rule_dict()],
-        exit_rules=[_structured_signal_exit_rule_dict(), {"kind": "time_stop", "n_bars": 10}],
+        exit_rules=[_structured_signal_exit_rule_dict(), {"kind": "stop_loss", "pct": 0.03}],
         sizing=_structured_sizing_dict(),
     )
     _patch_ideation(monkeypatch, payload)

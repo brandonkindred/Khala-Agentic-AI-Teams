@@ -53,10 +53,10 @@ Bare bar fields are addressed by the string literals `"bar.close"`, `"bar.high"`
 
 - **`entry_rules`**: list of objects with `{"kind": "entry", "side": "long"|"short", "when": Predicate, "note": str}`.
 - **`exit_rules`**: list of one or more of:
-  - `{"kind": "time_stop", "n_bars": int>0, "note": str}` — exit after N bars.
   - `{"kind": "stop_loss", "pct": 0<float<=1.0, "basis": "entry_price"|"trailing_high"|"trailing_low", "note": str}` — note `pct` is a fraction (`0.03` = 3%), not a percent.
   - `{"kind": "take_profit", "pct": float>0, "note": str}` — `pct` is a fraction.
   - `{"kind": "signal_exit", "when": Predicate, "note": str}`.
+  Bar-counting "time stops" are deliberately NOT a supported kind — real traders close on price, P&L, or signal reversal, not on an arbitrary "exit after N bars" trigger.
 - **`sizing`** (single object, not a list):
   - `{"kind": "fixed_fraction", "fraction": 0<float<=1.0, "note": str}` — fraction is `0.02` for 2% per trade.
   - `{"kind": "volatility_target", "target_annual_vol": float>0, "note": str}`.
@@ -87,7 +87,7 @@ A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
      "when": {"lhs": {"name": "rsi", "params": {"period": 14}},
               "op": ">",
               "rhs": 70}},
-    {"kind": "time_stop", "n_bars": 10}
+    {"kind": "stop_loss", "pct": 0.03}
   ],
   "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
   "risk_limits": {"max_position_pct": 5},
@@ -101,7 +101,7 @@ A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
 ```json
 {
   "entry_rules": ["close > sma(20)"],
-  "exit_rules": ["exit after 10 bars"],
+  "exit_rules": ["stop loss 3%"],
   "sizing_rules": ["risk 2% per trade"]
 }
 ```

@@ -34,7 +34,7 @@ from investment_team.models import (
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     Predicate,
-    TimeStopRule,
+    StopLossRule,
 )
 
 # ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ def _make_record(record_id: str) -> StrategyLabRecord:
                 ),
             )
         ],
-        exit_rules=[TimeStopRule(n_bars=max(1, record_salt % 100))],
+        exit_rules=[StopLossRule(pct=0.03)],
     )
     backtest = BacktestRecord(
         backtest_id=f"bt-{record_id}",

@@ -501,6 +501,16 @@ class BacktestExecutionDiagnostics(BaseModel):
     entries_filled: int = Field(default=0, ge=0)
     exits_emitted: int = Field(default=0, ge=0)
     closed_trades: int = Field(default=0, ge=0)
+    # Issue #527 — count of engine-emitted exit orders, keyed by rule kind
+    # (``stop_loss`` / ``take_profit``). Counts close-order submissions,
+    # not fills; fills land in the existing trade ledger.
+    exit_rule_firings: Dict[str, int] = Field(default_factory=dict)
+    # Per-symbol breakdown of ``exit_rule_firings`` — same counts, keyed by
+    # ``symbol → rule_kind → count``. The aggregate field above is the
+    # row-sum across symbols. Conformance checks consume the per-symbol
+    # view so a stop_loss firing on one symbol can't mask a missed
+    # firing on another (cross-symbol leak attribution).
+    exit_rule_firings_by_symbol: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     open_positions_at_end: List[OpenPositionDiagnostic] = Field(default_factory=list)
     last_order_events: List[OrderLifecycleEvent] = Field(default_factory=list)
 
@@ -668,6 +678,16 @@ class TradeRecord(BaseModel):
     participation_clipped: Optional[bool] = None
     partial_fill_count: Optional[int] = None
     total_unfilled_qty: Optional[float] = None
+    # Issue #527 — close-order attribution. Mirrors
+    # ``OrderRequest.reason`` for the order that closed the position.
+    # Engine-fired structured-exit closes carry a
+    # ``"engine_exit:<rule_kind>"`` prefix; strategy-emitted closes
+    # carry whatever ``reason`` the strategy set (typically empty
+    # / None). Used by ``ExitRuleConformanceGate`` to distinguish
+    # engine-closed from strategy-closed trades so a gap-down
+    # strategy exit below a structured stop-loss floor is not
+    # mis-attributed as an engine leak.
+    exit_reason: Optional[str] = None
 
 
 class BacktestRecord(BaseModel):

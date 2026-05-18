@@ -277,12 +277,6 @@ class EntryRule(_SpecNode):
 EntryRuleUnion = EntryRule
 
 
-class TimeStopRule(_SpecNode):
-    kind: Literal["time_stop"] = "time_stop"
-    n_bars: int = Field(gt=0)
-    note: str = ""
-
-
 class StopLossRule(_SpecNode):
     kind: Literal["stop_loss"] = "stop_loss"
     pct: float = Field(gt=0, le=1.0)
@@ -302,8 +296,12 @@ class SignalExitRule(_SpecNode):
     note: str = ""
 
 
+# Exit rules: structured close conditions the engine enforces (stop-loss /
+# take-profit) plus aspirational signal-based exits. Bar-counting time stops
+# are deliberately *not* a member — real traders close on price, P&L, or
+# signal reversal, not on an arbitrary "Nth bar held" trigger.
 ExitRule = Annotated[
-    Union[TimeStopRule, StopLossRule, TakeProfitRule, SignalExitRule],
+    Union[StopLossRule, TakeProfitRule, SignalExitRule],
     Field(discriminator="kind"),
 ]
 
@@ -345,7 +343,6 @@ SizingRule = Annotated[
 IndicatorRef.model_rebuild()
 Predicate.model_rebuild()
 EntryRule.model_rebuild()
-TimeStopRule.model_rebuild()
 StopLossRule.model_rebuild()
 TakeProfitRule.model_rebuild()
 SignalExitRule.model_rebuild()
@@ -467,12 +464,10 @@ _STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
 
 
 def _format_rule(
-    rule: Union[EntryRule, TimeStopRule, StopLossRule, TakeProfitRule, SignalExitRule],
+    rule: Union[EntryRule, StopLossRule, TakeProfitRule, SignalExitRule],
 ) -> str:
     if isinstance(rule, EntryRule):
         return f"{rule.side} when {_format_predicate(rule.when)}"
-    if isinstance(rule, TimeStopRule):
-        return f"exit after {rule.n_bars} bars"
     if isinstance(rule, StopLossRule):
         prefix = _STOP_LOSS_BASIS_PREFIX.get(rule.basis, "")
         return f"{prefix}stop loss {_format_number(rule.pct * 100)}%"
@@ -497,5 +492,3 @@ def format_sizing_rule(sizing) -> str:
     if isinstance(sizing, FixedNotionalSizing):
         return f"${_format_number(sizing.notional_usd)} per trade"
     raise TypeError(f"unknown SizingRule variant: {type(sizing).__name__}")
-
-
