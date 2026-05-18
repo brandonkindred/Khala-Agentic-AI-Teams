@@ -1,7 +1,7 @@
-"""Unit tests for ``SpecReadinessGate`` (issue #540).
+"""Unit tests for ``SpecReadinessGate``.
 
-Eight deterministic implementability rules + the two end-to-end scenarios
-named in the issue's acceptance criteria. Every rule has at least one
+Eight deterministic implementability rules plus the two end-to-end scenarios
+that match the gate's acceptance contract. Every rule has at least one
 dedicated test that exercises its failure path.
 """
 
@@ -265,7 +265,7 @@ def test_rule8_max_position_pct_above_25_is_critical() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Issue #540 acceptance criteria: end-to-end vague + well-formed cases
+# Acceptance contract: end-to-end vague + well-formed cases
 # ---------------------------------------------------------------------------
 
 

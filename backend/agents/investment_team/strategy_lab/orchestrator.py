@@ -488,9 +488,10 @@ class StrategyLabOrchestrator:
             for g in pre_spec_gates_raw
             if not (g.severity == "critical" and g.details.startswith("strategy_code is missing"))
         ]
-        # Issue #540 — SpecReadinessGate runs in the design phase, blocking
-        # exit to synthesis on any critical failure. Hands its results to the
-        # same short-circuit path as StrategySpecValidator below.
+        # SpecReadinessGate (design phase). Postcondition: any critical
+        # result here flows into the same short-circuit path that
+        # StrategySpecValidator's criticals already do, so the synthesis
+        # phase cannot be entered with an unimplementable spec.
         readiness_design = self.spec_readiness_gate.validate(
             spec, phase="design", backtest_config=config
         )
@@ -542,11 +543,13 @@ class StrategyLabOrchestrator:
             #       pre-synthesis and is immutable for this cycle, see
             #       #547 items 1 & 2).
             emit("coding", {"sub_phase": "started", "refinement_round": round_num})
-            # Issue #540 — re-run SpecReadinessGate on the first synthesis
-            # round as a defense-in-depth sanity check that the spec wasn't
-            # mutated between design exit and synthesis entry. The spec is
-            # immutable across the remaining rounds so we don't repeat the
-            # check.
+            # Re-run SpecReadinessGate on the first synthesis round.
+            # Precondition: design-phase readiness passed. Postcondition:
+            # a critical failure here means the spec was mutated between
+            # design exit and synthesis entry — the same short-circuit
+            # path that fires for any other critical synthesis-phase gate
+            # picks it up. Skipped on round_num > 0 because the spec is
+            # immutable across the synthesis loop.
             if round_num == 0:
                 round_gate_results.extend(
                     self.spec_readiness_gate.validate(
