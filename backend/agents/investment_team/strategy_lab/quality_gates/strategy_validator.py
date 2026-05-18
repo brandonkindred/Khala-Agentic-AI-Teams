@@ -54,7 +54,10 @@ class StrategySpecValidator(GateResultsMixin):
         pass an explicit ``phase`` so the persisted gate history reflects
         where the spec was actually re-checked.
         """
-        self._set_phase(phase)
+        with self._using_phase(phase):
+            return self._run_checks(spec)
+
+    def _run_checks(self, spec: StrategySpec) -> List[QualityGateResult]:
         results: List[QualityGateResult] = []
 
         if normalize_asset_class(spec.asset_class) == "options":

@@ -133,23 +133,23 @@ class BacktestAnomalyDetector(GateResultsMixin):
         result with a deterministic failure category and order counters.
         Other rules ignore them.
         """
-        self._set_phase(phase)
-        # Zero trades is a hard short-circuit — every downstream statistic
-        # is meaningless without trades, so we return immediately.
-        if not trades:
-            return [
-                self._critical(_format_zero_trade_details(diagnostics, coverage_report))
-            ]
-        ctx = BacktestAnomalyCtx(
-            metrics=metrics,
-            trades=trades,
-            mode=mode,
-            dsr_aware=dsr_aware,
-            diagnostics=diagnostics,
-            coverage_report=coverage_report,
-        )
-        results = [r for rule in self._RULES for r in rule(self, ctx)]
-        return results or [self._info("Backtest results passed all anomaly checks.")]
+        with self._using_phase(phase):
+            # Zero trades is a hard short-circuit — every downstream statistic
+            # is meaningless without trades, so we return immediately.
+            if not trades:
+                return [
+                    self._critical(_format_zero_trade_details(diagnostics, coverage_report))
+                ]
+            ctx = BacktestAnomalyCtx(
+                metrics=metrics,
+                trades=trades,
+                mode=mode,
+                dsr_aware=dsr_aware,
+                diagnostics=diagnostics,
+                coverage_report=coverage_report,
+            )
+            results = [r for rule in self._RULES for r in rule(self, ctx)]
+            return results or [self._info("Backtest results passed all anomaly checks.")]
 
     # ------------------------------------------------------------------
     # Rules — each takes the per-call ``BacktestAnomalyCtx`` and yields zero

@@ -136,23 +136,23 @@ class CodeSafetyChecker(GateResultsMixin):
         non-empty. Other rules ignore ``spec``; passing ``None`` (the
         default) keeps the legacy call sites and tests behaving as before.
         """
-        self._set_phase(phase)
-        # Parse first — a syntax error is a hard short-circuit because every
-        # AST rule below requires a tree.
-        try:
-            tree = ast.parse(code)
-        except SyntaxError as e:
-            return [self._critical(f"Code has a syntax error: {e}")]
+        with self._using_phase(phase):
+            # Parse first — a syntax error is a hard short-circuit because
+            # every AST rule below requires a tree.
+            try:
+                tree = ast.parse(code)
+            except SyntaxError as e:
+                return [self._critical(f"Code has a syntax error: {e}")]
 
-        ctx = CodeSafetyCtx(
-            code=code,
-            tree=tree,
-            spec=spec,
-            strategy_classes=_find_strategy_subclasses(tree),
-            executable=_strip_comments_and_strings(code),
-        )
-        results = [r for rule in self._RULES for r in rule(self, ctx)]
-        return results or [self._info("Code passed all safety checks.")]
+            ctx = CodeSafetyCtx(
+                code=code,
+                tree=tree,
+                spec=spec,
+                strategy_classes=_find_strategy_subclasses(tree),
+                executable=_strip_comments_and_strings(code),
+            )
+            results = [r for rule in self._RULES for r in rule(self, ctx)]
+            return results or [self._info("Code passed all safety checks.")]
 
     # ------------------------------------------------------------------
     # Rules — each reads call-scoped state and yields zero or more results.

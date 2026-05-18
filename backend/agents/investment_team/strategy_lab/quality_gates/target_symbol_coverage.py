@@ -73,7 +73,15 @@ class TargetSymbolCoverageGate(GateResultsMixin):
         *,
         phase: StrategyLabPhase = "synthesis",
     ) -> List[QualityGateResult]:
-        self._set_phase(phase)
+        with self._using_phase(phase):
+            return self._check_fetch_body(spec, requested_symbols, fetched_symbols)
+
+    def _check_fetch_body(
+        self,
+        spec: StrategySpec,
+        requested_symbols: List[str],
+        fetched_symbols: List[str],
+    ) -> List[QualityGateResult]:
         results: List[QualityGateResult] = []
         fetched_upper = {s.strip().upper() for s in fetched_symbols if s and s.strip()}
 
@@ -113,7 +121,14 @@ class TargetSymbolCoverageGate(GateResultsMixin):
         *,
         phase: StrategyLabPhase = "synthesis",
     ) -> List[QualityGateResult]:
-        self._set_phase(phase)
+        with self._using_phase(phase):
+            return self._check_trades_body(spec, trades)
+
+    def _check_trades_body(
+        self,
+        spec: StrategySpec,
+        trades: List[TradeRecord],
+    ) -> List[QualityGateResult]:
         if not spec.target_symbols:
             return [
                 self._info("spec.target_symbols empty; trade-symbol coverage check skipped.")

@@ -114,8 +114,23 @@ non-positive values are interpreted as a missing price and fail Rule 5 closed.
 """
 
 
+_KNOWN_ASSET_CLASSES: frozenset[str] = frozenset(
+    {"stocks", "crypto", "commodities", "forex", "futures"}
+)
+
+
 def _default_universe_for(asset_class: str) -> List[str]:
-    # Pre: asset_class is a non-empty string.
+    """Return the canonical default universe for ``asset_class``.
+
+    Pre: ``asset_class`` is a non-empty string.
+    Post: returns a non-empty list of upper-case ticker strings.
+
+    Raises ``ValueError`` for asset classes outside
+    :data:`_KNOWN_ASSET_CLASSES`. The old ``else`` branch silently fell
+    back to ``OTHER_SYMBOLS`` (a stocks-equivalent broad-ETF list), which
+    let a typo'd ``asset_class="bonds"`` size against TLT/QQQ/EEM/etc. —
+    exactly the false-confidence Codex flagged for forex/futures earlier.
+    """
     assert isinstance(asset_class, str) and asset_class, "asset_class must be a non-empty str"
 
     ac = asset_class.lower()
@@ -130,9 +145,11 @@ def _default_universe_for(asset_class: str) -> List[str]:
     elif ac == "futures":
         out = list(FUTURES_SYMBOLS)
     else:
-        out = list(OTHER_SYMBOLS)
+        raise ValueError(
+            f"unknown asset_class {asset_class!r}; "
+            f"expected one of {sorted(_KNOWN_ASSET_CLASSES)}"
+        )
 
-    # Post: returns a non-empty list of upper-case ticker strings.
     assert out and all(isinstance(s, str) and s for s in out), "default universe must be non-empty"
     return out
 
@@ -226,13 +243,13 @@ class SpecReadinessGate(GateResultsMixin):
         assert backtest_config is None or isinstance(backtest_config, BacktestConfig), (
             "backtest_config override must be a BacktestConfig or None"
         )
-        self._set_phase(phase)
         ctx = SpecReadinessCtx(spec=spec, config=backtest_config or self._backtest_config)
-        results: List[QualityGateResult] = [
-            r for rule in self._RULES for r in rule(self, ctx)
-        ]
-        if not results:
-            results.append(self._info("Strategy spec passed all readiness checks."))
+        with self._using_phase(phase):
+            results: List[QualityGateResult] = [
+                r for rule in self._RULES for r in rule(self, ctx)
+            ]
+            if not results:
+                results.append(self._info("Strategy spec passed all readiness checks."))
         # Post: every result carries the caller's phase and GATE name.
         assert all(r.phase == phase for r in results), (
             "every result must carry the caller's phase"
@@ -350,7 +367,40 @@ class SpecReadinessGate(GateResultsMixin):
             return ()
 
         kind = getattr(ctx.spec.sizing, "kind", None)
-        symbols = ctx.spec.target_symbols or _default_universe_for(ctx.spec.asset_class)
+
+        # Volatility-target sizing depends on realised volatility, which we
+        # cannot estimate at design time. Emit a warning so the operator
+        # notices that Rule 5 abstained — a silent skip would let an
+        # implausibly low ``target_annual_vol`` (e.g. 0.001) bypass the
+        # implementability check entirely.
+        if kind == "volatility_target":
+            tav = getattr(ctx.spec.sizing, "target_annual_vol", None)
+            return (
+                self._warning(
+                    "Sizing realisability: volatility_target sizing requires "
+                    "realised vol and cannot be evaluated at readiness time. "
+                    f"Confirm target_annual_vol={tav!r} is sensible "
+                    "(typical range: 0.05–0.30)."
+                ),
+            )
+
+        # Resolve the universe to size against. ``_default_universe_for`` now
+        # raises on unknown asset classes (previously it silently fell back to
+        # ``OTHER_SYMBOLS``); surface that as a critical so the operator sees
+        # the misclassification instead of a sizing pass against an unrelated
+        # universe.
+        if ctx.spec.target_symbols:
+            symbols = list(ctx.spec.target_symbols)
+        else:
+            try:
+                symbols = _default_universe_for(ctx.spec.asset_class)
+            except ValueError as exc:
+                return (
+                    self._critical(
+                        f"Sizing realisability: {exc}. Set spec.target_symbols "
+                        "explicitly or pick a supported asset_class."
+                    ),
+                )
         if not symbols:
             return ()
         capital = config.initial_capital
@@ -374,7 +424,8 @@ class SpecReadinessGate(GateResultsMixin):
             elif kind == "fixed_notional":
                 notional = float(ctx.spec.sizing.notional_usd)
             else:
-                # volatility_target needs realised vol — cannot evaluate here.
+                # Unknown sizing kind — covered by spec_dsl validation, but
+                # be defensive: nothing further to evaluate.
                 continue
             qty = notional / price
             if qty < threshold or (not enforce_whole_lot and qty <= threshold):

@@ -289,7 +289,7 @@ class StrategyLabOrchestrator:
             )
         return float("nan")
 
-    def _record_gates(
+    def record_gates(
         self,
         results: List[QualityGateResult],
         all_gate_results: Optional[List[QualityGateResult]] = None,
@@ -321,7 +321,7 @@ class StrategyLabOrchestrator:
             all_gate_results.extend(results)
         return results
 
-    def _orchestrator_gate(
+    def build_orchestrator_gate(
         self,
         name: str,
         *,
@@ -559,7 +559,7 @@ class StrategyLabOrchestrator:
             spec, phase="design", backtest_config=config
         )
         pre_spec_gates.extend(readiness_design)
-        self._record_gates(pre_spec_gates, all_gate_results, refinement_round=-1)
+        self.record_gates(pre_spec_gates, all_gate_results, refinement_round=-1)
         pre_synthesis_criticals = [
             g for g in pre_spec_gates if not g.passed and g.severity == "critical"
         ]
@@ -619,7 +619,7 @@ class StrategyLabOrchestrator:
                 )
             code_gates = self.code_safety_checker.check(code, spec)
             round_gate_results.extend(code_gates)
-            self._record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
+            self.record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
 
             checks_total = len(round_gate_results)
             checks_passed = sum(1 for g in round_gate_results if g.passed)
@@ -693,7 +693,7 @@ class StrategyLabOrchestrator:
                 market_data = fetch.data
                 if not market_data:
                     all_gate_results.append(
-                        self._orchestrator_gate(
+                        self.build_orchestrator_gate(
                             "market_data",
                             phase="synthesis",
                             details=f"No market data available for asset class '{spec.asset_class}'.",
@@ -718,7 +718,7 @@ class StrategyLabOrchestrator:
                 fetch_coverage_gates = self.target_symbol_coverage_gate.check_fetch(
                     spec, requested_symbols, fetched_symbols
                 )
-                self._record_gates(
+                self.record_gates(
                     fetch_coverage_gates, all_gate_results, refinement_round=round_num
                 )
                 if any(not g.passed and g.severity == "critical" for g in fetch_coverage_gates):
@@ -730,7 +730,7 @@ class StrategyLabOrchestrator:
 
             if not exec_result.success:
                 all_gate_results.append(
-                    self._orchestrator_gate(
+                    self.build_orchestrator_gate(
                         "code_execution",
                         phase="synthesis",
                         details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr[:500]}",
@@ -785,7 +785,7 @@ class StrategyLabOrchestrator:
             # False at the acceptance gate (same precedent as the
             # max-refinement-rounds anomaly branch below).
             trade_coverage_gates = self.target_symbol_coverage_gate.check_trades(spec, trades)
-            self._record_gates(
+            self.record_gates(
                 trade_coverage_gates, all_gate_results, refinement_round=round_num
             )
             if any(not g.passed and g.severity == "critical" for g in trade_coverage_gates):
@@ -826,7 +826,7 @@ class StrategyLabOrchestrator:
                 diagnostics=exec_result.execution_diagnostics,
                 coverage_report=metrics.coverage_report,
             )
-            self._record_gates(anomaly_gates, all_gate_results, refinement_round=round_num)
+            self.record_gates(anomaly_gates, all_gate_results, refinement_round=round_num)
 
             critical_anomalies = [
                 g for g in anomaly_gates if not g.passed and g.severity == "critical"
@@ -994,7 +994,7 @@ class StrategyLabOrchestrator:
                     )
                 )
                 all_gate_results.append(
-                    self._orchestrator_gate(
+                    self.build_orchestrator_gate(
                         "trade_alignment",
                         phase="verification",
                         severity=gate_severity,  # type: ignore[arg-type]
@@ -1082,7 +1082,7 @@ class StrategyLabOrchestrator:
                 safety_gates = self.code_safety_checker.check(
                     proposed_code, proposed_spec, phase="verification"
                 )
-                self._record_gates(
+                self.record_gates(
                     safety_gates,
                     all_gate_results,
                     refinement_round=align_round,
@@ -1117,7 +1117,7 @@ class StrategyLabOrchestrator:
                 align_exec = run_strategy_code(proposed_code, market_data, config, strategy=spec)
                 if not align_exec.success:
                     all_gate_results.append(
-                        self._orchestrator_gate(
+                        self.build_orchestrator_gate(
                             "alignment_code_execution",
                             phase="verification",
                             details=(
@@ -1172,7 +1172,7 @@ class StrategyLabOrchestrator:
                     coverage_report=new_metrics.coverage_report,
                     phase="verification",
                 )
-                self._record_gates(
+                self.record_gates(
                     anomaly_gates,
                     all_gate_results,
                     refinement_round=align_round,
@@ -1370,7 +1370,7 @@ class StrategyLabOrchestrator:
             if fallback_criticals:
                 # Surface the upgraded severities so the persisted
                 # gate-result history reflects the true rejection reason.
-                self._record_gates(
+                self.record_gates(
                     fallback_anomalies, all_gate_results, gate_name_prefix="fallback_"
                 )
             # Gap 7 / 9: mirror the fallback gate's own verdict onto

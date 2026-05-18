@@ -1,19 +1,17 @@
 """Shared pytest fixtures for the investment_team test suite.
 
-Autouse-stubs the live ``MarketDataService.fetch_ohlcv`` lookup so the
-readiness price provider on ``StrategyLabOrchestrator`` sees a
-deterministic, finite price during tests. Without this, the production
-fail-closed path (``_readiness_price_provider`` returns ``NaN`` when the
-live service raises or returns no bars) trips ``SpecReadinessGate``
-Rule 5 in every test that builds a real orchestrator and calls
-``run_cycle`` — those tests never wanted to exercise the readiness
-sizing path and would otherwise short-circuit on a spurious critical.
+The ``stub_readiness_market_data_fetch`` fixture is **opt-in**: tests
+that build a real ``StrategyLabOrchestrator`` and drive ``run_cycle``
+without otherwise mocking the data layer request it explicitly. Making
+it autouse would mask the production fail-closed path in every
+integration test, defeating the very check ``_readiness_price_provider``
+implements (return ``NaN`` when the live service raises / returns no
+bars so ``SpecReadinessGate`` Rule 5 surfaces a critical instead of
+silently passing).
 
-Tests that explicitly need the fail-closed behaviour (e.g. the
-``_readiness_price_provider`` regression tests in
-``test_spec_readiness.py``) replace ``orch.market_data_service.fetch_ohlcv``
-per-instance after the fixture has run; those instance overrides take
-precedence over the class-level stub installed here.
+Tests that test the fail-closed path itself (regression tests in
+``test_spec_readiness.py``) must not request this fixture and instead
+override ``orch.market_data_service.fetch_ohlcv`` per-instance.
 """
 
 from __future__ import annotations
@@ -21,15 +19,16 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _stub_readiness_market_data_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture
+def stub_readiness_market_data_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Return a single synthetic OHLCV bar for any ``fetch_ohlcv`` call.
 
     Patches the class so every ``MarketDataService`` instance — including
     ones built inside ``StrategyLabOrchestrator.__init__`` — picks up the
     stub before the orchestrator's ``_readiness_price_provider`` reaches
     it. Tests that need a different return can override the instance
-    attribute (``orch.market_data_service.fetch_ohlcv = ...``).
+    attribute (``orch.market_data_service.fetch_ohlcv = ...``) after the
+    fixture has run.
     """
     from investment_team.market_data_service import MarketDataService, OHLCVBar
 

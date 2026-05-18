@@ -266,6 +266,44 @@ def test_default_universe_for_futures_and_forex() -> None:
     assert _default_universe_for("forex") == list(FOREX_SYMBOLS)
 
 
+def test_default_universe_for_raises_on_unknown_asset_class() -> None:
+    """Unknown asset classes must raise instead of silently returning ETF list."""
+    import pytest
+
+    from investment_team.strategy_lab.quality_gates.spec_readiness import _default_universe_for
+
+    with pytest.raises(ValueError, match="unknown asset_class 'bonds'"):
+        _default_universe_for("bonds")
+
+
+def test_rule5_unknown_asset_class_is_critical() -> None:
+    """A typo'd asset_class with empty target_symbols emits a Rule 5 critical."""
+    spec = _spec(
+        asset_class="bonds",
+        target_symbols=[],
+        timeframe="1d",
+        hypothesis="generic mean reversion",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("unknown asset_class" in c for c in _critical(results))
+
+
+def test_rule5_volatility_target_emits_warning() -> None:
+    """Vol-target sizing cannot be evaluated statically — surface as warning."""
+    from investment_team.strategy_lab.spec_dsl import VolatilityTargetSizing
+
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        target_symbols=["AAPL"],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("volatility_target" in w and "0.15" in w for w in warnings), warnings
+    # No critical from Rule 5 (the rule abstained, not failed).
+    sizing_criticals = [c for c in _critical(results) if "Sizing" in c or "qty=" in c]
+    assert not sizing_criticals, sizing_criticals
+
+
 def test_rule5_accepts_fractional_qty_on_crypto() -> None:
     """Crypto specs accept fractional positions — 0.1 BTC is implementable."""
     spec = _spec(

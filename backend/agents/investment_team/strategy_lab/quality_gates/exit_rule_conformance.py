@@ -70,7 +70,24 @@ class ExitRuleConformanceGate(GateResultsMixin):
         timeframe: str = "1d",
         phase: StrategyLabPhase = "verification",
     ) -> List[QualityGateResult]:
-        self._set_phase(phase)
+        with self._using_phase(phase):
+            return self._check_body(
+                exit_rules=exit_rules,
+                trades=trades,
+                diagnostics=diagnostics,
+                config=config,
+                timeframe=timeframe,
+            )
+
+    def _check_body(
+        self,
+        *,
+        exit_rules: Sequence[ExitRule],
+        trades: Sequence[TradeRecord],
+        diagnostics: Optional[BacktestExecutionDiagnostics],
+        config: BacktestConfig,
+        timeframe: str,
+    ) -> List[QualityGateResult]:
         if not exit_rules:
             return [
                 self._info("spec.exit_rules empty; engine-enforcement check skipped.")

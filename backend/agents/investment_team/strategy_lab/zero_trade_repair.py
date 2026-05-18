@@ -15,8 +15,8 @@ sub-pipeline now; the orchestrator instantiates one repairer in
 at the single call site.
 
 The orchestrator is passed in by reference and the repairer reads the
-gate instances and helper methods (``_record_gates``,
-``_orchestrator_gate``) off it — no API surface is duplicated, but the
+gate instances and helper methods (``record_gates``,
+``build_orchestrator_gate``) off it — no API surface is duplicated, but the
 ~340 lines of branching now sit in their own module with their own test
 boundary.
 """
@@ -118,7 +118,7 @@ class ZeroTradeRepairer:
 
     def __init__(self, orchestrator: "StrategyLabOrchestrator") -> None:
         # Pre: orchestrator is non-None; the repairer reads gate instances
-        # and helper methods (``_record_gates``, ``_orchestrator_gate``) off
+        # and helper methods (``record_gates``, ``build_orchestrator_gate``) off
         # it. No duplication of those collaborators here.
         assert orchestrator is not None, "orchestrator must be supplied"
         self._orch = orchestrator
@@ -215,7 +215,7 @@ class ZeroTradeRepairer:
         # ── Code-safety gate on the proposed code ────────────────────
         # Stamp-only: the caller persists ``safety_gates`` via the outcome's
         # ``new_gates=`` so the orchestrator's running list is not extended here.
-        safety_gates = orch._record_gates(
+        safety_gates = orch.record_gates(
             orch.code_safety_checker.check(report.proposed_code, spec),
             refinement_round=round_num,
             gate_name_prefix="zero_trade_repair_",
@@ -269,7 +269,7 @@ class ZeroTradeRepairer:
             # forward (the ValidationError path below would otherwise drop
             # the audit trail even though the warning was logged).
             dropped_keys_gates = [
-                orch._orchestrator_gate(
+                orch.build_orchestrator_gate(
                     "zero_trade_repair_dropped_spec_keys",
                     phase="synthesis",
                     severity="warning",
@@ -327,7 +327,7 @@ class ZeroTradeRepairer:
             # Zero-trade repair runs inside the synthesis refinement loop —
             # re-validate the patched spec under that phase rather than design.
             # Stamp-only; the caller persists via the outcome's ``new_gates=``.
-            post_repair_spec_gates = orch._record_gates(
+            post_repair_spec_gates = orch.record_gates(
                 orch.strategy_validator.validate(proposed_spec, phase="synthesis"),
                 refinement_round=round_num,
                 gate_name_prefix="zero_trade_repair_",
@@ -365,7 +365,7 @@ class ZeroTradeRepairer:
             report.proposed_code, market_data, config, strategy=proposed_spec
         )
         if not repair_exec.success:
-            failure_gate = orch._orchestrator_gate(
+            failure_gate = orch.build_orchestrator_gate(
                 "zero_trade_repair_code_execution",
                 phase="synthesis",
                 details=(
@@ -411,7 +411,7 @@ class ZeroTradeRepairer:
 
         # ── Anomaly recheck ──────────────────────────────────────────
         # Stamp-only; ``new_gates`` is persisted by the caller via the outcome.
-        new_anomaly_gates = orch._record_gates(
+        new_anomaly_gates = orch.record_gates(
             orch.anomaly_detector.check(
                 new_metrics,
                 new_trades,

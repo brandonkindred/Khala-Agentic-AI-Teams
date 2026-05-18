@@ -51,8 +51,16 @@ class AcceptanceGate(GateResultsMixin):
         want to adjust the DSR threshold based on cumulative trial count; the
         DSR itself is already deflated upstream.
         """
-        self._set_phase(phase)
+        with self._using_phase(phase):
+            return self._evaluate(result, config, n_trials=n_trials)
 
+    def _evaluate(
+        self,
+        result: BacktestResult,
+        config: BacktestConfig,
+        *,
+        n_trials: Optional[int],
+    ) -> List[QualityGateResult]:
         missing: List[str] = []
         if result.oos_sharpe is None:
             missing.append("oos_sharpe")
