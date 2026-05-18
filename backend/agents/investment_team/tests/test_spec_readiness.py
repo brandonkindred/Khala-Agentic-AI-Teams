@@ -232,6 +232,40 @@ def test_rule5_sizing_under_one_share_is_critical() -> None:
     assert any("qty=" in c and "AAPL" in c for c in _critical(results))
 
 
+def test_rule5_exactly_one_whole_lot_passes_for_stocks() -> None:
+    """A notional spec yielding qty=1.0 on stocks is implementable."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=100.0),
+        target_symbols=["AAPL"],
+        asset_class="stocks",
+    )
+    # Default provider returns $100/share; 100 / 100 = 1.0 exactly.
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    sizing_failures = [c for c in _critical(results) if "qty=" in c]
+    assert not sizing_failures, sizing_failures
+
+
+def test_rule5_nan_price_fails_closed() -> None:
+    """A provider returning NaN must trip Rule 5 — fail closed."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=1000.0),
+        target_symbols=["AAPL"],
+        asset_class="stocks",
+    )
+    gate = SpecReadinessGate(market_sample_provider=lambda sym: float("nan"))
+    results = gate.validate(spec, backtest_config=_config())
+    assert any("no usable price sample" in c for c in _critical(results))
+
+
+def test_default_universe_for_futures_and_forex() -> None:
+    """`_default_universe_for` must return matching asset-class symbols."""
+    from investment_team.strategy_lab.quality_gates.spec_readiness import _default_universe_for
+    from investment_team.symbols import FOREX_SYMBOLS, FUTURES_SYMBOLS
+
+    assert _default_universe_for("futures") == list(FUTURES_SYMBOLS)
+    assert _default_universe_for("forex") == list(FOREX_SYMBOLS)
+
+
 def test_rule5_accepts_fractional_qty_on_crypto() -> None:
     """Crypto specs accept fractional positions — 0.1 BTC is implementable."""
     spec = _spec(

@@ -11,6 +11,7 @@ escalates a subset of the overlapping items to critical severity.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Callable, Iterator, List, Optional
 
@@ -116,6 +117,10 @@ def _default_universe_for(asset_class: str) -> List[str]:
         out = list(CRYPTO_SYMBOLS)
     elif ac == "commodities":
         out = list(COMMODITY_SYMBOLS)
+    elif ac == "forex":
+        out = list(FOREX_SYMBOLS)
+    elif ac == "futures":
+        out = list(FUTURES_SYMBOLS)
     else:
         out = list(OTHER_SYMBOLS)
 
@@ -459,8 +464,10 @@ class SpecReadinessGate:
             try:
                 price = float(self._market_sample_provider(sym))
             except Exception:
-                price = 0.0
-            if price <= 0:
+                price = float("nan")
+            # Fail closed on NaN / +inf / -inf — the gate cannot validate
+            # sizing without a finite positive price.
+            if not math.isfinite(price) or price <= 0:
                 out.append(
                     QualityGateResult(
                         gate_name=GATE,
@@ -468,7 +475,7 @@ class SpecReadinessGate:
                         passed=False,
                         severity="critical",
                         details=(
-                            f"Sizing realisability: no positive price sample "
+                            f"Sizing realisability: no usable price sample "
                             f"for '{sym}' (got {price!r})."
                         ),
                     )
@@ -484,10 +491,11 @@ class SpecReadinessGate:
             else:
                 continue
             qty = notional / price
-            # Crypto/forex accept fractional positions, so anything > 0 is fine.
-            # Stocks/futures/commodities are rejected when qty < 1.
+            # Crypto/forex accept any positive position (threshold 0, strict >).
+            # Stocks/futures/commodities require at least one whole unit;
+            # qty == 1.0 exactly is implementable, so the comparison is strict.
             threshold = 1.0 if enforce_whole_lot else 0.0
-            if qty <= threshold:
+            if qty < threshold or (not enforce_whole_lot and qty <= threshold):
                 out.append(
                     QualityGateResult(
                         gate_name=GATE,
