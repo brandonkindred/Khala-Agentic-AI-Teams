@@ -337,7 +337,13 @@ class ProcessDesignerAgent:
         from strands import Agent
 
         agent = Agent(
-            model=get_strands_model("agentic_team_provisioning"),
+            # response_format="text": this assistant produces a conversational
+            # reply with embedded ```process / ```agents / ```suggestions code
+            # blocks that downstream parsers strip out (_parse_process_json,
+            # _parse_agents_json, _parse_suggestions, _strip_code_blocks).
+            # JSON mode would force the entire response into a single object
+            # and the prose + block pattern would disappear.
+            model=get_strands_model("agentic_team_provisioning", response_format="text"),
             system_prompt=system_prompt,
         )
         result = agent(prompt)

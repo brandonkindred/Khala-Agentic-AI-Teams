@@ -1203,10 +1203,14 @@ class BlogWriterAgent:
             draft=draft,
         )
         try:
+            # NOTE: text mode (the ``_call_agent`` default). The prompt asks
+            # for a top-level JSON *array* but Ollama's JSON mode constrains
+            # output to ``json_object`` (object-shaped), so forcing
+            # ``expect_json=True`` here can produce wrapped/empty results.
+            # The slicer below extracts ``[...]`` from prose regardless.
             raw = self._call_agent(
                 prompt,
                 system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
-                expect_json=True,
             )
             cleaned = raw.strip()
             start = cleaned.find("[")
