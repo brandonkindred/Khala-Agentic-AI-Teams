@@ -853,6 +853,16 @@ class StrategyLabOrchestrator:
         # persisted record alongside the LLM alignment verdict; the alignment
         # agent's prompt (now treating exit rules as engine-enforced) reads
         # the same trade ledger and reaches a compatible verdict.
+        #
+        # ``exit_rule_conformance_passed`` vetos ``is_winning`` below: a
+        # critical failure here means the engine's per-bar enforcement
+        # leaked (e.g. a trade overshot a structured stop-loss floor by
+        # more than slippage tolerance, or held past ``TimeStop.n_bars+1``).
+        # That's an engine-side correctness bug, not a strategy-code bug,
+        # so refinement won't fix it — but we must NOT publish the run as
+        # winning even if the LLM alignment agent later agrees the trades
+        # look reasonable.
+        exit_rule_conformance_passed = True
         if execution_succeeded and trades:
             conformance_gate = ExitRuleConformanceGate()
             conformance_results = conformance_gate.check(
@@ -863,6 +873,9 @@ class StrategyLabOrchestrator:
                 timeframe=spec.timeframe,
             )
             all_gate_results.extend(conformance_results)
+            exit_rule_conformance_passed = not any(
+                (not r.passed) and r.severity == "critical" for r in conformance_results
+            )
 
         if execution_succeeded and trades and market_data is not None:
             for align_round in range(MAX_ALIGNMENT_ROUNDS):
@@ -1211,7 +1224,12 @@ class StrategyLabOrchestrator:
         upstream_admitted = False
         if acceptance_results:
             acceptance_passed = all(r.passed for r in acceptance_results)
-            is_winning = execution_succeeded and acceptance_passed and trades_aligned
+            is_winning = (
+                execution_succeeded
+                and acceptance_passed
+                and trades_aligned
+                and exit_rule_conformance_passed
+            )
             upstream_admitted = acceptance_passed
         elif walk_forward_failed and execution_succeeded:
             fallback_anomalies = self.anomaly_detector.check(
@@ -1224,7 +1242,12 @@ class StrategyLabOrchestrator:
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
             ]
             return_ok = metrics.annualized_return_pct > WINNING_THRESHOLD
-            is_winning = return_ok and not fallback_criticals and trades_aligned
+            is_winning = (
+                return_ok
+                and not fallback_criticals
+                and trades_aligned
+                and exit_rule_conformance_passed
+            )
             upstream_admitted = return_ok and not fallback_criticals
             if fallback_criticals:
                 # Surface the upgraded severities so the persisted
@@ -1291,6 +1314,37 @@ class StrategyLabOrchestrator:
         # skipped entirely when ``market_data is None``, in which case
         # ``trades_aligned`` is False for unrelated reasons and an
         # ``alignment_failed`` suffix would be misleading.
+        # Issue #527 — surface a conformance-veto reason on
+        # ``acceptance_reason`` so the audit trail explains why publication
+        # was blocked when the deterministic exit-rule gate fired. Mirrors
+        # the alignment-failure suffix logic below: replace a stale
+        # success-style reason from an upstream admit, append to a
+        # real upstream rejection.
+        if execution_succeeded and trades and not exit_rule_conformance_passed:
+            conformance_criticals = [
+                r
+                for r in all_gate_results
+                if r.gate_name == "exit_rule_conformance"
+                and not r.passed
+                and r.severity == "critical"
+            ]
+            detail = "; ".join(r.details for r in conformance_criticals)
+            conformance_suffix = (
+                f"exit_rule_conformance_failed: {detail}"
+                if detail
+                else "exit_rule_conformance_failed: engine enforcement leaked"
+            )
+            prior_reason = (metrics.acceptance_reason or "").strip()
+            if prior_reason and not upstream_admitted:
+                combined = f"{prior_reason} | {conformance_suffix}"
+            else:
+                combined = conformance_suffix
+            metrics = metrics.model_copy(update={"acceptance_reason": combined})
+            # Future replacement by the alignment-suffix block sees the
+            # conformance reason as the "prior" reason and will append
+            # rather than overwrite when both gates rejected.
+            upstream_admitted = False
+
         if execution_succeeded and trades and alignment_reports and not trades_aligned:
             last_report = alignment_reports[-1]
             # NOTE: do NOT name this ``rationale`` — that shadows the
