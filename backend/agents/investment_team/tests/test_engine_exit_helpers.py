@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Dict
 
 from investment_team.models import BacktestConfig
-from investment_team.strategy_lab.spec_dsl import StopLossRule
+from investment_team.strategy_lab.spec_dsl import StopLossRule, TakeProfitRule
 from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio, Position
 from investment_team.trading_service.service import (
@@ -105,13 +105,15 @@ def test_tracker_resets_when_position_identity_changes() -> None:
     """Same-bar exit + re-entry replaces the underlying ``Position`` with a
     new ``entry_order_id``. The tracker must reset trailing watermarks
     against the new entry — not carry the prior trade's stale state,
-    which could fire a trailing-stop immediately.
+    which could fire a trailing-stop immediately. The fresh entry is
+    flagged ``just_opened`` so rule evaluation skips this bar.
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
             side="long",
             entry_price=100.0,
             entry_order_id="o1",
+            just_opened=False,
             high_since_entry=120.0,
             low_since_entry=95.0,
         )
@@ -135,21 +137,26 @@ def test_tracker_resets_when_position_identity_changes() -> None:
     state = tracker["AAA"]
     assert state.entry_order_id == "o2"
     assert state.entry_price == 110.0
-    assert state.high_since_entry == 112.0
-    assert state.low_since_entry == 109.0
+    assert state.just_opened is True
+    # Watermarks initialised at entry_price, NOT the bar's full OHLC, so
+    # pre-entry extremes can't drive same-bar rule evaluation later.
+    assert state.high_since_entry == 110.0
+    assert state.low_since_entry == 110.0
 
 
 def test_tracker_carries_over_when_entry_order_id_unchanged() -> None:
     """Same ``entry_order_id`` → same trade. Weighted-average entry refresh
-    from scale-ins; watermarks extend.
+    from scale-ins; watermarks extend; ``just_opened`` flips to False on
+    the first carry-over bar.
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
             side="long",
             entry_price=100.0,
             entry_order_id="o1",
-            high_since_entry=105.0,
-            low_since_entry=98.0,
+            just_opened=True,
+            high_since_entry=100.0,
+            low_since_entry=100.0,
         )
     }
     # Same entry_order_id but ``Portfolio.extend`` would have updated
@@ -171,6 +178,7 @@ def test_tracker_carries_over_when_entry_order_id_unchanged() -> None:
 
     state = tracker["AAA"]
     assert state.entry_order_id == "o1"
+    assert state.just_opened is False  # first post-entry bar
     assert state.entry_price == 102.5  # scale-in refresh
     assert state.high_since_entry == 108.0  # extends
     assert state.low_since_entry == 97.0  # extends
@@ -182,6 +190,7 @@ def test_tracker_drops_entry_when_position_closed() -> None:
             side="long",
             entry_price=100.0,
             entry_order_id="o1",
+            just_opened=False,
             high_since_entry=110.0,
             low_since_entry=95.0,
         )
@@ -209,6 +218,7 @@ def _populate_tracker_and_portfolio() -> tuple[Dict[str, _TrackedPosition], Port
             side="long",
             entry_price=100.0,
             entry_order_id="o1",
+            just_opened=False,
             high_since_entry=110.0,
             low_since_entry=95.0,
         )
@@ -519,3 +529,188 @@ def test_engine_does_not_bind_same_side_resting_orders() -> None:
 
     # Same-side resting order stays unbound — it isn't a close.
     assert add_po.working_against_entry_order_id is None
+
+
+def test_engine_binds_same_bar_queued_strategy_exits_too() -> None:
+    """A strategy that emits an opposite-side GTC/limit close on the SAME
+    bar the engine fires a stop-loss queues the order in
+    ``pending_for_prev`` — it isn't on the book yet, so the resting-order
+    binding loop misses it. Without binding here too, the strategy's
+    close gets submitted unbound on the next bar, survives the engine's
+    close-fill, and can later open a reverse position. The fix routes
+    the binding through ``engine_exit_bindings`` so the submit step
+    stamps ``working_against_entry_order_id`` on its ``PendingOrder``.
+    """
+    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)  # trips the 98 stop floor
+    result = TradingServiceResult()
+
+    # Strategy queues a SELL LIMIT at 150 on the same bar — not yet on the book.
+    queued_strategy_exit = OrderRequest(
+        client_order_id="c-queued",
+        symbol="AAA",
+        side=OrderSide.SHORT,
+        qty=100.0,
+        order_type=OrderType.LIMIT,
+        limit_price=150.0,
+        tif=TimeInForce.GTC,
+        reason="strategy_take_profit",
+    )
+    pending: list[OrderRequest] = [queued_strategy_exit]
+    engine_exit_bindings: Dict[str, str] = {}
+
+    svc._maybe_emit_engine_exits(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+        engine_order_seq=0,
+        engine_exit_bindings=engine_exit_bindings,
+    )
+
+    # Engine emitted its stop-loss close AND registered a binding for the
+    # strategy's same-bar queued limit. When the submit step processes
+    # ``pending_for_prev`` on the next bar, both orders get
+    # ``working_against_entry_order_id`` stamped → the stale-continuation
+    # guard drops the survivor when the engine close fills first.
+    assert "c-queued" in engine_exit_bindings
+    assert engine_exit_bindings["c-queued"] == "o1"
+
+
+def test_engine_does_not_bind_same_bar_same_side_queued_orders() -> None:
+    """Symmetric to the resting-order carve-out: a same-bar same-side
+    queued order (a scale-in entry) must NOT be bound to the position.
+    """
+    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)
+    result = TradingServiceResult()
+
+    queued_add = OrderRequest(
+        client_order_id="c-add",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=50.0,
+        order_type=OrderType.LIMIT,
+        limit_price=80.0,
+        tif=TimeInForce.GTC,
+        reason="strategy_scale_in",
+    )
+    pending: list[OrderRequest] = [queued_add]
+    engine_exit_bindings: Dict[str, str] = {}
+
+    svc._maybe_emit_engine_exits(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+        engine_order_seq=0,
+        engine_exit_bindings=engine_exit_bindings,
+    )
+
+    # The engine's own emission gets a binding; the same-side scale-in does not.
+    engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
+    engine_cid = engine_orders[0].client_order_id
+    assert engine_cid in engine_exit_bindings
+    assert "c-add" not in engine_exit_bindings
+
+
+def test_engine_skips_rule_eval_on_entry_bar() -> None:
+    """A limit-filled entry that lands mid-bar shares an OHLC bar with
+    price action from BEFORE the fill. If the engine evaluated rules on
+    that bar against ``bar.high`` / ``bar.low``, a take-profit could
+    fire from a pre-entry high (e.g. buy limit at 95 filled by a bar
+    with high=110 instantly trips TakeProfit(pct=0.05) → target=99.75).
+    ``just_opened=True`` skips rule eval entirely on the entry bar; the
+    next bar's tracker update clears the flag and rule eval resumes.
+    """
+    svc = _service(exit_rules=[TakeProfitRule(pct=0.05)])
+    # Position entered at 95, bar.high=110 would trip a take-profit at
+    # 95 * 1.05 = 99.75 if not gated by just_opened.
+    tracker = {
+        "AAA": _TrackedPosition(
+            side="long",
+            entry_price=95.0,
+            entry_order_id="o1",
+            just_opened=True,
+            high_since_entry=95.0,
+            low_since_entry=95.0,
+        )
+    }
+    portfolio = _portfolio_with(
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=100,
+        entry_price=95.0,
+        entry_order_id="o1",
+    )
+    order_book = OrderBook()
+    bar = _bar(high=110.0, low=95.0, close=105.0)
+    result = TradingServiceResult()
+
+    pending: list[OrderRequest] = []
+    svc._maybe_emit_engine_exits(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+        engine_order_seq=0,
+        engine_exit_bindings={},
+    )
+
+    # No engine emission — the entry bar is gated even though bar.high
+    # nominally clears the take-profit target. Rule eval resumes once
+    # the next bar flips just_opened to False.
+    assert pending == []
+    assert result.execution_diagnostics.exit_rule_firings == {}
+
+
+def test_engine_runs_rules_normally_after_first_post_entry_bar() -> None:
+    """Counterpart to ``test_engine_skips_rule_eval_on_entry_bar``: once
+    ``just_opened`` is False, take-profit / stop-loss evaluate against
+    the bar's OHLC as expected.
+    """
+    svc = _service(exit_rules=[TakeProfitRule(pct=0.05)])
+    tracker = {
+        "AAA": _TrackedPosition(
+            side="long",
+            entry_price=95.0,
+            entry_order_id="o1",
+            just_opened=False,  # first post-entry bar
+            high_since_entry=95.0,
+            low_since_entry=95.0,
+        )
+    }
+    portfolio = _portfolio_with(
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=100,
+        entry_price=95.0,
+        entry_order_id="o1",
+    )
+    order_book = OrderBook()
+    # Same bar shape as the entry-bar test, but now post-entry.
+    bar = _bar(high=110.0, low=95.0, close=105.0)
+    result = TradingServiceResult()
+
+    pending: list[OrderRequest] = []
+    svc._maybe_emit_engine_exits(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+        engine_order_seq=0,
+        engine_exit_bindings={},
+    )
+
+    # Take-profit fires off the bar's high.
+    assert result.execution_diagnostics.exit_rule_firings.get("take_profit") == 1

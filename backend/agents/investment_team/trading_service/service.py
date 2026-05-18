@@ -76,11 +76,19 @@ class _TrackedPosition:
     :meth:`TradingService._update_position_tracker` detects that and starts
     fresh, so a stale trailing watermark can't fire a rule on the
     brand-new trade.
+
+    ``just_opened`` is ``True`` on the bar a position first appears.
+    :meth:`TradingService._maybe_emit_engine_exits` skips rule evaluation
+    while this flag is set so the entry bar's pre-fill price action (a
+    limit fill at ``bar.low`` doesn't entitle a take-profit to fire from
+    a pre-entry ``bar.high``) can't queue impossible close orders. The
+    next bar's tracker update clears the flag.
     """
 
     side: str  # "long" | "short"
     entry_price: float
     entry_order_id: str
+    just_opened: bool
     high_since_entry: float
     low_since_entry: float
 
@@ -1297,6 +1305,10 @@ class TradingService:
             # evaluate against the position's current basis rather than
             # the first slice's price.
             existing.entry_price = pos.entry_price
+            # First carry-over bar — the position has now seen a full bar
+            # of post-entry price action and rule evaluation can use the
+            # bar's high/low.
+            existing.just_opened = False
             if cur_bar.high > existing.high_since_entry:
                 existing.high_since_entry = cur_bar.high
             if cur_bar.low < existing.low_since_entry:
@@ -1304,14 +1316,21 @@ class TradingService:
         else:
             # Fresh entry this bar — either truly first entry, or a same-bar
             # exit + re-entry replaced the prior position (different
-            # ``entry_order_id``). Reset watermarks so a stale trailing high
-            # doesn't fire a rule against the new trade.
+            # ``entry_order_id``). Initialise watermarks at ``entry_price``
+            # rather than the entry bar's full OHLC: for a limit / stop
+            # entry filled mid-bar, the bar's high/low may include price
+            # action from BEFORE the fill, and using it would let
+            # take-profit / trailing-stop rules queue impossible closes
+            # off pre-entry extremes. ``just_opened=True`` keeps rule
+            # evaluation off this bar entirely; the next bar extends the
+            # watermarks normally.
             tracker[sym] = _TrackedPosition(
                 side=("long" if pos.side == OrderSide.LONG else "short"),
                 entry_price=pos.entry_price,
                 entry_order_id=pos.entry_order_id,
-                high_since_entry=cur_bar.high,
-                low_since_entry=cur_bar.low,
+                just_opened=True,
+                high_since_entry=pos.entry_price,
+                low_since_entry=pos.entry_price,
             )
 
     def _maybe_emit_engine_exits(
@@ -1362,6 +1381,14 @@ class TradingService:
             return engine_order_seq
 
         tracked = position_tracker[sym]
+        # Skip the entry bar: for a limit / stop fill landing mid-bar, the
+        # bar's full OHLC may include price action from before the entry
+        # filled, and rule evaluation off ``bar.high`` / ``bar.low`` could
+        # queue impossible closes (e.g. take-profit firing from a
+        # pre-entry high). The next bar's tracker update clears
+        # ``just_opened`` and rule evaluation resumes normally.
+        if tracked.just_opened:
+            return engine_order_seq
         tracked_side: str = tracked.side
 
         # Skip if a prior bar's engine market exit is still pending on the
@@ -1441,6 +1468,26 @@ class TradingService:
                     # Same-side resting order is an add, not a close — leave alone.
                     continue
                 resting.working_against_entry_order_id = pos.entry_order_id
+            # Same-bar pending strategy exits live in ``pending_for_prev``,
+            # not yet on the order book — they get submitted at the top of
+            # the next bar. Without binding them here too, a strategy
+            # GTC/limit close queued on the bar the engine fires would
+            # become an unbound resting order next bar, surviving the
+            # engine's close-fill and later opening a reverse position
+            # exactly like the resting-order scenario above. Routing the
+            # binding through ``engine_exit_bindings`` so the submit step
+            # stamps ``working_against_entry_order_id`` on the resulting
+            # ``PendingOrder`` works for both engine emissions and these
+            # piggybacked strategy orders.
+            for queued in pending_for_prev:
+                if queued.symbol != sym:
+                    continue
+                if queued.client_order_id in engine_exit_bindings:
+                    continue
+                queued_side = "long" if queued.side == OrderSide.LONG else "short"
+                if queued_side == tracked_side:
+                    continue
+                engine_exit_bindings[queued.client_order_id] = pos.entry_order_id
             result.execution_diagnostics.orders_emitted += 1
             result.execution_diagnostics.exits_emitted += 1
             firings = result.execution_diagnostics.exit_rule_firings
