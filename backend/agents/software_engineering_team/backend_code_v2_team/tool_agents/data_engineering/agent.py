@@ -53,7 +53,11 @@ class DataEngineeringToolAgent:
     def __init__(self, llm=None) -> None:
         from strands.models.model import Model as _StrandsModel
 
-        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
+        self._model = (
+            llm
+            if (llm is not None and isinstance(llm, _StrandsModel))
+            else get_strands_model(response_format="text")
+        )
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
