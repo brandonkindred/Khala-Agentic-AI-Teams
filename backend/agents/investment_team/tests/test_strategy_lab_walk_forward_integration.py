@@ -201,6 +201,15 @@ def _orchestrator(
     orch = StrategyLabOrchestrator()
     if market_data_service is not None:
         orch.market_data_service = market_data_service  # type: ignore[assignment]
+    # The stub market-data service implements ``fetch_multi_symbol_range``
+    # but not ``fetch_ohlcv``; ``_readiness_price_provider`` would raise on
+    # the attribute miss and (now that the provider fails closed) return
+    # ``NaN``, tripping SpecReadinessGate Rule 5 before the test's
+    # walk-forward path can run. Stamp a fixed sentinel directly on the
+    # gate's bound slot so readiness sees a usable price.
+    orch.spec_readiness_gate._market_sample_provider = (
+        lambda symbol, asset_class: 100.0
+    )
     return orch
 
 
@@ -707,6 +716,19 @@ def _wire_run_cycle_stubs(
     """
     from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
     from investment_team.strategy_lab.orchestrator import _MarketDataFetch
+
+    # ``_readiness_price_provider`` now fails closed (NaN) when the live
+    # ``MarketDataService.fetch_ohlcv`` returns no bars, so without a stub
+    # SpecReadinessGate's Rule 5 critical short-circuits the design phase
+    # before any test reaches the walk-forward path it exercises. Replace
+    # the gate's bound provider with a fixed sentinel so readiness sees a
+    # usable price and the test can drive the rest of the cycle. We poke
+    # the gate's slot directly because the bound reference was captured
+    # at ``__init__`` time — patching ``orch._readiness_price_provider``
+    # alone does not redirect it.
+    orch.spec_readiness_gate._market_sample_provider = (
+        lambda symbol, asset_class: 100.0
+    )
 
     spec_dict = {
         "asset_class": "stocks",
