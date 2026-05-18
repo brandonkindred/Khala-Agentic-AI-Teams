@@ -183,6 +183,72 @@ def test_branding_assistant_agent_handles_extraction_failure_gracefully() -> Non
     assert len(suggested_questions) >= 1
 
 
+def test_branding_assistant_agent_legacy_llm_kwarg_drives_both_stages() -> None:
+    """Backward-compat: the legacy ``llm=`` kwarg must route to BOTH stages.
+
+    Regression: a previous iteration only assigned ``llm`` to the conversation
+    stage, leaving extraction to construct a real Strands ``Agent`` against
+    the live LLM service. Offline / unit-test callers that injected a fake
+    via ``llm=`` then hit a real network call on extraction. The fake must
+    drive both stages so tests stay hermetic.
+    """
+    fake_llm = MagicMock()
+
+    def _side_effect(prompt: str) -> str:
+        # Conversation stage gets the chatty prompt template; extractor gets
+        # the EXTRACTION_USER_TEMPLATE which references "Strategist's reply".
+        if "Strategist's reply" in prompt:
+            return json.dumps(
+                {
+                    "mission_update": {"company_name": "Acme"},
+                    "suggested_questions": ["What does Acme do?"],
+                }
+            )
+        return "Acme — got it. What's the work you want to be known for?"
+
+    fake_llm.side_effect = _side_effect
+    agent = BrandingAssistantAgent(llm=fake_llm)
+    mission = BrandingMission(
+        company_name="TBD", company_description="To be discussed.", target_audience="TBD"
+    )
+
+    reply, updated_mission, suggested_questions = agent.respond(
+        messages=[], current_mission=mission, user_message="We're Acme"
+    )
+
+    # Both stages used the injected fake — no real Strands Agent constructed.
+    assert fake_llm.call_count == 2
+    assert "Acme" in reply
+    assert updated_mission.company_name == "Acme"
+    assert suggested_questions == ["What does Acme do?"]
+
+
+def test_branding_assistant_agent_explicit_kwargs_override_legacy_llm() -> None:
+    """Explicit ``conversation_llm`` / ``extraction_llm`` kwargs take precedence
+    over the legacy ``llm=`` shim so callers can still inject distinct backends.
+    """
+    explicit_conv = MagicMock(return_value="Explicit conversation reply.")
+    explicit_extract = MagicMock(return_value=json.dumps({"mission_update": {}}))
+    legacy = MagicMock(return_value="should not be called")
+
+    agent = BrandingAssistantAgent(
+        conversation_llm=explicit_conv,
+        extraction_llm=explicit_extract,
+        llm=legacy,
+    )
+    agent.respond(
+        messages=[],
+        current_mission=BrandingMission(
+            company_name="TBD", company_description="To be discussed.", target_audience="TBD"
+        ),
+        user_message="Hi",
+    )
+
+    explicit_conv.assert_called_once()
+    explicit_extract.assert_called_once()
+    legacy.assert_not_called()
+
+
 def test_branding_assistant_agent_handles_conversation_llm_failure() -> None:
     conversation_llm = MagicMock(side_effect=Exception("LLM unavailable"))
     extraction_llm = MagicMock()

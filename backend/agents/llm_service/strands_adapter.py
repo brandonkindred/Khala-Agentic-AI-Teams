@@ -23,16 +23,24 @@ Design notes
   not stall the event loop.
 * Strands message format is Bedrock-style (``list[Message]`` with
   ``ContentBlock`` items). The adapter flattens these to the OpenAI-compatible
-  chat shape that ``LLMClient.chat_round`` accepts.
+  chat shape that ``LLMClient.{chat_json_round,chat_round}`` accept.
 * Tool specs are translated from Strands ``ToolSpec`` to the OpenAI
   ``{"type": "function", "function": {...}}`` shape used by
-  ``LLMClient.{complete_json,chat_round}``.
-* Responses from ``chat_round`` are replayed as a short synthetic stream:
+  ``LLMClient.{complete_json,chat_json_round,chat_round}``.
+* Responses are replayed as a short synthetic stream:
   ``messageStart`` → one ``contentBlockDelta`` (text or tool use) → ``messageStop``.
   This matches what Strands' ``Agent`` loop expects without requiring the
-  underlying client to actually stream. ``chat_round`` returns prose (no JSON
-  parsing); the structured-output path is handled separately via
-  ``structured_output`` below.
+  underlying client to actually stream.
+* ``response_format`` selects the backing call:
+  - ``"json"`` (default) → ``chat_json_round`` — forces JSON output on the
+    wire and parses the result. This preserves backward compatibility for the
+    many Strands agents that ask for JSON in their system prompt and then
+    ``json.loads`` the assistant content (e.g. ``RoutePlannerAgent``).
+  - ``"text"`` → ``chat_round`` — free-form prose; no ``response_format`` is
+    forced and no JSON parsing is attempted. Use this only for conversational
+    agents whose replies should be natural language (e.g. branding assistant).
+  The structured-output path (``structured_output``) is unaffected and always
+  uses ``complete_json``.
 """
 
 from __future__ import annotations
@@ -192,6 +200,13 @@ class LLMClientModel(Model):
         Default sampling parameters applied to every ``stream`` /
         ``structured_output`` call. Overridable per-call via ``update_config``
         or ``invocation_state``.
+    response_format:
+        Either ``"json"`` (default) or ``"text"``. ``"json"`` routes ``stream``
+        through ``chat_json_round`` (forces JSON output on the wire) which is
+        the safe default for the many Strands agents that ask for JSON in
+        their system prompt and then ``json.loads`` the result. ``"text"``
+        routes through ``chat_round`` and returns raw prose — use for
+        conversational agents only.
     """
 
     def __init__(
@@ -203,8 +218,11 @@ class LLMClientModel(Model):
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         think: bool = False,
+        response_format: str = "json",
     ) -> None:
         assert client is not None, "client is required"
+        if response_format not in ("json", "text"):
+            raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
         self._client = client
         self.config: Dict[str, Any] = {
             "agent_key": agent_key,
@@ -212,6 +230,7 @@ class LLMClientModel(Model):
             "temperature": temperature,
             "max_tokens": max_tokens,
             "think": think,
+            "response_format": response_format,
         }
 
     # -- strands.models.Model required interface ---------------------------
@@ -237,16 +256,19 @@ class LLMClientModel(Model):
     ) -> AsyncGenerator[StreamEvent, None]:
         """Run one turn of the backing LLM and synthesize Strands stream events.
 
-        The backing ``LLMClient.chat_round`` is called in a worker thread so the
+        The backing ``LLMClient`` call (``chat_json_round`` by default, or
+        ``chat_round`` when the model was configured with
+        ``response_format="text"``) is dispatched in a worker thread so the
         event loop stays responsive. The full assistant turn is emitted as a
         single content delta (text or tool use) — downstream Strands components
         expect complete blocks, not token-level streaming.
 
-        ``chat_round`` returns raw assistant prose (or a ``__tool_calls__``
-        dict). Using it instead of ``chat_json_round`` is what lets
-        conversational agents (e.g. branding) receive free-form natural-language
-        replies — ``chat_json_round`` forces ``response_format=json_object`` on
-        the LLM and JSON-parses the result, which is wrong for chat.
+        Defaulting to ``chat_json_round`` preserves backward compatibility for
+        Strands agents that ask for JSON in their system prompt and then
+        ``json.loads`` the assistant content (e.g.
+        ``RoutePlannerAgent``). Conversational agents that want free-form
+        prose opt into ``response_format="text"`` and are routed through
+        ``chat_round`` instead.
 
         ``tool_choice`` is accepted for interface compatibility but is not
         forwarded: ``LLMClient`` does not currently expose a tool_choice knob.
@@ -264,18 +286,25 @@ class LLMClientModel(Model):
         temperature = float(state.get("temperature", self.config.get("temperature", 0.0)) or 0.0)
         max_tokens = state.get("max_tokens", self.config.get("max_tokens"))
         think = bool(state.get("think", self.config.get("think", False)))
+        response_format = str(
+            state.get("response_format", self.config.get("response_format", "json"))
+        )
 
         logger.debug(
-            "strands_adapter.stream: messages=%d tools=%s temp=%s think=%s agent_key=%s",
+            "strands_adapter.stream: messages=%d tools=%s temp=%s think=%s response_format=%s agent_key=%s",
             len(oai_messages),
             len(oai_tools) if oai_tools else 0,
             temperature,
             think,
+            response_format,
             self.config.get("agent_key"),
         )
 
+        backing_call = (
+            self._client.chat_round if response_format == "text" else self._client.chat_json_round
+        )
         result = await asyncio.to_thread(
-            self._client.chat_round,
+            backing_call,
             oai_messages,
             temperature=temperature,
             tools=oai_tools,
@@ -309,9 +338,10 @@ class LLMClientModel(Model):
             yield {"messageStop": {"stopReason": "tool_use"}}
             return
 
-        # Plain prose response from ``chat_round``. If a backing client (e.g.
-        # legacy implementations) hands us a dict instead, serialize it so the
-        # downstream Strands consumer still receives deterministic text.
+        # Plain content. ``chat_json_round`` returns a dict (we JSON-serialize
+        # so downstream JSON-parsing agents like ``RoutePlannerAgent`` see
+        # well-formed JSON text); ``chat_round`` returns a string (used as-is).
+        # A dict result from ``chat_round`` is also serialized defensively.
         if isinstance(result, str):
             text = result
         else:
@@ -382,6 +412,7 @@ def get_strands_model(
     think: bool = False,
     model_id: Optional[str] = None,
     client: Optional[LLMClient] = None,
+    response_format: str = "json",
 ) -> LLMClientModel:
     """Return a Strands-compatible ``Model`` wired to the Khala LLM service.
 
@@ -390,6 +421,11 @@ def get_strands_model(
     :func:`llm_service.get_client` (respecting ``LLM_PROVIDER``,
     ``LLM_MODEL_<agent_key>``, and the rest of the env contract) and wraps
     the result in :class:`LLMClientModel`.
+
+    ``response_format`` defaults to ``"json"`` (forces JSON output on the wire
+    via ``chat_json_round``) to preserve backward compatibility for Strands
+    agents whose system prompts ask for JSON. Pass ``response_format="text"``
+    for conversational agents that need free-form natural-language replies.
 
     Pass ``client=`` explicitly to inject a ``DummyLLMClient`` or a mock in
     tests without touching the factory cache.
@@ -402,6 +438,7 @@ def get_strands_model(
         temperature=temperature,
         max_tokens=max_tokens,
         think=think,
+        response_format=response_format,
     )
 
 
