@@ -261,10 +261,16 @@ class StrategyLabOrchestrator:
         """Recent-close lookup wired into ``SpecReadinessGate.Rule 5``.
 
         Pre: ``symbol`` and ``asset_class`` are non-empty strings.
-        Post: returns a strictly positive finite price. Falls back to
-        ``100.0`` only when the provider chain is exhausted, the symbol is
-        unknown, or any unexpected exception is raised — so the gate degrades
-        to its static default rather than crashing the cycle.
+        Post: returns either a strictly positive finite price *or*
+        ``float("nan")`` when no live price is available — so Rule 5's
+        non-finite check fails the gate closed instead of silently sizing
+        against a synthetic placeholder that could let a high-priced spec
+        slip through.
+
+        The cycle never crashes on a data-fetch failure: the exception is
+        logged and the NaN return turns into a critical readiness failure
+        the operator can act on, rather than a "looks fine, then runs to
+        zero trades" silent error downstream.
         """
         assert isinstance(symbol, str) and symbol, "symbol must be a non-empty str"
         assert isinstance(asset_class, str) and asset_class, "asset_class must be a non-empty str"
@@ -274,14 +280,14 @@ class StrategyLabOrchestrator:
                 close = float(bars[-1].close)
                 if close > 0:
                     return close
-        except Exception as exc:  # noqa: BLE001 — fail-soft to static default
+        except Exception as exc:  # noqa: BLE001 — fail-closed via NaN below
             logger.debug(
-                "readiness price provider fell back for %s/%s: %s",
+                "readiness price provider returned NaN for %s/%s: %s",
                 symbol,
                 asset_class,
                 exc,
             )
-        return 100.0
+        return float("nan")
 
     def _record_gates(
         self,

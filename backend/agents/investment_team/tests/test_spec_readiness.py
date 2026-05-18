@@ -393,7 +393,8 @@ def test_rule7_daily_timeframe_on_commodities_passes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_rule8_stop_loss_geq_take_profit_is_critical() -> None:
+def test_rule8_stop_loss_geq_take_profit_is_warning_not_critical() -> None:
+    """A wider stop than profit target is a valid risk/reward choice — warn, don't block."""
     spec = _spec(
         exit_=[
             StopLossRule(pct=0.10),
@@ -401,7 +402,11 @@ def test_rule8_stop_loss_geq_take_profit_is_critical() -> None:
         ],
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    assert any("stop_loss.pct" in c for c in _critical(results))
+    # No criticals about the stop/profit ratio.
+    assert not any("stop_loss.pct" in c for c in _critical(results))
+    # Warning surfaced so the refinement prompt notices the unusual asymmetry.
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("stop_loss.pct" in w for w in warnings), warnings
 
 
 def test_rule8_max_position_pct_above_25_is_critical() -> None:
@@ -520,8 +525,10 @@ def test_orchestrator_wires_readiness_price_provider() -> None:
     assert any("qty=" in c and "NVDA" in c for c in _critical(results))
 
 
-def test_readiness_price_provider_falls_back_on_failure() -> None:
-    """Provider returns the static fallback when the data service raises."""
+def test_readiness_price_provider_fails_closed_on_data_failure() -> None:
+    """Provider returns ``NaN`` when the data service raises, so Rule 5 fails closed."""
+    import math
+
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 
     orch = StrategyLabOrchestrator()
@@ -531,7 +538,19 @@ def test_readiness_price_provider_falls_back_on_failure() -> None:
 
     orch.market_data_service.fetch_ohlcv = boom
     price = orch._readiness_price_provider("AAPL", "stocks")
-    assert price == 100.0
+    assert math.isnan(price)
+
+
+def test_readiness_price_provider_fails_closed_on_empty_bars() -> None:
+    """Provider returns ``NaN`` when the data service returns no bars."""
+    import math
+
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    orch = StrategyLabOrchestrator()
+    orch.market_data_service.fetch_ohlcv = lambda *_a, **_kw: []
+    price = orch._readiness_price_provider("AAPL", "stocks")
+    assert math.isnan(price)
 
 
 def test_custom_market_sample_provider_is_used() -> None:

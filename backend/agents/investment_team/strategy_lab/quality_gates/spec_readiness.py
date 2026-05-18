@@ -445,11 +445,19 @@ class SpecReadinessGate(GateResultsMixin):
             min_tp = min(r.pct for r in take_profits)
             max_sl = max(r.pct for r in stop_losses)
             assert min_tp > 0 and max_sl > 0, "exit-rule pcts must be strictly positive"
+            # Wider stops than profit targets are a deliberate risk/reward
+            # choice for trend-following strategies (let losers run a bit
+            # further before bailing, take winners quicker). The two legs
+            # don't "race" each other — they trigger on opposite price
+            # directions — so this isn't an implementability failure. Warn
+            # so the refinement prompt notices the unusual ratio, but don't
+            # block synthesis.
             if max_sl >= min_tp:
                 out.append(
-                    self._critical(
-                        f"stop_loss.pct={max_sl} ≥ take_profit.pct={min_tp} — "
-                        "stop would trigger before profit target."
+                    self._warning(
+                        f"stop_loss.pct={max_sl} ≥ take_profit.pct={min_tp}; "
+                        "wider stop than profit target is a valid risk/reward "
+                        "choice but unusual — confirm the asymmetry is intentional."
                     )
                 )
 

@@ -111,13 +111,11 @@ def test_maybe_attach_coverage_report_runs_stage_when_gate_on(
 def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
     """Every ``_maybe_attach_coverage_report`` call site must pair an
     ``exec_result`` with the spec whose ``strategy_code`` matches the
-    code that produced it. The alignment-site bug (PR #475 review)
-    passed the loop-level ``spec`` alongside ``align_exec`` when
-    ``proposed_spec`` is the source of truth. Lock the AST shape so a
-    future refactor that re-introduces the drift fails loudly here.
+    code that produced it. Lock the AST shape across both the orchestrator
+    and the zero-trade repair module so a future refactor that
+    re-introduces the spec/exec drift fails loudly here.
     """
-    source = inspect.getsource(orch_mod)
-    tree = ast.parse(source)
+    from investment_team.strategy_lab import zero_trade_repair as zt_repair_mod
 
     expected_spec_for_exec = {
         "exec_result": "spec",
@@ -126,24 +124,28 @@ def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
     }
 
     sites: list[dict[str, Any]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = getattr(func, "id", None) or getattr(func, "attr", None)
-        if name != "_maybe_attach_coverage_report":
-            continue
-        kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
-        spec_arg = kwargs.get("spec")
-        exec_arg = kwargs.get("exec_result")
-        lineno = node.lineno
-        assert isinstance(spec_arg, ast.Name), (
-            f"orchestrator.py:{lineno} — spec kwarg must be a bare Name reference"
-        )
-        assert isinstance(exec_arg, ast.Name), (
-            f"orchestrator.py:{lineno} — exec_result kwarg must be a bare Name reference"
-        )
-        sites.append({"spec": spec_arg.id, "exec_result": exec_arg.id, "lineno": lineno})
+    for module in (orch_mod, zt_repair_mod):
+        source = inspect.getsource(module)
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "id", None) or getattr(func, "attr", None)
+            if name != "_maybe_attach_coverage_report":
+                continue
+            kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+            spec_arg = kwargs.get("spec")
+            exec_arg = kwargs.get("exec_result")
+            lineno = node.lineno
+            modname = module.__name__.rsplit(".", 1)[-1]
+            assert isinstance(spec_arg, ast.Name), (
+                f"{modname}.py:{lineno} — spec kwarg must be a bare Name reference"
+            )
+            assert isinstance(exec_arg, ast.Name), (
+                f"{modname}.py:{lineno} — exec_result kwarg must be a bare Name reference"
+            )
+            sites.append({"spec": spec_arg.id, "exec_result": exec_arg.id, "lineno": lineno})
 
     assert len(sites) == 3, f"expected 3 _maybe_attach_coverage_report sites, found {sites}"
     for site in sites:
@@ -166,13 +168,21 @@ def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
 
 
 def _collect_attribute_call_sites(
-    source: str, *, owner_attr: str, method_attr: str
+    source: str,
+    *,
+    owner_attr: str,
+    method_attr: str,
+    root_names: frozenset = frozenset({"self"}),
 ) -> list[dict[str, Any]]:
-    """Walk ``source`` and return every ``self.{owner_attr}.{method_attr}(...)``
+    """Walk ``source`` and return every ``<root>.{owner_attr}.{method_attr}(...)``
     call as ``{lineno, kwargs}``. Used by the source-level invariants
     below; the AST shape keeps tests independent of import paths and
-    avoids false positives from unrelated ``.check``/``.run`` methods
-    (or from an alias on something other than ``self``).
+    avoids false positives from unrelated ``.check``/``.run`` methods.
+
+    ``root_names`` controls which leftmost tokens count as the receiver:
+    in :mod:`orchestrator` it's ``{"self"}``; in :mod:`zero_trade_repair`
+    the gate/agent collaborators live on ``self._orch`` (locally bound to
+    ``orch``) so ``{"orch", "self"}`` covers both shapes.
     """
     tree = ast.parse(source)
     sites: list[dict[str, Any]] = []
@@ -185,9 +195,8 @@ def _collect_attribute_call_sites(
         owner = func.value
         if not isinstance(owner, ast.Attribute) or owner.attr != owner_attr:
             continue
-        # Pin the leftmost token to ``self`` so an unrelated alias
-        # (e.g. ``other.<owner_attr>.<method_attr>``) doesn't match.
-        if not isinstance(owner.value, ast.Name) or owner.value.id != "self":
+        # Pin the leftmost token so an unrelated alias doesn't match.
+        if not isinstance(owner.value, ast.Name) or owner.value.id not in root_names:
             continue
         sites.append({"lineno": node.lineno, "kwargs": {kw.arg for kw in node.keywords}})
     return sites
@@ -228,22 +237,31 @@ def test_collect_attribute_call_sites_helper_isolates_matching_calls() -> None:
 
 
 def test_every_anomaly_detector_check_call_forwards_coverage_report() -> None:
-    """Issue #452 — every ``self.anomaly_detector.check(...)`` call in the
-    orchestrator must forward ``coverage_report=`` so the persisted gate
-    result carries the static probe's verdict (when one is attached).
+    """Every ``anomaly_detector.check(...)`` call across the orchestrator
+    and the zero-trade repair module must forward ``coverage_report=`` so
+    the persisted gate result carries the static probe's verdict.
 
     Locking this at source level catches the alignment-loop and walk-
     forward-fallback paths that are not directly exercised by the
-    existing isolated drivers. The site count is pinned (``== 4``) for
-    parity with the sibling ``_maybe_attach_coverage_report`` invariant
-    above — a new call site is a deliberate change and should bump the
-    expected total here intentionally.
+    existing isolated drivers. Four call sites are expected: main loop +
+    alignment loop + walk-forward fallback live on the orchestrator
+    (``self.anomaly_detector.check``); the zero-trade-repair recheck
+    lives in :mod:`zero_trade_repair` (``orch.anomaly_detector.check``).
     """
-    sites = _collect_attribute_call_sites(
+    from investment_team.strategy_lab import zero_trade_repair as zt_repair_mod
+
+    orch_sites = _collect_attribute_call_sites(
         inspect.getsource(orch_mod),
         owner_attr="anomaly_detector",
         method_attr="check",
     )
+    zt_sites = _collect_attribute_call_sites(
+        inspect.getsource(zt_repair_mod),
+        owner_attr="anomaly_detector",
+        method_attr="check",
+        root_names=frozenset({"orch"}),
+    )
+    sites = orch_sites + zt_sites
     assert len(sites) == 4, (
         "expected exactly 4 anomaly_detector.check sites (main loop, alignment "
         "loop, walk-forward-fallback, zero-trade-repair recheck); if a new "
@@ -257,19 +275,23 @@ def test_every_anomaly_detector_check_call_forwards_coverage_report() -> None:
 
 
 def test_repair_agent_run_call_forwards_coverage_report() -> None:
-    """Issue #452 — ``self.zero_trade_repair_agent.run(...)`` in the
-    orchestrator must forward ``coverage_report=`` so the agent's prompt
-    sees the static probe's verdict alongside the executor diagnostics.
+    """The ``zero_trade_repair_agent.run(...)`` call in the repair module
+    must forward ``coverage_report=`` so the agent's prompt sees the
+    static probe's verdict alongside the executor diagnostics.
 
     Functional coverage of the forwarding lives in
     ``test_strategy_lab_zero_trade_repair.py``; this AST check locks the
     contract at the source level too so a refactor that drops the kwarg
-    fails loudly.
+    fails loudly. The call lives in :mod:`zero_trade_repair`
+    (``orch.zero_trade_repair_agent.run``).
     """
+    from investment_team.strategy_lab import zero_trade_repair as zt_repair_mod
+
     sites = _collect_attribute_call_sites(
-        inspect.getsource(orch_mod),
+        inspect.getsource(zt_repair_mod),
         owner_attr="zero_trade_repair_agent",
         method_attr="run",
+        root_names=frozenset({"orch"}),
     )
     assert len(sites) == 1, (
         "expected exactly 1 zero_trade_repair_agent.run site; if a new call "
