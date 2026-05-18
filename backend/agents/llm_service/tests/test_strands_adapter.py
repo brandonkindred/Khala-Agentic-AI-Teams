@@ -448,6 +448,33 @@ def test_get_strands_model_forwards_response_format() -> None:
     assert model.get_config()["response_format"] == "text"
 
 
+def test_public_llm_service_get_strands_model_accepts_response_format(monkeypatch) -> None:
+    """Regression: ``llm_service.get_strands_model`` is re-exported from
+    ``strands_provider`` (not ``strands_adapter``). The branding assistant calls
+    it as ``get_strands_model("branding_assistant", response_format="text")``,
+    so the provider's signature must accept that keyword or production init
+    raises ``TypeError`` before serving any request.
+    """
+    from llm_service import factory
+    from llm_service import get_strands_model as public_get_strands_model
+    from llm_service.strands_provider import _clear_strands_model_cache_for_testing
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    factory._clear_client_cache_for_testing()
+    _clear_strands_model_cache_for_testing()
+    try:
+        model_text = public_get_strands_model("test_agent", response_format="text")
+        model_json = public_get_strands_model("test_agent", response_format="json")
+    finally:
+        _clear_strands_model_cache_for_testing()
+
+    assert isinstance(model_text, LLMClientModel)
+    assert model_text.get_config()["response_format"] == "text"
+    assert model_json.get_config()["response_format"] == "json"
+    # Distinct response_format values must not collide in the cache.
+    assert model_text is not model_json
+
+
 # ---------------------------------------------------------------------------
 # LLMClientModel.structured_output
 # ---------------------------------------------------------------------------
