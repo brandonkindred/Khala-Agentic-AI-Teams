@@ -955,6 +955,8 @@ class TradingService:
                     chunk_size=chunk_size,
                     on_trade=on_trade,
                     eod_buffer=eod_buffer,
+                    position_tracker=position_tracker,
+                    engine_exits=engine_exits,
                 )
 
             # We need one-bar lookahead in the fill simulator, so we buffer
@@ -1128,7 +1130,8 @@ class TradingService:
                     #    any orders it submits in response. Warm-up bars set
                     #    ``ctx.is_warmup = True`` in the subprocess so the
                     #    strategy can short-circuit order emission; we also
-                    #    drop any orders it emits anyway as a safety net.
+                    #    drop any orders it emits anyway as a safety net
+                    #    (handled inside ``_process_bar_strategy_response``).
                     resp = harness.send_bar(
                         bar=cur_bar.model_dump(mode="json"),
                         state=self._state(portfolio),
@@ -1141,119 +1144,18 @@ class TradingService:
                         # bars the strategy could actually have signaled on.
                         result.bars_processed += 1
 
-                    if is_warmup:
-                        if resp.orders:
-                            result.warmup_orders_dropped += len(resp.orders)
-                            logger.info(
-                                "dropped %d order(s) submitted during warm-up bar",
-                                len(resp.orders),
-                            )
-                            for o in resp.orders:
-                                _record_event(
-                                    result.execution_diagnostics,
-                                    "warmup_dropped",
-                                    timestamp=cur_bar.timestamp,
-                                    symbol=o.get("symbol"),
-                                    side=o.get("side"),
-                                    order_type=o.get("order_type"),
-                                )
-                        # Cancels during warm-up are also no-ops (no live order book).
-                        prev_bar = cur_bar
-                        continue
-
-                    # Map cancels.
-                    for c in resp.cancels:
-                        oid = c.get("order_id")
-                        if oid:
-                            order_book.cancel(oid)
-
-                    # Orders submitted now are evaluated against the *next*
-                    # bar (look-ahead-safe).
-                    for o in resp.orders:
-                        result.execution_diagnostics.orders_emitted += 1
-                        _record_event(
-                            result.execution_diagnostics,
-                            "emitted",
-                            timestamp=cur_bar.timestamp,
-                            symbol=o.get("symbol"),
-                            side=o.get("side"),
-                            order_type=o.get("order_type"),
-                        )
-                        try:
-                            req = OrderRequest(**o)
-                            req.validate_prices()
-                            pending_for_prev.append(req)
-                            # An opposite-side order against an existing open
-                            # position is the strategy's exit intent. Counted
-                            # here (parent-side, before fill) so the diagnostic
-                            # reflects emission, not execution; #410 owns the
-                            # fill-side ``exit_filled`` event.
-                            held = portfolio.positions.get(req.symbol)
-                            if held is not None and held.side != req.side:
-                                result.execution_diagnostics.exits_emitted += 1
-                        except UnsupportedOrderFeatureError as exc:
-                            # Runtime-support gates from validate_prices ("feature
-                            # ships in a later step of #379") must terminate the
-                            # run, not be silently dropped. Convert to a
-                            # StrategyRuntimeError so the outer loop returns a
-                            # structured ``TradingServiceResult.error`` instead
-                            # of crashing ``TradingService.run()``. The narrow
-                            # subclass keeps unrelated ``NotImplementedError``s
-                            # from strategy code in the generic catch below.
-                            # See #383.
-                            _increment_rejection(
-                                result.execution_diagnostics, "unsupported_feature"
-                            )
-                            _record_event(
-                                result.execution_diagnostics,
-                                "rejected",
-                                timestamp=cur_bar.timestamp,
-                                symbol=o.get("symbol"),
-                                side=o.get("side"),
-                                order_type=o.get("order_type"),
-                                reason="unsupported_feature",
-                                detail=str(exc),
-                            )
-                            raise StrategyRuntimeError(
-                                f"strategy emitted an unsupported order: {exc}",
-                                etype="unsupported_feature",
-                            ) from exc
-                        except Exception as exc:  # malformed request from strategy
-                            logger.warning("dropping malformed order from strategy: %s", exc)
-                            _increment_rejection(result.execution_diagnostics, "malformed_request")
-                            _record_event(
-                                result.execution_diagnostics,
-                                "rejected",
-                                timestamp=cur_bar.timestamp,
-                                symbol=o.get("symbol"),
-                                side=o.get("side"),
-                                order_type=o.get("order_type"),
-                                reason="malformed_request",
-                                detail=str(exc),
-                            )
-
-                    # Issue #527 — engine-side enforcement of structured
-                    # ``exit_rules``. Runs after the strategy's orders are
-                    # queued so we can dedupe against strategy-emitted closes
-                    # and any in-flight engine exit on the order book. No-op
-                    # when the spec has no exit rules.
-                    engine_exits.maybe_emit(
+                    self._process_bar_strategy_response(
                         cur_bar=cur_bar,
-                        position_tracker=position_tracker,
+                        bar_orders=resp.orders,
+                        bar_cancels=resp.cancels,
+                        is_warmup=is_warmup,
                         portfolio=portfolio,
-                        pending_for_prev=pending_for_prev,
                         order_book=order_book,
+                        pending_for_prev=pending_for_prev,
+                        position_tracker=position_tracker,
+                        engine_exits=engine_exits,
                         result=result,
                     )
-
-                    # Issue #527 — extend trailing watermarks AFTER rule
-                    # evaluation so the next bar's eval has cur_bar's
-                    # extreme baked in, but THIS bar's eval did not see
-                    # ``cur_bar.high`` raise the trailing floor and then
-                    # trigger off ``cur_bar.low`` (intrabar lookahead).
-                    # No-op when the spec has no exit rules.
-                    if self._exit_rules:
-                        self._extend_watermarks(tracker=position_tracker, cur_bar=cur_bar)
 
                     prev_bar = cur_bar
 
@@ -1322,6 +1224,8 @@ class TradingService:
         chunk_size: int,
         on_trade: Optional[Callable[[TradeRecord], None]],
         eod_buffer: "_StreamingEquityBuffer",
+        position_tracker: Dict[str, _TrackedPosition],
+        engine_exits: _EngineExitDispatcher,
     ) -> TradingServiceResult:
         prev_bar = None
         pending_for_prev: List[OrderRequest] = []
@@ -1470,78 +1374,42 @@ class TradingService:
 
                     result.bars_processed += 1
 
+                    # Issue #527 — refresh engine-side per-position state
+                    # for ``cur_bar.symbol`` based on the post-fill
+                    # portfolio. Mirrors the per-bar (``run``) path's
+                    # placement between fills+drawdown and the strategy-
+                    # response processing step. No-op when exit_rules is
+                    # empty.
+                    if self._exit_rules:
+                        self._update_position_tracker(
+                            tracker=position_tracker,
+                            cur_bar=cur_bar,
+                            portfolio=portfolio,
+                        )
+
                 # 4) Process the strategy's response for this bar.
-                if is_warmup:
-                    if bar_orders:
-                        result.warmup_orders_dropped += len(bar_orders)
-                        logger.info(
-                            "dropped %d order(s) submitted during warm-up bar",
-                            len(bar_orders),
-                        )
-                        for o in bar_orders:
-                            _record_event(
-                                result.execution_diagnostics,
-                                "warmup_dropped",
-                                timestamp=cur_bar.timestamp,
-                                symbol=o.get("symbol"),
-                                side=o.get("side"),
-                                order_type=o.get("order_type"),
-                            )
-                    prev_bar = cur_bar
-                    continue
-
-                for c in bar_cancels:
-                    oid = c.get("order_id")
-                    if oid:
-                        order_book.cancel(oid)
-
-                for o in bar_orders:
-                    result.execution_diagnostics.orders_emitted += 1
-                    _record_event(
-                        result.execution_diagnostics,
-                        "emitted",
-                        timestamp=cur_bar.timestamp,
-                        symbol=o.get("symbol"),
-                        side=o.get("side"),
-                        order_type=o.get("order_type"),
+                try:
+                    self._process_bar_strategy_response(
+                        cur_bar=cur_bar,
+                        bar_orders=bar_orders,
+                        bar_cancels=bar_cancels,
+                        is_warmup=is_warmup,
+                        portfolio=portfolio,
+                        order_book=order_book,
+                        pending_for_prev=pending_for_prev,
+                        position_tracker=position_tracker,
+                        engine_exits=engine_exits,
+                        result=result,
                     )
-                    try:
-                        req = OrderRequest(**o)
-                        req.validate_prices()
-                        pending_for_prev.append(req)
-                        held = portfolio.positions.get(req.symbol)
-                        if held is not None and held.side != req.side:
-                            result.execution_diagnostics.exits_emitted += 1
-                    except UnsupportedOrderFeatureError as exc:
-                        _increment_rejection(result.execution_diagnostics, "unsupported_feature")
-                        _record_event(
-                            result.execution_diagnostics,
-                            "rejected",
-                            timestamp=cur_bar.timestamp,
-                            symbol=o.get("symbol"),
-                            side=o.get("side"),
-                            order_type=o.get("order_type"),
-                            reason="unsupported_feature",
-                            detail=str(exc),
-                        )
-                        chunk_buffer.clear()
-                        raise StrategyRuntimeError(
-                            f"strategy emitted an unsupported order: {exc}",
-                            etype="unsupported_feature",
-                        ) from exc
-                    except Exception as exc:
-                        logger.warning("dropping malformed order from strategy: %s", exc)
-                        _increment_rejection(result.execution_diagnostics, "malformed_request")
-                        _record_event(
-                            result.execution_diagnostics,
-                            "rejected",
-                            timestamp=cur_bar.timestamp,
-                            symbol=o.get("symbol"),
-                            side=o.get("side"),
-                            order_type=o.get("order_type"),
-                            reason="malformed_request",
-                            detail=str(exc),
-                        )
+                except StrategyRuntimeError:
+                    # ``_process_bar_strategy_response`` raises on an
+                    # ``UnsupportedOrderFeatureError`` from the strategy.
+                    # The per-bar path just lets it propagate; the
+                    # chunked path needs to clear the buffer first so
+                    # the outer loop's recovery path doesn't replay
+                    # any buffered bars.
+                    chunk_buffer.clear()
+                    raise
 
                 prev_bar = cur_bar
 
@@ -1620,6 +1488,154 @@ class TradingService:
     # ------------------------------------------------------------------
     # Issue #527 — engine-side enforcement of structured ``exit_rules``.
     # ------------------------------------------------------------------
+
+    def _process_bar_strategy_response(
+        self,
+        *,
+        cur_bar,
+        bar_orders: List[Dict],
+        bar_cancels: List[Dict],
+        is_warmup: bool,
+        portfolio: Portfolio,
+        order_book: OrderBook,
+        pending_for_prev: List[OrderRequest],
+        position_tracker: Dict[str, _TrackedPosition],
+        engine_exits: _EngineExitDispatcher,
+        result: TradingServiceResult,
+    ) -> None:
+        """Apply one bar's strategy response (cancels + orders) to the
+        order book and pending-submit queue, then run the engine's
+        structured-exit-rule enforcement step.
+
+        Shared between the per-bar (``run``) and chunked
+        (``_run_chunked``) paths — extracted because earlier the engine-
+        exit enforcement step lived only in the per-bar copy, so any
+        run with ``BAR_CHUNK_SIZE>1`` silently skipped ``exit_rules``
+        evaluation entirely. The dedup makes that gap structurally
+        impossible.
+
+        Warm-up bars short-circuit: orders submitted during warm-up
+        are dropped with a ``warmup_dropped`` lifecycle event (the
+        strategy is expected to honour ``ctx.is_warmup``; we drop
+        anyway as a safety net), cancels are no-ops (no live book),
+        and the engine-exit step is skipped (no positions exist
+        during warm-up that could trip a rule).
+
+        Orders queued here are look-ahead-safe: the bar-loop caller
+        submits them against the NEXT bar.
+
+        Raises :class:`StrategyRuntimeError` on
+        ``UnsupportedOrderFeatureError`` from
+        ``OrderRequest.validate_prices`` — the chunked caller must
+        ``chunk_buffer.clear()`` before letting it propagate.
+        """
+        if is_warmup:
+            if bar_orders:
+                result.warmup_orders_dropped += len(bar_orders)
+                logger.info(
+                    "dropped %d order(s) submitted during warm-up bar",
+                    len(bar_orders),
+                )
+                for o in bar_orders:
+                    _record_event(
+                        result.execution_diagnostics,
+                        "warmup_dropped",
+                        timestamp=cur_bar.timestamp,
+                        symbol=o.get("symbol"),
+                        side=o.get("side"),
+                        order_type=o.get("order_type"),
+                    )
+            # Cancels during warm-up are no-ops (no live order book).
+            return
+
+        for c in bar_cancels:
+            oid = c.get("order_id")
+            if oid:
+                order_book.cancel(oid)
+
+        # Orders submitted now are evaluated against the *next* bar
+        # (look-ahead-safe).
+        for o in bar_orders:
+            result.execution_diagnostics.orders_emitted += 1
+            _record_event(
+                result.execution_diagnostics,
+                "emitted",
+                timestamp=cur_bar.timestamp,
+                symbol=o.get("symbol"),
+                side=o.get("side"),
+                order_type=o.get("order_type"),
+            )
+            try:
+                req = OrderRequest(**o)
+                req.validate_prices()
+                pending_for_prev.append(req)
+                # An opposite-side order against an existing open
+                # position is the strategy's exit intent. Counted
+                # here (parent-side, before fill) so the diagnostic
+                # reflects emission, not execution; #410 owns the
+                # fill-side ``exit_filled`` event.
+                held = portfolio.positions.get(req.symbol)
+                if held is not None and held.side != req.side:
+                    result.execution_diagnostics.exits_emitted += 1
+            except UnsupportedOrderFeatureError as exc:
+                # Runtime-support gates from validate_prices ("feature
+                # ships in a later step of #379") must terminate the
+                # run, not be silently dropped. Convert to a
+                # StrategyRuntimeError so the outer loop returns a
+                # structured ``TradingServiceResult.error`` instead of
+                # crashing ``TradingService.run()``. The narrow subclass
+                # keeps unrelated ``NotImplementedError``s from strategy
+                # code in the generic catch below. See #383.
+                _increment_rejection(result.execution_diagnostics, "unsupported_feature")
+                _record_event(
+                    result.execution_diagnostics,
+                    "rejected",
+                    timestamp=cur_bar.timestamp,
+                    symbol=o.get("symbol"),
+                    side=o.get("side"),
+                    order_type=o.get("order_type"),
+                    reason="unsupported_feature",
+                    detail=str(exc),
+                )
+                raise StrategyRuntimeError(
+                    f"strategy emitted an unsupported order: {exc}",
+                    etype="unsupported_feature",
+                ) from exc
+            except Exception as exc:  # malformed request from strategy
+                logger.warning("dropping malformed order from strategy: %s", exc)
+                _increment_rejection(result.execution_diagnostics, "malformed_request")
+                _record_event(
+                    result.execution_diagnostics,
+                    "rejected",
+                    timestamp=cur_bar.timestamp,
+                    symbol=o.get("symbol"),
+                    side=o.get("side"),
+                    order_type=o.get("order_type"),
+                    reason="malformed_request",
+                    detail=str(exc),
+                )
+
+        # Issue #527 — engine-side enforcement of structured
+        # ``exit_rules``. Runs after the strategy's orders are queued
+        # so we can dedupe against strategy-emitted closes and any
+        # in-flight engine exit on the order book. No-op when the
+        # spec has no exit rules.
+        engine_exits.maybe_emit(
+            cur_bar=cur_bar,
+            position_tracker=position_tracker,
+            portfolio=portfolio,
+            pending_for_prev=pending_for_prev,
+            order_book=order_book,
+            result=result,
+        )
+
+        # Issue #527 — extend trailing watermarks AFTER rule evaluation
+        # so the next bar's eval has cur_bar's extreme baked in, but
+        # THIS bar's eval did not see ``cur_bar.high`` raise the
+        # trailing floor and then trigger off ``cur_bar.low`` (intrabar
+        # lookahead). No-op when the spec has no exit rules.
+        if self._exit_rules:
+            self._extend_watermarks(tracker=position_tracker, cur_bar=cur_bar)
 
     @staticmethod
     def _update_position_tracker(
