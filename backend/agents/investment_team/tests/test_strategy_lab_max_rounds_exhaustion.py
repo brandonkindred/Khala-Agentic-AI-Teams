@@ -29,6 +29,14 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
 )
 
+# Every test in this module builds a real ``StrategyLabOrchestrator`` and
+# drives ``run_cycle``, so the readiness price provider would otherwise hit
+# the live yfinance chain (or its test-environment stub) and trip
+# SpecReadinessGate Rule 5 on a NaN. Use the opt-in fixture from
+# ``conftest.py`` so every test in this file sees a deterministic price
+# without an autouse fixture masking production fail-closed behaviour.
+pytestmark = pytest.mark.usefixtures("stub_readiness_market_data_fetch")
+
 
 def _rsi_entry_dict() -> Dict[str, Any]:
     return EntryRule(
