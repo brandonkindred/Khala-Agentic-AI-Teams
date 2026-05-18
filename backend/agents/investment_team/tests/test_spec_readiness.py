@@ -304,6 +304,57 @@ def test_rule5_volatility_target_emits_warning() -> None:
     assert not sizing_criticals, sizing_criticals
 
 
+def test_check_sizing_realisable_directly_catches_unknown_asset_class_value_error() -> None:
+    """Direct probe of the rule's ``ValueError`` catch path.
+
+    The end-to-end ``test_rule5_unknown_asset_class_is_critical`` exercises
+    this transitively via the rule-table iteration in ``validate``; this
+    unit test pins the catch-and-convert behaviour at the rule boundary so
+    a future refactor that moves the asset-class resolution out of Rule 5
+    fails loudly here rather than silently dropping the critical.
+    """
+    from investment_team.strategy_lab.quality_gates.spec_readiness import (
+        SpecReadinessCtx,
+        SpecReadinessGate,
+    )
+
+    spec = _spec(
+        asset_class="bonds",
+        target_symbols=[],
+        timeframe="1d",
+        hypothesis="generic mean reversion",
+    )
+    gate = SpecReadinessGate()
+    ctx = SpecReadinessCtx(spec=spec, config=_config())
+    with gate._using_phase("design"):
+        results = list(gate._check_sizing_realisable(ctx))
+    assert len(results) == 1
+    assert results[0].severity == "critical"
+    assert "unknown asset_class" in results[0].details
+
+
+def test_check_sizing_realisable_directly_emits_volatility_target_warning() -> None:
+    """Direct probe of the rule's volatility-target abstention path."""
+    from investment_team.strategy_lab.quality_gates.spec_readiness import (
+        SpecReadinessCtx,
+        SpecReadinessGate,
+    )
+    from investment_team.strategy_lab.spec_dsl import VolatilityTargetSizing
+
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.001),
+        target_symbols=["AAPL"],
+    )
+    gate = SpecReadinessGate()
+    ctx = SpecReadinessCtx(spec=spec, config=_config())
+    with gate._using_phase("design"):
+        results = list(gate._check_sizing_realisable(ctx))
+    assert len(results) == 1
+    assert results[0].severity == "warning"
+    assert "volatility_target" in results[0].details
+    assert "0.001" in results[0].details
+
+
 def test_rule5_accepts_fractional_qty_on_crypto() -> None:
     """Crypto specs accept fractional positions — 0.1 BTC is implementable."""
     spec = _spec(

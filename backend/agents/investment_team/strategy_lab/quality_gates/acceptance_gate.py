@@ -52,82 +52,73 @@ class AcceptanceGate(GateResultsMixin):
         DSR itself is already deflated upstream.
         """
         with self._using_phase(phase):
-            return self._evaluate(result, config, n_trials=n_trials)
+            missing: List[str] = []
+            if result.oos_sharpe is None:
+                missing.append("oos_sharpe")
+            if result.is_oos_degradation_pct is None:
+                missing.append("is_oos_degradation_pct")
+            if result.oos_trade_count is None:
+                missing.append("oos_trade_count")
+            if missing:
+                return [
+                    self._warning(
+                        "Acceptance gate cannot evaluate — walk-forward diagnostics "
+                        f"missing: {', '.join(missing)}."
+                    )
+                ]
 
-    def _evaluate(
-        self,
-        result: BacktestResult,
-        config: BacktestConfig,
-        *,
-        n_trials: Optional[int],
-    ) -> List[QualityGateResult]:
-        missing: List[str] = []
-        if result.oos_sharpe is None:
-            missing.append("oos_sharpe")
-        if result.is_oos_degradation_pct is None:
-            missing.append("is_oos_degradation_pct")
-        if result.oos_trade_count is None:
-            missing.append("oos_trade_count")
-        if missing:
-            return [
-                self._warning(
-                    "Acceptance gate cannot evaluate — walk-forward diagnostics "
-                    f"missing: {', '.join(missing)}."
+            results: List[QualityGateResult] = []
+
+            # 1. Deflated Sharpe threshold.
+            dsr = float(result.deflated_sharpe)
+            passed_dsr = dsr >= config.dsr_threshold
+            results.append(
+                (self._info if passed_dsr else self._critical)(
+                    f"OOS DSR {dsr:.3f} "
+                    f"{'meets' if passed_dsr else 'below'} threshold "
+                    f"{config.dsr_threshold:.3f}"
+                    + (f" (n_trials={n_trials})" if n_trials is not None else "")
                 )
-            ]
-
-        results: List[QualityGateResult] = []
-
-        # 1. Deflated Sharpe threshold.
-        dsr = float(result.deflated_sharpe)
-        passed_dsr = dsr >= config.dsr_threshold
-        results.append(
-            (self._info if passed_dsr else self._critical)(
-                f"OOS DSR {dsr:.3f} "
-                f"{'meets' if passed_dsr else 'below'} threshold "
-                f"{config.dsr_threshold:.3f}"
-                + (f" (n_trials={n_trials})" if n_trials is not None else "")
             )
-        )
 
-        # 2. IS → OOS degradation.
-        deg = float(result.is_oos_degradation_pct)
-        passed_deg = deg <= config.max_is_oos_degradation_pct
-        results.append(
-            (self._info if passed_deg else self._critical)(
-                f"IS→OOS Sharpe degradation {deg:.1f}% "
-                f"{'within' if passed_deg else 'exceeds'} "
-                f"{config.max_is_oos_degradation_pct:.1f}% ceiling"
+            # 2. IS → OOS degradation.
+            deg = float(result.is_oos_degradation_pct)
+            passed_deg = deg <= config.max_is_oos_degradation_pct
+            results.append(
+                (self._info if passed_deg else self._critical)(
+                    f"IS→OOS Sharpe degradation {deg:.1f}% "
+                    f"{'within' if passed_deg else 'exceeds'} "
+                    f"{config.max_is_oos_degradation_pct:.1f}% ceiling"
+                )
             )
-        )
 
-        # 3. OOS trade count.
-        n_oos = int(result.oos_trade_count)
-        passed_count = n_oos >= config.min_oos_trades
-        results.append(
-            (self._info if passed_count else self._critical)(
-                f"OOS trade count {n_oos} "
-                f"{'meets' if passed_count else 'below'} minimum "
-                f"{config.min_oos_trades}"
+            # 3. OOS trade count.
+            n_oos = int(result.oos_trade_count)
+            passed_count = n_oos >= config.min_oos_trades
+            results.append(
+                (self._info if passed_count else self._critical)(
+                    f"OOS trade count {n_oos} "
+                    f"{'meets' if passed_count else 'below'} minimum "
+                    f"{config.min_oos_trades}"
+                )
             )
-        )
 
-        # 4. Regime-conditional pass.
-        regime_results = result.regime_results or []
-        beats = sum(1 for r in regime_results if r.get("beat_benchmark"))
-        total = len(regime_results)
-        passed_regime = beats >= self._min_regime_beats
-        regime_detail = (
-            f"Beat benchmark in {beats} of {total} regime subwindows "
-            f"(threshold: {self._min_regime_beats})"
-            if total
-            else "No regime subwindows evaluated"
-        )
-        results.append(
-            (self._info if passed_regime else self._critical)(regime_detail)
-        )
+            # 4. Regime-conditional pass.
+            regime_results = result.regime_results or []
+            beats = sum(1 for r in regime_results if r.get("beat_benchmark"))
+            total = len(regime_results)
+            passed_regime = beats >= self._min_regime_beats
+            regime_detail = (
+                f"Beat benchmark in {beats} of {total} regime subwindows "
+                f"(threshold: {self._min_regime_beats})"
+                if total
+                else "No regime subwindows evaluated"
+            )
+            results.append(
+                (self._info if passed_regime else self._critical)(regime_detail)
+            )
 
-        return results
+            return results
 
 
 def summarize_acceptance_reason(results: List[QualityGateResult]) -> str:

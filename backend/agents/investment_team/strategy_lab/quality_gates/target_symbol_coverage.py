@@ -74,45 +74,37 @@ class TargetSymbolCoverageGate(GateResultsMixin):
         phase: StrategyLabPhase = "synthesis",
     ) -> List[QualityGateResult]:
         with self._using_phase(phase):
-            return self._check_fetch_body(spec, requested_symbols, fetched_symbols)
+            results: List[QualityGateResult] = []
+            fetched_upper = {s.strip().upper() for s in fetched_symbols if s and s.strip()}
 
-    def _check_fetch_body(
-        self,
-        spec: StrategySpec,
-        requested_symbols: List[str],
-        fetched_symbols: List[str],
-    ) -> List[QualityGateResult]:
-        results: List[QualityGateResult] = []
-        fetched_upper = {s.strip().upper() for s in fetched_symbols if s and s.strip()}
-
-        if spec.target_symbols:
-            target_upper = {s.strip().upper() for s in spec.target_symbols if s and s.strip()}
-            missing = sorted(target_upper - fetched_upper)
-            if missing:
-                results.append(
-                    self._critical("target_symbols missing from fetched market data: "
-                            f"{missing}. Requested={sorted({s.upper() for s in requested_symbols})}, "
-                            f"fetched={sorted(fetched_upper)}.")
-                )
+            if spec.target_symbols:
+                target_upper = {s.strip().upper() for s in spec.target_symbols if s and s.strip()}
+                missing = sorted(target_upper - fetched_upper)
+                if missing:
+                    results.append(
+                        self._critical("target_symbols missing from fetched market data: "
+                                f"{missing}. Requested={sorted({s.upper() for s in requested_symbols})}, "
+                                f"fetched={sorted(fetched_upper)}.")
+                    )
+                else:
+                    results.append(
+                        self._info(f"All {len(target_upper)} target_symbols present in fetched data.")
+                    )
             else:
-                results.append(
-                    self._info(f"All {len(target_upper)} target_symbols present in fetched data.")
-                )
-        else:
-            mentioned = sorted(self._tickers_in_hypothesis(spec.hypothesis or ""))
-            if mentioned:
-                results.append(
-                    self._warning(f"Hypothesis mentions known ticker(s) {mentioned} but "
-                            "spec.target_symbols is empty; the backtest is using the "
-                            "asset-class default universe. Set spec.target_symbols "
-                            "explicitly to guarantee the run trades the intended tickers.")
-                )
-            else:
-                results.append(
-                    self._info("spec.target_symbols empty; no specific tickers referenced in hypothesis.")
-                )
+                mentioned = sorted(self._tickers_in_hypothesis(spec.hypothesis or ""))
+                if mentioned:
+                    results.append(
+                        self._warning(f"Hypothesis mentions known ticker(s) {mentioned} but "
+                                "spec.target_symbols is empty; the backtest is using the "
+                                "asset-class default universe. Set spec.target_symbols "
+                                "explicitly to guarantee the run trades the intended tickers.")
+                    )
+                else:
+                    results.append(
+                        self._info("spec.target_symbols empty; no specific tickers referenced in hypothesis.")
+                    )
 
-        return results
+            return results
 
     def check_trades(
         self,
@@ -122,29 +114,22 @@ class TargetSymbolCoverageGate(GateResultsMixin):
         phase: StrategyLabPhase = "synthesis",
     ) -> List[QualityGateResult]:
         with self._using_phase(phase):
-            return self._check_trades_body(spec, trades)
+            if not spec.target_symbols:
+                return [
+                    self._info("spec.target_symbols empty; trade-symbol coverage check skipped.")
+                ]
 
-    def _check_trades_body(
-        self,
-        spec: StrategySpec,
-        trades: List[TradeRecord],
-    ) -> List[QualityGateResult]:
-        if not spec.target_symbols:
+            target_upper = {s.strip().upper() for s in spec.target_symbols if s and s.strip()}
+            offending = sorted({t.symbol.strip().upper() for t in trades if t.symbol} - target_upper)
+            if offending:
+                return [
+                    self._critical("Trade ledger contains symbols outside spec.target_symbols: "
+                            f"{offending}. target_symbols={sorted(target_upper)}.")
+                ]
+
             return [
-                self._info("spec.target_symbols empty; trade-symbol coverage check skipped.")
+                self._info(f"All {len(trades)} trades within target_symbols.")
             ]
-
-        target_upper = {s.strip().upper() for s in spec.target_symbols if s and s.strip()}
-        offending = sorted({t.symbol.strip().upper() for t in trades if t.symbol} - target_upper)
-        if offending:
-            return [
-                self._critical("Trade ledger contains symbols outside spec.target_symbols: "
-                        f"{offending}. target_symbols={sorted(target_upper)}.")
-            ]
-
-        return [
-            self._info(f"All {len(trades)} trades within target_symbols.")
-        ]
 
     @staticmethod
     def _tickers_in_hypothesis(text: str) -> set[str]:

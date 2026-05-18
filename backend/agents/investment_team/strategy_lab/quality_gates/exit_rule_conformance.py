@@ -71,66 +71,49 @@ class ExitRuleConformanceGate(GateResultsMixin):
         phase: StrategyLabPhase = "verification",
     ) -> List[QualityGateResult]:
         with self._using_phase(phase):
-            return self._check_body(
-                exit_rules=exit_rules,
-                trades=trades,
-                diagnostics=diagnostics,
-                config=config,
-                timeframe=timeframe,
-            )
+            if not exit_rules:
+                return [
+                    self._info("spec.exit_rules empty; engine-enforcement check skipped.")
+                ]
 
-    def _check_body(
-        self,
-        *,
-        exit_rules: Sequence[ExitRule],
-        trades: Sequence[TradeRecord],
-        diagnostics: Optional[BacktestExecutionDiagnostics],
-        config: BacktestConfig,
-        timeframe: str,
-    ) -> List[QualityGateResult]:
-        if not exit_rules:
-            return [
-                self._info("spec.exit_rules empty; engine-enforcement check skipped.")
-            ]
+            results: List[QualityGateResult] = []
+            firings = (diagnostics.exit_rule_firings if diagnostics is not None else None) or {}
+            firings_by_symbol = (
+                diagnostics.exit_rule_firings_by_symbol if diagnostics is not None else None
+            ) or {}
 
-        results: List[QualityGateResult] = []
-        firings = (diagnostics.exit_rule_firings if diagnostics is not None else None) or {}
-        firings_by_symbol = (
-            diagnostics.exit_rule_firings_by_symbol if diagnostics is not None else None
-        ) or {}
+            # ---- StopLossRule (entry_price basis only — trailing variants need
+            # bar-by-bar replay which the gate cannot reconstruct from the trade
+            # ledger alone) ----
+            stop_losses = [r for r in exit_rules if isinstance(r, StopLossRule)]
+            for rule in stop_losses:
+                results.append(self._check_stop_loss(rule, trades, firings_by_symbol))
 
-        # ---- StopLossRule (entry_price basis only — trailing variants need
-        # bar-by-bar replay which the gate cannot reconstruct from the trade
-        # ledger alone) ----
-        stop_losses = [r for r in exit_rules if isinstance(r, StopLossRule)]
-        for rule in stop_losses:
-            results.append(self._check_stop_loss(rule, trades, firings_by_symbol))
+            # ---- TakeProfitRule (sanity only) ----
+            take_profits = [r for r in exit_rules if isinstance(r, TakeProfitRule)]
+            for rule in take_profits:
+                results.append(self._check_take_profit(rule, trades, exit_rules, firings))
 
-        # ---- TakeProfitRule (sanity only) ----
-        take_profits = [r for r in exit_rules if isinstance(r, TakeProfitRule)]
-        for rule in take_profits:
-            results.append(self._check_take_profit(rule, trades, exit_rules, firings))
+            # ---- SignalExitRule — not yet engine-enforced ----
+            signal_exits = [r for r in exit_rules if isinstance(r, SignalExitRule)]
+            if signal_exits:
+                results.append(
+                    self._info(f"{len(signal_exits)} SignalExitRule(s) present but not yet "
+                            "engine-enforced (see rule_compiler module docstring).")
+                )
 
-        # ---- SignalExitRule — not yet engine-enforced ----
-        signal_exits = [r for r in exit_rules if isinstance(r, SignalExitRule)]
-        if signal_exits:
-            results.append(
-                self._info(f"{len(signal_exits)} SignalExitRule(s) present but not yet "
-                        "engine-enforced (see rule_compiler module docstring).")
-            )
+            # ---- Aggregate: engine emitted at least one exit when expected ----
+            if diagnostics is not None:
+                firings = diagnostics.exit_rule_firings or {}
+                total = sum(firings.values())
+                details = "engine_exits: " + (
+                    ", ".join(f"{k}={v}" for k, v in sorted(firings.items())) or "none"
+                )
+                results.append(
+                    self._info(details + f" (total={total}, trades={len(trades)})")
+                )
 
-        # ---- Aggregate: engine emitted at least one exit when expected ----
-        if diagnostics is not None:
-            firings = diagnostics.exit_rule_firings or {}
-            total = sum(firings.values())
-            details = "engine_exits: " + (
-                ", ".join(f"{k}={v}" for k, v in sorted(firings.items())) or "none"
-            )
-            results.append(
-                self._info(details + f" (total={total}, trades={len(trades)})")
-            )
-
-        return results
+            return results
 
     # ------------------------------------------------------------------
     # Per-rule checks

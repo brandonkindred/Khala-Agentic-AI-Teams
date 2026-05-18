@@ -45,13 +45,10 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 
-# Every test in this module builds a real ``StrategyLabOrchestrator`` and
-# drives ``run_cycle``, so the readiness price provider would otherwise hit
-# the live yfinance chain (or its test-environment stub) and trip
-# SpecReadinessGate Rule 5 on a NaN. Use the opt-in fixture from
-# ``conftest.py`` so every test in this file sees a deterministic price
-# without an autouse fixture masking production fail-closed behaviour.
-pytestmark = pytest.mark.usefixtures("stub_readiness_market_data_fetch")
+# Every test in this module drives `run_cycle` on a real
+# StrategyLabOrchestrator; the marker auto-applies the readiness fetch
+# stub from conftest. See conftest.py for the contract.
+pytestmark = pytest.mark.strategy_lab_integration
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
