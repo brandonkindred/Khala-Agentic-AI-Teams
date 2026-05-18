@@ -23,7 +23,6 @@ from investment_team.strategy_lab.spec_dsl import (
     VolatilityTargetSizing,
     format_rules_for_prompt,
     format_sizing_rule,
-    from_prose,
 )
 
 # ---------------------------------------------------------------------------
@@ -458,7 +457,7 @@ def test_strategy_spec_has_no_sizing_rules_field():
 # ---------------------------------------------------------------------------
 
 
-def test_strategy_spec_timeframe_required_when_no_legacy_markers():
+def test_strategy_spec_timeframe_required():
     from investment_team.models import StrategySpec
 
     with pytest.raises(ValidationError) as exc_info:
@@ -468,7 +467,6 @@ def test_strategy_spec_timeframe_required_when_no_legacy_markers():
             asset_class="stocks",
             hypothesis="h",
             signal_definition="s",
-            # no timeframe; no legacy markers either
         )
     errors = exc_info.value.errors()
     assert any(e["loc"] == ("timeframe",) for e in errors)
@@ -501,158 +499,6 @@ def test_strategy_spec_rejects_unknown_timeframe():
             signal_definition="s",
             timeframe="7d",  # type: ignore[arg-type]
         )
-
-
-def test_strategy_spec_legacy_payload_migrates_in_place():
-    """Legacy persisted shape — typed IndicatorRef + 'gt' op + no timeframe — rewrites in-flight."""
-    from investment_team.models import StrategySpec
-
-    legacy = {
-        "strategy_id": "legacy-1",
-        "authored_by": "test",
-        "asset_class": "stocks",
-        "hypothesis": "h",
-        "signal_definition": "s",
-        "entry_rules": [
-            {
-                "kind": "entry",
-                "side": "long",
-                "when": {
-                    "lhs": {"kind": "price", "field": "close"},
-                    "op": "gt",
-                    "rhs": {"kind": "sma", "period": 20},
-                },
-            }
-        ],
-        "exit_rules": [{"kind": "time_stop", "n_bars": 10}],
-        "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
-    }
-    spec = StrategySpec.model_validate(legacy)
-    assert spec.timeframe == "1d"
-    assert spec.entry_rules[0].when.lhs == "bar.close"
-    assert spec.entry_rules[0].when.op == ">"
-    assert isinstance(spec.entry_rules[0].when.rhs, IndicatorRef)
-    assert spec.entry_rules[0].when.rhs.name == "sma"
-
-
-def test_strategy_spec_legacy_unparsable_rule_routed_to_unparsed():
-    from investment_team.models import StrategySpec
-
-    legacy = {
-        "strategy_id": "legacy-unparseable",
-        "authored_by": "test",
-        "asset_class": "stocks",
-        "hypothesis": "h",
-        "signal_definition": "s",
-        "entry_rules": [{"kind": "unparsable", "prose": "enter on vibes"}],
-        "exit_rules": [],
-    }
-    spec = StrategySpec.model_validate(legacy)
-    assert spec.entry_rules == []
-    assert spec.requires_redesign is True
-    assert "enter on vibes" in spec.unparsed_rules
-
-
-def test_strategy_spec_legacy_sizing_rules_field_migrates():
-    from investment_team.models import StrategySpec
-
-    legacy = {
-        "strategy_id": "legacy-sizing",
-        "authored_by": "test",
-        "asset_class": "stocks",
-        "hypothesis": "h",
-        "signal_definition": "s",
-        "entry_rules": [],
-        "exit_rules": [],
-        "sizing_rules": ["risk 2% per trade"],
-    }
-    spec = StrategySpec.model_validate(legacy)
-    assert isinstance(spec.sizing, FixedFractionSizing)
-    assert spec.sizing.fraction == 0.02
-
-
-def test_strategy_spec_mixed_legacy_and_new_shape_rules_both_survive():
-    """Regression: a payload with structural legacy markers in one rule
-    must not drop sibling rules that are already in the new shape."""
-    from investment_team.models import StrategySpec
-
-    payload = {
-        "strategy_id": "mixed",
-        "authored_by": "test",
-        "asset_class": "stocks",
-        "hypothesis": "h",
-        "signal_definition": "s",
-        "entry_rules": [
-            # legacy-shape (triggers _migrate_legacy_payload)
-            {
-                "kind": "entry",
-                "side": "long",
-                "when": {
-                    "lhs": {"kind": "price", "field": "close"},
-                    "op": "gt",
-                    "rhs": {"kind": "sma", "period": 20},
-                },
-            },
-            # already-new-shape — must pass through unchanged
-            {
-                "kind": "entry",
-                "side": "long",
-                "when": {
-                    "lhs": "bar.close",
-                    "op": ">",
-                    "rhs": {"name": "rsi", "params": {"period": 14}},
-                },
-            },
-        ],
-        "exit_rules": [],
-    }
-    spec = StrategySpec.model_validate(payload)
-    assert len(spec.entry_rules) == 2
-    assert spec.unparsed_rules == []
-    assert spec.requires_redesign is False
-    assert isinstance(spec.entry_rules[0].when.rhs, IndicatorRef)
-    assert spec.entry_rules[0].when.rhs.name == "sma"
-    assert isinstance(spec.entry_rules[1].when.rhs, IndicatorRef)
-    assert spec.entry_rules[1].when.rhs.name == "rsi"
-
-
-# ---------------------------------------------------------------------------
-# Issue #537 — `from_prose` top-level adapter.
-# ---------------------------------------------------------------------------
-
-
-def test_from_prose_parses_clean_legacy_spec():
-    legacy = {
-        "strategy_id": "prose-1",
-        "authored_by": "test",
-        "asset_class": "stocks",
-        "hypothesis": "h",
-        "signal_definition": "s",
-        "entry_rules": ["close > sma(20)"],
-        "exit_rules": ["exit after 10 bars"],
-        "sizing_rules": ["risk 2% per trade"],
-    }
-    spec = from_prose(legacy)
-    assert spec.timeframe == "1d"
-    assert spec.requires_redesign is False
-    assert spec.unparsed_rules == []
-    assert spec.entry_rules[0].when.lhs == "bar.close"
-
-
-def test_from_prose_flags_requires_redesign_on_unparseable():
-    legacy = {
-        "strategy_id": "prose-bad",
-        "authored_by": "test",
-        "asset_class": "stocks",
-        "hypothesis": "h",
-        "signal_definition": "s",
-        "entry_rules": ["enter on vibes", "close > sma(20)"],
-        "exit_rules": [],
-    }
-    spec = from_prose(legacy)
-    assert spec.requires_redesign is True
-    assert "enter on vibes" in spec.unparsed_rules
-    assert len(spec.entry_rules) == 1  # only the parseable one
 
 
 def test_default_sizing_payload_is_two_pct():
