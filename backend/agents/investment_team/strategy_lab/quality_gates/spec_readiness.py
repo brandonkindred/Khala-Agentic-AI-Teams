@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import dataclass
 from typing import Callable, ClassVar, Iterable, Iterator, List, Optional
 
 from ...models import BacktestConfig, StrategySpec
@@ -162,6 +163,19 @@ def _default_market_sample_provider(symbol: str, asset_class: str) -> float:
     return price
 
 
+@dataclass(frozen=True)
+class SpecReadinessCtx:
+    """Per-``validate`` context handed to every rule in ``SpecReadinessGate._RULES``.
+
+    Built once at the top of ``validate``. Threading the ctx explicitly
+    through each rule replaces the previous ``ctx.config`` slot that
+    had to be reset in a ``finally`` block.
+    """
+
+    spec: StrategySpec
+    config: Optional[BacktestConfig]
+
+
 class SpecReadinessGate(GateResultsMixin):
     """Deterministic implementability checks on a constructed ``StrategySpec``.
 
@@ -191,13 +205,8 @@ class SpecReadinessGate(GateResultsMixin):
             market_sample_provider or _default_market_sample_provider
         )
         self._backtest_config = backtest_config
-        # Per-call config slot — set by ``validate()`` before any rule runs so
-        # individual ``_check_*`` methods can read it without an extra
-        # parameter. Reset back to ``None`` on exit so the gate can be safely
-        # re-used across cycles.
-        self._call_config: Optional[BacktestConfig] = None
 
-        # Post: provider is callable, config slot is the supplied value or None.
+        # Post: provider is callable.
         assert callable(self._market_sample_provider), "provider slot must be callable"
 
     def validate(
@@ -218,33 +227,30 @@ class SpecReadinessGate(GateResultsMixin):
             "backtest_config override must be a BacktestConfig or None"
         )
         self._set_phase(phase)
-        self._call_config = backtest_config or self._backtest_config
-        try:
-            results: List[QualityGateResult] = [
-                r for rule in self._RULES for r in rule(self, spec)
-            ]
-            if not results:
-                results.append(self._info("Strategy spec passed all readiness checks."))
-            # Post: every result carries the caller's phase and GATE name.
-            assert all(r.phase == phase for r in results), (
-                "every result must carry the caller's phase"
-            )
-            assert all(r.gate_name == GATE for r in results), (
-                "every result must carry GATE name"
-            )
-            return results
-        finally:
-            self._call_config = None
+        ctx = SpecReadinessCtx(spec=spec, config=backtest_config or self._backtest_config)
+        results: List[QualityGateResult] = [
+            r for rule in self._RULES for r in rule(self, ctx)
+        ]
+        if not results:
+            results.append(self._info("Strategy spec passed all readiness checks."))
+        # Post: every result carries the caller's phase and GATE name.
+        assert all(r.phase == phase for r in results), (
+            "every result must carry the caller's phase"
+        )
+        assert all(r.gate_name == GATE for r in results), (
+            "every result must carry GATE name"
+        )
+        return results
 
     # ------------------------------------------------------------------
     # Rule 1: Universe set — every whitelisted ticker named in the
     # hypothesis must also appear in ``target_symbols`` (after stripping
     # Yahoo provider suffixes).
     # ------------------------------------------------------------------
-    def _check_universe_set(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
-        assert isinstance(spec, StrategySpec)
-        named_raw = {m.group(0).upper() for m in _SYMBOL_REGEX.finditer(spec.hypothesis or "")}
-        targets_raw = {s.upper() for s in spec.target_symbols}
+    def _check_universe_set(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
+        named_raw = {m.group(0).upper() for m in _SYMBOL_REGEX.finditer(ctx.spec.hypothesis or "")}
+        targets_raw = {s.upper() for s in ctx.spec.target_symbols}
         named = {_canonicalize_ticker(s) for s in named_raw}
         targets = {_canonicalize_ticker(s) for s in targets_raw}
         if not named or named <= targets:
@@ -269,11 +275,11 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Rule 2: Entry rules non-trivial.
     # ------------------------------------------------------------------
-    def _check_entry_rules_non_trivial(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
-        assert isinstance(spec, StrategySpec)
-        if not spec.entry_rules:
+    def _check_entry_rules_non_trivial(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
+        if not ctx.spec.entry_rules:
             return (self._critical("No entry rules — strategy cannot generate trades."),)
-        for idx, rule in enumerate(spec.entry_rules):
+        for idx, rule in enumerate(ctx.spec.entry_rules):
             if not isinstance(rule, EntryRule):
                 return (
                     self._critical(
@@ -293,9 +299,9 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Rule 3: Indicator validity.
     # ------------------------------------------------------------------
-    def _check_indicator_validity(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
-        assert isinstance(spec, StrategySpec)
-        for ref in self._iter_indicator_refs(spec):
+    def _check_indicator_validity(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
+        for ref in self._iter_indicator_refs(ctx.spec):
             if ref.name not in _KNOWN_INDICATOR_NAMES:
                 return (
                     self._critical(
@@ -316,17 +322,17 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Rule 4: Exit completeness.
     # ------------------------------------------------------------------
-    def _check_exit_completeness(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
-        assert isinstance(spec, StrategySpec)
+    def _check_exit_completeness(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
         allowed_kinds = {"signal_exit", "stop_loss", "take_profit"}
-        if not spec.exit_rules:
+        if not ctx.spec.exit_rules:
             return (
                 self._critical(
                     "No exit rules — positions would never close. Add at "
                     "least one of: signal_exit, stop_loss, take_profit."
                 ),
             )
-        if not any(getattr(r, "kind", None) in allowed_kinds for r in spec.exit_rules):
+        if not any(getattr(r, "kind", None) in allowed_kinds for r in ctx.spec.exit_rules):
             return (
                 self._critical(
                     f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."
@@ -337,24 +343,24 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Rule 5: Sizing realisable.
     # ------------------------------------------------------------------
-    def _check_sizing_realisable(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
-        assert isinstance(spec, StrategySpec)
-        config = self._call_config
+    def _check_sizing_realisable(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
+        config = ctx.config
         if config is None:
             return ()
 
-        kind = getattr(spec.sizing, "kind", None)
-        symbols = spec.target_symbols or _default_universe_for(spec.asset_class)
+        kind = getattr(ctx.spec.sizing, "kind", None)
+        symbols = ctx.spec.target_symbols or _default_universe_for(ctx.spec.asset_class)
         if not symbols:
             return ()
         capital = config.initial_capital
         assert capital > 0, "initial_capital must be strictly positive"
-        enforce_whole_lot = spec.asset_class.lower() in _WHOLE_LOT_ASSET_CLASSES
+        enforce_whole_lot = ctx.spec.asset_class.lower() in _WHOLE_LOT_ASSET_CLASSES
         threshold = 1.0 if enforce_whole_lot else 0.0
 
         for sym in symbols:
             try:
-                price = float(self._market_sample_provider(sym, spec.asset_class))
+                price = float(self._market_sample_provider(sym, ctx.spec.asset_class))
             except Exception:
                 price = float("nan")
             if not math.isfinite(price) or price <= 0:
@@ -364,9 +370,9 @@ class SpecReadinessGate(GateResultsMixin):
                     ),
                 )
             if kind == "fixed_fraction":
-                notional = capital * float(spec.sizing.fraction)
+                notional = capital * float(ctx.spec.sizing.fraction)
             elif kind == "fixed_notional":
-                notional = float(spec.sizing.notional_usd)
+                notional = float(ctx.spec.sizing.notional_usd)
             else:
                 # volatility_target needs realised vol — cannot evaluate here.
                 continue
@@ -385,14 +391,14 @@ class SpecReadinessGate(GateResultsMixin):
     # Rule 6: Hypothesis–rule consistency.
     # ------------------------------------------------------------------
     def _check_hypothesis_rule_consistency(
-        self, spec: StrategySpec
+        self, ctx: SpecReadinessCtx
     ) -> Iterable[QualityGateResult]:
-        assert isinstance(spec, StrategySpec)
+        assert isinstance(ctx.spec, StrategySpec)
         terms = {
             re.sub(r"\s+", " ", m.group(0).lower())
-            for m in _CONCEPT_TERMS.finditer(spec.hypothesis or "")
+            for m in _CONCEPT_TERMS.finditer(ctx.spec.hypothesis or "")
         }
-        referenced = {ref.name for ref in self._iter_indicator_refs(spec)}
+        referenced = {ref.name for ref in self._iter_indicator_refs(ctx.spec)}
         # A concept fires only when *none* of its allowed indicators is referenced,
         # so "moving average" is satisfied by either SMA or EMA.
         orphan = sorted(
@@ -413,14 +419,14 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Rule 7: Timeframe data availability.
     # ------------------------------------------------------------------
-    def _check_timeframe_availability(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
-        assert isinstance(spec, StrategySpec)
-        if spec.timeframe == "1d" or spec.asset_class.lower() in _FULL_TIMEFRAME_ASSET_CLASSES:
+    def _check_timeframe_availability(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
+        if ctx.spec.timeframe == "1d" or ctx.spec.asset_class.lower() in _FULL_TIMEFRAME_ASSET_CLASSES:
             return ()
         return (
             self._critical(
-                f"Asset class '{spec.asset_class}' has no reliable "
-                f"intraday data for timeframe '{spec.timeframe}'; "
+                f"Asset class '{ctx.spec.asset_class}' has no reliable "
+                f"intraday data for timeframe '{ctx.spec.timeframe}'; "
                 "use '1d' or pick stocks/crypto."
             ),
         )
@@ -429,12 +435,12 @@ class SpecReadinessGate(GateResultsMixin):
     # Rule 8: Risk-limit coherence — independent stop/profit and position
     # caps; both sub-checks can fire on the same spec.
     # ------------------------------------------------------------------
-    def _check_risk_limit_coherence(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
-        assert isinstance(spec, StrategySpec)
+    def _check_risk_limit_coherence(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
         out: List[QualityGateResult] = []
 
-        stop_losses = [r for r in spec.exit_rules if isinstance(r, StopLossRule)]
-        take_profits = [r for r in spec.exit_rules if isinstance(r, TakeProfitRule)]
+        stop_losses = [r for r in ctx.spec.exit_rules if isinstance(r, StopLossRule)]
+        take_profits = [r for r in ctx.spec.exit_rules if isinstance(r, TakeProfitRule)]
         if stop_losses and take_profits:
             min_tp = min(r.pct for r in take_profits)
             max_sl = max(r.pct for r in stop_losses)
@@ -447,10 +453,10 @@ class SpecReadinessGate(GateResultsMixin):
                     )
                 )
 
-        if spec.risk_limits.max_position_pct > 25:
+        if ctx.spec.risk_limits.max_position_pct > 25:
             out.append(
                 self._critical(
-                    f"max_position_pct={spec.risk_limits.max_position_pct}% "
+                    f"max_position_pct={ctx.spec.risk_limits.max_position_pct}% "
                     "exceeds the 25% cap for a single-position risk budget."
                 )
             )

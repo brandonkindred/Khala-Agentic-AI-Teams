@@ -2,10 +2,29 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import ClassVar, Iterable, List, Optional
 
 from ...models import BacktestExecutionDiagnostics, BacktestResult, CoverageReport, TradeRecord
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
+
+
+@dataclass(frozen=True)
+class BacktestAnomalyCtx:
+    """Per-``check`` context handed to every rule in ``BacktestAnomalyDetector._RULES``.
+
+    Frozen so individual rules cannot accidentally mutate state visible to
+    later rules. Built once at the top of ``check`` and threaded through each
+    rule call — replaces the previous ``self._<attr>`` pattern that risked
+    bleed-over across concurrent ``check`` invocations.
+    """
+
+    metrics: BacktestResult
+    trades: List[TradeRecord]
+    mode: str
+    dsr_aware: bool
+    diagnostics: Optional[BacktestExecutionDiagnostics]
+    coverage_report: Optional[CoverageReport]
 
 GATE = "backtest_anomaly"
 
@@ -115,58 +134,52 @@ class BacktestAnomalyDetector(GateResultsMixin):
         Other rules ignore them.
         """
         self._set_phase(phase)
-        # Store call-scoped context so each rule reads from instance state
-        # without an explicit-arg parade.
-        self._metrics = metrics
-        self._trades = trades
-        self._mode = mode
-        self._dsr_aware = dsr_aware
-        self._diagnostics = diagnostics
-        self._coverage_report = coverage_report
-        try:
-            # Zero trades is a hard short-circuit — every downstream statistic
-            # is meaningless without trades, so we return immediately.
-            if not trades:
-                return [
-                    self._critical(_format_zero_trade_details(diagnostics, coverage_report))
-                ]
-            results = [r for rule in self._RULES for r in rule(self)]
-            return results or [self._info("Backtest results passed all anomaly checks.")]
-        finally:
-            self._metrics = None  # type: ignore[assignment]
-            self._trades = None  # type: ignore[assignment]
-            self._diagnostics = None
-            self._coverage_report = None
+        # Zero trades is a hard short-circuit — every downstream statistic
+        # is meaningless without trades, so we return immediately.
+        if not trades:
+            return [
+                self._critical(_format_zero_trade_details(diagnostics, coverage_report))
+            ]
+        ctx = BacktestAnomalyCtx(
+            metrics=metrics,
+            trades=trades,
+            mode=mode,
+            dsr_aware=dsr_aware,
+            diagnostics=diagnostics,
+            coverage_report=coverage_report,
+        )
+        results = [r for rule in self._RULES for r in rule(self, ctx)]
+        return results or [self._info("Backtest results passed all anomaly checks.")]
 
     # ------------------------------------------------------------------
-    # Rules — each reads call-scoped state from ``self`` and yields zero or
-    # more results. Listed in ``_RULES`` below.
+    # Rules — each takes the per-call ``BacktestAnomalyCtx`` and yields zero
+    # or more results. Listed in ``_RULES`` below.
     # ------------------------------------------------------------------
-    def _check_trade_count_floor(self) -> Iterable[QualityGateResult]:
+    def _check_trade_count_floor(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
         # Paper sessions run over short windows (a few weeks at most) so a
         # <5-trade minimum is inappropriate; the signals_per_bar floor is the
         # paper-mode equivalent.
-        if self._mode != "paper" and len(self._trades) < 5:
+        if ctx.mode != "paper" and len(ctx.trades) < 5:
             return (
                 self._critical(
-                    f"Only {len(self._trades)} trades — "
+                    f"Only {len(ctx.trades)} trades — "
                     "statistically meaningless for a multi-year backtest."
                 ),
             )
         return ()
 
-    def _check_annualized_return_ceiling(self) -> Iterable[QualityGateResult]:
-        if self._metrics.annualized_return_pct > 200:
+    def _check_annualized_return_ceiling(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
+        if ctx.metrics.annualized_return_pct > 200:
             return (
                 self._critical(
-                    f"Annualized return {self._metrics.annualized_return_pct:.1f}% is "
+                    f"Annualized return {ctx.metrics.annualized_return_pct:.1f}% is "
                     "suspiciously high (>200%) — likely a data or logic bug."
                 ),
             )
         return ()
 
-    def _check_win_rate(self) -> Iterable[QualityGateResult]:
-        wr = self._metrics.win_rate_pct
+    def _check_win_rate(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
+        wr = ctx.metrics.win_rate_pct
         if wr > 95:
             return (
                 self._critical(
@@ -182,23 +195,23 @@ class BacktestAnomalyDetector(GateResultsMixin):
             )
         return ()
 
-    def _check_profit_factor(self) -> Iterable[QualityGateResult]:
-        if self._metrics.profit_factor > 10:
+    def _check_profit_factor(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
+        if ctx.metrics.profit_factor > 10:
             return (
                 self._critical(
-                    f"Profit factor {self._metrics.profit_factor:.1f} exceeds 10 — "
+                    f"Profit factor {ctx.metrics.profit_factor:.1f} exceeds 10 — "
                     "likely data snooping or bug."
                 ),
             )
         return ()
 
-    def _check_sharpe_ratio(self) -> Iterable[QualityGateResult]:
+    def _check_sharpe_ratio(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
         # When the orchestrator runs walk-forward + AcceptanceGate, OOS
         # Deflated Sharpe is the authoritative overfitting check — so the
         # single-window ``Sharpe > 5.0`` flag is downgraded from critical to
         # warning to avoid double-rejecting strategies whose IS Sharpe is
         # high but OOS DSR clears.
-        sr = self._metrics.sharpe_ratio
+        sr = ctx.metrics.sharpe_ratio
         if sr > 5.0:
             details = (
                 f"Sharpe ratio {sr:.2f} exceeds 5.0 — almost certainly indicates "
@@ -206,12 +219,12 @@ class BacktestAnomalyDetector(GateResultsMixin):
                 + (
                     "AcceptanceGate's OOS Deflated Sharpe is the authoritative "
                     "overfitting check on this run."
-                    if self._dsr_aware
+                    if ctx.dsr_aware
                     else "When walk-forward is available, AcceptanceGate's OOS "
                     "Deflated Sharpe is the more precise overfitting check."
                 )
             )
-            return (self._warning(details) if self._dsr_aware else self._critical(details),)
+            return (self._warning(details) if ctx.dsr_aware else self._critical(details),)
         if sr > 3.0:
             return (
                 self._warning(
@@ -221,8 +234,8 @@ class BacktestAnomalyDetector(GateResultsMixin):
             )
         return ()
 
-    def _check_avg_hold_time(self) -> Iterable[QualityGateResult]:
-        avg_hold = sum(t.hold_days for t in self._trades) / len(self._trades)
+    def _check_avg_hold_time(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
+        avg_hold = sum(t.hold_days for t in ctx.trades) / len(ctx.trades)
         if avg_hold < 1:
             return (
                 self._critical(
@@ -233,11 +246,11 @@ class BacktestAnomalyDetector(GateResultsMixin):
             )
         return ()
 
-    def _check_trade_concentration(self) -> Iterable[QualityGateResult]:
-        total_pnl = sum(abs(t.net_pnl) for t in self._trades)
+    def _check_trade_concentration(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
+        total_pnl = sum(abs(t.net_pnl) for t in ctx.trades)
         if total_pnl <= 0:
             return ()
-        max_single = max(abs(t.net_pnl) for t in self._trades)
+        max_single = max(abs(t.net_pnl) for t in ctx.trades)
         if max_single / total_pnl > 0.5:
             return (
                 self._warning(
@@ -247,29 +260,29 @@ class BacktestAnomalyDetector(GateResultsMixin):
             )
         return ()
 
-    def _check_trade_diversification(self) -> Iterable[QualityGateResult]:
-        if len(self._trades) <= 1:
+    def _check_trade_diversification(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
+        if len(ctx.trades) <= 1:
             return ()
-        sides = {t.side for t in self._trades}
-        symbols = {t.symbol for t in self._trades}
+        sides = {t.side for t in ctx.trades}
+        symbols = {t.symbol for t in ctx.trades}
         if len(sides) == 1 and len(symbols) == 1:
             return (
                 self._warning(
-                    f"All {len(self._trades)} trades are {next(iter(sides))} on "
+                    f"All {len(ctx.trades)} trades are {next(iter(sides))} on "
                     f"{next(iter(symbols))} — no diversification."
                 ),
             )
         return ()
 
-    def _check_cost_sensitivity(self) -> Iterable[QualityGateResult]:
-        gross_wins = sum(t.gross_pnl for t in self._trades if t.gross_pnl > 0)
-        gross_losses = abs(sum(t.gross_pnl for t in self._trades if t.gross_pnl <= 0))
+    def _check_cost_sensitivity(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
+        gross_wins = sum(t.gross_pnl for t in ctx.trades if t.gross_pnl > 0)
+        gross_losses = abs(sum(t.gross_pnl for t in ctx.trades if t.gross_pnl <= 0))
         gross_pf = gross_wins / gross_losses if gross_losses > 0 else 0.0
-        if gross_pf > 1.0 and self._metrics.profit_factor < 1.0:
+        if gross_pf > 1.0 and ctx.metrics.profit_factor < 1.0:
             return (
                 self._warning(
                     f"Profit factor drops from {gross_pf:.2f} (gross) to "
-                    f"{self._metrics.profit_factor:.2f} (net) — strategy edge is "
+                    f"{ctx.metrics.profit_factor:.2f} (net) — strategy edge is "
                     "consumed by transaction costs."
                 ),
             )
