@@ -448,6 +448,45 @@ def test_get_strands_model_forwards_response_format() -> None:
     assert model.get_config()["response_format"] == "text"
 
 
+def test_clone_returns_new_model_sharing_backing_client() -> None:
+    """``LLMClientModel.clone(response_format=...)`` derives a sibling that
+    reuses the same backing client but applies the override. Use case:
+    callers that need both prose and JSON variants of the same upstream
+    model (e.g. ``BlogWriterAgent`` for the ``---DRAFT---`` marker path
+    plus its JSON helpers).
+    """
+    client = _RecordingClient("hello")
+    base = LLMClientModel(
+        client,
+        agent_key="blog",
+        temperature=0.3,
+        think=True,
+        response_format="json",
+    )
+    sibling = base.clone(response_format="text")
+
+    assert sibling is not base
+    assert sibling._client is base._client
+    assert sibling.get_config()["response_format"] == "text"
+    # Non-overridden fields inherited.
+    assert sibling.get_config()["agent_key"] == "blog"
+    assert sibling.get_config()["temperature"] == 0.3
+    assert sibling.get_config()["think"] is True
+    # Base config is unmodified.
+    assert base.get_config()["response_format"] == "json"
+
+    # Verify the cloned text-mode sibling routes through chat_round (not chat_json_round).
+    _drain(sibling.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert len(client.chat_round_calls) == 1
+    assert client.chat_json_round_calls == []
+
+
+def test_clone_rejects_invalid_response_format() -> None:
+    base = LLMClientModel(_RecordingClient({}))
+    with pytest.raises(ValueError, match="response_format"):
+        base.clone(response_format="xml")
+
+
 def test_public_llm_service_get_strands_model_accepts_response_format(monkeypatch) -> None:
     """Regression: ``llm_service.get_strands_model`` is re-exported from
     ``strands_provider`` (not ``strands_adapter``). The branding assistant calls

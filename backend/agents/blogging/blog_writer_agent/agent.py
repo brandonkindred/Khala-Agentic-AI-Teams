@@ -158,6 +158,21 @@ class BlogWriterAgent:
         """
         assert llm_client is not None, "llm_client is required"
         self._model = llm_client
+        # ``_call_agent`` produces the ``---DRAFT---`` hybrid format (JSON
+        # marker line + Markdown body), which only works when the underlying
+        # adapter is in text mode — JSON mode forces a single JSON object on
+        # the wire and the marker pattern disappears. Derive a text-mode
+        # sibling from the injected model when possible; fall back to the
+        # passed model so test fixtures (MagicMock, fakes) continue to work.
+        try:
+            from llm_service.strands_adapter import LLMClientModel  # noqa: PLC0415
+
+            if isinstance(llm_client, LLMClientModel):
+                self._text_model = llm_client.clone(response_format="text")
+            else:
+                self._text_model = llm_client
+        except ImportError:
+            self._text_model = llm_client
         self._writing_style_prompt = (writing_style_guide_content or "").strip()
         self._brand_spec_prompt = (brand_spec_content or "").strip()
         parts: list[str] = []
@@ -167,15 +182,40 @@ class BlogWriterAgent:
             parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
         self._style_prompt = "\n\n".join(parts)
 
-    def _call_agent(self, prompt: str, system_prompt: str = "") -> str:
-        """Call a Strands Agent and return the raw text result."""
-        agent = Agent(model=self._model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
+    def _call_agent(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        *,
+        expect_json: bool = False,
+    ) -> str:
+        """Call a Strands Agent and return the raw assistant content.
+
+        ``expect_json=False`` (default) uses the text-mode sibling — required
+        for drafting / revision paths that emit the ``---DRAFT---`` marker +
+        Markdown hybrid format. JSON mode would force a single JSON object
+        on the wire and the marker would disappear, leaving the placeholder
+        fallback as the only path.
+
+        ``expect_json=True`` uses the default (JSON-mode) model — appropriate
+        for the few non-``_call_agent_json`` callers that still parse the
+        result as JSON (e.g. planning retry path, uncertainty-array
+        detection).
+        """
+        model = self._model if expect_json else self._text_model
+        agent = Agent(model=model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
         result = agent(prompt)
         return str(result).strip()
 
     def _call_agent_json(self, prompt: str, system_prompt: str = "") -> dict:
-        """Call a Strands Agent and parse JSON from the result."""
-        raw = self._call_agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.", system_prompt)
+        """Call the JSON-mode Strands Agent and parse JSON from the result.
+
+        Uses ``self._model`` directly (default JSON mode), which forces
+        ``response_format=json_object`` on the wire for planning helpers and
+        gates that ``json.loads`` the assistant content.
+        """
+        agent = Agent(model=self._model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
+        raw = str(agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")).strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         return json.loads(raw)
@@ -280,7 +320,9 @@ class BlogWriterAgent:
             try:
                 raw = self._call_agent(
                     prompt + "\n\nRespond with a single JSON object only, no markdown fences.",
-                    system_prompt=system)
+                    system_prompt=system,
+                    expect_json=True,
+                )
                 data = parse_json_object(raw)
                 return data, parse_retries
             except (json.JSONDecodeError, TypeError, ValueError) as e:
@@ -1163,7 +1205,9 @@ class BlogWriterAgent:
         try:
             raw = self._call_agent(
                 prompt,
-                system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.")
+                system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
+                expect_json=True,
+            )
             cleaned = raw.strip()
             start = cleaned.find("[")
             end = cleaned.rfind("]") + 1

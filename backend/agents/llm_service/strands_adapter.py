@@ -243,6 +243,35 @@ class LLMClientModel(Model):
         """Return the adapter config (agent_key, model_id, sampling params)."""
         return self.config
 
+    def clone(self, **overrides: Any) -> "LLMClientModel":
+        """Return a new ``LLMClientModel`` sharing the backing client but with
+        per-field overrides applied to the config.
+
+        Use this when one caller (e.g. ``BlogWriterAgent``) needs both a JSON
+        and a text variant of the same upstream model — the cached
+        ``get_strands_model`` is for the canonical default, ``clone`` is for
+        deriving the sibling without re-hitting the factory or constructing a
+        fresh backing client.
+
+        Example::
+
+            text_model = json_model.clone(response_format="text")
+        """
+        cfg = dict(self.config)
+        cfg.update(overrides)
+        rf = cfg.get("response_format", "json")
+        if rf not in ("json", "text"):
+            raise ValueError(f"response_format must be 'json' or 'text', got {rf!r}")
+        return LLMClientModel(
+            self._client,
+            agent_key=cfg.get("agent_key"),
+            model_id=cfg.get("model_id"),
+            temperature=float(cfg.get("temperature", 0.0) or 0.0),
+            max_tokens=cfg.get("max_tokens"),
+            think=bool(cfg.get("think", False)),
+            response_format=str(rf),
+        )
+
     async def stream(
         self,
         messages: Messages,

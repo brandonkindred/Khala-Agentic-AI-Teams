@@ -234,3 +234,46 @@ def test_draft_run_requires_both_guidelines() -> None:
     )
     with pytest.raises(ValueError, match="requires both brand and writing guidelines"):
         agent.run(draft_input)
+
+
+def test_blog_writer_agent_derives_text_mode_sibling_when_given_llm_client_model() -> None:
+    """BlogWriterAgent's drafting path uses the ``---DRAFT---`` marker
+    pattern which only works in text mode. When constructed with a real
+    ``LLMClientModel`` (the production path via ``get_strands_model("blog")``
+    which defaults to JSON), the writer must derive a ``response_format="text"``
+    sibling internally so ``_call_agent`` does not get JSON-forced.
+    """
+    from llm_service.strands_adapter import LLMClientModel
+
+    json_model = LLMClientModel(DummyLLMClient(), agent_key="blog", response_format="json")
+    agent = BlogWriterAgent(
+        llm_client=json_model,
+        writing_style_guide_content="Use clear sentences.",
+        brand_spec_content="Brand voice: practical.",
+    )
+
+    # The original JSON-mode model is preserved for ``_call_agent_json``.
+    assert agent._model is json_model
+    assert agent._model.get_config()["response_format"] == "json"
+
+    # The text-mode sibling is a different instance with response_format flipped.
+    assert agent._text_model is not json_model
+    assert agent._text_model.get_config()["response_format"] == "text"
+
+    # Backing client is shared — same retries, telemetry, rate limit guard.
+    assert agent._text_model._client is json_model._client
+
+
+def test_blog_writer_agent_falls_back_when_llm_client_is_not_strands_model() -> None:
+    """Test fixtures and offline callers often pass a raw ``LLMClient``
+    (DummyLLMClient, MagicMock) instead of a Strands ``LLMClientModel``.
+    The writer must not crash trying to derive a sibling — fall back to
+    using the injected object as both models."""
+    raw_client = DummyLLMClient()
+    agent = BlogWriterAgent(
+        llm_client=raw_client,
+        writing_style_guide_content="Use clear sentences.",
+        brand_spec_content="Brand voice: practical.",
+    )
+    assert agent._model is raw_client
+    assert agent._text_model is raw_client
