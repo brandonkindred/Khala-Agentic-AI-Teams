@@ -22,7 +22,7 @@ Volatility: {volatility_pct:.1f}%
 {simulated_trades_section}
 
 ## Instructions
-Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced: the parent engine emits time-stop / stop-loss / take-profit closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. a tight cluster of N-day holds points to a time stop firing).
+Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced for `TimeStopRule`, `StopLossRule`, and `TakeProfitRule`: the parent engine emits closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. a tight cluster of N-day holds points to a time stop firing). `SignalExitRule` entries in the list above are NOT yet engine-enforced — treat any predicate-based exit prose the same way as entry intent.
 Think step by step: what in the strategy design plausibly produced strong risk-adjusted returns?
 Relate the hypothesis and rules to (1) Sharpe/drawdown/volatility, (2) win rate vs profit factor, (3) patterns in the simulated trades (hold periods, win/loss mix, concentration).
 Write 5-8 sentences. Be specific — avoid generic praise. Explain *why* this strategy class succeeded in this backtest.

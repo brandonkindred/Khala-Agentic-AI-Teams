@@ -68,10 +68,19 @@ class _TrackedPosition:
     Mirrors the public :class:`PositionState` shape but is mutable so the bar
     loop can update bars-held / watermarks in place. The snapshot handed to
     :func:`evaluate_exit_rules` is a fresh immutable copy.
+
+    ``entry_order_id`` pins the tracker to a specific :class:`Position`
+    instance. When a same-bar exit-then-re-entry replaces the underlying
+    position, ``portfolio.positions[sym]`` swaps to a new ``Position`` with
+    a different ``entry_order_id``; the tracker reset path in
+    :meth:`TradingService._update_position_tracker` detects that and starts
+    fresh, so a stale ``bars_held`` / watermark can't fire a rule on the
+    brand-new trade.
     """
 
     side: str  # "long" | "short"
     entry_price: float
+    entry_order_id: str
     bars_held: int
     high_since_entry: float
     low_since_entry: float
@@ -492,6 +501,12 @@ class TradingService:
         # structured exit rules. Keyed by symbol; populated after each bar's
         # fills are processed. No effect when ``self._exit_rules`` is empty.
         position_tracker: Dict[str, _TrackedPosition] = {}
+        # Issue #527 — engine-issued exit orders bind to the position they
+        # close so the fill simulator's stale-continuation guard drops them
+        # when a prior strategy exit (limit/stop/GTC) closes the position
+        # first. Keyed by client_order_id; consumed when the order moves
+        # from ``pending_for_prev`` to the order book.
+        engine_exit_bindings: Dict[str, str] = {}
         # Monotonic counter for engine-issued client_order_ids so each
         # rule-triggered close has a distinct id. Strategy ids are emitted
         # client-side; engine ids must not collide with them, hence the
@@ -676,7 +691,7 @@ class TradingService:
                                 if apply_default and req.unfilled_policy is None:
                                     req.unfilled_policy = self._default_unfilled_policy
                                 equity = portfolio.mark_to_market()
-                                order_book.submit(
+                                submitted_po = order_book.submit(
                                     req,
                                     submitted_at=prev_bar.timestamp,
                                     submitted_equity=equity,
@@ -691,6 +706,17 @@ class TradingService:
                                         or req.attached_take_profit is not None
                                     ),
                                 )
+                                # Issue #527 — pin engine-emitted exits to the
+                                # Position they target so the fill simulator's
+                                # stale-continuation guard drops them when a
+                                # prior strategy exit closes the position first.
+                                # Without this, an engine_exit submitted while a
+                                # GTC/limit strategy exit is resting on the book
+                                # could fall through to ``_fill_entry`` and open
+                                # a new opposite-side position.
+                                bound_entry = engine_exit_bindings.pop(req.client_order_id, None)
+                                if bound_entry is not None:
+                                    submitted_po.working_against_entry_order_id = bound_entry
                                 result.execution_diagnostics.orders_accepted += 1
                                 _record_event(
                                     result.execution_diagnostics,
@@ -865,6 +891,7 @@ class TradingService:
                             order_book=order_book,
                             result=result,
                             engine_order_seq=engine_order_seq,
+                            engine_exit_bindings=engine_exit_bindings,
                         )
 
                     prev_bar = cur_bar
@@ -1254,25 +1281,29 @@ class TradingService:
             # Position closed this bar (or never opened) — drop tracker entry.
             tracker.pop(sym, None)
             return
-        if sym in tracker:
-            state = tracker[sym]
-            state.bars_held += 1
+        existing = tracker.get(sym)
+        if existing is not None and existing.entry_order_id == pos.entry_order_id:
+            existing.bars_held += 1
             # When a partial entry scales in (REQUEUE_NEXT_BAR / TWAP_N),
             # ``Portfolio.extend`` updates ``pos.entry_price`` to the new
             # weighted-average entry. Mirror that here so
             # ``StopLossRule(basis="entry_price")`` and ``TakeProfitRule``
             # evaluate against the position's current basis rather than
             # the first slice's price.
-            state.entry_price = pos.entry_price
-            if cur_bar.high > state.high_since_entry:
-                state.high_since_entry = cur_bar.high
-            if cur_bar.low < state.low_since_entry:
-                state.low_since_entry = cur_bar.low
+            existing.entry_price = pos.entry_price
+            if cur_bar.high > existing.high_since_entry:
+                existing.high_since_entry = cur_bar.high
+            if cur_bar.low < existing.low_since_entry:
+                existing.low_since_entry = cur_bar.low
         else:
-            # Fresh entry this bar — entry bar counts as bars_held == 1.
+            # Fresh entry this bar — either truly first entry, or a same-bar
+            # exit + re-entry replaced the prior position (different
+            # ``entry_order_id``). Reset bars_held / watermarks so a stale
+            # trailing high doesn't fire a rule against the new trade.
             tracker[sym] = _TrackedPosition(
                 side=("long" if pos.side == OrderSide.LONG else "short"),
                 entry_price=pos.entry_price,
+                entry_order_id=pos.entry_order_id,
                 bars_held=1,
                 high_since_entry=cur_bar.high,
                 low_since_entry=cur_bar.low,
@@ -1288,24 +1319,36 @@ class TradingService:
         order_book: OrderBook,
         result: "TradingServiceResult",
         engine_order_seq: int,
+        engine_exit_bindings: Dict[str, str],
     ) -> int:
         """Evaluate ``self._exit_rules`` against the current bar and emit
         synthetic close orders for any triggered rule.
 
         Dedup rules of thumb:
-        * Sum the strategy's opposite-side qty in ``pending_for_prev`` for
-          this symbol. If the strategy is fully closing the position
-          (sum >= position.qty), skip the engine emission — its close is
-          redundant. If the strategy only partially unwinds (sum <
-          position.qty), the engine emits a close for the *remaining*
-          qty so a structured rule isn't suppressed by a 1-share
-          decoration order.
-        * Sum any in-flight engine-emitted exits on the order book the
-          same way; if those already cover the open qty, no new emission.
+        * Sum the strategy's same-bar opposite-side **market** qty in
+          ``pending_for_prev`` for this symbol. Limit / stop / trailing
+          orders are NOT counted — they aren't guaranteed to fill on the
+          next bar, so treating them as "covering" would let a strategy
+          dodge engine enforcement with a price-far-from-market limit
+          order that never fills. The engine's structured rule fires
+          regardless and the strategy's separate limit hangs out on the
+          book until it triggers (or expires).
+        * Sum any in-flight engine-emitted market exits on the order book
+          the same way; if those already cover the open qty, no new
+          emission. Engine exits are always market, so the same
+          guaranteed-fill assumption applies.
+        * Partial coverage emits an engine close sized at
+          ``pos.qty - covered_qty`` rather than skipping entirely, so a
+          1-share decoration order can't suppress a structured rule on
+          the remaining qty.
 
         Engine-emitted orders carry ``reason="engine_exit:<rule_kind>"`` so
         the conformance gate can count them off the order-lifecycle event
-        stream. Returns the updated ``engine_order_seq``.
+        stream. The engine binds each emission to the targeted Position's
+        ``entry_order_id`` via ``engine_exit_bindings`` so the fill
+        simulator's stale-continuation guard drops the close when a prior
+        strategy exit closes the position first. Returns the updated
+        ``engine_order_seq``.
         """
         sym = cur_bar.symbol
         if sym not in position_tracker:
@@ -1318,18 +1361,21 @@ class TradingService:
         tracked_side: str = tracked.side
 
         # Compute already-covered close qty from (a) the strategy's
-        # same-bar opposite-side orders and (b) in-flight engine exits on
-        # the order book. Treat the open position as already-covered only
-        # when the sum of covers meets or exceeds the open qty.
+        # same-bar opposite-side **market** orders and (b) in-flight
+        # engine market exits on the order book. Non-market orders aren't
+        # guaranteed to fill on the next bar, so they don't count as
+        # coverage and the engine emits its market close regardless.
         covered_qty = 0.0
         for req in pending_for_prev:
-            if req.symbol != sym:
+            if req.symbol != sym or req.order_type != OrderType.MARKET:
                 continue
             req_side = "long" if req.side == OrderSide.LONG else "short"
             if req_side != tracked_side:
                 covered_qty += req.qty
         for po in order_book.pending_for_symbol(sym):
             po_req = po.request
+            if po_req.order_type != OrderType.MARKET:
+                continue
             po_side = "long" if po_req.side == OrderSide.LONG else "short"
             if po_side != tracked_side and (po_req.reason or "").startswith(
                 ENGINE_EXIT_REASON_PREFIX
@@ -1374,6 +1420,12 @@ class TradingService:
                 )
                 continue
             pending_for_prev.append(req)
+            # Record the binding so the submit step can set
+            # ``working_against_entry_order_id`` on the resulting PendingOrder
+            # — see :meth:`_update_position_tracker` for why position
+            # identity matters and ``fill_simulator.process_bar``'s
+            # stale-continuation guard for what consumes the binding.
+            engine_exit_bindings[req.client_order_id] = pos.entry_order_id
             result.execution_diagnostics.orders_emitted += 1
             result.execution_diagnostics.exits_emitted += 1
             firings = result.execution_diagnostics.exit_rule_firings
