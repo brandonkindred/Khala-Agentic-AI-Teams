@@ -8,7 +8,7 @@ from typing import List
 from ...models import StrategySpec
 from ...strategy_lab_context import normalize_asset_class
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from .models import QualityGateResult
+from .models import QualityGateResult, StrategyLabPhase
 
 GATE = "strategy_spec_validator"
 
@@ -39,7 +39,19 @@ _CONCEPT_TERMS = re.compile(
 class StrategySpecValidator:
     """Run deterministic checks on a StrategySpec before code execution."""
 
-    def validate(self, spec: StrategySpec) -> List[QualityGateResult]:
+    def validate(
+        self, spec: StrategySpec, *, phase: StrategyLabPhase = "design"
+    ) -> List[QualityGateResult]:
+        """Run the validator and tag every result with ``phase``.
+
+        Pre: ``spec`` is a StrategySpec; ``phase`` is a valid phase literal.
+        Post: every returned result carries the caller's ``phase`` and
+        ``gate_name == GATE``. The default matches the primary pre-synthesis
+        call; callers that re-run the validator outside the design phase
+        (e.g. the zero-trade repair path inside the refinement loop) must
+        pass an explicit ``phase`` so the persisted gate history reflects
+        where the spec was actually re-checked.
+        """
         results: List[QualityGateResult] = []
 
         # 0. Asset class supported (#535). 'options' has no chain data,
@@ -49,7 +61,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details=(
@@ -66,7 +78,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details="No entry rules defined — strategy cannot generate trades.",
@@ -78,7 +90,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details="No exit rules defined — positions would never close.",
@@ -90,7 +102,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="warning",
                     details="Hypothesis is empty — strategy rationale is unclear.",
@@ -102,7 +114,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details="strategy_code is missing — nothing to execute.",
@@ -116,7 +128,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details=f"max_position_pct={max_pos}% is outside safe range [1%, 25%].",
@@ -127,7 +139,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="warning",
                     details=(
@@ -158,7 +170,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="warning",
                     details=f"Rules reference concepts mismatched with asset class '{spec.asset_class}'.",
@@ -170,7 +182,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="warning",
                     details="Rules reference non-computable data (sentiment, social media, etc.) without a numerical proxy.",
@@ -200,7 +212,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=False,
                     severity="warning",
                     details=(
@@ -217,7 +229,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="design",
+                    phase=phase,
                     passed=True,
                     severity="info",
                     details="Strategy spec passed all validation checks.",

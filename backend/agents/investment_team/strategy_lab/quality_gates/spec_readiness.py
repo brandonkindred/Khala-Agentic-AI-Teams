@@ -58,7 +58,8 @@ _SYMBOL_WHITELIST: frozenset[str] = frozenset(
 # / `X` still sits at a word/non-word boundary. Longest-first alternation
 # ensures `ES=F` is preferred over the bare `ES` when both could match.
 _SYMBOL_REGEX = re.compile(
-    r"\b(" + "|".join(sorted(map(re.escape, _SYMBOL_WHITELIST), key=len, reverse=True)) + r")\b"
+    r"\b(" + "|".join(sorted(map(re.escape, _SYMBOL_WHITELIST), key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
 )
 
 # Asset classes whose intraday timeframes the data-provider chain supports.
@@ -89,17 +90,20 @@ _CONCEPT_TERMS = re.compile(
     r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|stochastic|adx|vwap)\b",
     re.IGNORECASE,
 )
-_CONCEPT_TO_INDICATOR_NAME: dict[str, str] = {
-    "rsi": "rsi",
-    "macd": "macd",
-    "moving average": "sma",
-    "ema": "ema",
-    "sma": "sma",
-    "bollinger": "bollinger",
-    "atr": "atr",
-    "stochastic": "stochastic",
-    "adx": "adx",
-    "vwap": "vwap",
+# Map each prose concept to the set of DSL indicator names that satisfy it.
+# A concept is "orphan" iff *none* of its allowed indicators appears in the
+# spec's predicates — so "moving average" is satisfied by either SMA or EMA.
+_CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
+    "rsi": frozenset({"rsi"}),
+    "macd": frozenset({"macd"}),
+    "moving average": frozenset({"sma", "ema"}),
+    "ema": frozenset({"ema"}),
+    "sma": frozenset({"sma"}),
+    "bollinger": frozenset({"bollinger"}),
+    "atr": frozenset({"atr"}),
+    "stochastic": frozenset({"stochastic"}),
+    "adx": frozenset({"adx"}),
+    "vwap": frozenset({"vwap"}),
 }
 
 
@@ -540,10 +544,13 @@ class SpecReadinessGate:
             for m in _CONCEPT_TERMS.finditer(hypothesis)
         }
         referenced = {ref.name for ref in self._iter_indicator_refs(spec)}
+        # A concept fires only when *none* of its allowed indicators is
+        # referenced — so "moving average" is satisfied by either SMA or EMA.
         orphan = sorted(
             t
             for t in terms_in_hypothesis
-            if (n := _CONCEPT_TO_INDICATOR_NAME.get(t)) is not None and n not in referenced
+            if (names := _CONCEPT_TO_INDICATOR_NAMES.get(t)) is not None
+            and not (names & referenced)
         )
 
         out: List[QualityGateResult] = []

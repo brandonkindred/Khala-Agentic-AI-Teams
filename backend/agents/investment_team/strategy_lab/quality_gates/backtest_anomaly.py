@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from ...models import BacktestExecutionDiagnostics, BacktestResult, CoverageReport, TradeRecord
-from .models import QualityGateResult
+from .models import QualityGateResult, StrategyLabPhase
 
 GATE = "backtest_anomaly"
 
@@ -96,6 +96,7 @@ class BacktestAnomalyDetector:
         dsr_aware: bool = False,
         diagnostics: Optional[BacktestExecutionDiagnostics] = None,
         coverage_report: Optional[CoverageReport] = None,
+        phase: StrategyLabPhase = "synthesis",
     ) -> List[QualityGateResult]:
         """Run anomaly checks.
 
@@ -132,7 +133,7 @@ class BacktestAnomalyDetector:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details=_format_zero_trade_details(diagnostics, coverage_report),
@@ -148,7 +149,7 @@ class BacktestAnomalyDetector:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details=f"Only {len(trades)} trades — statistically meaningless for a multi-year backtest.",
@@ -160,7 +161,7 @@ class BacktestAnomalyDetector:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details=f"Annualized return {metrics.annualized_return_pct:.1f}% is suspiciously high (>200%) — likely a data or logic bug.",
@@ -172,7 +173,7 @@ class BacktestAnomalyDetector:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details=f"Win rate {metrics.win_rate_pct:.1f}% exceeds 95% — almost certainly overfitting or lookahead bias.",
@@ -182,7 +183,7 @@ class BacktestAnomalyDetector:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=False,
                     severity="warning",
                     details=f"Win rate {metrics.win_rate_pct:.1f}% exceeds 90% — review for possible overfitting.",
@@ -194,7 +195,7 @@ class BacktestAnomalyDetector:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details=f"Profit factor {metrics.profit_factor:.1f} exceeds 10 — likely data snooping or bug.",
@@ -214,7 +215,7 @@ class BacktestAnomalyDetector:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=False,
                     severity="warning" if dsr_aware else "critical",
                     details=(
@@ -236,7 +237,7 @@ class BacktestAnomalyDetector:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=False,
                     severity="warning",
                     details=f"Sharpe ratio {metrics.sharpe_ratio:.2f} exceeds 3.0 — review for overfitting or data snooping.",
@@ -250,7 +251,7 @@ class BacktestAnomalyDetector:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
-                        phase="verification",
+                        phase=phase,
                         passed=False,
                         severity="critical",
                         details=(
@@ -270,7 +271,7 @@ class BacktestAnomalyDetector:
                     results.append(
                         QualityGateResult(
                             gate_name=GATE,
-                            phase="verification",
+                            phase=phase,
                             passed=False,
                             severity="warning",
                             details=f"Largest single trade is {max_single / total_pnl:.0%} of total absolute P&L — high concentration risk.",
@@ -285,7 +286,7 @@ class BacktestAnomalyDetector:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
-                        phase="verification",
+                        phase=phase,
                         passed=False,
                         severity="warning",
                         details=f"All {len(trades)} trades are {next(iter(sides))} on {next(iter(symbols))} — no diversification.",
@@ -301,7 +302,7 @@ class BacktestAnomalyDetector:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
-                        phase="verification",
+                        phase=phase,
                         passed=False,
                         severity="warning",
                         details=(
@@ -315,7 +316,7 @@ class BacktestAnomalyDetector:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=True,
                     severity="info",
                     details="Backtest results passed all anomaly checks.",

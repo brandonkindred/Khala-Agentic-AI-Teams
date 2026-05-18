@@ -1056,7 +1056,10 @@ class StrategyLabOrchestrator:
                 change_summary = report.changes_made or "alignment fix"
 
                 # ── Re-validate code safety on the proposed code ──────
-                safety_gates = self.code_safety_checker.check(proposed_code, proposed_spec)
+                # Alignment runs after backtest — phase tag is verification.
+                safety_gates = self.code_safety_checker.check(
+                    proposed_code, proposed_spec, phase="verification"
+                )
                 for g in safety_gates:
                     g.refinement_round = align_round
                     g.gate_name = f"alignment_{g.gate_name}"
@@ -1145,6 +1148,7 @@ class StrategyLabOrchestrator:
                     dsr_aware=config.walk_forward_enabled,
                     diagnostics=align_exec.execution_diagnostics,
                     coverage_report=new_metrics.coverage_report,
+                    phase="verification",
                 )
                 for g in anomaly_gates:
                     g.refinement_round = align_round
@@ -1319,11 +1323,14 @@ class StrategyLabOrchestrator:
             )
             upstream_admitted = acceptance_passed
         elif walk_forward_failed and execution_succeeded:
+            # Walk-forward fallback: anomaly recheck occurs after refinement
+            # in the verification phase.
             fallback_anomalies = self.anomaly_detector.check(
                 metrics,
                 trades,
                 dsr_aware=False,
                 coverage_report=metrics.coverage_report,
+                phase="verification",
             )
             fallback_criticals = [
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
@@ -1835,7 +1842,11 @@ class StrategyLabOrchestrator:
         # ``quality_gate_results`` rather than being silently dropped.
         post_repair_spec_gates: List[QualityGateResult] = []
         if report.proposed_spec_updates:
-            post_repair_spec_gates = self.strategy_validator.validate(proposed_spec)
+            # Zero-trade repair runs inside the synthesis refinement loop —
+            # re-validate the patched spec under that phase rather than design.
+            post_repair_spec_gates = self.strategy_validator.validate(
+                proposed_spec, phase="synthesis"
+            )
             for g in post_repair_spec_gates:
                 g.refinement_round = round_num
                 g.gate_name = f"zero_trade_repair_{g.gate_name}"

@@ -36,7 +36,7 @@ from ...symbols import (
     OTHER_SYMBOLS,
     STOCK_SYMBOLS,
 )
-from .models import QualityGateResult
+from .models import QualityGateResult, StrategyLabPhase
 
 GATE = "target_symbol_coverage"
 
@@ -68,6 +68,8 @@ class TargetSymbolCoverageGate:
         spec: StrategySpec,
         requested_symbols: List[str],
         fetched_symbols: List[str],
+        *,
+        phase: StrategyLabPhase = "synthesis",
     ) -> List[QualityGateResult]:
         results: List[QualityGateResult] = []
         fetched_upper = {s.strip().upper() for s in fetched_symbols if s and s.strip()}
@@ -79,7 +81,7 @@ class TargetSymbolCoverageGate:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
-                        phase="verification",
+                        phase=phase,
                         passed=False,
                         severity="critical",
                         details=(
@@ -93,7 +95,7 @@ class TargetSymbolCoverageGate:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
-                        phase="verification",
+                        phase=phase,
                         passed=True,
                         severity="info",
                         details=f"All {len(target_upper)} target_symbols present in fetched data.",
@@ -105,7 +107,7 @@ class TargetSymbolCoverageGate:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
-                        phase="verification",
+                        phase=phase,
                         passed=False,
                         severity="warning",
                         details=(
@@ -120,7 +122,7 @@ class TargetSymbolCoverageGate:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
-                        phase="verification",
+                        phase=phase,
                         passed=True,
                         severity="info",
                         details="spec.target_symbols empty; no specific tickers referenced in hypothesis.",
@@ -133,12 +135,14 @@ class TargetSymbolCoverageGate:
         self,
         spec: StrategySpec,
         trades: List[TradeRecord],
+        *,
+        phase: StrategyLabPhase = "synthesis",
     ) -> List[QualityGateResult]:
         if not spec.target_symbols:
             return [
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=True,
                     severity="info",
                     details="spec.target_symbols empty; trade-symbol coverage check skipped.",
@@ -151,7 +155,7 @@ class TargetSymbolCoverageGate:
             return [
                 QualityGateResult(
                     gate_name=GATE,
-                    phase="verification",
+                    phase=phase,
                     passed=False,
                     severity="critical",
                     details=(
@@ -164,7 +168,7 @@ class TargetSymbolCoverageGate:
         return [
             QualityGateResult(
                 gate_name=GATE,
-                phase="verification",
+                phase=phase,
                 passed=True,
                 severity="info",
                 details=f"All {len(trades)} trades within target_symbols.",

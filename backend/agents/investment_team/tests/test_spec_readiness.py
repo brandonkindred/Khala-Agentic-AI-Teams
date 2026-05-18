@@ -321,6 +321,36 @@ def test_rule6_hypothesis_mentions_indicator_not_in_rules_is_critical() -> None:
     assert any("macd" in c.lower() for c in _critical(results))
 
 
+def test_rule1_matches_lowercase_ticker_in_hypothesis() -> None:
+    """Rule 1's regex is case-insensitive: `qqq` in hypothesis is caught."""
+    spec = _spec(
+        hypothesis="qqq mean-reverts to its 50-day moving average.",
+        target_symbols=[],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("QQQ" in c for c in _critical(results))
+
+
+def test_rule6_moving_average_is_satisfied_by_ema() -> None:
+    """'Moving average' in the hypothesis is satisfied by either SMA or EMA."""
+    spec = _spec(
+        hypothesis="AAPL crosses its EMA moving average to signal long entry.",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="ema", params={"period": 20}),
+                    op="cross_above",
+                    rhs="bar.close",
+                ),
+            ),
+        ],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    rule6_failures = [c for c in _critical(results) if "moving average" in c]
+    assert not rule6_failures, rule6_failures
+
+
 def test_rule6_passes_when_hypothesis_and_rules_match() -> None:
     spec = _spec(
         hypothesis="RSI(14) below 30 on AAPL signals oversold conditions.",
