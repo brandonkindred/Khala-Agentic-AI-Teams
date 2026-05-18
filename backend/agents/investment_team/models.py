@@ -678,6 +678,16 @@ class TradeRecord(BaseModel):
     participation_clipped: Optional[bool] = None
     partial_fill_count: Optional[int] = None
     total_unfilled_qty: Optional[float] = None
+    # Issue #527 — close-order attribution. Mirrors
+    # ``OrderRequest.reason`` for the order that closed the position.
+    # Engine-fired structured-exit closes carry a
+    # ``"engine_exit:<rule_kind>"`` prefix; strategy-emitted closes
+    # carry whatever ``reason`` the strategy set (typically empty
+    # / None). Used by ``ExitRuleConformanceGate`` to distinguish
+    # engine-closed from strategy-closed trades so a gap-down
+    # strategy exit below a structured stop-loss floor is not
+    # mis-attributed as an engine leak.
+    exit_reason: Optional[str] = None
 
 
 class BacktestRecord(BaseModel):

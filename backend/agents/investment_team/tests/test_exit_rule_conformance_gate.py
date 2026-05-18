@@ -42,12 +42,20 @@ def _trade(
     side: str = "long",
     entry_price: float = 100.0,
     exit_price: float = 101.0,
+    symbol: str = "AAA",
+    exit_reason: str | None = "engine_exit:stop_loss",
 ) -> TradeRecord:
+    """Build a TradeRecord. ``exit_reason`` defaults to
+    ``"engine_exit:stop_loss"`` so legacy fixtures keep counting
+    below-floor trades against the engine — tests that need the
+    strategy-close exclusion pass ``exit_reason=None`` or a
+    non-engine string explicitly.
+    """
     return TradeRecord(
         trade_num=trade_num,
         entry_date="2024-01-01",
         exit_date="2024-01-06",
-        symbol="AAA",
+        symbol=symbol,
         side=side,
         entry_price=entry_price,
         exit_price=exit_price,
@@ -59,6 +67,7 @@ def _trade(
         hold_days=hold_days,
         outcome="win" if return_pct > 0 else "loss",
         cumulative_pnl=(exit_price - entry_price) * 100.0,
+        exit_reason=exit_reason,
     )
 
 
@@ -415,6 +424,7 @@ def test_stop_loss_cross_symbol_firings_do_not_mask_leak() -> None:
             hold_days=1,
             outcome="loss",
             cumulative_pnl=-800.0,
+            exit_reason="engine_exit:stop_loss",
         ),
         TradeRecord(
             trade_num=2,
@@ -432,6 +442,7 @@ def test_stop_loss_cross_symbol_firings_do_not_mask_leak() -> None:
             hold_days=1,
             outcome="loss",
             cumulative_pnl=-1_800.0,
+            exit_reason="engine_exit:stop_loss",
         ),
     ]
     # Aggregate firings would mask the leak (2 trades, 2 firings); per
@@ -453,3 +464,131 @@ def test_stop_loss_cross_symbol_firings_do_not_mask_leak() -> None:
     assert len(fails) == 1
     assert fails[0].severity == "critical"
     assert "BBB" in fails[0].details
+
+
+def test_stop_loss_excludes_strategy_closed_below_floor_trades() -> None:
+    """A strategy-emitted market exit that fills on a next-bar gap-down
+    open beneath the structured stop-loss floor must NOT count as an
+    engine leak: the engine never had a chance to fire on that bar
+    (position closed before rule eval). Regression for the P2 review
+    comment on PR #581 (issue #527).
+
+    Setup: two below-floor trades on AAA, zero engine firings. Trade
+    1 closed by strategy (``exit_reason="strategy_market_exit"``);
+    trade 2 closed by engine (``exit_reason=None`` would be ambiguous,
+    so explicit ``engine_exit:stop_loss``). Old behaviour: both count,
+    "2 unaccounted" critical. New behaviour: only trade 2 counts,
+    still flags 1 unaccounted critical (the real engine leak).
+    """
+    gate = ExitRuleConformanceGate()
+    trades = [
+        _trade(
+            trade_num=1,
+            symbol="AAA",
+            entry_price=100.0,
+            exit_price=92.0,
+            return_pct=-8.0,
+            exit_reason="strategy_market_exit",  # strategy closed
+        ),
+        _trade(
+            trade_num=2,
+            symbol="AAA",
+            entry_price=100.0,
+            exit_price=93.0,
+            return_pct=-7.0,
+            exit_reason="engine_exit:stop_loss",  # engine claim
+        ),
+    ]
+    # Zero engine firings — the engine claim on trade 2 is the leak
+    # (engine attribution but no recorded firing).
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={},
+        exit_rule_firings_by_symbol={"AAA": {}},
+    )
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=trades,
+        diagnostics=diag,
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "critical"
+    # Trade 2 (the engine-attributed one) is flagged; trade 1 is
+    # explicitly excluded with a count in the details.
+    assert "trade_num" in fails[0].details
+    assert "1 strategy-closed below-floor trade(s)" in fails[0].details
+    assert "excluded" in fails[0].details
+
+
+def test_stop_loss_passes_when_all_below_floor_are_strategy_closed() -> None:
+    """Counterpart: if every below-floor trade was strategy-closed
+    (None exit_reason for a vanilla strategy market exit, or an
+    explicit strategy string), the gate must pass — the engine had
+    nothing to do here.
+    """
+    gate = ExitRuleConformanceGate()
+    trades = [
+        _trade(
+            trade_num=1,
+            symbol="AAA",
+            entry_price=100.0,
+            exit_price=92.0,
+            return_pct=-8.0,
+            exit_reason=None,  # vanilla strategy market exit
+        ),
+        _trade(
+            trade_num=2,
+            symbol="AAA",
+            entry_price=100.0,
+            exit_price=93.0,
+            return_pct=-7.0,
+            exit_reason="strategy_close",  # explicit strategy reason
+        ),
+    ]
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={},
+        exit_rule_firings_by_symbol={"AAA": {}},
+    )
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=trades,
+        diagnostics=diag,
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+    info = next(r for r in results if r.gate_name == "exit_rule_conformance" and r.passed)
+    assert "2 strategy-closed below-floor trade(s)" in info.details
+
+
+def test_stop_loss_excludes_engine_take_profit_below_floor() -> None:
+    """An engine take_profit firing can fill below the stop-loss floor
+    on a gap (engine fired TP on bar N's high, fills on bar N+1's
+    open which gapped down past the SL floor). That's NOT a stop_loss
+    leak — the engine made a deliberate TP choice and the fill
+    happened where it happened.
+    """
+    gate = ExitRuleConformanceGate()
+    trades = [
+        _trade(
+            trade_num=1,
+            symbol="AAA",
+            entry_price=100.0,
+            exit_price=93.0,
+            return_pct=-7.0,
+            exit_reason="engine_exit:take_profit",  # engine TP fired
+        ),
+    ]
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"take_profit": 1},
+        exit_rule_firings_by_symbol={"AAA": {"take_profit": 1}},
+    )
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=trades,
+        diagnostics=diag,
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []

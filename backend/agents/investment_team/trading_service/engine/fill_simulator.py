@@ -1073,6 +1073,12 @@ class FillSimulator:
             participation_clipped=pos.participation_clipped,
             partial_fill_count=pos.partial_fill_count,
             total_unfilled_qty=pos.total_unfilled_qty,
+            # Issue #527 — propagate the close ``OrderRequest.reason``
+            # onto the trade record so the conformance gate can tell
+            # engine-fired closes (``engine_exit:<kind>``) from
+            # strategy-emitted closes. ``po.request.reason`` is None /
+            # empty for vanilla strategy market exits.
+            exit_reason=po.request.reason or None,
         )
         return exit_fill, record
 

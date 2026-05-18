@@ -188,19 +188,24 @@ class _EngineExitDispatcher:
         if intent is None:
             return
 
-        # Issue #527 — size the close to cover same-bar scale-ins. A
-        # same-side strategy order queued in ``pending_for_prev`` will
-        # submit BEFORE the engine close on the next bar and grow
-        # ``pos.qty`` past the snapshot the engine saw at emission
-        # time. ``_fill_exit`` clips the engine close at
-        # ``min(req.qty, existing_pos.qty)``, so without this we'd
-        # leave the scale-in residual exposure open even though the
-        # structured exit rule already fired. Sum the same-side queued
-        # qtys and oversize the engine close accordingly; if any
-        # scale-in is rejected / clipped at fill time the engine close
-        # clips back down to the actual ``existing_pos.qty`` — no
-        # over-close risk.
-        scale_in_qty = self._sum_same_side_queued(sym, tracked.side, pending_for_prev)
+        # Issue #527 — size the close to cover any same-side scale-in
+        # that could grow ``pos.qty`` past the snapshot the engine saw
+        # at emission. Two sources, both BEFORE the engine close on the
+        # next bar:
+        #   * Same-bar queued in ``pending_for_prev`` — strategy order
+        #     submitted on this bar; submits first next bar.
+        #   * Already resting on the order book — a GTC/limit scale-in
+        #     from a prior bar that's still working; could fill
+        #     alongside ``pending_for_prev`` next bar.
+        # ``_fill_exit`` clips the engine close at
+        # ``min(req.qty, existing_pos.qty)``, so without this oversize
+        # the residual exposure stays open even though the structured
+        # exit rule already fired. If any scale-in is rejected /
+        # clipped at fill time the engine close clips back down to the
+        # actual ``existing_pos.qty`` — no over-close risk.
+        scale_in_qty = self._sum_same_side_queued(
+            sym, tracked.side, pending_for_prev
+        ) + self._sum_same_side_resting(sym, tracked.side, order_book)
 
         req = self._build_close_order(intent, tracked, pos, scale_in_qty)
         if req is None:
@@ -288,6 +293,42 @@ class _EngineExitDispatcher:
             if queued.side != tracked_side:
                 continue
             total += queued.qty
+        return total
+
+    @staticmethod
+    def _sum_same_side_resting(
+        sym: str,
+        tracked_side: OrderSide,
+        order_book: OrderBook,
+    ) -> float:
+        """Sum the unfilled qty of same-side orders already resting
+        on the book — i.e. scale-ins the strategy submitted on a
+        prior bar that are still working and could fill on the next
+        bar alongside the engine close (e.g. GTC limits at a deeper
+        price).
+
+        Mirrors :meth:`_sum_same_side_queued` but for the resting
+        side of the world. The two are summed at the call site and
+        passed to :meth:`_build_close_order` as ``scale_in_qty``.
+
+        Excludes already-bound orders — those will be retired by the
+        stale-continuation guard once the engine close fills, so they
+        won't add to the position. ``cumulative_filled_qty`` is
+        subtracted off the unfilled portion: a partially filled
+        scale-in's already-filled qty is already accounted for in
+        ``pos.qty``.
+        """
+        total = 0.0
+        for po in order_book.pending_for_symbol(sym):
+            req = po.request
+            if req.side != tracked_side:
+                continue
+            if po.working_against_entry_order_id is not None:
+                continue
+            remaining = req.qty - po.cumulative_filled_qty
+            if remaining <= 0:
+                continue
+            total += remaining
         return total
 
     def _build_close_order(
@@ -1734,10 +1775,22 @@ class TradingService:
         The next bar's evaluation reads the now-extended watermark,
         which is the intended trailing-stop semantics (track every
         prior bar's extreme since entry).
+
+        ``just_opened=True`` (non-market entry) skips extension on
+        the entry bar: a limit / stop fill that landed mid-bar shares
+        OHLC with pre-entry price action — including the entry bar's
+        high / low here would let a pre-entry intrabar spike define
+        the trailing watermark and trigger a trailing-high stop on
+        the next bar from price action that happened before the
+        position existed. The tradeoff is losing the entry bar's
+        post-fill range; that's the safer side of the unknowable
+        intrabar fill location.
         """
         sym = cur_bar.symbol
         state = tracker.get(sym)
         if state is None:
+            return
+        if state.just_opened:
             return
         if cur_bar.high > state.high_since_entry:
             state.high_since_entry = cur_bar.high

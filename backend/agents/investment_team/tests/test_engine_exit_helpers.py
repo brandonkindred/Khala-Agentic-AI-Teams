@@ -1017,3 +1017,196 @@ def test_engine_does_not_oversize_for_other_symbol_queued_orders() -> None:
     engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
     assert len(engine_orders) == 1
     assert engine_orders[0].qty == 100.0
+
+
+def test_engine_oversizes_close_to_cover_resting_same_side_scale_in() -> None:
+    """A same-side GTC/limit scale-in resting on the book from a
+    PRIOR bar isn't in ``pending_for_prev`` but could fill on the
+    next bar alongside the engine close. The engine close must size
+    to cover it for the same reason as the same-bar queued case
+    (see ``test_engine_oversizes_close_to_cover_same_bar_scale_ins``):
+    if the resting order fills first, ``_fill_exit`` clips to that
+    fattened ``existing_pos.qty`` and leaves the residual open.
+
+    Fix: ``_sum_same_side_resting`` scans the order book for unbound
+    same-side orders with remaining qty and the dispatcher sums that
+    into ``scale_in_qty`` alongside ``_sum_same_side_queued``.
+    """
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)
+    result = TradingServiceResult()
+
+    # Resting GTC LONG scale-in from a prior bar — unbound.
+    resting_add = OrderRequest(
+        client_order_id="c-resting-add",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=75.0,
+        order_type=OrderType.LIMIT,
+        limit_price=80.0,
+        tif=TimeInForce.GTC,
+        reason="strategy_scale_in",
+    )
+    order_book.submit(resting_add, submitted_at="2024-01-05T00:00:00", submitted_equity=100_000.0)
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
+    assert len(engine_orders) == 1
+    # Engine close sized to cover pos.qty (100) + resting add (75) = 175.
+    assert engine_orders[0].qty == 175.0
+
+
+def test_engine_close_excludes_partially_filled_resting_scale_in_already_filled_qty() -> None:
+    """A resting same-side order that's been partially filled —
+    e.g. an entry continuation with cumulative_filled_qty>0 — has
+    its already-filled qty baked into ``pos.qty``. Only the
+    *remaining* unfilled qty needs to be covered by the engine
+    close oversize. Otherwise we'd double-count and oversize the
+    engine close past the maximum residual the position could
+    reach.
+    """
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)
+    result = TradingServiceResult()
+
+    partial_resting = OrderRequest(
+        client_order_id="c-partial",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=80.0,
+        order_type=OrderType.LIMIT,
+        limit_price=80.0,
+        tif=TimeInForce.GTC,
+        reason="strategy_partial_add",
+    )
+    po = order_book.submit(
+        partial_resting, submitted_at="2024-01-05T00:00:00", submitted_equity=100_000.0
+    )
+    po.cumulative_filled_qty = 30.0  # 50 left unfilled
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
+    assert len(engine_orders) == 1
+    # 100 (pos) + 50 (resting unfilled) = 150 — the 30 already filled
+    # is already in pos.qty so we don't double-count it.
+    assert engine_orders[0].qty == 150.0
+
+
+def test_engine_does_not_oversize_for_already_bound_resting_orders() -> None:
+    """Already-bound resting orders (prior engine exits, bracket
+    children) will be retired by the stale-continuation guard once
+    the engine close fills; they won't grow the position, so they
+    must not inflate the engine close qty.
+    """
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)
+    result = TradingServiceResult()
+
+    bound_resting = OrderRequest(
+        client_order_id="c-bound",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=50.0,
+        order_type=OrderType.LIMIT,
+        limit_price=80.0,
+        tif=TimeInForce.GTC,
+        reason="strategy_other_run",
+    )
+    bound_po = order_book.submit(
+        bound_resting, submitted_at="2024-01-05T00:00:00", submitted_equity=100_000.0
+    )
+    bound_po.working_against_entry_order_id = "o-other"
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
+    assert len(engine_orders) == 1
+    # Bound orders don't add to scale_in_qty.
+    assert engine_orders[0].qty == 100.0
+
+
+def test_extend_watermarks_skips_just_opened_entry_bar() -> None:
+    """Regression for the entry-bar lookahead carve-out. A non-market
+    fill (``just_opened=True``) shares OHLC with pre-entry price
+    action — including the entry bar's high/low in the watermark
+    would let a pre-entry intrabar spike drive a trailing-high stop
+    on the next bar from price action that happened before the
+    position existed. ``_extend_watermarks`` must skip while
+    ``just_opened=True`` and resume on the next bar after
+    ``_update_position_tracker`` flips the flag.
+    """
+    tracker: Dict[str, _TrackedPosition] = {
+        "AAA": _TrackedPosition(
+            side=OrderSide.LONG,
+            entry_price=110.0,
+            entry_order_id="o-limit",
+            just_opened=True,  # non-market entry on this bar
+            high_since_entry=110.0,
+            low_since_entry=110.0,
+        )
+    }
+    # Entry bar prints high=130 (pre-entry intrabar spike) and low=105
+    # (post-entry dip). For a limit fill at 110 mid-bar we don't know
+    # which side printed first — so the safe move is to skip the
+    # whole bar.
+    bar = _bar(high=130.0, low=105.0)
+
+    TradingService._extend_watermarks(tracker=tracker, cur_bar=bar)
+
+    state = tracker["AAA"]
+    # Watermarks unchanged — entry bar's range stays out of the
+    # trailing watermark.
+    assert state.high_since_entry == 110.0
+    assert state.low_since_entry == 110.0
+
+
+def test_extend_watermarks_resumes_after_just_opened_clears() -> None:
+    """Counterpart: once the tracker carry-over (next bar) flips
+    ``just_opened`` to False, ``_extend_watermarks`` runs normally.
+    """
+    tracker: Dict[str, _TrackedPosition] = {
+        "AAA": _TrackedPosition(
+            side=OrderSide.LONG,
+            entry_price=110.0,
+            entry_order_id="o-limit",
+            just_opened=False,  # carry-over bar
+            high_since_entry=110.0,
+            low_since_entry=110.0,
+        )
+    }
+    bar = _bar(high=120.0, low=108.0)
+
+    TradingService._extend_watermarks(tracker=tracker, cur_bar=bar)
+
+    state = tracker["AAA"]
+    assert state.high_since_entry == 120.0
+    assert state.low_since_entry == 108.0
