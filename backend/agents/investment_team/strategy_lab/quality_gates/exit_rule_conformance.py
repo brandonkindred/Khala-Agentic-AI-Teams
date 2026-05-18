@@ -81,7 +81,7 @@ class ExitRuleConformanceGate:
         # ---- TakeProfitRule (sanity only) ----
         take_profits = [r for r in exit_rules if isinstance(r, TakeProfitRule)]
         for rule in take_profits:
-            results.append(self._check_take_profit(rule, trades, exit_rules))
+            results.append(self._check_take_profit(rule, trades, exit_rules, firings))
 
         # ---- SignalExitRule — not yet engine-enforced ----
         signal_exits = [r for r in exit_rules if isinstance(r, SignalExitRule)]
@@ -145,16 +145,22 @@ class ExitRuleConformanceGate:
         # ``return_pct`` against a strict floor without false-positive
         # criticals on every gap.
         #
-        # Instead: count trades whose return clearly tripped the rule's
-        # raw threshold (no slippage tolerance). If those exist AND the
-        # engine never emitted any ``stop_loss`` close, that's a
-        # genuine enforcement leak. Otherwise the firings counter
-        # confirms the engine did its job and the residual gap is a
-        # real-world market-execution cost, not a conformance bug.
+        # Per-trade comparison: count trades whose return cleared the
+        # rule's raw threshold (no slippage tolerance) and compare to
+        # the recorded ``stop_loss`` firing count. If the number of
+        # below-floor trades EXCEEDS the firing count, at least one
+        # trade fell through without engine enforcement — that's a
+        # leak. ``stop_firings >= tripped`` means each below-floor
+        # trade is plausibly accounted for by a matching engine
+        # emission (and the residual return shortfall is a gap fill, not
+        # a leak). Pure trade-count comparison can't tell which
+        # specific trade leaked, but it can't mask leaks behind
+        # unrelated firings either.
         raw_floor_pct = -(rule.pct * 100.0)
         tripped = [t for t in trades if t.return_pct < raw_floor_pct]
         stop_firings = firings.get("stop_loss", 0)
-        if tripped and stop_firings == 0:
+        if len(tripped) > stop_firings:
+            leak_count = len(tripped) - stop_firings
             sample = [(t.trade_num, t.return_pct) for t in tripped[:5]]
             return QualityGateResult(
                 gate_name=GATE,
@@ -163,7 +169,8 @@ class ExitRuleConformanceGate:
                 details=(
                     f"StopLossRule(pct={rule.pct}) leak: {len(tripped)} trade(s) "
                     f"closed below the {raw_floor_pct:.2f}% floor but the engine "
-                    "never emitted a stop_loss exit. Sample "
+                    f"recorded only {stop_firings} stop_loss firing(s) "
+                    f"({leak_count} unaccounted-for trade(s)). Sample "
                     f"(trade_num, return_pct)={sample}."
                 ),
             )
@@ -173,8 +180,8 @@ class ExitRuleConformanceGate:
             severity="info",
             details=(
                 f"StopLossRule(pct={rule.pct}) — "
-                f"{stop_firings} engine firing(s) recorded; "
-                f"{len(tripped)} trade(s) below raw floor (gap-fill expected on next-bar opens)."
+                f"{stop_firings} engine firing(s) covers "
+                f"{len(tripped)} below-floor trade(s) (gap-fill expected on next-bar opens)."
             ),
         )
 
@@ -183,13 +190,21 @@ class ExitRuleConformanceGate:
         rule: TakeProfitRule,
         trades: Sequence[TradeRecord],
         all_rules: Sequence[ExitRule],
+        firings: Mapping[str, int],
     ) -> QualityGateResult:
         # Take-profit is hardest to assert on. The engine fires it whenever
-        # bar.high >= entry * (1 + pct), but other rules (stop loss) can
-        # close a trade first. So a passing trade ledger may legitimately
-        # never hit the take-profit floor. We only flag the "lonely
-        # take-profit" case: take-profit is the ONLY rule and zero trades
-        # cleared its threshold.
+        # ``bar.high >= entry * (1 + pct)``, but the synthetic close fills
+        # on bar N+1's open — gaps and slippage can land the realised
+        # ``return_pct`` below the rule's raw target even on a valid
+        # firing. And when other exit rules (stop loss) co-exist, they
+        # can close a trade first.
+        #
+        # The robust signal is the engine ``take_profit`` firings counter:
+        # at least one emission means the rule did its job. We only flag
+        # the "lonely take-profit" case: take-profit is the ONLY rule,
+        # trades exist, and the engine never emitted any take_profit
+        # close — meaning the rule was either misconfigured or the
+        # threshold is unreachable on the symbols' actual price action.
         only_rule = len(all_rules) == 1
         if not only_rule:
             return QualityGateResult(
@@ -202,15 +217,15 @@ class ExitRuleConformanceGate:
                     "trades before the take-profit threshold is reached)."
                 ),
             )
-        target_pct = rule.pct * 100.0
-        if any(t.return_pct >= target_pct for t in trades):
+        tp_firings = firings.get("take_profit", 0)
+        if tp_firings >= 1:
             return QualityGateResult(
                 gate_name=GATE,
                 passed=True,
                 severity="info",
                 details=(
-                    f"TakeProfitRule(pct={rule.pct}) reached on at least one of "
-                    f"{len(trades)} trade(s)."
+                    f"TakeProfitRule(pct={rule.pct}) — {tp_firings} engine firing(s) "
+                    f"recorded across {len(trades)} trade(s)."
                 ),
             )
         if not trades:
@@ -227,8 +242,8 @@ class ExitRuleConformanceGate:
             passed=False,
             severity="warning",
             details=(
-                f"TakeProfitRule(pct={rule.pct}) is the only exit rule but no "
-                f"trade reached the {target_pct:.2f}% threshold across "
-                f"{len(trades)} trade(s)."
+                f"TakeProfitRule(pct={rule.pct}) is the only exit rule but the engine "
+                f"recorded zero take_profit firings across {len(trades)} trade(s) — "
+                "the threshold may be unreachable on the strategy's universe."
             ),
         )

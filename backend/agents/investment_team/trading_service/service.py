@@ -1316,21 +1316,39 @@ class TradingService:
         else:
             # Fresh entry this bar — either truly first entry, or a same-bar
             # exit + re-entry replaced the prior position (different
-            # ``entry_order_id``). Initialise watermarks at ``entry_price``
-            # rather than the entry bar's full OHLC: for a limit / stop
-            # entry filled mid-bar, the bar's high/low may include price
-            # action from BEFORE the fill, and using it would let
-            # take-profit / trailing-stop rules queue impossible closes
-            # off pre-entry extremes. ``just_opened=True`` keeps rule
-            # evaluation off this bar entirely; the next bar extends the
-            # watermarks normally.
+            # ``entry_order_id``). Two paths:
+            #
+            # * **Market entry** — filled at the bar's open, so the bar's
+            #   full high/low is post-entry price action. Initialise
+            #   watermarks from the bar and let rule evaluation run on
+            #   this bar; a stop-loss / take-profit that trips through
+            #   the bar's range is a real same-bar exit and must be
+            #   captured (otherwise a long opened at the open can trade
+            #   through its stop and recover with no engine emission).
+            # * **Non-market entry** (limit / stop / trailing-stop /
+            #   anything else) — the fill could have landed anywhere
+            #   inside the bar, so the bar's pre-fill price action is
+            #   ambiguous. Initialise watermarks at ``entry_price`` and
+            #   gate rule evaluation off the entry bar with
+            #   ``just_opened=True`` so pre-entry extremes can't queue
+            #   impossible same-bar closes. The next bar's tracker
+            #   update clears the flag.
+            is_market_entry = pos.entry_order_type == "market"
+            if is_market_entry:
+                high_init = cur_bar.high
+                low_init = cur_bar.low
+                just_opened = False
+            else:
+                high_init = pos.entry_price
+                low_init = pos.entry_price
+                just_opened = True
             tracker[sym] = _TrackedPosition(
                 side=("long" if pos.side == OrderSide.LONG else "short"),
                 entry_price=pos.entry_price,
                 entry_order_id=pos.entry_order_id,
-                just_opened=True,
-                high_since_entry=pos.entry_price,
-                low_since_entry=pos.entry_price,
+                just_opened=just_opened,
+                high_since_entry=high_init,
+                low_since_entry=low_init,
             )
 
     def _maybe_emit_engine_exits(

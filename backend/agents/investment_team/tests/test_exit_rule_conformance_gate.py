@@ -293,3 +293,89 @@ def test_multi_rule_all_pass_returns_no_failures() -> None:
     )
     fails = [r for r in results if not r.passed]
     assert fails == [], [r.details for r in fails]
+
+
+def test_stop_loss_fails_when_below_floor_trades_exceed_firings() -> None:
+    """Per-trade leak counting: one correctly stopped trade must NOT mask
+    a separate trade that closed below the floor without an engine firing.
+    Regression for the P2 review comment on issue #527 PR: the previous
+    "any firings > 0 → pass" check was too loose.
+    """
+    gate = ExitRuleConformanceGate()
+    # Two below-floor trades, only one engine firing → 1 unaccounted leak.
+    trades = [
+        _trade(trade_num=1, return_pct=-7.0),
+        _trade(trade_num=2, return_pct=-8.0),
+    ]
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=trades,
+        diagnostics=_diagnostics(stop_loss=1),
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "critical"
+    assert "leak" in fails[0].details.lower()
+    assert "1 unaccounted-for trade" in fails[0].details
+
+
+def test_stop_loss_passes_when_firings_cover_below_floor_count() -> None:
+    """Exactly as many firings as below-floor trades → no leak. Each
+    below-floor trade is plausibly accounted for by a matching engine
+    emission; gap-fill semantics absorb the rest.
+    """
+    gate = ExitRuleConformanceGate()
+    trades = [
+        _trade(trade_num=1, return_pct=-7.0),
+        _trade(trade_num=2, return_pct=-8.0),
+    ]
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=trades,
+        diagnostics=_diagnostics(stop_loss=2),
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+
+
+def test_take_profit_alone_passes_on_firings_even_with_short_realized_return() -> None:
+    """Realized return below the rule's raw target is expected when the
+    engine fires take-profit on bar N's high but the synthetic close
+    fills on bar N+1's open (gap / slippage / costs eat into the
+    realised return). The gate must use the engine firings diagnostic,
+    not the trade ledger's ``return_pct``, to verify enforcement.
+    Regression for the P3 review comment on issue #527 PR.
+    """
+    gate = ExitRuleConformanceGate()
+    # take_profit target = 5%; trade realised 3% after gap/costs.
+    trades = [_trade(return_pct=3.0)]
+    results = gate.check(
+        exit_rules=[TakeProfitRule(pct=0.05)],
+        trades=trades,
+        diagnostics=_diagnostics(take_profit=1),
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == [], [r.details for r in results]
+
+
+def test_take_profit_alone_warns_when_engine_never_fired() -> None:
+    """Take-profit is the only rule, trades exist, but engine recorded
+    zero firings — the threshold may be unreachable on the strategy's
+    universe. Surface as a warning so the operator can revisit the
+    spec.
+    """
+    gate = ExitRuleConformanceGate()
+    trades = [_trade(return_pct=1.0), _trade(trade_num=2, return_pct=2.0)]
+    results = gate.check(
+        exit_rules=[TakeProfitRule(pct=0.05)],
+        trades=trades,
+        diagnostics=_diagnostics(),
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "warning"
+    assert "zero take_profit firings" in fails[0].details

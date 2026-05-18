@@ -68,6 +68,7 @@ def _portfolio_with(
     entry_price: float,
     entry_order_id: str,
     entry_timestamp: str = "2024-01-01",
+    entry_order_type: str = "market",
 ) -> Portfolio:
     p = Portfolio(initial_capital=100_000.0)
     p.positions[symbol] = Position(
@@ -80,6 +81,7 @@ def _portfolio_with(
         entry_order_id=entry_order_id,
         entry_client_order_id=f"c-{entry_order_id}",
         original_qty=qty,
+        entry_order_type=entry_order_type,
     )
     return p
 
@@ -101,12 +103,12 @@ def _bar(symbol: str = "AAA", **kwargs) -> _MockBar:
 # ---------------------------------------------------------------------------
 
 
-def test_tracker_resets_when_position_identity_changes() -> None:
-    """Same-bar exit + re-entry replaces the underlying ``Position`` with a
-    new ``entry_order_id``. The tracker must reset trailing watermarks
-    against the new entry — not carry the prior trade's stale state,
-    which could fire a trailing-stop immediately. The fresh entry is
-    flagged ``just_opened`` so rule evaluation skips this bar.
+def test_tracker_resets_on_limit_entry_with_just_opened_and_entry_price_watermarks() -> None:
+    """Same-bar exit + re-entry with a NON-market entry. The tracker must
+    reset trailing watermarks against the new entry — and because the
+    fill could have landed anywhere inside the bar, init watermarks at
+    ``entry_price`` and flag ``just_opened=True`` so rule eval skips
+    this bar.
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
@@ -118,13 +120,14 @@ def test_tracker_resets_when_position_identity_changes() -> None:
             low_since_entry=95.0,
         )
     }
-    # Same-bar exit/re-entry — new Position, different entry_order_id.
+    # Same-bar exit/re-entry — new Position, different entry_order_id, LIMIT type.
     portfolio = _portfolio_with(
         symbol="AAA",
         side=OrderSide.LONG,
         qty=10,
         entry_price=110.0,
         entry_order_id="o2",
+        entry_order_type="limit",
     )
     bar = _bar(high=112.0, low=109.0)
 
@@ -142,6 +145,38 @@ def test_tracker_resets_when_position_identity_changes() -> None:
     # pre-entry extremes can't drive same-bar rule evaluation later.
     assert state.high_since_entry == 110.0
     assert state.low_since_entry == 110.0
+
+
+def test_tracker_resets_on_market_entry_using_bar_ohlc_without_gating() -> None:
+    """Market entries fill at the bar's open, so the bar's full
+    high/low IS post-entry price action. The tracker initialises
+    watermarks from the bar (so a same-bar stop/take-profit can be
+    captured) and leaves ``just_opened=False`` so rule eval runs on
+    this bar. Without this carve-out, longs opened at the open could
+    trade through their stop and recover with no engine emission.
+    """
+    tracker: Dict[str, _TrackedPosition] = {}
+    portfolio = _portfolio_with(
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10,
+        entry_price=100.0,
+        entry_order_id="o-mkt",
+        entry_order_type="market",
+    )
+    bar = _bar(high=112.0, low=88.0)
+
+    TradingService._update_position_tracker(
+        tracker=tracker,
+        cur_bar=bar,
+        portfolio=portfolio,
+    )
+
+    state = tracker["AAA"]
+    assert state.entry_order_id == "o-mkt"
+    assert state.just_opened is False  # rule eval runs on the entry bar
+    assert state.high_since_entry == 112.0  # full bar high captured
+    assert state.low_since_entry == 88.0  # full bar low captured
 
 
 def test_tracker_carries_over_when_entry_order_id_unchanged() -> None:
