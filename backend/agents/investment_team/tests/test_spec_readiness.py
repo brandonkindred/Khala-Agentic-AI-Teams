@@ -232,6 +232,36 @@ def test_rule5_sizing_under_one_share_is_critical() -> None:
     assert any("qty=" in c and "AAPL" in c for c in _critical(results))
 
 
+def test_rule5_accepts_fractional_qty_on_crypto() -> None:
+    """Crypto specs accept fractional positions — 0.1 BTC is implementable."""
+    spec = _spec(
+        asset_class="crypto",
+        target_symbols=["BTC"],
+        sizing=FixedNotionalSizing(notional_usd=10.0),
+        hypothesis="BTC mean-reversion on the 1d timeframe.",
+        # Replace the default RSI entry with a self-consistent one to avoid
+        # tripping Rule 6 (hypothesis mentions reversion but no rsi term).
+    )
+    # Default provider returns $100/BTC → 0.1 BTC. Crypto allows fractional, pass.
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    sizing_failures = [c for c in _critical(results) if "qty=" in c]
+    assert not sizing_failures, sizing_failures
+
+
+def test_rule5_accepts_fractional_qty_on_forex() -> None:
+    """Forex specs accept fractional positions — sub-lot sizing is valid."""
+    spec = _spec(
+        asset_class="forex",
+        target_symbols=["EURUSD=X"],
+        sizing=FixedNotionalSizing(notional_usd=50.0),
+        hypothesis="EURUSD=X mean-reverts intraday on RSI(14).",
+        timeframe="1h",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    sizing_failures = [c for c in _critical(results) if "qty=" in c]
+    assert not sizing_failures, sizing_failures
+
+
 def test_rule5_passes_with_realistic_sizing() -> None:
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.02),

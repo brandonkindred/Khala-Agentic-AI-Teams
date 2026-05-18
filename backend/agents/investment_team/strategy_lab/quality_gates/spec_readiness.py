@@ -63,6 +63,11 @@ _SYMBOL_REGEX = re.compile(
 # Asset classes whose intraday timeframes the data-provider chain supports.
 _FULL_TIMEFRAME_ASSET_CLASSES: frozenset[str] = frozenset({"stocks", "crypto"})
 
+# Asset classes that trade in whole units (shares / contracts). Crypto and
+# forex accept fractional quantities, so Rule 5's whole-lot check is skipped
+# for them — the runtime contract takes ``qty: float = Field(gt=0)``.
+_WHOLE_LOT_ASSET_CLASSES: frozenset[str] = frozenset({"stocks", "futures", "commodities"})
+
 # Authoritative set of DSL indicator names. A constructed IndicatorRef always
 # satisfies this set; the gate enforces it again as defense-in-depth against
 # a future refactor that bypasses Pydantic.
@@ -445,6 +450,9 @@ class SpecReadinessGate:
         capital = config.initial_capital
         # Class invariant: BacktestConfig guarantees initial_capital > 0.
         assert capital > 0, "initial_capital must be strictly positive"
+        # Crypto/forex accept fractional quantities — only enforce the whole-lot
+        # threshold for asset classes that need it.
+        enforce_whole_lot = spec.asset_class.lower() in _WHOLE_LOT_ASSET_CLASSES
 
         out: List[QualityGateResult] = []
         for sym in symbols:
@@ -476,7 +484,10 @@ class SpecReadinessGate:
             else:
                 continue
             qty = notional / price
-            if qty < 1:
+            # Crypto/forex accept fractional positions, so anything > 0 is fine.
+            # Stocks/futures/commodities are rejected when qty < 1.
+            threshold = 1.0 if enforce_whole_lot else 0.0
+            if qty <= threshold:
                 out.append(
                     QualityGateResult(
                         gate_name=GATE,
@@ -484,9 +495,9 @@ class SpecReadinessGate:
                         passed=False,
                         severity="critical",
                         details=(
-                            f"Sizing yields qty={qty:.4f} < 1 for symbol "
-                            f"'{sym}' at sample price ${price:.2f} with "
-                            f"capital ${capital:.0f}."
+                            f"Sizing yields qty={qty:.4f} (threshold {threshold}) "
+                            f"for symbol '{sym}' at sample price ${price:.2f} "
+                            f"with capital ${capital:.0f}."
                         ),
                     )
                 )
