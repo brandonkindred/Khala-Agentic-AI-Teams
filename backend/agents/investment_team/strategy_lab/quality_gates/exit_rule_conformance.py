@@ -27,6 +27,7 @@ of which the alignment agent's LLM-driven audit should defer to.
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Sequence
 
 from ...models import (
@@ -142,12 +143,20 @@ class ExitRuleConformanceGate:
                     f"timeframe={timeframe!r} (gate is daily-only for the MVP)."
                 ),
             )
-        # Engine emits the close on the Nth bar; fill lands on the (N+1)th
-        # bar's open. Worst-case observed ``hold_days`` is ``n_bars`` —
-        # entry on day 1, close on day N+1, hold_days = N. Add a one-day
-        # safety margin to account for weekend/holiday gaps where the next
-        # trading day is more than 24h after the close emission.
-        ceiling = rule.n_bars + 1
+        # ``hold_days`` is a calendar-day delta on ``TradeRecord``; the
+        # rule's ``n_bars`` counts trading bars. For daily-bar US-equity
+        # data, every 5 trading bars span at least one weekend (2 calendar
+        # days). Plus a 1-bar fill-lag (close emitted on bar N, fills on
+        # bar N+1's open — and that next trading day can be a Monday) and
+        # an allowance for the ~10 US market holidays per year (~1 day per
+        # 25 trading days). The conservative upper bound is
+        # ``n_bars + ceil(n_bars * 2/5) + ceil(n_bars / 25) + 3``: it
+        # widens to absorb weekends/holidays but is still tight enough to
+        # catch gross engine-enforcement leaks (e.g. ``n_bars=5`` allows
+        # at most 10 calendar days). Without this, a 1-bar hold across a
+        # Fri→Mon weekend records ``hold_days==3`` and trips a false
+        # critical for ``TimeStopRule(n_bars=1)``.
+        ceiling = rule.n_bars + math.ceil(rule.n_bars * 2 / 5) + math.ceil(rule.n_bars / 25) + 3
         offenders = [t for t in trades if t.hold_days > ceiling]
         if offenders:
             sample = [t.trade_num for t in offenders[:5]]

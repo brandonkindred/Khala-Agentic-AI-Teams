@@ -108,8 +108,9 @@ def test_time_stop_pass_within_ceiling() -> None:
 
 def test_time_stop_fail_when_trade_exceeds_ceiling() -> None:
     gate = ExitRuleConformanceGate()
-    # n_bars=5 → ceiling = 5 + 1 = 6. hold_days=7 violates.
-    trades = [_trade(hold_days=h) for h in (1, 7, 4)]
+    # n_bars=5 → ceiling = 5 + ceil(10/5) + ceil(5/25) + 3 = 5+2+1+3 = 11.
+    # hold_days=20 is well past the weekend/holiday-tolerant ceiling.
+    trades = [_trade(hold_days=h) for h in (1, 20, 4)]
     results = gate.check(
         exit_rules=[TimeStopRule(n_bars=5)],
         trades=trades,
@@ -121,6 +122,27 @@ def test_time_stop_fail_when_trade_exceeds_ceiling() -> None:
     assert fail[0].severity == "critical"
     assert "TimeStopRule" in fail[0].details
     assert fail[0].gate_name == GATE
+
+
+def test_time_stop_tolerates_weekend_and_holiday_gaps() -> None:
+    """A compliant 1-bar hold entered Friday and closed Monday records
+    ``hold_days==3`` because the calendar wraps a weekend. The ceiling
+    must be generous enough to absorb that — otherwise the gate fires a
+    false critical and vetoes ``is_winning`` on perfectly clean runs.
+    Regression for the P2 review comment on issue #527 PR.
+    """
+    gate = ExitRuleConformanceGate()
+    # TimeStopRule(n_bars=1) → ceiling = 1 + 1 + 1 + 3 = 6. A Fri-entry
+    # / Mon-fill 1-bar hold (hold_days=3) is well under 6.
+    trades = [_trade(hold_days=3)]
+    results = gate.check(
+        exit_rules=[TimeStopRule(n_bars=1)],
+        trades=trades,
+        diagnostics=_diagnostics(time_stop=1),
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == [], [r.details for r in fails]
 
 
 def test_time_stop_skipped_on_sub_daily_timeframe() -> None:
@@ -140,12 +162,13 @@ def test_time_stop_skipped_on_sub_daily_timeframe() -> None:
     assert skipped
 
 
-def test_time_stop_ceiling_includes_one_bar_fill_lag() -> None:
-    # n_bars=10 → ceiling=11. hold_days==11 should pass (not violate).
+def test_time_stop_ceiling_absorbs_weekends_and_fill_lag() -> None:
+    # n_bars=10 → ceiling = 10 + ceil(20/5) + ceil(10/25) + 3 = 10+4+1+3 = 18.
+    # 18 calendar days easily covers 10 trading days + 2 weekends + holiday + fill lag.
     gate = ExitRuleConformanceGate()
     results = gate.check(
         exit_rules=[TimeStopRule(n_bars=10)],
-        trades=[_trade(hold_days=11)],
+        trades=[_trade(hold_days=18)],
         diagnostics=_diagnostics(),
         config=_config(),
     )

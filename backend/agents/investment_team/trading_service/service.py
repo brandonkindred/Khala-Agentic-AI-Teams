@@ -1257,6 +1257,13 @@ class TradingService:
         if sym in tracker:
             state = tracker[sym]
             state.bars_held += 1
+            # When a partial entry scales in (REQUEUE_NEXT_BAR / TWAP_N),
+            # ``Portfolio.extend`` updates ``pos.entry_price`` to the new
+            # weighted-average entry. Mirror that here so
+            # ``StopLossRule(basis="entry_price")`` and ``TakeProfitRule``
+            # evaluate against the position's current basis rather than
+            # the first slice's price.
+            state.entry_price = pos.entry_price
             if cur_bar.high > state.high_since_entry:
                 state.high_since_entry = cur_bar.high
             if cur_bar.low < state.low_since_entry:
@@ -1286,10 +1293,15 @@ class TradingService:
         synthetic close orders for any triggered rule.
 
         Dedup rules of thumb:
-        * Skip symbols the strategy already chose to exit this bar (an
-          opposite-side order in ``pending_for_prev``).
-        * Skip symbols with an in-flight engine-emitted exit on the order
-          book (prior bar's enforcement is still pending fill).
+        * Sum the strategy's opposite-side qty in ``pending_for_prev`` for
+          this symbol. If the strategy is fully closing the position
+          (sum >= position.qty), skip the engine emission — its close is
+          redundant. If the strategy only partially unwinds (sum <
+          position.qty), the engine emits a close for the *remaining*
+          qty so a structured rule isn't suppressed by a 1-share
+          decoration order.
+        * Sum any in-flight engine-emitted exits on the order book the
+          same way; if those already cover the open qty, no new emission.
 
         Engine-emitted orders carry ``reason="engine_exit:<rule_kind>"`` so
         the conformance gate can count them off the order-lifecycle event
@@ -1305,22 +1317,27 @@ class TradingService:
         tracked = position_tracker[sym]
         tracked_side: str = tracked.side
 
-        # Dedup: strategy already submitted an opposite-side close this bar.
+        # Compute already-covered close qty from (a) the strategy's
+        # same-bar opposite-side orders and (b) in-flight engine exits on
+        # the order book. Treat the open position as already-covered only
+        # when the sum of covers meets or exceeds the open qty.
+        covered_qty = 0.0
         for req in pending_for_prev:
             if req.symbol != sym:
                 continue
             req_side = "long" if req.side == OrderSide.LONG else "short"
             if req_side != tracked_side:
-                return engine_order_seq
-
-        # Dedup: prior bar's engine exit is still on the order book.
+                covered_qty += req.qty
         for po in order_book.pending_for_symbol(sym):
             po_req = po.request
             po_side = "long" if po_req.side == OrderSide.LONG else "short"
             if po_side != tracked_side and (po_req.reason or "").startswith(
                 ENGINE_EXIT_REASON_PREFIX
             ):
-                return engine_order_seq
+                covered_qty += po_req.qty
+        if covered_qty >= pos.qty:
+            return engine_order_seq
+        engine_close_qty = pos.qty - covered_qty
 
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
@@ -1341,7 +1358,7 @@ class TradingService:
                 client_order_id=f"e{engine_order_seq}",
                 symbol=intent.symbol,
                 side=close_side,
-                qty=pos.qty,
+                qty=engine_close_qty,
                 order_type=OrderType.MARKET,
                 tif=TimeInForce.DAY,
                 reason=f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}",

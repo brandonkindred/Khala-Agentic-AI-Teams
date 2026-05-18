@@ -328,6 +328,71 @@ def test_strategy_emitted_close_dedupes_engine_firing_same_bar() -> None:
     )
 
 
+def test_partial_strategy_unwind_does_not_suppress_engine_close() -> None:
+    """If the strategy submits a partial unwind (e.g. sells 1 of 10 long
+    shares) on the bar a time-stop fires, the engine must still emit a
+    close for the residual qty rather than treating the partial as a
+    full close. Regression for the P1 review comment on issue #527 PR.
+    """
+    strategy_with_partial_unwind = textwrap.dedent(
+        '''\
+        """Enter 10 shares, partial-unwind 1 share on the bar a TimeStop fires."""
+        from contract import OrderSide, OrderType, Strategy
+
+
+        class PartialUnwind(Strategy):
+            _bar_count = 0
+
+            def on_bar(self, ctx, bar):
+                self._bar_count += 1
+                pos = ctx.position(bar.symbol)
+                if pos is None and self._bar_count == 1:
+                    ctx.submit_order(
+                        symbol=bar.symbol, side=OrderSide.LONG, qty=10,
+                        order_type=OrderType.MARKET, reason="self_entry",
+                    )
+                elif pos is not None and self._bar_count == 3:
+                    # Token partial: sell 1 of 10. Engine TimeStopRule(n_bars=3)
+                    # should still emit a close for the residual 9 — not be
+                    # suppressed by this 1-share decoration.
+                    ctx.submit_order(
+                        symbol=bar.symbol, side=OrderSide.SHORT, qty=1,
+                        order_type=OrderType.MARKET, reason="partial_unwind",
+                    )
+        '''
+    )
+    spec = StrategySpec(
+        strategy_id="strat-partial-dedup",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="partial unwind doesn't suppress engine close",
+        signal_definition="enter 10, partial unwind 1 same bar TimeStop fires",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close",
+                    op=">",
+                    rhs=IndicatorRef(name="sma", params={"period": 5}),
+                ),
+            )
+        ],
+        exit_rules=[TimeStopRule(n_bars=3)],
+        strategy_code=strategy_with_partial_unwind,
+    )
+
+    run = run_backtest(strategy=spec, config=_config(), market_data=_flat_bars())
+
+    assert run.service_result.error is None, run.service_result.error
+    diag = run.service_result.execution_diagnostics
+    # Engine MUST still fire a time-stop close (for the residual 9 shares).
+    assert diag.exit_rule_firings.get("time_stop", 0) >= 1, (
+        "engine should still fire engine_exit when strategy only partially "
+        f"unwinds; firings={diag.exit_rule_firings}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Chunked path rejection
 # ---------------------------------------------------------------------------
