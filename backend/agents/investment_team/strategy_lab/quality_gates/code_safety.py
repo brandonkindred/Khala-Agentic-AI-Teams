@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, Iterable, List, Optional
 
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
@@ -103,7 +103,14 @@ _LOOKAHEAD_PATTERNS = [
 
 
 class CodeSafetyChecker(GateResultsMixin):
-    """Scan generated strategy code for unsafe patterns before subprocess execution."""
+    """Scan generated strategy code for unsafe patterns before subprocess execution.
+
+    Contract: every call to :meth:`check` returns a non-empty
+    ``List[QualityGateResult]``. Every entry carries the caller's ``phase``
+    and ``gate_name == GATE``. Rules are listed in ``_RULES`` and iterated in
+    order; a syntax-error short-circuit fires before any other rule because
+    the AST-based rules cannot run without a parse tree.
+    """
 
     GATE: ClassVar[str] = GATE
 
@@ -131,201 +138,245 @@ class CodeSafetyChecker(GateResultsMixin):
         default) keeps the legacy call sites and tests behaving as before.
         """
         self._set_phase(phase)
-        results: List[QualityGateResult] = []
-
-        # 1. Parse the code
+        # Parse first — a syntax error is a hard short-circuit because every
+        # AST rule below requires a tree.
         try:
             tree = ast.parse(code)
         except SyntaxError as e:
-            results.append(
-                self._critical(f"Code has a syntax error: {e}")
-            )
-            return results
+            return [self._critical(f"Code has a syntax error: {e}")]
 
-        # 2. Check the module defines exactly one contract.Strategy subclass
-        #    with a correctly-shaped ``on_bar`` method. The PR-3 streaming
-        #    harness requires this shape and raises at runtime otherwise;
-        #    flagging here turns a runtime classification error into an
-        #    actionable refinement hint.
-        strategy_classes = _find_strategy_subclasses(tree)
-        if len(strategy_classes) == 0:
-            results.append(
-                self._critical("Code must define exactly one subclass of contract.Strategy; "
-                        "none found. Use `from contract import Strategy` and `class "
-                        "MyStrategy(Strategy): ...`.")
-            )
-        elif len(strategy_classes) > 1:
-            names = ", ".join(sorted(c.name for c in strategy_classes))
-            results.append(
-                self._critical(f"Code defines multiple Strategy subclasses ({names}); the "
-                        "harness accepts exactly one.")
-            )
-        else:
-            strategy_cls = strategy_classes[0]
-            on_bar_issue = _validate_on_bar(strategy_cls)
-            if on_bar_issue is not None:
-                results.append(
-                    self._critical(on_bar_issue)
-                )
+        # Stash call-scoped context so each rule reads from instance state.
+        self._code = code
+        self._tree = tree
+        self._spec = spec
+        self._strategy_classes = _find_strategy_subclasses(tree)
+        self._executable = _strip_comments_and_strings(code)
+        try:
+            results = [r for rule in self._RULES for r in rule(self)]
+            return results or [self._info("Code passed all safety checks.")]
+        finally:
+            self._code = ""
+            self._tree = None  # type: ignore[assignment]
+            self._spec = None
+            self._strategy_classes = []
+            self._executable = ""
 
-        # 3. Walk AST for banned imports
-        for node in ast.walk(tree):
+    # ------------------------------------------------------------------
+    # Rules — each reads call-scoped state and yields zero or more results.
+    # ------------------------------------------------------------------
+    def _check_strategy_class_shape(self) -> Iterable[QualityGateResult]:
+        # The streaming harness requires exactly one Strategy subclass with a
+        # correctly-shaped ``on_bar``. Flagging here turns a runtime
+        # classification error into an actionable refinement hint.
+        n = len(self._strategy_classes)
+        if n == 0:
+            return (
+                self._critical(
+                    "Code must define exactly one subclass of contract.Strategy; "
+                    "none found. Use `from contract import Strategy` and `class "
+                    "MyStrategy(Strategy): ...`."
+                ),
+            )
+        if n > 1:
+            names = ", ".join(sorted(c.name for c in self._strategy_classes))
+            return (
+                self._critical(
+                    f"Code defines multiple Strategy subclasses ({names}); the "
+                    "harness accepts exactly one."
+                ),
+            )
+        on_bar_issue = _validate_on_bar(self._strategy_classes[0])
+        if on_bar_issue is not None:
+            return (self._critical(on_bar_issue),)
+        return ()
+
+    def _check_banned_imports(self) -> Iterable[QualityGateResult]:
+        out: List[QualityGateResult] = []
+        for node in ast.walk(self._tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     top_module = alias.name.split(".")[0]
                     if top_module in BANNED_IMPORTS:
-                        results.append(
-                            self._critical(f"Banned import: '{alias.name}' — network/filesystem/system access not allowed.")
+                        out.append(
+                            self._critical(
+                                f"Banned import: '{alias.name}' — "
+                                "network/filesystem/system access not allowed."
+                            )
                         )
                     elif top_module not in ALLOWED_IMPORTS:
-                        results.append(
-                            self._warning(f"Non-allowlisted import: '{alias.name}' — may not be available in sandbox.")
+                        out.append(
+                            self._warning(
+                                f"Non-allowlisted import: '{alias.name}' — "
+                                "may not be available in sandbox."
+                            )
                         )
-
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    top_module = node.module.split(".")[0]
-                    if top_module in BANNED_IMPORTS:
-                        results.append(
-                            self._critical(f"Banned import: 'from {node.module}' — network/filesystem/system access not allowed.")
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top_module = node.module.split(".")[0]
+                if top_module in BANNED_IMPORTS:
+                    out.append(
+                        self._critical(
+                            f"Banned import: 'from {node.module}' — "
+                            "network/filesystem/system access not allowed."
                         )
-                    elif top_module not in ALLOWED_IMPORTS:
-                        results.append(
-                            self._warning(f"Non-allowlisted import: 'from {node.module}' — may not be available in sandbox.")
+                    )
+                elif top_module not in ALLOWED_IMPORTS:
+                    out.append(
+                        self._warning(
+                            f"Non-allowlisted import: 'from {node.module}' — "
+                            "may not be available in sandbox."
                         )
+                    )
+        return out
 
-        # 4. Walk AST for banned function calls
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                func_name = _get_call_name(node)
-                if func_name in ("exec", "eval", "compile", "__import__", "globals", "breakpoint"):
-                    results.append(
-                        self._critical(f"Banned function call: '{func_name}()' — dynamic code execution not allowed.")
+    def _check_banned_calls(self) -> Iterable[QualityGateResult]:
+        out: List[QualityGateResult] = []
+        for node in ast.walk(self._tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func_name = _get_call_name(node)
+            if func_name in ("exec", "eval", "compile", "__import__", "globals", "breakpoint"):
+                out.append(
+                    self._critical(
+                        f"Banned function call: '{func_name}()' — "
+                        "dynamic code execution not allowed."
                     )
-                if func_name == "open":
-                    results.append(
-                        self._critical("Banned function call: 'open()' — file I/O not allowed in strategy code.")
+                )
+            if func_name == "open":
+                out.append(
+                    self._critical(
+                        "Banned function call: 'open()' — file I/O not allowed in strategy code."
                     )
-                if func_name in ("setattr", "delattr"):
-                    results.append(
-                        self._critical(f"Banned function call: '{func_name}()' — attribute manipulation not allowed.")
+                )
+            if func_name in ("setattr", "delattr"):
+                out.append(
+                    self._critical(
+                        f"Banned function call: '{func_name}()' — "
+                        "attribute manipulation not allowed."
                     )
+                )
+        return out
 
-        # 5. Regex fallback for patterns AST might miss
+    def _check_banned_call_regex(self) -> Iterable[QualityGateResult]:
+        # AST sometimes misses patterns hidden behind getattr / dynamic
+        # attribute access; the regex pass catches those.
+        out: List[QualityGateResult] = []
         for pattern in _BANNED_CALL_PATTERNS:
-            if pattern.search(code):
+            if pattern.search(self._code):
                 match_text = pattern.pattern.replace(r"\b", "").replace(r"\s*\(", "(")
-                results.append(
-                    self._critical(f"Regex detected banned pattern: '{match_text}'.")
-                )
+                out.append(self._critical(f"Regex detected banned pattern: '{match_text}'."))
+        return out
 
-        # 6. Look-ahead bias detection (run against executable code only,
-        #    excluding comments and string literals to avoid false positives)
-        executable = _strip_comments_and_strings(code)
+    def _check_lookahead_bias(self) -> Iterable[QualityGateResult]:
+        # Run against executable code only — comments and string literals are
+        # stripped to avoid false positives.
+        out: List[QualityGateResult] = []
         for pattern, reason in _LOOKAHEAD_PATTERNS:
-            if pattern.search(executable):
-                results.append(
-                    self._critical(f"Look-ahead bias: {reason}")
-                )
+            if pattern.search(self._executable):
+                out.append(self._critical(f"Look-ahead bias: {reason}"))
+        return out
 
-        # 7. Code length
-        line_count = len(code.splitlines())
+    def _check_code_length(self) -> Iterable[QualityGateResult]:
+        line_count = len(self._code.splitlines())
         if line_count > 1000:
-            results.append(
-                self._warning(f"Code is {line_count} lines — consider simplifying (limit: 1000).")
+            return (
+                self._warning(
+                    f"Code is {line_count} lines — consider simplifying (limit: 1000)."
+                ),
             )
+        return ()
 
-        # 8. Order-flow shape (#547): every viable strategy must call
-        #    ``ctx.submit_order(...)`` from inside ``on_bar`` (directly or
-        #    via a helper invoked from it), and the reachable calls must
-        #    form a real entry+exit pair — either two calls with distinct
-        #    ``side`` values, or a single call with a non-None
-        #    ``attached_stop_loss`` / ``attached_take_profit`` (bracket /
-        #    OCO support, #389).
+    def _check_order_flow_shape(self) -> Iterable[QualityGateResult]:
+        # Every viable strategy must call ``ctx.submit_order(...)`` from
+        # inside ``on_bar`` (directly or via a helper), and the reachable
+        # calls must form an entry+exit pair — either two calls with
+        # distinct ``side`` values, or a single call with a non-None
+        # ``attached_stop_loss`` / ``attached_take_profit`` bracket leg.
         #
-        #    * The trading service only processes the ``HarnessResponse``
-        #      from ``send_bar``; ``send_start`` / ``send_fill`` /
-        #      ``send_end`` responses are discarded today, so any
-        #      ``submit_order`` made from those hooks is dropped before
-        #      backtesting. The gate counts only ``on_bar``-reachable
-        #      calls to match the engine's real behaviour.
-        #    * ``on_bar`` accepts only its second positional parameter as
-        #      the context receiver (``def on_bar(self, ctx, bar):``
-        #      looks for ``ctx.submit_order``; a swapped
-        #      ``def on_bar(self, bar, ctx):`` accepts only ``bar`` and
-        #      ``ctx.submit_order`` would crash at runtime — flagged).
-        #    * Helpers reached via ``self.<method>(...)`` from ``on_bar``
-        #      relax the receiver check to any non-``self`` positional
-        #      parameter, since the call site we can't statically resolve
-        #      may pass the context through.
-        #    * Two ``side="LONG"`` calls do not form an entry+exit pair;
-        #      a real exit requires the opposite side or a bracket leg.
-        if len(strategy_classes) == 1:
-            hook_calls = _collect_hook_submit_calls(strategy_classes[0])
-            if len(hook_calls) == 0:
-                results.append(
-                    self._critical("No ctx.submit_order call reachable from on_bar — strategy "
-                            "has no entry path that the engine will process. The "
-                            "trading service only consumes orders submitted from "
-                            "on_bar (responses from on_start / on_fill / on_end are "
-                            "currently dropped), so any submission outside on_bar is "
-                            "silently ignored.")
-                )
-            elif not _calls_form_entry_exit_pair(hook_calls):
-                if len(hook_calls) == 1:
-                    detail = (
-                        "Only one ctx.submit_order call found in the engine hooks "
-                        "and no non-None attached bracket exit (attached_stop_loss "
-                        "/ attached_take_profit) — strategy has no exit path."
-                    )
-                else:
-                    detail = (
-                        "Multiple ctx.submit_order calls found but all use the same "
-                        "OrderSide and no bracket exit is attached — strategy has no "
-                        "real exit leg. Closing a position requires submitting the "
-                        "opposite OrderSide (LONG closes SHORT, SHORT closes LONG) or "
-                        "attaching an attached_stop_loss / attached_take_profit "
-                        "bracket leg."
-                    )
-                results.append(
-                    self._critical(detail)
-                )
-
-        # 9. Symbol-universe guard (#524). When ``spec.target_symbols`` is
-        #    non-empty, the generated module MUST declare a class-level
-        #    ``UNIVERSE`` set/frozenset and guard ``on_bar`` with
-        #    ``if bar.symbol not in self.UNIVERSE: return``. The historical
-        #    replay stream interleaves bars across every fetched symbol;
-        #    without this guard a permissive predicate trades whichever
-        #    ticker fires first, not the one named in the hypothesis.
-        if spec is not None and getattr(spec, "target_symbols", None):
-            if len(strategy_classes) == 1:
-                strategy_cls = strategy_classes[0]
-                if not _has_universe_constant(strategy_cls):
-                    results.append(
-                        self._critical("Spec has non-empty target_symbols but the strategy "
-                                "class is missing a UNIVERSE = frozenset({...}) (or "
-                                "set/tuple) class-level constant. Without UNIVERSE + "
-                                "an `if bar.symbol not in self.UNIVERSE: return` guard "
-                                "at the top of on_bar, the historical replay stream "
-                                "will feed bars for every fetched symbol to the "
-                                "signal logic and trades will land on the wrong asset.")
-                    )
-                elif not _has_universe_guard_in_on_bar(strategy_cls):
-                    results.append(
-                        self._critical("Strategy defines UNIVERSE but on_bar is missing the "
-                                "`if bar.symbol not in self.UNIVERSE: return` guard. "
-                                "Without the early-exit, the historical replay stream "
-                                "will deliver bars for every fetched symbol and the "
-                                "signal logic will trade tickers outside target_symbols.")
-                    )
-
-        if not results:
-            results.append(
-                self._info("Code passed all safety checks.")
+        # The trading service only processes ``HarnessResponse`` from
+        # ``send_bar``; responses from ``send_start`` / ``send_fill`` /
+        # ``send_end`` are discarded, so submissions outside ``on_bar`` are
+        # silently dropped — they don't count here.
+        if len(self._strategy_classes) != 1:
+            return ()
+        hook_calls = _collect_hook_submit_calls(self._strategy_classes[0])
+        if not hook_calls:
+            return (
+                self._critical(
+                    "No ctx.submit_order call reachable from on_bar — strategy "
+                    "has no entry path that the engine will process. The "
+                    "trading service only consumes orders submitted from "
+                    "on_bar (responses from on_start / on_fill / on_end are "
+                    "currently dropped), so any submission outside on_bar is "
+                    "silently ignored."
+                ),
             )
+        if _calls_form_entry_exit_pair(hook_calls):
+            return ()
+        if len(hook_calls) == 1:
+            detail = (
+                "Only one ctx.submit_order call found in the engine hooks "
+                "and no non-None attached bracket exit (attached_stop_loss "
+                "/ attached_take_profit) — strategy has no exit path."
+            )
+        else:
+            detail = (
+                "Multiple ctx.submit_order calls found but all use the same "
+                "OrderSide and no bracket exit is attached — strategy has no "
+                "real exit leg. Closing a position requires submitting the "
+                "opposite OrderSide (LONG closes SHORT, SHORT closes LONG) or "
+                "attaching an attached_stop_loss / attached_take_profit "
+                "bracket leg."
+            )
+        return (self._critical(detail),)
 
-        return results
+    def _check_universe_guard(self) -> Iterable[QualityGateResult]:
+        # When ``spec.target_symbols`` is non-empty the generated module MUST
+        # declare a class-level ``UNIVERSE`` set/frozenset and guard ``on_bar``
+        # with ``if bar.symbol not in self.UNIVERSE: return``. The historical
+        # replay stream interleaves bars across every fetched symbol; without
+        # this guard a permissive predicate trades whichever ticker fires
+        # first, not the one named in the hypothesis.
+        if self._spec is None or not getattr(self._spec, "target_symbols", None):
+            return ()
+        if len(self._strategy_classes) != 1:
+            return ()
+        strategy_cls = self._strategy_classes[0]
+        if not _has_universe_constant(strategy_cls):
+            return (
+                self._critical(
+                    "Spec has non-empty target_symbols but the strategy "
+                    "class is missing a UNIVERSE = frozenset({...}) (or "
+                    "set/tuple) class-level constant. Without UNIVERSE + "
+                    "an `if bar.symbol not in self.UNIVERSE: return` guard "
+                    "at the top of on_bar, the historical replay stream "
+                    "will feed bars for every fetched symbol to the "
+                    "signal logic and trades will land on the wrong asset."
+                ),
+            )
+        if not _has_universe_guard_in_on_bar(strategy_cls):
+            return (
+                self._critical(
+                    "Strategy defines UNIVERSE but on_bar is missing the "
+                    "`if bar.symbol not in self.UNIVERSE: return` guard. "
+                    "Without the early-exit, the historical replay stream "
+                    "will deliver bars for every fetched symbol and the "
+                    "signal logic will trade tickers outside target_symbols."
+                ),
+            )
+        return ()
+
+    # Rules iterated in order by ``check``. Order is preserved so error
+    # messages remain stable across runs.
+    _RULES: ClassVar[tuple] = (
+        _check_strategy_class_shape,
+        _check_banned_imports,
+        _check_banned_calls,
+        _check_banned_call_regex,
+        _check_lookahead_bias,
+        _check_code_length,
+        _check_order_flow_shape,
+        _check_universe_guard,
+    )
 
 
 def _get_call_name(node: ast.Call) -> str:
