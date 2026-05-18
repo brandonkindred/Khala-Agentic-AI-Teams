@@ -23,7 +23,7 @@ fix by rewriting strategy code.
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import ClassVar, List
 
 from ...models import StrategySpec, TradeRecord
 from ...symbols import (
@@ -36,7 +36,7 @@ from ...symbols import (
     OTHER_SYMBOLS,
     STOCK_SYMBOLS,
 )
-from .models import QualityGateResult, StrategyLabPhase
+from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
 GATE = "target_symbol_coverage"
 
@@ -60,8 +60,10 @@ _KNOWN_TICKERS: frozenset[str] = frozenset(
 _TICKER_RE = re.compile(r"\b([A-Z]{2,6})\b")
 
 
-class TargetSymbolCoverageGate:
+class TargetSymbolCoverageGate(GateResultsMixin):
     """Critical gate enforcing that the realized universe matches intent."""
+
+    GATE: ClassVar[str] = GATE
 
     def check_fetch(
         self,
@@ -71,6 +73,7 @@ class TargetSymbolCoverageGate:
         *,
         phase: StrategyLabPhase = "synthesis",
     ) -> List[QualityGateResult]:
+        self._set_phase(phase)
         results: List[QualityGateResult] = []
         fetched_upper = {s.strip().upper() for s in fetched_symbols if s and s.strip()}
 
@@ -79,54 +82,26 @@ class TargetSymbolCoverageGate:
             missing = sorted(target_upper - fetched_upper)
             if missing:
                 results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=(
-                            "target_symbols missing from fetched market data: "
+                    self._critical("target_symbols missing from fetched market data: "
                             f"{missing}. Requested={sorted({s.upper() for s in requested_symbols})}, "
-                            f"fetched={sorted(fetched_upper)}."
-                        ),
-                    )
+                            f"fetched={sorted(fetched_upper)}.")
                 )
             else:
                 results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=True,
-                        severity="info",
-                        details=f"All {len(target_upper)} target_symbols present in fetched data.",
-                    )
+                    self._info(f"All {len(target_upper)} target_symbols present in fetched data.")
                 )
         else:
             mentioned = sorted(self._tickers_in_hypothesis(spec.hypothesis or ""))
             if mentioned:
                 results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="warning",
-                        details=(
-                            f"Hypothesis mentions known ticker(s) {mentioned} but "
+                    self._warning(f"Hypothesis mentions known ticker(s) {mentioned} but "
                             "spec.target_symbols is empty; the backtest is using the "
                             "asset-class default universe. Set spec.target_symbols "
-                            "explicitly to guarantee the run trades the intended tickers."
-                        ),
-                    )
+                            "explicitly to guarantee the run trades the intended tickers.")
                 )
             else:
                 results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=True,
-                        severity="info",
-                        details="spec.target_symbols empty; no specific tickers referenced in hypothesis.",
-                    )
+                    self._info("spec.target_symbols empty; no specific tickers referenced in hypothesis.")
                 )
 
         return results
@@ -138,41 +113,22 @@ class TargetSymbolCoverageGate:
         *,
         phase: StrategyLabPhase = "synthesis",
     ) -> List[QualityGateResult]:
+        self._set_phase(phase)
         if not spec.target_symbols:
             return [
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=True,
-                    severity="info",
-                    details="spec.target_symbols empty; trade-symbol coverage check skipped.",
-                )
+                self._info("spec.target_symbols empty; trade-symbol coverage check skipped.")
             ]
 
         target_upper = {s.strip().upper() for s in spec.target_symbols if s and s.strip()}
         offending = sorted({t.symbol.strip().upper() for t in trades if t.symbol} - target_upper)
         if offending:
             return [
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=(
-                        "Trade ledger contains symbols outside spec.target_symbols: "
-                        f"{offending}. target_symbols={sorted(target_upper)}."
-                    ),
-                )
+                self._critical("Trade ledger contains symbols outside spec.target_symbols: "
+                        f"{offending}. target_symbols={sorted(target_upper)}.")
             ]
 
         return [
-            QualityGateResult(
-                gate_name=GATE,
-                phase=phase,
-                passed=True,
-                severity="info",
-                details=f"All {len(trades)} trades within target_symbols.",
-            )
+            self._info(f"All {len(trades)} trades within target_symbols.")
         ]
 
     @staticmethod

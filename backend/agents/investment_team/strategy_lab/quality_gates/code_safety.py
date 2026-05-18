@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
-from .models import QualityGateResult, StrategyLabPhase
+from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
 GATE = "code_safety"
 
@@ -102,8 +102,10 @@ _LOOKAHEAD_PATTERNS = [
 ]
 
 
-class CodeSafetyChecker:
+class CodeSafetyChecker(GateResultsMixin):
     """Scan generated strategy code for unsafe patterns before subprocess execution."""
+
+    GATE: ClassVar[str] = GATE
 
     def check(
         self,
@@ -120,16 +122,15 @@ class CodeSafetyChecker:
         loop call site; callers re-using the checker in a different phase
         (e.g. the trade-alignment fix path, which lives in verification)
         must pass ``phase`` explicitly.
-        """
-        """Run all code-safety rules against ``code``.
 
         ``spec`` is the active ``StrategySpec`` when available; it's used by
-        the symbol-universe rule (#524) to verify that the generated module
+        the symbol-universe rule to verify that the generated module
         contains a ``UNIVERSE`` constant and a ``bar.symbol not in
         self.UNIVERSE: return`` guard whenever ``spec.target_symbols`` is
         non-empty. Other rules ignore ``spec``; passing ``None`` (the
         default) keeps the legacy call sites and tests behaving as before.
         """
+        self._set_phase(phase)
         results: List[QualityGateResult] = []
 
         # 1. Parse the code
@@ -137,13 +138,7 @@ class CodeSafetyChecker:
             tree = ast.parse(code)
         except SyntaxError as e:
             results.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=f"Code has a syntax error: {e}",
-                )
+                self._critical(f"Code has a syntax error: {e}")
             )
             return results
 
@@ -155,44 +150,22 @@ class CodeSafetyChecker:
         strategy_classes = _find_strategy_subclasses(tree)
         if len(strategy_classes) == 0:
             results.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=(
-                        "Code must define exactly one subclass of contract.Strategy; "
+                self._critical("Code must define exactly one subclass of contract.Strategy; "
                         "none found. Use `from contract import Strategy` and `class "
-                        "MyStrategy(Strategy): ...`."
-                    ),
-                )
+                        "MyStrategy(Strategy): ...`.")
             )
         elif len(strategy_classes) > 1:
             names = ", ".join(sorted(c.name for c in strategy_classes))
             results.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=(
-                        f"Code defines multiple Strategy subclasses ({names}); the "
-                        "harness accepts exactly one."
-                    ),
-                )
+                self._critical(f"Code defines multiple Strategy subclasses ({names}); the "
+                        "harness accepts exactly one.")
             )
         else:
             strategy_cls = strategy_classes[0]
             on_bar_issue = _validate_on_bar(strategy_cls)
             if on_bar_issue is not None:
                 results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=on_bar_issue,
-                    )
+                    self._critical(on_bar_issue)
                 )
 
         # 3. Walk AST for banned imports
@@ -202,23 +175,11 @@ class CodeSafetyChecker:
                     top_module = alias.name.split(".")[0]
                     if top_module in BANNED_IMPORTS:
                         results.append(
-                            QualityGateResult(
-                                gate_name=GATE,
-                                phase=phase,
-                                passed=False,
-                                severity="critical",
-                                details=f"Banned import: '{alias.name}' — network/filesystem/system access not allowed.",
-                            )
+                            self._critical(f"Banned import: '{alias.name}' — network/filesystem/system access not allowed.")
                         )
                     elif top_module not in ALLOWED_IMPORTS:
                         results.append(
-                            QualityGateResult(
-                                gate_name=GATE,
-                                phase=phase,
-                                passed=False,
-                                severity="warning",
-                                details=f"Non-allowlisted import: '{alias.name}' — may not be available in sandbox.",
-                            )
+                            self._warning(f"Non-allowlisted import: '{alias.name}' — may not be available in sandbox.")
                         )
 
             elif isinstance(node, ast.ImportFrom):
@@ -226,23 +187,11 @@ class CodeSafetyChecker:
                     top_module = node.module.split(".")[0]
                     if top_module in BANNED_IMPORTS:
                         results.append(
-                            QualityGateResult(
-                                gate_name=GATE,
-                                phase=phase,
-                                passed=False,
-                                severity="critical",
-                                details=f"Banned import: 'from {node.module}' — network/filesystem/system access not allowed.",
-                            )
+                            self._critical(f"Banned import: 'from {node.module}' — network/filesystem/system access not allowed.")
                         )
                     elif top_module not in ALLOWED_IMPORTS:
                         results.append(
-                            QualityGateResult(
-                                gate_name=GATE,
-                                phase=phase,
-                                passed=False,
-                                severity="warning",
-                                details=f"Non-allowlisted import: 'from {node.module}' — may not be available in sandbox.",
-                            )
+                            self._warning(f"Non-allowlisted import: 'from {node.module}' — may not be available in sandbox.")
                         )
 
         # 4. Walk AST for banned function calls
@@ -251,33 +200,15 @@ class CodeSafetyChecker:
                 func_name = _get_call_name(node)
                 if func_name in ("exec", "eval", "compile", "__import__", "globals", "breakpoint"):
                     results.append(
-                        QualityGateResult(
-                            gate_name=GATE,
-                            phase=phase,
-                            passed=False,
-                            severity="critical",
-                            details=f"Banned function call: '{func_name}()' — dynamic code execution not allowed.",
-                        )
+                        self._critical(f"Banned function call: '{func_name}()' — dynamic code execution not allowed.")
                     )
                 if func_name == "open":
                     results.append(
-                        QualityGateResult(
-                            gate_name=GATE,
-                            phase=phase,
-                            passed=False,
-                            severity="critical",
-                            details="Banned function call: 'open()' — file I/O not allowed in strategy code.",
-                        )
+                        self._critical("Banned function call: 'open()' — file I/O not allowed in strategy code.")
                     )
                 if func_name in ("setattr", "delattr"):
                     results.append(
-                        QualityGateResult(
-                            gate_name=GATE,
-                            phase=phase,
-                            passed=False,
-                            severity="critical",
-                            details=f"Banned function call: '{func_name}()' — attribute manipulation not allowed.",
-                        )
+                        self._critical(f"Banned function call: '{func_name}()' — attribute manipulation not allowed.")
                     )
 
         # 5. Regex fallback for patterns AST might miss
@@ -285,13 +216,7 @@ class CodeSafetyChecker:
             if pattern.search(code):
                 match_text = pattern.pattern.replace(r"\b", "").replace(r"\s*\(", "(")
                 results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=f"Regex detected banned pattern: '{match_text}'.",
-                    )
+                    self._critical(f"Regex detected banned pattern: '{match_text}'.")
                 )
 
         # 6. Look-ahead bias detection (run against executable code only,
@@ -300,26 +225,14 @@ class CodeSafetyChecker:
         for pattern, reason in _LOOKAHEAD_PATTERNS:
             if pattern.search(executable):
                 results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=f"Look-ahead bias: {reason}",
-                    )
+                    self._critical(f"Look-ahead bias: {reason}")
                 )
 
         # 7. Code length
         line_count = len(code.splitlines())
         if line_count > 1000:
             results.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="warning",
-                    details=f"Code is {line_count} lines — consider simplifying (limit: 1000).",
-                )
+                self._warning(f"Code is {line_count} lines — consider simplifying (limit: 1000).")
             )
 
         # 8. Order-flow shape (#547): every viable strategy must call
@@ -351,20 +264,12 @@ class CodeSafetyChecker:
             hook_calls = _collect_hook_submit_calls(strategy_classes[0])
             if len(hook_calls) == 0:
                 results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=(
-                            "No ctx.submit_order call reachable from on_bar — strategy "
+                    self._critical("No ctx.submit_order call reachable from on_bar — strategy "
                             "has no entry path that the engine will process. The "
                             "trading service only consumes orders submitted from "
                             "on_bar (responses from on_start / on_fill / on_end are "
                             "currently dropped), so any submission outside on_bar is "
-                            "silently ignored."
-                        ),
-                    )
+                            "silently ignored.")
                 )
             elif not _calls_form_entry_exit_pair(hook_calls):
                 if len(hook_calls) == 1:
@@ -383,13 +288,7 @@ class CodeSafetyChecker:
                         "bracket leg."
                     )
                 results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=detail,
-                    )
+                    self._critical(detail)
                 )
 
         # 9. Symbol-universe guard (#524). When ``spec.target_symbols`` is
@@ -404,48 +303,26 @@ class CodeSafetyChecker:
                 strategy_cls = strategy_classes[0]
                 if not _has_universe_constant(strategy_cls):
                     results.append(
-                        QualityGateResult(
-                            gate_name=GATE,
-                            phase=phase,
-                            passed=False,
-                            severity="critical",
-                            details=(
-                                "Spec has non-empty target_symbols but the strategy "
+                        self._critical("Spec has non-empty target_symbols but the strategy "
                                 "class is missing a UNIVERSE = frozenset({...}) (or "
                                 "set/tuple) class-level constant. Without UNIVERSE + "
                                 "an `if bar.symbol not in self.UNIVERSE: return` guard "
                                 "at the top of on_bar, the historical replay stream "
                                 "will feed bars for every fetched symbol to the "
-                                "signal logic and trades will land on the wrong asset."
-                            ),
-                        )
+                                "signal logic and trades will land on the wrong asset.")
                     )
                 elif not _has_universe_guard_in_on_bar(strategy_cls):
                     results.append(
-                        QualityGateResult(
-                            gate_name=GATE,
-                            phase=phase,
-                            passed=False,
-                            severity="critical",
-                            details=(
-                                "Strategy defines UNIVERSE but on_bar is missing the "
+                        self._critical("Strategy defines UNIVERSE but on_bar is missing the "
                                 "`if bar.symbol not in self.UNIVERSE: return` guard. "
                                 "Without the early-exit, the historical replay stream "
                                 "will deliver bars for every fetched symbol and the "
-                                "signal logic will trade tickers outside target_symbols."
-                            ),
-                        )
+                                "signal logic will trade tickers outside target_symbols.")
                     )
 
         if not results:
             results.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=True,
-                    severity="info",
-                    details="Code passed all safety checks.",
-                )
+                self._info("Code passed all safety checks.")
             )
 
         return results

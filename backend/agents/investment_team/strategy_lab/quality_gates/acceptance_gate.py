@@ -17,18 +17,20 @@ incomplete evaluation rather than silently passing.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
 from ...models import BacktestConfig, BacktestResult
-from .models import QualityGateResult
+from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
 GATE = "acceptance_gate"
 
 DEFAULT_MIN_REGIME_BEATS = 2
 
 
-class AcceptanceGate:
+class AcceptanceGate(GateResultsMixin):
     """Composite OOS acceptance gate built on walk-forward diagnostics."""
+
+    GATE: ClassVar[str] = GATE
 
     def __init__(self, min_regime_beats: int = DEFAULT_MIN_REGIME_BEATS):
         if min_regime_beats < 0:
@@ -41,6 +43,7 @@ class AcceptanceGate:
         config: BacktestConfig,
         *,
         n_trials: Optional[int] = None,
+        phase: StrategyLabPhase = "verification",
     ) -> List[QualityGateResult]:
         """Return one ``QualityGateResult`` per sub-criterion.
 
@@ -48,6 +51,8 @@ class AcceptanceGate:
         want to adjust the DSR threshold based on cumulative trial count; the
         DSR itself is already deflated upstream.
         """
+        self._set_phase(phase)
+
         missing: List[str] = []
         if result.oos_sharpe is None:
             missing.append("oos_sharpe")
@@ -57,15 +62,9 @@ class AcceptanceGate:
             missing.append("oos_trade_count")
         if missing:
             return [
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase="verification",
-                    passed=False,
-                    severity="warning",
-                    details=(
-                        "Acceptance gate cannot evaluate — walk-forward diagnostics "
-                        f"missing: {', '.join(missing)}."
-                    ),
+                self._warning(
+                    "Acceptance gate cannot evaluate — walk-forward diagnostics "
+                    f"missing: {', '.join(missing)}."
                 )
             ]
 
@@ -75,17 +74,11 @@ class AcceptanceGate:
         dsr = float(result.deflated_sharpe)
         passed_dsr = dsr >= config.dsr_threshold
         results.append(
-            QualityGateResult(
-                gate_name=GATE,
-                phase="verification",
-                passed=passed_dsr,
-                severity="info" if passed_dsr else "critical",
-                details=(
-                    f"OOS DSR {dsr:.3f} "
-                    f"{'meets' if passed_dsr else 'below'} threshold "
-                    f"{config.dsr_threshold:.3f}"
-                    + (f" (n_trials={n_trials})" if n_trials is not None else "")
-                ),
+            (self._info if passed_dsr else self._critical)(
+                f"OOS DSR {dsr:.3f} "
+                f"{'meets' if passed_dsr else 'below'} threshold "
+                f"{config.dsr_threshold:.3f}"
+                + (f" (n_trials={n_trials})" if n_trials is not None else "")
             )
         )
 
@@ -93,16 +86,10 @@ class AcceptanceGate:
         deg = float(result.is_oos_degradation_pct)
         passed_deg = deg <= config.max_is_oos_degradation_pct
         results.append(
-            QualityGateResult(
-                gate_name=GATE,
-                phase="verification",
-                passed=passed_deg,
-                severity="info" if passed_deg else "critical",
-                details=(
-                    f"IS→OOS Sharpe degradation {deg:.1f}% "
-                    f"{'within' if passed_deg else 'exceeds'} "
-                    f"{config.max_is_oos_degradation_pct:.1f}% ceiling"
-                ),
+            (self._info if passed_deg else self._critical)(
+                f"IS→OOS Sharpe degradation {deg:.1f}% "
+                f"{'within' if passed_deg else 'exceeds'} "
+                f"{config.max_is_oos_degradation_pct:.1f}% ceiling"
             )
         )
 
@@ -110,16 +97,10 @@ class AcceptanceGate:
         n_oos = int(result.oos_trade_count)
         passed_count = n_oos >= config.min_oos_trades
         results.append(
-            QualityGateResult(
-                gate_name=GATE,
-                phase="verification",
-                passed=passed_count,
-                severity="info" if passed_count else "critical",
-                details=(
-                    f"OOS trade count {n_oos} "
-                    f"{'meets' if passed_count else 'below'} minimum "
-                    f"{config.min_oos_trades}"
-                ),
+            (self._info if passed_count else self._critical)(
+                f"OOS trade count {n_oos} "
+                f"{'meets' if passed_count else 'below'} minimum "
+                f"{config.min_oos_trades}"
             )
         )
 
@@ -135,13 +116,7 @@ class AcceptanceGate:
             else "No regime subwindows evaluated"
         )
         results.append(
-            QualityGateResult(
-                gate_name=GATE,
-                phase="verification",
-                passed=passed_regime,
-                severity="info" if passed_regime else "critical",
-                details=regime_detail,
-            )
+            (self._info if passed_regime else self._critical)(regime_detail)
         )
 
         return results

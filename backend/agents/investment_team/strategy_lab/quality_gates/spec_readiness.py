@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, ClassVar, Iterable, Iterator, List, Optional
 
 from ...models import BacktestConfig, StrategySpec
 from ...symbols import (
@@ -35,7 +35,7 @@ from ..spec_dsl import (
     StopLossRule,
     TakeProfitRule,
 )
-from .models import QualityGateResult, StrategyLabPhase
+from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
 GATE = "spec_readiness"
 
@@ -82,8 +82,6 @@ _INDICATOR_REQUIRED_PARAMS: dict[str, frozenset[str]] = {
     "sma": frozenset({"period"}),
     "ema": frozenset({"period"}),
 }
-
-_VALID_PHASES: frozenset[str] = frozenset({"design", "design_review", "synthesis", "verification"})
 
 # Indicator concept vocabulary for prose mentions in the hypothesis.
 _CONCEPT_TERMS = re.compile(
@@ -164,13 +162,15 @@ def _default_market_sample_provider(symbol: str, asset_class: str) -> float:
     return price
 
 
-class SpecReadinessGate:
+class SpecReadinessGate(GateResultsMixin):
     """Deterministic implementability checks on a constructed ``StrategySpec``.
 
     Contract (class invariant): every call to :meth:`validate` returns a
     non-empty ``List[QualityGateResult]``. Every result in that list carries
     the ``phase`` argument the caller supplied and has ``gate_name == GATE``.
     """
+
+    GATE: ClassVar[str] = GATE
 
     def __init__(
         self,
@@ -191,6 +191,11 @@ class SpecReadinessGate:
             market_sample_provider or _default_market_sample_provider
         )
         self._backtest_config = backtest_config
+        # Per-call config slot — set by ``validate()`` before any rule runs so
+        # individual ``_check_*`` methods can read it without an extra
+        # parameter. Reset back to ``None`` on exit so the gate can be safely
+        # re-used across cycles.
+        self._call_config: Optional[BacktestConfig] = None
 
         # Post: provider is callable, config slot is the supplied value or None.
         assert callable(self._market_sample_provider), "provider slot must be callable"
@@ -202,418 +207,230 @@ class SpecReadinessGate:
         phase: StrategyLabPhase = "design",
         backtest_config: Optional[BacktestConfig] = None,
     ) -> List[QualityGateResult]:
-        # Pre: spec is a StrategySpec; phase is one of the four valid labels.
+        """Run every readiness rule and return one result list.
+
+        Pre: ``spec`` is a StrategySpec; ``phase`` is a valid phase literal.
+        Post: result list is non-empty; every entry carries the caller's
+        ``phase`` and ``gate_name == GATE``.
+        """
         assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
-        assert phase in _VALID_PHASES, f"phase must be one of {sorted(_VALID_PHASES)}; got {phase!r}"
         assert backtest_config is None or isinstance(backtest_config, BacktestConfig), (
             "backtest_config override must be a BacktestConfig or None"
         )
-
-        results: List[QualityGateResult] = []
-        config = backtest_config or self._backtest_config
-
-        results.extend(self._check_universe_set(spec, phase))
-        results.extend(self._check_entry_rules_non_trivial(spec, phase))
-        results.extend(self._check_indicator_validity(spec, phase))
-        results.extend(self._check_exit_completeness(spec, phase))
-        results.extend(self._check_sizing_realisable(spec, phase, config))
-        results.extend(self._check_hypothesis_rule_consistency(spec, phase))
-        results.extend(self._check_timeframe_availability(spec, phase))
-        results.extend(self._check_risk_limit_coherence(spec, phase))
-
-        if not results:
-            results.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=True,
-                    severity="info",
-                    details="Strategy spec passed all readiness checks.",
-                )
+        self._set_phase(phase)
+        self._call_config = backtest_config or self._backtest_config
+        try:
+            results: List[QualityGateResult] = [
+                r for rule in self._RULES for r in rule(self, spec)
+            ]
+            if not results:
+                results.append(self._info("Strategy spec passed all readiness checks."))
+            # Post: every result carries the caller's phase and GATE name.
+            assert all(r.phase == phase for r in results), (
+                "every result must carry the caller's phase"
             )
-
-        # Post: results non-empty; every result carries the caller's phase and GATE name.
-        assert results, "validate must always return at least one result"
-        assert all(r.phase == phase for r in results), "every result must carry the caller's phase"
-        assert all(r.gate_name == GATE for r in results), "every result must carry GATE name"
-        return results
+            assert all(r.gate_name == GATE for r in results), (
+                "every result must carry GATE name"
+            )
+            return results
+        finally:
+            self._call_config = None
 
     # ------------------------------------------------------------------
-    # Rule 1: Universe set
+    # Rule 1: Universe set — every whitelisted ticker named in the
+    # hypothesis must also appear in ``target_symbols`` (after stripping
+    # Yahoo provider suffixes).
     # ------------------------------------------------------------------
-    def _check_universe_set(
-        self, spec: StrategySpec, phase: StrategyLabPhase
-    ) -> List[QualityGateResult]:
-        # Pre: spec is StrategySpec, phase is a valid phase literal.
+    def _check_universe_set(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
         assert isinstance(spec, StrategySpec)
-        assert phase in _VALID_PHASES
-
         named_raw = {m.group(0).upper() for m in _SYMBOL_REGEX.finditer(spec.hypothesis or "")}
         targets_raw = {s.upper() for s in spec.target_symbols}
-        # Compare on the canonical (suffix-stripped) form so `ES` ≡ `ES=F` and
-        # `EURUSD` ≡ `EURUSD=X` — the spec is implementable either way; the
-        # downstream fetcher resolves the provider form when needed.
-        named_canon = {_canonicalize_ticker(s) for s in named_raw}
-        targets_canon = {_canonicalize_ticker(s) for s in targets_raw}
+        named = {_canonicalize_ticker(s) for s in named_raw}
+        targets = {_canonicalize_ticker(s) for s in targets_raw}
+        if not named or named <= targets:
+            return ()
+        if not targets:
+            return (
+                self._critical(
+                    f"Hypothesis names symbol(s) {sorted(named_raw)} but "
+                    "target_symbols is empty — backtest universe would not "
+                    "include the symbols the strategy is about."
+                ),
+            )
+        missing_canon = named - targets
+        missing_raw = sorted(s for s in named_raw if _canonicalize_ticker(s) in missing_canon)
+        return (
+            self._critical(
+                f"Hypothesis names symbol(s) {missing_raw} not "
+                f"present in target_symbols {sorted(targets_raw)}."
+            ),
+        )
 
-        out: List[QualityGateResult] = []
-        if not named_canon and not targets_canon:
-            pass  # asset-class default universe will be used
-        elif named_canon and not targets_canon:
-            out.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=(
-                        f"Hypothesis names symbol(s) {sorted(named_raw)} but "
-                        "target_symbols is empty — backtest universe would not "
-                        "include the symbols the strategy is about."
+    # ------------------------------------------------------------------
+    # Rule 2: Entry rules non-trivial.
+    # ------------------------------------------------------------------
+    def _check_entry_rules_non_trivial(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
+        assert isinstance(spec, StrategySpec)
+        if not spec.entry_rules:
+            return (self._critical("No entry rules — strategy cannot generate trades."),)
+        for idx, rule in enumerate(spec.entry_rules):
+            if not isinstance(rule, EntryRule):
+                return (
+                    self._critical(
+                        f"entry_rules[{idx}] is not a structured EntryRule "
+                        f"(got {type(rule).__name__})."
                     ),
                 )
-            )
-        else:
-            missing_canon = named_canon - targets_canon
-            if missing_canon:
-                missing_raw = sorted(s for s in named_raw if _canonicalize_ticker(s) in missing_canon)
-                out.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=(
-                            f"Hypothesis names symbol(s) {missing_raw} not "
-                            f"present in target_symbols {sorted(targets_raw)}."
-                        ),
-                    )
+            if not isinstance(rule.when, Predicate):
+                return (
+                    self._critical(
+                        f"entry_rules[{idx}].when is not a Predicate "
+                        f"(got {type(rule.when).__name__})."
+                    ),
                 )
-
-        # Post: 0 or 1 critical failures; never warnings or info.
-        assert len(out) <= 1, "universe-set check emits at most one result"
-        assert all(not r.passed and r.severity == "critical" for r in out)
-        return out
+        return ()
 
     # ------------------------------------------------------------------
-    # Rule 2: Entry rules non-trivial
+    # Rule 3: Indicator validity.
     # ------------------------------------------------------------------
-    def _check_entry_rules_non_trivial(
-        self, spec: StrategySpec, phase: StrategyLabPhase
-    ) -> List[QualityGateResult]:
-        # Pre: spec is StrategySpec, phase is a valid phase literal.
+    def _check_indicator_validity(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
         assert isinstance(spec, StrategySpec)
-        assert phase in _VALID_PHASES
-
-        out: List[QualityGateResult] = []
-        if not spec.entry_rules:
-            out.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details="No entry rules — strategy cannot generate trades.",
-                )
-            )
-        else:
-            for idx, rule in enumerate(spec.entry_rules):
-                if not isinstance(rule, EntryRule):
-                    out.append(
-                        QualityGateResult(
-                            gate_name=GATE,
-                            phase=phase,
-                            passed=False,
-                            severity="critical",
-                            details=(
-                                f"entry_rules[{idx}] is not a structured EntryRule "
-                                f"(got {type(rule).__name__})."
-                            ),
-                        )
-                    )
-                    break
-                if not isinstance(rule.when, Predicate):
-                    out.append(
-                        QualityGateResult(
-                            gate_name=GATE,
-                            phase=phase,
-                            passed=False,
-                            severity="critical",
-                            details=(
-                                f"entry_rules[{idx}].when is not a Predicate "
-                                f"(got {type(rule.when).__name__})."
-                            ),
-                        )
-                    )
-                    break
-
-        # Post: 0 or 1 critical failures.
-        assert len(out) <= 1
-        assert all(not r.passed and r.severity == "critical" for r in out)
-        return out
-
-    # ------------------------------------------------------------------
-    # Rule 3: Indicator validity
-    # ------------------------------------------------------------------
-    def _check_indicator_validity(
-        self, spec: StrategySpec, phase: StrategyLabPhase
-    ) -> List[QualityGateResult]:
-        # Pre: spec is StrategySpec, phase is a valid phase literal.
-        assert isinstance(spec, StrategySpec)
-        assert phase in _VALID_PHASES
-
-        out: List[QualityGateResult] = []
         for ref in self._iter_indicator_refs(spec):
             if ref.name not in _KNOWN_INDICATOR_NAMES:
-                out.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=(
-                            f"Indicator '{ref.name}' is not in the supported "
-                            f"set {sorted(_KNOWN_INDICATOR_NAMES)}."
-                        ),
-                    )
+                return (
+                    self._critical(
+                        f"Indicator '{ref.name}' is not in the supported "
+                        f"set {sorted(_KNOWN_INDICATOR_NAMES)}."
+                    ),
                 )
-                break
             required = _INDICATOR_REQUIRED_PARAMS.get(ref.name, frozenset())
             missing = sorted(required - set(ref.params.keys()))
             if missing:
-                out.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=(
-                            f"Indicator '{ref.name}' is missing required "
-                            f"param(s) {missing}."
-                        ),
-                    )
+                return (
+                    self._critical(
+                        f"Indicator '{ref.name}' is missing required param(s) {missing}."
+                    ),
                 )
-                break
-
-        # Post: 0 or 1 critical failures (short-circuits on first violation).
-        assert len(out) <= 1
-        assert all(not r.passed and r.severity == "critical" for r in out)
-        return out
+        return ()
 
     # ------------------------------------------------------------------
-    # Rule 4: Exit completeness
+    # Rule 4: Exit completeness.
     # ------------------------------------------------------------------
-    def _check_exit_completeness(
-        self, spec: StrategySpec, phase: StrategyLabPhase
-    ) -> List[QualityGateResult]:
-        # Pre: spec is StrategySpec, phase is a valid phase literal.
+    def _check_exit_completeness(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
         assert isinstance(spec, StrategySpec)
-        assert phase in _VALID_PHASES
-
         allowed_kinds = {"signal_exit", "stop_loss", "take_profit"}
-        out: List[QualityGateResult] = []
         if not spec.exit_rules:
-            out.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=(
-                        "No exit rules — positions would never close. Add at "
-                        "least one of: signal_exit, stop_loss, take_profit."
-                    ),
-                )
+            return (
+                self._critical(
+                    "No exit rules — positions would never close. Add at "
+                    "least one of: signal_exit, stop_loss, take_profit."
+                ),
             )
-        elif not any(getattr(r, "kind", None) in allowed_kinds for r in spec.exit_rules):
-            out.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=(
-                        f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."
-                    ),
-                )
+        if not any(getattr(r, "kind", None) in allowed_kinds for r in spec.exit_rules):
+            return (
+                self._critical(
+                    f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."
+                ),
             )
-
-        # Post: 0 or 1 critical failures.
-        assert len(out) <= 1
-        assert all(not r.passed and r.severity == "critical" for r in out)
-        return out
+        return ()
 
     # ------------------------------------------------------------------
-    # Rule 5: Sizing realisable
+    # Rule 5: Sizing realisable.
     # ------------------------------------------------------------------
-    def _check_sizing_realisable(
-        self,
-        spec: StrategySpec,
-        phase: StrategyLabPhase,
-        config: Optional[BacktestConfig],
-    ) -> List[QualityGateResult]:
-        # Pre: spec is StrategySpec, phase is valid, config is BacktestConfig or None.
+    def _check_sizing_realisable(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
         assert isinstance(spec, StrategySpec)
-        assert phase in _VALID_PHASES
-        assert config is None or isinstance(config, BacktestConfig)
-
+        config = self._call_config
         if config is None:
-            return []
+            return ()
 
         kind = getattr(spec.sizing, "kind", None)
         symbols = spec.target_symbols or _default_universe_for(spec.asset_class)
         if not symbols:
-            return []
+            return ()
         capital = config.initial_capital
-        # Class invariant: BacktestConfig guarantees initial_capital > 0.
         assert capital > 0, "initial_capital must be strictly positive"
-        # Crypto/forex accept fractional quantities — only enforce the whole-lot
-        # threshold for asset classes that need it.
         enforce_whole_lot = spec.asset_class.lower() in _WHOLE_LOT_ASSET_CLASSES
+        threshold = 1.0 if enforce_whole_lot else 0.0
 
-        out: List[QualityGateResult] = []
         for sym in symbols:
             try:
                 price = float(self._market_sample_provider(sym, spec.asset_class))
             except Exception:
                 price = float("nan")
-            # Fail closed on NaN / +inf / -inf — the gate cannot validate
-            # sizing without a finite positive price.
             if not math.isfinite(price) or price <= 0:
-                out.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=(
-                            f"Sizing realisability: no usable price sample "
-                            f"for '{sym}' (got {price!r})."
-                        ),
-                    )
+                return (
+                    self._critical(
+                        f"Sizing realisability: no usable price sample for '{sym}' (got {price!r})."
+                    ),
                 )
-                break
             if kind == "fixed_fraction":
                 notional = capital * float(spec.sizing.fraction)
             elif kind == "fixed_notional":
                 notional = float(spec.sizing.notional_usd)
-            elif kind == "volatility_target":
-                # Cannot evaluate without realised vol; treat as realisable.
-                continue
             else:
+                # volatility_target needs realised vol — cannot evaluate here.
                 continue
             qty = notional / price
-            # Crypto/forex accept any positive position (threshold 0, strict >).
-            # Stocks/futures/commodities require at least one whole unit;
-            # qty == 1.0 exactly is implementable, so the comparison is strict.
-            threshold = 1.0 if enforce_whole_lot else 0.0
             if qty < threshold or (not enforce_whole_lot and qty <= threshold):
-                out.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=(
-                            f"Sizing yields qty={qty:.4f} (threshold {threshold}) "
-                            f"for symbol '{sym}' at sample price ${price:.2f} "
-                            f"with capital ${capital:.0f}."
-                        ),
-                    )
+                return (
+                    self._critical(
+                        f"Sizing yields qty={qty:.4f} (threshold {threshold}) "
+                        f"for symbol '{sym}' at sample price ${price:.2f} "
+                        f"with capital ${capital:.0f}."
+                    ),
                 )
-                break
-
-        # Post: 0 or 1 critical failures (short-circuits on first symbol that fails).
-        assert len(out) <= 1
-        assert all(not r.passed and r.severity == "critical" for r in out)
-        return out
+        return ()
 
     # ------------------------------------------------------------------
-    # Rule 6: Hypothesis–rule consistency
+    # Rule 6: Hypothesis–rule consistency.
     # ------------------------------------------------------------------
     def _check_hypothesis_rule_consistency(
-        self, spec: StrategySpec, phase: StrategyLabPhase
-    ) -> List[QualityGateResult]:
-        # Pre: spec is StrategySpec, phase is a valid phase literal.
+        self, spec: StrategySpec
+    ) -> Iterable[QualityGateResult]:
         assert isinstance(spec, StrategySpec)
-        assert phase in _VALID_PHASES
-
-        hypothesis = spec.hypothesis or ""
-        terms_in_hypothesis = {
+        terms = {
             re.sub(r"\s+", " ", m.group(0).lower())
-            for m in _CONCEPT_TERMS.finditer(hypothesis)
+            for m in _CONCEPT_TERMS.finditer(spec.hypothesis or "")
         }
         referenced = {ref.name for ref in self._iter_indicator_refs(spec)}
-        # A concept fires only when *none* of its allowed indicators is
-        # referenced — so "moving average" is satisfied by either SMA or EMA.
+        # A concept fires only when *none* of its allowed indicators is referenced,
+        # so "moving average" is satisfied by either SMA or EMA.
         orphan = sorted(
             t
-            for t in terms_in_hypothesis
+            for t in terms
             if (names := _CONCEPT_TO_INDICATOR_NAMES.get(t)) is not None
             and not (names & referenced)
         )
-
-        out: List[QualityGateResult] = []
-        if orphan:
-            out.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=(
-                        f"Hypothesis names indicator concept(s) {sorted(orphan)} "
-                        "that no entry/exit rule references."
-                    ),
-                )
-            )
-
-        # Post: 0 or 1 critical failures.
-        assert len(out) <= 1
-        assert all(not r.passed and r.severity == "critical" for r in out)
-        return out
+        if not orphan:
+            return ()
+        return (
+            self._critical(
+                f"Hypothesis names indicator concept(s) {orphan} "
+                "that no entry/exit rule references."
+            ),
+        )
 
     # ------------------------------------------------------------------
-    # Rule 7: Timeframe data availability
+    # Rule 7: Timeframe data availability.
     # ------------------------------------------------------------------
-    def _check_timeframe_availability(
-        self, spec: StrategySpec, phase: StrategyLabPhase
-    ) -> List[QualityGateResult]:
-        # Pre: spec is StrategySpec, phase is a valid phase literal.
+    def _check_timeframe_availability(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
         assert isinstance(spec, StrategySpec)
-        assert phase in _VALID_PHASES
-
-        out: List[QualityGateResult] = []
-        if spec.timeframe != "1d" and spec.asset_class.lower() not in _FULL_TIMEFRAME_ASSET_CLASSES:
-            out.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=(
-                        f"Asset class '{spec.asset_class}' has no reliable "
-                        f"intraday data for timeframe '{spec.timeframe}'; "
-                        "use '1d' or pick stocks/crypto."
-                    ),
-                )
-            )
-
-        # Post: 0 or 1 critical failures.
-        assert len(out) <= 1
-        assert all(not r.passed and r.severity == "critical" for r in out)
-        return out
+        if spec.timeframe == "1d" or spec.asset_class.lower() in _FULL_TIMEFRAME_ASSET_CLASSES:
+            return ()
+        return (
+            self._critical(
+                f"Asset class '{spec.asset_class}' has no reliable "
+                f"intraday data for timeframe '{spec.timeframe}'; "
+                "use '1d' or pick stocks/crypto."
+            ),
+        )
 
     # ------------------------------------------------------------------
-    # Rule 8: Risk-limit coherence
+    # Rule 8: Risk-limit coherence — independent stop/profit and position
+    # caps; both sub-checks can fire on the same spec.
     # ------------------------------------------------------------------
-    def _check_risk_limit_coherence(
-        self, spec: StrategySpec, phase: StrategyLabPhase
-    ) -> List[QualityGateResult]:
-        # Pre: spec is StrategySpec, phase is a valid phase literal.
+    def _check_risk_limit_coherence(self, spec: StrategySpec) -> Iterable[QualityGateResult]:
         assert isinstance(spec, StrategySpec)
-        assert phase in _VALID_PHASES
-
         out: List[QualityGateResult] = []
 
         stop_losses = [r for r in spec.exit_rules if isinstance(r, StopLossRule)]
@@ -621,47 +438,44 @@ class SpecReadinessGate:
         if stop_losses and take_profits:
             min_tp = min(r.pct for r in take_profits)
             max_sl = max(r.pct for r in stop_losses)
-            # Class invariant: StopLossRule.pct and TakeProfitRule.pct are > 0.
             assert min_tp > 0 and max_sl > 0, "exit-rule pcts must be strictly positive"
             if max_sl >= min_tp:
                 out.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        phase=phase,
-                        passed=False,
-                        severity="critical",
-                        details=(
-                            f"stop_loss.pct={max_sl} ≥ take_profit.pct={min_tp} — "
-                            "stop would trigger before profit target."
-                        ),
+                    self._critical(
+                        f"stop_loss.pct={max_sl} ≥ take_profit.pct={min_tp} — "
+                        "stop would trigger before profit target."
                     )
                 )
 
         if spec.risk_limits.max_position_pct > 25:
             out.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase=phase,
-                    passed=False,
-                    severity="critical",
-                    details=(
-                        f"max_position_pct={spec.risk_limits.max_position_pct}% "
-                        "exceeds the 25% cap for a single-position risk budget."
-                    ),
+                self._critical(
+                    f"max_position_pct={spec.risk_limits.max_position_pct}% "
+                    "exceeds the 25% cap for a single-position risk budget."
                 )
             )
-
-        # Post: 0, 1, or 2 critical failures (the two sub-checks are independent).
-        assert len(out) <= 2
-        assert all(not r.passed and r.severity == "critical" for r in out)
         return out
+
+    # ------------------------------------------------------------------
+    # Rule registry — declarative list iterated by ``validate``. Order is
+    # preserved so error messages remain stable across runs.
+    # ------------------------------------------------------------------
+    _RULES: ClassVar[tuple] = (
+        _check_universe_set,
+        _check_entry_rules_non_trivial,
+        _check_indicator_validity,
+        _check_exit_completeness,
+        _check_sizing_realisable,
+        _check_hypothesis_rule_consistency,
+        _check_timeframe_availability,
+        _check_risk_limit_coherence,
+    )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     @staticmethod
     def _iter_indicator_refs(spec: StrategySpec) -> Iterator[IndicatorRef]:
-        # Pre: spec is a StrategySpec.
         assert isinstance(spec, StrategySpec)
         for rule in spec.entry_rules:
             yield from SpecReadinessGate._predicate_indicator_refs(rule.when)
@@ -671,7 +485,6 @@ class SpecReadinessGate:
 
     @staticmethod
     def _predicate_indicator_refs(pred: Predicate) -> Iterator[IndicatorRef]:
-        # Pre: pred is a Predicate.
         assert isinstance(pred, Predicate)
         if isinstance(pred.lhs, IndicatorRef):
             yield pred.lhs

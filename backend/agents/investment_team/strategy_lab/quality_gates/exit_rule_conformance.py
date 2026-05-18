@@ -36,7 +36,7 @@ of which the alignment agent's LLM-driven audit should defer to.
 
 from __future__ import annotations
 
-from typing import List, Mapping, Optional, Sequence
+from typing import ClassVar, List, Mapping, Optional, Sequence
 
 from ...models import (
     BacktestConfig,
@@ -50,13 +50,15 @@ from ..spec_dsl import (
     StopLossRule,
     TakeProfitRule,
 )
-from .models import QualityGateResult
+from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
 GATE = "exit_rule_conformance"
 
 
-class ExitRuleConformanceGate:
+class ExitRuleConformanceGate(GateResultsMixin):
     """Deterministic post-run check that engine-emitted exits match the spec."""
+
+    GATE: ClassVar[str] = GATE
 
     def check(
         self,
@@ -66,16 +68,12 @@ class ExitRuleConformanceGate:
         diagnostics: Optional[BacktestExecutionDiagnostics],
         config: BacktestConfig,
         timeframe: str = "1d",
+        phase: StrategyLabPhase = "verification",
     ) -> List[QualityGateResult]:
+        self._set_phase(phase)
         if not exit_rules:
             return [
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase="verification",
-                    passed=True,
-                    severity="info",
-                    details="spec.exit_rules empty; engine-enforcement check skipped.",
-                )
+                self._info("spec.exit_rules empty; engine-enforcement check skipped.")
             ]
 
         results: List[QualityGateResult] = []
@@ -100,16 +98,8 @@ class ExitRuleConformanceGate:
         signal_exits = [r for r in exit_rules if isinstance(r, SignalExitRule)]
         if signal_exits:
             results.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase="verification",
-                    passed=True,
-                    severity="info",
-                    details=(
-                        f"{len(signal_exits)} SignalExitRule(s) present but not yet "
-                        "engine-enforced (see rule_compiler module docstring)."
-                    ),
-                )
+                self._info(f"{len(signal_exits)} SignalExitRule(s) present but not yet "
+                        "engine-enforced (see rule_compiler module docstring).")
             )
 
         # ---- Aggregate: engine emitted at least one exit when expected ----
@@ -120,13 +110,7 @@ class ExitRuleConformanceGate:
                 ", ".join(f"{k}={v}" for k, v in sorted(firings.items())) or "none"
             )
             results.append(
-                QualityGateResult(
-                    gate_name=GATE,
-                    phase="verification",
-                    passed=True,
-                    severity="info",
-                    details=details + f" (total={total}, trades={len(trades)})",
-                )
+                self._info(details + f" (total={total}, trades={len(trades)})")
             )
 
         return results
@@ -135,23 +119,15 @@ class ExitRuleConformanceGate:
     # Per-rule checks
     # ------------------------------------------------------------------
 
-    @staticmethod
     def _check_stop_loss(
+        self,
         rule: StopLossRule,
         trades: Sequence[TradeRecord],
         firings_by_symbol: Mapping[str, Mapping[str, int]],
     ) -> QualityGateResult:
         if rule.basis != "entry_price":
-            return QualityGateResult(
-                gate_name=GATE,
-                phase="verification",
-                passed=True,
-                severity="info",
-                details=(
-                    f"StopLossRule(basis={rule.basis!r}) conformance check skipped "
-                    "(trailing variants require bar-by-bar replay)."
-                ),
-            )
+            return self._info(f"StopLossRule(basis={rule.basis!r}) conformance check skipped "
+                    "(trailing variants require bar-by-bar replay).")
         # The engine detects the trigger on bar N's low (long) / high
         # (short), but the synthetic market close fills on bar N+1's
         # open. That next-bar fill can land arbitrarily far below the
@@ -216,33 +192,17 @@ class ExitRuleConformanceGate:
         )
         if unaccounted:
             sample = [(t.trade_num, t.symbol, t.return_pct) for t in unaccounted[:5]]
-            return QualityGateResult(
-                gate_name=GATE,
-                phase="verification",
-                passed=False,
-                severity="critical",
-                details=(
-                    f"StopLossRule(pct={rule.pct}) leak: {total_tripped} engine-attributed "
+            return self._critical(f"StopLossRule(pct={rule.pct}) leak: {total_tripped} engine-attributed "
                     f"trade(s) closed below the {raw_floor_pct:.2f}% floor; "
                     f"{len(unaccounted)} unaccounted for by per-symbol firings. "
-                    f"Sample (trade_num, symbol, return_pct)={sample}{skipped_suffix}."
-                ),
-            )
-        return QualityGateResult(
-            gate_name=GATE,
-            phase="verification",
-            passed=True,
-            severity="info",
-            details=(
-                f"StopLossRule(pct={rule.pct}) — per-symbol firings cover "
+                    f"Sample (trade_num, symbol, return_pct)={sample}{skipped_suffix}.")
+        return self._info(f"StopLossRule(pct={rule.pct}) — per-symbol firings cover "
                 f"{total_tripped} engine-attributed below-floor trade(s) across "
                 f"{len(by_symbol_tripped)} symbol(s); "
-                f"total firings={total_firings}{skipped_suffix}."
-            ),
-        )
+                f"total firings={total_firings}{skipped_suffix}.")
 
-    @staticmethod
     def _check_take_profit(
+        self,
         rule: TakeProfitRule,
         trades: Sequence[TradeRecord],
         all_rules: Sequence[ExitRule],
@@ -263,47 +223,15 @@ class ExitRuleConformanceGate:
         # threshold is unreachable on the symbols' actual price action.
         only_rule = len(all_rules) == 1
         if not only_rule:
-            return QualityGateResult(
-                gate_name=GATE,
-                phase="verification",
-                passed=True,
-                severity="info",
-                details=(
-                    f"TakeProfitRule(pct={rule.pct}) co-exists with other exit "
+            return self._info(f"TakeProfitRule(pct={rule.pct}) co-exists with other exit "
                     "rules; conformance is informational (other rules may close "
-                    "trades before the take-profit threshold is reached)."
-                ),
-            )
+                    "trades before the take-profit threshold is reached).")
         tp_firings = firings.get("take_profit", 0)
         if tp_firings >= 1:
-            return QualityGateResult(
-                gate_name=GATE,
-                phase="verification",
-                passed=True,
-                severity="info",
-                details=(
-                    f"TakeProfitRule(pct={rule.pct}) — {tp_firings} engine firing(s) "
-                    f"recorded across {len(trades)} trade(s)."
-                ),
-            )
+            return self._info(f"TakeProfitRule(pct={rule.pct}) — {tp_firings} engine firing(s) "
+                    f"recorded across {len(trades)} trade(s).")
         if not trades:
-            return QualityGateResult(
-                gate_name=GATE,
-                phase="verification",
-                passed=True,
-                severity="info",
-                details=(
-                    f"TakeProfitRule(pct={rule.pct}) — zero trades produced; no firings to verify."
-                ),
-            )
-        return QualityGateResult(
-            gate_name=GATE,
-            phase="verification",
-            passed=False,
-            severity="warning",
-            details=(
-                f"TakeProfitRule(pct={rule.pct}) is the only exit rule but the engine "
+            return self._info(f"TakeProfitRule(pct={rule.pct}) — zero trades produced; no firings to verify.")
+        return self._warning(f"TakeProfitRule(pct={rule.pct}) is the only exit rule but the engine "
                 f"recorded zero take_profit firings across {len(trades)} trade(s) — "
-                "the threshold may be unreachable on the strategy's universe."
-            ),
-        )
+                "the threshold may be unreachable on the strategy's universe.")
