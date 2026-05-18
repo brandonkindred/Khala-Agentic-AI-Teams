@@ -845,37 +845,14 @@ class StrategyLabOrchestrator:
         alignment_attempts: List[str] = []
         alignment_reports: List[TradeAlignmentReport] = []
 
-        # Issue #527 — run the deterministic exit-rule conformance gate before
-        # the LLM alignment loop. ``ExitRuleConformanceGate`` reads the trade
-        # ledger and the engine's ``exit_rule_firings`` diagnostic to verify
-        # every trade obeys the structured exit rules within tolerance. The
-        # results are appended to ``all_gate_results`` so they surface on the
-        # persisted record alongside the LLM alignment verdict; the alignment
-        # agent's prompt (now treating exit rules as engine-enforced) reads
-        # the same trade ledger and reaches a compatible verdict.
-        #
-        # ``exit_rule_conformance_passed`` vetos ``is_winning`` below: a
-        # critical failure here means the engine's per-bar enforcement
-        # leaked (e.g. a trade overshot a structured stop-loss floor by
-        # more than slippage tolerance). That's an engine-side
-        # correctness bug, not a strategy-code bug,
-        # so refinement won't fix it — but we must NOT publish the run as
-        # winning even if the LLM alignment agent later agrees the trades
-        # look reasonable.
-        exit_rule_conformance_passed = True
-        if execution_succeeded and trades:
-            conformance_gate = ExitRuleConformanceGate()
-            conformance_results = conformance_gate.check(
-                exit_rules=spec.exit_rules,
-                trades=trades,
-                diagnostics=metrics.execution_diagnostics,
-                config=config,
-                timeframe=spec.timeframe,
-            )
-            all_gate_results.extend(conformance_results)
-            exit_rule_conformance_passed = not any(
-                (not r.passed) and r.severity == "critical" for r in conformance_results
-            )
+        # Issue #527 — engine-side enforcement of structured ``exit_rules``
+        # has a deterministic conformance gate that runs once the trade
+        # ledger is settled. It runs AFTER the alignment loop because
+        # alignment re-execution can replace ``trades`` / ``metrics`` with
+        # a new ledger that has different conformance characteristics —
+        # running before alignment would leave us evaluating a stale run.
+        # See the gate invocation just before the ``is_winning``
+        # resolution below.
 
         if execution_succeeded and trades and market_data is not None:
             for align_round in range(MAX_ALIGNMENT_ROUNDS):
@@ -1191,6 +1168,27 @@ class StrategyLabOrchestrator:
                 acceptance_results = []
                 acceptance_reason = None
                 walk_forward_failed = True
+
+        # ── Exit-rule conformance ─────────────────────────────────────
+        # Issue #527 — deterministic check that the engine actually
+        # enforced ``spec.exit_rules`` against the FINAL trade ledger
+        # (post-alignment-loop). Critical failure vetoes ``is_winning``
+        # below; results are appended to ``all_gate_results`` for the
+        # persisted record.
+        exit_rule_conformance_passed = True
+        if execution_succeeded and trades:
+            conformance_gate = ExitRuleConformanceGate()
+            conformance_results = conformance_gate.check(
+                exit_rules=spec.exit_rules,
+                trades=trades,
+                diagnostics=metrics.execution_diagnostics,
+                config=config,
+                timeframe=spec.timeframe,
+            )
+            all_gate_results.extend(conformance_results)
+            exit_rule_conformance_passed = not any(
+                (not r.passed) and r.severity == "critical" for r in conformance_results
+            )
 
         # ── Resolve is_winning ────────────────────────────────────────
         # Publication requires (a) the walk-forward acceptance gate (or

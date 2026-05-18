@@ -62,9 +62,7 @@ def _trade(
     )
 
 
-def _diagnostics(
-    *, symbol: str = "AAA", **firings: int
-) -> BacktestExecutionDiagnostics:
+def _diagnostics(*, symbol: str = "AAA", **firings: int) -> BacktestExecutionDiagnostics:
     """Helper: build a diagnostics envelope where every firing is attributed
     to a single symbol. Tests that need cross-symbol scenarios construct
     ``BacktestExecutionDiagnostics`` directly.

@@ -109,9 +109,10 @@ def _bar(symbol: str = "AAA", **kwargs) -> _MockBar:
 def test_tracker_resets_on_limit_entry_with_just_opened_and_entry_price_watermarks() -> None:
     """Same-bar exit + re-entry with a NON-market entry. The tracker must
     reset trailing watermarks against the new entry — and because the
-    fill could have landed anywhere inside the bar, init watermarks at
-    ``entry_price`` and flag ``just_opened=True`` so rule eval skips
-    this bar.
+    fill could have landed anywhere inside the bar, flag
+    ``just_opened=True`` so rule eval skips this bar entirely.
+    Watermarks initialise at ``entry_price`` (same as the market-entry
+    case — see :func:`_extend_watermarks` for the lookahead rationale).
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
@@ -150,13 +151,16 @@ def test_tracker_resets_on_limit_entry_with_just_opened_and_entry_price_watermar
     assert state.low_since_entry == 110.0
 
 
-def test_tracker_resets_on_market_entry_using_bar_ohlc_without_gating() -> None:
-    """Market entries fill at the bar's open, so the bar's full
-    high/low IS post-entry price action. The tracker initialises
-    watermarks from the bar (so a same-bar stop/take-profit can be
-    captured) and leaves ``just_opened=False`` so rule eval runs on
-    this bar. Without this carve-out, longs opened at the open could
-    trade through their stop and recover with no engine emission.
+def test_tracker_resets_on_market_entry_with_entry_price_watermarks() -> None:
+    """Market entries fill at the bar's open. Rule eval is NOT gated
+    (``just_opened=False``) so a same-bar entry_price stop / take-profit
+    can fire — those rules consult ``entry_price`` not the trailing
+    watermark. The trailing watermark itself initialises at
+    ``entry_price`` to avoid intrabar lookahead: if it initialised at
+    ``cur_bar.high``/``cur_bar.low`` a trailing stop could trigger on
+    the same bar's low from a floor that was raised by the same bar's
+    high (regardless of which printed first). ``_extend_watermarks``
+    runs AFTER rule evaluation so the next bar reads the bar's range.
     """
     tracker: Dict[str, _TrackedPosition] = {}
     portfolio = _portfolio_with(
@@ -178,14 +182,19 @@ def test_tracker_resets_on_market_entry_using_bar_ohlc_without_gating() -> None:
     state = tracker["AAA"]
     assert state.entry_order_id == "o-mkt"
     assert state.just_opened is False  # rule eval runs on the entry bar
-    assert state.high_since_entry == 112.0  # full bar high captured
-    assert state.low_since_entry == 88.0  # full bar low captured
+    # Watermarks at entry_price — NOT the bar's OHLC — to keep the
+    # entry bar's eval lookahead-free. ``_extend_watermarks`` runs
+    # AFTER rule eval and updates them for the next bar.
+    assert state.high_since_entry == 100.0
+    assert state.low_since_entry == 100.0
 
 
 def test_tracker_carries_over_when_entry_order_id_unchanged() -> None:
     """Same ``entry_order_id`` → same trade. Weighted-average entry refresh
-    from scale-ins; watermarks extend; ``just_opened`` flips to False on
-    the first carry-over bar.
+    from scale-ins; ``just_opened`` flips to False on the first carry-
+    over bar. Watermarks are NOT extended here — ``_extend_watermarks``
+    runs separately AFTER rule evaluation so trailing-stop rules can't
+    fire from a floor that the current bar's high just raised.
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
@@ -218,8 +227,49 @@ def test_tracker_carries_over_when_entry_order_id_unchanged() -> None:
     assert state.entry_order_id == "o1"
     assert state.just_opened is False  # first post-entry bar
     assert state.entry_price == 102.5  # scale-in refresh
-    assert state.high_since_entry == 108.0  # extends
-    assert state.low_since_entry == 97.0  # extends
+    # Watermarks unchanged here — extension is now done by the
+    # separate ``_extend_watermarks`` call after rule eval. Updating
+    # them here would let a trailing stop fire on the same bar's low
+    # from a floor raised by the same bar's high (intrabar lookahead).
+    assert state.high_since_entry == 100.0
+    assert state.low_since_entry == 100.0
+
+
+def test_extend_watermarks_picks_up_bar_extremes() -> None:
+    """``_extend_watermarks`` runs after rule eval and pushes
+    high_since_entry / low_since_entry out to the current bar's
+    extremes so the NEXT bar's eval sees the latest trailing floor.
+    """
+    tracker: Dict[str, _TrackedPosition] = {
+        "AAA": _TrackedPosition(
+            side="long",
+            entry_price=100.0,
+            entry_order_id="o1",
+            just_opened=False,
+            high_since_entry=100.0,
+            low_since_entry=100.0,
+        )
+    }
+    bar = _bar(high=108.0, low=97.0)
+
+    TradingService._extend_watermarks(tracker=tracker, cur_bar=bar)
+
+    state = tracker["AAA"]
+    assert state.high_since_entry == 108.0
+    assert state.low_since_entry == 97.0
+
+
+def test_extend_watermarks_no_op_when_symbol_absent() -> None:
+    """``_extend_watermarks`` is a no-op when the tracker has no entry
+    for the bar's symbol — guards against KeyError after a same-bar
+    exit drops the position before watermark extension runs.
+    """
+    tracker: Dict[str, _TrackedPosition] = {}
+    bar = _bar(high=108.0, low=97.0)
+
+    TradingService._extend_watermarks(tracker=tracker, cur_bar=bar)
+
+    assert tracker == {}
 
 
 def test_tracker_drops_entry_when_position_closed() -> None:
@@ -794,3 +844,176 @@ def test_engine_cancels_pending_entry_continuation_when_exit_fires() -> None:
     engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
     assert len(engine_orders) == 1
     assert "o1" not in order_book._pending
+
+
+def test_trailing_stop_does_not_lookahead_within_a_bar() -> None:
+    """Regression: trailing-stop rules must not see the current bar's
+    high in the trailing floor while evaluating against the current
+    bar's low. A long entered at 100 with
+    ``StopLossRule(pct=0.05, basis="trailing_high")``: if today prints
+    high=120 and low=110, the trailing floor would be 120*(1-0.05)=114
+    and bar.low=110 would trip it — even though we don't know whether
+    the high or the low printed first. The fix initialises watermarks
+    at ``entry_price`` and defers watermark extension to
+    ``_extend_watermarks`` which runs AFTER rule evaluation.
+    """
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")])
+    # Fresh entry, watermarks at entry_price=100.
+    tracker: Dict[str, _TrackedPosition] = {
+        "AAA": _TrackedPosition(
+            side="long",
+            entry_price=100.0,
+            entry_order_id="o1",
+            just_opened=False,
+            high_since_entry=100.0,
+            low_since_entry=100.0,
+        )
+    }
+    portfolio = _portfolio_with(
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=100,
+        entry_price=100.0,
+        entry_order_id="o1",
+    )
+    order_book = OrderBook()
+    # Today: high=120 (would push trailing floor to 114), low=110.
+    # 110 > 100*(1-0.05)=95, so the trailing stop must NOT fire.
+    bar = _bar(high=120.0, low=110.0, close=115.0)
+    result = TradingServiceResult()
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    # No engine emission — the trailing floor is 95 (from entry_price),
+    # bar.low=110 is well clear.
+    assert pending == []
+    assert result.execution_diagnostics.exit_rule_firings == {}
+
+    # NOW extend watermarks (as the bar-loop does after rule eval).
+    # The high gets baked in for the next bar.
+    TradingService._extend_watermarks(tracker=tracker, cur_bar=bar)
+    assert tracker["AAA"].high_since_entry == 120.0
+
+
+def test_engine_oversizes_close_to_cover_same_bar_scale_ins() -> None:
+    """A strategy scale-in queued on the SAME bar the engine fires its
+    stop-loss submits BEFORE the engine close on the next bar (its
+    ``client_order_id`` is earlier in ``pending_for_prev``). When that
+    scale-in fills first, ``pos.qty`` grows past the snapshot the
+    engine saw at emission time, and ``_fill_exit`` clips the engine
+    close at ``min(req.qty, existing_pos.qty)`` — leaving the scale-in
+    residual exposure open even though the structured stop already
+    fired. Fix: sum same-side queued qtys and oversize the engine
+    close by that amount; the clip-down then nets to zero exposure.
+    """
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)  # bar.low=95 trips floor=98
+    result = TradingServiceResult()
+
+    # Strategy queues a same-side LONG scale-in on this bar — fills
+    # before the engine close on the next bar.
+    queued_add = OrderRequest(
+        client_order_id="c-scale-in",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=50.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        reason="strategy_scale_in",
+    )
+    pending: list[OrderRequest] = [queued_add]
+
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
+    assert len(engine_orders) == 1
+    # Engine close sized to cover pos.qty (100) + scale-in (50) = 150.
+    # If the scale-in is rejected/clipped at fill time, ``_fill_exit``
+    # clips the engine close back down to existing_pos.qty.
+    assert engine_orders[0].qty == 150.0
+
+
+def test_engine_does_not_oversize_for_opposite_side_queued_orders() -> None:
+    """An opposite-side queued order is a strategy exit, not a
+    scale-in. It must NOT inflate the engine's close qty (the binding
+    machinery will dedup it at fill time instead).
+    """
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)
+    result = TradingServiceResult()
+
+    queued_strategy_exit = OrderRequest(
+        client_order_id="c-strategy-exit",
+        symbol="AAA",
+        side=OrderSide.SHORT,
+        qty=50.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        reason="strategy_close",
+    )
+    pending: list[OrderRequest] = [queued_strategy_exit]
+
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
+    assert len(engine_orders) == 1
+    # No oversize — exits aren't scale-ins.
+    assert engine_orders[0].qty == 100.0
+
+
+def test_engine_does_not_oversize_for_other_symbol_queued_orders() -> None:
+    """``_sum_same_side_queued`` is symbol-scoped — a same-side queued
+    order for a different symbol must not inflate the close qty.
+    """
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)
+    result = TradingServiceResult()
+
+    queued_other = OrderRequest(
+        client_order_id="c-other-sym",
+        symbol="BBB",
+        side=OrderSide.LONG,
+        qty=200.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        reason="strategy_other_symbol",
+    )
+    pending: list[OrderRequest] = [queued_other]
+
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
+    assert len(engine_orders) == 1
+    assert engine_orders[0].qty == 100.0

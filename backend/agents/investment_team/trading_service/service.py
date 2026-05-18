@@ -185,7 +185,21 @@ class _EngineExitDispatcher:
         if intent is None:
             return
 
-        req = self._build_close_order(intent, tracked, pos)
+        # Issue #527 — size the close to cover same-bar scale-ins. A
+        # same-side strategy order queued in ``pending_for_prev`` will
+        # submit BEFORE the engine close on the next bar and grow
+        # ``pos.qty`` past the snapshot the engine saw at emission
+        # time. ``_fill_exit`` clips the engine close at
+        # ``min(req.qty, existing_pos.qty)``, so without this we'd
+        # leave the scale-in residual exposure open even though the
+        # structured exit rule already fired. Sum the same-side queued
+        # qtys and oversize the engine close accordingly; if any
+        # scale-in is rejected / clipped at fill time the engine close
+        # clips back down to the actual ``existing_pos.qty`` — no
+        # over-close risk.
+        scale_in_qty = self._sum_same_side_queued(sym, tracked.side, pending_for_prev)
+
+        req = self._build_close_order(intent, tracked, pos, scale_in_qty)
         if req is None:
             return
 
@@ -255,14 +269,39 @@ class _EngineExitDispatcher:
         intents = evaluate_exit_rules(self.exit_rules, {sym: snapshot}, {sym: bar_snap})
         return intents[0] if intents else None
 
+    @staticmethod
+    def _sum_same_side_queued(
+        sym: str,
+        tracked_side: str,
+        pending_for_prev: List[OrderRequest],
+    ) -> float:
+        """Sum the qty of same-side strategy orders queued for the
+        same symbol — i.e. scale-ins the strategy submitted on this
+        bar that will fill on the next bar before the engine close.
+        """
+        total = 0.0
+        for queued in pending_for_prev:
+            if queued.symbol != sym:
+                continue
+            queued_side = "long" if queued.side == OrderSide.LONG else "short"
+            if queued_side != tracked_side:
+                continue
+            total += queued.qty
+        return total
+
     def _build_close_order(
         self,
         intent: ExitIntent,
         tracked: _TrackedPosition,
         pos: Position,
+        scale_in_qty: float = 0.0,
     ) -> Optional[OrderRequest]:
         """Construct + validate the engine's market close. Returns
         ``None`` on validation failure (logged, run continues).
+
+        ``scale_in_qty`` is added to ``pos.qty`` so any same-side
+        same-bar strategy order that grows the position next bar is
+        also closed by this emission (see ``_sum_same_side_queued``).
         """
         self._next_seq += 1
         close_side = OrderSide.SHORT if tracked.side == "long" else OrderSide.LONG
@@ -270,7 +309,7 @@ class _EngineExitDispatcher:
             client_order_id=f"e{self._next_seq}",
             symbol=intent.symbol,
             side=close_side,
-            qty=pos.qty,
+            qty=pos.qty + scale_in_qty,
             order_type=OrderType.MARKET,
             tif=TimeInForce.DAY,
             reason=f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}",
@@ -1208,6 +1247,15 @@ class TradingService:
                         result=result,
                     )
 
+                    # Issue #527 — extend trailing watermarks AFTER rule
+                    # evaluation so the next bar's eval has cur_bar's
+                    # extreme baked in, but THIS bar's eval did not see
+                    # ``cur_bar.high`` raise the trailing floor and then
+                    # trigger off ``cur_bar.low`` (intrabar lookahead).
+                    # No-op when the spec has no exit rules.
+                    if self._exit_rules:
+                        self._extend_watermarks(tracker=position_tracker, cur_bar=cur_bar)
+
                     prev_bar = cur_bar
 
                 # End-of-stream: any orders still queued for "next bar" are
@@ -1583,12 +1631,26 @@ class TradingService:
     ) -> None:
         """Reconcile ``tracker`` against ``portfolio.positions`` for one symbol.
 
-        Called after fills are processed each bar. Refreshes
-        ``entry_price`` (for scaled-in positions) and extends trailing
-        high/low watermarks against the bar. When the underlying
-        ``Position`` is replaced (different ``entry_order_id``), the
-        tracker resets so a stale trailing watermark can't fire a rule
-        on a brand-new trade.
+        Called BEFORE rule evaluation each bar. Handles:
+
+        * Fresh-entry tracker creation (with watermarks initialised at
+          ``entry_price`` regardless of market vs limit entry — see the
+          ``_extend_watermarks`` docstring for why the entry bar's
+          high/low is NOT included here).
+        * Identity reset on same-bar exit + re-entry (different
+          ``entry_order_id``).
+        * ``entry_price`` refresh on scale-ins (partial-fill
+          continuation where ``Portfolio.extend`` updates the weighted-
+          average entry).
+        * ``just_opened`` flip from ``True`` to ``False`` on the first
+          carry-over bar.
+
+        Watermark extension is deliberately split off into
+        :meth:`_extend_watermarks` so trailing-stop rules don't see
+        the current bar's high/low while evaluating against the same
+        bar's high/low (would be intrabar lookahead — a long could
+        use ``cur_bar.high`` to raise the trailing floor and then
+        trigger off ``cur_bar.low`` even if the low printed first).
         """
         sym = cur_bar.symbol
         pos = portfolio.positions.get(sym)
@@ -1598,58 +1660,74 @@ class TradingService:
             return
         existing = tracker.get(sym)
         if existing is not None and existing.entry_order_id == pos.entry_order_id:
-            # When a partial entry scales in (REQUEUE_NEXT_BAR / TWAP_N),
-            # ``Portfolio.extend`` updates ``pos.entry_price`` to the new
-            # weighted-average entry. Mirror that here so
-            # ``StopLossRule(basis="entry_price")`` and ``TakeProfitRule``
-            # evaluate against the position's current basis rather than
-            # the first slice's price.
+            # Scale-in refresh: ``Portfolio.extend`` updates
+            # ``pos.entry_price`` to the new weighted-average entry on
+            # ``REQUEUE_NEXT_BAR`` / ``TWAP_N`` continuations. Mirror
+            # that here so ``StopLossRule(basis="entry_price")`` and
+            # ``TakeProfitRule`` evaluate against the position's current
+            # basis rather than the first slice's price.
             existing.entry_price = pos.entry_price
-            # First carry-over bar — the position has now seen a full bar
-            # of post-entry price action and rule evaluation can use the
-            # bar's high/low.
+            # First carry-over bar — the position has now seen a full
+            # bar of post-entry price action. Rule evaluation may use
+            # whatever watermark extension the prior bar's
+            # ``_extend_watermarks`` step produced.
             existing.just_opened = False
-            if cur_bar.high > existing.high_since_entry:
-                existing.high_since_entry = cur_bar.high
-            if cur_bar.low < existing.low_since_entry:
-                existing.low_since_entry = cur_bar.low
         else:
-            # Fresh entry this bar — either truly first entry, or a same-bar
-            # exit + re-entry replaced the prior position (different
-            # ``entry_order_id``). Two paths:
+            # Fresh entry this bar — either truly first entry, or a
+            # same-bar exit + re-entry replaced the prior position
+            # (different ``entry_order_id``).
             #
-            # * **Market entry** — filled at the bar's open, so the bar's
-            #   full high/low is post-entry price action. Initialise
-            #   watermarks from the bar and let rule evaluation run on
-            #   this bar; a stop-loss / take-profit that trips through
-            #   the bar's range is a real same-bar exit and must be
-            #   captured (otherwise a long opened at the open can trade
-            #   through its stop and recover with no engine emission).
-            # * **Non-market entry** (limit / stop / trailing-stop /
-            #   anything else) — the fill could have landed anywhere
-            #   inside the bar, so the bar's pre-fill price action is
-            #   ambiguous. Initialise watermarks at ``entry_price`` and
-            #   gate rule evaluation off the entry bar with
-            #   ``just_opened=True`` so pre-entry extremes can't queue
-            #   impossible same-bar closes. The next bar's tracker
-            #   update clears the flag.
-            is_market_entry = pos.entry_order_type == "market"
-            if is_market_entry:
-                high_init = cur_bar.high
-                low_init = cur_bar.low
-                just_opened = False
-            else:
-                high_init = pos.entry_price
-                low_init = pos.entry_price
-                just_opened = True
+            # Watermarks initialise at ``entry_price`` for BOTH market
+            # and non-market fills. Including the entry bar's high/low
+            # here would create intrabar lookahead for trailing stops
+            # (today's high raises the floor, today's low triggers it,
+            # regardless of which printed first). Non-market entries
+            # additionally set ``just_opened=True`` so rule evaluation
+            # is skipped entirely on the entry bar (the bar's pre-fill
+            # price action is ambiguous). Market entries leave
+            # ``just_opened=False`` so an entry_price stop-loss or
+            # take-profit can fire same-bar from ``bar.high`` / ``bar.low``
+            # against ``entry_price`` (the watermark isn't consulted
+            # for those rule kinds).
+            just_opened = pos.entry_order_type != "market"
             tracker[sym] = _TrackedPosition(
                 side=("long" if pos.side == OrderSide.LONG else "short"),
                 entry_price=pos.entry_price,
                 entry_order_id=pos.entry_order_id,
                 just_opened=just_opened,
-                high_since_entry=high_init,
-                low_since_entry=low_init,
+                high_since_entry=pos.entry_price,
+                low_since_entry=pos.entry_price,
             )
+
+    @staticmethod
+    def _extend_watermarks(
+        *,
+        tracker: Dict[str, _TrackedPosition],
+        cur_bar,
+    ) -> None:
+        """Extend ``high_since_entry`` / ``low_since_entry`` for the
+        current bar's symbol AFTER rule evaluation.
+
+        Why a separate call: ``_update_position_tracker`` runs before
+        :meth:`_EngineExitDispatcher.maybe_emit` so the tracker
+        reflects the current bar's fills + ``entry_price`` /
+        ``just_opened`` state. Watermark extension is deferred to
+        after rule evaluation so trailing-stop rules see only the
+        watermark "as of the prior bar" — they can't fire from a
+        floor that just moved up on the same bar's high.
+
+        The next bar's evaluation reads the now-extended watermark,
+        which is the intended trailing-stop semantics (track every
+        prior bar's extreme since entry).
+        """
+        sym = cur_bar.symbol
+        state = tracker.get(sym)
+        if state is None:
+            return
+        if cur_bar.high > state.high_since_entry:
+            state.high_since_entry = cur_bar.high
+        if cur_bar.low < state.low_since_entry:
+            state.low_since_entry = cur_bar.low
 
     # ------------------------------------------------------------------
 
