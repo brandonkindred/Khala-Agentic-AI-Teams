@@ -49,6 +49,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="critical",
                     details=(
@@ -65,6 +66,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="critical",
                     details="No entry rules defined — strategy cannot generate trades.",
@@ -76,6 +78,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="critical",
                     details="No exit rules defined — positions would never close.",
@@ -87,6 +90,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="warning",
                     details="Hypothesis is empty — strategy rationale is unclear.",
@@ -98,6 +102,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="critical",
                     details="strategy_code is missing — nothing to execute.",
@@ -111,6 +116,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="critical",
                     details=f"max_position_pct={max_pos}% is outside safe range [1%, 25%].",
@@ -121,6 +127,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="warning",
                     details=(
@@ -151,6 +158,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="warning",
                     details=f"Rules reference concepts mismatched with asset class '{spec.asset_class}'.",
@@ -162,6 +170,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="warning",
                     details="Rules reference non-computable data (sentiment, social media, etc.) without a numerical proxy.",
@@ -191,6 +200,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=False,
                     severity="warning",
                     details=(
@@ -207,6 +217,7 @@ class StrategySpecValidator:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="design",
                     passed=True,
                     severity="info",
                     details="Strategy spec passed all validation checks.",

@@ -65,6 +65,7 @@ from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult
+from .quality_gates.spec_readiness import SpecReadinessGate
 from .quality_gates.strategy_validator import StrategySpecValidator
 from .quality_gates.target_symbol_coverage import TargetSymbolCoverageGate
 from .spec_dsl import DEFAULT_SIZING_PAYLOAD
@@ -271,6 +272,7 @@ class StrategyLabOrchestrator:
         self.zero_trade_repair_agent = ZeroTradeRepairAgent()
         self.analysis_agent = AnalysisAgent()
         self.strategy_validator = StrategySpecValidator()
+        self.spec_readiness_gate = SpecReadinessGate()
         self.code_safety_checker = CodeSafetyChecker()
         self.anomaly_detector = BacktestAnomalyDetector()
         self.acceptance_gate = AcceptanceGate()
@@ -486,6 +488,13 @@ class StrategyLabOrchestrator:
             for g in pre_spec_gates_raw
             if not (g.severity == "critical" and g.details.startswith("strategy_code is missing"))
         ]
+        # Issue #540 — SpecReadinessGate runs in the design phase, blocking
+        # exit to synthesis on any critical failure. Hands its results to the
+        # same short-circuit path as StrategySpecValidator below.
+        readiness_design = self.spec_readiness_gate.validate(
+            spec, phase="design", backtest_config=config
+        )
+        pre_spec_gates.extend(readiness_design)
         for g in pre_spec_gates:
             g.refinement_round = -1
         all_gate_results.extend(pre_spec_gates)
@@ -533,6 +542,17 @@ class StrategyLabOrchestrator:
             #       pre-synthesis and is immutable for this cycle, see
             #       #547 items 1 & 2).
             emit("coding", {"sub_phase": "started", "refinement_round": round_num})
+            # Issue #540 — re-run SpecReadinessGate on the first synthesis
+            # round as a defense-in-depth sanity check that the spec wasn't
+            # mutated between design exit and synthesis entry. The spec is
+            # immutable across the remaining rounds so we don't repeat the
+            # check.
+            if round_num == 0:
+                round_gate_results.extend(
+                    self.spec_readiness_gate.validate(
+                        spec, phase="synthesis", backtest_config=config
+                    )
+                )
             code_gates = self.code_safety_checker.check(code, spec)
             round_gate_results.extend(code_gates)
             for g in round_gate_results:
@@ -615,6 +635,7 @@ class StrategyLabOrchestrator:
                             gate_name="market_data",
                             passed=False,
                             severity="critical",
+                            phase="synthesis",
                             details=f"No market data available for asset class '{spec.asset_class}'.",
                             refinement_round=round_num,
                         )
@@ -653,6 +674,7 @@ class StrategyLabOrchestrator:
                         gate_name="code_execution",
                         passed=False,
                         severity="critical",
+                        phase="synthesis",
                         details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr[:500]}",
                         refinement_round=round_num,
                     )
@@ -920,6 +942,7 @@ class StrategyLabOrchestrator:
                         gate_name="trade_alignment",
                         passed=report.aligned,
                         severity=gate_severity,  # type: ignore[arg-type]
+                        phase="verification",
                         details=gate_details,
                         refinement_round=align_round,
                     )
@@ -1038,6 +1061,7 @@ class StrategyLabOrchestrator:
                             gate_name="alignment_code_execution",
                             passed=False,
                             severity="critical",
+                            phase="verification",
                             details=(
                                 f"Re-execution after alignment fix failed "
                                 f"({align_exec.error_type}): {align_exec.stderr[:400]}"
@@ -1725,6 +1749,7 @@ class StrategyLabOrchestrator:
                     gate_name="zero_trade_repair_dropped_spec_keys",
                     passed=False,
                     severity="warning",
+                    phase="synthesis",
                     details=(
                         "Zero-trade repair proposed off-list spec keys "
                         f"{dropped_spec_keys}; dropped per #530 "
@@ -1817,6 +1842,7 @@ class StrategyLabOrchestrator:
                 gate_name="zero_trade_repair_code_execution",
                 passed=False,
                 severity="critical",
+                phase="synthesis",
                 details=(
                     f"Re-execution after zero-trade repair failed "
                     f"({repair_exec.error_type}): {repair_exec.stderr[:400]}"

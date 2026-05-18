@@ -71,6 +71,7 @@ class ExitRuleConformanceGate:
             return [
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="verification",
                     passed=True,
                     severity="info",
                     details="spec.exit_rules empty; engine-enforcement check skipped.",
@@ -101,6 +102,7 @@ class ExitRuleConformanceGate:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="verification",
                     passed=True,
                     severity="info",
                     details=(
@@ -120,6 +122,7 @@ class ExitRuleConformanceGate:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="verification",
                     passed=True,
                     severity="info",
                     details=details + f" (total={total}, trades={len(trades)})",
@@ -141,6 +144,7 @@ class ExitRuleConformanceGate:
         if rule.basis != "entry_price":
             return QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=True,
                 severity="info",
                 details=(
@@ -214,6 +218,7 @@ class ExitRuleConformanceGate:
             sample = [(t.trade_num, t.symbol, t.return_pct) for t in unaccounted[:5]]
             return QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=False,
                 severity="critical",
                 details=(
@@ -225,6 +230,7 @@ class ExitRuleConformanceGate:
             )
         return QualityGateResult(
             gate_name=GATE,
+            phase="verification",
             passed=True,
             severity="info",
             details=(
@@ -259,6 +265,7 @@ class ExitRuleConformanceGate:
         if not only_rule:
             return QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=True,
                 severity="info",
                 details=(
@@ -271,6 +278,7 @@ class ExitRuleConformanceGate:
         if tp_firings >= 1:
             return QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=True,
                 severity="info",
                 details=(
@@ -281,6 +289,7 @@ class ExitRuleConformanceGate:
         if not trades:
             return QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=True,
                 severity="info",
                 details=(
@@ -289,6 +298,7 @@ class ExitRuleConformanceGate:
             )
         return QualityGateResult(
             gate_name=GATE,
+            phase="verification",
             passed=False,
             severity="warning",
             details=(

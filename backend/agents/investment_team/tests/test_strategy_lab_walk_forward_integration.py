@@ -815,12 +815,14 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
                 gate_name="oos_deflated_sharpe",
                 passed=True,
                 severity="info",
+                phase="verification",
                 details="DSR passes",
             ),
             QualityGateResult(
                 gate_name="is_oos_degradation",
                 passed=True,
                 severity="info",
+                phase="verification",
                 details="IS->OOS within tolerance",
             ),
         ],
@@ -914,6 +916,7 @@ def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monke
                 gate_name="sharpe_sane",
                 passed=True,
                 severity="info",
+                phase="verification",
                 details="ok",
             )
         ],
@@ -993,12 +996,14 @@ def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
                 gate_name="oos_deflated_sharpe",
                 passed=False,
                 severity="critical",
+                phase="verification",
                 details="DSR below threshold",
             ),
             QualityGateResult(
                 gate_name="oos_trade_count",
                 passed=False,
                 severity="critical",
+                phase="verification",
                 details="trade count below floor",
             ),
         ],
@@ -1102,6 +1107,7 @@ def test_walk_forward_fallback_rejected_records_acceptance_reason(monkeypatch):
                 gate_name="sharpe_sane",
                 passed=False,
                 severity="critical",
+                phase="verification",
                 details="Sharpe ratio 6.40 > 5.0 (overfit suspect)",
             )
         ]
@@ -1144,7 +1150,7 @@ def test_walk_forward_fallback_passed_records_provenance(monkeypatch):
         orch.anomaly_detector,
         "check",
         lambda *a, **kw: [
-            _QGR(gate_name="sharpe_sane", passed=True, severity="info", details="ok")
+            _QGR(gate_name="sharpe_sane", passed=True, severity="info", phase="verification", details="ok")
         ],
     )
 

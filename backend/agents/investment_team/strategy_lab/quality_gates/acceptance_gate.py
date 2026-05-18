@@ -59,6 +59,7 @@ class AcceptanceGate:
             return [
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="verification",
                     passed=False,
                     severity="warning",
                     details=(
@@ -76,6 +77,7 @@ class AcceptanceGate:
         results.append(
             QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=passed_dsr,
                 severity="info" if passed_dsr else "critical",
                 details=(
@@ -93,6 +95,7 @@ class AcceptanceGate:
         results.append(
             QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=passed_deg,
                 severity="info" if passed_deg else "critical",
                 details=(
@@ -109,6 +112,7 @@ class AcceptanceGate:
         results.append(
             QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=passed_count,
                 severity="info" if passed_count else "critical",
                 details=(
@@ -133,6 +137,7 @@ class AcceptanceGate:
         results.append(
             QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=passed_regime,
                 severity="info" if passed_regime else "critical",
                 details=regime_detail,

@@ -124,6 +124,7 @@ class CodeSafetyChecker:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="synthesis",
                     passed=False,
                     severity="critical",
                     details=f"Code has a syntax error: {e}",
@@ -141,6 +142,7 @@ class CodeSafetyChecker:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="synthesis",
                     passed=False,
                     severity="critical",
                     details=(
@@ -155,6 +157,7 @@ class CodeSafetyChecker:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="synthesis",
                     passed=False,
                     severity="critical",
                     details=(
@@ -170,6 +173,7 @@ class CodeSafetyChecker:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
+                        phase="synthesis",
                         passed=False,
                         severity="critical",
                         details=on_bar_issue,
@@ -185,6 +189,7 @@ class CodeSafetyChecker:
                         results.append(
                             QualityGateResult(
                                 gate_name=GATE,
+                                phase="synthesis",
                                 passed=False,
                                 severity="critical",
                                 details=f"Banned import: '{alias.name}' — network/filesystem/system access not allowed.",
@@ -194,6 +199,7 @@ class CodeSafetyChecker:
                         results.append(
                             QualityGateResult(
                                 gate_name=GATE,
+                                phase="synthesis",
                                 passed=False,
                                 severity="warning",
                                 details=f"Non-allowlisted import: '{alias.name}' — may not be available in sandbox.",
@@ -207,6 +213,7 @@ class CodeSafetyChecker:
                         results.append(
                             QualityGateResult(
                                 gate_name=GATE,
+                                phase="synthesis",
                                 passed=False,
                                 severity="critical",
                                 details=f"Banned import: 'from {node.module}' — network/filesystem/system access not allowed.",
@@ -216,6 +223,7 @@ class CodeSafetyChecker:
                         results.append(
                             QualityGateResult(
                                 gate_name=GATE,
+                                phase="synthesis",
                                 passed=False,
                                 severity="warning",
                                 details=f"Non-allowlisted import: 'from {node.module}' — may not be available in sandbox.",
@@ -230,6 +238,7 @@ class CodeSafetyChecker:
                     results.append(
                         QualityGateResult(
                             gate_name=GATE,
+                            phase="synthesis",
                             passed=False,
                             severity="critical",
                             details=f"Banned function call: '{func_name}()' — dynamic code execution not allowed.",
@@ -239,6 +248,7 @@ class CodeSafetyChecker:
                     results.append(
                         QualityGateResult(
                             gate_name=GATE,
+                            phase="synthesis",
                             passed=False,
                             severity="critical",
                             details="Banned function call: 'open()' — file I/O not allowed in strategy code.",
@@ -248,6 +258,7 @@ class CodeSafetyChecker:
                     results.append(
                         QualityGateResult(
                             gate_name=GATE,
+                            phase="synthesis",
                             passed=False,
                             severity="critical",
                             details=f"Banned function call: '{func_name}()' — attribute manipulation not allowed.",
@@ -261,6 +272,7 @@ class CodeSafetyChecker:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
+                        phase="synthesis",
                         passed=False,
                         severity="critical",
                         details=f"Regex detected banned pattern: '{match_text}'.",
@@ -275,6 +287,7 @@ class CodeSafetyChecker:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
+                        phase="synthesis",
                         passed=False,
                         severity="critical",
                         details=f"Look-ahead bias: {reason}",
@@ -287,6 +300,7 @@ class CodeSafetyChecker:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="synthesis",
                     passed=False,
                     severity="warning",
                     details=f"Code is {line_count} lines — consider simplifying (limit: 1000).",
@@ -324,6 +338,7 @@ class CodeSafetyChecker:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
+                        phase="synthesis",
                         passed=False,
                         severity="critical",
                         details=(
@@ -355,6 +370,7 @@ class CodeSafetyChecker:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
+                        phase="synthesis",
                         passed=False,
                         severity="critical",
                         details=detail,
@@ -375,6 +391,7 @@ class CodeSafetyChecker:
                     results.append(
                         QualityGateResult(
                             gate_name=GATE,
+                            phase="synthesis",
                             passed=False,
                             severity="critical",
                             details=(
@@ -392,6 +409,7 @@ class CodeSafetyChecker:
                     results.append(
                         QualityGateResult(
                             gate_name=GATE,
+                            phase="synthesis",
                             passed=False,
                             severity="critical",
                             details=(
@@ -408,6 +426,7 @@ class CodeSafetyChecker:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="synthesis",
                     passed=True,
                     severity="info",
                     details="Code passed all safety checks.",

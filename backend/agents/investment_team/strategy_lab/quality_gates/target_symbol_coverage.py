@@ -79,6 +79,7 @@ class TargetSymbolCoverageGate:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
+                        phase="verification",
                         passed=False,
                         severity="critical",
                         details=(
@@ -92,6 +93,7 @@ class TargetSymbolCoverageGate:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
+                        phase="verification",
                         passed=True,
                         severity="info",
                         details=f"All {len(target_upper)} target_symbols present in fetched data.",
@@ -103,6 +105,7 @@ class TargetSymbolCoverageGate:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
+                        phase="verification",
                         passed=False,
                         severity="warning",
                         details=(
@@ -117,6 +120,7 @@ class TargetSymbolCoverageGate:
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
+                        phase="verification",
                         passed=True,
                         severity="info",
                         details="spec.target_symbols empty; no specific tickers referenced in hypothesis.",
@@ -134,6 +138,7 @@ class TargetSymbolCoverageGate:
             return [
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="verification",
                     passed=True,
                     severity="info",
                     details="spec.target_symbols empty; trade-symbol coverage check skipped.",
@@ -146,6 +151,7 @@ class TargetSymbolCoverageGate:
             return [
                 QualityGateResult(
                     gate_name=GATE,
+                    phase="verification",
                     passed=False,
                     severity="critical",
                     details=(
@@ -158,6 +164,7 @@ class TargetSymbolCoverageGate:
         return [
             QualityGateResult(
                 gate_name=GATE,
+                phase="verification",
                 passed=True,
                 severity="info",
                 details=f"All {len(trades)} trades within target_symbols.",

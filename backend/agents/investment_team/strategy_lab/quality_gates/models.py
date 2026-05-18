@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+StrategyLabPhase = Literal["design", "design_review", "synthesis", "verification"]
+
 
 class QualityGateResult(BaseModel):
     """Result of a single quality gate check."""
@@ -14,4 +16,5 @@ class QualityGateResult(BaseModel):
     passed: bool
     details: str
     severity: Literal["info", "warning", "critical"]
+    phase: StrategyLabPhase
     refinement_round: int = 0

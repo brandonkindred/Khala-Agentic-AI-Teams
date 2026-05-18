@@ -112,6 +112,7 @@ def test_validation_phase_exhaustion_sets_max_rounds_status(
                 gate_name="code_safety",
                 passed=False,
                 severity="critical",
+                phase="synthesis",
                 details="forced critical for test",
             )
         ]
@@ -193,6 +194,7 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
                 gate_name="backtest_anomaly",
                 passed=False,
                 severity="critical",
+                phase="verification",
                 details="forced anomaly for test",
             )
         ]
