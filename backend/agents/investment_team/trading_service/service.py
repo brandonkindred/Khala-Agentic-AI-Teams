@@ -86,7 +86,7 @@ class _TrackedPosition:
     next bar's tracker update clears the flag.
     """
 
-    side: str  # "long" | "short"
+    side: OrderSide
     entry_price: float
     entry_order_id: str
     just_opened: bool
@@ -94,9 +94,12 @@ class _TrackedPosition:
     low_since_entry: float
 
     def snapshot(self, symbol: str, qty: float) -> PositionState:
+        # ``PositionState`` (the public evaluator input) carries the
+        # side as a ``"long" | "short"`` Literal; convert at the
+        # boundary so internal dispatcher logic stays enum-typed.
         return PositionState(
             symbol=symbol,
-            side=self.side,  # type: ignore[arg-type]
+            side="long" if self.side == OrderSide.LONG else "short",
             qty=qty,
             entry_price=self.entry_price,
             high_since_entry=self.high_since_entry,
@@ -246,8 +249,7 @@ class _EngineExitDispatcher:
             po_req = po.request
             if po_req.order_type != OrderType.MARKET:
                 continue
-            po_side = "long" if po_req.side == OrderSide.LONG else "short"
-            if po_side != tracked.side and (po_req.reason or "").startswith(
+            if po_req.side != tracked.side and (po_req.reason or "").startswith(
                 ENGINE_EXIT_REASON_PREFIX
             ):
                 return None
@@ -272,7 +274,7 @@ class _EngineExitDispatcher:
     @staticmethod
     def _sum_same_side_queued(
         sym: str,
-        tracked_side: str,
+        tracked_side: OrderSide,
         pending_for_prev: List[OrderRequest],
     ) -> float:
         """Sum the qty of same-side strategy orders queued for the
@@ -283,8 +285,7 @@ class _EngineExitDispatcher:
         for queued in pending_for_prev:
             if queued.symbol != sym:
                 continue
-            queued_side = "long" if queued.side == OrderSide.LONG else "short"
-            if queued_side != tracked_side:
+            if queued.side != tracked_side:
                 continue
             total += queued.qty
         return total
@@ -304,7 +305,7 @@ class _EngineExitDispatcher:
         also closed by this emission (see ``_sum_same_side_queued``).
         """
         self._next_seq += 1
-        close_side = OrderSide.SHORT if tracked.side == "long" else OrderSide.LONG
+        close_side = OrderSide.SHORT if tracked.side == OrderSide.LONG else OrderSide.LONG
         req = OrderRequest(
             client_order_id=f"e{self._next_seq}",
             symbol=intent.symbol,
@@ -336,7 +337,7 @@ class _EngineExitDispatcher:
     def _retire_competing_resting_orders(
         self,
         sym: str,
-        tracked_side: str,
+        tracked_side: OrderSide,
         pos: Position,
         order_book: OrderBook,
     ) -> None:
@@ -363,15 +364,14 @@ class _EngineExitDispatcher:
                 continue
             if resting.cumulative_filled_qty > 0:
                 continue
-            resting_side = "long" if resting.request.side == OrderSide.LONG else "short"
-            if resting_side == tracked_side:
+            if resting.request.side == tracked_side:
                 continue
             resting.working_against_entry_order_id = pos.entry_order_id
 
     def _bind_same_bar_queued_exits(
         self,
         sym: str,
-        tracked_side: str,
+        tracked_side: OrderSide,
         pos: Position,
         pending_for_prev: List[OrderRequest],
     ) -> None:
@@ -386,8 +386,7 @@ class _EngineExitDispatcher:
                 continue
             if queued.client_order_id in self.engine_exit_bindings:
                 continue
-            queued_side = "long" if queued.side == OrderSide.LONG else "short"
-            if queued_side == tracked_side:
+            if queued.side == tracked_side:
                 continue
             self.engine_exit_bindings[queued.client_order_id] = pos.entry_order_id
 
@@ -1691,7 +1690,7 @@ class TradingService:
             # for those rule kinds).
             just_opened = pos.entry_order_type != "market"
             tracker[sym] = _TrackedPosition(
-                side=("long" if pos.side == OrderSide.LONG else "short"),
+                side=pos.side,
                 entry_price=pos.entry_price,
                 entry_order_id=pos.entry_order_id,
                 just_opened=just_opened,

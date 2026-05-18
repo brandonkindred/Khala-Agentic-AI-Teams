@@ -116,7 +116,7 @@ def test_tracker_resets_on_limit_entry_with_just_opened_and_entry_price_watermar
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
-            side="long",
+            side=OrderSide.LONG,
             entry_price=100.0,
             entry_order_id="o1",
             just_opened=False,
@@ -198,7 +198,7 @@ def test_tracker_carries_over_when_entry_order_id_unchanged() -> None:
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
-            side="long",
+            side=OrderSide.LONG,
             entry_price=100.0,
             entry_order_id="o1",
             just_opened=True,
@@ -242,7 +242,7 @@ def test_extend_watermarks_picks_up_bar_extremes() -> None:
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
-            side="long",
+            side=OrderSide.LONG,
             entry_price=100.0,
             entry_order_id="o1",
             just_opened=False,
@@ -275,7 +275,7 @@ def test_extend_watermarks_no_op_when_symbol_absent() -> None:
 def test_tracker_drops_entry_when_position_closed() -> None:
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
-            side="long",
+            side=OrderSide.LONG,
             entry_price=100.0,
             entry_order_id="o1",
             just_opened=False,
@@ -303,7 +303,7 @@ def test_tracker_drops_entry_when_position_closed() -> None:
 def _populate_tracker_and_portfolio() -> tuple[Dict[str, _TrackedPosition], Portfolio, OrderBook]:
     tracker = {
         "AAA": _TrackedPosition(
-            side="long",
+            side=OrderSide.LONG,
             entry_price=100.0,
             entry_order_id="o1",
             just_opened=False,
@@ -706,7 +706,7 @@ def test_engine_skips_rule_eval_on_entry_bar() -> None:
     # 95 * 1.05 = 99.75 if not gated by just_opened.
     tracker = {
         "AAA": _TrackedPosition(
-            side="long",
+            side=OrderSide.LONG,
             entry_price=95.0,
             entry_order_id="o1",
             just_opened=True,
@@ -750,7 +750,7 @@ def test_engine_runs_rules_normally_after_first_post_entry_bar() -> None:
     disp = _dispatcher(exit_rules=[TakeProfitRule(pct=0.05)])
     tracker = {
         "AAA": _TrackedPosition(
-            side="long",
+            side=OrderSide.LONG,
             entry_price=95.0,
             entry_order_id="o1",
             just_opened=False,  # first post-entry bar
@@ -861,7 +861,7 @@ def test_trailing_stop_does_not_lookahead_within_a_bar() -> None:
     # Fresh entry, watermarks at entry_price=100.
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
-            side="long",
+            side=OrderSide.LONG,
             entry_price=100.0,
             entry_order_id="o1",
             just_opened=False,
