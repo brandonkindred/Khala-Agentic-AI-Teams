@@ -318,6 +318,15 @@ class LLMClientModel(Model):
         response_format = str(
             state.get("response_format", self.config.get("response_format", "json"))
         )
+        # Match the strictness of __init__ / clone: anything other than the two
+        # documented values is a programming error, not a silent fallback to
+        # JSON mode. Logging + ValueError beats silently routing a "Text" /
+        # "prose" / etc. override to chat_json_round.
+        if response_format not in ("json", "text"):
+            raise ValueError(
+                "invocation_state['response_format'] must be 'json' or 'text', "
+                f"got {response_format!r}"
+            )
 
         logger.debug(
             "strands_adapter.stream: messages=%d tools=%s temp=%s think=%s response_format=%s agent_key=%s",

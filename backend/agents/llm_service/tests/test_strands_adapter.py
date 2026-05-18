@@ -514,6 +514,48 @@ def test_public_llm_service_get_strands_model_accepts_response_format(monkeypatc
     assert model_text is not model_json
 
 
+def test_public_llm_service_get_strands_model_accepts_client_kwarg() -> None:
+    """Regression: the SE v2 phases' ``_resolve_model`` helpers call
+    ``get_strands_model(client=llm, response_format="text")`` to wrap an
+    injected ``LLMClient`` instance. The public re-export must accept the
+    ``client=`` kwarg — otherwise every backend_code_v2 / frontend_code_v2
+    planning, execution, review, and problem-solving call raises ``TypeError``
+    the moment an ``LLMClient`` (e.g. ``OllamaLLMClient`` in production) is
+    handed in.
+
+    Tests don't catch this because ``DummyLLMClient`` also implements the
+    Strands ``Model`` interface, so ``_resolve_model`` short-circuits on
+    ``isinstance(llm, _StrandsModel)`` before reaching the ``client=`` branch.
+    """
+    from llm_service import get_strands_model as public_get_strands_model
+
+    client = DummyLLMClient()
+    model = public_get_strands_model("test_agent", client=client, response_format="text")
+    assert isinstance(model, LLMClientModel)
+    assert model._client is client
+    assert model.get_config()["response_format"] == "text"
+
+
+def test_invocation_state_invalid_response_format_raises() -> None:
+    """Per-call ``response_format`` overrides via ``invocation_state`` must
+    match the same strictness as ``__init__`` and ``clone``. Silently
+    routing a typo (``"Text"``, ``"prose"``) to JSON mode is a worse failure
+    than crashing visibly.
+    """
+    client = _RecordingClient("hello")
+    model = LLMClientModel(client)
+
+    async def _run() -> None:
+        async for _ in model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            invocation_state={"response_format": "prose"},
+        ):
+            pass
+
+    with pytest.raises(ValueError, match="response_format"):
+        asyncio.run(_run())
+
+
 # ---------------------------------------------------------------------------
 # LLMClientModel.structured_output
 # ---------------------------------------------------------------------------
