@@ -73,6 +73,7 @@
       "bars_processed": 504,
       "closed_trades": 9,
       "entries_filled": 10,
+      "exit_rule_firings": {},
       "exits_emitted": 9,
       "last_order_events": [
         {

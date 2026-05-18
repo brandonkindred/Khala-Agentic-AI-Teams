@@ -21,7 +21,7 @@ The spec contains two kinds of rules; treat them differently:
 ### Enforced rules (engine-checked — `severity: critical` allowed)
 
 These are the rules the backtest engine actually applies. Deviations here
-are real bugs in the strategy code.
+are real bugs in the strategy code or the engine, not artistic licence.
 
 - **Sizing rules** — `shares` respects the documented sizing scheme (fixed
   fraction, volatility target, notional cap, etc.).
@@ -30,26 +30,31 @@ are real bugs in the strategy code.
   ignored stop-losses are critical misalignments.
 - **Universe & direction** — only `asset_class`-appropriate symbols and only
   `long`/`short` sides allowed by the spec should appear.
+- **Exit rules** — `exit_rules` are structured `TimeStopRule` /
+  `StopLossRule` / `TakeProfitRule` / `SignalExitRule` objects that the
+  parent engine evaluates after every bar and enforces by emitting close
+  orders on the strategy's behalf. A separate deterministic conformance
+  gate (`exit_rule_conformance`) is run before this audit and counts the
+  engine firings; trust it. Your job is to flag the rare residual case
+  where the engine's enforcement could not protect the trade (e.g. an
+  overshoot beyond the stop-loss floor by more than slippage tolerance).
+  `severity: critical` is appropriate here. `SignalExitRule` is not yet
+  engine-enforced — see the aspirational section below.
 
 ### Aspirational rules (prose intent — downgrade severity)
 
-`entry_rules` and `exit_rules` are author-supplied prose intent. Until the
-structured-rule DSL work lands, the engine does NOT mechanically enforce
-them — the strategy code is free to ignore prose like "exit after 10 bars"
-or "enter when RSI < 30", and the backtest will still run. Report behavioural
-gaps against this intent, but downgrade them:
+`entry_rules` are author-supplied intent. The engine does NOT
+mechanically open positions from them — the strategy code is free to
+ignore prose like "enter when RSI < 30", and the backtest will still
+run. Report behavioural gaps against this intent, but downgrade them:
 
 - **Entry rules** — describe whether the trade-entry behaviour is consistent
   with the authored intent. If a trade looks like it ignored the intent,
   flag it — but use `severity: warning` (or `info`), not `critical`,
   unless the same trade also breaches an enforced rule above.
-- **Exit rules** — describe whether each exit appears consistent with the
-  authored intent (signal reversal, stop-loss, take-profit, time stop,
-  force-close at the final bar). Holding longer than the prose suggests, or
-  exiting earlier than the prose suggests, is reportable but is NOT a
-  critical misalignment by itself — keep `severity` at `warning` or `info`.
-  Reserve `critical` for cases where the same trade also breaches an
-  enforced rule (e.g. an ignored stop-loss).
+- **SignalExitRule** specifically (predicate-based exits) is also not
+  yet engine-enforced; same `warning` / `info` treatment until the
+  shared per-bar indicator runtime lands.
 
 Cosmetic differences (rounding, tie-breaker behavior on identical signals)
 do NOT count as misalignment. Code is misaligned only when trade behavior
@@ -59,15 +64,17 @@ meaningfully diverges from the specification.
 
 1. **SCAN the spec** — restate each entry rule, exit rule, sizing rule, and
    risk limit. Tag each one as **enforced** (sizing, risk limits, universe,
-   direction) or **aspirational** (entry_rules / exit_rules prose).
+   direction, and every structured `exit_rules` entry except `SignalExitRule`)
+   or **aspirational** (entry_rules prose intent, plus any `SignalExitRule`).
 2. **SPOT-CHECK trades** — use the provided sample ledger rows to check
    whether trade behaviour is consistent with the authored intent. Look for:
    - Trades whose entry behaviour is inconsistent with the authored entry
      intent (note: `severity: warning` unless an enforced rule is also
      breached).
-   - Trades that overshoot the stop-loss (enforced — `critical` allowed)
-     or that exit inconsistently with the authored exit intent (aspirational
-     — `warning` / `info`).
+   - Trades that overshoot the structured stop-loss floor by more than
+     slippage tolerance (enforced — `critical` allowed), or that
+     exceeded a structured time-stop or take-profit threshold (the
+     deterministic conformance gate flags these; defer to it).
    - Trades whose sizing exceeds `max_position_pct` of capital at entry
      (enforced — `critical` allowed).
    - Repeated same-day entries/exits, lookahead bias, or single-bar holds
@@ -100,9 +107,11 @@ invent misalignments.
 ## Output
 
 Reserve `severity: critical` for issues against enforced rules (sizing,
-risk_limits, universe, direction). Issues citing only `entry_rules` or
-`exit_rules` prose MUST use `severity: warning` or `info` unless the same
-trade also breaches an enforced rule.
+risk_limits, universe, direction, structured `exit_rules` except
+`SignalExitRule`). Issues citing only `entry_rules` prose (or a
+`SignalExitRule` predicate, which is not yet engine-enforced) MUST use
+`severity: warning` or `info` unless the same trade also breaches an
+enforced rule.
 
 Return ONLY a JSON object with no markdown:
 

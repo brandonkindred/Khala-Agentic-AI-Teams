@@ -63,6 +63,7 @@ from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
+from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult
 from .quality_gates.strategy_validator import StrategySpecValidator
 from .quality_gates.target_symbol_coverage import TargetSymbolCoverageGate
@@ -843,6 +844,25 @@ class StrategyLabOrchestrator:
         # is reached).
         alignment_attempts: List[str] = []
         alignment_reports: List[TradeAlignmentReport] = []
+
+        # Issue #527 — run the deterministic exit-rule conformance gate before
+        # the LLM alignment loop. ``ExitRuleConformanceGate`` reads the trade
+        # ledger and the engine's ``exit_rule_firings`` diagnostic to verify
+        # every trade obeys the structured exit rules within tolerance. The
+        # results are appended to ``all_gate_results`` so they surface on the
+        # persisted record alongside the LLM alignment verdict; the alignment
+        # agent's prompt (now treating exit rules as engine-enforced) reads
+        # the same trade ledger and reaches a compatible verdict.
+        if execution_succeeded and trades:
+            conformance_gate = ExitRuleConformanceGate()
+            conformance_results = conformance_gate.check(
+                exit_rules=spec.exit_rules,
+                trades=trades,
+                diagnostics=metrics.execution_diagnostics,
+                config=config,
+                timeframe=spec.timeframe,
+            )
+            all_gate_results.extend(conformance_results)
 
         if execution_succeeded and trades and market_data is not None:
             for align_round in range(MAX_ALIGNMENT_ROUNDS):

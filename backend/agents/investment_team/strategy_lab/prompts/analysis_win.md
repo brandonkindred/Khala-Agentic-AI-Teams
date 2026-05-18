@@ -5,7 +5,7 @@ Asset class: {asset_class}
 Hypothesis: {hypothesis}
 Signal: {signal_definition}
 Intended entry rules (as authored — may not all be machine-enforced): {entry_rules}
-Intended exit rules (as authored — may not all be machine-enforced): {exit_rules}
+Engine-enforced exit rules (structured DSL applied by the parent engine every bar): {exit_rules}
 Sizing / risk: {sizing_rules}
 Rationale for testing: {rationale}
 
@@ -22,7 +22,7 @@ Volatility: {volatility_pct:.1f}%
 {simulated_trades_section}
 
 ## Instructions
-The entry/exit rules above are prose specifications, not engine-enforced behaviour — do not assert that trades "violated" them; instead describe whether trade behaviour was consistent with the intent.
+Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced: the parent engine emits time-stop / stop-loss / take-profit closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. a tight cluster of N-day holds points to a time stop firing).
 Think step by step: what in the strategy design plausibly produced strong risk-adjusted returns?
 Relate the hypothesis and rules to (1) Sharpe/drawdown/volatility, (2) win rate vs profit factor, (3) patterns in the simulated trades (hold periods, win/loss mix, concentration).
 Write 5-8 sentences. Be specific — avoid generic praise. Explain *why* this strategy class succeeded in this backtest.

@@ -29,6 +29,12 @@ from ..models import (
     OrderLifecycleEvent,
     TradeRecord,
 )
+from ..strategy_lab.executor.rule_compiler import (
+    BarSnapshot,
+    PositionState,
+    evaluate_exit_rules,
+)
+from ..strategy_lab.spec_dsl import ExitRule
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
 from .engine.execution_model import build_execution_model
 from .engine.fill_simulator import FillOutcome, FillSimulator, FillSimulatorConfig
@@ -37,6 +43,8 @@ from .engine.portfolio import Portfolio
 from .strategy.contract import (
     OrderRequest,
     OrderSide,
+    OrderType,
+    TimeInForce,
     UnfilledPolicy,
     UnsupportedOrderFeatureError,
 )
@@ -45,6 +53,40 @@ from .strategy.streaming_harness import StrategyRuntimeError, StreamingHarness
 logger = logging.getLogger(__name__)
 
 _MAX_ORDER_EVENTS = 20
+
+# Issue #527 — reserved order ``reason`` prefix the engine stamps on every
+# rule-triggered close order it emits on the strategy's behalf. The conformance
+# quality gate reads this prefix off ``OrderLifecycleEvent`` records to count
+# wrapper-emitted exits and verify each trade obeyed the structured rules.
+ENGINE_EXIT_REASON_PREFIX = "engine_exit:"
+
+
+@dataclass
+class _TrackedPosition:
+    """Per-symbol state the parent engine maintains to evaluate exit rules.
+
+    Mirrors the public :class:`PositionState` shape but is mutable so the bar
+    loop can update bars-held / watermarks in place. The snapshot handed to
+    :func:`evaluate_exit_rules` is a fresh immutable copy.
+    """
+
+    side: str  # "long" | "short"
+    entry_price: float
+    bars_held: int
+    high_since_entry: float
+    low_since_entry: float
+
+    def snapshot(self, symbol: str, qty: float) -> PositionState:
+        return PositionState(
+            symbol=symbol,
+            side=self.side,  # type: ignore[arg-type]
+            qty=qty,
+            entry_price=self.entry_price,
+            bars_held=self.bars_held,
+            high_since_entry=self.high_since_entry,
+            low_since_entry=self.low_since_entry,
+        )
+
 
 # Default chunk size for the batched-bar protocol (issue #377). 1 keeps
 # byte-identical behaviour with the per-bar codepath; values >1 only take
@@ -394,6 +436,7 @@ class TradingService:
         default_unfilled_policy: UnfilledPolicy = UnfilledPolicy.DROP,
         bar_chunk_size: Optional[int] = None,
         coverage_probe_mode: bool = False,
+        exit_rules: Optional[List[ExitRule]] = None,
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
@@ -410,6 +453,10 @@ class TradingService:
             limits = RiskLimits.from_legacy_dict(risk_limits or {})
         self._risk = RiskFilter(limits)
         self._default_unfilled_policy = default_unfilled_policy
+        # Issue #527 — structured exit rules the parent engine enforces after
+        # each bar's strategy response. Empty list (or None) preserves the
+        # legacy behaviour where strategy code is the only source of exits.
+        self._exit_rules: List[ExitRule] = list(exit_rules or [])
         # Issue #377: when set, overrides ``BAR_CHUNK_SIZE`` env. Paper-trade
         # mode pins this to 1 so live-bar handling never buffers. Reject
         # zero/negative or non-int explicitly so a future caller passing
@@ -441,6 +488,15 @@ class TradingService:
         """
         portfolio = Portfolio(initial_capital=self.config.initial_capital)
         order_book = OrderBook()
+        # Issue #527 — per-position state the engine uses to evaluate
+        # structured exit rules. Keyed by symbol; populated after each bar's
+        # fills are processed. No effect when ``self._exit_rules`` is empty.
+        position_tracker: Dict[str, _TrackedPosition] = {}
+        # Monotonic counter for engine-issued client_order_ids so each
+        # rule-triggered close has a distinct id. Strategy ids are emitted
+        # client-side; engine ids must not collide with them, hence the
+        # ``e`` prefix vs the strategy's ``c`` prefix.
+        engine_order_seq = 0
         execution_model = build_execution_model(
             self.config.execution_model,
             participation_cap=self.config.fill_participation_cap,
@@ -508,6 +564,20 @@ class TradingService:
                 )
 
             if use_chunked:
+                # Issue #527 — engine-side exit-rule enforcement is wired
+                # into the per-bar path only. The chunked path delivers
+                # multiple bars per strategy round-trip; emitting synthetic
+                # closes mid-chunk would require restructuring the rule
+                # evaluator to run inside the chunk replay, which is out of
+                # scope for the MVP. Surface this as a configuration error
+                # so operators don't silently lose enforcement.
+                if self._exit_rules:
+                    raise NotImplementedError(
+                        "TradingService.exit_rules is not supported with the "
+                        "chunked-bar protocol (BAR_CHUNK_SIZE > 1). Run with "
+                        "BAR_CHUNK_SIZE=1 or pass bar_chunk_size=1 to enable "
+                        "engine-enforced exit rules."
+                    )
                 return self._run_chunked(
                     stream=stream,
                     harness=harness,
@@ -659,6 +729,21 @@ class TradingService:
                             )
                             break
 
+                        # Issue #527 — refresh engine-side per-position state
+                        # for ``cur_bar.symbol`` based on the post-fill
+                        # portfolio. No-op when exit_rules is empty (the
+                        # tracker stays empty, the rule-eval block at the
+                        # bottom of the loop short-circuits). Updating here
+                        # — after fills but before send_bar — means
+                        # ``bars_held`` reflects every bar the engine has
+                        # actually seen, regardless of strategy behaviour.
+                        if self._exit_rules:
+                            self._update_position_tracker(
+                                tracker=position_tracker,
+                                cur_bar=cur_bar,
+                                portfolio=portfolio,
+                            )
+
                     # 4) Deliver the current bar to the strategy and collect
                     #    any orders it submits in response. Warm-up bars set
                     #    ``ctx.is_warmup = True`` in the subprocess so the
@@ -766,6 +851,21 @@ class TradingService:
                                 reason="malformed_request",
                                 detail=str(exc),
                             )
+
+                    # Issue #527 — engine-side enforcement of structured
+                    # ``exit_rules``. Runs after the strategy's orders are
+                    # queued so we can dedupe against strategy-emitted closes
+                    # and any in-flight engine exit on the order book.
+                    if self._exit_rules:
+                        engine_order_seq = self._maybe_emit_engine_exits(
+                            cur_bar=cur_bar,
+                            position_tracker=position_tracker,
+                            portfolio=portfolio,
+                            pending_for_prev=pending_for_prev,
+                            order_book=order_book,
+                            result=result,
+                            engine_order_seq=engine_order_seq,
+                        )
 
                     prev_bar = cur_bar
 
@@ -1128,6 +1228,149 @@ class TradingService:
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
         return _finalize_diagnostics(result)
+
+    # ------------------------------------------------------------------
+    # Issue #527 — engine-side enforcement of structured ``exit_rules``.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _update_position_tracker(
+        *,
+        tracker: Dict[str, _TrackedPosition],
+        cur_bar,
+        portfolio: Portfolio,
+    ) -> None:
+        """Reconcile ``tracker`` against ``portfolio.positions`` for one symbol.
+
+        Called after fills are processed each bar. ``bars_held`` for an
+        existing tracked position counts the entry bar as bar 1 and
+        increments by one on every subsequent bar the engine sees for
+        that symbol — so ``TimeStopRule(n_bars=N)`` fires once the
+        position has been observed across at least N bars.
+        """
+        sym = cur_bar.symbol
+        pos = portfolio.positions.get(sym)
+        if pos is None:
+            # Position closed this bar (or never opened) — drop tracker entry.
+            tracker.pop(sym, None)
+            return
+        if sym in tracker:
+            state = tracker[sym]
+            state.bars_held += 1
+            if cur_bar.high > state.high_since_entry:
+                state.high_since_entry = cur_bar.high
+            if cur_bar.low < state.low_since_entry:
+                state.low_since_entry = cur_bar.low
+        else:
+            # Fresh entry this bar — entry bar counts as bars_held == 1.
+            tracker[sym] = _TrackedPosition(
+                side=("long" if pos.side == OrderSide.LONG else "short"),
+                entry_price=pos.entry_price,
+                bars_held=1,
+                high_since_entry=cur_bar.high,
+                low_since_entry=cur_bar.low,
+            )
+
+    def _maybe_emit_engine_exits(
+        self,
+        *,
+        cur_bar,
+        position_tracker: Dict[str, _TrackedPosition],
+        portfolio: Portfolio,
+        pending_for_prev: List[OrderRequest],
+        order_book: OrderBook,
+        result: "TradingServiceResult",
+        engine_order_seq: int,
+    ) -> int:
+        """Evaluate ``self._exit_rules`` against the current bar and emit
+        synthetic close orders for any triggered rule.
+
+        Dedup rules of thumb:
+        * Skip symbols the strategy already chose to exit this bar (an
+          opposite-side order in ``pending_for_prev``).
+        * Skip symbols with an in-flight engine-emitted exit on the order
+          book (prior bar's enforcement is still pending fill).
+
+        Engine-emitted orders carry ``reason="engine_exit:<rule_kind>"`` so
+        the conformance gate can count them off the order-lifecycle event
+        stream. Returns the updated ``engine_order_seq``.
+        """
+        sym = cur_bar.symbol
+        if sym not in position_tracker:
+            return engine_order_seq
+        pos = portfolio.positions.get(sym)
+        if pos is None or pos.qty <= 0:
+            return engine_order_seq
+
+        tracked = position_tracker[sym]
+        tracked_side: str = tracked.side
+
+        # Dedup: strategy already submitted an opposite-side close this bar.
+        for req in pending_for_prev:
+            if req.symbol != sym:
+                continue
+            req_side = "long" if req.side == OrderSide.LONG else "short"
+            if req_side != tracked_side:
+                return engine_order_seq
+
+        # Dedup: prior bar's engine exit is still on the order book.
+        for po in order_book.pending_for_symbol(sym):
+            po_req = po.request
+            po_side = "long" if po_req.side == OrderSide.LONG else "short"
+            if po_side != tracked_side and (po_req.reason or "").startswith(
+                ENGINE_EXIT_REASON_PREFIX
+            ):
+                return engine_order_seq
+
+        snapshot = tracked.snapshot(sym, pos.qty)
+        bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
+        intents = evaluate_exit_rules(
+            self._exit_rules,
+            {sym: snapshot},
+            {sym: bar_snap},
+        )
+        if not intents:
+            return engine_order_seq
+
+        # At most one intent per symbol — ``evaluate_exit_rules`` stops at the
+        # first triggered rule per position. Defensive iteration regardless.
+        for intent in intents:
+            engine_order_seq += 1
+            close_side = OrderSide.SHORT if tracked_side == "long" else OrderSide.LONG
+            req = OrderRequest(
+                client_order_id=f"e{engine_order_seq}",
+                symbol=intent.symbol,
+                side=close_side,
+                qty=pos.qty,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+                reason=f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}",
+            )
+            try:
+                req.validate_prices()
+            except Exception as exc:  # pragma: no cover — engine-built request
+                logger.error(
+                    "engine-issued exit order failed validation (rule=%s symbol=%s): %s",
+                    intent.rule_kind,
+                    sym,
+                    exc,
+                )
+                continue
+            pending_for_prev.append(req)
+            result.execution_diagnostics.orders_emitted += 1
+            result.execution_diagnostics.exits_emitted += 1
+            firings = result.execution_diagnostics.exit_rule_firings
+            firings[intent.rule_kind] = firings.get(intent.rule_kind, 0) + 1
+            _record_event(
+                result.execution_diagnostics,
+                "emitted",
+                timestamp=cur_bar.timestamp,
+                symbol=intent.symbol,
+                side=close_side.value,
+                order_type=OrderType.MARKET.value,
+                reason=req.reason,
+            )
+        return engine_order_seq
 
     # ------------------------------------------------------------------
 
