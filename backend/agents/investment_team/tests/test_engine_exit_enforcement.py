@@ -49,8 +49,9 @@ def _flat_bars(n: int = 30, start_price: float = 100.0) -> Dict[str, List[OHLCVB
     """30 daily bars that drift up by 1c/bar — slow steady uptrend.
 
     Slow enough that none of the stop-loss / take-profit thresholds used in
-    the tests fire on price alone, so the time-stop test isolates the
-    bars-held trigger.
+    the tests fire on price alone — these bars are the "no-trigger
+    baseline" the dedup / fallback tests use to verify engine behaviour
+    in the absence of a structured-exit event.
     """
     out: List[OHLCVBar] = []
     for i in range(n):
@@ -396,15 +397,36 @@ def test_partial_strategy_unwind_does_not_suppress_engine_close() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Chunked path rejection
+# Chunked path fallback
 # ---------------------------------------------------------------------------
 
 
-def test_chunked_path_rejected_when_exit_rules_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``BAR_CHUNK_SIZE>1`` combined with non-empty ``exit_rules`` must raise
-    rather than silently lose enforcement (issue #527 scope decision).
+def test_chunked_path_falls_back_to_per_bar_when_exit_rules_present(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``BAR_CHUNK_SIZE>1`` combined with non-empty ``exit_rules`` must NOT
+    crash ``run_backtest`` — engine-side enforcement is wired only on the
+    per-bar path, so we fall back to per-bar mode for this run and log a
+    warning. Raising would crash every Strategy Lab / API run that has a
+    structured exit rule whenever the global env var is set.
     """
+    import logging
+
     monkeypatch.setenv("BAR_CHUNK_SIZE", "8")
     spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
-    with pytest.raises(NotImplementedError, match="chunked-bar protocol"):
-        run_backtest(strategy=spec, config=_config(), market_data=_flat_bars())
+
+    with caplog.at_level(logging.WARNING, logger="investment_team.trading_service.service"):
+        run = run_backtest(
+            strategy=spec,
+            config=_config(),
+            market_data=_falling_bars(n_pre_drop=5, drop_bar_low=90.0, n_post_drop=10),
+        )
+
+    # Run completed (no crash) and engine still enforced the stop-loss.
+    assert run.service_result.error is None, run.service_result.error
+    diag = run.service_result.execution_diagnostics
+    assert diag.exit_rule_firings.get("stop_loss", 0) >= 1, diag.exit_rule_firings
+    # Operator-visible warning explains the fallback.
+    assert any(
+        "BAR_CHUNK_SIZE" in rec.message and "falling back" in rec.message for rec in caplog.records
+    ), [rec.message for rec in caplog.records]

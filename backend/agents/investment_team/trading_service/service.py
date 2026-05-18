@@ -576,21 +576,29 @@ class TradingService:
                     chunk_size,
                 )
 
+            # Issue #527 — engine-side exit-rule enforcement is wired
+            # into the per-bar path only. The chunked path delivers
+            # multiple bars per strategy round-trip; emitting synthetic
+            # closes mid-chunk would require restructuring the rule
+            # evaluator to run inside the chunk replay, which is out of
+            # scope for the MVP. Rather than crashing
+            # ``run_backtest`` for any spec with exit rules whenever
+            # ``BAR_CHUNK_SIZE`` is set globally, fall back to per-bar
+            # mode for this run with a single ``logger.warning``: the
+            # caller asked for chunking, but enforcement is the more
+            # important guarantee.
+            if use_chunked and self._exit_rules:
+                logger.warning(
+                    "BAR_CHUNK_SIZE=%d requested but TradingService.exit_rules "
+                    "is non-empty; engine-side rule enforcement requires the "
+                    "per-bar protocol — falling back to BAR_CHUNK_SIZE=1 for "
+                    "this run. Set bar_chunk_size=1 explicitly to suppress "
+                    "this warning.",
+                    chunk_size,
+                )
+                use_chunked = False
+
             if use_chunked:
-                # Issue #527 — engine-side exit-rule enforcement is wired
-                # into the per-bar path only. The chunked path delivers
-                # multiple bars per strategy round-trip; emitting synthetic
-                # closes mid-chunk would require restructuring the rule
-                # evaluator to run inside the chunk replay, which is out of
-                # scope for the MVP. Surface this as a configuration error
-                # so operators don't silently lose enforcement.
-                if self._exit_rules:
-                    raise NotImplementedError(
-                        "TradingService.exit_rules is not supported with the "
-                        "chunked-bar protocol (BAR_CHUNK_SIZE > 1). Run with "
-                        "BAR_CHUNK_SIZE=1 or pass bar_chunk_size=1 to enable "
-                        "engine-enforced exit rules."
-                    )
                 return self._run_chunked(
                     stream=stream,
                     harness=harness,

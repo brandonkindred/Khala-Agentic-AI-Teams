@@ -5,12 +5,15 @@ bar loop, every trade either obeys the rules within tolerance or comes from
 the strategy code's own exit logic.  This gate iterates the trade ledger
 and the execution diagnostics and reports:
 
-* **StopLossRule(pct=P, basis="entry_price")** — for losing trades, the
-  worst observed return is bounded by ``-pct - slippage_tolerance``.
-  Slippage on the close fill can push the realised return slightly past
-  the rule's floor; the tolerance band derives from
-  ``BacktestConfig.slippage_bps``. Trailing variants need bar-by-bar
-  replay and are flagged as informational.
+* **StopLossRule(pct=P, basis="entry_price")** — count trades whose
+  return cleared the raw ``-pct`` floor. The engine detects the trigger
+  on bar N's low (long) / high (short) but the synthetic close fills on
+  bar N+1's open, so an overnight gap can land the realised return
+  arbitrarily far below the rule's threshold without indicating an
+  enforcement bug. Critical failure fires only when below-floor trades
+  exist *and* the engine never emitted any ``stop_loss`` close — i.e.
+  the rule was tripped but the enforcement path didn't run. Trailing
+  variants need bar-by-bar replay and are flagged as informational.
 * **TakeProfitRule(pct=P)** — sanity-only: when ``exit_rules`` contains
   exactly one rule and that rule is the take-profit, we expect at least
   one engine firing. When other rules are present, the take-profit may
@@ -25,7 +28,7 @@ of which the alignment agent's LLM-driven audit should defer to.
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence
 
 from ...models import (
     BacktestConfig,
@@ -66,13 +69,14 @@ class ExitRuleConformanceGate:
             ]
 
         results: List[QualityGateResult] = []
+        firings = (diagnostics.exit_rule_firings if diagnostics is not None else None) or {}
 
         # ---- StopLossRule (entry_price basis only — trailing variants need
         # bar-by-bar replay which the gate cannot reconstruct from the trade
         # ledger alone) ----
         stop_losses = [r for r in exit_rules if isinstance(r, StopLossRule)]
         for rule in stop_losses:
-            results.append(self._check_stop_loss(rule, trades, config))
+            results.append(self._check_stop_loss(rule, trades, firings))
 
         # ---- TakeProfitRule (sanity only) ----
         take_profits = [r for r in exit_rules if isinstance(r, TakeProfitRule)]
@@ -120,7 +124,7 @@ class ExitRuleConformanceGate:
     def _check_stop_loss(
         rule: StopLossRule,
         trades: Sequence[TradeRecord],
-        config: BacktestConfig,
+        firings: Mapping[str, int],
     ) -> QualityGateResult:
         if rule.basis != "entry_price":
             return QualityGateResult(
@@ -132,22 +136,34 @@ class ExitRuleConformanceGate:
                     "(trailing variants require bar-by-bar replay)."
                 ),
             )
-        # Tolerance band: slippage on the close fill can push the realised
-        # return past the rule's floor. Use 2x the configured slippage as
-        # an upper-bound on cumulative entry+exit slip, plus a small
-        # absolute pad so float-equality noise doesn't trip the gate.
-        slip_pct = (config.slippage_bps / 10_000.0) * 2.0
-        floor_pct = -(rule.pct * 100.0) - (slip_pct * 100.0) - 0.5
-        offenders = [t for t in trades if t.return_pct < floor_pct]
-        if offenders:
-            sample = [(t.trade_num, t.return_pct) for t in offenders[:5]]
+        # The engine detects the trigger on bar N's low (long) / high
+        # (short), but the synthetic market close fills on bar N+1's
+        # open. That next-bar fill can land arbitrarily far below the
+        # trigger price on an overnight gap (long entry at 100, stop at
+        # 95, next bar opens at 80 → return_pct ≈ -20% even though the
+        # engine emitted the exit as designed). So we can't bound
+        # ``return_pct`` against a strict floor without false-positive
+        # criticals on every gap.
+        #
+        # Instead: count trades whose return clearly tripped the rule's
+        # raw threshold (no slippage tolerance). If those exist AND the
+        # engine never emitted any ``stop_loss`` close, that's a
+        # genuine enforcement leak. Otherwise the firings counter
+        # confirms the engine did its job and the residual gap is a
+        # real-world market-execution cost, not a conformance bug.
+        raw_floor_pct = -(rule.pct * 100.0)
+        tripped = [t for t in trades if t.return_pct < raw_floor_pct]
+        stop_firings = firings.get("stop_loss", 0)
+        if tripped and stop_firings == 0:
+            sample = [(t.trade_num, t.return_pct) for t in tripped[:5]]
             return QualityGateResult(
                 gate_name=GATE,
                 passed=False,
                 severity="critical",
                 details=(
-                    f"StopLossRule(pct={rule.pct}) violated: {len(offenders)} "
-                    f"trade(s) below floor {floor_pct:.2f}%. Sample "
+                    f"StopLossRule(pct={rule.pct}) leak: {len(tripped)} trade(s) "
+                    f"closed below the {raw_floor_pct:.2f}% floor but the engine "
+                    "never emitted a stop_loss exit. Sample "
                     f"(trade_num, return_pct)={sample}."
                 ),
             )
@@ -156,8 +172,9 @@ class ExitRuleConformanceGate:
             passed=True,
             severity="info",
             details=(
-                f"StopLossRule(pct={rule.pct}) satisfied across "
-                f"{len(trades)} trade(s); floor={floor_pct:.2f}%."
+                f"StopLossRule(pct={rule.pct}) — "
+                f"{stop_firings} engine firing(s) recorded; "
+                f"{len(tripped)} trade(s) below raw floor (gap-fill expected on next-bar opens)."
             ),
         )
 
