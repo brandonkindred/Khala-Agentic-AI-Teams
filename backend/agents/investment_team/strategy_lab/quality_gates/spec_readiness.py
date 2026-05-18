@@ -15,7 +15,16 @@ import re
 from typing import Callable, Iterator, List, Optional
 
 from ...models import BacktestConfig, StrategySpec
-from ...symbols import COMMODITY_SYMBOLS, CRYPTO_SYMBOLS, OTHER_SYMBOLS, STOCK_SYMBOLS
+from ...symbols import (
+    COMMODITY_SYMBOLS,
+    CRYPTO_SYMBOLS,
+    FOREX_SYMBOLS,
+    FOREX_SYMBOLS_BARE,
+    FUTURES_SYMBOLS,
+    FUTURES_SYMBOLS_BARE,
+    OTHER_SYMBOLS,
+    STOCK_SYMBOLS,
+)
 from ..spec_dsl import (
     EntryRule,
     IndicatorName,
@@ -29,13 +38,26 @@ from .models import QualityGateResult, StrategyLabPhase
 
 GATE = "spec_readiness"
 
-# Whitelist regex matches any tradeable symbol the spec is allowed to name in
-# its hypothesis. Word-bounded so "ETH" doesn't match "ETHEREUM".
+# Whitelist of every tradeable symbol the spec is allowed to name in its
+# hypothesis. Covers all five asset classes plus the broad ETFs; word-bounded
+# so "ETH" doesn't match "ETHEREUM" and "ES" doesn't match arbitrary prose.
 _SYMBOL_WHITELIST: frozenset[str] = frozenset(
-    {*STOCK_SYMBOLS, *CRYPTO_SYMBOLS, *COMMODITY_SYMBOLS, *OTHER_SYMBOLS}
+    {
+        *STOCK_SYMBOLS,
+        *CRYPTO_SYMBOLS,
+        *COMMODITY_SYMBOLS,
+        *FOREX_SYMBOLS,
+        *FOREX_SYMBOLS_BARE,
+        *FUTURES_SYMBOLS,
+        *FUTURES_SYMBOLS_BARE,
+        *OTHER_SYMBOLS,
+    }
 )
+# `=X` / `=F` suffixes are non-word characters, so `\b` after the literal `F`
+# / `X` still sits at a word/non-word boundary. Longest-first alternation
+# ensures `ES=F` is preferred over the bare `ES` when both could match.
 _SYMBOL_REGEX = re.compile(
-    r"\b(" + "|".join(sorted(_SYMBOL_WHITELIST, key=len, reverse=True)) + r")\b"
+    r"\b(" + "|".join(sorted(map(re.escape, _SYMBOL_WHITELIST), key=len, reverse=True)) + r")\b"
 )
 
 # Asset classes whose intraday timeframes the data-provider chain supports.

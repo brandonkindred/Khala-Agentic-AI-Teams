@@ -112,6 +112,30 @@ def test_rule1_hypothesis_symbol_not_in_target_symbols() -> None:
     assert any("QQQ" in c for c in critical), critical
 
 
+def test_rule1_catches_futures_ticker_mismatch() -> None:
+    """Bare futures names (`ES`, `NQ`) in the hypothesis must be caught."""
+    spec = _spec(
+        hypothesis="Trade ES on Monday-morning gaps.",
+        target_symbols=["NQ=F"],
+        asset_class="futures",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    critical = _critical(results)
+    assert any("ES" in c for c in critical), critical
+
+
+def test_rule1_catches_forex_ticker_mismatch() -> None:
+    """Forex suffixed tickers (`EURUSD=X`) in the hypothesis must be caught."""
+    spec = _spec(
+        hypothesis="EURUSD=X tends to revert intraday.",
+        target_symbols=["GBPUSD=X"],
+        asset_class="forex",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    critical = _critical(results)
+    assert any("EURUSD=X" in c for c in critical), critical
+
+
 def test_rule1_passes_when_no_symbols_in_hypothesis_and_no_targets() -> None:
     spec = _spec(
         hypothesis="RSI(14) below 30 signals long entry.",
