@@ -25,7 +25,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict
 
-from investment_team.models import BacktestConfig
 from investment_team.strategy_lab.spec_dsl import StopLossRule, TakeProfitRule
 from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio, Position
@@ -33,6 +32,7 @@ from investment_team.trading_service.service import (
     ENGINE_EXIT_REASON_PREFIX,
     TradingService,
     TradingServiceResult,
+    _EngineExitDispatcher,
     _TrackedPosition,
 )
 from investment_team.trading_service.strategy.contract import (
@@ -52,11 +52,14 @@ class _MockBar:
     close: float
 
 
-def _service(*, exit_rules) -> TradingService:
-    return TradingService(
-        strategy_code="from contract import Strategy\nclass S(Strategy):\n    pass\n",
-        config=BacktestConfig(start_date="2024-01-01", end_date="2024-12-31"),
+def _dispatcher(*, exit_rules, bindings=None) -> _EngineExitDispatcher:
+    """Build a dispatcher with optional pre-seeded bindings. Tests that
+    don't seed bindings get an empty dict by default; ``bindings is not
+    None`` lets a test pass in its own mutable dict to observe writes.
+    """
+    return _EngineExitDispatcher(
         exit_rules=exit_rules,
+        engine_exit_bindings={} if bindings is None else bindings,
     )
 
 
@@ -280,7 +283,7 @@ def test_engine_always_emits_at_full_position_qty() -> None:
     fill, so the engine emits its full-size market close regardless.
     """
     # bar.low=95 trips a StopLossRule(pct=0.02) (floor=98).
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar()
     result = TradingServiceResult()
@@ -297,15 +300,13 @@ def test_engine_always_emits_at_full_position_qty() -> None:
             reason="strategy_limit_exit",
         )
     ]
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings={},
     )
     engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
     assert len(engine_orders) == 1
@@ -321,7 +322,7 @@ def test_engine_emits_even_when_strategy_submits_full_market_close() -> None:
     close at fill time if the strategy's order fully closed the position
     first, and clips the engine close to the residual qty otherwise.
     """
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar()  # low=95 trips the 98 floor
     result = TradingServiceResult()
@@ -337,15 +338,13 @@ def test_engine_emits_even_when_strategy_submits_full_market_close() -> None:
             reason="strategy_full_exit",
         )
     ]
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings={},
     )
     engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
     assert len(engine_orders) == 1
@@ -360,7 +359,7 @@ def test_engine_skips_when_prior_engine_exit_still_pending() -> None:
     otherwise every subsequent bar where the rule re-triggers stacks
     another engine market, polluting the book and the diagnostics.
     """
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar()
     result = TradingServiceResult()
@@ -380,15 +379,13 @@ def test_engine_skips_when_prior_engine_exit_still_pending() -> None:
     )
 
     pending: list[OrderRequest] = []
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=1,
-        engine_exit_bindings={},
     )
 
     # No new engine emission — the prior one is still in flight.
@@ -402,23 +399,23 @@ def test_engine_emission_registers_binding_to_entry_order_id() -> None:
     first. Without it, the engine market falls through to ``_fill_entry``
     and opens a brand-new opposite-side position.
     """
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])  # entry=100 → floor=98; bar.low=95 fires
+    engine_exit_bindings: Dict[str, str] = {}
+    disp = _dispatcher(
+        exit_rules=[StopLossRule(pct=0.02)], bindings=engine_exit_bindings
+    )  # entry=100 → floor=98; bar.low=95 fires
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar(high=105, low=95)
     result = TradingServiceResult()
 
-    engine_exit_bindings: Dict[str, str] = {}
     pending: list[OrderRequest] = []
 
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings=engine_exit_bindings,
     )
 
     assert len(pending) == 1
@@ -436,7 +433,7 @@ def test_engine_binds_unbound_resting_strategy_exits_to_position() -> None:
     The engine binds the resting order to the same ``entry_order_id`` so
     the stale-continuation guard drops it when the engine close fires.
     """
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar(high=105, low=95)  # bar.low=95 trips the 98 stop floor
     result = TradingServiceResult()
@@ -462,15 +459,13 @@ def test_engine_binds_unbound_resting_strategy_exits_to_position() -> None:
     assert resting_po.working_against_entry_order_id is None
 
     pending: list[OrderRequest] = []
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings={},
     )
 
     # Engine emitted its stop-loss close…
@@ -490,7 +485,7 @@ def test_engine_does_not_rebind_already_bound_resting_orders() -> None:
     on every subsequent bar would be a no-op here (same id), but the
     invariant is what we're guarding.
     """
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar(high=105, low=95)
     result = TradingServiceResult()
@@ -511,15 +506,13 @@ def test_engine_does_not_rebind_already_bound_resting_orders() -> None:
     prior_po.working_against_entry_order_id = "o-other"  # pre-bound elsewhere
 
     pending: list[OrderRequest] = []
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings={},
     )
 
     # Binding preserved — engine binding loop must not stomp prior bindings.
@@ -530,7 +523,7 @@ def test_engine_does_not_bind_same_side_resting_orders() -> None:
     """A resting same-side order is an add, not a close — it has nothing
     to do with the engine's exit and must not be bound to the position.
     """
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar(high=105, low=95)
     result = TradingServiceResult()
@@ -551,15 +544,13 @@ def test_engine_does_not_bind_same_side_resting_orders() -> None:
     )
 
     pending: list[OrderRequest] = []
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings={},
     )
 
     # Same-side resting order stays unbound — it isn't a close.
@@ -576,7 +567,8 @@ def test_engine_binds_same_bar_queued_strategy_exits_too() -> None:
     the binding through ``engine_exit_bindings`` so the submit step
     stamps ``working_against_entry_order_id`` on its ``PendingOrder``.
     """
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    engine_exit_bindings: Dict[str, str] = {}
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)], bindings=engine_exit_bindings)
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar(high=105, low=95)  # trips the 98 stop floor
     result = TradingServiceResult()
@@ -593,17 +585,14 @@ def test_engine_binds_same_bar_queued_strategy_exits_too() -> None:
         reason="strategy_take_profit",
     )
     pending: list[OrderRequest] = [queued_strategy_exit]
-    engine_exit_bindings: Dict[str, str] = {}
 
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings=engine_exit_bindings,
     )
 
     # Engine emitted its stop-loss close AND registered a binding for the
@@ -619,7 +608,8 @@ def test_engine_does_not_bind_same_bar_same_side_queued_orders() -> None:
     """Symmetric to the resting-order carve-out: a same-bar same-side
     queued order (a scale-in entry) must NOT be bound to the position.
     """
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    engine_exit_bindings: Dict[str, str] = {}
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)], bindings=engine_exit_bindings)
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar(high=105, low=95)
     result = TradingServiceResult()
@@ -635,17 +625,14 @@ def test_engine_does_not_bind_same_bar_same_side_queued_orders() -> None:
         reason="strategy_scale_in",
     )
     pending: list[OrderRequest] = [queued_add]
-    engine_exit_bindings: Dict[str, str] = {}
 
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings=engine_exit_bindings,
     )
 
     # The engine's own emission gets a binding; the same-side scale-in does not.
@@ -664,7 +651,7 @@ def test_engine_skips_rule_eval_on_entry_bar() -> None:
     ``just_opened=True`` skips rule eval entirely on the entry bar; the
     next bar's tracker update clears the flag and rule eval resumes.
     """
-    svc = _service(exit_rules=[TakeProfitRule(pct=0.05)])
+    disp = _dispatcher(exit_rules=[TakeProfitRule(pct=0.05)])
     # Position entered at 95, bar.high=110 would trip a take-profit at
     # 95 * 1.05 = 99.75 if not gated by just_opened.
     tracker = {
@@ -689,15 +676,13 @@ def test_engine_skips_rule_eval_on_entry_bar() -> None:
     result = TradingServiceResult()
 
     pending: list[OrderRequest] = []
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings={},
     )
 
     # No engine emission — the entry bar is gated even though bar.high
@@ -712,7 +697,7 @@ def test_engine_runs_rules_normally_after_first_post_entry_bar() -> None:
     ``just_opened`` is False, take-profit / stop-loss evaluate against
     the bar's OHLC as expected.
     """
-    svc = _service(exit_rules=[TakeProfitRule(pct=0.05)])
+    disp = _dispatcher(exit_rules=[TakeProfitRule(pct=0.05)])
     tracker = {
         "AAA": _TrackedPosition(
             side="long",
@@ -736,15 +721,13 @@ def test_engine_runs_rules_normally_after_first_post_entry_bar() -> None:
     result = TradingServiceResult()
 
     pending: list[OrderRequest] = []
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings={},
     )
 
     # Take-profit fires off the bar's high.
@@ -763,7 +746,7 @@ def test_engine_cancels_pending_entry_continuation_when_exit_fires() -> None:
     and cancels them so the rule's close is the last word on the
     position.
     """
-    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar(high=105, low=95)  # bar.low=95 trips floor=98
     result = TradingServiceResult()
@@ -797,15 +780,13 @@ def test_engine_cancels_pending_entry_continuation_when_exit_fires() -> None:
     order_book._by_symbol["AAA"].append("o1")
 
     pending: list[OrderRequest] = []
-    svc._maybe_emit_engine_exits(
+    disp.maybe_emit(
         cur_bar=bar,
         position_tracker=tracker,
         portfolio=portfolio,
         pending_for_prev=pending,
         order_book=order_book,
         result=result,
-        engine_order_seq=0,
-        engine_exit_bindings={},
     )
 
     # Engine emitted its stop-loss close AND cancelled the pending

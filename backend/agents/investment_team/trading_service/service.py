@@ -16,7 +16,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date as date_cls
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -31,6 +31,7 @@ from ..models import (
 )
 from ..strategy_lab.executor.rule_compiler import (
     BarSnapshot,
+    ExitIntent,
     PositionState,
     evaluate_exit_rules,
 )
@@ -39,7 +40,7 @@ from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
 from .engine.execution_model import build_execution_model
 from .engine.fill_simulator import FillOutcome, FillSimulator, FillSimulatorConfig
 from .engine.order_book import OrderBook
-from .engine.portfolio import Portfolio
+from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
     OrderRequest,
     OrderSide,
@@ -78,7 +79,7 @@ class _TrackedPosition:
     brand-new trade.
 
     ``just_opened`` is ``True`` on the bar a position first appears.
-    :meth:`TradingService._maybe_emit_engine_exits` skips rule evaluation
+    :meth:`_EngineExitDispatcher.maybe_emit` skips rule evaluation
     while this flag is set so the entry bar's pre-fill price action (a
     limit fill at ``bar.low`` doesn't entitle a take-profit to fire from
     a pre-entry ``bar.high``) can't queue impossible close orders. The
@@ -100,6 +101,309 @@ class _TrackedPosition:
             entry_price=self.entry_price,
             high_since_entry=self.high_since_entry,
             low_since_entry=self.low_since_entry,
+        )
+
+
+@dataclass
+class _EngineExitDispatcher:
+    """Per-run owner of engine-side ``exit_rules`` enforcement.
+
+    Splits the per-bar engine-side enforcement loop into one method
+    per concern so each can be tested and extended in isolation. Holds
+    the run-scoped state that used to be threaded through helper
+    keyword arguments:
+
+    * ``exit_rules`` — the spec's structured close conditions (immutable
+      across the run).
+    * ``engine_exit_bindings`` — ``client_order_id → entry_order_id``
+      bindings consumed by the bar-loop submit step to stamp
+      ``working_against_entry_order_id`` on the resulting
+      ``PendingOrder``. Same map covers engine emissions and same-bar
+      piggybacked strategy orders.
+    * ``_next_seq`` — monotonic counter for engine-issued
+      ``client_order_id``\\ s. Strategy ids are emitted client-side; engine
+      ids must not collide, hence the ``e`` prefix vs the strategy's
+      ``c`` prefix.
+
+    Empty ``exit_rules`` makes :meth:`maybe_emit` a no-op.
+    """
+
+    exit_rules: Sequence[ExitRule]
+    engine_exit_bindings: Dict[str, str] = field(default_factory=dict)
+    _next_seq: int = 0
+
+    # ------------------------------------------------------------------
+
+    def maybe_emit(
+        self,
+        *,
+        cur_bar,
+        position_tracker: Mapping[str, _TrackedPosition],
+        portfolio: Portfolio,
+        pending_for_prev: List[OrderRequest],
+        order_book: OrderBook,
+        result: "TradingServiceResult",
+    ) -> None:
+        """Top-level entry point — call once per bar after strategy orders
+        have been queued into ``pending_for_prev``.
+
+        Dedup model: the engine always emits at the position's full open
+        qty and lets the fill simulator + the position-identity binding
+        handle the rest. Specifically:
+
+        * Engine orders carry ``working_against_entry_order_id`` via
+          ``engine_exit_bindings``. If a same-bar strategy order closes
+          the position first on the next bar, the fill simulator's
+          stale-continuation guard drops the engine close before it
+          falls through to ``_fill_entry``.
+        * If the strategy's same-bar order is partial / clipped (FOK
+          rejection, IOC drop, participation cap, REQUEUE_NEXT_BAR
+          residual), the engine close sits behind it in submission order
+          and ``_fill_exit`` clips ``req.qty`` to ``existing_pos.qty`` —
+          residual exposure gets closed on the same bar rather than
+          waiting for the rule to fire again.
+        * The one explicit guard is on in-flight engine markets: if a
+          prior bar's engine exit is still pending (e.g. REQUEUE
+          residual across bars), skip re-emission so the order book
+          doesn't accumulate redundant engine markets while the rule
+          keeps re-triggering.
+
+        Engine-emitted orders carry ``reason="engine_exit:<rule_kind>"``
+        so the conformance gate can count them off the
+        order-lifecycle event stream.
+        """
+        if not self.exit_rules:
+            return
+
+        sym = cur_bar.symbol
+        gating = self._should_evaluate(sym, position_tracker, portfolio, order_book)
+        if gating is None:
+            return
+        tracked, pos = gating
+
+        intent = self._evaluate(sym, tracked, pos, cur_bar)
+        if intent is None:
+            return
+
+        req = self._build_close_order(intent, tracked, pos)
+        if req is None:
+            return
+
+        pending_for_prev.append(req)
+        self._register_binding(req, pos)
+        self._retire_competing_resting_orders(sym, tracked.side, pos, order_book)
+        self._bind_same_bar_queued_exits(sym, tracked.side, pos, pending_for_prev)
+        self._cancel_pending_entry_continuations(sym, pos, order_book)
+        self._record_emission(req, intent, cur_bar, result)
+
+    # ------------------------------------------------------------------
+    # Sub-steps. Kept as private methods so subclasses or sibling unit
+    # tests can override / poke at a single concern.
+    # ------------------------------------------------------------------
+
+    def _should_evaluate(
+        self,
+        sym: str,
+        position_tracker: Mapping[str, _TrackedPosition],
+        portfolio: Portfolio,
+        order_book: OrderBook,
+    ) -> Optional[tuple[_TrackedPosition, Position]]:
+        """Return ``(tracked, pos)`` if rule evaluation should run for
+        this symbol on this bar, else ``None``.
+
+        Gates:
+        * Tracker has the symbol (a position is open).
+        * Portfolio agrees and has positive qty.
+        * ``tracked.just_opened`` is False — skip the entry bar for
+          non-market fills (see ``_update_position_tracker``).
+        * No in-flight engine market exit already pending on the
+          order book (avoid stacking redundant engine markets across
+          bars while the rule keeps re-triggering).
+        """
+        if sym not in position_tracker:
+            return None
+        pos = portfolio.positions.get(sym)
+        if pos is None or pos.qty <= 0:
+            return None
+        tracked = position_tracker[sym]
+        if tracked.just_opened:
+            return None
+        for po in order_book.pending_for_symbol(sym):
+            po_req = po.request
+            if po_req.order_type != OrderType.MARKET:
+                continue
+            po_side = "long" if po_req.side == OrderSide.LONG else "short"
+            if po_side != tracked.side and (po_req.reason or "").startswith(
+                ENGINE_EXIT_REASON_PREFIX
+            ):
+                return None
+        return tracked, pos
+
+    def _evaluate(
+        self,
+        sym: str,
+        tracked: _TrackedPosition,
+        pos: Position,
+        cur_bar,
+    ) -> Optional[ExitIntent]:
+        """Run the pure rule evaluator. Returns at most one intent per
+        symbol — :func:`evaluate_exit_rules` stops at the first
+        triggered rule per position.
+        """
+        snapshot = tracked.snapshot(sym, pos.qty)
+        bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
+        intents = evaluate_exit_rules(self.exit_rules, {sym: snapshot}, {sym: bar_snap})
+        return intents[0] if intents else None
+
+    def _build_close_order(
+        self,
+        intent: ExitIntent,
+        tracked: _TrackedPosition,
+        pos: Position,
+    ) -> Optional[OrderRequest]:
+        """Construct + validate the engine's market close. Returns
+        ``None`` on validation failure (logged, run continues).
+        """
+        self._next_seq += 1
+        close_side = OrderSide.SHORT if tracked.side == "long" else OrderSide.LONG
+        req = OrderRequest(
+            client_order_id=f"e{self._next_seq}",
+            symbol=intent.symbol,
+            side=close_side,
+            qty=pos.qty,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            reason=f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}",
+        )
+        try:
+            req.validate_prices()
+        except Exception as exc:  # pragma: no cover — engine-built request
+            logger.error(
+                "engine-issued exit order failed validation (rule=%s symbol=%s): %s",
+                intent.rule_kind,
+                intent.symbol,
+                exc,
+            )
+            return None
+        return req
+
+    def _register_binding(self, req: OrderRequest, pos: Position) -> None:
+        """Record the binding so the bar-loop submit step can set
+        ``working_against_entry_order_id`` on the resulting
+        ``PendingOrder``.
+        """
+        self.engine_exit_bindings[req.client_order_id] = pos.entry_order_id
+
+    def _retire_competing_resting_orders(
+        self,
+        sym: str,
+        tracked_side: str,
+        pos: Position,
+        order_book: OrderBook,
+    ) -> None:
+        """Bind any unbound opposite-side resting orders to the position
+        so they retire when the engine close removes the position.
+
+        Without this, an unbound GTC/limit strategy exit
+        (``cumulative_filled_qty==0`` AND
+        ``working_against_entry_order_id is None``) would survive the
+        engine close and, on a later trigger, fall through to
+        ``_fill_entry`` (``existing_pos is None``) — opening an
+        unintended reverse position.
+
+        Carve-outs:
+        * Already-bound orders (prior engine exits, bracket children)
+          keep their binding.
+        * Same-side resting orders are scale-in intents, not closes —
+          left alone.
+        * Partially filled orders are already bound to the position via
+          ``_fill_exit``'s auto-binding.
+        """
+        for resting in order_book.pending_for_symbol(sym):
+            if resting.working_against_entry_order_id is not None:
+                continue
+            if resting.cumulative_filled_qty > 0:
+                continue
+            resting_side = "long" if resting.request.side == OrderSide.LONG else "short"
+            if resting_side == tracked_side:
+                continue
+            resting.working_against_entry_order_id = pos.entry_order_id
+
+    def _bind_same_bar_queued_exits(
+        self,
+        sym: str,
+        tracked_side: str,
+        pos: Position,
+        pending_for_prev: List[OrderRequest],
+    ) -> None:
+        """Bind same-bar opposite-side strategy orders queued in
+        ``pending_for_prev`` (not yet on the order book). Same effect
+        as :meth:`_retire_competing_resting_orders` but for orders that
+        haven't reached the book yet — the binding goes into
+        ``engine_exit_bindings`` and the submit step applies it.
+        """
+        for queued in pending_for_prev:
+            if queued.symbol != sym:
+                continue
+            if queued.client_order_id in self.engine_exit_bindings:
+                continue
+            queued_side = "long" if queued.side == OrderSide.LONG else "short"
+            if queued_side == tracked_side:
+                continue
+            self.engine_exit_bindings[queued.client_order_id] = pos.entry_order_id
+
+    def _cancel_pending_entry_continuations(
+        self,
+        sym: str,
+        pos: Position,
+        order_book: OrderBook,
+    ) -> None:
+        """Cancel any in-flight continuation of the position's entry
+        order. A partial-fill remainder (``REQUEUE_NEXT_BAR`` or
+        ``TWAP_N``) still on the book would fill on the next bar
+        before the engine's close, growing the position past what the
+        engine sized for and leaving residual exposure after
+        ``_fill_exit`` clips at ``min(req.qty, existing_pos.qty)``.
+
+        Continuations are identified by ``po.order_id ==
+        pos.entry_order_id`` (exact — the strategy can't reuse an
+        engine-issued order_id, and same-side new strategy entries
+        have different order_ids).
+        """
+        for po in order_book.pending_for_symbol(sym):
+            if po.order_id != pos.entry_order_id:
+                continue
+            if po.cumulative_filled_qty <= 0:
+                continue
+            order_book.cancel(po.order_id)
+
+    def _record_emission(
+        self,
+        req: OrderRequest,
+        intent: ExitIntent,
+        cur_bar,
+        result: "TradingServiceResult",
+    ) -> None:
+        """Bump diagnostics counters (global + per-symbol firings,
+        ``orders_emitted`` / ``exits_emitted``) and append the
+        ``OrderLifecycleEvent``.
+        """
+        diag = result.execution_diagnostics
+        diag.orders_emitted += 1
+        diag.exits_emitted += 1
+        diag.exit_rule_firings[intent.rule_kind] = (
+            diag.exit_rule_firings.get(intent.rule_kind, 0) + 1
+        )
+        sym_firings = diag.exit_rule_firings_by_symbol.setdefault(intent.symbol, {})
+        sym_firings[intent.rule_kind] = sym_firings.get(intent.rule_kind, 0) + 1
+        _record_event(
+            diag,
+            "emitted",
+            timestamp=cur_bar.timestamp,
+            symbol=intent.symbol,
+            side=req.side.value,
+            order_type=OrderType.MARKET.value,
+            reason=req.reason,
         )
 
 
@@ -507,17 +811,13 @@ class TradingService:
         # structured exit rules. Keyed by symbol; populated after each bar's
         # fills are processed. No effect when ``self._exit_rules`` is empty.
         position_tracker: Dict[str, _TrackedPosition] = {}
-        # Issue #527 — engine-issued exit orders bind to the position they
-        # close so the fill simulator's stale-continuation guard drops them
-        # when a prior strategy exit (limit/stop/GTC) closes the position
-        # first. Keyed by client_order_id; consumed when the order moves
-        # from ``pending_for_prev`` to the order book.
-        engine_exit_bindings: Dict[str, str] = {}
-        # Monotonic counter for engine-issued client_order_ids so each
-        # rule-triggered close has a distinct id. Strategy ids are emitted
-        # client-side; engine ids must not collide with them, hence the
-        # ``e`` prefix vs the strategy's ``c`` prefix.
-        engine_order_seq = 0
+        # Issue #527 — owns engine-side exit-rule enforcement for this
+        # run. Encapsulates the ``client_order_id → entry_order_id``
+        # binding map (consumed by the submit step below), the sequence
+        # counter, and the per-bar dispatch logic split across
+        # :meth:`_EngineExitDispatcher.maybe_emit` sub-steps. No-op
+        # when ``self._exit_rules`` is empty.
+        engine_exits = _EngineExitDispatcher(exit_rules=self._exit_rules)
         execution_model = build_execution_model(
             self.config.execution_model,
             participation_cap=self.config.fill_participation_cap,
@@ -728,7 +1028,9 @@ class TradingService:
                                 # GTC/limit strategy exit is resting on the book
                                 # could fall through to ``_fill_entry`` and open
                                 # a new opposite-side position.
-                                bound_entry = engine_exit_bindings.pop(req.client_order_id, None)
+                                bound_entry = engine_exits.engine_exit_bindings.pop(
+                                    req.client_order_id, None
+                                )
                                 if bound_entry is not None:
                                     submitted_po.working_against_entry_order_id = bound_entry
                                 result.execution_diagnostics.orders_accepted += 1
@@ -895,18 +1197,16 @@ class TradingService:
                     # Issue #527 — engine-side enforcement of structured
                     # ``exit_rules``. Runs after the strategy's orders are
                     # queued so we can dedupe against strategy-emitted closes
-                    # and any in-flight engine exit on the order book.
-                    if self._exit_rules:
-                        engine_order_seq = self._maybe_emit_engine_exits(
-                            cur_bar=cur_bar,
-                            position_tracker=position_tracker,
-                            portfolio=portfolio,
-                            pending_for_prev=pending_for_prev,
-                            order_book=order_book,
-                            result=result,
-                            engine_order_seq=engine_order_seq,
-                            engine_exit_bindings=engine_exit_bindings,
-                        )
+                    # and any in-flight engine exit on the order book. No-op
+                    # when the spec has no exit rules.
+                    engine_exits.maybe_emit(
+                        cur_bar=cur_bar,
+                        position_tracker=position_tracker,
+                        portfolio=portfolio,
+                        pending_for_prev=pending_for_prev,
+                        order_book=order_book,
+                        result=result,
+                    )
 
                     prev_bar = cur_bar
 
@@ -1350,198 +1650,6 @@ class TradingService:
                 high_since_entry=high_init,
                 low_since_entry=low_init,
             )
-
-    def _maybe_emit_engine_exits(
-        self,
-        *,
-        cur_bar,
-        position_tracker: Dict[str, _TrackedPosition],
-        portfolio: Portfolio,
-        pending_for_prev: List[OrderRequest],
-        order_book: OrderBook,
-        result: "TradingServiceResult",
-        engine_order_seq: int,
-        engine_exit_bindings: Dict[str, str],
-    ) -> int:
-        """Evaluate ``self._exit_rules`` against the current bar and emit
-        synthetic close orders for any triggered rule.
-
-        Dedup model: the engine always emits at the position's full open
-        qty and lets the fill simulator + the position-identity binding
-        handle the rest. Specifically:
-
-        * Engine orders carry ``working_against_entry_order_id`` via
-          ``engine_exit_bindings`` (see the bar-loop submit step). If a
-          same-bar strategy order closes the position first on the next
-          bar, the fill simulator's stale-continuation guard drops the
-          engine close before it falls through to ``_fill_entry``.
-        * If the strategy's same-bar order is partial / clipped (FOK
-          rejection, IOC drop, participation cap, REQUEUE_NEXT_BAR
-          residual), the engine close sits behind it in submission order
-          and ``_fill_exit`` clips ``req.qty`` to ``existing_pos.qty`` —
-          residual exposure gets closed on the same bar rather than
-          waiting for the rule to fire again.
-        * The one explicit guard is on in-flight engine markets: if a
-          prior bar's engine exit is still pending (e.g. REQUEUE residual
-          across bars), skip re-emission so the order book doesn't
-          accumulate redundant engine markets across bars while the rule
-          keeps re-triggering.
-
-        Engine-emitted orders carry ``reason="engine_exit:<rule_kind>"`` so
-        the conformance gate can count them off the order-lifecycle event
-        stream. Returns the updated ``engine_order_seq``.
-        """
-        sym = cur_bar.symbol
-        if sym not in position_tracker:
-            return engine_order_seq
-        pos = portfolio.positions.get(sym)
-        if pos is None or pos.qty <= 0:
-            return engine_order_seq
-
-        tracked = position_tracker[sym]
-        # Skip the entry bar: for a limit / stop fill landing mid-bar, the
-        # bar's full OHLC may include price action from before the entry
-        # filled, and rule evaluation off ``bar.high`` / ``bar.low`` could
-        # queue impossible closes (e.g. take-profit firing from a
-        # pre-entry high). The next bar's tracker update clears
-        # ``just_opened`` and rule evaluation resumes normally.
-        if tracked.just_opened:
-            return engine_order_seq
-        tracked_side: str = tracked.side
-
-        # Skip if a prior bar's engine market exit is still pending on the
-        # book — it will fire when the fill simulator can fill it, and we
-        # don't want to stack redundant engine markets across bars while
-        # the rule keeps re-triggering against the same open position.
-        for po in order_book.pending_for_symbol(sym):
-            po_req = po.request
-            if po_req.order_type != OrderType.MARKET:
-                continue
-            po_side = "long" if po_req.side == OrderSide.LONG else "short"
-            if po_side != tracked_side and (po_req.reason or "").startswith(
-                ENGINE_EXIT_REASON_PREFIX
-            ):
-                return engine_order_seq
-
-        snapshot = tracked.snapshot(sym, pos.qty)
-        bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
-        intents = evaluate_exit_rules(
-            self._exit_rules,
-            {sym: snapshot},
-            {sym: bar_snap},
-        )
-        if not intents:
-            return engine_order_seq
-
-        # At most one intent per symbol — ``evaluate_exit_rules`` stops at the
-        # first triggered rule per position. Defensive iteration regardless.
-        for intent in intents:
-            engine_order_seq += 1
-            close_side = OrderSide.SHORT if tracked_side == "long" else OrderSide.LONG
-            req = OrderRequest(
-                client_order_id=f"e{engine_order_seq}",
-                symbol=intent.symbol,
-                side=close_side,
-                qty=pos.qty,
-                order_type=OrderType.MARKET,
-                tif=TimeInForce.DAY,
-                reason=f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}",
-            )
-            try:
-                req.validate_prices()
-            except Exception as exc:  # pragma: no cover — engine-built request
-                logger.error(
-                    "engine-issued exit order failed validation (rule=%s symbol=%s): %s",
-                    intent.rule_kind,
-                    sym,
-                    exc,
-                )
-                continue
-            pending_for_prev.append(req)
-            # Record the binding so the submit step can set
-            # ``working_against_entry_order_id`` on the resulting PendingOrder
-            # — see :meth:`_update_position_tracker` for why position
-            # identity matters and ``fill_simulator.process_bar``'s
-            # stale-continuation guard for what consumes the binding.
-            engine_exit_bindings[req.client_order_id] = pos.entry_order_id
-            # Retire any other unbound opposite-side strategy orders resting
-            # on the book for this symbol: they were intended to close the
-            # current position, and once the engine emits its own close the
-            # position is going away. Without binding them too, an
-            # unbound GTC/limit strategy exit (``cumulative_filled_qty==0``
-            # AND ``working_against_entry_order_id is None``) would survive
-            # the engine close and, when it later triggers in
-            # ``FillSimulator.process_bar``, fall through to ``_fill_entry``
-            # because ``existing_pos is None`` — opening an unintended
-            # reverse position. Binding ties them to the position's
-            # ``entry_order_id`` so the same stale-continuation guard drops
-            # them when the engine close removes the position.
-            for resting in order_book.pending_for_symbol(sym):
-                if resting.working_against_entry_order_id is not None:
-                    continue
-                if resting.cumulative_filled_qty > 0:
-                    continue
-                resting_side = "long" if resting.request.side == OrderSide.LONG else "short"
-                if resting_side == tracked_side:
-                    # Same-side resting order is an add, not a close — leave alone.
-                    continue
-                resting.working_against_entry_order_id = pos.entry_order_id
-            # Same-bar pending strategy exits live in ``pending_for_prev``,
-            # not yet on the order book — they get submitted at the top of
-            # the next bar. Without binding them here too, a strategy
-            # GTC/limit close queued on the bar the engine fires would
-            # become an unbound resting order next bar, surviving the
-            # engine's close-fill and later opening a reverse position
-            # exactly like the resting-order scenario above. Routing the
-            # binding through ``engine_exit_bindings`` so the submit step
-            # stamps ``working_against_entry_order_id`` on the resulting
-            # ``PendingOrder`` works for both engine emissions and these
-            # piggybacked strategy orders.
-            for queued in pending_for_prev:
-                if queued.symbol != sym:
-                    continue
-                if queued.client_order_id in engine_exit_bindings:
-                    continue
-                queued_side = "long" if queued.side == OrderSide.LONG else "short"
-                if queued_side == tracked_side:
-                    continue
-                engine_exit_bindings[queued.client_order_id] = pos.entry_order_id
-            result.execution_diagnostics.orders_emitted += 1
-            result.execution_diagnostics.exits_emitted += 1
-            firings = result.execution_diagnostics.exit_rule_firings
-            firings[intent.rule_kind] = firings.get(intent.rule_kind, 0) + 1
-            # Per-symbol breakdown — the conformance gate uses this so a
-            # stop_loss firing on one symbol can't mask a missed firing
-            # on another.
-            by_symbol = result.execution_diagnostics.exit_rule_firings_by_symbol
-            sym_firings = by_symbol.setdefault(intent.symbol, {})
-            sym_firings[intent.rule_kind] = sym_firings.get(intent.rule_kind, 0) + 1
-            # Cancel any in-flight continuation of the position's entry
-            # order: a partial-fill remainder (``REQUEUE_NEXT_BAR`` or
-            # ``TWAP_N``) still on the book would fill on the next bar
-            # before the engine's close, growing the position past what
-            # the engine sized for and leaving residual exposure after
-            # the close clips at ``min(req.qty, existing_pos.qty)``.
-            # Identifying continuations by ``po.order_id ==
-            # pos.entry_order_id`` is exact — the strategy can't reuse an
-            # engine-issued order_id, and same-side new entries from the
-            # strategy have different order_ids.
-            for po in order_book.pending_for_symbol(sym):
-                if po.order_id != pos.entry_order_id:
-                    continue
-                if po.cumulative_filled_qty <= 0:
-                    continue
-                order_book.cancel(po.order_id)
-            _record_event(
-                result.execution_diagnostics,
-                "emitted",
-                timestamp=cur_bar.timestamp,
-                symbol=intent.symbol,
-                side=close_side.value,
-                order_type=OrderType.MARKET.value,
-                reason=req.reason,
-            )
-        return engine_order_seq
 
     # ------------------------------------------------------------------
 
