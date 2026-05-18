@@ -40,7 +40,9 @@ def test_founder_agent_instances_are_independent(monkeypatch):
     # identity is observable.
     monkeypatch.setattr(strands, "Agent", lambda **kwargs: MagicMock(name="StrandsAgentStub"))
     monkeypatch.setattr(
-        llm_service, "get_strands_model", lambda team_key: MagicMock(name="ModelStub")
+        llm_service,
+        "get_strands_model",
+        lambda team_key, **kwargs: MagicMock(name="ModelStub"),
     )
 
     from user_agent_founder.agent import FounderAgent

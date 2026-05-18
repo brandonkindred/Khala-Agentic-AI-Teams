@@ -10,7 +10,8 @@ from . import _path_setup  # noqa: F401  # Add blogging to path when run from pr
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-llm_client = get_strands_model("blog")
+# See run_writer_agent.py for rationale on response_format="text".
+llm_client = get_strands_model("blog", response_format="text")
 
 # Enable caching for checkpoint/resume capability
 cache = AgentCache(cache_dir=".agent_cache")

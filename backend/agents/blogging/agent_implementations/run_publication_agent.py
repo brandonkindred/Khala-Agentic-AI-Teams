@@ -55,7 +55,8 @@ Implementing LLM observability is non-negotiable for any serious enterprise AI i
 
 
 def main() -> None:
-    llm = get_strands_model("blog")
+    # See run_writer_agent.py for rationale on response_format="text".
+    llm = get_strands_model("blog", response_format="text")
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
 
