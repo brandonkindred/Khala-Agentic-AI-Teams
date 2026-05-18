@@ -103,7 +103,12 @@ _CONCEPT_TO_INDICATOR_NAME: dict[str, str] = {
 }
 
 
-MarketSampleProvider = Callable[[str], float]
+MarketSampleProvider = Callable[[str, str], float]
+"""(symbol, asset_class) → recent close price in USD.
+
+Implementations must return a strictly positive finite float. NaN / inf /
+non-positive values are interpreted as a missing price and fail Rule 5 closed.
+"""
 
 
 def _default_universe_for(asset_class: str) -> List[str]:
@@ -143,10 +148,13 @@ def _canonicalize_ticker(symbol: str) -> str:
     return s
 
 
-def _default_market_sample_provider(symbol: str) -> float:
-    # Pre: symbol is a non-empty string.
+def _default_market_sample_provider(symbol: str, asset_class: str) -> float:
+    # Pre: symbol and asset_class are non-empty strings.
     assert isinstance(symbol, str) and symbol, "symbol must be a non-empty str"
-    # Post: returns a strictly positive finite price.
+    assert isinstance(asset_class, str) and asset_class, "asset_class must be a non-empty str"
+    # Post: returns a strictly positive finite price. The static fallback is
+    # intentionally arbitrary — real callers inject a `MarketDataService`-backed
+    # provider so high-priced symbols are sized against a real recent close.
     price = 100.0
     assert price > 0, "price must be strictly positive"
     return price
@@ -462,7 +470,7 @@ class SpecReadinessGate:
         out: List[QualityGateResult] = []
         for sym in symbols:
             try:
-                price = float(self._market_sample_provider(sym))
+                price = float(self._market_sample_provider(sym, spec.asset_class))
             except Exception:
                 price = float("nan")
             # Fail closed on NaN / +inf / -inf — the gate cannot validate

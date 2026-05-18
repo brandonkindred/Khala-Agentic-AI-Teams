@@ -252,7 +252,7 @@ def test_rule5_nan_price_fails_closed() -> None:
         target_symbols=["AAPL"],
         asset_class="stocks",
     )
-    gate = SpecReadinessGate(market_sample_provider=lambda sym: float("nan"))
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, asset_class: float("nan"))
     results = gate.validate(spec, backtest_config=_config())
     assert any("no usable price sample" in c for c in _critical(results))
 
@@ -458,12 +458,58 @@ def test_phase_tag_propagates_to_results() -> None:
     assert all(r.phase == "synthesis" for r in synth)
 
 
+def test_orchestrator_wires_readiness_price_provider() -> None:
+    """``StrategyLabOrchestrator`` constructs the gate with a real-price provider.
+
+    The provider invokes ``MarketDataService.fetch_ohlcv``; we verify the
+    wiring by monkeypatching the service to return a sentinel close and
+    confirming Rule 5 uses that price.
+    """
+    from investment_team.market_data_service import OHLCVBar
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    orch = StrategyLabOrchestrator()
+
+    sentinel_bar = OHLCVBar(
+        date="2024-06-01",
+        open=950.0,
+        high=960.0,
+        low=940.0,
+        close=950.0,
+        volume=1_000_000,
+    )
+    orch.market_data_service.fetch_ohlcv = lambda symbol, asset_class, days=5: [sentinel_bar]
+
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=500.0),
+        target_symbols=["NVDA"],
+        asset_class="stocks",
+    )
+    # $500 notional / $950 = 0.526 share — fails the whole-lot check.
+    results = orch.spec_readiness_gate.validate(spec, backtest_config=_config())
+    assert any("qty=" in c and "NVDA" in c for c in _critical(results))
+
+
+def test_readiness_price_provider_falls_back_on_failure() -> None:
+    """Provider returns the static fallback when the data service raises."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    orch = StrategyLabOrchestrator()
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("network down")
+
+    orch.market_data_service.fetch_ohlcv = boom
+    price = orch._readiness_price_provider("AAPL", "stocks")
+    assert price == 100.0
+
+
 def test_custom_market_sample_provider_is_used() -> None:
     spec = _spec(
         sizing=FixedNotionalSizing(notional_usd=500.0),
         target_symbols=["AAPL"],
     )
     # Pretend AAPL is $1000 — $500 notional yields 0.5 share, should fail.
-    gate = SpecReadinessGate(market_sample_provider=lambda sym: 1000.0)
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, asset_class: 1000.0)
     results = gate.validate(spec, backtest_config=_config())
     assert any("qty=" in c for c in _critical(results))

@@ -272,18 +272,48 @@ class StrategyLabOrchestrator:
         self.zero_trade_repair_agent = ZeroTradeRepairAgent()
         self.analysis_agent = AnalysisAgent()
         self.strategy_validator = StrategySpecValidator()
-        self.spec_readiness_gate = SpecReadinessGate()
         self.code_safety_checker = CodeSafetyChecker()
         self.anomaly_detector = BacktestAnomalyDetector()
         self.acceptance_gate = AcceptanceGate()
         self.target_symbol_coverage_gate = TargetSymbolCoverageGate()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
+        # SpecReadinessGate is wired to the live MarketDataService so Rule 5
+        # sizes against real recent closes rather than a synthetic default.
+        self.spec_readiness_gate = SpecReadinessGate(
+            market_sample_provider=self._readiness_price_provider,
+        )
         # Per-failure_phase counter of consecutive refinement rounds where
         # the LLM emitted stray spec-mutating keys. Reset at the start of
         # each ``_run_design_attempt`` and tripped when any phase hits
         # ``_SPEC_MUTATION_TRIP_THRESHOLD``.
         self._consecutive_spec_mutation_rounds: Dict[str, int] = {}
+
+    def _readiness_price_provider(self, symbol: str, asset_class: str) -> float:
+        """Recent-close lookup wired into ``SpecReadinessGate.Rule 5``.
+
+        Pre: ``symbol`` and ``asset_class`` are non-empty strings.
+        Post: returns a strictly positive finite price. Falls back to
+        ``100.0`` only when the provider chain is exhausted, the symbol is
+        unknown, or any unexpected exception is raised — so the gate degrades
+        to its static default rather than crashing the cycle.
+        """
+        assert isinstance(symbol, str) and symbol, "symbol must be a non-empty str"
+        assert isinstance(asset_class, str) and asset_class, "asset_class must be a non-empty str"
+        try:
+            bars = self.market_data_service.fetch_ohlcv(symbol, asset_class, days=5)
+            if bars:
+                close = float(bars[-1].close)
+                if close > 0:
+                    return close
+        except Exception as exc:  # noqa: BLE001 — fail-soft to static default
+            logger.debug(
+                "readiness price provider fell back for %s/%s: %s",
+                symbol,
+                asset_class,
+                exc,
+            )
+        return 100.0
 
     def run_cycle(
         self,
