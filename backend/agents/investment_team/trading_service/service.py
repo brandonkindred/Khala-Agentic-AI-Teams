@@ -1419,6 +1419,28 @@ class TradingService:
             # identity matters and ``fill_simulator.process_bar``'s
             # stale-continuation guard for what consumes the binding.
             engine_exit_bindings[req.client_order_id] = pos.entry_order_id
+            # Retire any other unbound opposite-side strategy orders resting
+            # on the book for this symbol: they were intended to close the
+            # current position, and once the engine emits its own close the
+            # position is going away. Without binding them too, an
+            # unbound GTC/limit strategy exit (``cumulative_filled_qty==0``
+            # AND ``working_against_entry_order_id is None``) would survive
+            # the engine close and, when it later triggers in
+            # ``FillSimulator.process_bar``, fall through to ``_fill_entry``
+            # because ``existing_pos is None`` — opening an unintended
+            # reverse position. Binding ties them to the position's
+            # ``entry_order_id`` so the same stale-continuation guard drops
+            # them when the engine close removes the position.
+            for resting in order_book.pending_for_symbol(sym):
+                if resting.working_against_entry_order_id is not None:
+                    continue
+                if resting.cumulative_filled_qty > 0:
+                    continue
+                resting_side = "long" if resting.request.side == OrderSide.LONG else "short"
+                if resting_side == tracked_side:
+                    # Same-side resting order is an add, not a close — leave alone.
+                    continue
+                resting.working_against_entry_order_id = pos.entry_order_id
             result.execution_diagnostics.orders_emitted += 1
             result.execution_diagnostics.exits_emitted += 1
             firings = result.execution_diagnostics.exit_rule_firings

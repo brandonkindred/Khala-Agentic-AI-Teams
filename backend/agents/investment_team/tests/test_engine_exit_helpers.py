@@ -380,3 +380,142 @@ def test_engine_emission_registers_binding_to_entry_order_id() -> None:
     cid = pending[0].client_order_id
     assert cid in engine_exit_bindings
     assert engine_exit_bindings[cid] == "o1"
+
+
+def test_engine_binds_unbound_resting_strategy_exits_to_position() -> None:
+    """A strategy GTC/limit close resting on the book BEFORE the engine
+    fires a stop-loss must be retired alongside the engine's market close,
+    or it survives the position-close and a later trigger opens an
+    unintended reverse position (``FillSimulator.process_bar`` routes the
+    unbound order to ``_fill_entry`` because ``existing_pos is None``).
+    The engine binds the resting order to the same ``entry_order_id`` so
+    the stale-continuation guard drops it when the engine close fires.
+    """
+    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)  # bar.low=95 trips the 98 stop floor
+    result = TradingServiceResult()
+
+    # Strategy has a resting GTC SELL LIMIT at 200 (a take-profit far
+    # above market) — opposite side to the long position, unbound.
+    resting_strategy_exit = OrderRequest(
+        client_order_id="c1",
+        symbol="AAA",
+        side=OrderSide.SHORT,
+        qty=100.0,
+        order_type=OrderType.LIMIT,
+        limit_price=200.0,
+        tif=TimeInForce.GTC,
+        reason="strategy_take_profit",
+    )
+    resting_po = order_book.submit(
+        resting_strategy_exit,
+        submitted_at="2024-01-05T00:00:00",
+        submitted_equity=100_000.0,
+    )
+    # Sanity: starts unbound.
+    assert resting_po.working_against_entry_order_id is None
+
+    pending: list[OrderRequest] = []
+    svc._maybe_emit_engine_exits(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+        engine_order_seq=0,
+        engine_exit_bindings={},
+    )
+
+    # Engine emitted its stop-loss close…
+    engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
+    assert len(engine_orders) == 1
+    # …and the resting strategy GTC limit is now bound to the same
+    # position. When the engine close fills next bar and removes the
+    # position, the fill simulator's stale guard will drop the GTC at
+    # its next trigger instead of opening a reverse short.
+    assert resting_po.working_against_entry_order_id == "o1"
+
+
+def test_engine_does_not_rebind_already_bound_resting_orders() -> None:
+    """The binding pass must leave already-bound orders alone — e.g. a
+    prior bar's engine exit or a strategy partial that's already in
+    flight against the position. Re-binding to a fresh ``entry_order_id``
+    on every subsequent bar would be a no-op here (same id), but the
+    invariant is what we're guarding.
+    """
+    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)
+    result = TradingServiceResult()
+
+    prior = OrderRequest(
+        client_order_id="c-prior",
+        symbol="AAA",
+        side=OrderSide.SHORT,
+        qty=100.0,
+        order_type=OrderType.LIMIT,
+        limit_price=150.0,
+        tif=TimeInForce.GTC,
+        reason="strategy_other",
+    )
+    prior_po = order_book.submit(
+        prior, submitted_at="2024-01-05T00:00:00", submitted_equity=100_000.0
+    )
+    prior_po.working_against_entry_order_id = "o-other"  # pre-bound elsewhere
+
+    pending: list[OrderRequest] = []
+    svc._maybe_emit_engine_exits(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+        engine_order_seq=0,
+        engine_exit_bindings={},
+    )
+
+    # Binding preserved — engine binding loop must not stomp prior bindings.
+    assert prior_po.working_against_entry_order_id == "o-other"
+
+
+def test_engine_does_not_bind_same_side_resting_orders() -> None:
+    """A resting same-side order is an add, not a close — it has nothing
+    to do with the engine's exit and must not be bound to the position.
+    """
+    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)
+    result = TradingServiceResult()
+
+    # Same-side (LONG) limit — strategy intends to add to the position.
+    resting_add = OrderRequest(
+        client_order_id="c-add",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=50.0,
+        order_type=OrderType.LIMIT,
+        limit_price=80.0,
+        tif=TimeInForce.GTC,
+        reason="strategy_scale_in",
+    )
+    add_po = order_book.submit(
+        resting_add, submitted_at="2024-01-05T00:00:00", submitted_equity=100_000.0
+    )
+
+    pending: list[OrderRequest] = []
+    svc._maybe_emit_engine_exits(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+        engine_order_seq=0,
+        engine_exit_bindings={},
+    )
+
+    # Same-side resting order stays unbound — it isn't a close.
+    assert add_po.working_against_entry_order_id is None
