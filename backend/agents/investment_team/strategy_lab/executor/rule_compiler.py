@@ -1,22 +1,31 @@
 """Pure-functional evaluator for structured ``ExitRule`` discriminated unions.
 
 Issue #527 — the executor's bar loop owns enforcement of structured exit
-rules (``TimeStopRule`` / ``StopLossRule`` / ``TakeProfitRule``). Strategy
-code authors only the entry/signal logic; the engine reads the spec's
-``exit_rules`` and emits close orders when a rule fires.
+rules. Strategy code authors the entry/signal logic; the engine reads
+``StrategySpec.exit_rules`` and emits close orders when a rule fires.
 
-This module is intentionally side-effect free: it takes the current per-
-position state and the current bar, and returns a list of ``ExitIntent``
-records. The caller (``TradingService``) is responsible for translating
-each intent into an actual close order on the order book.
+Supported rule kinds (matching the discriminated ``ExitRule`` union in
+``spec_dsl``):
 
-``SignalExitRule`` is deferred to a follow-up — the engine does not have a
-shared per-bar indicator runtime today (the streaming harness computes
-indicators inside the strategy subprocess, not the parent), so evaluating
-``Predicate`` would require new plumbing out of scope for the MVP. The
-evaluator treats it as a silent no-op (``False`` from ``_rule_triggers``)
-so a spec mixing ``SignalExitRule`` with other rules still gets the
-other rules enforced.
+* ``StopLossRule(pct, basis)`` — close when the bar's low (long) or
+  high (short) crosses the rule's price floor. ``basis`` selects
+  ``entry_price`` / ``trailing_high`` / ``trailing_low``.
+* ``TakeProfitRule(pct)`` — close when the bar's high (long) or low
+  (short) clears the rule's price target.
+* ``SignalExitRule(when)`` — close when a predicate fires. Not yet
+  engine-enforced (the parent engine has no per-bar indicator runtime
+  today); the evaluator treats it as a silent no-op so a spec mixing
+  signal exits with stop/take-profit still gets the latter enforced.
+
+Bar-counting "time stops" are deliberately absent: real traders close
+on price action, P&L, or signal reversal — not on an arbitrary "Nth
+bar held" counter.
+
+This module is intentionally side-effect free: it takes the current
+per-position state and the current bar, and returns a list of
+``ExitIntent`` records. The caller (``TradingService``) is responsible
+for translating each intent into an actual close order on the order
+book.
 """
 
 from __future__ import annotations
@@ -29,10 +38,9 @@ from ..spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
-    TimeStopRule,
 )
 
-ExitRuleKind = Literal["time_stop", "stop_loss", "take_profit", "signal_exit"]
+ExitRuleKind = Literal["stop_loss", "take_profit", "signal_exit"]
 
 
 @dataclass(frozen=True)
@@ -43,7 +51,6 @@ class PositionState:
     side: Literal["long", "short"]
     qty: float
     entry_price: float
-    bars_held: int
     high_since_entry: float
     low_since_entry: float
 
@@ -107,8 +114,6 @@ def evaluate_exit_rules(
 
 
 def _kind_of(rule: ExitRule) -> ExitRuleKind:
-    if isinstance(rule, TimeStopRule):
-        return "time_stop"
     if isinstance(rule, StopLossRule):
         return "stop_loss"
     if isinstance(rule, TakeProfitRule):
@@ -119,12 +124,6 @@ def _kind_of(rule: ExitRule) -> ExitRuleKind:
 
 
 def _rule_triggers(rule: ExitRule, position: PositionState, bar: BarSnapshot) -> bool:
-    if isinstance(rule, TimeStopRule):
-        # ``n_bars`` counts inclusively from the entry bar — ``n_bars=1`` means
-        # "close on the entry bar itself", ``n_bars=10`` means close once the
-        # position has been held for at least 10 bars (entry + 9 subsequent).
-        return position.bars_held >= rule.n_bars
-
     if isinstance(rule, StopLossRule):
         return _stop_loss_triggers(rule, position, bar)
 

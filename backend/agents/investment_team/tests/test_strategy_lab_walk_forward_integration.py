@@ -34,7 +34,7 @@ from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     Predicate,
     SignalExitRule,
-    TimeStopRule,
+    StopLossRule,
 )
 
 # ---------------------------------------------------------------------------
@@ -599,7 +599,7 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
                 when=Predicate(lhs="bar.close", op=">", rhs=0),
             ).model_dump()
         ],
-        "exit_rules": [TimeStopRule(n_bars=5).model_dump()],
+        "exit_rules": [StopLossRule(pct=0.20).model_dump()],
         "risk_limits": {},
         "speculative": False,
     }
@@ -718,7 +718,7 @@ def _wire_run_cycle_stubs(
                 when=Predicate(lhs="bar.close", op=">", rhs=0),
             ).model_dump()
         ],
-        "exit_rules": [TimeStopRule(n_bars=5).model_dump()],
+        "exit_rules": [StopLossRule(pct=0.20).model_dump()],
         "risk_limits": {},
         "speculative": False,
     }

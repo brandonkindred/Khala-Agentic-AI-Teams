@@ -42,7 +42,7 @@ from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     Predicate,
     SignalExitRule,
-    TimeStopRule,
+    StopLossRule,
 )
 from investment_team.tool_agents.web_interfaces import (
     BrowserType,
@@ -1818,7 +1818,7 @@ def _make_lab_record(
         signal_definition="sig",
         timeframe="1d",
         entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=1))],
-        exit_rules=[TimeStopRule(n_bars=1)],
+        exit_rules=[StopLossRule(pct=0.03)],
         risk_limits={},
         speculative=False,
     )

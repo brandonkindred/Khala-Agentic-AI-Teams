@@ -134,16 +134,17 @@ describe('InvestmentStrategyComponent', () => {
     });
   });
 
-  it('prefills a TimeStopRule into the exit-rules array', () => {
+  it('prefills a StopLossRule into the exit-rules array', () => {
     const spec = baseSpec({
-      exit_rules: [{ kind: 'time_stop', n_bars: 10, note: '' }],
+      exit_rules: [{ kind: 'stop_loss', pct: 0.03, basis: 'entry_price', note: '' }],
     });
     component.populateForm(spec);
 
     expect(component.exitRulesArray.length).toBe(1);
     const row = component.exitRulesArray.at(0);
-    expect(row.get('kind')!.value).toBe('time_stop');
-    expect(row.get('n_bars')!.value).toBe(10);
+    expect(row.get('kind')!.value).toBe('stop_loss');
+    expect(row.get('pct')!.value).toBe(0.03);
+    expect(row.get('basis')!.value).toBe('entry_price');
     expect(component.hasPrefillErrors).toBe(false);
   });
 
@@ -250,36 +251,26 @@ describe('InvestmentStrategyComponent', () => {
     expect(params.get('period')).not.toBeNull();
   });
 
-  it('keeps the form valid after adding a time_stop exit rule', async () => {
+  it('keeps the form valid after adding a stop_loss exit rule', async () => {
     component.form.patchValue({ hypothesis: 'h', signal_definition: 's' });
     component.addExitRule();
     fixture.detectChanges();
 
-    // The exit rule defaults to time_stop with n_bars=10. The nested `when`
+    // The exit rule defaults to stop_loss with pct=0.05. The nested `when`
     // predicate would otherwise mark the form invalid via its required SMA
     // params; it must be disabled when kind != signal_exit.
     expect(component.form.valid).toBe(true);
 
     await component.createStrategy();
     const req = httpMock.expectOne(strategiesUrl);
-    expect(req.request.body.exit_rules).toEqual([{ kind: 'time_stop', n_bars: 10 }]);
+    expect(req.request.body.exit_rules).toEqual([
+      { kind: 'stop_loss', pct: 0.05, basis: 'entry_price' },
+    ]);
     req.flush({
-      strategy_id: 'strat-ts',
-      strategy: baseSpec({ strategy_id: 'strat-ts' }),
+      strategy_id: 'strat-sl',
+      strategy: baseSpec({ strategy_id: 'strat-sl' }),
       message: 'ok',
     });
-  });
-
-  it('rejects fractional n_bars on time_stop exit rules', () => {
-    component.form.patchValue({ hypothesis: 'h', signal_definition: 's' });
-    component.addExitRule();
-    fixture.detectChanges();
-
-    const rule = component.exitRulesArray.at(0);
-    rule.get('n_bars')!.setValue(1.5);
-
-    expect(rule.get('n_bars')!.hasError('notInteger')).toBe(true);
-    expect(component.form.valid).toBe(false);
   });
 
   it('drops blank optional indicator params from the wire payload', async () => {

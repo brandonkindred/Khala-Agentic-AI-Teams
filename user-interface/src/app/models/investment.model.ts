@@ -300,14 +300,17 @@ export interface EntryRule {
   note?: string;
 }
 
-export interface TimeStopRule    { kind: 'time_stop'; n_bars: number; note?: string; }
 export interface StopLossRule    { kind: 'stop_loss'; pct: number; basis?: 'entry_price' | 'trailing_high' | 'trailing_low'; note?: string; }
 export interface TakeProfitRule  { kind: 'take_profit'; pct: number; note?: string; }
 export interface SignalExitRule  { kind: 'signal_exit'; when: Predicate; note?: string; }
 
-export type ExitRule = TimeStopRule | StopLossRule | TakeProfitRule | SignalExitRule;
+// Exit rules: structured close conditions the engine enforces (stop-loss /
+// take-profit) plus aspirational signal-based exits. Bar-counting "time
+// stops" are deliberately NOT a member — real traders close on price,
+// P&L, or signal reversal.
+export type ExitRule = StopLossRule | TakeProfitRule | SignalExitRule;
 
-export const EXIT_RULE_KINDS = ['time_stop', 'stop_loss', 'take_profit', 'signal_exit'] as const;
+export const EXIT_RULE_KINDS = ['stop_loss', 'take_profit', 'signal_exit'] as const;
 export type ExitRuleKind = typeof EXIT_RULE_KINDS[number];
 
 export type StopLossBasis = 'entry_price' | 'trailing_high' | 'trailing_low';

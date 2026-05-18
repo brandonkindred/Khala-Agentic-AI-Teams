@@ -37,7 +37,7 @@ from investment_team.strategy_lab.spec_dsl import (
     IndicatorRef,
     Predicate,
     StopLossRule,
-    TimeStopRule,
+    TakeProfitRule,
     format_rules_for_prompt,
     format_sizing_rule,
 )
@@ -59,7 +59,7 @@ def _render_inputs() -> dict[str, object]:
             rhs=IndicatorRef(name="sma", params={"period": 50}),
         ),
     )
-    exits = [TimeStopRule(n_bars=10), StopLossRule(pct=0.02)]
+    exits = [TakeProfitRule(pct=0.05), StopLossRule(pct=0.02)]
     sizing = FixedFractionSizing(fraction=0.01)
     return {
         "asset_class": "equity",

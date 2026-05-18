@@ -6,9 +6,11 @@ end-to-end:
 
 * Tracker resets when the position identity (``entry_order_id``)
   changes — a same-bar exit + re-entry must not inherit stale
-  ``bars_held`` / watermarks.
-* Engine dedup ignores non-market strategy orders (limit/stop closes
-  far from the market aren't guaranteed to fill).
+  trailing watermarks.
+* Engine emits at full ``pos.qty`` regardless of any same-bar strategy
+  close (the fill simulator does dedup at fill time via the binding).
+* In-flight engine markets prevent re-emission so the book doesn't
+  stack redundant engine closes across bars.
 * Engine emissions bind to ``pos.entry_order_id`` via
   ``engine_exit_bindings`` so the fill simulator's stale-continuation
   guard can drop them when a prior strategy exit closes the position
@@ -24,10 +26,7 @@ from dataclasses import dataclass
 from typing import Dict
 
 from investment_team.models import BacktestConfig
-from investment_team.strategy_lab.spec_dsl import (
-    StopLossRule,
-    TimeStopRule,
-)
+from investment_team.strategy_lab.spec_dsl import StopLossRule
 from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio, Position
 from investment_team.trading_service.service import (
@@ -104,17 +103,15 @@ def _bar(symbol: str = "AAA", **kwargs) -> _MockBar:
 
 def test_tracker_resets_when_position_identity_changes() -> None:
     """Same-bar exit + re-entry replaces the underlying ``Position`` with a
-    new ``entry_order_id``. The tracker must reset to ``bars_held=1`` /
-    fresh watermarks against the new entry — not carry the prior trade's
-    stale state, which could fire a ``TimeStopRule`` or trailing-stop
-    immediately.
+    new ``entry_order_id``. The tracker must reset trailing watermarks
+    against the new entry — not carry the prior trade's stale state,
+    which could fire a trailing-stop immediately.
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
             side="long",
             entry_price=100.0,
             entry_order_id="o1",
-            bars_held=9,
             high_since_entry=120.0,
             low_since_entry=95.0,
         )
@@ -138,21 +135,19 @@ def test_tracker_resets_when_position_identity_changes() -> None:
     state = tracker["AAA"]
     assert state.entry_order_id == "o2"
     assert state.entry_price == 110.0
-    assert state.bars_held == 1
     assert state.high_since_entry == 112.0
     assert state.low_since_entry == 109.0
 
 
 def test_tracker_carries_over_when_entry_order_id_unchanged() -> None:
-    """Same ``entry_order_id`` → same trade. bars_held++; weighted-average
-    entry refresh from scale-ins; watermarks extend.
+    """Same ``entry_order_id`` → same trade. Weighted-average entry refresh
+    from scale-ins; watermarks extend.
     """
     tracker: Dict[str, _TrackedPosition] = {
         "AAA": _TrackedPosition(
             side="long",
             entry_price=100.0,
             entry_order_id="o1",
-            bars_held=3,
             high_since_entry=105.0,
             low_since_entry=98.0,
         )
@@ -176,7 +171,6 @@ def test_tracker_carries_over_when_entry_order_id_unchanged() -> None:
 
     state = tracker["AAA"]
     assert state.entry_order_id == "o1"
-    assert state.bars_held == 4
     assert state.entry_price == 102.5  # scale-in refresh
     assert state.high_since_entry == 108.0  # extends
     assert state.low_since_entry == 97.0  # extends
@@ -188,7 +182,6 @@ def test_tracker_drops_entry_when_position_closed() -> None:
             side="long",
             entry_price=100.0,
             entry_order_id="o1",
-            bars_held=5,
             high_since_entry=110.0,
             low_since_entry=95.0,
         )
@@ -216,7 +209,6 @@ def _populate_tracker_and_portfolio() -> tuple[Dict[str, _TrackedPosition], Port
             side="long",
             entry_price=100.0,
             entry_order_id="o1",
-            bars_held=10,
             high_since_entry=110.0,
             low_since_entry=95.0,
         )
@@ -242,7 +234,8 @@ def test_engine_always_emits_at_full_position_qty() -> None:
     Far-from-market limit close from the strategy: not guaranteed to
     fill, so the engine emits its full-size market close regardless.
     """
-    svc = _service(exit_rules=[TimeStopRule(n_bars=10)])
+    # bar.low=95 trips a StopLossRule(pct=0.02) (floor=98).
+    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar()
     result = TradingServiceResult()
@@ -282,14 +275,10 @@ def test_engine_emits_even_when_strategy_submits_full_market_close() -> None:
     simulator's stale-continuation guard (via binding) drops the engine
     close at fill time if the strategy's order fully closed the position
     first, and clips the engine close to the residual qty otherwise.
-
-    This swaps the pre-fix expectation (engine skipped on full market
-    cover) for the post-fix expectation (always emit; let the fill
-    simulator handle the rest).
     """
-    svc = _service(exit_rules=[TimeStopRule(n_bars=10)])
+    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
-    bar = _bar()
+    bar = _bar()  # low=95 trips the 98 floor
     result = TradingServiceResult()
 
     pending = [
@@ -316,17 +305,17 @@ def test_engine_emits_even_when_strategy_submits_full_market_close() -> None:
     engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
     assert len(engine_orders) == 1
     assert engine_orders[0].qty == 100.0
-    assert result.execution_diagnostics.exit_rule_firings.get("time_stop") == 1
+    assert result.execution_diagnostics.exit_rule_firings.get("stop_loss") == 1
 
 
 def test_engine_skips_when_prior_engine_exit_still_pending() -> None:
     """A prior bar's engine market exit (e.g. ``REQUEUE_NEXT_BAR`` residual
     that didn't fully fill on the next bar) is still pending on the order
     book. The engine must NOT re-emit while it's still in flight —
-    otherwise every subsequent bar where ``bars_held >= n_bars`` stacks
+    otherwise every subsequent bar where the rule re-triggers stacks
     another engine market, polluting the book and the diagnostics.
     """
-    svc = _service(exit_rules=[TimeStopRule(n_bars=10)])
+    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _populate_tracker_and_portfolio()
     bar = _bar()
     result = TradingServiceResult()
@@ -339,7 +328,7 @@ def test_engine_skips_when_prior_engine_exit_still_pending() -> None:
         qty=100.0,
         order_type=OrderType.MARKET,
         tif=TimeInForce.DAY,
-        reason=f"{ENGINE_EXIT_REASON_PREFIX}time_stop",
+        reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
     )
     order_book.submit(
         prior_engine_exit, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0

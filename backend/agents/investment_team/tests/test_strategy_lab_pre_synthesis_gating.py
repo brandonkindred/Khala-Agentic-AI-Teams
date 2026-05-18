@@ -25,7 +25,7 @@ from investment_team.strategy_lab.spec_dsl import (
     IndicatorRef,
     Predicate,
     SignalExitRule,
-    TimeStopRule,
+    StopLossRule,
 )
 
 
@@ -43,7 +43,7 @@ def _rsi_exit_dict() -> Dict[str, Any]:
 
 
 def _time_stop_exit_dict() -> Dict[str, Any]:
-    return TimeStopRule(n_bars=5).model_dump()
+    return StopLossRule(pct=0.03).model_dump()
 
 
 def _config() -> BacktestConfig:

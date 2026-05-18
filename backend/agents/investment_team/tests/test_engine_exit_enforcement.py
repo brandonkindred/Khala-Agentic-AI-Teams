@@ -25,7 +25,6 @@ from investment_team.strategy_lab.spec_dsl import (
     Predicate,
     StopLossRule,
     TakeProfitRule,
-    TimeStopRule,
 )
 from investment_team.trading_service.modes.backtest import run_backtest
 from investment_team.trading_service.service import ENGINE_EXIT_REASON_PREFIX
@@ -179,27 +178,13 @@ def _spec(*, exit_rules) -> StrategySpec:
 # ---------------------------------------------------------------------------
 
 
-def test_time_stop_closes_position_strategy_left_open() -> None:
-    spec = _spec(exit_rules=[TimeStopRule(n_bars=5)])
-    run = run_backtest(strategy=spec, config=_config(), market_data=_flat_bars())
-
-    assert run.service_result.error is None, run.service_result.error
-    # At least one closed trade — engine emitted the close.
-    assert len(run.trades) >= 1
-    # Every trade respects the time stop within the +1 bar fill-lag ceiling.
-    for trade in run.trades:
-        assert trade.hold_days <= 6, (
-            f"trade {trade.trade_num} held {trade.hold_days} days, "
-            "expected <= 6 (n_bars=5 + 1 bar fill lag)"
-        )
-    # Diagnostics records the firing.
-    diag = run.service_result.execution_diagnostics
-    assert diag.exit_rule_firings.get("time_stop", 0) >= 1, diag.exit_rule_firings
-
-
 def test_engine_emitted_close_carries_reason_prefix() -> None:
-    spec = _spec(exit_rules=[TimeStopRule(n_bars=3)])
-    run = run_backtest(strategy=spec, config=_config(), market_data=_flat_bars())
+    spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
+    run = run_backtest(
+        strategy=spec,
+        config=_config(),
+        market_data=_falling_bars(n_pre_drop=5, drop_bar_low=90.0, n_post_drop=10),
+    )
 
     diag = run.service_result.execution_diagnostics
     emitted = [
@@ -215,7 +200,7 @@ def test_engine_emitted_close_carries_reason_prefix() -> None:
     for e in emitted:
         # Reason format: ``engine_exit:<rule_kind>``.
         suffix = (e.reason or "").split(":", 1)[1]
-        assert suffix in {"time_stop", "stop_loss", "take_profit"}, e.reason
+        assert suffix in {"stop_loss", "take_profit"}, e.reason
 
 
 def test_stop_loss_closes_when_price_breaks_floor() -> None:
@@ -277,7 +262,7 @@ def test_strategy_emitted_close_does_not_skip_engine_emission() -> None:
     """
     strategy_with_self_exit = textwrap.dedent(
         '''\
-        """Enter long once, exit on bar 3 — same bar a TimeStopRule(n_bars=2) fires."""
+        """Enter long once, then self-exit on the bar a stop-loss fires."""
         from contract import OrderSide, OrderType, Strategy
 
 
@@ -292,7 +277,9 @@ def test_strategy_emitted_close_does_not_skip_engine_emission() -> None:
                         symbol=bar.symbol, side=OrderSide.LONG, qty=10,
                         order_type=OrderType.MARKET, reason="self_entry",
                     )
-                elif pos is not None and self._bar_count >= 3:
+                elif pos is not None and bar.low < 92.0:
+                    # On the drop bar (low=90), the engine StopLossRule(pct=0.05)
+                    # ALSO fires. Both orders queue.
                     ctx.submit_order(
                         symbol=bar.symbol, side=OrderSide.SHORT, qty=pos.qty,
                         order_type=OrderType.MARKET, reason="self_exit",
@@ -316,11 +303,15 @@ def test_strategy_emitted_close_does_not_skip_engine_emission() -> None:
                 ),
             )
         ],
-        exit_rules=[TimeStopRule(n_bars=2)],
+        exit_rules=[StopLossRule(pct=0.05)],
         strategy_code=strategy_with_self_exit,
     )
 
-    run = run_backtest(strategy=spec, config=_config(), market_data=_flat_bars())
+    run = run_backtest(
+        strategy=spec,
+        config=_config(),
+        market_data=_falling_bars(n_pre_drop=5, drop_bar_low=90.0, n_post_drop=10),
+    )
 
     assert run.service_result.error is None, run.service_result.error
     diag = run.service_result.execution_diagnostics
@@ -328,7 +319,7 @@ def test_strategy_emitted_close_does_not_skip_engine_emission() -> None:
     # clipping of the strategy's market order. The fill simulator's
     # stale-continuation guard drops whichever of the two orders arrives
     # against an already-closed position.
-    assert diag.exit_rule_firings.get("time_stop", 0) >= 1, (
+    assert diag.exit_rule_firings.get("stop_loss", 0) >= 1, (
         f"engine should emit even when strategy also submits a same-bar close; "
         f"firings={diag.exit_rule_firings}"
     )
@@ -336,13 +327,13 @@ def test_strategy_emitted_close_does_not_skip_engine_emission() -> None:
 
 def test_partial_strategy_unwind_does_not_suppress_engine_close() -> None:
     """If the strategy submits a partial unwind (e.g. sells 1 of 10 long
-    shares) on the bar a time-stop fires, the engine must still emit a
+    shares) on the bar a stop-loss fires, the engine must still emit a
     close for the residual qty rather than treating the partial as a
     full close. Regression for the P1 review comment on issue #527 PR.
     """
     strategy_with_partial_unwind = textwrap.dedent(
         '''\
-        """Enter 10 shares, partial-unwind 1 share on the bar a TimeStop fires."""
+        """Enter 10 shares, partial-unwind 1 share on the bar a stop-loss fires."""
         from contract import OrderSide, OrderType, Strategy
 
 
@@ -357,10 +348,11 @@ def test_partial_strategy_unwind_does_not_suppress_engine_close() -> None:
                         symbol=bar.symbol, side=OrderSide.LONG, qty=10,
                         order_type=OrderType.MARKET, reason="self_entry",
                     )
-                elif pos is not None and self._bar_count == 3:
-                    # Token partial: sell 1 of 10. Engine TimeStopRule(n_bars=3)
-                    # should still emit a close for the residual 9 — not be
-                    # suppressed by this 1-share decoration.
+                elif pos is not None and bar.low < 92.0:
+                    # Token partial: sell 1 of 10 on the drop bar. The engine's
+                    # ``StopLossRule(pct=0.05)`` should still emit a close for
+                    # the residual 9 — not be suppressed by this 1-share
+                    # decoration.
                     ctx.submit_order(
                         symbol=bar.symbol, side=OrderSide.SHORT, qty=1,
                         order_type=OrderType.MARKET, reason="partial_unwind",
@@ -372,7 +364,7 @@ def test_partial_strategy_unwind_does_not_suppress_engine_close() -> None:
         authored_by="tests",
         asset_class="equity",
         hypothesis="partial unwind doesn't suppress engine close",
-        signal_definition="enter 10, partial unwind 1 same bar TimeStop fires",
+        signal_definition="enter 10, partial unwind 1 same bar stop-loss fires",
         timeframe="1d",
         entry_rules=[
             EntryRule(
@@ -384,16 +376,20 @@ def test_partial_strategy_unwind_does_not_suppress_engine_close() -> None:
                 ),
             )
         ],
-        exit_rules=[TimeStopRule(n_bars=3)],
+        exit_rules=[StopLossRule(pct=0.05)],
         strategy_code=strategy_with_partial_unwind,
     )
 
-    run = run_backtest(strategy=spec, config=_config(), market_data=_flat_bars())
+    run = run_backtest(
+        strategy=spec,
+        config=_config(),
+        market_data=_falling_bars(n_pre_drop=5, drop_bar_low=90.0, n_post_drop=10),
+    )
 
     assert run.service_result.error is None, run.service_result.error
     diag = run.service_result.execution_diagnostics
-    # Engine MUST still fire a time-stop close (for the residual 9 shares).
-    assert diag.exit_rule_firings.get("time_stop", 0) >= 1, (
+    # Engine MUST still fire a stop-loss close (for the residual 9 shares).
+    assert diag.exit_rule_firings.get("stop_loss", 0) >= 1, (
         "engine should still fire engine_exit when strategy only partially "
         f"unwinds; firings={diag.exit_rule_firings}"
     )
@@ -409,6 +405,6 @@ def test_chunked_path_rejected_when_exit_rules_present(monkeypatch: pytest.Monke
     rather than silently lose enforcement (issue #527 scope decision).
     """
     monkeypatch.setenv("BAR_CHUNK_SIZE", "8")
-    spec = _spec(exit_rules=[TimeStopRule(n_bars=5)])
+    spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
     with pytest.raises(NotImplementedError, match="chunked-bar protocol"):
         run_backtest(strategy=spec, config=_config(), market_data=_flat_bars())

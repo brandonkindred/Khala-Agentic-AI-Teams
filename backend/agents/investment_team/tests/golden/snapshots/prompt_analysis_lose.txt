@@ -5,7 +5,7 @@ Asset class: equity
 Hypothesis: Trend-followers profit when SMA(20) crosses above SMA(50).
 Signal: SMA(20) > SMA(50)
 Intended entry rules (as authored — may not all be machine-enforced): long when sma(20) > sma(50)
-Engine-enforced exit rules (structured DSL applied by the parent engine every bar): exit after 10 bars, stop loss 2%
+Engine-enforced exit rules (structured DSL applied by the parent engine every bar): take profit 5%, stop loss 2%
 Sizing / risk: risk 1% per trade
 Rationale for testing: Validate SMA-cross trend following on the equity sleeve.
 
@@ -23,7 +23,7 @@ Trade 1: BUY AAA on 2024-01-15 @ 100.00, SELL on 2024-01-25 @ 102.50 (+2.5%)
 Trade 2: BUY BBB on 2024-02-01 @ 50.00, SELL on 2024-02-11 @ 49.00 (-2.0%)
 
 ## Instructions
-Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced for `TimeStopRule`, `StopLossRule`, and `TakeProfitRule`: the parent engine emits closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. a tight cluster of N-day holds points to a time stop firing). `SignalExitRule` entries in the list above are NOT yet engine-enforced — treat any predicate-based exit prose the same way as entry intent.
+Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced for `StopLossRule` and `TakeProfitRule`: the parent engine emits closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. losing trades clustered near the stop-loss floor point to it firing). `SignalExitRule` entries in the list above are NOT yet engine-enforced — treat any predicate-based exit prose the same way as entry intent.
 Think step by step: what failure modes explain weak performance — signal timing, risk/reward asymmetry, cost drag, or rules misaligned with the market regime implied by the results?
 Use the trade-level evidence where it supports your reasoning.
 Write 5-8 sentences. Be specific about *why* this strategy underperformed.

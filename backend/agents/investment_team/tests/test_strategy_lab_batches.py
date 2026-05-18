@@ -32,7 +32,7 @@ from investment_team.models import (  # noqa: E402
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     Predicate,
-    TimeStopRule,
+    StopLossRule,
 )
 
 
@@ -64,7 +64,7 @@ def _make_record(idx: int, config: BacktestConfig) -> StrategyLabRecord:
         signal_definition="sig",
         timeframe="1d",
         entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
-        exit_rules=[TimeStopRule(n_bars=5)],
+        exit_rules=[StopLossRule(pct=0.03)],
         risk_limits={},
         speculative=False,
     )

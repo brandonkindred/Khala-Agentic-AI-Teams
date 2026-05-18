@@ -15,7 +15,6 @@ from investment_team.models import (
     TradeRecord,
 )
 from investment_team.strategy_lab.quality_gates.exit_rule_conformance import (
-    GATE,
     ExitRuleConformanceGate,
 )
 from investment_team.strategy_lab.spec_dsl import (
@@ -24,7 +23,6 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
-    TimeStopRule,
 )
 
 
@@ -85,95 +83,6 @@ def test_no_exit_rules_skips_with_info() -> None:
     assert results[0].passed is True
     assert results[0].severity == "info"
     assert "empty" in results[0].details.lower()
-
-
-# ---------------------------------------------------------------------------
-# TimeStopRule
-# ---------------------------------------------------------------------------
-
-
-def test_time_stop_pass_within_ceiling() -> None:
-    gate = ExitRuleConformanceGate()
-    trades = [_trade(hold_days=h) for h in (1, 3, 5)]
-    results = gate.check(
-        exit_rules=[TimeStopRule(n_bars=5)],
-        trades=trades,
-        diagnostics=_diagnostics(time_stop=2),
-        config=_config(),
-    )
-    # First result is the TimeStop check; gate may append an aggregate info row.
-    time_stop = [r for r in results if "TimeStopRule" in r.details]
-    assert all(r.passed for r in time_stop), [r.details for r in time_stop]
-
-
-def test_time_stop_fail_when_trade_exceeds_ceiling() -> None:
-    gate = ExitRuleConformanceGate()
-    # n_bars=5 → ceiling = 5 + ceil(10/5) + ceil(5/25) + 3 = 5+2+1+3 = 11.
-    # hold_days=20 is well past the weekend/holiday-tolerant ceiling.
-    trades = [_trade(hold_days=h) for h in (1, 20, 4)]
-    results = gate.check(
-        exit_rules=[TimeStopRule(n_bars=5)],
-        trades=trades,
-        diagnostics=_diagnostics(),
-        config=_config(),
-    )
-    fail = [r for r in results if not r.passed]
-    assert len(fail) == 1
-    assert fail[0].severity == "critical"
-    assert "TimeStopRule" in fail[0].details
-    assert fail[0].gate_name == GATE
-
-
-def test_time_stop_tolerates_weekend_and_holiday_gaps() -> None:
-    """A compliant 1-bar hold entered Friday and closed Monday records
-    ``hold_days==3`` because the calendar wraps a weekend. The ceiling
-    must be generous enough to absorb that — otherwise the gate fires a
-    false critical and vetoes ``is_winning`` on perfectly clean runs.
-    Regression for the P2 review comment on issue #527 PR.
-    """
-    gate = ExitRuleConformanceGate()
-    # TimeStopRule(n_bars=1) → ceiling = 1 + 1 + 1 + 3 = 6. A Fri-entry
-    # / Mon-fill 1-bar hold (hold_days=3) is well under 6.
-    trades = [_trade(hold_days=3)]
-    results = gate.check(
-        exit_rules=[TimeStopRule(n_bars=1)],
-        trades=trades,
-        diagnostics=_diagnostics(time_stop=1),
-        config=_config(),
-    )
-    fails = [r for r in results if not r.passed]
-    assert fails == [], [r.details for r in fails]
-
-
-def test_time_stop_skipped_on_sub_daily_timeframe() -> None:
-    gate = ExitRuleConformanceGate()
-    trades = [_trade(hold_days=99)]  # would fail on daily
-    results = gate.check(
-        exit_rules=[TimeStopRule(n_bars=5)],
-        trades=trades,
-        diagnostics=_diagnostics(),
-        config=_config(),
-        timeframe="15m",
-    )
-    # No critical violations; just info "skipped on sub-daily".
-    fails = [r for r in results if not r.passed]
-    assert fails == []
-    skipped = [r for r in results if "skipped" in r.details and "15m" in r.details]
-    assert skipped
-
-
-def test_time_stop_ceiling_absorbs_weekends_and_fill_lag() -> None:
-    # n_bars=10 → ceiling = 10 + ceil(20/5) + ceil(10/25) + 3 = 10+4+1+3 = 18.
-    # 18 calendar days easily covers 10 trading days + 2 weekends + holiday + fill lag.
-    gate = ExitRuleConformanceGate()
-    results = gate.check(
-        exit_rules=[TimeStopRule(n_bars=10)],
-        trades=[_trade(hold_days=18)],
-        diagnostics=_diagnostics(),
-        config=_config(),
-    )
-    fails = [r for r in results if not r.passed]
-    assert fails == []
 
 
 # ---------------------------------------------------------------------------
@@ -265,9 +174,9 @@ def test_take_profit_with_other_rules_is_informational() -> None:
     gate = ExitRuleConformanceGate()
     trades = [_trade(return_pct=1.0)]
     results = gate.check(
-        exit_rules=[TimeStopRule(n_bars=10), TakeProfitRule(pct=0.05)],
+        exit_rules=[StopLossRule(pct=0.05), TakeProfitRule(pct=0.05)],
         trades=trades,
-        diagnostics=_diagnostics(time_stop=1),
+        diagnostics=_diagnostics(stop_loss=1),
         config=_config(),
     )
     fails = [r for r in results if not r.passed]
@@ -307,24 +216,24 @@ def test_signal_exit_rule_is_informational_only() -> None:
 
 def test_diagnostics_summary_includes_firings_breakdown() -> None:
     gate = ExitRuleConformanceGate()
-    diag = _diagnostics(time_stop=3, stop_loss=1)
+    diag = _diagnostics(stop_loss=3, take_profit=1)
     results = gate.check(
-        exit_rules=[TimeStopRule(n_bars=10)],
-        trades=[_trade(hold_days=5)],
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=[_trade(return_pct=-1.0)],
         diagnostics=diag,
         config=_config(),
     )
     summary = [r for r in results if "engine_exits" in r.details]
     assert summary, [r.details for r in results]
-    assert "time_stop=3" in summary[0].details
-    assert "stop_loss=1" in summary[0].details
+    assert "stop_loss=3" in summary[0].details
+    assert "take_profit=1" in summary[0].details
 
 
 def test_diagnostics_summary_handles_no_firings() -> None:
     gate = ExitRuleConformanceGate()
     results = gate.check(
-        exit_rules=[TimeStopRule(n_bars=10)],
-        trades=[_trade(hold_days=5)],
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=[_trade(return_pct=1.0)],
         diagnostics=_diagnostics(),
         config=_config(),
     )
@@ -341,18 +250,17 @@ def test_diagnostics_summary_handles_no_firings() -> None:
 def test_multi_rule_all_pass_returns_no_failures() -> None:
     gate = ExitRuleConformanceGate()
     trades: List[TradeRecord] = [
-        _trade(trade_num=1, hold_days=3, return_pct=-2.0),
-        _trade(trade_num=2, hold_days=5, return_pct=1.0),
-        _trade(trade_num=3, hold_days=2, return_pct=6.0),
+        _trade(trade_num=1, return_pct=-2.0),
+        _trade(trade_num=2, return_pct=1.0),
+        _trade(trade_num=3, return_pct=6.0),
     ]
     results = gate.check(
         exit_rules=[
-            TimeStopRule(n_bars=10),
             StopLossRule(pct=0.05),
             TakeProfitRule(pct=0.05),
         ],
         trades=trades,
-        diagnostics=_diagnostics(time_stop=1, stop_loss=1, take_profit=1),
+        diagnostics=_diagnostics(stop_loss=1, take_profit=1),
         config=_config(),
     )
     fails = [r for r in results if not r.passed]

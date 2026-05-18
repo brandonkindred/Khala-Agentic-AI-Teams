@@ -37,7 +37,7 @@ from investment_team.strategy_lab.spec_dsl import (
     IndicatorRef,
     Predicate,
     SignalExitRule,
-    TimeStopRule,
+    StopLossRule,
 )
 from investment_team.tests.test_strategy_lab_alignment import (
     _benign_sandbox_trades,
@@ -647,7 +647,7 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
                 proposed_spec_updates={
                     "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
                     # Off-list keys MUST NOT mutate the spec (#530).
-                    "exit_rules": [TimeStopRule(n_bars=10, note="added time stop").model_dump()],
+                    "exit_rules": [StopLossRule(pct=0.05, note="added stop").model_dump()],
                     "strategy_id": "hijacked",
                     "asset_class": "crypto",
                 },
@@ -720,7 +720,7 @@ def test_zero_trade_repair_drops_off_list_spec_keys_protects_thesis(
                             ),
                         ).model_dump()
                     ],
-                    "exit_rules": [TimeStopRule(n_bars=10, note="x").model_dump()],
+                    "exit_rules": [StopLossRule(pct=0.05, note="x").model_dump()],
                     "sizing": {"kind": "fixed_fraction", "fraction": 0.5},
                 },
                 changes_made="attempted to rewrite the thesis",

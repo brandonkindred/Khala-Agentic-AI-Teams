@@ -259,8 +259,7 @@ export class InvestmentStrategyComponent implements OnInit {
   }
 
   buildExitRuleGroup(initial?: ExitRule): FormGroup {
-    const kind = (initial?.kind && ALLOWED_EXIT_KINDS.has(initial.kind) ? initial.kind : 'time_stop') as ExitRuleKind;
-    const nBars = initial && initial.kind === 'time_stop' ? initial.n_bars : 10;
+    const kind = (initial?.kind && ALLOWED_EXIT_KINDS.has(initial.kind) ? initial.kind : 'stop_loss') as ExitRuleKind;
     const pct =
       initial && (initial.kind === 'stop_loss' || initial.kind === 'take_profit')
         ? initial.pct
@@ -270,7 +269,6 @@ export class InvestmentStrategyComponent implements OnInit {
 
     const group = this.fb.group({
       kind: [kind, Validators.required],
-      n_bars: [nBars],
       pct: [pct],
       basis: [basis],
       when: this.buildPredicateGroup(whenSeed),
@@ -417,8 +415,6 @@ export class InvestmentStrategyComponent implements OnInit {
     const kind = raw['kind'] as ExitRuleKind;
     const note = raw['note'] ? { note: raw['note'] as string } : {};
     switch (kind) {
-      case 'time_stop':
-        return { kind, n_bars: Number(raw['n_bars']), ...note };
       case 'stop_loss':
         return {
           kind,

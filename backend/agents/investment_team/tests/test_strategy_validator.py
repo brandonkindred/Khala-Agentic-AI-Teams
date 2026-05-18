@@ -19,7 +19,7 @@ from investment_team.strategy_lab.spec_dsl import (
     IndicatorRef,
     Predicate,
     SignalExitRule,
-    TimeStopRule,
+    StopLossRule,
 )
 
 
@@ -157,7 +157,7 @@ def test_hypothesis_term_missing_from_rules_emits_warning() -> None:
                 ),
             ),
         ],
-        exit_=[TimeStopRule(n_bars=5)],
+        exit_=[StopLossRule(pct=0.03)],
     )
     results = StrategySpecValidator().validate(spec)
     warnings = _warnings(results)
@@ -224,7 +224,7 @@ def test_no_recognised_terms_emits_no_consistency_warning() -> None:
                 when=Predicate(lhs="bar.close", op=">", rhs=0),
             ),
         ],
-        exit_=[TimeStopRule(n_bars=5)],
+        exit_=[StopLossRule(pct=0.03)],
     )
     results = StrategySpecValidator().validate(spec)
     warnings = _warnings(results)
@@ -241,7 +241,7 @@ def test_word_boundary_prevents_thematic_matching_ema() -> None:
                 when=Predicate(lhs="bar.close", op=">", rhs=0),
             ),
         ],
-        exit_=[TimeStopRule(n_bars=5)],
+        exit_=[StopLossRule(pct=0.03)],
     )
     results = StrategySpecValidator().validate(spec)
     warnings = _warnings(results)
@@ -273,7 +273,7 @@ def _spec_with_unparsed(
                 ),
             ),
         ],
-        exit_=[TimeStopRule(n_bars=5)],
+        exit_=[StopLossRule(pct=0.03)],
         asset_class=asset_class,
     ).model_copy(update={"unparsed_rules": unparsed_rules, "requires_redesign": True})
 
@@ -331,7 +331,7 @@ def test_hypothesis_consistency_scans_unparsed_rules() -> None:
                 ),
             ),
         ],
-        exit_=[TimeStopRule(n_bars=5)],
+        exit_=[StopLossRule(pct=0.03)],
     ).model_copy(update={"unparsed_rules": ["exit when rsi(14) > 70"], "requires_redesign": True})
     results = StrategySpecValidator().validate(spec)
     warnings = _warnings(results)

@@ -18,7 +18,6 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
-    TimeStopRule,
 )
 
 
@@ -28,7 +27,6 @@ def _long(symbol: str = "AAA", **kwargs) -> PositionState:
         "side": "long",
         "qty": 100.0,
         "entry_price": 100.0,
-        "bars_held": 1,
         "high_since_entry": 100.0,
         "low_since_entry": 100.0,
     }
@@ -42,7 +40,6 @@ def _short(symbol: str = "AAA", **kwargs) -> PositionState:
         "side": "short",
         "qty": 100.0,
         "entry_price": 100.0,
-        "bars_held": 1,
         "high_since_entry": 100.0,
         "low_since_entry": 100.0,
     }
@@ -52,40 +49,6 @@ def _short(symbol: str = "AAA", **kwargs) -> PositionState:
 
 def _bar(high: float = 101.0, low: float = 99.0, close: float = 100.0) -> BarSnapshot:
     return BarSnapshot(high=high, low=low, close=close)
-
-
-# ---------------------------------------------------------------------------
-# TimeStopRule
-# ---------------------------------------------------------------------------
-
-
-def test_time_stop_fires_at_threshold() -> None:
-    pos = _long(bars_held=10)
-    intents = evaluate_exit_rules([TimeStopRule(n_bars=10)], {"AAA": pos}, {"AAA": _bar()})
-    assert len(intents) == 1
-    assert intents[0].rule_kind == "time_stop"
-    assert intents[0].rule_index == 0
-    assert intents[0].symbol == "AAA"
-
-
-def test_time_stop_does_not_fire_before_threshold() -> None:
-    pos = _long(bars_held=9)
-    intents = evaluate_exit_rules([TimeStopRule(n_bars=10)], {"AAA": pos}, {"AAA": _bar()})
-    assert intents == []
-
-
-def test_time_stop_fires_well_past_threshold() -> None:
-    pos = _long(bars_held=42)
-    intents = evaluate_exit_rules([TimeStopRule(n_bars=10)], {"AAA": pos}, {"AAA": _bar()})
-    assert len(intents) == 1
-
-
-def test_time_stop_one_bar_fires_on_entry_bar() -> None:
-    # bars_held == 1 means "this is the entry bar" — TimeStopRule(n_bars=1)
-    # closes on the entry bar (engine emits at end of bar 1, fills bar 2).
-    pos = _long(bars_held=1)
-    intents = evaluate_exit_rules([TimeStopRule(n_bars=1)], {"AAA": pos}, {"AAA": _bar()})
-    assert len(intents) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -212,10 +175,10 @@ def test_take_profit_short_fires_on_low_below_target() -> None:
 
 
 def test_first_triggered_rule_wins_when_both_fire() -> None:
-    pos = _long(bars_held=10)
-    rules = [StopLossRule(pct=0.05), TimeStopRule(n_bars=10)]
-    # Both fire (low=94 < 95 floor; bars_held >= 10).
-    intents = evaluate_exit_rules(rules, {"AAA": pos}, {"AAA": _bar(high=96, low=94)})
+    pos = _long()
+    rules = [StopLossRule(pct=0.05), TakeProfitRule(pct=0.05)]
+    # Stop-loss fires (low=94 < 95 floor). Take-profit also fires (high=106 > 105).
+    intents = evaluate_exit_rules(rules, {"AAA": pos}, {"AAA": _bar(high=106, low=94)})
     assert len(intents) == 1
     # ``stop_loss`` first in spec → it wins.
     assert intents[0].rule_kind == "stop_loss"
@@ -223,11 +186,11 @@ def test_first_triggered_rule_wins_when_both_fire() -> None:
 
 
 def test_rule_order_swapped_changes_winner() -> None:
-    pos = _long(bars_held=10)
-    rules = [TimeStopRule(n_bars=10), StopLossRule(pct=0.05)]
-    intents = evaluate_exit_rules(rules, {"AAA": pos}, {"AAA": _bar(high=96, low=94)})
+    pos = _long()
+    rules = [TakeProfitRule(pct=0.05), StopLossRule(pct=0.05)]
+    intents = evaluate_exit_rules(rules, {"AAA": pos}, {"AAA": _bar(high=106, low=94)})
     assert len(intents) == 1
-    assert intents[0].rule_kind == "time_stop"
+    assert intents[0].rule_kind == "take_profit"
 
 
 def test_no_rules_yields_no_intents() -> None:
@@ -236,24 +199,24 @@ def test_no_rules_yields_no_intents() -> None:
 
 
 def test_no_open_positions_yields_no_intents() -> None:
-    intents = evaluate_exit_rules([TimeStopRule(n_bars=1)], {}, {"AAA": _bar()})
+    intents = evaluate_exit_rules([StopLossRule(pct=0.05)], {}, {"AAA": _bar()})
     assert intents == []
 
 
 def test_zero_qty_position_skipped() -> None:
-    pos = _long(qty=0.0, bars_held=99)
-    intents = evaluate_exit_rules([TimeStopRule(n_bars=1)], {"AAA": pos}, {"AAA": _bar()})
+    pos = _long(qty=0.0)
+    intents = evaluate_exit_rules([StopLossRule(pct=0.05)], {"AAA": pos}, {"AAA": _bar(low=90)})
     assert intents == []
 
 
 def test_position_without_matching_bar_skipped() -> None:
-    pos = _long(bars_held=10)
-    intents = evaluate_exit_rules([TimeStopRule(n_bars=1)], {"AAA": pos}, {})
+    pos = _long()
+    intents = evaluate_exit_rules([StopLossRule(pct=0.05)], {"AAA": pos}, {})
     assert intents == []
 
 
 # ---------------------------------------------------------------------------
-# SignalExitRule — explicit NotImplementedError
+# SignalExitRule — silent no-op (not yet engine-enforced)
 # ---------------------------------------------------------------------------
 
 
@@ -275,9 +238,9 @@ def test_signal_exit_rule_is_silent_noop() -> None:
 
 
 def test_signal_exit_does_not_block_other_rules_in_spec() -> None:
-    # Mix SignalExit + TimeStop. TimeStop should still fire even though the
+    # Mix SignalExit + StopLoss. StopLoss should still fire even though the
     # SignalExit is iterated first.
-    pos = _long(bars_held=10)
+    pos = _long()
     signal = SignalExitRule(
         when=Predicate(
             lhs=IndicatorRef(name="rsi", params={"period": 14}),
@@ -286,12 +249,12 @@ def test_signal_exit_does_not_block_other_rules_in_spec() -> None:
         )
     )
     intents = evaluate_exit_rules(
-        [signal, TimeStopRule(n_bars=10)],
+        [signal, StopLossRule(pct=0.05)],
         {"AAA": pos},
-        {"AAA": _bar()},
+        {"AAA": _bar(low=94)},
     )
     assert len(intents) == 1
-    assert intents[0].rule_kind == "time_stop"
+    assert intents[0].rule_kind == "stop_loss"
     assert intents[0].rule_index == 1
 
 
@@ -301,24 +264,26 @@ def test_signal_exit_does_not_block_other_rules_in_spec() -> None:
 
 
 def test_multi_symbol_evaluates_each_position_against_its_own_bar() -> None:
-    rules = [TimeStopRule(n_bars=5)]
+    rules = [StopLossRule(pct=0.05)]
     positions = {
-        "AAA": _long("AAA", bars_held=5),
-        "BBB": _long("BBB", bars_held=3),
+        "AAA": _long("AAA"),
+        "BBB": _long("BBB"),
     }
-    bars = {"AAA": _bar(), "BBB": _bar()}
+    # AAA bar trips the stop floor (low=94 < 95); BBB stays above (low=96).
+    bars = {"AAA": _bar(low=94), "BBB": _bar(low=96)}
     intents = evaluate_exit_rules(rules, positions, bars)
     assert len(intents) == 1
     assert intents[0].symbol == "AAA"
 
 
 def test_multi_symbol_skips_when_no_bar_for_symbol() -> None:
-    rules = [TimeStopRule(n_bars=1)]
+    rules = [StopLossRule(pct=0.05)]
     positions = {
-        "AAA": _long("AAA", bars_held=10),
-        "BBB": _long("BBB", bars_held=10),
+        "AAA": _long("AAA"),
+        "BBB": _long("BBB"),
     }
-    bars = {"AAA": _bar()}  # no bar for BBB
+    # Both would fire by bar alone, but BBB has no bar — only AAA emits.
+    bars = {"AAA": _bar(low=94)}
     intents = evaluate_exit_rules(rules, positions, bars)
     assert len(intents) == 1
     assert intents[0].symbol == "AAA"

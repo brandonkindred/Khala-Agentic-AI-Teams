@@ -502,8 +502,8 @@ class BacktestExecutionDiagnostics(BaseModel):
     exits_emitted: int = Field(default=0, ge=0)
     closed_trades: int = Field(default=0, ge=0)
     # Issue #527 — count of engine-emitted exit orders, keyed by rule kind
-    # (``time_stop`` / ``stop_loss`` / ``take_profit``). Counts close-order
-    # submissions, not fills; fills land in the existing trade ledger.
+    # (``stop_loss`` / ``take_profit``). Counts close-order submissions,
+    # not fills; fills land in the existing trade ledger.
     exit_rule_firings: Dict[str, int] = Field(default_factory=dict)
     open_positions_at_end: List[OpenPositionDiagnostic] = Field(default_factory=list)
     last_order_events: List[OrderLifecycleEvent] = Field(default_factory=list)

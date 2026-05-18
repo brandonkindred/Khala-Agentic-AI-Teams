@@ -19,7 +19,6 @@ from investment_team.strategy_lab.spec_dsl import (
     SizingRuleAdapter,
     StopLossRule,
     TakeProfitRule,
-    TimeStopRule,
     VolatilityTargetSizing,
     format_rules_for_prompt,
     format_sizing_rule,
@@ -67,7 +66,6 @@ def test_entry_rule_round_trip():
 @pytest.mark.parametrize(
     "rule",
     [
-        TimeStopRule(n_bars=5),
         StopLossRule(pct=0.03),
         StopLossRule(pct=0.03, basis="trailing_high"),
         TakeProfitRule(pct=0.05),
@@ -125,13 +123,22 @@ def test_entry_discriminator_dispatch():
 
 def test_exit_discriminator_dispatch():
     assert isinstance(
-        ExitRuleAdapter.validate_python({"kind": "time_stop", "n_bars": 5}),
-        TimeStopRule,
-    )
-    assert isinstance(
         ExitRuleAdapter.validate_python({"kind": "stop_loss", "pct": 0.03}),
         StopLossRule,
     )
+    assert isinstance(
+        ExitRuleAdapter.validate_python({"kind": "take_profit", "pct": 0.05}),
+        TakeProfitRule,
+    )
+
+
+def test_exit_discriminator_rejects_legacy_time_stop():
+    """``TimeStopRule`` was removed — bar-counting exits aren't a real
+    trading concept. The discriminated union must now reject the legacy
+    payload shape so old fixtures don't silently get re-validated.
+    """
+    with pytest.raises(ValueError):
+        ExitRuleAdapter.validate_python({"kind": "time_stop", "n_bars": 5})
 
 
 def test_sizing_discriminator_dispatch():
@@ -236,11 +243,6 @@ def test_predicate_rhs_accepts_float():
     assert p.rhs == 30.0
 
 
-def test_time_stop_must_be_positive():
-    with pytest.raises(ValidationError):
-        TimeStopRule(n_bars=0)
-
-
 def test_fixed_fraction_upper_bound():
     with pytest.raises(ValidationError):
         FixedFractionSizing(fraction=1.5)
@@ -272,10 +274,6 @@ def test_format_entry_rsi_lt_30():
         when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
     )
     assert format_rules_for_prompt([rule]) == "long when rsi(14) < 30"
-
-
-def test_format_time_stop():
-    assert format_rules_for_prompt([TimeStopRule(n_bars=5)]) == "exit after 5 bars"
 
 
 def test_format_stop_loss():
@@ -341,9 +339,11 @@ def test_format_rules_for_prompt_join_separator():
     rules = [
         StopLossRule(pct=0.03),
         TakeProfitRule(pct=0.05),
-        TimeStopRule(n_bars=10),
+        StopLossRule(pct=0.02, basis="trailing_high"),
     ]
-    assert format_rules_for_prompt(rules) == "stop loss 3%, take profit 5%, exit after 10 bars"
+    assert (
+        format_rules_for_prompt(rules) == "stop loss 3%, take profit 5%, trailing-high stop loss 2%"
+    )
 
 
 def test_format_rules_for_prompt_empty():
@@ -373,7 +373,7 @@ def _make_structured_strategy_spec():
                 ),
             ),
         ],
-        exit_rules=[TimeStopRule(n_bars=10)],
+        exit_rules=[StopLossRule(pct=0.03)],
         sizing=FixedFractionSizing(fraction=0.02),
     )
 

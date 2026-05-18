@@ -3,31 +3,28 @@
 Once :class:`TradingService` enforces structured ``ExitRule`` objects in its
 bar loop, every trade either obeys the rules within tolerance or comes from
 the strategy code's own exit logic.  This gate iterates the trade ledger
-and the execution diagnostics and reports the first kind of violation:
+and the execution diagnostics and reports:
 
-* **TimeStopRule(n_bars=N)** — every trade ``hold_days <= N + 1`` (the +1
-  is the bar of fill lag: engine emits the close on bar N, fills at bar
-  N+1's open).  Only meaningful on daily timeframes; sub-daily runs are
-  flagged as ``info`` (not enforced) until bar-aware hold counting lands.
 * **StopLossRule(pct=P, basis="entry_price")** — for losing trades, the
   worst observed return is bounded by ``-pct - slippage_tolerance``.
   Slippage on the close fill can push the realised return slightly past
   the rule's floor; the tolerance band derives from
-  ``BacktestConfig.slippage_bps``.
+  ``BacktestConfig.slippage_bps``. Trailing variants need bar-by-bar
+  replay and are flagged as informational.
 * **TakeProfitRule(pct=P)** — sanity-only: when ``exit_rules`` contains
   exactly one rule and that rule is the take-profit, we expect at least
-  one engine firing.  When other rules are present, the take-profit may
-  legitimately never fire (a time stop closed the trade first).
+  one engine firing. When other rules are present, the take-profit may
+  legitimately never fire (a stop-loss closed the trade first).
+* **SignalExitRule** — informational; not yet engine-enforced.
 
-The gate is **deterministic and post-hoc**.  It does not re-run the
-strategy or call out to an LLM.  Critical failures here indicate either
+The gate is **deterministic and post-hoc**. It does not re-run the
+strategy or call out to an LLM. Critical failures here indicate either
 a bug in :mod:`rule_compiler` or a violation of engine invariants — both
 of which the alignment agent's LLM-driven audit should defer to.
 """
 
 from __future__ import annotations
 
-import math
 from typing import List, Optional, Sequence
 
 from ...models import (
@@ -40,7 +37,6 @@ from ..spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
-    TimeStopRule,
 )
 from .models import QualityGateResult
 
@@ -70,11 +66,6 @@ class ExitRuleConformanceGate:
             ]
 
         results: List[QualityGateResult] = []
-
-        # ---- TimeStopRule ----
-        time_stops = [r for r in exit_rules if isinstance(r, TimeStopRule)]
-        for rule in time_stops:
-            results.append(self._check_time_stop(rule, trades, timeframe))
 
         # ---- StopLossRule (entry_price basis only — trailing variants need
         # bar-by-bar replay which the gate cannot reconstruct from the trade
@@ -124,60 +115,6 @@ class ExitRuleConformanceGate:
     # ------------------------------------------------------------------
     # Per-rule checks
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _check_time_stop(
-        rule: TimeStopRule,
-        trades: Sequence[TradeRecord],
-        timeframe: str,
-    ) -> QualityGateResult:
-        if timeframe != "1d":
-            # ``hold_days`` is calendar-day granular; comparing against
-            # ``n_bars`` only makes sense when one bar == one day.
-            return QualityGateResult(
-                gate_name=GATE,
-                passed=True,
-                severity="info",
-                details=(
-                    f"TimeStopRule(n_bars={rule.n_bars}) conformance check skipped on "
-                    f"timeframe={timeframe!r} (gate is daily-only for the MVP)."
-                ),
-            )
-        # ``hold_days`` is a calendar-day delta on ``TradeRecord``; the
-        # rule's ``n_bars`` counts trading bars. For daily-bar US-equity
-        # data, every 5 trading bars span at least one weekend (2 calendar
-        # days). Plus a 1-bar fill-lag (close emitted on bar N, fills on
-        # bar N+1's open — and that next trading day can be a Monday) and
-        # an allowance for the ~10 US market holidays per year (~1 day per
-        # 25 trading days). The conservative upper bound is
-        # ``n_bars + ceil(n_bars * 2/5) + ceil(n_bars / 25) + 3``: it
-        # widens to absorb weekends/holidays but is still tight enough to
-        # catch gross engine-enforcement leaks (e.g. ``n_bars=5`` allows
-        # at most 10 calendar days). Without this, a 1-bar hold across a
-        # Fri→Mon weekend records ``hold_days==3`` and trips a false
-        # critical for ``TimeStopRule(n_bars=1)``.
-        ceiling = rule.n_bars + math.ceil(rule.n_bars * 2 / 5) + math.ceil(rule.n_bars / 25) + 3
-        offenders = [t for t in trades if t.hold_days > ceiling]
-        if offenders:
-            sample = [t.trade_num for t in offenders[:5]]
-            return QualityGateResult(
-                gate_name=GATE,
-                passed=False,
-                severity="critical",
-                details=(
-                    f"TimeStopRule(n_bars={rule.n_bars}) violated: "
-                    f"{len(offenders)} trade(s) held > {ceiling} days "
-                    f"(sample trade_nums={sample})."
-                ),
-            )
-        return QualityGateResult(
-            gate_name=GATE,
-            passed=True,
-            severity="info",
-            details=(
-                f"TimeStopRule(n_bars={rule.n_bars}) satisfied across {len(trades)} trade(s)."
-            ),
-        )
 
     @staticmethod
     def _check_stop_loss(
@@ -231,11 +168,11 @@ class ExitRuleConformanceGate:
         all_rules: Sequence[ExitRule],
     ) -> QualityGateResult:
         # Take-profit is hardest to assert on. The engine fires it whenever
-        # bar.high >= entry * (1 + pct), but other rules (time stop, stop
-        # loss) can close a trade first. So a passing trade ledger may
-        # legitimately never hit the take-profit floor. We only flag the
-        # "lonely take-profit" case: take-profit is the ONLY rule and zero
-        # trades cleared its threshold.
+        # bar.high >= entry * (1 + pct), but other rules (stop loss) can
+        # close a trade first. So a passing trade ledger may legitimately
+        # never hit the take-profit floor. We only flag the "lonely
+        # take-profit" case: take-profit is the ONLY rule and zero trades
+        # cleared its threshold.
         only_rule = len(all_rules) == 1
         if not only_rule:
             return QualityGateResult(

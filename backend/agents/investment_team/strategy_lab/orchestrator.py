@@ -857,8 +857,8 @@ class StrategyLabOrchestrator:
         # ``exit_rule_conformance_passed`` vetos ``is_winning`` below: a
         # critical failure here means the engine's per-bar enforcement
         # leaked (e.g. a trade overshot a structured stop-loss floor by
-        # more than slippage tolerance, or held past ``TimeStop.n_bars+1``).
-        # That's an engine-side correctness bug, not a strategy-code bug,
+        # more than slippage tolerance). That's an engine-side
+        # correctness bug, not a strategy-code bug,
         # so refinement won't fix it — but we must NOT publish the run as
         # winning even if the LLM alignment agent later agrees the trades
         # look reasonable.

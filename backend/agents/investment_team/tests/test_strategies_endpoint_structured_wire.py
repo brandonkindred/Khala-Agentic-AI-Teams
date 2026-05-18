@@ -52,7 +52,7 @@ _STRUCTURED_BODY = {
             },
         }
     ],
-    "exit_rules": [{"kind": "time_stop", "n_bars": 10}],
+    "exit_rules": [{"kind": "stop_loss", "pct": 0.03}],
     "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
 }
 
@@ -65,8 +65,8 @@ def test_structured_strategy_post_round_trips(client: TestClient) -> None:
     assert strategy["entry_rules"][0]["kind"] == "entry"
     assert strategy["entry_rules"][0]["side"] == "long"
     assert strategy["entry_rules"][0]["when"]["lhs"] == "bar.close"
-    assert strategy["exit_rules"][0]["kind"] == "time_stop"
-    assert strategy["exit_rules"][0]["n_bars"] == 10
+    assert strategy["exit_rules"][0]["kind"] == "stop_loss"
+    assert strategy["exit_rules"][0]["pct"] == 0.03
     assert strategy["sizing"]["kind"] == "fixed_fraction"
     assert strategy["sizing"]["fraction"] == 0.02
 
@@ -75,7 +75,7 @@ def test_structured_strategy_post_round_trips(client: TestClient) -> None:
     "field, prose_value",
     [
         ("entry_rules", ["close > sma(20)"]),
-        ("exit_rules", ["exit after 10 bars"]),
+        ("exit_rules", ["stop loss 3%"]),
         ("sizing", "risk 2% per trade"),
     ],
 )

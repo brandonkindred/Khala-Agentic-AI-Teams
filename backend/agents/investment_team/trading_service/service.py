@@ -66,7 +66,7 @@ class _TrackedPosition:
     """Per-symbol state the parent engine maintains to evaluate exit rules.
 
     Mirrors the public :class:`PositionState` shape but is mutable so the bar
-    loop can update bars-held / watermarks in place. The snapshot handed to
+    loop can update watermarks in place. The snapshot handed to
     :func:`evaluate_exit_rules` is a fresh immutable copy.
 
     ``entry_order_id`` pins the tracker to a specific :class:`Position`
@@ -74,14 +74,13 @@ class _TrackedPosition:
     position, ``portfolio.positions[sym]`` swaps to a new ``Position`` with
     a different ``entry_order_id``; the tracker reset path in
     :meth:`TradingService._update_position_tracker` detects that and starts
-    fresh, so a stale ``bars_held`` / watermark can't fire a rule on the
+    fresh, so a stale trailing watermark can't fire a rule on the
     brand-new trade.
     """
 
     side: str  # "long" | "short"
     entry_price: float
     entry_order_id: str
-    bars_held: int
     high_since_entry: float
     low_since_entry: float
 
@@ -91,7 +90,6 @@ class _TrackedPosition:
             side=self.side,  # type: ignore[arg-type]
             qty=qty,
             entry_price=self.entry_price,
-            bars_held=self.bars_held,
             high_since_entry=self.high_since_entry,
             low_since_entry=self.low_since_entry,
         )
@@ -760,9 +758,9 @@ class TradingService:
                         # portfolio. No-op when exit_rules is empty (the
                         # tracker stays empty, the rule-eval block at the
                         # bottom of the loop short-circuits). Updating here
-                        # — after fills but before send_bar — means
-                        # ``bars_held`` reflects every bar the engine has
-                        # actually seen, regardless of strategy behaviour.
+                        # — after fills but before send_bar — keeps trailing
+                        # watermarks consistent with every bar the engine
+                        # has actually seen, regardless of strategy behaviour.
                         if self._exit_rules:
                             self._update_position_tracker(
                                 tracker=position_tracker,
@@ -1269,11 +1267,12 @@ class TradingService:
     ) -> None:
         """Reconcile ``tracker`` against ``portfolio.positions`` for one symbol.
 
-        Called after fills are processed each bar. ``bars_held`` for an
-        existing tracked position counts the entry bar as bar 1 and
-        increments by one on every subsequent bar the engine sees for
-        that symbol — so ``TimeStopRule(n_bars=N)`` fires once the
-        position has been observed across at least N bars.
+        Called after fills are processed each bar. Refreshes
+        ``entry_price`` (for scaled-in positions) and extends trailing
+        high/low watermarks against the bar. When the underlying
+        ``Position`` is replaced (different ``entry_order_id``), the
+        tracker resets so a stale trailing watermark can't fire a rule
+        on a brand-new trade.
         """
         sym = cur_bar.symbol
         pos = portfolio.positions.get(sym)
@@ -1283,7 +1282,6 @@ class TradingService:
             return
         existing = tracker.get(sym)
         if existing is not None and existing.entry_order_id == pos.entry_order_id:
-            existing.bars_held += 1
             # When a partial entry scales in (REQUEUE_NEXT_BAR / TWAP_N),
             # ``Portfolio.extend`` updates ``pos.entry_price`` to the new
             # weighted-average entry. Mirror that here so
@@ -1298,13 +1296,12 @@ class TradingService:
         else:
             # Fresh entry this bar — either truly first entry, or a same-bar
             # exit + re-entry replaced the prior position (different
-            # ``entry_order_id``). Reset bars_held / watermarks so a stale
-            # trailing high doesn't fire a rule against the new trade.
+            # ``entry_order_id``). Reset watermarks so a stale trailing high
+            # doesn't fire a rule against the new trade.
             tracker[sym] = _TrackedPosition(
                 side=("long" if pos.side == OrderSide.LONG else "short"),
                 entry_price=pos.entry_price,
                 entry_order_id=pos.entry_order_id,
-                bars_held=1,
                 high_since_entry=cur_bar.high,
                 low_since_entry=cur_bar.low,
             )
@@ -1342,8 +1339,8 @@ class TradingService:
         * The one explicit guard is on in-flight engine markets: if a
           prior bar's engine exit is still pending (e.g. REQUEUE residual
           across bars), skip re-emission so the order book doesn't
-          accumulate redundant engine markets while bars_held keeps
-          growing.
+          accumulate redundant engine markets across bars while the rule
+          keeps re-triggering.
 
         Engine-emitted orders carry ``reason="engine_exit:<rule_kind>"`` so
         the conformance gate can count them off the order-lifecycle event
@@ -1361,8 +1358,8 @@ class TradingService:
 
         # Skip if a prior bar's engine market exit is still pending on the
         # book — it will fire when the fill simulator can fill it, and we
-        # don't want to stack redundant engine markets while bars_held
-        # keeps growing across bars.
+        # don't want to stack redundant engine markets across bars while
+        # the rule keeps re-triggering against the same open position.
         for po in order_book.pending_for_symbol(sym):
             po_req = po.request
             if po_req.order_type != OrderType.MARKET:

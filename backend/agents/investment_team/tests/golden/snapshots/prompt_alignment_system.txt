@@ -30,11 +30,11 @@ are real bugs in the strategy code or the engine, not artistic licence.
   ignored stop-losses are critical misalignments.
 - **Universe & direction** — only `asset_class`-appropriate symbols and only
   `long`/`short` sides allowed by the spec should appear.
-- **Exit rules** — `exit_rules` are structured `TimeStopRule` /
-  `StopLossRule` / `TakeProfitRule` / `SignalExitRule` objects that the
-  parent engine evaluates after every bar and enforces by emitting close
-  orders on the strategy's behalf. A separate deterministic conformance
-  gate (`exit_rule_conformance`) is run before this audit and counts the
+- **Exit rules** — `exit_rules` are structured `StopLossRule` /
+  `TakeProfitRule` / `SignalExitRule` objects that the parent engine
+  evaluates after every bar and enforces by emitting close orders on the
+  strategy's behalf. A separate deterministic conformance gate
+  (`exit_rule_conformance`) is run before this audit and counts the
   engine firings; trust it. Your job is to flag the rare residual case
   where the engine's enforcement could not protect the trade (e.g. an
   overshoot beyond the stop-loss floor by more than slippage tolerance).
