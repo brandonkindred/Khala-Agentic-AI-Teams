@@ -66,7 +66,6 @@ def get_strands_model(
     """
     from . import config as llm_config
 
-    model_id = llm_config.resolve_model(agent_key)
     base_url = llm_config.resolve_base_url()
 
     # Caller-supplied client bypasses the cache — they own the lifecycle and
@@ -74,12 +73,19 @@ def get_strands_model(
     # tests) that share the same (model_id, base_url) key with the default
     # path. Caching here would alias them.
     if client is not None:
+        # Prefer the actual model exposed by the client for telemetry / logs;
+        # falling back to the env-resolved default would mis-tag the model
+        # whenever the caller wraps a client whose ``.model`` differs from
+        # ``LLM_MODEL``/``LLM_MODEL_<agent_key>``.
+        client_model = getattr(client, "model", None)
         return LLMClientModel(
             client,
             agent_key=agent_key,
-            model_id=model_id,
+            model_id=client_model or llm_config.resolve_model(agent_key),
             response_format=response_format,
         )
+
+    model_id = llm_config.resolve_model(agent_key)
 
     cache_key = (model_id, base_url, response_format)
 
