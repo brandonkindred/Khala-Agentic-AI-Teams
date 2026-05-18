@@ -22,7 +22,8 @@ def client(monkeypatch_module) -> TestClient:
     from investment_team.api import main as api_main
 
     monkeypatch_module.setattr(api_main, "_strategies", {})
-    return TestClient(api_main.app)
+    with TestClient(api_main.app) as c:
+        yield c
 
 
 @pytest.fixture(scope="module")
