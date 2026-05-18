@@ -1673,90 +1673,6 @@ class StrategyLabOrchestrator:
             ),
         )
 
-    @staticmethod
-    def _merge_risk_limits_tighten_only(
-        current: RiskLimits, proposed: Any
-    ) -> Tuple[RiskLimits, List[str], List[str]]:
-        """Tighten-only merge of refinement-proposed risk limits (#543).
-
-        Returns ``(merged_limits, loosened_fields, discarded_unknown_keys)``.
-
-        - ``loosened_fields`` lists fields whose proposed value would loosen
-          the limit (raise an "lower"-direction cap, lower a "higher"-direction
-          floor, or transition ``target_annual_vol`` from ``None`` to a
-          value — which fundamentally changes the sizing model and is
-          treated as loosening).
-        - ``discarded_unknown_keys`` lists fields the caller proposed that
-          either aren't in the ``RiskLimits`` schema or are marked
-          immutable in ``_RISK_LIMIT_TIGHTEN_DIRECTION`` (e.g.
-          ``vol_lookback_days``).
-
-        Callers raise ``SpecImplementabilityError`` when ``loosened_fields``
-        is non-empty; unknown keys are warned but never trip.
-        """
-        loosened: List[str] = []
-        unknown: List[str] = []
-        if not isinstance(proposed, dict):
-            return current, loosened, unknown
-
-        merged_data = current.model_dump()
-        for key, new_value in proposed.items():
-            direction = _RISK_LIMIT_TIGHTEN_DIRECTION.get(key)
-            if direction is None:
-                # Either unknown to RiskLimits or explicitly immutable.
-                unknown.append(key)
-                continue
-
-            current_value = merged_data.get(key)
-
-            # Special-case ``target_annual_vol``: ``None`` means "no vol
-            # target" (flat sizing). Switching to a value or vice-versa
-            # changes the sizing model — treat any None↔value transition
-            # as loosening.
-            if key == "target_annual_vol":
-                if current_value is None and new_value is not None:
-                    loosened.append(key)
-                    continue
-                if current_value is not None and new_value is None:
-                    loosened.append(key)
-                    continue
-
-            try:
-                cmp_current = float(current_value) if current_value is not None else None
-                cmp_new = float(new_value) if new_value is not None else None
-            except (TypeError, ValueError):
-                unknown.append(key)
-                continue
-
-            if cmp_current is None or cmp_new is None:
-                # Already handled above; defensive.
-                continue
-
-            if direction == "lower":
-                if cmp_new < cmp_current:
-                    merged_data[key] = new_value
-                elif cmp_new > cmp_current:
-                    loosened.append(key)
-                # equal: no-op
-            elif direction == "higher":
-                if cmp_new > cmp_current:
-                    merged_data[key] = new_value
-                elif cmp_new < cmp_current:
-                    loosened.append(key)
-                # equal: no-op
-
-        try:
-            merged = RiskLimits.model_validate(merged_data)
-        except Exception:
-            # Validation failed on the merged limits — bail out without
-            # mutating; surface every proposed key as unknown so the caller
-            # logs the full set and keeps the original limits.
-            logger.warning(
-                "Refined risk_limits failed pydantic validation; keeping current limits unchanged."
-            )
-            return current, loosened, sorted(set(unknown) | set(proposed.keys()))
-
-        return merged, loosened, unknown
 
     def _apply_updates(
         self,
@@ -1785,7 +1701,7 @@ class StrategyLabOrchestrator:
         risk_limits_proposed = updates.get("risk_limits")
 
         if risk_limits_proposed is not None:
-            merged_limits, loosened, unknown = self._merge_risk_limits_tighten_only(
+            merged_limits, loosened, unknown = _merge_risk_limits_tighten_only(
                 spec.risk_limits, risk_limits_proposed
             )
             if loosened:
@@ -2071,7 +1987,7 @@ class StrategyLabOrchestrator:
         # Pooled OOS daily-return series for DSR + bootstrap CI. Uses the
         # same equity-curve construction the metrics engine uses, so the
         # series is consistent with the per-fold OOS Sharpes.
-        oos_returns = self._daily_returns_from_trades(
+        oos_returns = _daily_returns_from_trades(
             all_oos_trades, config.initial_capital, config.start_date, config.end_date
         )
         skew, kurt = summarize_return_moments(oos_returns)
@@ -2100,41 +2016,6 @@ class StrategyLabOrchestrator:
             }
         )
 
-    @staticmethod
-    def _daily_returns_from_trades(
-        trades: Sequence[TradeRecord],
-        initial_capital: float,
-        start_date: str,
-        end_date: str,
-    ) -> List[float]:
-        """Daily log returns from the equity curve implied by the trades.
-
-        Log basis matches :meth:`EquityCurve.daily_returns` and the rest of
-        the metrics module, so OOS-Sharpe / DSR / bootstrap CIs computed
-        downstream share the same return convention as the in-sample
-        ``compute_performance_metrics`` Sharpe.
-
-        If the equity curve crosses zero (portfolio ruin), the series is
-        returned **empty** rather than zero-padding the ruin step. Zeroing
-        a wipeout would convert it to a neutral day and let the OOS DSR /
-        Sharpe CI / moments report misleadingly low risk; an empty series
-        falls through every downstream consumer
-        (:func:`summarize_return_moments`, :func:`compute_deflated_sharpe`,
-        :func:`bootstrap_sharpe_ci`) as their well-defined "no data" path.
-        """
-        curve = build_equity_curve_from_trades(
-            trades, initial_capital, start_date=start_date, end_date=end_date
-        )
-        if len(curve.equity) < 2:
-            return []
-        if any(v <= 0 for v in curve.equity):
-            # Ruin: invalidate the whole series. Any downstream Sharpe / DSR
-            # / CI on a curve that touched zero would be meaningless.
-            return []
-        out: List[float] = []
-        for i in range(1, len(curve.equity)):
-            out.append(math.log(curve.equity[i] / curve.equity[i - 1]))
-        return out
 
     def _evaluate_regimes(
         self,
@@ -2161,12 +2042,12 @@ class StrategyLabOrchestrator:
             )
             if len(curve.equity) < 2:
                 return []
-            strategy_returns = self._equity_to_returns(curve.equity)
+            strategy_returns = _equity_to_returns(curve.equity)
 
             bench_dates, bench_equity = self._build_benchmark_equity(spec, market_data, config)
             if len(bench_equity) < 2:
                 return []
-            benchmark_returns = self._equity_to_returns(bench_equity)
+            benchmark_returns = _equity_to_returns(bench_equity)
 
             n = min(len(strategy_returns), len(benchmark_returns))
             strategy_returns = strategy_returns[:n]
@@ -2176,23 +2057,13 @@ class StrategyLabOrchestrator:
             subwindows = vix_quartile_subwindows(
                 aligned_dates,
                 benchmark_returns,
-                vix_provider=self._resolve_vix_provider(),
+                vix_provider=_resolve_vix_provider(),
             )
             return regime_comparison(strategy_returns, benchmark_returns, subwindows)
         except Exception:
             logger.exception("Regime evaluation failed for %s", spec.strategy_id)
             return []
 
-    @staticmethod
-    def _equity_to_returns(equity: Sequence[float]) -> List[float]:
-        out: List[float] = []
-        for i in range(1, len(equity)):
-            prev = equity[i - 1]
-            if prev <= 0:
-                out.append(0.0)
-            else:
-                out.append((equity[i] - prev) / prev)
-        return out
 
     def _build_benchmark_equity(
         self,
@@ -2228,11 +2099,11 @@ class StrategyLabOrchestrator:
             if blend and "SPY" in blend and "AGG" in blend and blend["SPY"] and blend["AGG"]:
                 spy_bars = blend["SPY"]
                 agg_bars = blend["AGG"]
-                spy_dates = [self._parse_bar_date(b.date) for b in spy_bars]
-                spy_equity = self._closes_to_equity(
+                spy_dates = [_parse_bar_date(b.date) for b in spy_bars]
+                spy_equity = _closes_to_equity(
                     [b.close for b in spy_bars], config.initial_capital
                 )
-                agg_equity = self._closes_to_equity(
+                agg_equity = _closes_to_equity(
                     [b.close for b in agg_bars], config.initial_capital
                 )
                 blended = build_60_40_equity(
@@ -2256,33 +2127,168 @@ class StrategyLabOrchestrator:
             single = None
         if single and bench_symbol in single and single[bench_symbol]:
             bars = single[bench_symbol]
-            dates = [self._parse_bar_date(b.date) for b in bars]
-            equity = self._closes_to_equity([b.close for b in bars], config.initial_capital)
+            dates = [_parse_bar_date(b.date) for b in bars]
+            equity = _closes_to_equity([b.close for b in bars], config.initial_capital)
             n = min(len(dates), len(equity))
             return dates[:n], equity[:n]
         return [], []
 
-    @staticmethod
-    def _closes_to_equity(closes: Sequence[float], initial_capital: float) -> List[float]:
-        if not closes or closes[0] <= 0:
-            return []
-        scale = initial_capital / closes[0]
-        return [c * scale for c in closes]
 
-    @staticmethod
-    def _parse_bar_date(d: str) -> Any:
-        from datetime import date
 
-        return date.fromisoformat(d[:10])
 
-    @staticmethod
-    def _resolve_vix_provider() -> Optional[Callable[[Sequence[Any]], List[float]]]:
-        """Return a VIX provider callable when ``STRATEGY_LAB_VIX_SOURCE`` is
-        set, otherwise None so :func:`vix_quartile_subwindows` falls back to
-        realized-vol on the benchmark series. Production deployments can
-        wire in a Yahoo ``^VIX`` fetcher here without touching callers."""
-        source = os.environ.get("STRATEGY_LAB_VIX_SOURCE", "").strip().lower()
-        if not source:
-            return None
-        # Hook point for production providers; unset → realized-vol fallback.
+# ──────────────────────────────────────────────────────────────────────────
+# Pure helpers (formerly @staticmethod on StrategyLabOrchestrator). Each is
+# stateless — moved to module-level so the orchestrator class body reflects
+# coordination state only.
+# ──────────────────────────────────────────────────────────────────────────
+
+def _merge_risk_limits_tighten_only(
+    current: RiskLimits, proposed: Any
+) -> Tuple[RiskLimits, List[str], List[str]]:
+    """Tighten-only merge of refinement-proposed risk limits (#543).
+
+    Returns ``(merged_limits, loosened_fields, discarded_unknown_keys)``.
+
+    - ``loosened_fields`` lists fields whose proposed value would loosen
+      the limit (raise an "lower"-direction cap, lower a "higher"-direction
+      floor, or transition ``target_annual_vol`` from ``None`` to a
+      value — which fundamentally changes the sizing model and is
+      treated as loosening).
+    - ``discarded_unknown_keys`` lists fields the caller proposed that
+      either aren't in the ``RiskLimits`` schema or are marked
+      immutable in ``_RISK_LIMIT_TIGHTEN_DIRECTION`` (e.g.
+      ``vol_lookback_days``).
+
+    Callers raise ``SpecImplementabilityError`` when ``loosened_fields``
+    is non-empty; unknown keys are warned but never trip.
+    """
+    loosened: List[str] = []
+    unknown: List[str] = []
+    if not isinstance(proposed, dict):
+        return current, loosened, unknown
+
+    merged_data = current.model_dump()
+    for key, new_value in proposed.items():
+        direction = _RISK_LIMIT_TIGHTEN_DIRECTION.get(key)
+        if direction is None:
+            # Either unknown to RiskLimits or explicitly immutable.
+            unknown.append(key)
+            continue
+
+        current_value = merged_data.get(key)
+
+        # Special-case ``target_annual_vol``: ``None`` means "no vol
+        # target" (flat sizing). Switching to a value or vice-versa
+        # changes the sizing model — treat any None↔value transition
+        # as loosening.
+        if key == "target_annual_vol":
+            if current_value is None and new_value is not None:
+                loosened.append(key)
+                continue
+            if current_value is not None and new_value is None:
+                loosened.append(key)
+                continue
+
+        try:
+            cmp_current = float(current_value) if current_value is not None else None
+            cmp_new = float(new_value) if new_value is not None else None
+        except (TypeError, ValueError):
+            unknown.append(key)
+            continue
+
+        if cmp_current is None or cmp_new is None:
+            # Already handled above; defensive.
+            continue
+
+        if direction == "lower":
+            if cmp_new < cmp_current:
+                merged_data[key] = new_value
+            elif cmp_new > cmp_current:
+                loosened.append(key)
+            # equal: no-op
+        elif direction == "higher":
+            if cmp_new > cmp_current:
+                merged_data[key] = new_value
+            elif cmp_new < cmp_current:
+                loosened.append(key)
+            # equal: no-op
+
+    try:
+        merged = RiskLimits.model_validate(merged_data)
+    except Exception:
+        # Validation failed on the merged limits — bail out without
+        # mutating; surface every proposed key as unknown so the caller
+        # logs the full set and keeps the original limits.
+        logger.warning(
+            "Refined risk_limits failed pydantic validation; keeping current limits unchanged."
+        )
+        return current, loosened, sorted(set(unknown) | set(proposed.keys()))
+
+    return merged, loosened, unknown
+
+def _daily_returns_from_trades(
+    trades: Sequence[TradeRecord],
+    initial_capital: float,
+    start_date: str,
+    end_date: str,
+) -> List[float]:
+    """Daily log returns from the equity curve implied by the trades.
+
+    Log basis matches :meth:`EquityCurve.daily_returns` and the rest of
+    the metrics module, so OOS-Sharpe / DSR / bootstrap CIs computed
+    downstream share the same return convention as the in-sample
+    ``compute_performance_metrics`` Sharpe.
+
+    If the equity curve crosses zero (portfolio ruin), the series is
+    returned **empty** rather than zero-padding the ruin step. Zeroing
+    a wipeout would convert it to a neutral day and let the OOS DSR /
+    Sharpe CI / moments report misleadingly low risk; an empty series
+    falls through every downstream consumer
+    (:func:`summarize_return_moments`, :func:`compute_deflated_sharpe`,
+    :func:`bootstrap_sharpe_ci`) as their well-defined "no data" path.
+    """
+    curve = build_equity_curve_from_trades(
+        trades, initial_capital, start_date=start_date, end_date=end_date
+    )
+    if len(curve.equity) < 2:
+        return []
+    if any(v <= 0 for v in curve.equity):
+        # Ruin: invalidate the whole series. Any downstream Sharpe / DSR
+        # / CI on a curve that touched zero would be meaningless.
+        return []
+    out: List[float] = []
+    for i in range(1, len(curve.equity)):
+        out.append(math.log(curve.equity[i] / curve.equity[i - 1]))
+    return out
+
+def _equity_to_returns(equity: Sequence[float]) -> List[float]:
+    out: List[float] = []
+    for i in range(1, len(equity)):
+        prev = equity[i - 1]
+        if prev <= 0:
+            out.append(0.0)
+        else:
+            out.append((equity[i] - prev) / prev)
+    return out
+
+def _closes_to_equity(closes: Sequence[float], initial_capital: float) -> List[float]:
+    if not closes or closes[0] <= 0:
+        return []
+    scale = initial_capital / closes[0]
+    return [c * scale for c in closes]
+
+def _parse_bar_date(d: str) -> Any:
+    from datetime import date
+
+    return date.fromisoformat(d[:10])
+
+def _resolve_vix_provider() -> Optional[Callable[[Sequence[Any]], List[float]]]:
+    """Return a VIX provider callable when ``STRATEGY_LAB_VIX_SOURCE`` is
+    set, otherwise None so :func:`vix_quartile_subwindows` falls back to
+    realized-vol on the benchmark series. Production deployments can
+    wire in a Yahoo ``^VIX`` fetcher here without touching callers."""
+    source = os.environ.get("STRATEGY_LAB_VIX_SOURCE", "").strip().lower()
+    if not source:
         return None
+    # Hook point for production providers; unset → realized-vol fallback.
+    return None

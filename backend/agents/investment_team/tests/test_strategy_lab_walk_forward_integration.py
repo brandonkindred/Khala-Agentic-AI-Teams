@@ -27,7 +27,12 @@ import pytest
 from investment_team.execution.metrics import compute_deflated_sharpe
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
-from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+from investment_team.strategy_lab.orchestrator import (
+    StrategyLabOrchestrator,
+    _closes_to_equity,
+    _daily_returns_from_trades,
+    _equity_to_returns,
+)
 from investment_team.strategy_lab.quality_gates.acceptance_gate import AcceptanceGate
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.spec_dsl import (
@@ -451,7 +456,7 @@ def test_acceptance_gate_rejects_overfit_pattern():
 
 def test_daily_returns_from_trades_handles_empty_input():
     """Returns an empty list rather than raising on an empty trade ledger."""
-    out = StrategyLabOrchestrator._daily_returns_from_trades(
+    out = _daily_returns_from_trades(
         [], 100_000.0, "2022-01-03", "2022-12-30"
     )
     assert out == [] or all(r == 0.0 for r in out)
@@ -472,7 +477,7 @@ def test_daily_returns_from_trades_emits_log_returns():
             symbol="TST",
         )
     ]
-    out = StrategyLabOrchestrator._daily_returns_from_trades(
+    out = _daily_returns_from_trades(
         trades, 100_000.0, "2023-01-03", "2023-01-05"
     )
     assert len(out) >= 1
@@ -499,7 +504,7 @@ def test_daily_returns_from_trades_invalidates_ruin_series():
             symbol="TST",
         )
     ]
-    out = StrategyLabOrchestrator._daily_returns_from_trades(
+    out = _daily_returns_from_trades(
         trades, 100_000.0, "2023-01-03", "2023-01-06"
     )
     assert out == []
@@ -508,14 +513,14 @@ def test_daily_returns_from_trades_invalidates_ruin_series():
 def test_equity_to_returns_skips_zero_or_negative_prev():
     """Zero/negative previous equity yields a 0.0 return at that step (no
     ZeroDivisionError, no NaN)."""
-    out = StrategyLabOrchestrator._equity_to_returns([100.0, 0.0, 50.0])
+    out = _equity_to_returns([100.0, 0.0, 50.0])
     assert len(out) == 2
     assert out[0] == pytest.approx(-1.0)
     assert out[1] == 0.0
 
 
 def test_closes_to_equity_scales_to_initial_capital():
-    out = StrategyLabOrchestrator._closes_to_equity([10.0, 11.0, 12.0], 100_000.0)
+    out = _closes_to_equity([10.0, 11.0, 12.0], 100_000.0)
     assert out[0] == pytest.approx(100_000.0)
     assert out[-1] == pytest.approx(100_000.0 * 12.0 / 10.0)
 
