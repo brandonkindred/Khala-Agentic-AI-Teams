@@ -24,10 +24,7 @@ BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 
 
 def main() -> None:
-    # Blog agents mix prose drafting with prompt-driven JSON helpers; prose is
-    # the dominant call shape. ``response_format="text"`` keeps natural-language
-    # paths working — JSON helpers strip fences and json.loads the result.
-    llm_client = get_strands_model("blog", response_format="text")
+    llm_client = get_strands_model("blog")
 
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")

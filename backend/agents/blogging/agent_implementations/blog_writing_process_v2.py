@@ -703,12 +703,7 @@ def run_pipeline(
                 logger.warning("Failed to update job status: %s", e)
 
     if llm_client is None:
-        # Blog agents mix prose drafting with prompt-driven JSON helpers; prose
-        # is the dominant call shape. ``response_format="text"`` keeps
-        # natural-language paths working — JSON helpers strip fences and
-        # json.loads the result, which is sufficient when the model honors the
-        # in-prompt "respond with JSON only" instruction.
-        llm_client = get_strands_model("blog", response_format="text")
+        llm_client = get_strands_model("blog")
 
     if length_policy is None:
         length_policy = resolve_length_policy(
