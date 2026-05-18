@@ -1069,7 +1069,11 @@ def _try_build_fix_one_at_a_time(
             break
 
     try:
-        _build_fix_model = get_strands_model("build_fix_specialist")
+        # response_format="text": the build-fix loop parses the assistant
+        # content as the template-based output of
+        # parse_problem_solving_single_issue_template, not JSON. JSON mode
+        # would break the template parser.
+        _build_fix_model = get_strands_model("build_fix_specialist", response_format="text")
     except Exception as e:
         logger.warning("Build fix: could not get model: %s", e)
         return False, result.error_summary if agent_type == "frontend" else (

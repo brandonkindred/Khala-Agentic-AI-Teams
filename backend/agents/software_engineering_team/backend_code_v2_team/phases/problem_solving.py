@@ -46,7 +46,16 @@ def _resolve_model(llm):
         return llm
     from llm_service import LLMClient as _LLMClient
 
-    return get_strands_model(client=llm) if (llm is not None and isinstance(llm, _LLMClient)) else get_strands_model()
+    # response_format="text": the v2 phases consume the assistant content as
+    # template-based prose (parse_planning_template / parse_review_template /
+    # parse_files_and_summary_template / parse_problem_solving_single_issue_template),
+    # not JSON. The default JSON mode forces ``response_format=json_object`` on
+    # the wire and breaks the template parser.
+    return (
+        get_strands_model(client=llm, response_format="text")
+        if (llm is not None and isinstance(llm, _LLMClient))
+        else get_strands_model(response_format="text")
+    )
 
 logger = logging.getLogger(__name__)
 
