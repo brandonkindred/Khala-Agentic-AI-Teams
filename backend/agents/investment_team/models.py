@@ -505,6 +505,12 @@ class BacktestExecutionDiagnostics(BaseModel):
     # (``stop_loss`` / ``take_profit``). Counts close-order submissions,
     # not fills; fills land in the existing trade ledger.
     exit_rule_firings: Dict[str, int] = Field(default_factory=dict)
+    # Per-symbol breakdown of ``exit_rule_firings`` — same counts, keyed by
+    # ``symbol → rule_kind → count``. The aggregate field above is the
+    # row-sum across symbols. Conformance checks consume the per-symbol
+    # view so a stop_loss firing on one symbol can't mask a missed
+    # firing on another (cross-symbol leak attribution).
+    exit_rule_firings_by_symbol: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     open_positions_at_end: List[OpenPositionDiagnostic] = Field(default_factory=list)
     last_order_events: List[OrderLifecycleEvent] = Field(default_factory=list)
 

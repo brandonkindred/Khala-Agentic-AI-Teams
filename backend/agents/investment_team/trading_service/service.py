@@ -1510,6 +1510,28 @@ class TradingService:
             result.execution_diagnostics.exits_emitted += 1
             firings = result.execution_diagnostics.exit_rule_firings
             firings[intent.rule_kind] = firings.get(intent.rule_kind, 0) + 1
+            # Per-symbol breakdown — the conformance gate uses this so a
+            # stop_loss firing on one symbol can't mask a missed firing
+            # on another.
+            by_symbol = result.execution_diagnostics.exit_rule_firings_by_symbol
+            sym_firings = by_symbol.setdefault(intent.symbol, {})
+            sym_firings[intent.rule_kind] = sym_firings.get(intent.rule_kind, 0) + 1
+            # Cancel any in-flight continuation of the position's entry
+            # order: a partial-fill remainder (``REQUEUE_NEXT_BAR`` or
+            # ``TWAP_N``) still on the book would fill on the next bar
+            # before the engine's close, growing the position past what
+            # the engine sized for and leaving residual exposure after
+            # the close clips at ``min(req.qty, existing_pos.qty)``.
+            # Identifying continuations by ``po.order_id ==
+            # pos.entry_order_id`` is exact — the strategy can't reuse an
+            # engine-issued order_id, and same-side new entries from the
+            # strategy have different order_ids.
+            for po in order_book.pending_for_symbol(sym):
+                if po.order_id != pos.entry_order_id:
+                    continue
+                if po.cumulative_filled_qty <= 0:
+                    continue
+                order_book.cancel(po.order_id)
             _record_event(
                 result.execution_diagnostics,
                 "emitted",

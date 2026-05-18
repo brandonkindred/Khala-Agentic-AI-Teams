@@ -74,6 +74,7 @@
       "closed_trades": 5,
       "entries_filled": 5,
       "exit_rule_firings": {},
+      "exit_rule_firings_by_symbol": {},
       "exits_emitted": 5,
       "last_order_events": [
         {

@@ -749,3 +749,67 @@ def test_engine_runs_rules_normally_after_first_post_entry_bar() -> None:
 
     # Take-profit fires off the bar's high.
     assert result.execution_diagnostics.exit_rule_firings.get("take_profit") == 1
+
+
+def test_engine_cancels_pending_entry_continuation_when_exit_fires() -> None:
+    """A partial-fill entry remainder (REQUEUE_NEXT_BAR / TWAP slice) is
+    still pending on the book when the engine fires its stop-loss /
+    take-profit. Without cancelling, the continuation could fill on the
+    next bar before the engine's market close, growing the position
+    past the engine's sized close (which clips at the snapshot ``pos.qty``
+    via ``_fill_exit``'s ``min(req.qty, existing_pos.qty)`` invariant).
+    The fix scans ``order_book.pending_for_symbol(sym)`` for orders
+    matching ``pos.entry_order_id`` with ``cumulative_filled_qty > 0``
+    and cancels them so the rule's close is the last word on the
+    position.
+    """
+    svc = _service(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _populate_tracker_and_portfolio()
+    bar = _bar(high=105, low=95)  # bar.low=95 trips floor=98
+    result = TradingServiceResult()
+
+    # Build a pending entry continuation: same side as position, marked
+    # as partially filled, ``order_id == pos.entry_order_id`` so the
+    # engine recognises it as a continuation.
+    entry_continuation = OrderRequest(
+        client_order_id="c-entry",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=100.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        reason="entry_continuation",
+    )
+    submitted_po = order_book.submit(
+        entry_continuation,
+        submitted_at="2024-01-05T00:00:00",
+        submitted_equity=100_000.0,
+    )
+    # Force the order_id to match the position's entry_order_id (the
+    # real engine assigns this on first submission; we splice it in for
+    # the test since the order book auto-assigns an "o2"-style id).
+    order_book._pending[submitted_po.order_id] = submitted_po
+    submitted_po.order_id = "o1"
+    order_book._pending["o1"] = submitted_po
+    submitted_po.cumulative_filled_qty = 40.0  # 40 of 100 already filled
+    # Map the order under the position's symbol bucket so
+    # ``pending_for_symbol`` returns it under the matched id.
+    order_book._by_symbol["AAA"].append("o1")
+
+    pending: list[OrderRequest] = []
+    svc._maybe_emit_engine_exits(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+        engine_order_seq=0,
+        engine_exit_bindings={},
+    )
+
+    # Engine emitted its stop-loss close AND cancelled the pending
+    # entry continuation so it can't fill on the next bar.
+    engine_orders = [r for r in pending if (r.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX)]
+    assert len(engine_orders) == 1
+    assert "o1" not in order_book._pending

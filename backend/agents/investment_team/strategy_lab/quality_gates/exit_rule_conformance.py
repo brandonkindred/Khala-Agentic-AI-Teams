@@ -5,15 +5,17 @@ bar loop, every trade either obeys the rules within tolerance or comes from
 the strategy code's own exit logic.  This gate iterates the trade ledger
 and the execution diagnostics and reports:
 
-* **StopLossRule(pct=P, basis="entry_price")** — count trades whose
-  return cleared the raw ``-pct`` floor. The engine detects the trigger
-  on bar N's low (long) / high (short) but the synthetic close fills on
-  bar N+1's open, so an overnight gap can land the realised return
-  arbitrarily far below the rule's threshold without indicating an
-  enforcement bug. Critical failure fires only when below-floor trades
-  exist *and* the engine never emitted any ``stop_loss`` close — i.e.
-  the rule was tripped but the enforcement path didn't run. Trailing
-  variants need bar-by-bar replay and are flagged as informational.
+* **StopLossRule(pct=P, basis="entry_price")** — count below-floor
+  trades per symbol and compare to the engine's per-symbol
+  ``stop_loss`` firings. Critical failure fires when any symbol's
+  below-floor trade count exceeds its firing count (the rule was
+  tripped but the enforcement path didn't run). Per-symbol attribution
+  prevents a stop firing on symbol A from masking a leak on symbol B.
+  The engine triggers on bar N's low (long) / high (short) and fills
+  on bar N+1's open, so realised return can land below the rule's
+  raw threshold via gap fills — those are absorbed when matched 1:1
+  with firings. Trailing variants need bar-by-bar replay and are
+  flagged as informational.
 * **TakeProfitRule(pct=P)** — sanity-only: when ``exit_rules`` contains
   exactly one rule and that rule is the take-profit, we expect at least
   one engine firing. When other rules are present, the take-profit may
@@ -70,13 +72,16 @@ class ExitRuleConformanceGate:
 
         results: List[QualityGateResult] = []
         firings = (diagnostics.exit_rule_firings if diagnostics is not None else None) or {}
+        firings_by_symbol = (
+            diagnostics.exit_rule_firings_by_symbol if diagnostics is not None else None
+        ) or {}
 
         # ---- StopLossRule (entry_price basis only — trailing variants need
         # bar-by-bar replay which the gate cannot reconstruct from the trade
         # ledger alone) ----
         stop_losses = [r for r in exit_rules if isinstance(r, StopLossRule)]
         for rule in stop_losses:
-            results.append(self._check_stop_loss(rule, trades, firings))
+            results.append(self._check_stop_loss(rule, trades, firings_by_symbol))
 
         # ---- TakeProfitRule (sanity only) ----
         take_profits = [r for r in exit_rules if isinstance(r, TakeProfitRule)]
@@ -124,7 +129,7 @@ class ExitRuleConformanceGate:
     def _check_stop_loss(
         rule: StopLossRule,
         trades: Sequence[TradeRecord],
-        firings: Mapping[str, int],
+        firings_by_symbol: Mapping[str, Mapping[str, int]],
     ) -> QualityGateResult:
         if rule.basis != "entry_price":
             return QualityGateResult(
@@ -145,33 +150,37 @@ class ExitRuleConformanceGate:
         # ``return_pct`` against a strict floor without false-positive
         # criticals on every gap.
         #
-        # Per-trade comparison: count trades whose return cleared the
-        # rule's raw threshold (no slippage tolerance) and compare to
-        # the recorded ``stop_loss`` firing count. If the number of
-        # below-floor trades EXCEEDS the firing count, at least one
-        # trade fell through without engine enforcement — that's a
-        # leak. ``stop_firings >= tripped`` means each below-floor
-        # trade is plausibly accounted for by a matching engine
-        # emission (and the residual return shortfall is a gap fill, not
-        # a leak). Pure trade-count comparison can't tell which
-        # specific trade leaked, but it can't mask leaks behind
-        # unrelated firings either.
+        # Per-symbol attribution: count below-floor trades per symbol
+        # and compare to the engine's per-symbol ``stop_loss`` firings.
+        # A global rule-kind count would let an unrelated firing on
+        # symbol A mask a leak on symbol B; per-symbol attribution
+        # confines the gate's reasoning to one symbol at a time. Cap
+        # ``min(tripped_count, firings_count)`` covers the protected
+        # trades; the rest are leaks.
         raw_floor_pct = -(rule.pct * 100.0)
-        tripped = [t for t in trades if t.return_pct < raw_floor_pct]
-        stop_firings = firings.get("stop_loss", 0)
-        if len(tripped) > stop_firings:
-            leak_count = len(tripped) - stop_firings
-            sample = [(t.trade_num, t.return_pct) for t in tripped[:5]]
+        by_symbol_tripped: dict[str, list[TradeRecord]] = {}
+        for t in trades:
+            if t.return_pct < raw_floor_pct:
+                by_symbol_tripped.setdefault(t.symbol, []).append(t)
+        unaccounted: list[TradeRecord] = []
+        total_firings = 0
+        for sym, tripped in by_symbol_tripped.items():
+            sym_firings = firings_by_symbol.get(sym, {}).get("stop_loss", 0)
+            total_firings += sym_firings
+            if len(tripped) > sym_firings:
+                unaccounted.extend(tripped[sym_firings:])
+        total_tripped = sum(len(v) for v in by_symbol_tripped.values())
+        if unaccounted:
+            sample = [(t.trade_num, t.symbol, t.return_pct) for t in unaccounted[:5]]
             return QualityGateResult(
                 gate_name=GATE,
                 passed=False,
                 severity="critical",
                 details=(
-                    f"StopLossRule(pct={rule.pct}) leak: {len(tripped)} trade(s) "
-                    f"closed below the {raw_floor_pct:.2f}% floor but the engine "
-                    f"recorded only {stop_firings} stop_loss firing(s) "
-                    f"({leak_count} unaccounted-for trade(s)). Sample "
-                    f"(trade_num, return_pct)={sample}."
+                    f"StopLossRule(pct={rule.pct}) leak: {total_tripped} trade(s) "
+                    f"closed below the {raw_floor_pct:.2f}% floor; "
+                    f"{len(unaccounted)} unaccounted for by per-symbol firings. "
+                    f"Sample (trade_num, symbol, return_pct)={sample}."
                 ),
             )
         return QualityGateResult(
@@ -179,9 +188,10 @@ class ExitRuleConformanceGate:
             passed=True,
             severity="info",
             details=(
-                f"StopLossRule(pct={rule.pct}) — "
-                f"{stop_firings} engine firing(s) covers "
-                f"{len(tripped)} below-floor trade(s) (gap-fill expected on next-bar opens)."
+                f"StopLossRule(pct={rule.pct}) — per-symbol firings cover "
+                f"{total_tripped} below-floor trade(s) across "
+                f"{len(by_symbol_tripped)} symbol(s); "
+                f"total firings={total_firings}."
             ),
         )
 

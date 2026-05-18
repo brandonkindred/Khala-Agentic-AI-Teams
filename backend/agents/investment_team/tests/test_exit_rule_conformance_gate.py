@@ -62,8 +62,17 @@ def _trade(
     )
 
 
-def _diagnostics(**firings: int) -> BacktestExecutionDiagnostics:
-    return BacktestExecutionDiagnostics(exit_rule_firings=dict(firings))
+def _diagnostics(
+    *, symbol: str = "AAA", **firings: int
+) -> BacktestExecutionDiagnostics:
+    """Helper: build a diagnostics envelope where every firing is attributed
+    to a single symbol. Tests that need cross-symbol scenarios construct
+    ``BacktestExecutionDiagnostics`` directly.
+    """
+    return BacktestExecutionDiagnostics(
+        exit_rule_firings=dict(firings),
+        exit_rule_firings_by_symbol={symbol: dict(firings)} if firings else {},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +326,7 @@ def test_stop_loss_fails_when_below_floor_trades_exceed_firings() -> None:
     assert len(fails) == 1
     assert fails[0].severity == "critical"
     assert "leak" in fails[0].details.lower()
-    assert "1 unaccounted-for trade" in fails[0].details
+    assert "1 unaccounted" in fails[0].details
 
 
 def test_stop_loss_passes_when_firings_cover_below_floor_count() -> None:
@@ -379,3 +388,70 @@ def test_take_profit_alone_warns_when_engine_never_fired() -> None:
     assert len(fails) == 1
     assert fails[0].severity == "warning"
     assert "zero take_profit firings" in fails[0].details
+
+
+def test_stop_loss_cross_symbol_firings_do_not_mask_leak() -> None:
+    """Per-symbol attribution: an engine stop_loss firing on symbol AAA
+    must NOT cover a missed firing on symbol BBB. A global rule-kind
+    count would pass this scenario (2 below-floor trades, 2 firings)
+    even though BBB never had its rule enforced. Regression for the P2
+    review comment on issue #527 PR.
+    """
+    gate = ExitRuleConformanceGate()
+    # AAA: one below-floor trade, one firing (protected).
+    # BBB: one below-floor trade, ZERO firings (leak).
+    trades = [
+        TradeRecord(
+            trade_num=1,
+            entry_date="2024-01-01",
+            exit_date="2024-01-02",
+            symbol="AAA",
+            side="long",
+            entry_price=100.0,
+            exit_price=92.0,
+            shares=100,
+            position_value=10_000.0,
+            gross_pnl=-800.0,
+            net_pnl=-800.0,
+            return_pct=-8.0,
+            hold_days=1,
+            outcome="loss",
+            cumulative_pnl=-800.0,
+        ),
+        TradeRecord(
+            trade_num=2,
+            entry_date="2024-01-03",
+            exit_date="2024-01-04",
+            symbol="BBB",
+            side="long",
+            entry_price=200.0,
+            exit_price=180.0,
+            shares=50,
+            position_value=10_000.0,
+            gross_pnl=-1_000.0,
+            net_pnl=-1_000.0,
+            return_pct=-10.0,
+            hold_days=1,
+            outcome="loss",
+            cumulative_pnl=-1_800.0,
+        ),
+    ]
+    # Aggregate firings would mask the leak (2 trades, 2 firings); per
+    # symbol, BBB has 0 firings.
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"stop_loss": 2},
+        exit_rule_firings_by_symbol={
+            "AAA": {"stop_loss": 1},
+            "CCC": {"stop_loss": 1},  # unrelated firing on another symbol
+        },
+    )
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=trades,
+        diagnostics=diag,
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "critical"
+    assert "BBB" in fails[0].details
