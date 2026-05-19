@@ -1240,25 +1240,30 @@ class OllamaLLMClient(LLMClient):
             finish_reason="length",
         )
 
-    def chat_round(
+    def chat(
         self,
         messages: list,
         *,
+        response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
         think: bool = False,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
-        """One chat completion round that returns prose (or tool calls).
+        """One chat completion round, parameterized by ``response_format``.
 
-        See ``LLMClient.chat_round``. Returns either the raw assistant content
-        string or a ``{"__tool_calls__": [...]}`` dict when the model invokes
-        tools. No JSON output is forced and no JSON parsing is attempted on
-        plain content — this is the prose-chat counterpart to
-        ``chat_json_round`` and is what conversational agents (and the Strands
-        adapter's ``stream()``) should use.
+        See ``LLMClient.chat``. JSON-only differences from the text path are
+        local to the two if-statements below: the wire payload includes
+        ``response_format=json_object`` when no tools are present, and the
+        assistant content is parsed via ``_extract_json`` instead of being
+        returned raw. Tool-invocation envelopes are returned identically in
+        both modes.
         """
+        if response_format not in ("json", "text"):
+            raise ValueError(
+                f"response_format must be 'json' or 'text', got {response_format!r}"
+            )
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
         self._current_caller = _caller_tag()
@@ -1281,53 +1286,7 @@ class OllamaLLMClient(LLMClient):
         }
         if tools:
             payload["tools"] = tools
-        content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
-        stripped = (content or "").strip()
-        if stripped.startswith("{") and "__tool_calls__" in stripped:
-            try:
-                parsed = json.loads(stripped)
-                if isinstance(parsed, dict) and "__tool_calls__" in parsed:
-                    self._record_telemetry(status="success")
-                    return parsed
-            except json.JSONDecodeError:
-                pass
-        self._record_telemetry(status="success")
-        return content
-
-    def chat_json_round(
-        self,
-        messages: list,
-        *,
-        temperature: float = 0.2,
-        tools: Optional[list] = None,
-        think: bool = False,
-        max_tokens: Optional[int] = None,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """One chat completion round for multi-turn tool loops. See ``LLMClient.chat_json_round``."""
-        max_retries, backoff_base, backoff_max = _parse_retry_config()
-        sem = _get_ollama_semaphore()
-        self._current_caller = _caller_tag()
-        if max_tokens is None:
-            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
-            if env_max:
-                try:
-                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
-                except ValueError:
-                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-            else:
-                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-        max_tokens = min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
-        payload: dict = {
-            "model": self.model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "messages": messages,
-            "think": think,
-        }
-        if tools:
-            payload["tools"] = tools
-        else:
+        elif response_format == "json":
             payload["response_format"] = {"type": "json_object"}
         content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
         stripped = (content or "").strip()
@@ -1339,6 +1298,10 @@ class OllamaLLMClient(LLMClient):
                     return parsed
             except json.JSONDecodeError:
                 pass
+        if response_format == "text":
+            self._record_telemetry(status="success")
+            return content
+        # JSON mode: parse with the existing repair/continue fallbacks.
         try:
             result = self._extract_json(content)
             self._record_telemetry(status="success")

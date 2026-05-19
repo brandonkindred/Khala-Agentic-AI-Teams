@@ -768,83 +768,35 @@ class DummyLLMClient(LLMClient, Model):
             }
         return {"output": "Dummy response", "status": "ok"}
 
-    def chat_round(
+    def chat(
         self,
         messages: list,
         *,
+        response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
         think: bool = False,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
-        """Prose chat counterpart to ``chat_json_round``.
+        """One unified dummy chat round, parameterized by ``response_format``.
 
-        With ``tools`` (especially Strands' ``StructuredOutputTool``), delegates
-        to ``chat_json_round`` so structured-output and tool-loop tests keep
-        working. Without tools, runs the user prompt through the same pattern
-        matcher ``complete_json`` uses and returns the JSON-serialized dict as
-        text — this preserves the dict-shaped fixtures the test suite asserts
-        on, while still exercising the prose-chat code path through the Strands
-        adapter (no ``response_format=json_object`` is forced on the wire).
+        Branches, in order of precedence:
+
+        1. **Strands structured output** (``tools`` contains a
+           ``StructuredOutputTool``): return a single tool call invoking it
+           with the dict produced by the pattern matcher.
+        2. **Legacy tool loop** (``tools`` provided, no prior tool result):
+           emit a no-op ``git_status`` tool call.
+        3. **Follow-up rounds or no tools**: run the user prompt through
+           ``complete_json``. For ``response_format="json"`` return the dict;
+           for ``response_format="text"`` JSON-serialize the dict to a string
+           so callers exercising the prose path see deterministic text.
         """
-        if tools:
-            return self.chat_json_round(
-                messages,
-                temperature=temperature,
-                tools=tools,
-                think=think,
-                max_tokens=max_tokens,
-                **kwargs,
+        if response_format not in ("json", "text"):
+            raise ValueError(
+                f"response_format must be 'json' or 'text', got {response_format!r}"
             )
-        self._request_count += 1
-        system_prompt = None
-        user_prompt = ""
-        for m in messages:
-            if m.get("role") == "system":
-                system_prompt = m.get("content")
-            elif m.get("role") == "user":
-                user_prompt = m.get("content") or ""
-        data = self.complete_json(
-            user_prompt,
-            temperature=temperature,
-            system_prompt=system_prompt,
-            tools=None,
-            think=think,
-            **kwargs,
-        )
-        return json.dumps(data) if isinstance(data, dict) else str(data)
-
-    def chat_json_round(
-        self,
-        messages: list,
-        *,
-        temperature: float = 0.2,
-        tools: Optional[list] = None,
-        think: bool = False,
-        max_tokens: Optional[int] = None,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """Support tool-loop tests and Strands structured-output flows.
-
-        Behavior, in order of precedence:
-
-        1. **Strands structured output**: when ``tools`` contains a tool whose
-           description marks it as a ``StructuredOutputTool`` (the sentinel
-           Strands' ``Agent`` adds when ``structured_output_model=...`` is
-           used), return a single tool call invoking that tool with the dict
-           produced by the normal ``complete_json`` pattern matcher. This
-           lets Strands-migrated agents run end-to-end against the dummy
-           client without changes.
-
-        2. **Legacy tool loop** (first round, ``tools`` provided): emit a
-           no-op ``git_status`` tool call. Test suites for
-           ``complete_json_with_tool_loop`` register a ``git_status`` handler
-           and expect this handoff.
-
-        3. **Follow-up rounds or no tools**: fall through to
-           ``complete_json`` using the flattened user + system prompts.
-        """
         self._request_count += 1
         system_prompt = None
         user_prompt = ""
@@ -902,7 +854,7 @@ class DummyLLMClient(LLMClient, Model):
                 ]
             }
 
-        return self.complete_json(
+        data = self.complete_json(
             user_prompt,
             temperature=temperature,
             system_prompt=system_prompt,
@@ -910,3 +862,10 @@ class DummyLLMClient(LLMClient, Model):
             think=think,
             **kwargs,
         )
+        if response_format == "text":
+            # Preserve the existing dummy text-mode contract: the pattern
+            # matcher returns dicts; JSON-serialize them so the assertion
+            # shape (``json.loads(text) == {...}``) used across the test
+            # suite continues to hold.
+            return json.dumps(data) if isinstance(data, dict) else str(data)
+        return data

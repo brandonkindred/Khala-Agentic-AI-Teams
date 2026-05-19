@@ -15,6 +15,7 @@ from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 
 from ..models import (
     DocumentationSelfReviewResult,
@@ -28,20 +29,6 @@ from ..models import (
 )
 from ..output_templates import parse_documentation_self_review_template, parse_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT, REVIEW_PROMPT
-
-
-def _resolve_model(llm):
-    """Resolve the Strands model for this phase. See shared.strands_model.
-
-    response_format="text": the v2 phases consume the assistant content as
-    template-based prose (parse_planning_template / parse_review_template /
-    parse_files_and_summary_template / parse_problem_solving_single_issue_template),
-    not JSON. The default JSON mode forces response_format=json_object on the
-    wire and breaks the template parser.
-    """
-    from software_engineering_team.shared.strands_model import resolve_strands_model
-
-    return resolve_strands_model(llm, response_format="text")
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +54,7 @@ def _run_llm_review(
         else "N/A",
         code=code_text[:MAX_REVIEW_CODE_CHARS],
     )
-    raw = (lambda _r: str(_r))(Agent(model=_resolve_model(llm))(prompt)).strip()
+    raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
     data = parse_review_template(raw)
     issues: List[ReviewIssue] = []
     for item in data.get("issues") or []:
@@ -575,7 +562,7 @@ def run_documentation_self_review(
         )
 
         try:
-            raw = (lambda _r: str(_r))(Agent(model=_resolve_model(llm))(prompt)).strip()
+            raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
         except Exception as exc:
             logger.warning(
                 "Documentation self-review LLM call failed (iteration %d): %s",

@@ -14,6 +14,7 @@ from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 
 from ..models import (
     Microtask,
@@ -26,20 +27,6 @@ from ..models import (
 )
 from ..output_templates import parse_batch_fix_template, parse_problem_solving_single_issue_template
 from ..prompts import BATCH_FIX_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT, TYPESCRIPT_CONVENTIONS
-
-
-def _resolve_model(llm):
-    """Resolve the Strands model for this phase. See shared.strands_model.
-
-    response_format="text": the v2 phases consume the assistant content as
-    template-based prose (parse_planning_template / parse_review_template /
-    parse_files_and_summary_template / parse_problem_solving_single_issue_template),
-    not JSON. The default JSON mode forces response_format=json_object on the
-    wire and breaks the template parser.
-    """
-    from software_engineering_team.shared.strands_model import resolve_strands_model
-
-    return resolve_strands_model(llm, response_format="text")
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +132,7 @@ def run_batch_coding_fixes(
     )
 
     try:
-        raw = (lambda _r: str(_r))(Agent(model=_resolve_model(llm))(prompt)).strip()
+        raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
     except Exception as exc:
         logger.error(
             "[%s] Microtask %s: batch fix LLM call failed: %s",
@@ -272,7 +259,7 @@ def run_problem_solving(
                 current_code=relevant_code,
             )
             try:
-                raw = (lambda _r: str(_r))(Agent(model=_resolve_model(llm))(prompt)).strip()
+                raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
             except Exception as exc:
                 logger.warning(
                     "[%s] Problem-solving LLM call failed (issue %d, attempt %d): %s",
@@ -416,7 +403,7 @@ def run_problem_solving_for_microtask(
                 current_code=relevant_code,
             )
             try:
-                raw = (lambda _r: str(_r))(Agent(model=_resolve_model(llm))(prompt)).strip()
+                raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
             except Exception as exc:
                 logger.warning(
                     "[%s] Microtask %s: problem-solving LLM call failed (issue %d, attempt %d): %s",

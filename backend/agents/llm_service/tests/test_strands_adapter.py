@@ -59,31 +59,11 @@ class _RecordingClient(LLMClient):
         )
         return self.response
 
-    def chat_json_round(
+    def chat(
         self,
         messages: list,
         *,
-        temperature: float = 0.2,
-        tools: Optional[list] = None,
-        think: bool = False,
-        max_tokens: Optional[int] = None,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        call = {
-            "messages": messages,
-            "temperature": temperature,
-            "tools": tools,
-            "think": think,
-            "max_tokens": max_tokens,
-        }
-        self.chat_calls.append(call)
-        self.chat_json_round_calls.append(call)
-        return self.response
-
-    def chat_round(
-        self,
-        messages: list,
-        *,
+        response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
         think: bool = False,
@@ -92,13 +72,17 @@ class _RecordingClient(LLMClient):
     ) -> Any:
         call = {
             "messages": messages,
+            "response_format": response_format,
             "temperature": temperature,
             "tools": tools,
             "think": think,
             "max_tokens": max_tokens,
         }
         self.chat_calls.append(call)
-        self.chat_round_calls.append(call)
+        if response_format == "json":
+            self.chat_json_round_calls.append(call)
+        elif response_format == "text":
+            self.chat_round_calls.append(call)
         return self.response
 
 
@@ -613,6 +597,47 @@ def test_structured_output_raises_on_invalid_response() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_llm_client_config_validates_response_format_at_construction() -> None:
+    """The frozen dataclass enforces the contract in one place — invalid
+    response_format values raise from ``__post_init__`` so they can never
+    propagate to ``stream()``.
+    """
+    from llm_service.strands_adapter import LLMClientConfig
+
+    with pytest.raises(ValueError, match="response_format"):
+        LLMClientConfig(response_format="xml")  # type: ignore[arg-type]
+
+
+def test_update_config_rejects_unknown_keys() -> None:
+    """The previous mutable-dict ``self.config.update(...)`` silently retained
+    typo'd or unknown keys. The dataclass-backed ``update_config`` raises
+    ``TypeError`` instead, which is what we want — unknown keys never had a
+    meaningful effect and silently retaining them just hid bugs.
+    """
+    model = LLMClientModel(DummyLLMClient())
+    with pytest.raises(TypeError):
+        model.update_config(this_is_not_a_known_field="oops")
+
+
+def test_update_config_validates_response_format() -> None:
+    """``update_config`` reuses the dataclass validation — typo'd values raise."""
+    model = LLMClientModel(DummyLLMClient())
+    with pytest.raises(ValueError, match="response_format"):
+        model.update_config(response_format="Prose")
+
+
+def test_get_config_returns_independent_dict_view() -> None:
+    """Mutations on the dict returned by ``get_config()`` must not affect the
+    frozen underlying config — this was a real footgun with the previous
+    ``self.config: Dict`` design where the returned dict WAS the live config."""
+    model = LLMClientModel(DummyLLMClient(), agent_key="qa")
+    snapshot = model.get_config()
+    snapshot["agent_key"] = "mutated"
+
+    fresh = model.get_config()
+    assert fresh["agent_key"] == "qa"
+
+
 def test_get_config_and_update_config() -> None:
     client = DummyLLMClient()
     model = LLMClientModel(client, agent_key="qa_agent", model_id="dummy-v1", temperature=0.3)
@@ -714,10 +739,7 @@ def test_run_json_via_strands_returns_empty_dict_on_exception() -> None:
     ``data.get(...)`` defaults."""
 
     class _Broken(DummyLLMClient):
-        def chat_json_round(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
-            raise RuntimeError("simulated LLM failure")
-
-        def chat_round(self, *a: Any, **kw: Any) -> Any:  # type: ignore[override]
+        def chat(self, *a: Any, **kw: Any) -> Any:  # type: ignore[override]
             raise RuntimeError("simulated LLM failure")
 
         def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]

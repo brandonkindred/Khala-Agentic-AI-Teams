@@ -8,7 +8,6 @@ pre-existing tool-agent gap (raw LLMClient injections silently discarded).
 
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock
 
 import pytest

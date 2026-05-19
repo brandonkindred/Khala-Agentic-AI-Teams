@@ -42,8 +42,8 @@ def resolve_strands_model(llm: Any, *, response_format: str = "json") -> Any:
     llm:
         Either a Strands ``Model``, an ``LLMClient``, or ``None``.
     response_format:
-        ``"json"`` (default) or ``"text"``. Selects ``chat_json_round`` vs
-        ``chat_round`` on the wire. See ``llm_service/strands_adapter.py``
+        ``"json"`` (default) or ``"text"``. Selects the JSON / text branch of
+        ``LLMClient.chat`` on the wire. See ``llm_service/strands_adapter.py``
         for details.
     """
     # Local imports keep the optional ``strands`` and ``LLMClient`` imports off
@@ -59,3 +59,17 @@ def resolve_strands_model(llm: Any, *, response_format: str = "json") -> Any:
     if llm is not None and isinstance(llm, _LLMClient):
         return get_strands_model(client=llm, response_format=response_format)
     return get_strands_model(response_format=response_format)
+
+
+def resolve_text_mode_strands_model(llm: Any) -> Any:
+    """Convenience wrapper: ``resolve_strands_model(llm, response_format="text")``.
+
+    The v2 phase modules and template-based tool agents all need text-mode
+    output (their downstream consumers are template parsers like
+    ``parse_planning_template`` / ``parse_review_template`` /
+    ``parse_files_and_summary_template``, not ``json.loads``). Calling this
+    named helper at the use site removes the need for an 8-copy
+    ``_resolve_model`` trampoline per file *and* makes the text-mode intent
+    legible to a grep.
+    """
+    return resolve_strands_model(llm, response_format="text")

@@ -46,9 +46,10 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Literal, Optional
 
 from strands.models.model import Model
 from strands.types.content import Messages
@@ -60,7 +61,45 @@ from .interface import LLMClient
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["LLMClientModel", "get_strands_model", "run_json_via_strands"]
+__all__ = ["LLMClientConfig", "LLMClientModel", "get_strands_model", "run_json_via_strands"]
+
+
+ResponseFormat = Literal["json", "text"]
+
+
+@dataclasses.dataclass(frozen=True)
+class LLMClientConfig:
+    """Immutable configuration for an ``LLMClientModel``.
+
+    Replaces the previous mutable ``self.config: Dict[str, Any]`` plus ad-hoc
+    ``clone()`` enumeration of known keys. The dataclass enforces the contract
+    in one place: each field is an explicit name with a default, ``clone()``
+    becomes ``dataclasses.replace`` and inherits unknown-kwarg validation for
+    free, and unknown keys never silently disappear into a dict.
+
+    ``response_format`` is validated in ``__post_init__`` rather than at the
+    ``LLMClientModel`` boundary because the same validation is also needed by
+    ``replace``-style updates.
+    """
+
+    agent_key: Optional[str] = None
+    model_id: Optional[str] = None
+    temperature: float = 0.0
+    max_tokens: Optional[int] = None
+    think: bool = False
+    response_format: ResponseFormat = "json"
+
+    def __post_init__(self) -> None:
+        if self.response_format not in ("json", "text"):
+            raise ValueError(
+                f"response_format must be 'json' or 'text', got {self.response_format!r}"
+            )
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Return a plain dict view — Strands' ``Model.get_config`` contract
+        returns a mutable mapping. Mutations on the returned dict do NOT
+        affect the underlying frozen dataclass."""
+        return dataclasses.asdict(self)
 
 
 # ---------------------------------------------------------------------------
@@ -218,30 +257,49 @@ class LLMClientModel(Model):
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         think: bool = False,
-        response_format: str = "json",
+        response_format: ResponseFormat = "json",
     ) -> None:
         assert client is not None, "client is required"
-        if response_format not in ("json", "text"):
-            raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
         self._client = client
-        self.config: Dict[str, Any] = {
-            "agent_key": agent_key,
-            "model_id": model_id or type(client).__name__,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "think": think,
-            "response_format": response_format,
-        }
+        # The dataclass enforces ``response_format ∈ {"json","text"}``;
+        # invalid values raise ``ValueError`` from ``__post_init__``.
+        self._config = LLMClientConfig(
+            agent_key=agent_key,
+            model_id=model_id or type(client).__name__,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            think=think,
+            response_format=response_format,
+        )
 
     # -- strands.models.Model required interface ---------------------------
 
     def update_config(self, **model_config: Any) -> None:
-        """Shallow-merge ``model_config`` into the adapter's config dict."""
-        self.config.update(model_config)
+        """Replace this model's config with the fields listed in ``model_config``.
+
+        Strands' ``Model.update_config`` is part of the public contract, so we
+        keep the method name. Unlike the previous mutable-dict implementation,
+        this builds a new ``LLMClientConfig`` (which validates), so unknown
+        kwargs raise ``TypeError`` instead of being silently retained.
+        """
+        self._config = dataclasses.replace(self._config, **model_config)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the adapter config (agent_key, model_id, sampling params)."""
-        return self.config
+        """Return the adapter config as a plain dict — Strands' contract.
+
+        The returned dict is a copy; mutations don't affect the frozen
+        underlying ``LLMClientConfig``.
+        """
+        return self._config.as_dict()
+
+    @property
+    def config(self) -> Dict[str, Any]:
+        """Strands' ``Model`` contract exposes ``config`` as a dict — its
+        ``Agent`` loop calls ``model.config.get(...)`` internally. Return the
+        dict view here so that path keeps working; the frozen typed
+        ``LLMClientConfig`` is available on ``self._config`` for internal
+        adapter use where attribute access is cleaner."""
+        return self._config.as_dict()
 
     def clone(self, **overrides: Any) -> "LLMClientModel":
         """Return a new ``LLMClientModel`` sharing the backing client but with
@@ -257,20 +315,11 @@ class LLMClientModel(Model):
 
             text_model = json_model.clone(response_format="text")
         """
-        cfg = dict(self.config)
-        cfg.update(overrides)
-        rf = cfg.get("response_format", "json")
-        if rf not in ("json", "text"):
-            raise ValueError(f"response_format must be 'json' or 'text', got {rf!r}")
-        return LLMClientModel(
-            self._client,
-            agent_key=cfg.get("agent_key"),
-            model_id=cfg.get("model_id"),
-            temperature=float(cfg.get("temperature", 0.0) or 0.0),
-            max_tokens=cfg.get("max_tokens"),
-            think=bool(cfg.get("think", False)),
-            response_format=str(rf),
-        )
+        new_config = dataclasses.replace(self._config, **overrides)
+        sibling = LLMClientModel.__new__(LLMClientModel)
+        sibling._client = self._client
+        sibling._config = new_config
+        return sibling
 
     async def stream(
         self,
@@ -310,23 +359,24 @@ class LLMClientModel(Model):
         oai_tools = _tool_specs_to_openai(tool_specs)
 
         # Per-call overrides come through ``invocation_state``; fall back to
-        # the model's default config.
+        # the model's default config. Building a transient LLMClientConfig
+        # gives us the same field-level validation as ``clone()`` /
+        # ``update_config`` for free — a typo'd ``response_format="Text"``
+        # raises ``ValueError`` from ``LLMClientConfig.__post_init__``
+        # instead of silently falling back to JSON mode.
         state = invocation_state or {}
-        temperature = float(state.get("temperature", self.config.get("temperature", 0.0)) or 0.0)
-        max_tokens = state.get("max_tokens", self.config.get("max_tokens"))
-        think = bool(state.get("think", self.config.get("think", False)))
-        response_format = str(
-            state.get("response_format", self.config.get("response_format", "json"))
-        )
-        # Match the strictness of __init__ / clone: anything other than the two
-        # documented values is a programming error, not a silent fallback to
-        # JSON mode. Logging + ValueError beats silently routing a "Text" /
-        # "prose" / etc. override to chat_json_round.
-        if response_format not in ("json", "text"):
-            raise ValueError(
-                "invocation_state['response_format'] must be 'json' or 'text', "
-                f"got {response_format!r}"
+        cfg = self._config
+        try:
+            call_cfg = dataclasses.replace(
+                cfg,
+                **{k: state[k] for k in ("temperature", "max_tokens", "think", "response_format") if k in state},
             )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invocation_state contains invalid override: {exc}") from exc
+        temperature = float(call_cfg.temperature or 0.0)
+        max_tokens = call_cfg.max_tokens
+        think = bool(call_cfg.think)
+        response_format = call_cfg.response_format
 
         logger.debug(
             "strands_adapter.stream: messages=%d tools=%s temp=%s think=%s response_format=%s agent_key=%s",
@@ -335,15 +385,13 @@ class LLMClientModel(Model):
             temperature,
             think,
             response_format,
-            self.config.get("agent_key"),
+            cfg.agent_key,
         )
 
-        backing_call = (
-            self._client.chat_round if response_format == "text" else self._client.chat_json_round
-        )
         result = await asyncio.to_thread(
-            backing_call,
+            self._client.chat,
             oai_messages,
+            response_format=response_format,
             temperature=temperature,
             tools=oai_tools,
             think=think,
@@ -416,8 +464,8 @@ class LLMClientModel(Model):
         ]
         text_prompt = "\n\n".join(p for p in user_parts if p)
 
-        temperature = float(self.config.get("temperature", 0.0) or 0.0)
-        think = bool(self.config.get("think", False))
+        temperature = float(self._config.temperature or 0.0)
+        think = bool(self._config.think)
 
         data = await asyncio.to_thread(
             self._client.complete_json,

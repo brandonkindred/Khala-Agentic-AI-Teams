@@ -16,6 +16,7 @@ from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 
 from ..models import (
     ExecutionResult,
@@ -33,20 +34,6 @@ from ..models import (
 )
 from ..output_templates import parse_files_and_summary_template
 from ..prompts import EXECUTION_PROMPT, JAVA_CONVENTIONS, PYTHON_CONVENTIONS
-
-
-def _resolve_model(llm):
-    """Resolve the Strands model for this phase. See shared.strands_model.
-
-    response_format="text": the v2 phases consume the assistant content as
-    template-based prose (parse_planning_template / parse_review_template /
-    parse_files_and_summary_template / parse_problem_solving_single_issue_template),
-    not JSON. The default JSON mode forces response_format=json_object on the
-    wire and breaks the template parser.
-    """
-    from software_engineering_team.shared.strands_model import resolve_strands_model
-
-    return resolve_strands_model(llm, response_format="text")
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +99,7 @@ def _run_general_microtask(
         existing_code=existing_code[:8000] if existing_code else "(none)",
         architecture_context=arch_ctx or "(none)",
     )
-    raw = (lambda _r: str(_r))(Agent(model=_resolve_model(llm))(prompt)).strip()
+    raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
     data = parse_files_and_summary_template(raw)
     files = data.get("files") or {}
 

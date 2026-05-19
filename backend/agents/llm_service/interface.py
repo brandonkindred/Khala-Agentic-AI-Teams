@@ -187,6 +187,36 @@ class LLMClient(ABC):
             prompt, temperature=temperature, max_tokens=None, system_prompt=None, think=think
         )
 
+    def chat(
+        self,
+        messages: list[Dict[str, Any]],
+        *,
+        response_format: str = "json",
+        temperature: float = 0.2,
+        tools: Optional[list] = None,
+        think: bool = False,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """One chat completion round, parameterized by ``response_format``.
+
+        Returns one of:
+
+        - ``{"__tool_calls__": [...]}`` when the model invokes tools, regardless
+          of ``response_format`` (tool invocations always come back as a dict
+          envelope).
+        - A parsed ``Dict[str, Any]`` when ``response_format="json"`` (the
+          default). The wire request includes ``response_format=json_object``
+          when no tools are present, and the assistant content is parsed via
+          ``_extract_json`` with markdown-fence and repair fallbacks.
+        - A raw ``str`` of the assistant content when ``response_format="text"``.
+          No forcing on the wire, no parsing — for conversational prose, the
+          ``---DRAFT---`` marker pattern, template-based outputs, etc.
+
+        Default implementation: not supported — override in Ollama / Dummy.
+        """
+        raise LLMPermanentError(f"{type(self).__name__} does not implement chat")
+
     def chat_json_round(
         self,
         messages: list[Dict[str, Any]],
@@ -197,15 +227,21 @@ class LLMClient(ABC):
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """
-        Single chat completion round with optional tools (multi-turn tool loops).
+        """Backward-compatibility alias for ``chat(response_format="json")``.
 
-        Returns either a normal structured dict (parsed from assistant content) or
-        ``{"__tool_calls__": [...]}`` when the model requests tool execution.
-        Default implementation: not supported — override in Ollama / Dummy clients.
+        Kept so existing call sites (``tool_loop.py``, tests, external code
+        pinned to a specific Khala version) keep working while new code
+        migrates to ``chat()``. Same return contract as the JSON branch of
+        ``chat()``.
         """
-        raise LLMPermanentError(
-            f"{type(self).__name__} does not implement chat_json_round (required for tool loops)"
+        return self.chat(
+            messages,
+            response_format="json",
+            temperature=temperature,
+            tools=tools,
+            think=think,
+            max_tokens=max_tokens,
+            **kwargs,
         )
 
     def chat_round(
@@ -218,15 +254,16 @@ class LLMClient(ABC):
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
-        """
-        Single chat completion round that returns prose (or tool calls).
+        """Backward-compatibility alias for ``chat(response_format="text")``.
 
-        Returns either a plain string (assistant message content) or
-        ``{"__tool_calls__": [...]}`` when the model requests tool execution.
-        Unlike ``chat_json_round``, this does NOT request ``response_format=json_object``
-        and does NOT attempt to parse the content as JSON — use it for conversational
-        agents whose replies should be free-form natural language.
-
-        Default implementation: not supported — override in Ollama / Dummy clients.
+        Same return contract as the text branch of ``chat()``.
         """
-        raise LLMPermanentError(f"{type(self).__name__} does not implement chat_round")
+        return self.chat(
+            messages,
+            response_format="text",
+            temperature=temperature,
+            tools=tools,
+            think=think,
+            max_tokens=max_tokens,
+            **kwargs,
+        )

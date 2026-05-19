@@ -72,8 +72,9 @@ def complete_json_with_tool_loop(
         {"role": "user", "content": user_prompt},
     ]
     for round_idx in range(max_rounds):
-        result = llm.chat_json_round(
+        result = llm.chat(
             messages,
+            response_format="json",
             temperature=temperature,
             tools=tools,
             think=think,
