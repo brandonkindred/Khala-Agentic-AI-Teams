@@ -25,6 +25,8 @@ import json
 from pathlib import Path
 from typing import Any, List
 
+import pytest
+
 from investment_team.models import BacktestResult, StrategySpec
 from investment_team.strategy_lab.agents import analysis as analysis_module
 from investment_team.strategy_lab.agents.alignment import (
@@ -307,3 +309,144 @@ def test_no_alignment_report_omits_section_entirely(monkeypatch):
     assert "## Alignment status" not in prompts
     assert "TRADES DID NOT IMPLEMENT THE SPEC" not in prompts
     assert "alignment audit clean" not in prompts
+
+
+# ---------------------------------------------------------------------------
+# Issue #532 (Codex follow-up): the deterministic fallback narrative must
+# carry the misalignment disclaimer + issues forward when the LLM draft path
+# fails. Otherwise a fail-closed audit error or transient draft outage would
+# publish a confident auto-summary on a run that didn't implement the spec.
+# ---------------------------------------------------------------------------
+
+
+def _install_failing_draft_recorder(monkeypatch, *, mode: str) -> _Recorder:
+    """Patch ``strands.Agent`` so the FIRST call (draft phase) fails per
+    ``mode`` and any subsequent call (self-review) returns a normal
+    response. Mirrors the production failure modes Codex flagged:
+
+    * ``raise``  — draft LLM call raises
+    * ``junk``   — draft returns non-JSON text (``_extract_json`` raises)
+    * ``empty``  — draft returns valid JSON with an empty ``draft_narrative``
+    """
+
+    rec = _Recorder()
+
+    class _FailingDraftAgent:
+        _call_count = 0
+
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            rec.prompts.append(prompt)
+            _FailingDraftAgent._call_count += 1
+            if _FailingDraftAgent._call_count == 1:
+                if mode == "raise":
+                    raise RuntimeError("simulated draft transport failure")
+                if mode == "junk":
+                    return "this is not json"
+                if mode == "empty":
+                    return json.dumps({"draft_narrative": ""})
+                raise AssertionError(f"unknown mode {mode!r}")
+            return rec.render_response()
+
+    monkeypatch.setattr(analysis_module, "Agent", _FailingDraftAgent)
+    monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
+    return rec
+
+
+_MISALIGNED_REPORT = TradeAlignmentReport(
+    aligned=False,
+    rationale="Stop-loss skipped; trade entered outside the universe.",
+    issues=[
+        AlignmentIssue(
+            rule_type="exit_rules",
+            severity="critical",
+            description="stop-loss did not fire on trade #4 despite -8% drawdown",
+            affected_trades=[4],
+        ),
+        AlignmentIssue(
+            rule_type="universe",
+            severity="warning",
+            description="trade #7 used symbol outside the spec universe",
+            affected_trades=[7],
+        ),
+    ],
+)
+
+
+def _assert_misaligned_fallback(narrative: str) -> None:
+    assert (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary." in narrative
+    ), "Fallback narrative dropped the misalignment disclaimer (issue #532)."
+    for issue in _MISALIGNED_REPORT.issues:
+        assert issue.description in narrative, (
+            f"Fallback narrative dropped alignment issue {issue.description!r} (issue #532)."
+        )
+    assert "Detailed narrative generation failed" in narrative, (
+        "Fallback narrative dropped the deterministic auto-summary tail."
+    )
+
+
+@pytest.mark.parametrize(
+    "mode", ["raise", "junk", "empty"], ids=["draft_raises", "draft_junk", "draft_empty"]
+)
+def test_misaligned_disclaimer_survives_draft_failure(monkeypatch, mode):
+    """Codex review on #532: when ``aligned=False`` and the draft LLM call
+    raises, returns unparseable JSON, or yields an empty narrative, the
+    deterministic fallback must still surface the disclaimer + each audit
+    issue so misaligned runs cannot publish a clean auto-summary."""
+
+    _install_failing_draft_recorder(monkeypatch, mode=mode)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    _assert_misaligned_fallback(narrative)
+
+
+def test_aligned_fallback_unchanged_on_draft_failure(monkeypatch):
+    """Aligned (or absent) reports must not inject any disclaimer into the
+    fallback narrative — keeps clean runs byte-identical to pre-#532
+    behaviour when the LLM happens to fail."""
+
+    _install_failing_draft_recorder(monkeypatch, mode="raise")
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+        alignment_report=TradeAlignmentReport(aligned=True),
+    )
+
+    assert "did not faithfully implement the specification" not in narrative
+    assert "Alignment issues:" not in narrative
+    assert "Detailed narrative generation failed" in narrative
+
+
+def test_no_report_fallback_unchanged_on_draft_failure(monkeypatch):
+    """Legacy callers (no ``alignment_report``) get the original fallback
+    text byte-for-byte — back-compat guard."""
+
+    _install_failing_draft_recorder(monkeypatch, mode="empty")
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+    )
+
+    assert "did not faithfully implement the specification" not in narrative
+    assert "Alignment issues:" not in narrative
+    assert "Detailed narrative generation failed" in narrative

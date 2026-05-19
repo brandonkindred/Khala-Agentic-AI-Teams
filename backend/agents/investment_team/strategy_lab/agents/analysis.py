@@ -129,10 +129,10 @@ class AnalysisAgent:
             draft_narrative = draft_parsed.get("draft_narrative", "")
         except Exception:
             logger.exception("Draft analysis failed")
-            return _fallback_narrative(spec, metrics, is_winning)
+            return _fallback_narrative(spec, metrics, is_winning, alignment_report)
 
         if not draft_narrative:
-            return _fallback_narrative(spec, metrics, is_winning)
+            return _fallback_narrative(spec, metrics, is_winning, alignment_report)
 
         # Phase 2: Self-review
         if on_sub_phase:
@@ -278,15 +278,39 @@ def _format_alignment_status_section(report: Optional[TradeAlignmentReport]) -> 
     return "\n".join(lines)
 
 
-def _fallback_narrative(spec: StrategySpec, metrics: BacktestResult, is_winning: bool) -> str:
-    """Auto-generated fallback when LLM analysis fails."""
+def _fallback_narrative(
+    spec: StrategySpec,
+    metrics: BacktestResult,
+    is_winning: bool,
+    alignment_report: Optional[TradeAlignmentReport] = None,
+) -> str:
+    """Auto-generated fallback when LLM analysis fails.
+
+    When the draft LLM call raises, returns unparseable JSON, or yields an
+    empty narrative, this deterministic summary takes over. If
+    ``alignment_report.aligned`` is False the summary is prefixed with the
+    misalignment disclaimer and the audit's enumerated issues, so a
+    fail-closed audit error or transient LLM outage cannot publish a
+    confident auto-summary on a run that didn't faithfully implement the
+    spec (#532).
+    """
     label = "winning" if is_winning else "losing"
-    return (
+    summary = (
         f"Auto-summary: {spec.asset_class} strategy ({label}) with annualized return "
         f"{metrics.annualized_return_pct:.1f}%, Sharpe {metrics.sharpe_ratio:.2f}, "
         f"max drawdown {metrics.max_drawdown_pct:.1f}%, win rate {metrics.win_rate_pct:.1f}%. "
         f"(Detailed narrative generation failed.)"
     )
+    if alignment_report is None or alignment_report.aligned:
+        return summary
+
+    parts: List[str] = [_MISALIGNED_DISCLAIMER]
+    if alignment_report.issues:
+        parts.append("Alignment issues:")
+        for issue in alignment_report.issues:
+            parts.append(f"- [{issue.severity}] {issue.rule_type}: {issue.description}")
+    parts.append(summary)
+    return "\n".join(parts)
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
