@@ -234,6 +234,10 @@ class LLMClient(ABC):
         migrates to ``chat()``. Same return contract as the JSON branch of
         ``chat()``.
         """
+        # Drop any caller-supplied response_format from kwargs — the alias
+        # name is the contract, and forwarding both would TypeError on the
+        # downstream chat() call.
+        kwargs.pop("response_format", None)
         return self.chat(
             messages,
             response_format="json",
@@ -258,6 +262,7 @@ class LLMClient(ABC):
 
         Same return contract as the text branch of ``chat()``.
         """
+        kwargs.pop("response_format", None)
         return self.chat(
             messages,
             response_format="text",
