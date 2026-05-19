@@ -1000,8 +1000,8 @@ def test_market_data_service_get_symbols_for_strategy() -> None:
     symbols = service.get_symbols_for_strategy(stock_strategy)
     assert "AAPL" in symbols
     assert "BTC" not in symbols
-    # #534 — common index / sector ETFs are reachable from the stocks default
-    # so theme-level hypotheses don't fall through to a TSLA/AAPL universe.
+    # Common index / sector ETFs are reachable from the stocks default so
+    # theme-level hypotheses don't fall through to a TSLA/AAPL universe.
     for etf in ("QQQ", "IWM", "TLT", "EEM", "GDX", "XLE", "XLF"):
         assert etf in symbols, f"expected {etf} in stocks default, got {symbols}"
 
@@ -1212,10 +1212,9 @@ def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
 
 
 def test_resolve_strategy_symbols_unions_target_symbols_with_default() -> None:
-    """Issue #534 — resolve_strategy_symbols returns the union of the
-    asset-class default universe and target_symbols, deduped. Defaults come
-    first (in declared order), then any target_symbols not already in the
-    default."""
+    """resolve_strategy_symbols returns the union of the asset-class default
+    and target_symbols, deduped, with defaults first in declared order and
+    target-only extras appended in declared order."""
     from investment_team.market_data_service import MarketDataService
     from investment_team.symbols import STOCK_SYMBOLS
 
@@ -1230,8 +1229,8 @@ def test_resolve_strategy_symbols_unions_target_symbols_with_default() -> None:
         target_symbols=["QQQ", "GLD"],
     )
     result = service.resolve_strategy_symbols(spec)
-    # QQQ is already in STOCK_SYMBOLS post-#534 (added to the default). GLD is
-    # the only true extra, so it must appear once, after the default block.
+    # QQQ is already in STOCK_SYMBOLS, so GLD is the only true extra and
+    # must appear once, after the default block.
     assert result == list(STOCK_SYMBOLS) + ["GLD"]
     # Membership sanity: every default symbol and every target symbol present.
     for sym in list(STOCK_SYMBOLS) + ["QQQ", "GLD"]:
@@ -1241,8 +1240,8 @@ def test_resolve_strategy_symbols_unions_target_symbols_with_default() -> None:
 
 
 def test_resolve_strategy_symbols_union_dedupes() -> None:
-    """Issue #534 — when a target symbol is already in the asset-class default,
-    the union dedupes it and the default's declared order is preserved."""
+    """When a target symbol is already in the asset-class default, the union
+    dedupes it and the default's declared order is preserved."""
     from investment_team.market_data_service import MarketDataService
     from investment_team.symbols import STOCK_SYMBOLS
 
@@ -1264,7 +1263,7 @@ def test_resolve_strategy_symbols_union_dedupes() -> None:
 def test_resolve_strategy_symbols_target_symbols_not_truncated_when_union_exceeds_cap(
     monkeypatch,
 ) -> None:
-    """Issue #525 / #534 — the cap applies only to the asset-class default;
+    """The universe-size cap applies only to the asset-class default;
     target_symbols are unioned on top and are never truncated, even when the
     resulting union exceeds the cap."""
     from investment_team.market_data_service import MarketDataService
@@ -1339,8 +1338,8 @@ def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
         result = service.resolve_strategy_symbols(spec)
 
-    # #534 — BTC is unioned onto the stocks default rather than replacing it,
-    # but the mismatched target is still present so the fetch attempts it.
+    # BTC is unioned onto the stocks default rather than replacing it, but
+    # the mismatched target is still present so the fetch attempts it.
     assert "BTC" in result
     # But the operator sees the diagnostic.
     assert any(
@@ -1394,9 +1393,8 @@ def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> 
 
 
 def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
-    """Issue #525 / #534 — empty target_symbols returns the full asset-class
-    default universe when it fits under STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS
-    (default 20 post-#534)."""
+    """Empty target_symbols returns the full asset-class default universe
+    when it fits under STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS (default 20)."""
     from investment_team.market_data_service import MarketDataService
     from investment_team.symbols import STOCK_SYMBOLS
 
@@ -1409,8 +1407,8 @@ def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
         signal_definition="s",
         timeframe="1d",
     )
-    # STOCK_SYMBOLS has 17 entries (post-#534); the default cap is 20 so
-    # nothing is dropped.
+    # STOCK_SYMBOLS has 17 entries; the default cap is 20, so nothing is
+    # dropped.
     assert service.resolve_strategy_symbols(spec) == list(STOCK_SYMBOLS)
 
 
@@ -1463,8 +1461,8 @@ def test_resolve_strategy_symbols_invalid_env_var_falls_back(monkeypatch, caplog
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
         result = service.resolve_strategy_symbols(spec)
 
-    # Default cap is 20 (post-#534); STOCK_SYMBOLS has 17 entries so the full
-    # default universe survives the fallback.
+    # Default cap is 20; STOCK_SYMBOLS has 17 entries, so the full default
+    # universe survives the fallback.
     assert result == list(STOCK_SYMBOLS)
     assert any(
         "Invalid STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS" in r.message and "not-a-number" in r.message
@@ -1524,12 +1522,11 @@ def test_resolve_strategy_symbols_stable_across_universe_reordering(
 
 
 def test_fetch_market_data_uses_target_symbols_when_set() -> None:
-    """Issue #523 / #534 — when spec.target_symbols is non-empty, the fetcher
-    receives the union of the asset-class default and target_symbols (#534).
-    The explicit target travels into the fetch alongside the ambient
-    comparison set.
+    """When spec.target_symbols is non-empty, the fetcher receives the union
+    of the asset-class default and target_symbols, so the explicit target
+    travels into the fetch alongside the ambient comparison set.
 
-    Issue #525 — the fetch returns a ``_MarketDataFetch`` envelope carrying
+    The fetch returns a ``_MarketDataFetch`` envelope carrying
     requested/fetched audit lists alongside the OHLCV dict."""
     from unittest.mock import patch
 
@@ -1563,7 +1560,7 @@ def test_fetch_market_data_uses_target_symbols_when_set() -> None:
     ):
         fetch = orchestrator._fetch_market_data(spec, config)
 
-    # QQQ is in STOCK_SYMBOLS post-#534, so the union equals the default.
+    # QQQ is already in STOCK_SYMBOLS, so the union equals the default.
     expected = list(STOCK_SYMBOLS)
     assert captured["symbols"] == expected
     assert fetch.requested_symbols == expected
@@ -1572,8 +1569,8 @@ def test_fetch_market_data_uses_target_symbols_when_set() -> None:
 
 
 def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
-    """Issue #523 — empty target_symbols routes through the asset-class default
-    universe. Issue #525 — the full universe (10) is returned by default."""
+    """Empty target_symbols routes through the asset-class default universe.
+    The full default universe is returned when it fits under the cap."""
     from unittest.mock import patch
 
     from investment_team.market_data_service import MarketDataService
@@ -1610,10 +1607,10 @@ def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
 
 
 def test_fetch_market_data_records_dropped_symbols() -> None:
-    """Issue #525 / #534 — when the fetch returns empty bars for some symbols,
-    the audit envelope's fetched_symbols reflects only the symbols that
-    returned usable data. AAPL and MSFT are both already in the stocks default
-    so the union is just the default and the fake provider can stick to two
+    """When the fetch returns empty bars for some symbols, the audit
+    envelope's fetched_symbols reflects only the symbols that returned
+    usable data. AAPL and MSFT are both already in the stocks default so
+    the union is just the default and the fake provider can stick to two
     explicit names."""
     from unittest.mock import patch
 
@@ -1654,9 +1651,9 @@ def test_fetch_market_data_records_dropped_symbols() -> None:
 
 
 def test_fetch_market_data_records_intent_on_provider_exception() -> None:
-    """Issue #525 / #534 — even when the provider raises, the envelope still
-    carries ``requested_symbols`` so the audit trail reflects intent. Under
-    union semantics that intent is the asset-class default ∪ target_symbols."""
+    """Even when the provider raises, the envelope still carries
+    ``requested_symbols`` so the audit trail reflects intent. Under union
+    semantics that intent is the asset-class default ∪ target_symbols."""
     from unittest.mock import patch
 
     from investment_team.market_data_service import MarketDataService

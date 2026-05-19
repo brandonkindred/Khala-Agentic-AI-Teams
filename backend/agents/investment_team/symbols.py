@@ -3,19 +3,19 @@
 Used by the market data service (real OHLCV fetching), the deterministic backtest
 engine (synthetic trade generation), and any future consumer that routes by asset class.
 
-Universe-curation rationale (#534)
-----------------------------------
+Universe-curation rationale
+---------------------------
 Each ``*_SYMBOLS`` list is the default universe used when ``spec.target_symbols``
 is empty. The lists deliberately mix individual high-volume tickers (names that
-recur in LLM-generated hypotheses — AAPL, NVDA, BTC, ES=F, ...) with index/sector
-ETFs (QQQ, IWM, TLT, XLE, ...) so that theme-level hypotheses like
-"QQQ trend continuation" or "energy sector rotation" do not silently fall through
-to a TSLA/AAPL universe when ``target_symbols`` is omitted.
+recur in hypotheses — AAPL, NVDA, BTC, ES=F, ...) with index/sector ETFs (QQQ,
+IWM, TLT, XLE, ...) so that theme-level hypotheses like "QQQ trend continuation"
+or "energy sector rotation" do not silently fall through to a TSLA/AAPL universe
+when ``target_symbols`` is omitted.
 
-Cap interaction: ``MarketDataService.resolve_strategy_symbols`` truncates the
-asset-class default to ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`` (default ``20``);
-``spec.target_symbols`` is unioned on top of the (capped) default and is never
-truncated (#525).
+Cap interaction (contract with ``MarketDataService.resolve_strategy_symbols``):
+the asset-class default is truncated to ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS``
+(default ``20``) before being unioned with ``spec.target_symbols``;
+``spec.target_symbols`` is never truncated.
 
 Adding new symbols:
   * Pick the most liquid representative for the theme (prefer SPY over a niche
@@ -71,7 +71,7 @@ STOCK_SYMBOLS: list[str] = [
     "JPM",
     "AMD",
     "SPY",
-    # Index / sector ETFs so theme-level hypotheses (#534) — "QQQ trend",
+    # Index / sector ETFs so theme-level hypotheses — "QQQ trend",
     # "small-cap rotation via IWM", "energy sector breakout via XLE" — don't
     # silently fall through to a TSLA/AAPL universe when target_symbols is
     # omitted. These also live in OTHER_SYMBOLS so classify_symbol still
