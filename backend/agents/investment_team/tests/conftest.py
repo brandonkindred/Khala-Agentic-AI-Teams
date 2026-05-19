@@ -22,13 +22,17 @@ fail-closed path itself (regression tests in ``test_spec_readiness.py``)
 must NOT carry the marker; they override
 ``orch.market_data_service.fetch_ohlcv`` per-instance instead.
 
-The marker name documents test intent (this is an integration test
-against the Strategy Lab pipeline) rather than the implementation
-detail (which fixture to request) — easier to remember for future
-tests, and harder to forget than a manually-typed fixture name.
+Stub-builder helpers (``ideation_returning``, ``noop_refine``,
+``empty_market_data``, ``failing_sandbox``) are exported so individual
+test files don't redefine the same boilerplate. Use them to mock
+``orch.ideation_agent.run`` / ``orch.refinement_agent.run`` /
+``_fetch_market_data`` / ``run_strategy_code`` with one-line monkeypatch
+calls.
 """
 
 from __future__ import annotations
+
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -89,3 +93,91 @@ def stub_readiness_market_data_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
         return list(sentinel)
 
     monkeypatch.setattr(MarketDataService, "fetch_ohlcv", _stub)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Stub builders for ``StrategyLabOrchestrator`` collaborators.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def ideation_returning(
+    spec_dict: Dict[str, Any], code: str, *, rationale: str = "scripted rationale"
+) -> Callable[..., Tuple[Dict[str, Any], str, str]]:
+    """Build a stub ``IdeationAgent.run`` that returns scripted output.
+
+    Tests call ``monkeypatch.setattr(orch.ideation_agent, "run",
+    ideation_returning(spec, code))`` to bypass the LLM and pin the spec
+    + code the orchestrator's design phase sees.
+    """
+
+    def _run(**_kwargs) -> Tuple[Dict[str, Any], str, str]:
+        return spec_dict, code, rationale
+
+    return _run
+
+
+def noop_refine(code: str) -> Callable[..., Tuple[Dict[str, Any], str]]:
+    """Build a stub ``RefinementAgent.run`` that returns the same code unchanged.
+
+    Useful when a test forces the refinement loop to exhaust on the same
+    failure mode — refinement must produce something or the orchestrator
+    would early-exit, but the something must be the unchanged input so the
+    loop re-fails the gate it's testing.
+    """
+
+    def _run(**_kwargs) -> Tuple[Dict[str, Any], str]:
+        return {"changes_made": "no-op"}, code
+
+    return _run
+
+
+def empty_market_data(
+    *, requested: Optional[List[str]] = None, fetched: Optional[List[str]] = None
+) -> Callable[..., Any]:
+    """Build a stub ``_fetch_market_data`` that returns a "fetched but empty" envelope.
+
+    Pre: ``requested`` defaults to ``["AAPL"]``; ``fetched`` defaults to ``requested``.
+    Post: returns a callable suitable for
+    ``monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", ...)``
+    that yields a ``_MarketDataFetch`` whose ``data`` maps each requested
+    symbol to an empty bar list. This shape matters: the orchestrator
+    checks ``if not market_data: break`` (no-market-data short-circuit),
+    so the dict must be non-empty even when there are no bars — otherwise
+    the test exercises the no-data path instead of the execution-failure
+    path it usually intends to.
+    """
+    requested_symbols = list(requested or ["AAPL"])
+    fetched_symbols = list(fetched if fetched is not None else requested_symbols)
+
+    def _fetch(*_a, **_kw):
+        from investment_team.strategy_lab.orchestrator import _MarketDataFetch
+
+        return _MarketDataFetch(
+            data={s: [] for s in requested_symbols},
+            requested_symbols=requested_symbols,
+            fetched_symbols=fetched_symbols,
+        )
+
+    return _fetch
+
+
+def failing_sandbox(
+    *, error_type: str = "runtime_error", stderr: str = "forced failure for test"
+) -> Callable[..., Any]:
+    """Build a stub ``run_strategy_code`` that always reports execution failure.
+
+    Use via
+    ``monkeypatch.setattr(orchestrator_module, "run_strategy_code", failing_sandbox())``
+    when the test wants the synthesis loop to exhaust on the execute path.
+    """
+    from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
+
+    def _run(*_a, **_kw) -> StrategyRunResult:
+        return StrategyRunResult(
+            success=False,
+            trades=[],
+            stderr=stderr,
+            error_type=error_type,
+        )
+
+    return _run

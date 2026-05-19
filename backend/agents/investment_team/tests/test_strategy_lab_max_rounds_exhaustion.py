@@ -11,7 +11,7 @@ assert on the final record's ``status``.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import pytest
 
@@ -80,36 +80,15 @@ def _spec_dict() -> Dict[str, Any]:
     }
 
 
-def _ideation_returning(d: Dict[str, Any], code: str) -> Any:
-    def _run(**_kwargs) -> Tuple[Dict[str, Any], str, str]:
-        return d, code, "scripted rationale"
-
-    return _run
-
-
-def _stub_market_data(*_a, **_kw):
-    # Issue #525 — orchestrator now returns a _MarketDataFetch envelope.
-    from investment_team.strategy_lab.orchestrator import _MarketDataFetch
-
-    return _MarketDataFetch(
-        data={"AAPL": []},
-        requested_symbols=["AAPL"],
-        fetched_symbols=[],
-    )
-
-
 def test_validation_phase_exhaustion_sets_max_rounds_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Code-safety always critical → loop exhausts validation phase."""
+    from investment_team.tests.conftest import ideation_returning, noop_refine
+
     orch = StrategyLabOrchestrator()
-    monkeypatch.setattr(orch.ideation_agent, "run", _ideation_returning(_spec_dict(), _VALID_CODE))
-
-    # Refinement is a no-op: same code back, so each round re-fails code-safety.
-    def _stub_refine(**_kw):
-        return {"changes_made": "no-op"}, _VALID_CODE
-
-    monkeypatch.setattr(orch.refinement_agent, "run", _stub_refine)
+    monkeypatch.setattr(orch.ideation_agent, "run", ideation_returning(_spec_dict(), _VALID_CODE))
+    monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
 
     def _always_critical(_code: str, _spec=None):
         return [
@@ -137,26 +116,18 @@ def test_execution_phase_exhaustion_sets_max_rounds_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sandbox always reports execution failure → loop exhausts execution phase."""
-    from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
+    from investment_team.tests.conftest import (
+        empty_market_data,
+        failing_sandbox,
+        ideation_returning,
+        noop_refine,
+    )
 
     orch = StrategyLabOrchestrator()
-    monkeypatch.setattr(orch.ideation_agent, "run", _ideation_returning(_spec_dict(), _VALID_CODE))
-    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _stub_market_data)
-
-    def _stub_refine(**_kw):
-        return {"changes_made": "no-op"}, _VALID_CODE
-
-    monkeypatch.setattr(orch.refinement_agent, "run", _stub_refine)
-
-    def _always_fails(*_a, **_kw):
-        return StrategyRunResult(
-            success=False,
-            trades=[],
-            stderr="forced failure for test",
-            error_type="runtime_error",
-        )
-
-    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _always_fails)
+    monkeypatch.setattr(orch.ideation_agent, "run", ideation_returning(_spec_dict(), _VALID_CODE))
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", empty_market_data())
+    monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", failing_sandbox())
 
     record = orch.run_cycle(prior_records=[], config=_config())
 
@@ -171,26 +142,26 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
     evaluation must NOT be persisted with is_winning=True (#547 review feedback).
     Otherwise paper-trading would fire on a 'failed: max_refinement_rounds' record."""
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+    from investment_team.tests.conftest import (
+        empty_market_data,
+        ideation_returning,
+        noop_refine,
+    )
     from investment_team.tests.test_strategy_lab_alignment import (
         _benign_sandbox_trades,
         _code_exec,
     )
 
     orch = StrategyLabOrchestrator()
-    monkeypatch.setattr(orch.ideation_agent, "run", _ideation_returning(_spec_dict(), _VALID_CODE))
-    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _stub_market_data)
+    monkeypatch.setattr(orch.ideation_agent, "run", ideation_returning(_spec_dict(), _VALID_CODE))
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", empty_market_data())
 
     # Sandbox always succeeds with benign trades — execution itself is fine.
     def _ok_sandbox(*_a, **_kw):
         return _code_exec(success=True, raw_trades=_benign_sandbox_trades())
 
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", _ok_sandbox)
-
-    # Refinement is a no-op so the loop keeps hitting the same anomaly.
-    def _stub_refine(**_kw):
-        return {"changes_made": "no-op"}, _VALID_CODE
-
-    monkeypatch.setattr(orch.refinement_agent, "run", _stub_refine)
+    monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
 
     # Anomaly detector always reports critical → evaluation-phase exhaustion.
     def _always_anomalous(*_a, **_kw):
