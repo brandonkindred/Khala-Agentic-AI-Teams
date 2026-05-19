@@ -406,6 +406,379 @@ class StrategyLabOrchestrator:
             emit=emit,
         )
 
+    def _run_synthesis_loop(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        config: BacktestConfig,
+        all_gate_results: List[QualityGateResult],
+        refinement_attempts: List[str],
+        zero_trade_attempts: List[str],
+        emit: PhaseCallback,
+    ) -> _SynthesisLoopOutcome:
+        """Run up to ``MAX_CODE_REFINEMENT_ROUNDS`` of (validate → fetch →
+        execute → trade-collect → evaluate), refining ``spec``/``code``
+        between rounds.
+
+        Pre: pre-synthesis spec gating already passed (the caller's
+        ``_run_pre_synthesis_phase`` returned ``None``); ``all_gate_results``
+        is the running gate list the loop appends to via ``record_gates``;
+        ``refinement_attempts`` and ``zero_trade_attempts`` are the running
+        change-log lists the loop appends to in-place.
+        Post: returns a ``_SynthesisLoopOutcome`` carrying the final
+        ``spec``/``code``/``trades``/``metrics`` (plus ``market_data`` and
+        the universe audit lists), with ``execution_succeeded=True`` iff
+        a round produced a clean run with no critical anomalies, and
+        ``max_rounds_exhausted=True`` iff the loop ran the full budget
+        without converging. The two flags are mutually exclusive. The
+        loop never raises — fatal failures short-circuit by setting flags
+        and returning.
+
+        State mutations on the caller's lists (``all_gate_results``,
+        ``refinement_attempts``, ``zero_trade_attempts``) happen in-place
+        and the caller observes them directly; the outcome dataclass
+        carries only values the caller cannot read off shared mutable
+        state.
+        """
+        assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
+        assert isinstance(code, str), "code must be a string"
+        assert isinstance(config, BacktestConfig), "config must be a BacktestConfig"
+        assert isinstance(all_gate_results, list), "all_gate_results must be a list"
+        assert isinstance(refinement_attempts, list), "refinement_attempts must be a list"
+        assert isinstance(zero_trade_attempts, list), "zero_trade_attempts must be a list"
+
+        trades: List[TradeRecord] = []
+        metrics = compute_metrics(
+            [], config.initial_capital, config.start_date, config.end_date
+        )
+        execution_succeeded = False
+        market_data: Optional[Dict[str, List[OHLCVBar]]] = None
+        requested_symbols: List[str] = []
+        fetched_symbols: List[str] = []
+        max_rounds_exhausted = False
+
+        for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
+            round_gate_results: List[QualityGateResult] = []
+
+            # ── 2a: VALIDATE (code safety + spec readiness on round 0) ───
+            emit("coding", {"sub_phase": "started", "refinement_round": round_num})
+            if round_num == 0:
+                round_gate_results.extend(
+                    self.spec_readiness_gate.validate(
+                        spec, phase="synthesis", backtest_config=config
+                    )
+                )
+            code_gates = self.code_safety_checker.check(code, spec)
+            round_gate_results.extend(code_gates)
+            self.record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
+
+            checks_total = len(round_gate_results)
+            checks_passed = sum(1 for g in round_gate_results if g.passed)
+
+            critical_failures = [
+                g for g in round_gate_results if not g.passed and g.severity == "critical"
+            ]
+            if critical_failures:
+                emit(
+                    "coding",
+                    {
+                        "sub_phase": "failed",
+                        "refinement_round": round_num,
+                        "checks_passed": checks_passed,
+                        "checks_total": checks_total,
+                    },
+                )
+                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
+                    emit(
+                        "coding",
+                        {
+                            "sub_phase": "refining",
+                            "refinement_round": round_num,
+                            "failure_phase": "validation",
+                        },
+                    )
+                    failure_details = "\n".join(
+                        f"- [{g.gate_name}] {g.details}" for g in critical_failures
+                    )
+                    updates, code = self._refine(
+                        spec, code, "validation", failure_details, None, refinement_attempts
+                    )
+                    spec = self._apply_updates(spec, updates, code, failure_phase="validation")
+                    changes = updates.get("changes_made", "validation fix")
+                    refinement_attempts.append(changes)
+                    emit(
+                        "coding",
+                        {
+                            "sub_phase": "refined",
+                            "refinement_round": round_num,
+                            "changes_made": changes,
+                        },
+                    )
+                    continue
+                else:
+                    logger.warning(
+                        "Max code refinement rounds reached on validation for %s", spec.strategy_id
+                    )
+                    max_rounds_exhausted = True
+                    break
+
+            emit(
+                "coding",
+                {
+                    "sub_phase": "completed",
+                    "refinement_round": round_num,
+                    "checks_passed": checks_passed,
+                    "checks_total": checks_total,
+                },
+            )
+
+            # ── 2b: FETCH DATA (once, reuse across rounds) ───────────
+            if market_data is None:
+                emit("backtesting", {"sub_phase": "fetching_data"})
+                fetch = self._fetch_market_data(spec, config)
+                requested_symbols = list(fetch.requested_symbols)
+                fetched_symbols = list(fetch.fetched_symbols)
+                market_data = fetch.data
+                if not market_data:
+                    all_gate_results.append(
+                        self.build_orchestrator_gate(
+                            "market_data",
+                            phase="synthesis",
+                            details=f"No market data available for asset class '{spec.asset_class}'.",
+                            refinement_round=round_num,
+                        )
+                    )
+                    break
+                total_bars = sum(len(bars) for bars in market_data.values())
+                emit(
+                    "backtesting",
+                    {
+                        "sub_phase": "data_loaded",
+                        "symbols_count": len(market_data),
+                        "bars_count": total_bars,
+                    },
+                )
+
+                fetch_coverage_gates = self.target_symbol_coverage_gate.check_fetch(
+                    spec, requested_symbols, fetched_symbols
+                )
+                self.record_gates(
+                    fetch_coverage_gates, all_gate_results, refinement_round=round_num
+                )
+                if any(not g.passed and g.severity == "critical" for g in fetch_coverage_gates):
+                    break
+
+            # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
+            emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
+            exec_result = run_strategy_code(code, market_data, config, strategy=spec)
+
+            if not exec_result.success:
+                all_gate_results.append(
+                    self.build_orchestrator_gate(
+                        "code_execution",
+                        phase="synthesis",
+                        details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr[:500]}",
+                        refinement_round=round_num,
+                    )
+                )
+                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
+                    emit(
+                        "coding",
+                        {
+                            "sub_phase": "refining",
+                            "refinement_round": round_num,
+                            "failure_phase": "execution",
+                        },
+                    )
+                    failure_details = (
+                        f"Error type: {exec_result.error_type}\n"
+                        f"stderr:\n{exec_result.stderr[:2000]}"
+                    )
+                    updates, code = self._refine(
+                        spec, code, "execution", failure_details, None, refinement_attempts
+                    )
+                    spec = self._apply_updates(spec, updates, code, failure_phase="execution")
+                    changes = updates.get("changes_made", "execution fix")
+                    refinement_attempts.append(changes)
+                    emit(
+                        "coding",
+                        {
+                            "sub_phase": "refined",
+                            "refinement_round": round_num,
+                            "changes_made": changes,
+                        },
+                    )
+                    continue
+                else:
+                    logger.warning(
+                        "Max code refinement rounds reached on execution for %s", spec.strategy_id
+                    )
+                    max_rounds_exhausted = True
+                    break
+
+            # ── 2d: COLLECT TRADES + target-symbol coverage on trades ─
+            trades = exec_result.trades
+
+            trade_coverage_gates = self.target_symbol_coverage_gate.check_trades(spec, trades)
+            self.record_gates(
+                trade_coverage_gates, all_gate_results, refinement_round=round_num
+            )
+            if any(not g.passed and g.severity == "critical" for g in trade_coverage_gates):
+                max_rounds_exhausted = True
+                break
+
+            emit(
+                "backtesting",
+                {
+                    "sub_phase": "completed",
+                    "trades_count": len(trades),
+                    "execution_time": exec_result.execution_time_seconds,
+                },
+            )
+
+            # ── 2e: BACKTEST EVALUATION (anomaly gates → zero-trade-repair → generic refine) ─
+            metrics = compute_metrics(
+                trades, config.initial_capital, config.start_date, config.end_date
+            )
+
+            _maybe_attach_coverage_report(
+                metrics=metrics,
+                spec=spec,
+                market_data=market_data,
+                config=config,
+                exec_result=exec_result,
+            )
+
+            anomaly_gates = self.anomaly_detector.check(
+                metrics,
+                trades,
+                dsr_aware=config.walk_forward_enabled,
+                diagnostics=exec_result.execution_diagnostics,
+                coverage_report=metrics.coverage_report,
+            )
+            self.record_gates(anomaly_gates, all_gate_results, refinement_round=round_num)
+
+            critical_anomalies = [
+                g for g in anomaly_gates if not g.passed and g.severity == "critical"
+            ]
+            if critical_anomalies:
+                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
+                    emit(
+                        "coding",
+                        {
+                            "sub_phase": "refining",
+                            "refinement_round": round_num,
+                            "failure_phase": "evaluation",
+                        },
+                    )
+                    failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
+                    diagnostics_block = _format_execution_diagnostics(
+                        exec_result.execution_diagnostics
+                    )
+                    if diagnostics_block:
+                        failure_details = f"{failure_details}\n{diagnostics_block}"
+                    coverage_block = format_coverage_report(metrics.coverage_report)
+                    if coverage_block:
+                        failure_details = f"{failure_details}\n{coverage_block}"
+
+                    diag = exec_result.execution_diagnostics
+                    if (
+                        diag is not None
+                        and diag.zero_trade_category is not None
+                        and market_data is not None
+                    ):
+                        zt_outcome = self.zero_trade_repairer.try_repair(
+                            spec=spec,
+                            code=code,
+                            exec_result=exec_result,
+                            coverage_report=metrics.coverage_report,
+                            market_data=market_data,
+                            config=config,
+                            zero_trade_attempts=zero_trade_attempts,
+                            round_num=round_num,
+                            emit=emit,
+                        )
+                        all_gate_results.extend(zt_outcome.new_gates)
+                        if zt_outcome.committed:
+                            assert zt_outcome.new_spec is not None
+                            assert zt_outcome.new_metrics is not None
+                            assert zt_outcome.new_exec_result is not None
+                            code = zt_outcome.new_code
+                            spec = zt_outcome.new_spec
+                            trades = zt_outcome.new_trades
+                            metrics = zt_outcome.new_metrics
+                            exec_result = zt_outcome.new_exec_result
+                            refinement_attempts.append(
+                                f"zero-trade repair: {zt_outcome.changes_made}"
+                                if zt_outcome.changes_made
+                                else "zero-trade repair"
+                            )
+                            emit(
+                                "coding",
+                                {
+                                    "sub_phase": "refined",
+                                    "refinement_round": round_num,
+                                    "changes_made": (
+                                        zt_outcome.changes_made or "zero-trade repair"
+                                    ),
+                                    "via": "zero_trade_repair",
+                                },
+                            )
+                            continue
+
+                    updates, code = self._refine(
+                        spec,
+                        code,
+                        "evaluation (backtest anomaly)",
+                        failure_details,
+                        metrics,
+                        refinement_attempts,
+                    )
+                    spec = self._apply_updates(spec, updates, code, failure_phase="evaluation")
+                    changes = updates.get("changes_made", "anomaly fix")
+                    refinement_attempts.append(changes)
+                    emit(
+                        "coding",
+                        {
+                            "sub_phase": "refined",
+                            "refinement_round": round_num,
+                            "changes_made": changes,
+                        },
+                    )
+                    continue
+                else:
+                    logger.warning(
+                        "Max code refinement rounds reached on evaluation for %s", spec.strategy_id
+                    )
+                    # Even if the code is technically correct, the cycle
+                    # exhausted its rounds on an unresolved anomaly. Leaving
+                    # execution_succeeded=False ensures is_winning stays False
+                    # so paper-trading does not fire on a
+                    # "failed: max_refinement_rounds" record.
+                    max_rounds_exhausted = True
+                    break
+
+            # All gates passed — code is clean and backtest is sound
+            execution_succeeded = True
+            break
+
+        # Post-condition: success and round-exhaustion are mutually exclusive.
+        assert not (execution_succeeded and max_rounds_exhausted), (
+            "synthesis loop returned both execution_succeeded and max_rounds_exhausted"
+        )
+        return _SynthesisLoopOutcome(
+            spec=spec,
+            code=code,
+            trades=trades,
+            metrics=metrics,
+            market_data=market_data,
+            requested_symbols=requested_symbols,
+            fetched_symbols=fetched_symbols,
+            execution_succeeded=execution_succeeded,
+            max_rounds_exhausted=max_rounds_exhausted,
+        )
+
     def _run_trade_alignment_loop(
         self,
         *,
@@ -1155,21 +1528,6 @@ class StrategyLabOrchestrator:
         all_gate_results: List[QualityGateResult] = []
         refinement_attempts: List[str] = []
         zero_trade_attempts: List[str] = []
-        trades: List[TradeRecord] = []
-        metrics = compute_metrics([], config.initial_capital, config.start_date, config.end_date)
-        execution_succeeded = False
-        market_data: Optional[Dict[str, List[OHLCVBar]]] = None
-        # Issue #525 — audit trail of the symbol universe the fetch was
-        # asked to retrieve and the symbols that actually returned bars.
-        # Persisted on ``BacktestRecord`` so reviewers can see when a
-        # fetch silently dropped tickers.
-        requested_symbols: List[str] = []
-        fetched_symbols: List[str] = []
-        # #547 item 7: track whether the refinement loop exhausted the round
-        # cap so the persisted record's ``status`` is queryable rather than
-        # buried in logs. Set at each of the three break-on-max sites
-        # (validation / execution / evaluation phases).
-        max_rounds_exhausted = False
 
         # ── Phase 1b: PRE-SYNTHESIS SPEC GATING (#547 item 1) ─────────
         # Validate the ideation-time spec ONCE before entering the
@@ -1205,356 +1563,31 @@ class StrategyLabOrchestrator:
             return pre_synthesis
 
         # ── Phase 2: CODE REFINEMENT LOOP ─────────────────────────────
-        # Iterate up to MAX_CODE_REFINEMENT_ROUNDS, refining the
-        # generated code for correctness, performance, syntax errors,
-        # build errors, runtime errors, and backtest anomalies (zero
-        # trades, implausible returns, etc.).  The loop exits only when
-        # all quality gates pass AND the backtest produces sound results.
-
-        for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
-            round_gate_results: List[QualityGateResult] = []
-
-            # ── 2a: VALIDATE (code safety only — spec was validated
-            #       pre-synthesis and is immutable for this cycle, see
-            #       #547 items 1 & 2).
-            emit("coding", {"sub_phase": "started", "refinement_round": round_num})
-            # Re-run SpecReadinessGate on the first synthesis round.
-            # Precondition: design-phase readiness passed. Postcondition:
-            # a critical failure here means the spec was mutated between
-            # design exit and synthesis entry — the same short-circuit
-            # path that fires for any other critical synthesis-phase gate
-            # picks it up. Skipped on round_num > 0 because the spec is
-            # immutable across the synthesis loop.
-            if round_num == 0:
-                round_gate_results.extend(
-                    self.spec_readiness_gate.validate(
-                        spec, phase="synthesis", backtest_config=config
-                    )
-                )
-            code_gates = self.code_safety_checker.check(code, spec)
-            round_gate_results.extend(code_gates)
-            self.record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
-
-            checks_total = len(round_gate_results)
-            checks_passed = sum(1 for g in round_gate_results if g.passed)
-
-            critical_failures = [
-                g for g in round_gate_results if not g.passed and g.severity == "critical"
-            ]
-            if critical_failures:
-                emit(
-                    "coding",
-                    {
-                        "sub_phase": "failed",
-                        "refinement_round": round_num,
-                        "checks_passed": checks_passed,
-                        "checks_total": checks_total,
-                    },
-                )
-                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refining",
-                            "refinement_round": round_num,
-                            "failure_phase": "validation",
-                        },
-                    )
-                    failure_details = "\n".join(
-                        f"- [{g.gate_name}] {g.details}" for g in critical_failures
-                    )
-                    updates, code = self._refine(
-                        spec, code, "validation", failure_details, None, refinement_attempts
-                    )
-                    spec = self._apply_updates(spec, updates, code, failure_phase="validation")
-                    changes = updates.get("changes_made", "validation fix")
-                    refinement_attempts.append(changes)
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refined",
-                            "refinement_round": round_num,
-                            "changes_made": changes,
-                        },
-                    )
-                    continue
-                else:
-                    logger.warning(
-                        "Max code refinement rounds reached on validation for %s", spec.strategy_id
-                    )
-                    max_rounds_exhausted = True
-                    break
-
-            emit(
-                "coding",
-                {
-                    "sub_phase": "completed",
-                    "refinement_round": round_num,
-                    "checks_passed": checks_passed,
-                    "checks_total": checks_total,
-                },
-            )
-
-            # ── 2b: FETCH DATA (once, reuse across rounds) ───────────
-            if market_data is None:
-                emit("backtesting", {"sub_phase": "fetching_data"})
-                fetch = self._fetch_market_data(spec, config)
-                # Issue #525 — record requested/fetched on every cycle,
-                # even when the fetch returns nothing usable, so the
-                # audit trail captures intent on failed runs too.
-                requested_symbols = list(fetch.requested_symbols)
-                fetched_symbols = list(fetch.fetched_symbols)
-                market_data = fetch.data
-                if not market_data:
-                    all_gate_results.append(
-                        self.build_orchestrator_gate(
-                            "market_data",
-                            phase="synthesis",
-                            details=f"No market data available for asset class '{spec.asset_class}'.",
-                            refinement_round=round_num,
-                        )
-                    )
-                    break
-                total_bars = sum(len(bars) for bars in market_data.values())
-                emit(
-                    "backtesting",
-                    {
-                        "sub_phase": "data_loaded",
-                        "symbols_count": len(market_data),
-                        "bars_count": total_bars,
-                    },
-                )
-
-                # Issue #526 — fail closed if the fetched universe doesn't
-                # include the spec's target_symbols. Code refinement can't
-                # fix this (the data simply isn't there), so we break out
-                # the same way the no-market-data branch above does.
-                fetch_coverage_gates = self.target_symbol_coverage_gate.check_fetch(
-                    spec, requested_symbols, fetched_symbols
-                )
-                self.record_gates(
-                    fetch_coverage_gates, all_gate_results, refinement_round=round_num
-                )
-                if any(not g.passed and g.severity == "critical" for g in fetch_coverage_gates):
-                    break
-
-            # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
-            emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
-            exec_result = run_strategy_code(code, market_data, config, strategy=spec)
-
-            if not exec_result.success:
-                all_gate_results.append(
-                    self.build_orchestrator_gate(
-                        "code_execution",
-                        phase="synthesis",
-                        details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr[:500]}",
-                        refinement_round=round_num,
-                    )
-                )
-                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refining",
-                            "refinement_round": round_num,
-                            "failure_phase": "execution",
-                        },
-                    )
-                    failure_details = (
-                        f"Error type: {exec_result.error_type}\n"
-                        f"stderr:\n{exec_result.stderr[:2000]}"
-                    )
-                    updates, code = self._refine(
-                        spec, code, "execution", failure_details, None, refinement_attempts
-                    )
-                    spec = self._apply_updates(spec, updates, code, failure_phase="execution")
-                    changes = updates.get("changes_made", "execution fix")
-                    refinement_attempts.append(changes)
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refined",
-                            "refinement_round": round_num,
-                            "changes_made": changes,
-                        },
-                    )
-                    continue
-                else:
-                    logger.warning(
-                        "Max code refinement rounds reached on execution for %s", spec.strategy_id
-                    )
-                    max_rounds_exhausted = True
-                    break
-
-            # ── 2d: COLLECT TRADES ────────────────────────────────────
-            # TradingService has already finalised trades through
-            # FillSimulator, so the legacy raw-trade validation step is a
-            # no-op here. Kept the same ``trades`` variable name so the
-            # rest of the loop is untouched.
-            trades = exec_result.trades
-
-            # Issue #526 — fail closed when the ledger contains symbols
-            # outside spec.target_symbols. Uses ``max_rounds_exhausted`` to
-            # leave ``execution_succeeded=False`` so ``is_winning`` stays
-            # False at the acceptance gate (same precedent as the
-            # max-refinement-rounds anomaly branch below).
-            trade_coverage_gates = self.target_symbol_coverage_gate.check_trades(spec, trades)
-            self.record_gates(
-                trade_coverage_gates, all_gate_results, refinement_round=round_num
-            )
-            if any(not g.passed and g.severity == "critical" for g in trade_coverage_gates):
-                max_rounds_exhausted = True
-                break
-
-            emit(
-                "backtesting",
-                {
-                    "sub_phase": "completed",
-                    "trades_count": len(trades),
-                    "execution_time": exec_result.execution_time_seconds,
-                },
-            )
-
-            # ── 2e: BACKTEST EVALUATION ───────────────────────────────
-            # Code ran cleanly — now compute metrics and check for
-            # anomalies.  Critical anomalies (zero trades, implausible
-            # returns, etc.) trigger refinement while budget remains.
-            metrics = compute_metrics(
-                trades, config.initial_capital, config.start_date, config.end_date
-            )
-
-            # Issue #451 — attach a deterministic CoverageReport when the
-            # run is zero/low-trade. Successful runs pay no probe cost.
-            _maybe_attach_coverage_report(
-                metrics=metrics,
-                spec=spec,
-                market_data=market_data,
-                config=config,
-                exec_result=exec_result,
-            )
-
-            anomaly_gates = self.anomaly_detector.check(
-                metrics,
-                trades,
-                dsr_aware=config.walk_forward_enabled,
-                diagnostics=exec_result.execution_diagnostics,
-                coverage_report=metrics.coverage_report,
-            )
-            self.record_gates(anomaly_gates, all_gate_results, refinement_round=round_num)
-
-            critical_anomalies = [
-                g for g in anomaly_gates if not g.passed and g.severity == "critical"
-            ]
-            if critical_anomalies:
-                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refining",
-                            "refinement_round": round_num,
-                            "failure_phase": "evaluation",
-                        },
-                    )
-                    failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
-                    diagnostics_block = _format_execution_diagnostics(
-                        exec_result.execution_diagnostics
-                    )
-                    if diagnostics_block:
-                        failure_details = f"{failure_details}\n{diagnostics_block}"
-                    coverage_block = format_coverage_report(metrics.coverage_report)
-                    if coverage_block:
-                        failure_details = f"{failure_details}\n{coverage_block}"
-
-                    # Issue #405 — specialized zero-trade repair branch.
-                    # If the critical anomaly carries a deterministic
-                    # ``zero_trade_category``, ask the targeted repair
-                    # agent first. On a successful repair the proposal
-                    # has already passed code-safety, a fresh backtest,
-                    # and the anomaly gates, so we commit it and re-
-                    # enter the loop. On a failed proposal we fall
-                    # through to the generic refinement agent so the
-                    # existing loop semantics are preserved.
-                    diag = exec_result.execution_diagnostics
-                    if (
-                        diag is not None
-                        and diag.zero_trade_category is not None
-                        and market_data is not None
-                    ):
-                        zt_outcome = self.zero_trade_repairer.try_repair(
-                            spec=spec,
-                            code=code,
-                            exec_result=exec_result,
-                            coverage_report=metrics.coverage_report,
-                            market_data=market_data,
-                            config=config,
-                            zero_trade_attempts=zero_trade_attempts,
-                            round_num=round_num,
-                            emit=emit,
-                        )
-                        all_gate_results.extend(zt_outcome.new_gates)
-                        if zt_outcome.committed:
-                            assert zt_outcome.new_spec is not None
-                            assert zt_outcome.new_metrics is not None
-                            assert zt_outcome.new_exec_result is not None
-                            code = zt_outcome.new_code
-                            spec = zt_outcome.new_spec
-                            trades = zt_outcome.new_trades
-                            metrics = zt_outcome.new_metrics
-                            exec_result = zt_outcome.new_exec_result
-                            refinement_attempts.append(
-                                f"zero-trade repair: {zt_outcome.changes_made}"
-                                if zt_outcome.changes_made
-                                else "zero-trade repair"
-                            )
-                            emit(
-                                "coding",
-                                {
-                                    "sub_phase": "refined",
-                                    "refinement_round": round_num,
-                                    "changes_made": (
-                                        zt_outcome.changes_made or "zero-trade repair"
-                                    ),
-                                    "via": "zero_trade_repair",
-                                },
-                            )
-                            continue
-
-                    updates, code = self._refine(
-                        spec,
-                        code,
-                        "evaluation (backtest anomaly)",
-                        failure_details,
-                        metrics,
-                        refinement_attempts,
-                    )
-                    spec = self._apply_updates(spec, updates, code, failure_phase="evaluation")
-                    changes = updates.get("changes_made", "anomaly fix")
-                    refinement_attempts.append(changes)
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refined",
-                            "refinement_round": round_num,
-                            "changes_made": changes,
-                        },
-                    )
-                    continue
-                else:
-                    logger.warning(
-                        "Max code refinement rounds reached on evaluation for %s", spec.strategy_id
-                    )
-                    # Do NOT flip execution_succeeded — even if the code is
-                    # technically correct, the cycle exhausted its rounds on
-                    # an unresolved anomaly. Leaving execution_succeeded=False
-                    # ensures is_winning stays False so paper-trading does
-                    # not fire on a "failed: max_refinement_rounds" record
-                    # (#547 review feedback).
-                    max_rounds_exhausted = True
-                    break
-
-            # All gates passed — code is clean and backtest is sound
-            execution_succeeded = True
-            break
+        # ``_run_synthesis_loop`` iterates up to ``MAX_CODE_REFINEMENT_ROUNDS``
+        # rounds of (validate → fetch → execute → trade-collect → evaluate)
+        # and either converges (``execution_succeeded=True``) or
+        # short-circuits with ``max_rounds_exhausted`` / a fatal-fetch flag.
+        # The loop appends to ``all_gate_results``, ``refinement_attempts``,
+        # and ``zero_trade_attempts`` in-place; the returned outcome carries
+        # the final spec/code/trades/metrics + universe audit.
+        synthesis = self._run_synthesis_loop(
+            spec=spec,
+            code=code,
+            config=config,
+            all_gate_results=all_gate_results,
+            refinement_attempts=refinement_attempts,
+            zero_trade_attempts=zero_trade_attempts,
+            emit=emit,
+        )
+        spec = synthesis.spec
+        code = synthesis.code
+        trades = synthesis.trades
+        metrics = synthesis.metrics
+        market_data = synthesis.market_data
+        requested_symbols = synthesis.requested_symbols
+        fetched_symbols = synthesis.fetched_symbols
+        execution_succeeded = synthesis.execution_succeeded
+        max_rounds_exhausted = synthesis.max_rounds_exhausted
 
         # ── Phase 2.5: TRADE ALIGNMENT LOOP ───────────────────────────
         alignment_outcome = self._run_trade_alignment_loop(
@@ -2220,5 +2253,6 @@ from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
     _merge_risk_limits_tighten_only,
     _parse_bar_date,
     _resolve_vix_provider,
+    _SynthesisLoopOutcome,
     _VerificationOutcome,
 )

@@ -106,6 +106,44 @@ class _AlignmentLoopOutcome:
         return len(self.alignment_attempts)
 
 
+@dataclass
+class _SynthesisLoopOutcome:
+    """Bundle of state mutated by ``_run_synthesis_loop``.
+
+    The synthesis refinement loop iterates up to ``MAX_CODE_REFINEMENT_ROUNDS``
+    rounds of (validate → fetch → execute → trade-collect → evaluate),
+    refining ``spec``/``code`` between rounds and short-circuiting on
+    fatal failures (market-data unavailable, target-symbol coverage,
+    max-rounds exhaustion).
+
+    Returning the full final state keeps the boundary explicit so
+    ``_run_design_attempt`` doesn't need to inspect loop internals.
+
+    Invariants on return:
+    - ``execution_succeeded=True`` implies ``trades`` reflects a clean
+      run with no critical anomalies and ``metrics`` was computed from
+      those trades.
+    - ``execution_succeeded=False`` implies the loop short-circuited or
+      exhausted its rounds; ``trades``/``metrics`` may be empty defaults
+      or carry the last failed round's partials.
+    - ``market_data`` is ``None`` only when the first ``_fetch_market_data``
+      call returned an empty payload — the loop breaks immediately in
+      that case and downstream phases skip alignment.
+    - ``max_rounds_exhausted`` is mutually exclusive with
+      ``execution_succeeded=True``.
+    """
+
+    spec: StrategySpec
+    code: str
+    trades: List[TradeRecord]
+    metrics: BacktestResult
+    market_data: Optional[Dict[str, List[OHLCVBar]]]
+    requested_symbols: List[str]
+    fetched_symbols: List[str]
+    execution_succeeded: bool
+    max_rounds_exhausted: bool
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Pure helpers used by the orchestrator (and a few external callers).
 # ──────────────────────────────────────────────────────────────────────────
