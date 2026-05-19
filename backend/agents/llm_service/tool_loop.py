@@ -1,7 +1,7 @@
 """
 Multi-turn LLM tool loop: chat rounds until the model returns structured JSON (no tool calls).
 
-Uses ``LLMClient.chat_json_round`` (implemented by Ollama / Dummy clients).
+Uses ``LLMClient.chat(response_format="json", ...)`` (implemented by Ollama / Dummy clients).
 """
 
 from __future__ import annotations
@@ -72,14 +72,15 @@ def complete_json_with_tool_loop(
         {"role": "user", "content": user_prompt},
     ]
     for round_idx in range(max_rounds):
-        result = llm.chat_json_round(
+        result = llm.chat(
             messages,
+            response_format="json",
             temperature=temperature,
             tools=tools,
             think=think,
         )
         if not isinstance(result, dict):
-            raise LLMPermanentError(f"chat_json_round returned non-dict: {type(result)}")
+            raise LLMPermanentError(f"chat returned non-dict: {type(result)}")
 
         if "__tool_calls__" in result:
             tcalls = result["__tool_calls__"]

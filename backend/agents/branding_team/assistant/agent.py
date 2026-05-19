@@ -232,8 +232,15 @@ class BrandingAssistantAgent:
     """
 
     def __init__(self, conversation_llm=None, extraction_llm=None, llm=None):  # noqa: ANN001
-        if conversation_llm is None and llm is not None:
-            conversation_llm = llm
+        # Backward compatibility: the legacy ``llm=`` argument drives BOTH
+        # stages so tests and offline callers that inject a fake never hit a
+        # live LLM. New code should pass ``conversation_llm`` and
+        # ``extraction_llm`` separately when it needs distinct backends.
+        if llm is not None:
+            if conversation_llm is None:
+                conversation_llm = llm
+            if extraction_llm is None:
+                extraction_llm = llm
 
         if conversation_llm is None or extraction_llm is None:
             from strands import Agent
@@ -242,11 +249,16 @@ class BrandingAssistantAgent:
 
             if conversation_llm is None:
                 conversation_llm = Agent(
-                    model=get_strands_model("branding_assistant"),
+                    # response_format="text": the conversation stage must
+                    # produce free-form prose. Without this opt-in the adapter
+                    # would force JSON output on the wire and the user-facing
+                    # reply would be empty or JSON-shaped.
+                    model=get_strands_model("branding_assistant", response_format="text"),
                     system_prompt=SYSTEM_PROMPT,
                 )
             if extraction_llm is None:
                 extraction_llm = Agent(
+                    # Extractor emits strict JSON — keep the default JSON mode.
                     model=get_strands_model("branding_assistant"),
                     system_prompt=EXTRACTION_SYSTEM_PROMPT,
                 )

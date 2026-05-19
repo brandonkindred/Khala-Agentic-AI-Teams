@@ -57,49 +57,26 @@ class _RecordingClient(LLMClient):
         )
         return self.response
 
-    def chat_json_round(
+    def chat(
         self,
         messages: list,
         *,
-        temperature: float = 0.2,
-        tools: Optional[list] = None,
-        think: bool = False,
-        max_tokens: Optional[int] = None,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        self.chat_calls.append(
-            {
-                "messages": messages,
-                "temperature": temperature,
-                "tools": tools,
-                "think": think,
-                "max_tokens": max_tokens,
-            }
-        )
-        return self.response
-
-    def chat_round(
-        self,
-        messages: list,
-        *,
+        response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
         think: bool = False,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
-        # The strands adapter calls ``chat_round`` for ``stream()``. We record
-        # the same call shape and return the canned dict; the adapter will
-        # JSON-serialize it to text (matching the existing assertions).
-        self.chat_calls.append(
-            {
-                "messages": messages,
-                "temperature": temperature,
-                "tools": tools,
-                "think": think,
-                "max_tokens": max_tokens,
-            }
-        )
+        call = {
+            "messages": messages,
+            "response_format": response_format,
+            "temperature": temperature,
+            "tools": tools,
+            "think": think,
+            "max_tokens": max_tokens,
+        }
+        self.chat_calls.append(call)
         return self.response
 
 
@@ -383,6 +360,183 @@ def test_stream_per_call_overrides_via_invocation_state() -> None:
 
 
 # ---------------------------------------------------------------------------
+# response_format routing
+# ---------------------------------------------------------------------------
+
+
+def test_stream_defaults_to_json_response_format_for_backward_compat() -> None:
+    """The default model config must forward ``response_format="json"`` to
+    ``LLMClient.chat`` so the backing client forces ``response_format=json_object``
+    on the wire.
+
+    Regression: a previous iteration of this adapter defaulted to text mode
+    (no ``response_format=json_object`` on the wire), which broke Strands
+    agents that ask for JSON in their system prompt and then ``json.loads``
+    the assistant content (e.g. ``RoutePlannerAgent``). The default must
+    keep the JSON path so those agents continue to receive well-formed JSON.
+    """
+    client = _RecordingClient({"ordered_stops": [], "route_summary": "ok"})
+    model = LLMClientModel(client)
+    assert model.get_config()["response_format"] == "json"
+
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "plan a route"}]}]))
+
+    assert len(client.chat_calls) == 1
+    assert client.chat_calls[0]["response_format"] == "json"
+
+
+def test_stream_forwards_text_response_format_when_configured() -> None:
+    """Opt-in ``response_format="text"`` flows through to ``LLMClient.chat``
+    so the backing client uses the prose path (no JSON forcing on the wire)."""
+    client = _RecordingClient("Hi there — happy to help.")
+    model = LLMClientModel(client, response_format="text")
+
+    events = _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hello"}]}]))
+
+    assert len(client.chat_calls) == 1
+    assert client.chat_calls[0]["response_format"] == "text"
+    # The prose string is emitted as-is (no JSON serialization wrap).
+    text_event = next(e for e in events if "contentBlockDelta" in e)
+    assert text_event["contentBlockDelta"]["delta"]["text"] == "Hi there — happy to help."
+
+
+def test_invocation_state_can_override_response_format_per_call() -> None:
+    """Per-call ``response_format`` in ``invocation_state`` overrides the default."""
+    client = _RecordingClient("prose")
+    model = LLMClientModel(client)  # default json
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            invocation_state={"response_format": "text"},
+        )
+    )
+
+    assert len(client.chat_calls) == 1
+    assert client.chat_calls[0]["response_format"] == "text"
+
+
+def test_llm_client_model_rejects_invalid_response_format() -> None:
+    """Invalid ``response_format`` values fail fast at construction time."""
+    with pytest.raises(ValueError, match="response_format"):
+        LLMClientModel(_RecordingClient({}), response_format="xml")
+
+
+def test_get_strands_model_forwards_response_format() -> None:
+    client = _RecordingClient({"ok": True})
+    model = get_strands_model(client=client, response_format="text")
+    assert model.get_config()["response_format"] == "text"
+
+
+def test_clone_returns_new_model_sharing_backing_client() -> None:
+    """``LLMClientModel.clone(response_format=...)`` derives a sibling that
+    reuses the same backing client but applies the override. Use case:
+    callers that need both prose and JSON variants of the same upstream
+    model (e.g. ``BlogWriterAgent`` for the ``---DRAFT---`` marker path
+    plus its JSON helpers).
+    """
+    client = _RecordingClient("hello")
+    base = LLMClientModel(
+        client,
+        agent_key="blog",
+        temperature=0.3,
+        think=True,
+        response_format="json",
+    )
+    sibling = base.clone(response_format="text")
+
+    assert sibling is not base
+    assert sibling._client is base._client
+    assert sibling.get_config()["response_format"] == "text"
+    # Non-overridden fields inherited.
+    assert sibling.get_config()["agent_key"] == "blog"
+    assert sibling.get_config()["temperature"] == 0.3
+    assert sibling.get_config()["think"] is True
+    # Base config is unmodified.
+    assert base.get_config()["response_format"] == "json"
+
+    # Verify the cloned text-mode sibling forwards response_format="text".
+    _drain(sibling.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert len(client.chat_calls) == 1
+    assert client.chat_calls[0]["response_format"] == "text"
+
+
+def test_clone_rejects_invalid_response_format() -> None:
+    base = LLMClientModel(_RecordingClient({}))
+    with pytest.raises(ValueError, match="response_format"):
+        base.clone(response_format="xml")
+
+
+def test_public_llm_service_get_strands_model_accepts_response_format(monkeypatch) -> None:
+    """Regression: ``llm_service.get_strands_model`` is re-exported from
+    ``strands_provider`` (not ``strands_adapter``). The branding assistant calls
+    it as ``get_strands_model("branding_assistant", response_format="text")``,
+    so the provider's signature must accept that keyword or production init
+    raises ``TypeError`` before serving any request.
+    """
+    from llm_service import factory
+    from llm_service import get_strands_model as public_get_strands_model
+    from llm_service.strands_provider import _clear_strands_model_cache_for_testing
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    factory._clear_client_cache_for_testing()
+    _clear_strands_model_cache_for_testing()
+    try:
+        model_text = public_get_strands_model("test_agent", response_format="text")
+        model_json = public_get_strands_model("test_agent", response_format="json")
+    finally:
+        _clear_strands_model_cache_for_testing()
+
+    assert isinstance(model_text, LLMClientModel)
+    assert model_text.get_config()["response_format"] == "text"
+    assert model_json.get_config()["response_format"] == "json"
+    # Distinct response_format values must not collide in the cache.
+    assert model_text is not model_json
+
+
+def test_public_llm_service_get_strands_model_accepts_client_kwarg() -> None:
+    """Regression: the SE v2 phases' ``_resolve_model`` helpers call
+    ``get_strands_model(client=llm, response_format="text")`` to wrap an
+    injected ``LLMClient`` instance. The public re-export must accept the
+    ``client=`` kwarg — otherwise every backend_code_v2 / frontend_code_v2
+    planning, execution, review, and problem-solving call raises ``TypeError``
+    the moment an ``LLMClient`` (e.g. ``OllamaLLMClient`` in production) is
+    handed in.
+
+    Tests don't catch this because ``DummyLLMClient`` also implements the
+    Strands ``Model`` interface, so ``_resolve_model`` short-circuits on
+    ``isinstance(llm, _StrandsModel)`` before reaching the ``client=`` branch.
+    """
+    from llm_service import get_strands_model as public_get_strands_model
+
+    client = DummyLLMClient()
+    model = public_get_strands_model("test_agent", client=client, response_format="text")
+    assert isinstance(model, LLMClientModel)
+    assert model._client is client
+    assert model.get_config()["response_format"] == "text"
+
+
+def test_invocation_state_invalid_response_format_raises() -> None:
+    """Per-call ``response_format`` overrides via ``invocation_state`` must
+    match the same strictness as ``__init__`` and ``clone``. Silently
+    routing a typo (``"Text"``, ``"prose"``) to JSON mode is a worse failure
+    than crashing visibly.
+    """
+    client = _RecordingClient("hello")
+    model = LLMClientModel(client)
+
+    async def _run() -> None:
+        async for _ in model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            invocation_state={"response_format": "prose"},
+        ):
+            pass
+
+    with pytest.raises(ValueError, match="response_format"):
+        asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
 # LLMClientModel.structured_output
 # ---------------------------------------------------------------------------
 
@@ -437,6 +591,47 @@ def test_structured_output_raises_on_invalid_response() -> None:
 # ---------------------------------------------------------------------------
 # Config + factory
 # ---------------------------------------------------------------------------
+
+
+def test_llm_client_config_validates_response_format_at_construction() -> None:
+    """The frozen dataclass enforces the contract in one place — invalid
+    response_format values raise from ``__post_init__`` so they can never
+    propagate to ``stream()``.
+    """
+    from llm_service.strands_adapter import LLMClientConfig
+
+    with pytest.raises(ValueError, match="response_format"):
+        LLMClientConfig(response_format="xml")  # type: ignore[arg-type]
+
+
+def test_update_config_rejects_unknown_keys() -> None:
+    """The previous mutable-dict ``self.config.update(...)`` silently retained
+    typo'd or unknown keys. The dataclass-backed ``update_config`` raises
+    ``TypeError`` instead, which is what we want — unknown keys never had a
+    meaningful effect and silently retaining them just hid bugs.
+    """
+    model = LLMClientModel(DummyLLMClient())
+    with pytest.raises(TypeError):
+        model.update_config(this_is_not_a_known_field="oops")
+
+
+def test_update_config_validates_response_format() -> None:
+    """``update_config`` reuses the dataclass validation — typo'd values raise."""
+    model = LLMClientModel(DummyLLMClient())
+    with pytest.raises(ValueError, match="response_format"):
+        model.update_config(response_format="Prose")
+
+
+def test_get_config_returns_independent_dict_view() -> None:
+    """Mutations on the dict returned by ``get_config()`` must not affect the
+    frozen underlying config — this was a real footgun with the previous
+    ``self.config: Dict`` design where the returned dict WAS the live config."""
+    model = LLMClientModel(DummyLLMClient(), agent_key="qa")
+    snapshot = model.get_config()
+    snapshot["agent_key"] = "mutated"
+
+    fresh = model.get_config()
+    assert fresh["agent_key"] == "qa"
 
 
 def test_get_config_and_update_config() -> None:
@@ -540,10 +735,7 @@ def test_run_json_via_strands_returns_empty_dict_on_exception() -> None:
     ``data.get(...)`` defaults."""
 
     class _Broken(DummyLLMClient):
-        def chat_json_round(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
-            raise RuntimeError("simulated LLM failure")
-
-        def chat_round(self, *a: Any, **kw: Any) -> Any:  # type: ignore[override]
+        def chat(self, *a: Any, **kw: Any) -> Any:  # type: ignore[override]
             raise RuntimeError("simulated LLM failure")
 
         def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]

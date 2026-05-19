@@ -75,7 +75,6 @@ __all__ = [
     "get_client",
     "get_strands_model",
     "get_llm_config_summary",
-    "get_strands_model",
     "LLMClient",
     "LLMClientModel",
     "LLMError",

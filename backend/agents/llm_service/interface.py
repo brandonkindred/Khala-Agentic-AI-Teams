@@ -187,46 +187,33 @@ class LLMClient(ABC):
             prompt, temperature=temperature, max_tokens=None, system_prompt=None, think=think
         )
 
-    def chat_json_round(
+    def chat(
         self,
         messages: list[Dict[str, Any]],
         *,
-        temperature: float = 0.2,
-        tools: Optional[list] = None,
-        think: bool = False,
-        max_tokens: Optional[int] = None,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """
-        Single chat completion round with optional tools (multi-turn tool loops).
-
-        Returns either a normal structured dict (parsed from assistant content) or
-        ``{"__tool_calls__": [...]}`` when the model requests tool execution.
-        Default implementation: not supported — override in Ollama / Dummy clients.
-        """
-        raise LLMPermanentError(
-            f"{type(self).__name__} does not implement chat_json_round (required for tool loops)"
-        )
-
-    def chat_round(
-        self,
-        messages: list[Dict[str, Any]],
-        *,
+        response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
         think: bool = False,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
-        """
-        Single chat completion round that returns prose (or tool calls).
+        """One chat completion round, parameterized by ``response_format``.
 
-        Returns either a plain string (assistant message content) or
-        ``{"__tool_calls__": [...]}`` when the model requests tool execution.
-        Unlike ``chat_json_round``, this does NOT request ``response_format=json_object``
-        and does NOT attempt to parse the content as JSON — use it for conversational
-        agents whose replies should be free-form natural language.
+        Returns one of:
 
-        Default implementation: not supported — override in Ollama / Dummy clients.
+        - ``{"__tool_calls__": [...]}`` when the model invokes tools, regardless
+          of ``response_format`` (tool invocations always come back as a dict
+          envelope).
+        - A parsed ``Dict[str, Any]`` when ``response_format="json"`` (the
+          default). The wire request includes ``response_format=json_object``
+          when no tools are present, and the assistant content is parsed via
+          ``_extract_json`` with markdown-fence and repair fallbacks.
+        - A raw ``str`` of the assistant content when ``response_format="text"``.
+          No forcing on the wire, no parsing — for conversational prose, the
+          ``---DRAFT---`` marker pattern, template-based outputs, etc.
+
+        Default implementation: not supported — override in Ollama / Dummy.
         """
-        raise LLMPermanentError(f"{type(self).__name__} does not implement chat_round")
+        raise LLMPermanentError(f"{type(self).__name__} does not implement chat")
+

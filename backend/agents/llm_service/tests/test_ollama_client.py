@@ -253,13 +253,15 @@ def test_ollama_chat_round_returns_raw_prose_without_response_format(
     with patch("httpx.Client") as mock_client_cls:
         mock_client_cls.return_value = mock_client
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
-        result = client.chat_round(
-            [{"role": "user", "content": "tell me about brand strategy"}], temperature=0.2
+        result = client.chat(
+            [{"role": "user", "content": "tell me about brand strategy"}],
+            response_format="text",
+            temperature=0.2,
         )
     assert result == prose
     assert captured_payloads, "No payload captured"
     payload = captured_payloads[0]
-    # The critical assertion: chat_round MUST NOT force JSON output.
+    # The critical assertion: chat(response_format="text") MUST NOT force JSON output.
     assert "response_format" not in payload
     assert "tools" not in payload
 
@@ -289,8 +291,11 @@ def test_ollama_chat_round_returns_tool_calls_when_tools_present(
     with patch("httpx.Client") as mock_client_cls:
         mock_client_cls.return_value = mock_client
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
-        result = client.chat_round(
-            [{"role": "user", "content": "go"}], tools=tools, temperature=0.0
+        result = client.chat(
+            [{"role": "user", "content": "go"}],
+            response_format="text",
+            tools=tools,
+            temperature=0.0,
         )
     assert isinstance(result, dict)
     assert "__tool_calls__" in result
