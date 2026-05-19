@@ -1083,6 +1083,62 @@ class StrategyLabOrchestrator:
             exit_rule_conformance_passed=exit_rule_conformance_passed,
         )
 
+    def _run_analysis_phase(
+        self,
+        *,
+        spec: StrategySpec,
+        metrics: BacktestResult,
+        trades: List[TradeRecord],
+        rationale: str,
+        is_winning: bool,
+        execution_succeeded: bool,
+        refinement_attempts: List[Dict[str, Any]],
+        all_gate_results: List[QualityGateResult],
+        emit: PhaseCallback,
+    ) -> str:
+        """Run the analysis agent and return the narrative string.
+
+        Pre: synthesis + alignment + verification have settled. The narrative
+        is whatever the analysis agent produces, or a synthetic auto-summary
+        when the agent raises or there were no trades to analyse.
+        Post: returns a non-empty string when ``execution_succeeded and trades``
+        was true (or the failure-path auto-summary). Empty string only when
+        the cycle had no trades AND no execution failure to summarise — a
+        state the orchestrator treats as "nothing to write about".
+        """
+        if execution_succeeded and trades:
+            emit("analyzing", {"sub_phase": "draft"})
+            try:
+
+                def _on_analysis_sub(sub: str) -> None:
+                    emit("analyzing", {"sub_phase": sub})
+
+                narrative = self.analysis_agent.run(
+                    spec,
+                    metrics,
+                    trades,
+                    rationale,
+                    on_sub_phase=_on_analysis_sub,
+                    is_winning=is_winning,
+                )
+                emit("analyzing", {"sub_phase": "completed", "is_winning": is_winning})
+                return narrative
+            except Exception:
+                logger.exception("Analysis agent failed for %s", spec.strategy_id)
+                label = "winning" if is_winning else "losing"
+                return (
+                    f"Auto-summary: {spec.asset_class} strategy ({label}) with "
+                    f"annualized return {metrics.annualized_return_pct:.1f}%. "
+                    f"(Detailed narrative generation failed.)"
+                )
+        if not execution_succeeded:
+            return (
+                f"Strategy failed to produce valid backtest results after "
+                f"{len(refinement_attempts)} refinement round(s). "
+                f"Last failure: {all_gate_results[-1].details if all_gate_results else 'unknown'}."
+            )
+        return ""
+
     def _assemble_record(
         self,
         *,
@@ -1703,37 +1759,17 @@ class StrategyLabOrchestrator:
         # to carry every downstream-visible signal. The fields stay on the
         # dataclass for callers that want to inspect the outcome directly.
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────
-        narrative = ""
-        if execution_succeeded and trades:
-            emit("analyzing", {"sub_phase": "draft"})
-            try:
-
-                def _on_analysis_sub(sub: str) -> None:
-                    emit("analyzing", {"sub_phase": sub})
-
-                narrative = self.analysis_agent.run(
-                    spec,
-                    metrics,
-                    trades,
-                    rationale,
-                    on_sub_phase=_on_analysis_sub,
-                    is_winning=is_winning,
-                )
-                emit("analyzing", {"sub_phase": "completed", "is_winning": is_winning})
-            except Exception:
-                logger.exception("Analysis agent failed for %s", spec.strategy_id)
-                label = "winning" if is_winning else "losing"
-                narrative = (
-                    f"Auto-summary: {spec.asset_class} strategy ({label}) with "
-                    f"annualized return {metrics.annualized_return_pct:.1f}%. "
-                    f"(Detailed narrative generation failed.)"
-                )
-        elif not execution_succeeded:
-            narrative = (
-                f"Strategy failed to produce valid backtest results after "
-                f"{len(refinement_attempts)} refinement round(s). "
-                f"Last failure: {all_gate_results[-1].details if all_gate_results else 'unknown'}."
-            )
+        narrative = self._run_analysis_phase(
+            spec=spec,
+            metrics=metrics,
+            trades=trades,
+            rationale=rationale,
+            is_winning=is_winning,
+            execution_succeeded=execution_succeeded,
+            refinement_attempts=refinement_attempts,
+            all_gate_results=all_gate_results,
+            emit=emit,
+        )
 
         # ── Phase 4: RECORD ───────────────────────────────────────────
         return self._assemble_record(
