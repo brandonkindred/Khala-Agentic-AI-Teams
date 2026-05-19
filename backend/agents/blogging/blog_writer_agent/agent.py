@@ -158,12 +158,14 @@ class BlogWriterAgent:
         """
         assert llm_client is not None, "llm_client is required"
         self._model = llm_client
-        # ``_call_agent`` produces the ``---DRAFT---`` hybrid format (JSON
+        # ``_call_text`` produces the ``---DRAFT---`` hybrid format (JSON
         # marker line + Markdown body), which only works when the underlying
-        # adapter is in text mode — JSON mode forces a single JSON object on
-        # the wire and the marker pattern disappears. Derive a text-mode
-        # sibling from the injected model when possible; fall back to the
-        # passed model so test fixtures (MagicMock, fakes) continue to work.
+        # adapter is in text mode — JSON mode would force a single JSON object
+        # on the wire and the marker pattern would disappear. Derive a
+        # text-mode sibling from the injected model when possible; fall back
+        # to the passed model so test fixtures (MagicMock, fakes) continue to
+        # work. ``_call_json_raw`` / ``_call_agent_json`` use ``self._model``
+        # directly for structured helpers.
         try:
             from llm_service.strands_adapter import LLMClientModel  # noqa: PLC0415
 
@@ -182,40 +184,38 @@ class BlogWriterAgent:
             parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
         self._style_prompt = "\n\n".join(parts)
 
-    def _call_agent(
-        self,
-        prompt: str,
-        system_prompt: str = "",
-        *,
-        expect_json: bool = False,
-    ) -> str:
-        """Call a Strands Agent and return the raw assistant content.
+    def _call_text(self, prompt: str, system_prompt: str = "") -> str:
+        """Call the text-mode Strands Agent and return raw prose.
 
-        ``expect_json=False`` (default) uses the text-mode sibling — required
-        for drafting / revision paths that emit the ``---DRAFT---`` marker +
-        Markdown hybrid format. JSON mode would force a single JSON object
-        on the wire and the marker would disappear, leaving the placeholder
-        fallback as the only path.
-
-        ``expect_json=True`` uses the default (JSON-mode) model — appropriate
-        for the few non-``_call_agent_json`` callers that still parse the
-        result as JSON (e.g. planning retry path, uncertainty-array
-        detection).
+        Used for drafting and revision paths that emit the ``---DRAFT---``
+        marker + Markdown hybrid format. The text-mode sibling avoids forcing
+        ``response_format=json_object`` on the wire so the marker survives.
         """
-        model = self._model if expect_json else self._text_model
-        agent = Agent(model=model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
+        agent = Agent(model=self._text_model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
+        result = agent(prompt)
+        return str(result).strip()
+
+    def _call_json_raw(self, prompt: str, system_prompt: str = "") -> str:
+        """Call the JSON-mode Strands Agent and return the raw assistant content
+        without parsing. Use this when a caller needs to do its own slicing
+        before ``json.loads`` (e.g. the planning retry path that calls
+        ``parse_json_object``)."""
+        agent = Agent(model=self._model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
         result = agent(prompt)
         return str(result).strip()
 
     def _call_agent_json(self, prompt: str, system_prompt: str = "") -> dict:
         """Call the JSON-mode Strands Agent and parse JSON from the result.
 
-        Uses ``self._model`` directly (default JSON mode), which forces
-        ``response_format=json_object`` on the wire for planning helpers and
-        gates that ``json.loads`` the assistant content.
+        Used by the structured helpers (planning, gates) that ``json.loads``
+        the assistant content. ``response_format=json_object`` is forced on
+        the wire for reliability on Ollama; the markdown-fence stripping
+        below is a defensive cleanup in case the model wraps the JSON anyway.
         """
-        agent = Agent(model=self._model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
-        raw = str(agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")).strip()
+        raw = self._call_json_raw(
+            prompt + "\n\nRespond with valid JSON only, no markdown fences.",
+            system_prompt,
+        )
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         return json.loads(raw)
@@ -318,10 +318,9 @@ class BlogWriterAgent:
                 parse_retries += 1
                 logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, e)
             try:
-                raw = self._call_agent(
+                raw = self._call_json_raw(
                     prompt + "\n\nRespond with a single JSON object only, no markdown fences.",
                     system_prompt=system,
-                    expect_json=True,
                 )
                 data = parse_json_object(raw)
                 return data, parse_retries
@@ -509,7 +508,7 @@ class BlogWriterAgent:
             "then the full fixed blog post in Markdown."
         )
         try:
-            raw = self._call_agent(
+            raw = self._call_text(
                 prompt,
                 system_prompt=WRITING_SYSTEM_PROMPT)
             fixed = _extract_draft_after_marker(raw)
@@ -523,7 +522,7 @@ class BlogWriterAgent:
     def _llm_self_review(self, draft: str) -> str:
         """Run a focused LLM self-review for subjective violations. Returns cleaned draft."""
         try:
-            raw = self._call_agent(
+            raw = self._call_text(
                 f"Review this draft:\n\n{draft}",
                 system_prompt=SELF_REVIEW_PROMPT)
             cleaned = raw.strip()
@@ -553,7 +552,7 @@ class BlogWriterAgent:
                 '---\nUse this format: first line {{"draft": 0}}, then ---DRAFT---, '
                 "then the full fixed blog post in Markdown."
             )
-            raw_fix = self._call_agent(
+            raw_fix = self._call_text(
                 fix_prompt,
                 system_prompt=WRITING_SYSTEM_PROMPT)
             fixed = _extract_draft_after_marker(raw_fix)
@@ -689,7 +688,7 @@ class BlogWriterAgent:
         # complete_json() forces a single JSON object, so the model would output only {"draft": 0} and we'd get no content.
         draft = ""
         try:
-            raw_response = self._call_agent(
+            raw_response = self._call_text(
                 prompt,
                 system_prompt=WRITING_SYSTEM_PROMPT)
             draft = _extract_draft_after_marker(raw_response)
@@ -932,7 +931,7 @@ class BlogWriterAgent:
             logger.warning("Structured revision planning failed: %s — falling back to unstructured", e)
             # Graceful degradation: try plain-text plan
             try:
-                plain = self._call_agent(
+                plain = self._call_text(
                     prompt, system_prompt=WRITING_SYSTEM_PROMPT
                 )
                 return RevisionPlan(summary=(plain or "").strip(), changes=[], risks=[])
@@ -1038,7 +1037,7 @@ class BlogWriterAgent:
         )
         for attempt in range(2):
             try:
-                raw_response = self._call_agent(
+                raw_response = self._call_text(
                     prompt,
                     system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
@@ -1151,7 +1150,7 @@ class BlogWriterAgent:
         current_draft = draft
         for attempt in range(3):
             try:
-                raw_response = self._call_agent(
+                raw_response = self._call_text(
                     prompt,
                     system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
@@ -1208,7 +1207,7 @@ class BlogWriterAgent:
             # output to ``json_object`` (object-shaped), so forcing
             # ``expect_json=True`` here can produce wrapped/empty results.
             # The slicer below extracts ``[...]`` from prose regardless.
-            raw = self._call_agent(
+            raw = self._call_text(
                 prompt,
                 system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
             )
@@ -1391,7 +1390,7 @@ class BlogWriterAgent:
         current_draft = draft
         for attempt in range(3):
             try:
-                raw_response = self._call_agent(
+                raw_response = self._call_text(
                     prompt,
                     system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
@@ -1451,7 +1450,7 @@ class BlogWriterAgent:
             persistent_issues=persistent_text,
         )
         try:
-            summary = self._call_agent(
+            summary = self._call_text(
                 prompt)
             return (summary or "").strip()
         except Exception as e:

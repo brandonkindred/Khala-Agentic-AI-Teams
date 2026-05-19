@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from strands import Agent
 
-from llm_service import LLMClient, get_strands_model
+from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
 
 from ..models import (
@@ -31,23 +31,17 @@ from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT, REVIEW_PROMPT
 
 
 def _resolve_model(llm):
-    """Use injected LLM client as Strands model when it implements Model; else create one."""
-    from strands.models.model import Model as _StrandsModel
+    """Resolve the Strands model for this phase. See shared.strands_model.
 
-    if llm is not None and isinstance(llm, _StrandsModel):
-        return llm
-    from llm_service import LLMClient as _LLMClient
+    response_format="text": the v2 phases consume the assistant content as
+    template-based prose (parse_planning_template / parse_review_template /
+    parse_files_and_summary_template / parse_problem_solving_single_issue_template),
+    not JSON. The default JSON mode forces response_format=json_object on the
+    wire and breaks the template parser.
+    """
+    from software_engineering_team.shared.strands_model import resolve_strands_model
 
-    # response_format="text": the v2 phases consume the assistant content as
-    # template-based prose (parse_planning_template / parse_review_template /
-    # parse_files_and_summary_template / parse_problem_solving_single_issue_template),
-    # not JSON. The default JSON mode forces ``response_format=json_object`` on
-    # the wire and breaks the template parser.
-    return (
-        get_strands_model(client=llm, response_format="text")
-        if (llm is not None and isinstance(llm, _LLMClient))
-        else get_strands_model(response_format="text")
-    )
+    return resolve_strands_model(llm, response_format="text")
 
 logger = logging.getLogger(__name__)
 
