@@ -28,6 +28,11 @@ from investment_team.strategy_lab.spec_dsl import (
     StopLossRule,
 )
 
+# Every test in this module drives `run_cycle` on a real
+# StrategyLabOrchestrator; the marker auto-applies the readiness fetch
+# stub from conftest. See conftest.py for the contract.
+pytestmark = pytest.mark.strategy_lab_integration
+
 
 def _rsi_entry_dict() -> Dict[str, Any]:
     return EntryRule(

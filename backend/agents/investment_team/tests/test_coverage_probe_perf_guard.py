@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from investment_team.models import BacktestResult
-from investment_team.strategy_lab import orchestrator as orch_mod
+from investment_team.strategy_lab import _orchestrator_helpers as helpers_mod
 from investment_team.strategy_lab.orchestrator import _maybe_attach_coverage_report
 
 from ._coverage_probe_test_helpers import (
@@ -81,7 +81,7 @@ def test_success_path_does_not_invoke_probe_stage(
     def _must_not_run(**_kwargs: Any) -> None:
         raise AssertionError("run_coverage_stage must not run on a successful backtest")
 
-    monkeypatch.setattr(orch_mod, "run_coverage_stage", _must_not_run)
+    monkeypatch.setattr(helpers_mod, "run_coverage_stage", _must_not_run)
 
     metrics = _fresh_metrics()
     _maybe_attach_coverage_report(metrics=metrics, **_success_kwargs())
@@ -109,7 +109,7 @@ def test_success_path_runtime_within_ten_percent_of_unprobed(
     def _must_not_run(**_kwargs: Any) -> None:
         raise AssertionError("run_coverage_stage must not run on a successful backtest")
 
-    monkeypatch.setattr(orch_mod, "run_coverage_stage", _must_not_run)
+    monkeypatch.setattr(helpers_mod, "run_coverage_stage", _must_not_run)
 
     kwargs = _success_kwargs()
     metrics = _fresh_metrics()

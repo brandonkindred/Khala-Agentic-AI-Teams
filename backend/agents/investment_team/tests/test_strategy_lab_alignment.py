@@ -360,6 +360,7 @@ def _drive_alignment_loop(
                 gate_name="trade_alignment",
                 passed=report.aligned,
                 severity=gate_severity,  # type: ignore[arg-type]
+                phase="verification",
                 details=report.rationale or "n/a",
                 refinement_round=align_round,
             )
@@ -412,6 +413,7 @@ def _drive_alignment_loop(
                     gate_name="alignment_code_execution",
                     passed=False,
                     severity="critical",
+                    phase="verification",
                     details=f"re-exec failed: {align_exec.error_type}",
                     refinement_round=align_round,
                 )

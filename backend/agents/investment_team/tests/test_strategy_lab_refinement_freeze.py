@@ -36,6 +36,7 @@ from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 from investment_team.strategy_lab.orchestrator import (
     MAX_DESIGN_REENTRIES,
     StrategyLabOrchestrator,
+    _merge_risk_limits_tighten_only,
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -44,6 +45,11 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
 )
 from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
+
+# Every test in this module drives `run_cycle` on a real
+# StrategyLabOrchestrator; the marker auto-applies the readiness fetch
+# stub from conftest. See conftest.py for the contract.
+pytestmark = pytest.mark.strategy_lab_integration
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -191,7 +197,7 @@ def test_refinement_agent_passes_risk_limits_through(
 
 def test_merge_risk_limits_tightening_accepted() -> None:
     current = RiskLimits()  # default max_position_pct = 6.0
-    merged, loosened, unknown = StrategyLabOrchestrator._merge_risk_limits_tighten_only(
+    merged, loosened, unknown = _merge_risk_limits_tighten_only(
         current, {"max_position_pct": 3.0}
     )
     assert loosened == []
@@ -201,7 +207,7 @@ def test_merge_risk_limits_tightening_accepted() -> None:
 
 def test_merge_risk_limits_loosening_rejected() -> None:
     current = RiskLimits()
-    _, loosened, unknown = StrategyLabOrchestrator._merge_risk_limits_tighten_only(
+    _, loosened, unknown = _merge_risk_limits_tighten_only(
         current, {"max_position_pct": 99.0}
     )
     assert loosened == ["max_position_pct"]
@@ -210,7 +216,7 @@ def test_merge_risk_limits_loosening_rejected() -> None:
 
 def test_merge_risk_limits_unknown_key_discarded() -> None:
     current = RiskLimits()
-    merged, loosened, unknown = StrategyLabOrchestrator._merge_risk_limits_tighten_only(
+    merged, loosened, unknown = _merge_risk_limits_tighten_only(
         current, {"made_up_field": 0.1}
     )
     assert loosened == []
@@ -221,7 +227,7 @@ def test_merge_risk_limits_unknown_key_discarded() -> None:
 def test_merge_risk_limits_immutable_key_discarded() -> None:
     """``vol_lookback_days`` is mapped to ``None`` direction → discard, not trip."""
     current = RiskLimits()
-    _, loosened, unknown = StrategyLabOrchestrator._merge_risk_limits_tighten_only(
+    _, loosened, unknown = _merge_risk_limits_tighten_only(
         current, {"vol_lookback_days": 50}
     )
     assert loosened == []
@@ -232,7 +238,7 @@ def test_merge_risk_limits_target_vol_none_to_value_is_loosening() -> None:
     """Going from None (flat sizing) to a vol target changes sizing model."""
     current = RiskLimits()
     assert current.target_annual_vol is None
-    _, loosened, _ = StrategyLabOrchestrator._merge_risk_limits_tighten_only(
+    _, loosened, _ = _merge_risk_limits_tighten_only(
         current, {"target_annual_vol": 0.10}
     )
     assert loosened == ["target_annual_vol"]

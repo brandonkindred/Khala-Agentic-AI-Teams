@@ -27,7 +27,12 @@ import pytest
 from investment_team.execution.metrics import compute_deflated_sharpe
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
-from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+from investment_team.strategy_lab.orchestrator import (
+    StrategyLabOrchestrator,
+    _closes_to_equity,
+    _daily_returns_from_trades,
+    _equity_to_returns,
+)
 from investment_team.strategy_lab.quality_gates.acceptance_gate import AcceptanceGate
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.spec_dsl import (
@@ -201,6 +206,15 @@ def _orchestrator(
     orch = StrategyLabOrchestrator()
     if market_data_service is not None:
         orch.market_data_service = market_data_service  # type: ignore[assignment]
+    # The stub market-data service implements ``fetch_multi_symbol_range``
+    # but not ``fetch_ohlcv``; ``_readiness_price_provider`` would raise on
+    # the attribute miss and (now that the provider fails closed) return
+    # ``NaN``, tripping SpecReadinessGate Rule 5 before the test's
+    # walk-forward path can run. Stamp a fixed sentinel directly on the
+    # gate's bound slot so readiness sees a usable price.
+    orch.spec_readiness_gate._market_sample_provider = (
+        lambda symbol, asset_class: 100.0
+    )
     return orch
 
 
@@ -442,7 +456,7 @@ def test_acceptance_gate_rejects_overfit_pattern():
 
 def test_daily_returns_from_trades_handles_empty_input():
     """Returns an empty list rather than raising on an empty trade ledger."""
-    out = StrategyLabOrchestrator._daily_returns_from_trades(
+    out = _daily_returns_from_trades(
         [], 100_000.0, "2022-01-03", "2022-12-30"
     )
     assert out == [] or all(r == 0.0 for r in out)
@@ -463,7 +477,7 @@ def test_daily_returns_from_trades_emits_log_returns():
             symbol="TST",
         )
     ]
-    out = StrategyLabOrchestrator._daily_returns_from_trades(
+    out = _daily_returns_from_trades(
         trades, 100_000.0, "2023-01-03", "2023-01-05"
     )
     assert len(out) >= 1
@@ -490,7 +504,7 @@ def test_daily_returns_from_trades_invalidates_ruin_series():
             symbol="TST",
         )
     ]
-    out = StrategyLabOrchestrator._daily_returns_from_trades(
+    out = _daily_returns_from_trades(
         trades, 100_000.0, "2023-01-03", "2023-01-06"
     )
     assert out == []
@@ -499,14 +513,14 @@ def test_daily_returns_from_trades_invalidates_ruin_series():
 def test_equity_to_returns_skips_zero_or_negative_prev():
     """Zero/negative previous equity yields a 0.0 return at that step (no
     ZeroDivisionError, no NaN)."""
-    out = StrategyLabOrchestrator._equity_to_returns([100.0, 0.0, 50.0])
+    out = _equity_to_returns([100.0, 0.0, 50.0])
     assert len(out) == 2
     assert out[0] == pytest.approx(-1.0)
     assert out[1] == 0.0
 
 
 def test_closes_to_equity_scales_to_initial_capital():
-    out = StrategyLabOrchestrator._closes_to_equity([10.0, 11.0, 12.0], 100_000.0)
+    out = _closes_to_equity([10.0, 11.0, 12.0], 100_000.0)
     assert out[0] == pytest.approx(100_000.0)
     assert out[-1] == pytest.approx(100_000.0 * 12.0 / 10.0)
 
@@ -708,6 +722,19 @@ def _wire_run_cycle_stubs(
     from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
     from investment_team.strategy_lab.orchestrator import _MarketDataFetch
 
+    # ``_readiness_price_provider`` now fails closed (NaN) when the live
+    # ``MarketDataService.fetch_ohlcv`` returns no bars, so without a stub
+    # SpecReadinessGate's Rule 5 critical short-circuits the design phase
+    # before any test reaches the walk-forward path it exercises. Replace
+    # the gate's bound provider with a fixed sentinel so readiness sees a
+    # usable price and the test can drive the rest of the cycle. We poke
+    # the gate's slot directly because the bound reference was captured
+    # at ``__init__`` time — patching ``orch._readiness_price_provider``
+    # alone does not redirect it.
+    orch.spec_readiness_gate._market_sample_provider = (
+        lambda symbol, asset_class: 100.0
+    )
+
     spec_dict = {
         "asset_class": "stocks",
         "hypothesis": "h",
@@ -815,12 +842,14 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
                 gate_name="oos_deflated_sharpe",
                 passed=True,
                 severity="info",
+                phase="verification",
                 details="DSR passes",
             ),
             QualityGateResult(
                 gate_name="is_oos_degradation",
                 passed=True,
                 severity="info",
+                phase="verification",
                 details="IS->OOS within tolerance",
             ),
         ],
@@ -914,6 +943,7 @@ def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monke
                 gate_name="sharpe_sane",
                 passed=True,
                 severity="info",
+                phase="verification",
                 details="ok",
             )
         ],
@@ -993,12 +1023,14 @@ def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
                 gate_name="oos_deflated_sharpe",
                 passed=False,
                 severity="critical",
+                phase="verification",
                 details="DSR below threshold",
             ),
             QualityGateResult(
                 gate_name="oos_trade_count",
                 passed=False,
                 severity="critical",
+                phase="verification",
                 details="trade count below floor",
             ),
         ],
@@ -1102,6 +1134,7 @@ def test_walk_forward_fallback_rejected_records_acceptance_reason(monkeypatch):
                 gate_name="sharpe_sane",
                 passed=False,
                 severity="critical",
+                phase="verification",
                 details="Sharpe ratio 6.40 > 5.0 (overfit suspect)",
             )
         ]
@@ -1144,7 +1177,7 @@ def test_walk_forward_fallback_passed_records_provenance(monkeypatch):
         orch.anomaly_detector,
         "check",
         lambda *a, **kw: [
-            _QGR(gate_name="sharpe_sane", passed=True, severity="info", details="ok")
+            _QGR(gate_name="sharpe_sane", passed=True, severity="info", phase="verification", details="ok")
         ],
     )
 

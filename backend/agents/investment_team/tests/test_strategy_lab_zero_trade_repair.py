@@ -7,7 +7,7 @@ the generic ``RefinementAgent``, the orchestrator first asks
 :class:`ZeroTradeRepairAgent` for a targeted fix and, if the proposal
 clears code-safety + a fresh backtest + the anomaly gates, commits it
 in place. Failed proposals fall through to generic refinement. These
-tests exercise :meth:`StrategyLabOrchestrator._run_zero_trade_repair`
+tests exercise :meth:`ZeroTradeRepairer.try_repair`
 directly with stubs for the agent and ``run_strategy_code``.
 """
 
@@ -26,11 +26,9 @@ from investment_team.models import (
     StrategySpec,
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
+from investment_team.strategy_lab import zero_trade_repair as zero_trade_repair_module
 from investment_team.strategy_lab.agents.zero_trade_repair import ZeroTradeRepairReport
-from investment_team.strategy_lab.orchestrator import (
-    StrategyLabOrchestrator,
-    _ZeroTradeRepairOutcome,
-)
+from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -38,6 +36,9 @@ from investment_team.strategy_lab.spec_dsl import (
     Predicate,
     SignalExitRule,
     StopLossRule,
+)
+from investment_team.strategy_lab.zero_trade_repair import (
+    ZeroTradeRepairOutcome as _ZeroTradeRepairOutcome,
 )
 from investment_team.tests.test_strategy_lab_alignment import (
     _benign_sandbox_trades,
@@ -235,6 +236,10 @@ def _make_orchestrator_with_stubs(
     sandbox_stub = _StubSandbox(sandbox_results or [])
     orch.zero_trade_repair_agent = repair_stub  # type: ignore[assignment]
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", sandbox_stub)
+    # The zero-trade repairer module imports ``run_strategy_code`` directly
+    # rather than going through ``orchestrator_module``, so it needs its own
+    # monkeypatch target.
+    monkeypatch.setattr(zero_trade_repair_module, "run_strategy_code", sandbox_stub)
     return orch, repair_stub, sandbox_stub
 
 
@@ -249,7 +254,7 @@ def _drive_repair(
     zero_trade_attempts: Optional[List[str]] = None,
     coverage_report: Optional[CoverageReport] = None,
 ) -> tuple[_ZeroTradeRepairOutcome, List[tuple[str, Dict[str, Any]]], List[str]]:
-    """Convenience wrapper around ``orch._run_zero_trade_repair``.
+    """Convenience wrapper around ``orch.zero_trade_repairer.try_repair``.
 
     Captures emitted phase callbacks and the orchestrator's
     ``zero_trade_attempts`` log so tests can assert on them.
@@ -265,7 +270,7 @@ def _drive_repair(
     def emit(phase: str, data: Dict[str, Any]) -> None:
         events.append((phase, data))
 
-    outcome = orch._run_zero_trade_repair(
+    outcome = orch.zero_trade_repairer.try_repair(
         spec=spec,
         code=code,
         exec_result=exec_result,
@@ -1006,7 +1011,7 @@ def test_quality_gate_results_are_typed() -> None:
     orch = StrategyLabOrchestrator()
 
     no_category_diag = BacktestExecutionDiagnostics(zero_trade_category=None)
-    outcome = orch._run_zero_trade_repair(
+    outcome = orch.zero_trade_repairer.try_repair(
         spec=_spec(),
         code=_spec().strategy_code or "",
         exec_result=StrategyRunResult(
@@ -1030,7 +1035,7 @@ def test_coverage_report_is_forwarded_to_repair_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the orchestrator has attached a CoverageReport (#451) to the
-    failing run's metrics, ``_run_zero_trade_repair`` must forward it to
+    failing run's metrics, ``ZeroTradeRepairer.try_repair`` must forward it to
     the repair agent so the prompt sees the static probe's verdict
     alongside the executor diagnostics.
     """

@@ -50,6 +50,7 @@ def _passing_gate() -> QualityGateResult:
         gate_name="dummy",
         passed=True,
         severity="info",
+        phase="design",
         details="",
     )
 
