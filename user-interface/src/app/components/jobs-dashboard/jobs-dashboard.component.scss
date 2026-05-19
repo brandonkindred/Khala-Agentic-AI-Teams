@@ -44,6 +44,7 @@
       font-size: var(--kh-text-xs);
       color: var(--kh-text-secondary);
       font-family: var(--kh-font-mono);
+      font-variant-numeric: tabular-nums;
     }
 
     .live-dot {
@@ -503,6 +504,7 @@ tbody .col-actions {
   color: var(--kh-text-primary);
   font-family: var(--kh-font-mono);
   font-size: var(--kh-text-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .progress-cell {
@@ -523,6 +525,7 @@ tbody .col-actions {
     text-align: right;
     color: var(--kh-text-tertiary);
     font-family: var(--kh-font-mono);
+    font-variant-numeric: tabular-nums;
   }
 }
 
@@ -535,6 +538,7 @@ tbody .col-actions {
   color: var(--kh-text-secondary);
   font-size: var(--kh-text-xs);
   font-family: var(--kh-font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 // ── Agent Chips ─────────────────────────────────────────────────────────────
