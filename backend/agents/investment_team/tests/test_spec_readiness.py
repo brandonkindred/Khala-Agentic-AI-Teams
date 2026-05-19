@@ -498,6 +498,57 @@ def test_rule1_respects_universe_cap_when_default_is_truncated(monkeypatch) -> N
     assert any("QQQ" in c and "default universe" in c for c in critical), critical
 
 
+def test_rule1_accepts_asset_class_aliases_via_strict_normalize() -> None:
+    """The runtime fetch path accepts ``equity`` / ``fx`` / ``commodity`` and
+    friends via ``normalize_asset_class``. Rule 1's reachability check must
+    apply the same alias mapping so otherwise-tradeable specs don't get a
+    false critical when the LLM emits an alias instead of the canonical
+    label. ``equity`` resolves to ``stocks`` and ``QQQ`` is in the stocks
+    default, so Rule 1 must pass."""
+    spec = _spec(
+        asset_class="equity",
+        hypothesis="QQQ trend continuation on the daily timeframe.",
+        target_symbols=[],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    rule1_failures = [
+        c for c in _critical(results) if "target_symbols" in c or "Hypothesis names symbol" in c
+    ]
+    assert not rule1_failures, rule1_failures
+
+
+def test_rule5_respects_universe_cap_when_default_is_truncated(monkeypatch) -> None:
+    """Rule 5 sizes against the same capped universe ``resolve_strategy_symbols``
+    will request — a tail symbol with a missing price sample beyond the cap
+    must not fail readiness, since the fetcher will never request it.
+
+    Setup: cap at 2, empty ``target_symbols``, asset_class ``stocks``. The
+    market sample provider returns a usable price for the first two head
+    symbols and ``nan`` for everything else. Without the cap, Rule 5 walks
+    the entire default and trips on the third symbol; with the cap, only
+    the first two are sized and the rule passes.
+    """
+    monkeypatch.setenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS", "2")
+    from investment_team.symbols import STOCK_SYMBOLS
+
+    head = set(STOCK_SYMBOLS[:2])
+
+    def sample_provider(symbol: str, asset_class: str) -> float:
+        return 100.0 if symbol in head else float("nan")
+
+    spec = _spec(
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        target_symbols=[],
+    )
+    gate = SpecReadinessGate(market_sample_provider=sample_provider)
+    results = gate.validate(spec, backtest_config=_config())
+    sizing_failures = [
+        c for c in _critical(results) if "Sizing realisability" in c or "Sizing yields" in c
+    ]
+    assert not sizing_failures, sizing_failures
+
+
 def test_rule6_moving_average_is_satisfied_by_ema() -> None:
     """'Moving average' in the hypothesis is satisfied by either SMA or EMA."""
     spec = _spec(
