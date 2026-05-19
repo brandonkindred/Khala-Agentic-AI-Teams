@@ -28,7 +28,6 @@ from .models import (
 
 def make_discovery_auditor() -> Agent:
     return build_agent(
-        output_mode="json",
         name="discovery_auditor",
         description="Analyses current brand perception, SWOT, and stakeholder insights.",
         system_prompt=(
@@ -43,7 +42,6 @@ def make_discovery_auditor() -> Agent:
 
 def make_purpose_vision_writer() -> Agent:
     return build_agent(
-        output_mode="json",
         name="purpose_vision_writer",
         description="Crafts brand purpose, mission statement, and vision statement.",
         system_prompt=(
@@ -58,7 +56,6 @@ def make_purpose_vision_writer() -> Agent:
 
 def make_values_articulator() -> Agent:
     return build_agent(
-        output_mode="json",
         name="values_articulator",
         description="Defines core values with behavioral definitions and observable behaviors.",
         system_prompt=(
@@ -74,7 +71,6 @@ def make_values_articulator() -> Agent:
 
 def make_audience_segmenter() -> Agent:
     return build_agent(
-        output_mode="json",
         name="audience_segmenter",
         description="Segments target audience with psychographic depth.",
         system_prompt=(
@@ -88,7 +84,6 @@ def make_audience_segmenter() -> Agent:
 
 def make_differentiation_mapper() -> Agent:
     return build_agent(
-        output_mode="json",
         name="differentiation_mapper",
         description="Maps competitive differentiation pillars with proof points.",
         system_prompt=(
@@ -104,7 +99,6 @@ def make_differentiation_mapper() -> Agent:
 
 def make_positioning_synthesizer() -> Agent:
     return build_agent(
-        output_mode="json",
         name="positioning_synthesizer",
         description="Synthesises all Phase 1 fragments into positioning statement and brand promise.",
         system_prompt=(
@@ -127,7 +121,6 @@ def make_positioning_synthesizer() -> Agent:
 
 def make_storyteller() -> Agent:
     return build_agent(
-        output_mode="json",
         name="Storyteller",
         description="Crafts the brand story, hero narrative, and boilerplate variants.",
         system_prompt=(
@@ -145,7 +138,6 @@ def make_storyteller() -> Agent:
 
 def make_archetype_analyst() -> Agent:
     return build_agent(
-        output_mode="json",
         name="ArchetypeAnalyst",
         description="Selects brand archetypes with rationale and personality traits.",
         system_prompt=(
@@ -162,7 +154,6 @@ def make_archetype_analyst() -> Agent:
 
 def make_tagline_writer() -> Agent:
     return build_agent(
-        output_mode="json",
         name="TaglineWriter",
         description="Creates tagline, tagline rationale, and elevator pitches.",
         system_prompt=(
@@ -181,7 +172,6 @@ def make_tagline_writer() -> Agent:
 
 def make_message_mapper() -> Agent:
     return build_agent(
-        output_mode="json",
         name="MessageMapper",
         description="Builds messaging framework pillars and audience message maps.",
         system_prompt=(
@@ -197,7 +187,6 @@ def make_message_mapper() -> Agent:
 
 def make_persona_builder() -> Agent:
     return build_agent(
-        output_mode="json",
         name="PersonaBuilder",
         description="Creates rich persona profiles with psychographic depth.",
         system_prompt=(
@@ -211,7 +200,6 @@ def make_persona_builder() -> Agent:
 
 def make_voice_principles_drafter() -> Agent:
     return build_agent(
-        output_mode="json",
         name="VoicePrinciplesDrafter",
         description="Defines writing guidelines: voice principles, style dos/donts, editorial bar.",
         system_prompt=(
@@ -235,7 +223,6 @@ def make_voice_principles_drafter() -> Agent:
 
 def make_creative_director() -> Agent:
     return build_agent(
-        output_mode="json",
         name="CreativeDirector",
         description="Coordinates moodboard ideation, dispatches conceptualists, reviews candidates.",
         system_prompt=(
@@ -252,7 +239,6 @@ def make_creative_director() -> Agent:
 
 def make_moodboard_conceptualist(variant: str) -> Agent:
     return build_agent(
-        output_mode="json",
         name=f"MoodBoardConceptualist_{variant}",
         description=f"Generates a {variant.lower()} visual direction moodboard concept.",
         system_prompt=(
@@ -274,7 +260,6 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
 
 def make_converge_decider() -> Agent:
     return build_agent(
-        output_mode="json",
         name="converge_decider",
         description="Scores moodboard candidates and selects a winner.",
         system_prompt=(
@@ -293,7 +278,6 @@ def make_converge_decider() -> Agent:
 
 def make_logo_specifier() -> Agent:
     return build_agent(
-        output_mode="json",
         name="logo_specifier",
         description="Defines logo suite with usage rules.",
         system_prompt=(
@@ -307,7 +291,6 @@ def make_logo_specifier() -> Agent:
 
 def make_color_system_builder() -> Agent:
     return build_agent(
-        output_mode="json",
         name="color_system_builder",
         description="Builds the brand color palette with psychological rationale.",
         system_prompt=(
@@ -322,7 +305,6 @@ def make_color_system_builder() -> Agent:
 
 def make_typography_builder() -> Agent:
     return build_agent(
-        output_mode="json",
         name="typography_builder",
         description="Defines the typography system.",
         system_prompt=(
@@ -336,7 +318,6 @@ def make_typography_builder() -> Agent:
 
 def make_iconography_director() -> Agent:
     return build_agent(
-        output_mode="json",
         name="iconography_director",
         description="Defines iconography and illustration style.",
         system_prompt=(
@@ -350,7 +331,6 @@ def make_iconography_director() -> Agent:
 
 def make_photography_video_director() -> Agent:
     return build_agent(
-        output_mode="json",
         name="photography_video_director",
         description="Defines photography direction, video direction, and motion principles.",
         system_prompt=(
@@ -365,7 +345,6 @@ def make_photography_video_director() -> Agent:
 
 def make_voice_tone_builder() -> Agent:
     return build_agent(
-        output_mode="json",
         name="voice_tone_builder",
         description="Defines voice/tone spectrum and language dos/donts.",
         system_prompt=(
@@ -382,7 +361,6 @@ def make_voice_tone_builder() -> Agent:
 
 def make_design_system_codifier() -> Agent:
     return build_agent(
-        output_mode="json",
         name="design_system_codifier",
         description="Codifies the design system: principles, tokens, component standards.",
         system_prompt=(
@@ -402,7 +380,6 @@ def make_design_system_codifier() -> Agent:
 
 def make_brand_experience_principler() -> Agent:
     return build_agent(
-        output_mode="json",
         name="brand_experience_principler",
         description="Defines brand experience principles, signature moments, and sensory elements.",
         system_prompt=(
@@ -418,7 +395,6 @@ def make_brand_experience_principler() -> Agent:
 
 def _make_channel_guide(channel: str, description: str) -> Agent:
     return build_agent(
-        output_mode="json",
         name=f"{channel}_guide",
         description=f"Defines brand guidelines for the {channel} channel.",
         system_prompt=(
@@ -462,7 +438,6 @@ def make_internal_guide() -> Agent:
 
 def make_brand_architecture_builder() -> Agent:
     return build_agent(
-        output_mode="json",
         name="brand_architecture_builder",
         description="Defines brand architecture rules, naming conventions, and terminology.",
         system_prompt=(
@@ -478,7 +453,6 @@ def make_brand_architecture_builder() -> Agent:
 
 def make_brand_in_action_illustrator() -> Agent:
     return build_agent(
-        output_mode="json",
         name="brand_in_action_illustrator",
         description="Creates brand-in-action do/don't examples.",
         system_prompt=(
@@ -500,7 +474,6 @@ def make_brand_in_action_illustrator() -> Agent:
 
 def make_ownership_definer() -> Agent:
     return build_agent(
-        output_mode="json",
         name="ownership_definer",
         description="Defines brand ownership model and decision authority matrix.",
         system_prompt=(
@@ -515,7 +488,6 @@ def make_ownership_definer() -> Agent:
 
 def make_approval_workflow_designer() -> Agent:
     return build_agent(
-        output_mode="json",
         name="approval_workflow_designer",
         description="Designs approval workflows and agency briefing protocols.",
         system_prompt=(
@@ -530,7 +502,6 @@ def make_approval_workflow_designer() -> Agent:
 
 def make_asset_wiki_planner() -> Agent:
     return build_agent(
-        output_mode="json",
         name="asset_wiki_planner",
         description="Plans asset management and brand wiki backlog.",
         system_prompt=(
@@ -546,7 +517,6 @@ def make_asset_wiki_planner() -> Agent:
 
 def make_training_planner() -> Agent:
     return build_agent(
-        output_mode="json",
         name="training_planner",
         description="Plans brand training and onboarding programmes.",
         system_prompt=(
@@ -560,7 +530,6 @@ def make_training_planner() -> Agent:
 
 def make_kpi_designer() -> Agent:
     return build_agent(
-        output_mode="json",
         name="kpi_designer",
         description="Designs brand health KPIs with tracking methodology.",
         system_prompt=(
@@ -576,7 +545,6 @@ def make_kpi_designer() -> Agent:
 
 def make_evolution_framer() -> Agent:
     return build_agent(
-        output_mode="json",
         name="evolution_framer",
         description="Defines the brand evolution framework and version control cadence.",
         system_prompt=(
@@ -591,7 +559,6 @@ def make_evolution_framer() -> Agent:
 
 def make_brand_rules_codifier() -> Agent:
     return build_agent(
-        output_mode="json",
         name="brand_rules_codifier",
         description="Codifies top-level brand governance rules.",
         system_prompt=(

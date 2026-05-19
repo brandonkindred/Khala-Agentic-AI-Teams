@@ -34,8 +34,6 @@ class _RecordingClient(LLMClient):
     def __init__(self, response: Dict[str, Any]) -> None:
         self.response = response
         self.chat_calls: List[Dict[str, Any]] = []
-        self.chat_json_round_calls: List[Dict[str, Any]] = []
-        self.chat_round_calls: List[Dict[str, Any]] = []
         self.complete_json_calls: List[Dict[str, Any]] = []
 
     def complete_json(
@@ -79,10 +77,6 @@ class _RecordingClient(LLMClient):
             "max_tokens": max_tokens,
         }
         self.chat_calls.append(call)
-        if response_format == "json":
-            self.chat_json_round_calls.append(call)
-        elif response_format == "text":
-            self.chat_round_calls.append(call)
         return self.response
 
 
@@ -370,15 +364,16 @@ def test_stream_per_call_overrides_via_invocation_state() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_stream_defaults_to_chat_json_round_for_backward_compat() -> None:
-    """Default ``response_format="json"`` must route through ``chat_json_round``.
+def test_stream_defaults_to_json_response_format_for_backward_compat() -> None:
+    """The default model config must forward ``response_format="json"`` to
+    ``LLMClient.chat`` so the backing client forces ``response_format=json_object``
+    on the wire.
 
-    Regression: a previous iteration of this adapter switched the default to
-    ``chat_round`` (no ``response_format=json_object`` on the wire), which broke
-    Strands agents that ask for JSON in their system prompt and then
-    ``json.loads`` the assistant content (e.g. ``RoutePlannerAgent``). The
-    default must keep the JSON path so those agents continue to receive
-    well-formed JSON.
+    Regression: a previous iteration of this adapter defaulted to text mode
+    (no ``response_format=json_object`` on the wire), which broke Strands
+    agents that ask for JSON in their system prompt and then ``json.loads``
+    the assistant content (e.g. ``RoutePlannerAgent``). The default must
+    keep the JSON path so those agents continue to receive well-formed JSON.
     """
     client = _RecordingClient({"ordered_stops": [], "route_summary": "ok"})
     model = LLMClientModel(client)
@@ -386,19 +381,20 @@ def test_stream_defaults_to_chat_json_round_for_backward_compat() -> None:
 
     _drain(model.stream(messages=[{"role": "user", "content": [{"text": "plan a route"}]}]))
 
-    assert len(client.chat_json_round_calls) == 1
-    assert client.chat_round_calls == []
+    assert len(client.chat_calls) == 1
+    assert client.chat_calls[0]["response_format"] == "json"
 
 
-def test_stream_uses_chat_round_when_response_format_is_text() -> None:
-    """Opt-in ``response_format="text"`` routes through ``chat_round`` for prose."""
+def test_stream_forwards_text_response_format_when_configured() -> None:
+    """Opt-in ``response_format="text"`` flows through to ``LLMClient.chat``
+    so the backing client uses the prose path (no JSON forcing on the wire)."""
     client = _RecordingClient("Hi there — happy to help.")
     model = LLMClientModel(client, response_format="text")
 
     events = _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hello"}]}]))
 
-    assert len(client.chat_round_calls) == 1
-    assert client.chat_json_round_calls == []
+    assert len(client.chat_calls) == 1
+    assert client.chat_calls[0]["response_format"] == "text"
     # The prose string is emitted as-is (no JSON serialization wrap).
     text_event = next(e for e in events if "contentBlockDelta" in e)
     assert text_event["contentBlockDelta"]["delta"]["text"] == "Hi there — happy to help."
@@ -416,8 +412,8 @@ def test_invocation_state_can_override_response_format_per_call() -> None:
         )
     )
 
-    assert len(client.chat_round_calls) == 1
-    assert client.chat_json_round_calls == []
+    assert len(client.chat_calls) == 1
+    assert client.chat_calls[0]["response_format"] == "text"
 
 
 def test_llm_client_model_rejects_invalid_response_format() -> None:
@@ -459,10 +455,10 @@ def test_clone_returns_new_model_sharing_backing_client() -> None:
     # Base config is unmodified.
     assert base.get_config()["response_format"] == "json"
 
-    # Verify the cloned text-mode sibling routes through chat_round (not chat_json_round).
+    # Verify the cloned text-mode sibling forwards response_format="text".
     _drain(sibling.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
-    assert len(client.chat_round_calls) == 1
-    assert client.chat_json_round_calls == []
+    assert len(client.chat_calls) == 1
+    assert client.chat_calls[0]["response_format"] == "text"
 
 
 def test_clone_rejects_invalid_response_format() -> None:

@@ -44,9 +44,9 @@ def get_strands_model(
     rate limits) plus concurrency limiting and per-agent model routing.
 
     ``response_format`` is forwarded to ``LLMClientModel``: ``"json"`` (default)
-    forces JSON output on the wire via ``chat_json_round`` — the safe default
+    forces JSON output on the wire via ``chat(response_format="json")`` — the safe default
     for Strands agents that ask for JSON in their system prompt and then
-    ``json.loads`` the assistant content. ``"text"`` opts into ``chat_round``
+    ``json.loads`` the assistant content. ``"text"`` opts into ``chat(response_format="text")``
     for free-form prose (conversational agents, template-based phases).
 
     ``client`` lets callers wrap a specific ``LLMClient`` instance (e.g. a
