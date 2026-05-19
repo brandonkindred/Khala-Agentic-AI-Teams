@@ -245,6 +245,24 @@ def test_rule5_exactly_one_whole_lot_passes_for_stocks() -> None:
     assert not sizing_failures, sizing_failures
 
 
+def test_rule5_fixed_notional_exceeds_initial_capital_is_critical() -> None:
+    """A fixed_notional spec whose notional exceeds initial_capital cannot
+    be filled — fill engine rejects with ``insufficient_capital`` the
+    moment ``portfolio.capital < notional``. The readiness gate must
+    catch this before code synthesis."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=150_000.0),  # > default $100k
+        target_symbols=["AAPL"],
+        asset_class="stocks",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [
+        c for c in _critical(results)
+        if "exceeds initial_capital" in c and "insufficient_capital" in c
+    ]
+    assert matches, _critical(results)
+
+
 def test_rule5_nan_price_fails_closed() -> None:
     """A provider returning NaN must trip Rule 5 — fail closed."""
     spec = _spec(

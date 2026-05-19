@@ -408,6 +408,29 @@ class SpecReadinessGate(GateResultsMixin):
         enforce_whole_lot = ctx.spec.asset_class.lower() in _WHOLE_LOT_ASSET_CLASSES
         threshold = 1.0 if enforce_whole_lot else 0.0
 
+        # Notional is symbol-independent for both supported kinds, so resolve
+        # it once. fixed_notional with notional_usd > initial_capital can
+        # never produce a fillable order — the fill engine rejects with
+        # ``insufficient_capital`` the moment ``portfolio.capital < notional``
+        # (see ``fill_simulator.py``). fixed_fraction is bounded by
+        # ``fraction <= 1.0`` in the DSL so it cannot trip this branch.
+        if kind == "fixed_fraction":
+            notional = capital * float(ctx.spec.sizing.fraction)
+        elif kind == "fixed_notional":
+            notional = float(ctx.spec.sizing.notional_usd)
+            if notional > capital:
+                return (
+                    self._critical(
+                        f"Sizing realisability: fixed_notional ${notional:.0f} "
+                        f"exceeds initial_capital ${capital:.0f}; the first "
+                        "order would be rejected with insufficient_capital."
+                    ),
+                )
+        else:
+            # Unknown sizing kind — covered by spec_dsl validation, but be
+            # defensive: nothing further to evaluate.
+            return ()
+
         for sym in symbols:
             try:
                 price = float(self._market_sample_provider(sym, ctx.spec.asset_class))
@@ -419,14 +442,6 @@ class SpecReadinessGate(GateResultsMixin):
                         f"Sizing realisability: no usable price sample for '{sym}' (got {price!r})."
                     ),
                 )
-            if kind == "fixed_fraction":
-                notional = capital * float(ctx.spec.sizing.fraction)
-            elif kind == "fixed_notional":
-                notional = float(ctx.spec.sizing.notional_usd)
-            else:
-                # Unknown sizing kind — covered by spec_dsl validation, but
-                # be defensive: nothing further to evaluate.
-                continue
             qty = notional / price
             if qty < threshold or (not enforce_whole_lot and qty <= threshold):
                 return (
