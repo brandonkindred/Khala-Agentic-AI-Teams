@@ -25,8 +25,14 @@ import json
 from pathlib import Path
 from typing import Any, List
 
+import pytest
+
 from investment_team.models import BacktestResult, StrategySpec
 from investment_team.strategy_lab.agents import analysis as analysis_module
+from investment_team.strategy_lab.agents.alignment import (
+    AlignmentIssue,
+    TradeAlignmentReport,
+)
 from investment_team.strategy_lab.agents.analysis import AnalysisAgent
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -198,3 +204,548 @@ def test_analysis_agent_falls_back_to_metric_heuristic_when_unset(monkeypatch):
     assert "analysis_lose.md" not in rec.read_files
     prompts = "\n\n".join(rec.prompts)
     assert "Outcome label: WINNING" in prompts
+
+
+def test_misaligned_alignment_report_threads_disclaimer_into_draft_and_review(
+    monkeypatch,
+):
+    """Issue #532: when the orchestrator passes an ``alignment_report`` with
+    ``aligned=False``, both the draft template prompt and the self-review
+    prompt must surface the disclaimer + each concrete issue description.
+    Without this the LLM keeps writing confident causal narratives even when
+    the trades didn't implement the spec."""
+
+    rec = _install_recorder(monkeypatch)
+
+    report = TradeAlignmentReport(
+        aligned=False,
+        rationale="Stop-loss skipped; trade entered outside the universe.",
+        issues=[
+            AlignmentIssue(
+                rule_type="exit_rules",
+                severity="critical",
+                description="stop-loss did not fire on trade #4 despite -8% drawdown",
+                affected_trades=[4],
+            ),
+            AlignmentIssue(
+                rule_type="universe",
+                severity="warning",
+                description="trade #7 used symbol outside the spec universe",
+                affected_trades=[7],
+            ),
+        ],
+    )
+
+    AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=report,
+    )
+
+    # Two prompts are expected: draft (Phase 1) and self-review (Phase 2).
+    assert len(rec.prompts) == 2, (
+        f"Expected exactly two LLM calls (draft + self-review); got {len(rec.prompts)}."
+    )
+    for label, prompt in zip(("draft", "self-review"), rec.prompts):
+        assert "TRADES DID NOT IMPLEMENT THE SPEC" in prompt, (
+            f"{label} prompt missing misalignment header (issue #532)."
+        )
+        assert (
+            "The executed trades did not faithfully implement the specification; "
+            "interpretation is preliminary." in prompt
+        ), f"{label} prompt missing verbatim disclaimer (issue #532)."
+        for issue in report.issues:
+            assert issue.description in prompt, (
+                f"{label} prompt dropped alignment issue {issue.description!r} (issue #532)."
+            )
+        assert "DO NOT make causal claims about strategy design" in prompt, (
+            f"{label} prompt missing 'no causal claims' instruction (issue #532)."
+        )
+
+
+def test_aligned_report_does_not_inject_disclaimer(monkeypatch):
+    """Issue #532: ``aligned=True`` must NOT inject the misalignment
+    disclaimer into either prompt (winning runs aren't disclaimed)."""
+
+    rec = _install_recorder(monkeypatch)
+
+    AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+        alignment_report=TradeAlignmentReport(aligned=True),
+    )
+
+    prompts = "\n\n".join(rec.prompts)
+    assert "TRADES DID NOT IMPLEMENT THE SPEC" not in prompts
+    assert "did not faithfully implement the specification" not in prompts
+    # The one-line clean affirmation IS expected on aligned runs.
+    assert "alignment audit clean" in prompts
+
+
+def test_no_alignment_report_omits_section_entirely(monkeypatch):
+    """Issue #532: legacy callers (and the orchestrator fallback path that
+    runs without any alignment report) must produce prompts that contain
+    neither the disclaimer nor the clean affirmation — just the legacy
+    body, byte-for-byte minus the empty placeholder."""
+
+    rec = _install_recorder(monkeypatch)
+
+    AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+        # alignment_report omitted (defaults to None)
+    )
+
+    prompts = "\n\n".join(rec.prompts)
+    assert "## Alignment status" not in prompts
+    assert "TRADES DID NOT IMPLEMENT THE SPEC" not in prompts
+    assert "alignment audit clean" not in prompts
+
+
+# ---------------------------------------------------------------------------
+# Issue #532 (Codex follow-up): the deterministic fallback narrative must
+# carry the misalignment disclaimer + issues forward when the LLM draft path
+# fails. Otherwise a fail-closed audit error or transient draft outage would
+# publish a confident auto-summary on a run that didn't implement the spec.
+# ---------------------------------------------------------------------------
+
+
+def _install_failing_draft_recorder(monkeypatch, *, mode: str) -> _Recorder:
+    """Patch ``strands.Agent`` so the FIRST call (draft phase) fails per
+    ``mode`` and any subsequent call (self-review) returns a normal
+    response. Mirrors the production failure modes Codex flagged:
+
+    * ``raise``  — draft LLM call raises
+    * ``junk``   — draft returns non-JSON text (``_extract_json`` raises)
+    * ``empty``  — draft returns valid JSON with an empty ``draft_narrative``
+    """
+
+    rec = _Recorder()
+
+    class _FailingDraftAgent:
+        _call_count = 0
+
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            rec.prompts.append(prompt)
+            _FailingDraftAgent._call_count += 1
+            if _FailingDraftAgent._call_count == 1:
+                if mode == "raise":
+                    raise RuntimeError("simulated draft transport failure")
+                if mode == "junk":
+                    return "this is not json"
+                if mode == "empty":
+                    return json.dumps({"draft_narrative": ""})
+                raise AssertionError(f"unknown mode {mode!r}")
+            return rec.render_response()
+
+    monkeypatch.setattr(analysis_module, "Agent", _FailingDraftAgent)
+    monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
+    return rec
+
+
+_MISALIGNED_REPORT = TradeAlignmentReport(
+    aligned=False,
+    rationale="Stop-loss skipped; trade entered outside the universe.",
+    issues=[
+        AlignmentIssue(
+            rule_type="exit_rules",
+            severity="critical",
+            description="stop-loss did not fire on trade #4 despite -8% drawdown",
+            affected_trades=[4],
+        ),
+        AlignmentIssue(
+            rule_type="universe",
+            severity="warning",
+            description="trade #7 used symbol outside the spec universe",
+            affected_trades=[7],
+        ),
+    ],
+)
+
+
+def _assert_misaligned_fallback(narrative: str) -> None:
+    assert (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary." in narrative
+    ), "Fallback narrative dropped the misalignment disclaimer (issue #532)."
+    for issue in _MISALIGNED_REPORT.issues:
+        assert issue.description in narrative, (
+            f"Fallback narrative dropped alignment issue {issue.description!r} (issue #532)."
+        )
+    assert "Detailed narrative generation failed" in narrative, (
+        "Fallback narrative dropped the deterministic auto-summary tail."
+    )
+
+
+@pytest.mark.parametrize(
+    "mode", ["raise", "junk", "empty"], ids=["draft_raises", "draft_junk", "draft_empty"]
+)
+def test_misaligned_disclaimer_survives_draft_failure(monkeypatch, mode):
+    """Codex review on #532: when ``aligned=False`` and the draft LLM call
+    raises, returns unparseable JSON, or yields an empty narrative, the
+    deterministic fallback must still surface the disclaimer + each audit
+    issue so misaligned runs cannot publish a clean auto-summary."""
+
+    _install_failing_draft_recorder(monkeypatch, mode=mode)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    _assert_misaligned_fallback(narrative)
+
+
+def test_aligned_fallback_unchanged_on_draft_failure(monkeypatch):
+    """Aligned (or absent) reports must not inject any disclaimer into the
+    fallback narrative — keeps clean runs byte-identical to pre-#532
+    behaviour when the LLM happens to fail."""
+
+    _install_failing_draft_recorder(monkeypatch, mode="raise")
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+        alignment_report=TradeAlignmentReport(aligned=True),
+    )
+
+    assert "did not faithfully implement the specification" not in narrative
+    assert "Alignment issues:" not in narrative
+    assert "Detailed narrative generation failed" in narrative
+
+
+def test_no_report_fallback_unchanged_on_draft_failure(monkeypatch):
+    """Legacy callers (no ``alignment_report``) get the original fallback
+    text byte-for-byte — back-compat guard."""
+
+    _install_failing_draft_recorder(monkeypatch, mode="empty")
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+    )
+
+    assert "did not faithfully implement the specification" not in narrative
+    assert "Alignment issues:" not in narrative
+    assert "Detailed narrative generation failed" in narrative
+
+
+# ---------------------------------------------------------------------------
+# Issue #532 Codex follow-up (PR #584): the LLM cannot be trusted to follow
+# the "open with the disclaimer verbatim" instruction, and the self-review
+# pass meant to enforce it can itself fail. ``_ensure_misalignment_disclaimer``
+# is the deterministic safety rail that prepends the prefix on misaligned
+# runs whenever the published narrative is missing the disclaimer string.
+# ---------------------------------------------------------------------------
+
+
+def _install_compliant_review_recorder(monkeypatch, *, draft_body: str) -> _Recorder:
+    """Stubs ``strands.Agent`` so the FIRST call (draft) returns
+    ``draft_body`` (the test controls whether it contains the disclaimer)
+    and the SECOND call (self-review) returns a revised narrative that
+    echoes the draft. Captures both prompts in the recorder."""
+
+    rec = _Recorder()
+
+    class _StubAgent:
+        _call_count = 0
+
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            rec.prompts.append(prompt)
+            _StubAgent._call_count += 1
+            if _StubAgent._call_count == 1:
+                return json.dumps({"draft_narrative": draft_body})
+            # Self-review echoes the draft verbatim — exercises the
+            # "LLM ignored the disclaimer instruction" failure mode.
+            return json.dumps({"revised_narrative": draft_body, "verification_notes": "echoed"})
+
+    monkeypatch.setattr(analysis_module, "Agent", _StubAgent)
+    monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
+    return rec
+
+
+def test_misaligned_disclaimer_prepended_when_revised_drops_it(monkeypatch):
+    """Codex on PR #584: even when self-review succeeds, the LLM can ignore
+    the disclaimer instruction. The agent must deterministically prepend
+    the prefix when the revised narrative is missing the disclaimer
+    string so a non-compliant LLM cannot publish a clean narrative on a
+    misaligned run."""
+
+    _install_compliant_review_recorder(
+        monkeypatch,
+        draft_body="The strategy succeeded because of strong trend persistence.",
+    )
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    assert (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary." in narrative
+    )
+    for issue in _MISALIGNED_REPORT.issues:
+        assert issue.description in narrative
+    assert "strong trend persistence" in narrative
+
+
+def test_misaligned_no_modification_when_disclaimer_and_all_issues_present(monkeypatch):
+    """Fully-compliant LLM output (opens with the disclaimer AND includes
+    every concrete ``AlignmentIssue.description`` somewhere in the body)
+    must pass through the rail byte-identically — no duplicated
+    disclaimer, no appended issues block."""
+
+    disclaimer = (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary."
+    )
+    # Fully compliant — opens with the disclaimer and mentions every issue.
+    compliant_body = (
+        f"{disclaimer} Specifically: "
+        "stop-loss did not fire on trade #4 despite -8% drawdown, "
+        "and trade #7 used symbol outside the spec universe. "
+        "Rerun once aligned."
+    )
+    # Sanity-check the fixture so a refactor of _MISALIGNED_REPORT.issues
+    # surfaces in this test rather than as silent rail behaviour drift.
+    for issue in _MISALIGNED_REPORT.issues:
+        assert issue.description in compliant_body, (
+            f"Test fixture out of sync: {issue.description!r} missing from compliant_body."
+        )
+
+    _install_compliant_review_recorder(monkeypatch, draft_body=compliant_body)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    assert narrative.count(disclaimer) == 1
+    # Neither the prepend prefix nor the deterministic-append block must fire.
+    assert "Alignment issues:" not in narrative
+    assert "deterministically appended" not in narrative
+
+
+def test_misaligned_issues_appended_when_llm_opens_but_drops_issues(monkeypatch):
+    """Codex on PR #584 (commit 3518419): the LLM may open with the
+    disclaimer perfectly but then drop every concrete alignment issue
+    from the body. The rail must deterministically append the missing
+    issues so operators always see the audit facts — otherwise a
+    disclaimer-opening narrative could still bury the substance."""
+
+    disclaimer = (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary."
+    )
+    # LLM opens with the disclaimer but otherwise paraphrases vaguely
+    # without naming any of the concrete issues.
+    partial_body = (
+        f"{disclaimer} The trades diverged from the design in subtle ways. Rerun once aligned."
+    )
+
+    _install_compliant_review_recorder(monkeypatch, draft_body=partial_body)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    # Disclaimer still opens (rail didn't prepend a second one).
+    assert narrative.lstrip().startswith(disclaimer)
+    assert narrative.count(disclaimer) == 1
+    # Each missing issue must have been deterministically appended.
+    assert "Alignment issues (deterministically appended):" in narrative
+    for issue in _MISALIGNED_REPORT.issues:
+        assert issue.description in narrative
+
+
+def test_misaligned_only_missing_issues_appended(monkeypatch):
+    """If the LLM mentions *some* issues verbatim but drops others, only
+    the dropped ones must be appended — the rail must not duplicate
+    issues the LLM already surfaced."""
+
+    disclaimer = (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary."
+    )
+    # LLM mentions issue #1 verbatim but drops issue #2.
+    mentioned_issue = _MISALIGNED_REPORT.issues[0]
+    dropped_issue = _MISALIGNED_REPORT.issues[1]
+    partial_body = (
+        f"{disclaimer} The audit noted: {mentioned_issue.description}. Rerun once aligned."
+    )
+
+    _install_compliant_review_recorder(monkeypatch, draft_body=partial_body)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    # Mentioned issue must appear exactly once (LLM body); dropped issue
+    # must appear once (deterministic append).
+    assert narrative.count(mentioned_issue.description) == 1
+    assert narrative.count(dropped_issue.description) == 1
+    # The deterministic-append block must list ONLY the dropped issue.
+    append_idx = narrative.index("Alignment issues (deterministically appended):")
+    appended_block = narrative[append_idx:]
+    assert dropped_issue.description in appended_block
+    assert mentioned_issue.description not in appended_block
+
+
+def test_misaligned_disclaimer_enforced_when_buried_mid_narrative(monkeypatch):
+    """Codex on PR #584 (commit 2c8fcf3): a containment-only check would
+    accept narratives that mention the disclaimer *later* in the body but
+    open with a confident/causal claim. The safety rail must require the
+    disclaimer to OPEN the narrative — anything else gets the full
+    prefix prepended."""
+
+    disclaimer = (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary."
+    )
+    # LLM puts a causal claim first, then mentions the disclaimer later —
+    # exactly the bypass Codex flagged.
+    buried_body = (
+        f"The strategy succeeded because of strong trend persistence. (Aside: {disclaimer})"
+    )
+
+    _install_compliant_review_recorder(monkeypatch, draft_body=buried_body)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    # The safety rail must have prepended the full prefix — narrative
+    # opens with the disclaimer, not the causal claim.
+    assert narrative.lstrip().startswith(disclaimer), (
+        "Misaligned narrative must OPEN with the disclaimer; a containment-"
+        "only check would let a causal claim slip in first (Codex PR #584)."
+    )
+    # And the alignment issues must precede the LLM's causal body.
+    causal_idx = narrative.index("strong trend persistence")
+    for issue in _MISALIGNED_REPORT.issues:
+        issue_idx = narrative.index(issue.description)
+        assert issue_idx < causal_idx, (
+            f"Alignment issue {issue.description!r} must appear before "
+            "the LLM's causal claim, not after."
+        )
+
+
+def test_misaligned_disclaimer_enforced_when_review_fails(monkeypatch):
+    """Codex's specific scenario: the self-review LLM call raises (or
+    returns junk), and the agent returns the draft as-is. If the draft
+    ignored the disclaimer instruction the safety rail must still
+    enforce it deterministically."""
+
+    rec = _Recorder()
+
+    class _FailingReviewAgent:
+        _call_count = 0
+
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            rec.prompts.append(prompt)
+            _FailingReviewAgent._call_count += 1
+            if _FailingReviewAgent._call_count == 1:
+                return json.dumps(
+                    {
+                        "draft_narrative": (
+                            "The strategy underperformed because of slow regime adaptation."
+                        )
+                    }
+                )
+            raise RuntimeError("simulated review transport failure")
+
+    monkeypatch.setattr(analysis_module, "Agent", _FailingReviewAgent)
+    monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    assert (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary." in narrative
+    )
+    for issue in _MISALIGNED_REPORT.issues:
+        assert issue.description in narrative
+    assert "slow regime adaptation" in narrative
+
+
+def test_aligned_runs_skip_disclaimer_enforcement(monkeypatch):
+    """The safety rail must no-op on aligned (and no-report) runs — clean
+    runs stay byte-identical to pre-#532 behaviour even if the LLM happens
+    to mention an aligned strategy in non-disclaimer terms."""
+
+    _install_compliant_review_recorder(
+        monkeypatch,
+        draft_body="The strategy worked because of clear trend signals.",
+    )
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+        alignment_report=TradeAlignmentReport(aligned=True),
+    )
+
+    assert "did not faithfully implement the specification" not in narrative
+    assert "Alignment issues:" not in narrative
+    assert "clear trend signals" in narrative

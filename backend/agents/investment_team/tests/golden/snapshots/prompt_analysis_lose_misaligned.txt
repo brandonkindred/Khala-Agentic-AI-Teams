@@ -22,8 +22,20 @@ Volatility: 22.4%
 Trade 1: BUY AAA on 2024-01-15 @ 100.00, SELL on 2024-01-25 @ 102.50 (+2.5%)
 Trade 2: BUY BBB on 2024-02-01 @ 50.00, SELL on 2024-02-11 @ 49.00 (-2.0%)
 
-## Alignment status
-The executed trades faithfully implement the specification (alignment audit clean).
+## Alignment status — TRADES DID NOT IMPLEMENT THE SPEC
+
+Disclaimer to surface in the narrative: "The executed trades did not faithfully implement the specification; interpretation is preliminary."
+
+Concrete alignment issues (facts; do not paraphrase away):
+- [critical] exit_rules: stop-loss did not fire on trade #1 despite -8% drawdown
+- [warning] universe: trade #2 used symbol BBB which is outside the spec universe
+
+Audit rationale: Two trades skipped the stop-loss; one trade entered a symbol outside the spec universe.
+
+Constraints for this analysis:
+- DO open the narrative with the disclaimer above.
+- DO NOT make causal claims about strategy design (e.g. "worked because of X", "failed because of Y") — the trades are not a valid test of the spec.
+- DO describe execution gaps factually and recommend re-running once aligned.
 
 ## Instructions
 Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced for `StopLossRule` and `TakeProfitRule`: the parent engine emits closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. losing trades clustered near the stop-loss floor point to it firing). `SignalExitRule` entries in the list above are NOT yet engine-enforced — treat any predicate-based exit prose the same way as entry intent.
