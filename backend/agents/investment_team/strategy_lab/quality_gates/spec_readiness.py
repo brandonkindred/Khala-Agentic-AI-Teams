@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Iterable, Iterator, List, Optional
 
+from ...market_data_service import _max_universe_symbols
 from ...models import BacktestConfig, StrategySpec
 from ...symbols import (
     COMMODITY_SYMBOLS,
@@ -271,21 +272,26 @@ class SpecReadinessGate(GateResultsMixin):
             return ()
         if not targets:
             # Empty target_symbols ⇒ the fetcher falls back to the
-            # asset-class default. A hypothesis-named ticker is reachable
-            # when it appears in that default, so the gate must not block
-            # the spec just because target_symbols is unset. Delegates to
-            # the same strict helper Rule 5 uses, so an unknown asset_class
+            # asset-class default, truncated to the universe-size cap. A
+            # hypothesis-named ticker is reachable iff it lands in that
+            # *capped* slice, not the full raw default — otherwise a low
+            # ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`` could produce a false
+            # pass for a ticker at the tail of the declared list that
+            # the fetcher will never actually request. Delegates to the
+            # same strict helper Rule 5 uses, so an unknown asset_class
             # surfaces there as a sharper critical instead of being
             # silently smoothed over here.
             try:
-                default_canon = {
-                    _canonicalize_ticker(s) for s in _default_universe_for(ctx.spec.asset_class)
-                }
+                raw_default = _default_universe_for(ctx.spec.asset_class)
             except ValueError:
                 # Unknown asset_class — Rule 5 emits its own critical with
                 # a sharper message. Treat the default as empty here so
                 # Rule 1 still flags the unreachable named tickers.
-                default_canon = set()
+                default_canon: set[str] = set()
+            else:
+                cap = _max_universe_symbols()
+                capped_default = raw_default[:cap] if len(raw_default) > cap else raw_default
+                default_canon = {_canonicalize_ticker(s) for s in capped_default}
             if named <= default_canon:
                 return ()
             unreachable_canon = named - default_canon
@@ -294,9 +300,12 @@ class SpecReadinessGate(GateResultsMixin):
             )
             return (
                 self._critical(
-                    f"Hypothesis names symbol(s) {unreachable_raw} that are not in the "
-                    f"{ctx.spec.asset_class} default universe and target_symbols is empty "
-                    "— backtest universe would not include them."
+                    f"Hypothesis names symbol(s) {unreachable_raw} that are not reachable "
+                    f"via the (capped) {ctx.spec.asset_class} default universe and "
+                    "target_symbols is empty — backtest universe would not include them. "
+                    "Set spec.target_symbols explicitly or raise "
+                    "STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS if the ticker is in the declared "
+                    "default beyond the current cap."
                 ),
             )
         missing_canon = named - targets

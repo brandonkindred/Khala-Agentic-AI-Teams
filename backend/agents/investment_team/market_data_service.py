@@ -50,9 +50,10 @@ def _max_universe_symbols() -> int:
     ``_DEFAULT_MAX_UNIVERSE_SYMBOLS``. Values below 1 are clamped to 1 so
     the fetch path is never asked to resolve an empty universe.
 
-    Only the *asset-class default* is capped by this value;
-    ``spec.target_symbols`` is unioned on top by ``resolve_strategy_symbols``
-    and is never truncated.
+    Only the *asset-class default* path is capped by this value.
+    ``resolve_strategy_symbols`` returns ``spec.target_symbols`` verbatim
+    when non-empty (override semantics), so explicit operator-selected
+    universes are never truncated by the cap.
     """
     raw = os.getenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS")
     if not raw:
@@ -281,34 +282,32 @@ class MarketDataService:
         ``StrategySpec``'s validator). ``strategy.asset_class`` resolves
         through ``normalize_asset_class`` to one of the supported classes.
 
-        Postcondition: returns ``capped_default + extras`` where
+        Postcondition:
 
-          * ``capped_default`` is ``get_symbols_for_strategy(strategy)``
-            truncated to ``_max_universe_symbols()`` entries (in declared
-            order);
-          * ``extras`` is the elements of ``strategy.target_symbols`` not
-            already present in ``capped_default``, in their declared order.
-
-        Invariants:
-
-          * Every element of ``strategy.target_symbols`` appears in the
-            result exactly once — ``target_symbols`` is never truncated.
-          * Every element of ``capped_default`` appears in the result in its
-            declared order, ahead of any extras.
-          * The result contains no duplicates.
-          * Empty ``target_symbols`` ⇒ result == ``capped_default``.
+          * Non-empty ``target_symbols`` ⇒ return ``list(target_symbols)``
+            verbatim (override semantics). The asset-class default does
+            not contribute — an operator-selected universe stands alone so
+            that ``TargetSymbolCoverageGate.check_trades`` and the fetched
+            universe agree on what's tradeable.
+          * Empty ``target_symbols`` ⇒ return the asset-class default
+            truncated to ``_max_universe_symbols()`` entries, in declared
+            order.
 
         Side effects (best-effort warnings, never raised):
 
           * Cap truncation: when the raw asset-class default exceeds
-            ``_max_universe_symbols()``, a warning is logged before the
-            slice is taken so the truncation is never silent.
+            ``_max_universe_symbols()`` on the empty-targets path, a
+            warning is logged before the slice is taken so the truncation
+            is never silent.
           * Asset-class mismatch: when ``target_symbols`` is non-empty and
             contains a ticker whose natural class disagrees with
             ``strategy.asset_class``, a warning is logged. Ambiguous tickers
             (cross-asset ETFs like GLD, QQQ — ``classify_symbol`` returns
             ``None``) do not trigger the warning.
         """
+        if strategy.target_symbols:
+            self._warn_on_asset_class_mismatch(strategy)
+            return list(strategy.target_symbols)
         default = self.get_symbols_for_strategy(strategy)
         cap = _max_universe_symbols()
         if len(default) > cap:
@@ -323,12 +322,7 @@ class MarketDataService:
                 cap,
             )
             default = default[:cap]
-        if not strategy.target_symbols:
-            return default
-        self._warn_on_asset_class_mismatch(strategy)
-        seen = set(default)
-        extras = [s for s in strategy.target_symbols if s not in seen]
-        return default + extras
+        return default
 
     def _warn_on_asset_class_mismatch(self, strategy: StrategySpec) -> None:
         declared = normalize_asset_class(strategy.asset_class)

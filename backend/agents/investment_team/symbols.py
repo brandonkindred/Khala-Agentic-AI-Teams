@@ -14,8 +14,10 @@ when ``target_symbols`` is omitted.
 
 Cap interaction (contract with ``MarketDataService.resolve_strategy_symbols``):
 the asset-class default is truncated to ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS``
-(default ``20``) before being unioned with ``spec.target_symbols``;
-``spec.target_symbols`` is never truncated.
+(default ``20``) and is only used when ``spec.target_symbols`` is empty.
+Non-empty ``spec.target_symbols`` is returned verbatim (override semantics)
+so the fetched universe matches what ``TargetSymbolCoverageGate.check_trades``
+allows the strategy to trade.
 
 Adding new symbols:
   * Pick the most liquid representative for the theme (prefer SPY over a niche

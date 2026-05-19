@@ -477,6 +477,27 @@ def test_rule1_critical_message_cites_default_universe_when_unreachable() -> Non
     ), critical
 
 
+def test_rule1_respects_universe_cap_when_default_is_truncated(monkeypatch) -> None:
+    """The reachability check must compare the named ticker against the
+    *capped* default that ``resolve_strategy_symbols`` will actually
+    request, not the raw declared list. With a low cap, a ticker that
+    sits beyond the slice would otherwise produce a false pass.
+
+    QQQ lives near the tail of the stocks default; setting
+    ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS=2`` truncates the slice to the
+    first two large-cap entries so QQQ is *not* reachable. The gate must
+    surface that as a critical.
+    """
+    monkeypatch.setenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS", "2")
+    spec = _spec(
+        hypothesis="QQQ trend continuation on the daily timeframe.",
+        target_symbols=[],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    critical = _critical(results)
+    assert any("QQQ" in c and "default universe" in c for c in critical), critical
+
+
 def test_rule6_moving_average_is_satisfied_by_ema() -> None:
     """'Moving average' in the hypothesis is satisfied by either SMA or EMA."""
     spec = _spec(
