@@ -314,12 +314,23 @@ class LLMClientModel(Model):
         Example::
 
             text_model = json_model.clone(response_format="text")
+
+        The new model is constructed via the normal ``__init__`` path so it
+        re-runs every invariant (``client is not None`` assert, dataclass
+        ``__post_init__`` validation). The cost is one extra
+        ``LLMClientConfig`` construction; the win is the sibling stays valid
+        if ``__init__`` ever grows additional setup.
         """
         new_config = dataclasses.replace(self._config, **overrides)
-        sibling = LLMClientModel.__new__(LLMClientModel)
-        sibling._client = self._client
-        sibling._config = new_config
-        return sibling
+        return LLMClientModel(
+            self._client,
+            agent_key=new_config.agent_key,
+            model_id=new_config.model_id,
+            temperature=new_config.temperature,
+            max_tokens=new_config.max_tokens,
+            think=new_config.think,
+            response_format=new_config.response_format,
+        )
 
     async def stream(
         self,
