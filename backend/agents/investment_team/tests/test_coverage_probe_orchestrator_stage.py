@@ -83,7 +83,14 @@ def test_maybe_attach_coverage_report_runs_stage_when_gate_on(
         captured.append(kwargs)
         return make_report(CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE)
 
-    monkeypatch.setattr(orch_mod, "run_coverage_stage", _spy_run_coverage_stage)
+    # ``_maybe_attach_coverage_report`` was hoisted into
+    # ``_orchestrator_helpers`` so the helpers module — not the orchestrator
+    # module — is the actual lookup site for ``run_coverage_stage``. The
+    # orchestrator still re-exports the helper for backwards compatibility,
+    # but the monkeypatch must hit the module where the lookup happens.
+    from investment_team.strategy_lab import _orchestrator_helpers as helpers_mod
+
+    monkeypatch.setattr(helpers_mod, "run_coverage_stage", _spy_run_coverage_stage)
 
     metrics = _zeroed_metrics()
     spec = make_spec("Y = 2\n")
