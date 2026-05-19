@@ -132,6 +132,47 @@ COMMODITY_SYMBOLS: list[str] = ["GLD", "USO", "SLV", "DBA", "UNG", "PDBC", "DBC"
 OTHER_SYMBOLS: list[str] = ["GLD", "USO", "TLT", "QQQ", "IWM", "EEM", "GDX", "XLE", "XLF"]
 
 
+def asset_class_default_universe(asset_class: object) -> list[str]:
+    """Default symbol universe for an asset class.
+
+    Postcondition: returns the canonical default symbol list for the named
+    class in declared order. Unknown / mistyped classes fall back to the
+    stocks default to match the market data service's defensive default.
+    Returns an empty list for ``"options"`` — the validator rejects that
+    class upstream; the empty list is defense-in-depth for any path that
+    skips the validator.
+
+    The order returned here is the order the market data service preserves
+    when capping the universe to ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS``;
+    callers wanting an unordered membership check should call ``set()`` on
+    the result.
+
+    Used by both ``MarketDataService.get_symbols_for_strategy`` (resolves
+    the runtime fetch universe) and ``SpecReadinessGate._check_universe_set``
+    (decides whether a hypothesis-named ticker is reachable without explicit
+    ``target_symbols``). Centralising the mapping here is what keeps the
+    gate's pass rule and the fetcher's resolved universe in lockstep.
+    """
+    # Local import to avoid a circular dependency at module-import time —
+    # ``strategy_lab_context`` lives alongside ``symbols`` and is imported
+    # by callers that also import from here.
+    from .strategy_lab_context import normalize_asset_class
+
+    asset = normalize_asset_class(asset_class)
+    if asset == "crypto":
+        return list(CRYPTO_SYMBOLS)
+    if asset == "forex":
+        return list(FOREX_SYMBOLS)
+    if asset == "futures":
+        return list(FUTURES_SYMBOLS)
+    if asset == "commodities":
+        return list(COMMODITY_SYMBOLS)
+    if asset == "options":
+        return []
+    # "stocks" + defensive fallback for unknown classes.
+    return list(STOCK_SYMBOLS)
+
+
 def classify_symbol(symbol: str) -> Optional[str]:
     """Issue #523 — best-effort asset-class classification of a single ticker.
 

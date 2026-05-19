@@ -146,8 +146,7 @@ def _default_universe_for(asset_class: str) -> List[str]:
         out = list(FUTURES_SYMBOLS)
     else:
         raise ValueError(
-            f"unknown asset_class {asset_class!r}; "
-            f"expected one of {sorted(_KNOWN_ASSET_CLASSES)}"
+            f"unknown asset_class {asset_class!r}; expected one of {sorted(_KNOWN_ASSET_CLASSES)}"
         )
 
     assert out and all(isinstance(s, str) and s for s in out), "default universe must be non-empty"
@@ -245,24 +244,22 @@ class SpecReadinessGate(GateResultsMixin):
         )
         ctx = SpecReadinessCtx(spec=spec, config=backtest_config or self._backtest_config)
         with self._using_phase(phase):
-            results: List[QualityGateResult] = [
-                r for rule in self._RULES for r in rule(self, ctx)
-            ]
+            results: List[QualityGateResult] = [r for rule in self._RULES for r in rule(self, ctx)]
             if not results:
                 results.append(self._info("Strategy spec passed all readiness checks."))
         # Post: every result carries the caller's phase and GATE name.
-        assert all(r.phase == phase for r in results), (
-            "every result must carry the caller's phase"
-        )
-        assert all(r.gate_name == GATE for r in results), (
-            "every result must carry GATE name"
-        )
+        assert all(r.phase == phase for r in results), "every result must carry the caller's phase"
+        assert all(r.gate_name == GATE for r in results), "every result must carry GATE name"
         return results
 
     # ------------------------------------------------------------------
     # Rule 1: Universe set — every whitelisted ticker named in the
-    # hypothesis must also appear in ``target_symbols`` (after stripping
-    # Yahoo provider suffixes).
+    # hypothesis must be reachable in the backtest universe. A ticker is
+    # reachable when it appears in ``target_symbols`` (explicit operator
+    # intent) OR — when ``target_symbols`` is empty — in the asset-class
+    # default universe that ``MarketDataService.resolve_strategy_symbols``
+    # would fall back to. Yahoo provider suffixes are stripped before
+    # comparison so bare aliases compare equal to their suffix forms.
     # ------------------------------------------------------------------
     def _check_universe_set(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         assert isinstance(ctx.spec, StrategySpec)
@@ -273,11 +270,33 @@ class SpecReadinessGate(GateResultsMixin):
         if not named or named <= targets:
             return ()
         if not targets:
+            # Empty target_symbols ⇒ the fetcher falls back to the
+            # asset-class default. A hypothesis-named ticker is reachable
+            # when it appears in that default, so the gate must not block
+            # the spec just because target_symbols is unset. Delegates to
+            # the same strict helper Rule 5 uses, so an unknown asset_class
+            # surfaces there as a sharper critical instead of being
+            # silently smoothed over here.
+            try:
+                default_canon = {
+                    _canonicalize_ticker(s) for s in _default_universe_for(ctx.spec.asset_class)
+                }
+            except ValueError:
+                # Unknown asset_class — Rule 5 emits its own critical with
+                # a sharper message. Treat the default as empty here so
+                # Rule 1 still flags the unreachable named tickers.
+                default_canon = set()
+            if named <= default_canon:
+                return ()
+            unreachable_canon = named - default_canon
+            unreachable_raw = sorted(
+                s for s in named_raw if _canonicalize_ticker(s) in unreachable_canon
+            )
             return (
                 self._critical(
-                    f"Hypothesis names symbol(s) {sorted(named_raw)} but "
-                    "target_symbols is empty — backtest universe would not "
-                    "include the symbols the strategy is about."
+                    f"Hypothesis names symbol(s) {unreachable_raw} that are not in the "
+                    f"{ctx.spec.asset_class} default universe and target_symbols is empty "
+                    "— backtest universe would not include them."
                 ),
             )
         missing_canon = named - targets
@@ -351,9 +370,7 @@ class SpecReadinessGate(GateResultsMixin):
             )
         if not any(getattr(r, "kind", None) in allowed_kinds for r in ctx.spec.exit_rules):
             return (
-                self._critical(
-                    f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."
-                ),
+                self._critical(f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."),
             )
         return ()
 
@@ -487,7 +504,10 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     def _check_timeframe_availability(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         assert isinstance(ctx.spec, StrategySpec)
-        if ctx.spec.timeframe == "1d" or ctx.spec.asset_class.lower() in _FULL_TIMEFRAME_ASSET_CLASSES:
+        if (
+            ctx.spec.timeframe == "1d"
+            or ctx.spec.asset_class.lower() in _FULL_TIMEFRAME_ASSET_CLASSES
+        ):
             return ()
         return (
             self._critical(

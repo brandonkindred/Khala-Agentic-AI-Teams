@@ -1496,12 +1496,15 @@ def test_resolve_strategy_symbols_no_warning_when_under_cap(caplog) -> None:
 def test_resolve_strategy_symbols_stable_across_universe_reordering(
     monkeypatch,
 ) -> None:
-    """Issue #525 — without truncation, reordering the asset-class universe
-    constant returns the same symbol set (modulo order). This is the
-    reproducibility property that the silent ``[:5]`` slice broke."""
-    from investment_team import market_data_service as mds
+    """Without truncation, reordering the asset-class universe constant
+    returns the same symbol set (modulo order). The reproducibility
+    property the silent slice broke; still holds now that the universe
+    is sourced from ``symbols.STOCK_SYMBOLS`` via
+    ``asset_class_default_universe``."""
+    from investment_team import symbols
+    from investment_team.market_data_service import MarketDataService
 
-    service = mds.MarketDataService()
+    service = MarketDataService()
     spec = StrategySpec(
         strategy_id="s-reorder",
         authored_by="test",
@@ -1512,7 +1515,7 @@ def test_resolve_strategy_symbols_stable_across_universe_reordering(
     )
     baseline = set(service.resolve_strategy_symbols(spec))
 
-    monkeypatch.setattr(mds, "STOCK_SYMBOLS", list(reversed(mds.STOCK_SYMBOLS)))
+    monkeypatch.setattr(symbols, "STOCK_SYMBOLS", list(reversed(symbols.STOCK_SYMBOLS)))
     reordered = set(service.resolve_strategy_symbols(spec))
 
     assert baseline == reordered, (

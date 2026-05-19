@@ -26,12 +26,8 @@ from .models import StrategySpec
 from .strategy_lab_context import normalize_asset_class
 from .symbols import (
     COINGECKO_IDS,
-    COMMODITY_SYMBOLS,
-    CRYPTO_SYMBOLS,
-    FOREX_SYMBOLS,
-    FUTURES_SYMBOLS,
-    STOCK_SYMBOLS,
     YAHOO_CRYPTO_TICKERS,
+    asset_class_default_universe,
     classify_symbol,
 )
 
@@ -261,22 +257,21 @@ class MarketDataService:
         return self.cache.adv_for_bars(bars=bars, lookback=lookback)
 
     def get_symbols_for_strategy(self, strategy: StrategySpec) -> List[str]:
-        """Return relevant symbols based on the strategy's asset class."""
-        asset = normalize_asset_class(strategy.asset_class)
-        symbol_map: dict[str, list[str]] = {
-            "crypto": CRYPTO_SYMBOLS,
-            "stocks": STOCK_SYMBOLS,
-            "forex": FOREX_SYMBOLS,
-            "futures": FUTURES_SYMBOLS,
-            "commodities": COMMODITY_SYMBOLS,
-            # #535: 'options' is not yet supported — no option-chain data,
-            # Greeks, or contract execution model. StrategySpecValidator
-            # rejects it as a critical gate failure before this runs; the
-            # empty list here is defense-in-depth for any path that skips
-            # the validator.
-            "options": [],
-        }
-        return list(symbol_map.get(asset, STOCK_SYMBOLS))
+        """Return the asset-class default symbol list for ``strategy``.
+
+        Thin instance-method wrapper over ``asset_class_default_universe``
+        — kept on the service so callers that already hold a service
+        reference don't need to import the helper. The two stay in
+        lockstep so ``SpecReadinessGate`` and the fetcher always agree on
+        what "default universe" means.
+
+        ``"options"`` deliberately returns ``[]``: option-chain data,
+        Greeks, and a contract execution model are not yet supported.
+        ``StrategySpecValidator`` rejects ``asset_class="options"`` as a
+        critical gate failure upstream; the empty list here is
+        defense-in-depth for any path that skips the validator.
+        """
+        return asset_class_default_universe(strategy.asset_class)
 
     def resolve_strategy_symbols(self, strategy: StrategySpec) -> List[str]:
         """Pick the symbol universe a strategy should trade.
