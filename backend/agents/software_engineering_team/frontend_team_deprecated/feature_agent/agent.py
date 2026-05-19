@@ -14,7 +14,6 @@ from llm_service import (
     LLMClient,
     LLMUnreachableAfterRetriesError,
     call_llm_with_retries,
-    get_strands_model,
 )
 from software_engineering_team.shared.frontend_framework import resolve_frontend_framework
 from software_engineering_team.shared.job_store import LLM_UNREACHABLE_AFTER_RETRIES
@@ -262,9 +261,14 @@ def _llm_allowed_extensions(llm_client: Any, extensions: set[str]) -> set[str]:
         "Allowed:"
     )
     try:
-        from strands.models.model import Model as _StrandsModel
+        from software_engineering_team.shared.strands_model import (
+            resolve_text_mode_strands_model,
+        )
 
-        _model = llm_client if (llm_client is not None and isinstance(llm_client, _StrandsModel)) else get_strands_model()
+        # The prompt asks for a comma-separated list of extensions. JSON mode
+        # would force response_format=json_object and the model would emit a
+        # JSON object instead of the expected comma list.
+        _model = resolve_text_mode_strands_model(llm_client)
         response = (lambda _r: str(_r))(Agent(model=_model)(prompt, temperature=0.0)).strip()
         text = (response or "").strip().lower()
         if not text or "none" in text:
@@ -297,9 +301,13 @@ def _llm_allowed_root_paths(llm_client: Any, paths: list[str]) -> set[str]:
         "Allowed paths:"
     )
     try:
-        from strands.models.model import Model as _StrandsModel
+        from software_engineering_team.shared.strands_model import (
+            resolve_text_mode_strands_model,
+        )
 
-        _model = llm_client if (llm_client is not None and isinstance(llm_client, _StrandsModel)) else get_strands_model()
+        # Same rationale as _llm_allowed_extensions above: comma-separated
+        # output, not JSON.
+        _model = resolve_text_mode_strands_model(llm_client)
         response = (lambda _r: str(_r))(Agent(model=_model)(prompt, temperature=0.0)).strip()
         text = (response or "").strip()
         if not text or "none" in text.lower():
