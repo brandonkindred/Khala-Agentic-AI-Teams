@@ -93,13 +93,16 @@ def _critical(results) -> list[str]:
 
 
 def test_rule1_target_symbols_missing_when_hypothesis_names_ticker() -> None:
+    # GLD is whitelisted (cross-asset ETF) but not in the stocks default
+    # universe, so an empty target_symbols leaves the named ticker
+    # unreachable and Rule 1 fires.
     spec = _spec(
-        hypothesis="QQQ tends to revert to its 50-day SMA after a 2-sigma move.",
+        hypothesis="GLD tends to revert to its 50-day SMA after a 2-sigma move.",
         target_symbols=[],
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     critical = _critical(results)
-    assert any("QQQ" in c and "target_symbols" in c for c in critical), critical
+    assert any("GLD" in c and "target_symbols" in c for c in critical), critical
 
 
 def test_rule1_hypothesis_symbol_not_in_target_symbols() -> None:
@@ -257,7 +260,8 @@ def test_rule5_fixed_notional_exceeds_initial_capital_is_critical() -> None:
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     matches = [
-        c for c in _critical(results)
+        c
+        for c in _critical(results)
         if "exceeds initial_capital" in c and "insufficient_capital" in c
     ]
     assert matches, _critical(results)
@@ -429,13 +433,120 @@ def test_rule6_hypothesis_mentions_indicator_not_in_rules_is_critical() -> None:
 
 
 def test_rule1_matches_lowercase_ticker_in_hypothesis() -> None:
-    """Rule 1's regex is case-insensitive: `qqq` in hypothesis is caught."""
+    """Rule 1's regex is case-insensitive: `gld` in hypothesis is caught.
+
+    Uses GLD (whitelisted via OTHER_SYMBOLS / COMMODITY_SYMBOLS but not in
+    the stocks default) so the empty-targets path still trips Rule 1 and
+    the case-insensitivity assertion remains observable.
+    """
     spec = _spec(
-        hypothesis="qqq mean-reverts to its 50-day moving average.",
+        hypothesis="gld mean-reverts to its 50-day moving average.",
         target_symbols=[],
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    assert any("QQQ" in c for c in _critical(results))
+    assert any("GLD" in c for c in _critical(results))
+
+
+def test_rule1_passes_when_named_ticker_is_in_asset_class_default() -> None:
+    """When target_symbols is empty but the hypothesis-named ticker is
+    reachable from the asset-class default universe, Rule 1 passes —
+    ``resolve_strategy_symbols`` will include the symbol via the default."""
+    spec = _spec(
+        hypothesis="QQQ trend continuation on the daily timeframe.",
+        target_symbols=[],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    rule1_failures = [
+        c for c in _critical(results) if "target_symbols" in c or "Hypothesis names symbol" in c
+    ]
+    assert not rule1_failures, rule1_failures
+
+
+def test_rule1_critical_message_cites_default_universe_when_unreachable() -> None:
+    """When target_symbols is empty and the named ticker is not in the
+    asset-class default either, the critical message names the default
+    universe so the refinement prompt has enough context to fix it."""
+    spec = _spec(
+        hypothesis="SLV momentum on the daily timeframe.",  # SLV not in stocks default
+        target_symbols=[],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    critical = _critical(results)
+    assert any(
+        "SLV" in c and "default universe" in c and "target_symbols" in c for c in critical
+    ), critical
+
+
+def test_rule1_respects_universe_cap_when_default_is_truncated(monkeypatch) -> None:
+    """The reachability check must compare the named ticker against the
+    *capped* default that ``resolve_strategy_symbols`` will actually
+    request, not the raw declared list. With a low cap, a ticker that
+    sits beyond the slice would otherwise produce a false pass.
+
+    QQQ lives near the tail of the stocks default; setting
+    ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS=2`` truncates the slice to the
+    first two large-cap entries so QQQ is *not* reachable. The gate must
+    surface that as a critical.
+    """
+    monkeypatch.setenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS", "2")
+    spec = _spec(
+        hypothesis="QQQ trend continuation on the daily timeframe.",
+        target_symbols=[],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    critical = _critical(results)
+    assert any("QQQ" in c and "default universe" in c for c in critical), critical
+
+
+def test_rule1_accepts_asset_class_aliases_via_strict_normalize() -> None:
+    """The runtime fetch path accepts ``equity`` / ``fx`` / ``commodity`` and
+    friends via ``normalize_asset_class``. Rule 1's reachability check must
+    apply the same alias mapping so otherwise-tradeable specs don't get a
+    false critical when the LLM emits an alias instead of the canonical
+    label. ``equity`` resolves to ``stocks`` and ``QQQ`` is in the stocks
+    default, so Rule 1 must pass."""
+    spec = _spec(
+        asset_class="equity",
+        hypothesis="QQQ trend continuation on the daily timeframe.",
+        target_symbols=[],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    rule1_failures = [
+        c for c in _critical(results) if "target_symbols" in c or "Hypothesis names symbol" in c
+    ]
+    assert not rule1_failures, rule1_failures
+
+
+def test_rule5_respects_universe_cap_when_default_is_truncated(monkeypatch) -> None:
+    """Rule 5 sizes against the same capped universe ``resolve_strategy_symbols``
+    will request — a tail symbol with a missing price sample beyond the cap
+    must not fail readiness, since the fetcher will never request it.
+
+    Setup: cap at 2, empty ``target_symbols``, asset_class ``stocks``. The
+    market sample provider returns a usable price for the first two head
+    symbols and ``nan`` for everything else. Without the cap, Rule 5 walks
+    the entire default and trips on the third symbol; with the cap, only
+    the first two are sized and the rule passes.
+    """
+    monkeypatch.setenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS", "2")
+    from investment_team.symbols import STOCK_SYMBOLS
+
+    head = set(STOCK_SYMBOLS[:2])
+
+    def sample_provider(symbol: str, asset_class: str) -> float:
+        return 100.0 if symbol in head else float("nan")
+
+    spec = _spec(
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        target_symbols=[],
+    )
+    gate = SpecReadinessGate(market_sample_provider=sample_provider)
+    results = gate.validate(spec, backtest_config=_config())
+    sizing_failures = [
+        c for c in _critical(results) if "Sizing realisability" in c or "Sizing yields" in c
+    ]
+    assert not sizing_failures, sizing_failures
 
 
 def test_rule6_moving_average_is_satisfied_by_ema() -> None:
@@ -528,12 +639,17 @@ def test_rule8_max_position_pct_above_25_is_critical() -> None:
 
 
 def test_vague_spec_returns_multiple_criticals() -> None:
-    """A spec that is structurally valid but vague trips multiple rules."""
+    """A spec that is structurally valid but vague trips multiple rules.
+
+    Uses GLD (whitelisted but not in the stocks default) so Rule 1 still
+    fires from the empty-targets path. QQQ would no longer trip Rule 1
+    now that it sits in the stocks default universe.
+    """
     spec = _spec(
-        hypothesis="enter on bullish momentum on QQQ — MACD watch",
+        hypothesis="enter on bullish momentum on GLD — MACD watch",
         entry=[],  # Rule 2: no entries
         exit_=[],  # Rule 4: no exits
-        target_symbols=[],  # Rule 1: QQQ named, no targets
+        target_symbols=[],  # Rule 1: GLD named, no targets, not in stocks default
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     critical = _critical(results)
@@ -541,7 +657,7 @@ def test_vague_spec_returns_multiple_criticals() -> None:
     assert len(critical) >= 3, critical
     assert any("entry" in c.lower() for c in critical)
     assert any("exit" in c.lower() for c in critical)
-    assert any("QQQ" in c for c in critical)
+    assert any("GLD" in c for c in critical)
 
 
 def test_well_formed_spec_passes() -> None:

@@ -16,7 +16,9 @@ import re
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Iterable, Iterator, List, Optional
 
+from ...market_data_service import _max_universe_symbols
 from ...models import BacktestConfig, StrategySpec
+from ...strategy_lab_context import normalize_asset_class_strict
 from ...symbols import (
     COMMODITY_SYMBOLS,
     CRYPTO_SYMBOLS,
@@ -125,29 +127,40 @@ def _default_universe_for(asset_class: str) -> List[str]:
     Pre: ``asset_class`` is a non-empty string.
     Post: returns a non-empty list of upper-case ticker strings.
 
-    Raises ``ValueError`` for asset classes outside
-    :data:`_KNOWN_ASSET_CLASSES`. The old ``else`` branch silently fell
-    back to ``OTHER_SYMBOLS`` (a stocks-equivalent broad-ETF list), which
-    let a typo'd ``asset_class="bonds"`` size against TLT/QQQ/EEM/etc. —
-    exactly the false-confidence Codex flagged for forex/futures earlier.
+    Aliases the runtime fetch path accepts via ``normalize_asset_class``
+    — ``equity`` / ``equities`` / ``stock`` for stocks, ``fx`` for forex,
+    ``commodity`` / ``metal`` / ``energy`` for commodities — are mapped
+    to the canonical label before dispatch so the gate doesn't false-
+    critical otherwise-tradeable specs.
+
+    Raises ``ValueError`` for asset classes the strict normalizer can't
+    resolve (typos like ``"bonds"`` / ``"crpto"``) and for canonical
+    classes that have no default universe in the gate's scope (today
+    just ``"options"`` — ``StrategySpecValidator`` rejects that upstream;
+    raising here is defense-in-depth). The old strict-only path silently
+    fell back to ``OTHER_SYMBOLS`` for typos — exactly the false-
+    confidence Codex flagged for forex/futures earlier.
     """
     assert isinstance(asset_class, str) and asset_class, "asset_class must be a non-empty str"
 
-    ac = asset_class.lower()
-    if ac == "stocks":
+    canonical = normalize_asset_class_strict(asset_class)
+    if canonical == "stocks":
         out = list(STOCK_SYMBOLS)
-    elif ac == "crypto":
+    elif canonical == "crypto":
         out = list(CRYPTO_SYMBOLS)
-    elif ac == "commodities":
+    elif canonical == "commodities":
         out = list(COMMODITY_SYMBOLS)
-    elif ac == "forex":
+    elif canonical == "forex":
         out = list(FOREX_SYMBOLS)
-    elif ac == "futures":
+    elif canonical == "futures":
         out = list(FUTURES_SYMBOLS)
     else:
+        # ``canonical`` is in ``_CANONICAL_ASSET_CLASSES`` (the strict
+        # normalizer guarantees that) but not in the gate's universe map
+        # — today only ``"options"`` lands here.
         raise ValueError(
-            f"unknown asset_class {asset_class!r}; "
-            f"expected one of {sorted(_KNOWN_ASSET_CLASSES)}"
+            f"asset_class {asset_class!r} normalizes to {canonical!r} which has no "
+            f"default universe in the gate; expected one of {sorted(_KNOWN_ASSET_CLASSES)}"
         )
 
     assert out and all(isinstance(s, str) and s for s in out), "default universe must be non-empty"
@@ -245,24 +258,22 @@ class SpecReadinessGate(GateResultsMixin):
         )
         ctx = SpecReadinessCtx(spec=spec, config=backtest_config or self._backtest_config)
         with self._using_phase(phase):
-            results: List[QualityGateResult] = [
-                r for rule in self._RULES for r in rule(self, ctx)
-            ]
+            results: List[QualityGateResult] = [r for rule in self._RULES for r in rule(self, ctx)]
             if not results:
                 results.append(self._info("Strategy spec passed all readiness checks."))
         # Post: every result carries the caller's phase and GATE name.
-        assert all(r.phase == phase for r in results), (
-            "every result must carry the caller's phase"
-        )
-        assert all(r.gate_name == GATE for r in results), (
-            "every result must carry GATE name"
-        )
+        assert all(r.phase == phase for r in results), "every result must carry the caller's phase"
+        assert all(r.gate_name == GATE for r in results), "every result must carry GATE name"
         return results
 
     # ------------------------------------------------------------------
     # Rule 1: Universe set — every whitelisted ticker named in the
-    # hypothesis must also appear in ``target_symbols`` (after stripping
-    # Yahoo provider suffixes).
+    # hypothesis must be reachable in the backtest universe. A ticker is
+    # reachable when it appears in ``target_symbols`` (explicit operator
+    # intent) OR — when ``target_symbols`` is empty — in the asset-class
+    # default universe that ``MarketDataService.resolve_strategy_symbols``
+    # would fall back to. Yahoo provider suffixes are stripped before
+    # comparison so bare aliases compare equal to their suffix forms.
     # ------------------------------------------------------------------
     def _check_universe_set(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         assert isinstance(ctx.spec, StrategySpec)
@@ -273,11 +284,41 @@ class SpecReadinessGate(GateResultsMixin):
         if not named or named <= targets:
             return ()
         if not targets:
+            # Empty target_symbols ⇒ the fetcher falls back to the
+            # asset-class default, truncated to the universe-size cap. A
+            # hypothesis-named ticker is reachable iff it lands in that
+            # *capped* slice, not the full raw default — otherwise a low
+            # ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`` could produce a false
+            # pass for a ticker at the tail of the declared list that
+            # the fetcher will never actually request. Delegates to the
+            # same strict helper Rule 5 uses, so an unknown asset_class
+            # surfaces there as a sharper critical instead of being
+            # silently smoothed over here.
+            try:
+                raw_default = _default_universe_for(ctx.spec.asset_class)
+            except ValueError:
+                # Unknown asset_class — Rule 5 emits its own critical with
+                # a sharper message. Treat the default as empty here so
+                # Rule 1 still flags the unreachable named tickers.
+                default_canon: set[str] = set()
+            else:
+                cap = _max_universe_symbols()
+                capped_default = raw_default[:cap] if len(raw_default) > cap else raw_default
+                default_canon = {_canonicalize_ticker(s) for s in capped_default}
+            if named <= default_canon:
+                return ()
+            unreachable_canon = named - default_canon
+            unreachable_raw = sorted(
+                s for s in named_raw if _canonicalize_ticker(s) in unreachable_canon
+            )
             return (
                 self._critical(
-                    f"Hypothesis names symbol(s) {sorted(named_raw)} but "
-                    "target_symbols is empty — backtest universe would not "
-                    "include the symbols the strategy is about."
+                    f"Hypothesis names symbol(s) {unreachable_raw} that are not reachable "
+                    f"via the (capped) {ctx.spec.asset_class} default universe and "
+                    "target_symbols is empty — backtest universe would not include them. "
+                    "Set spec.target_symbols explicitly or raise "
+                    "STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS if the ticker is in the declared "
+                    "default beyond the current cap."
                 ),
             )
         missing_canon = named - targets
@@ -351,9 +392,7 @@ class SpecReadinessGate(GateResultsMixin):
             )
         if not any(getattr(r, "kind", None) in allowed_kinds for r in ctx.spec.exit_rules):
             return (
-                self._critical(
-                    f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."
-                ),
+                self._critical(f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."),
             )
         return ()
 
@@ -388,12 +427,15 @@ class SpecReadinessGate(GateResultsMixin):
         # raises on unknown asset classes (previously it silently fell back to
         # ``OTHER_SYMBOLS``); surface that as a critical so the operator sees
         # the misclassification instead of a sizing pass against an unrelated
-        # universe.
+        # universe. When falling back to the default, apply the same cap
+        # ``resolve_strategy_symbols`` would — otherwise a missing price for
+        # a tail symbol beyond the cap (which the fetcher will never request)
+        # would fail-close the strategy at readiness time.
         if ctx.spec.target_symbols:
             symbols = list(ctx.spec.target_symbols)
         else:
             try:
-                symbols = _default_universe_for(ctx.spec.asset_class)
+                raw_default = _default_universe_for(ctx.spec.asset_class)
             except ValueError as exc:
                 return (
                     self._critical(
@@ -401,6 +443,8 @@ class SpecReadinessGate(GateResultsMixin):
                         "explicitly or pick a supported asset_class."
                     ),
                 )
+            cap = _max_universe_symbols()
+            symbols = raw_default[:cap] if len(raw_default) > cap else raw_default
         if not symbols:
             return ()
         capital = config.initial_capital
@@ -487,7 +531,10 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     def _check_timeframe_availability(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         assert isinstance(ctx.spec, StrategySpec)
-        if ctx.spec.timeframe == "1d" or ctx.spec.asset_class.lower() in _FULL_TIMEFRAME_ASSET_CLASSES:
+        if (
+            ctx.spec.timeframe == "1d"
+            or ctx.spec.asset_class.lower() in _FULL_TIMEFRAME_ASSET_CLASSES
+        ):
             return ()
         return (
             self._critical(

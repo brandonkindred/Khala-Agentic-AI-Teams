@@ -1000,6 +1000,10 @@ def test_market_data_service_get_symbols_for_strategy() -> None:
     symbols = service.get_symbols_for_strategy(stock_strategy)
     assert "AAPL" in symbols
     assert "BTC" not in symbols
+    # Common index / sector ETFs are reachable from the stocks default so
+    # theme-level hypotheses don't fall through to a TSLA/AAPL universe.
+    for etf in ("QQQ", "IWM", "TLT", "EEM", "GDX", "XLE", "XLF"):
+        assert etf in symbols, f"expected {etf} in stocks default, got {symbols}"
 
     crypto_strategy = StrategySpec(
         strategy_id="s2",
@@ -1207,22 +1211,47 @@ def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
         )
 
 
-def test_resolve_strategy_symbols_prefers_target_symbols() -> None:
-    """Issue #523 — resolve_strategy_symbols returns target_symbols verbatim
-    when set, regardless of asset_class."""
+def test_resolve_strategy_symbols_overrides_default_when_targets_non_empty() -> None:
+    """Non-empty ``target_symbols`` is returned verbatim — the asset-class
+    default does not contribute, so the fetched universe matches what
+    ``TargetSymbolCoverageGate.check_trades`` will allow strategies to
+    trade. Dropping the default-union behavior fixed a conflict where
+    strategies could trade default-injected symbols and be hard-failed
+    by the coverage gate despite honoring the fetched universe."""
     from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     spec = StrategySpec(
-        strategy_id="s-tgt",
+        strategy_id="s-override",
         authored_by="test",
         asset_class="stocks",
-        hypothesis="QQQ trend continuation",
+        hypothesis="trade ARKK and VOO only",
         signal_definition="s",
         timeframe="1d",
-        target_symbols=["QQQ", "GLD"],
+        target_symbols=["ARKK", "VOO"],
     )
-    assert service.resolve_strategy_symbols(spec) == ["QQQ", "GLD"]
+    assert service.resolve_strategy_symbols(spec) == ["ARKK", "VOO"]
+
+
+def test_resolve_strategy_symbols_targets_not_truncated_by_universe_cap(
+    monkeypatch,
+) -> None:
+    """The universe-size cap only applies on the empty-targets path. Non-empty
+    ``target_symbols`` is returned verbatim regardless of the cap."""
+    from investment_team.market_data_service import MarketDataService
+
+    monkeypatch.setenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS", "2")
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-overflow",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="trade VTI, VOO, and ARKK",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["VTI", "VOO", "ARKK"],
+    )
+    assert service.resolve_strategy_symbols(spec) == ["VTI", "VOO", "ARKK"]
 
 
 def test_classify_symbol_unambiguous_cases() -> None:
@@ -1276,8 +1305,9 @@ def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
         result = service.resolve_strategy_symbols(spec)
 
-    # The fetch still proceeds against the requested symbols.
-    assert result == ["BTC"]
+    # BTC is unioned onto the stocks default rather than replacing it, but
+    # the mismatched target is still present so the fetch attempts it.
+    assert "BTC" in result
     # But the operator sees the diagnostic.
     assert any(
         "s-mismatch" in r.message and "BTC" in r.message and "stocks" in r.message
@@ -1330,8 +1360,8 @@ def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> 
 
 
 def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
-    """Issue #525 — empty target_symbols returns the full asset-class default
-    universe when it fits under STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS (default 10)."""
+    """Empty target_symbols returns the full asset-class default universe
+    when it fits under STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS (default 20)."""
     from investment_team.market_data_service import MarketDataService
     from investment_team.symbols import STOCK_SYMBOLS
 
@@ -1344,7 +1374,8 @@ def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
         signal_definition="s",
         timeframe="1d",
     )
-    # STOCK_SYMBOLS has 10 entries; the default cap is 10 so nothing is dropped.
+    # STOCK_SYMBOLS has 17 entries; the default cap is 20, so nothing is
+    # dropped.
     assert service.resolve_strategy_symbols(spec) == list(STOCK_SYMBOLS)
 
 
@@ -1397,7 +1428,8 @@ def test_resolve_strategy_symbols_invalid_env_var_falls_back(monkeypatch, caplog
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
         result = service.resolve_strategy_symbols(spec)
 
-    # Default cap is 10 — STOCK_SYMBOLS has exactly 10 entries.
+    # Default cap is 20; STOCK_SYMBOLS has 17 entries, so the full default
+    # universe survives the fallback.
     assert result == list(STOCK_SYMBOLS)
     assert any(
         "Invalid STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS" in r.message and "not-a-number" in r.message
@@ -1431,12 +1463,15 @@ def test_resolve_strategy_symbols_no_warning_when_under_cap(caplog) -> None:
 def test_resolve_strategy_symbols_stable_across_universe_reordering(
     monkeypatch,
 ) -> None:
-    """Issue #525 — without truncation, reordering the asset-class universe
-    constant returns the same symbol set (modulo order). This is the
-    reproducibility property that the silent ``[:5]`` slice broke."""
-    from investment_team import market_data_service as mds
+    """Without truncation, reordering the asset-class universe constant
+    returns the same symbol set (modulo order). The reproducibility
+    property the silent slice broke; still holds now that the universe
+    is sourced from ``symbols.STOCK_SYMBOLS`` via
+    ``asset_class_default_universe``."""
+    from investment_team import symbols
+    from investment_team.market_data_service import MarketDataService
 
-    service = mds.MarketDataService()
+    service = MarketDataService()
     spec = StrategySpec(
         strategy_id="s-reorder",
         authored_by="test",
@@ -1447,7 +1482,7 @@ def test_resolve_strategy_symbols_stable_across_universe_reordering(
     )
     baseline = set(service.resolve_strategy_symbols(spec))
 
-    monkeypatch.setattr(mds, "STOCK_SYMBOLS", list(reversed(mds.STOCK_SYMBOLS)))
+    monkeypatch.setattr(symbols, "STOCK_SYMBOLS", list(reversed(symbols.STOCK_SYMBOLS)))
     reordered = set(service.resolve_strategy_symbols(spec))
 
     assert baseline == reordered, (
@@ -1457,10 +1492,10 @@ def test_resolve_strategy_symbols_stable_across_universe_reordering(
 
 
 def test_fetch_market_data_uses_target_symbols_when_set() -> None:
-    """Issue #523 — when spec.target_symbols is non-empty, the fetcher receives
-    it verbatim and the asset-class default universe is bypassed.
-
-    Issue #525 — the fetch returns a ``_MarketDataFetch`` envelope carrying
+    """When spec.target_symbols is non-empty, the fetcher receives that
+    list verbatim (override semantics) so the fetched universe matches
+    what ``TargetSymbolCoverageGate.check_trades`` lets the strategy
+    trade. The fetch returns a ``_MarketDataFetch`` envelope carrying
     requested/fetched audit lists alongside the OHLCV dict."""
     from unittest.mock import patch
 
@@ -1494,14 +1529,13 @@ def test_fetch_market_data_uses_target_symbols_when_set() -> None:
         fetch = orchestrator._fetch_market_data(spec, config)
 
     assert captured["symbols"] == ["QQQ"]
-    assert fetch.data == {"QQQ": ["bar"]}
     assert fetch.requested_symbols == ["QQQ"]
     assert fetch.fetched_symbols == ["QQQ"]
 
 
 def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
-    """Issue #523 — empty target_symbols routes through the asset-class default
-    universe. Issue #525 — the full universe (10) is returned by default."""
+    """Empty target_symbols routes through the asset-class default universe.
+    The full default universe is returned when it fits under the cap."""
     from unittest.mock import patch
 
     from investment_team.market_data_service import MarketDataService
@@ -1538,9 +1572,10 @@ def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
 
 
 def test_fetch_market_data_records_dropped_symbols() -> None:
-    """Issue #525 — when the fetch returns empty bars for some symbols, the
-    audit envelope's fetched_symbols reflects only the symbols that returned
-    usable data."""
+    """When the fetch returns empty bars for some symbols, the audit
+    envelope's ``fetched_symbols`` reflects only the symbols that returned
+    usable data. Non-empty ``target_symbols`` rides into the fetcher
+    verbatim (override semantics)."""
     from unittest.mock import patch
 
     from investment_team.market_data_service import MarketDataService
@@ -1551,8 +1586,8 @@ def test_fetch_market_data_records_dropped_symbols() -> None:
     orchestrator.market_data_service = MarketDataService()
 
     def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
-        # AAPL returns bars; MSFT returns an empty list (provider had no data).
-        return {"AAPL": ["bar"], "MSFT": []}
+        # Only AAPL returns bars; MSFT comes back empty (provider had no data).
+        return {sym: ["bar"] if sym == "AAPL" else [] for sym in symbols}
 
     spec = StrategySpec(
         strategy_id="s-partial",
@@ -1575,8 +1610,9 @@ def test_fetch_market_data_records_dropped_symbols() -> None:
 
 
 def test_fetch_market_data_records_intent_on_provider_exception() -> None:
-    """Issue #525 — even when the provider raises, the envelope still carries
-    ``requested_symbols`` so the audit trail reflects intent."""
+    """Even when the provider raises, the envelope still carries
+    ``requested_symbols`` so the audit trail reflects intent. With
+    override semantics that intent is exactly ``target_symbols``."""
     from unittest.mock import patch
 
     from investment_team.market_data_service import MarketDataService

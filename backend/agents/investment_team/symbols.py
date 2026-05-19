@@ -2,6 +2,32 @@
 
 Used by the market data service (real OHLCV fetching), the deterministic backtest
 engine (synthetic trade generation), and any future consumer that routes by asset class.
+
+Universe-curation rationale
+---------------------------
+Each ``*_SYMBOLS`` list is the default universe used when ``spec.target_symbols``
+is empty. The lists deliberately mix individual high-volume tickers (names that
+recur in hypotheses — AAPL, NVDA, BTC, ES=F, ...) with index/sector ETFs (QQQ,
+IWM, TLT, XLE, ...) so that theme-level hypotheses like "QQQ trend continuation"
+or "energy sector rotation" do not silently fall through to a TSLA/AAPL universe
+when ``target_symbols`` is omitted.
+
+Cap interaction (contract with ``MarketDataService.resolve_strategy_symbols``):
+the asset-class default is truncated to ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS``
+(default ``20``) and is only used when ``spec.target_symbols`` is empty.
+Non-empty ``spec.target_symbols`` is returned verbatim (override semantics)
+so the fetched universe matches what ``TargetSymbolCoverageGate.check_trades``
+allows the strategy to trade.
+
+Adding new symbols:
+  * Pick the most liquid representative for the theme (prefer SPY over a niche
+    sector ETF; prefer ES=F over a thinly-traded contract).
+  * Prefer ETFs over individual names when the theme is broad (QQQ over AMD for
+    "semis", XLE over CVX for "energy").
+  * Keep total list length ≤ the default cap so the full universe is reachable
+    without an env-var override.
+  * Cross-asset ETFs (broad/ambiguous exposure) belong in ``OTHER_SYMBOLS`` so
+    ``classify_symbol`` doesn't false-positive on the mismatch warning.
 """
 
 from __future__ import annotations
@@ -47,6 +73,18 @@ STOCK_SYMBOLS: list[str] = [
     "JPM",
     "AMD",
     "SPY",
+    # Index / sector ETFs so theme-level hypotheses — "QQQ trend",
+    # "small-cap rotation via IWM", "energy sector breakout via XLE" — don't
+    # silently fall through to a TSLA/AAPL universe when target_symbols is
+    # omitted. These also live in OTHER_SYMBOLS so classify_symbol still
+    # treats them as ambiguous and the mismatch warning never false-positives.
+    "QQQ",
+    "IWM",
+    "TLT",
+    "EEM",
+    "GDX",
+    "XLE",
+    "XLF",
 ]
 CRYPTO_SYMBOLS: list[str] = [
     "BTC",
@@ -94,6 +132,47 @@ FUTURES_SYMBOLS_BARE: list[str] = ["ES", "NQ", "CL", "GC", "SI", "ZB", "NG", "ZM
 COMMODITY_SYMBOLS: list[str] = ["GLD", "USO", "SLV", "DBA", "UNG", "PDBC", "DBC"]
 # Broad ETFs used as a fallback
 OTHER_SYMBOLS: list[str] = ["GLD", "USO", "TLT", "QQQ", "IWM", "EEM", "GDX", "XLE", "XLF"]
+
+
+def asset_class_default_universe(asset_class: object) -> list[str]:
+    """Default symbol universe for an asset class.
+
+    Postcondition: returns the canonical default symbol list for the named
+    class in declared order. Unknown / mistyped classes fall back to the
+    stocks default to match the market data service's defensive default.
+    Returns an empty list for ``"options"`` — the validator rejects that
+    class upstream; the empty list is defense-in-depth for any path that
+    skips the validator.
+
+    The order returned here is the order the market data service preserves
+    when capping the universe to ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS``;
+    callers wanting an unordered membership check should call ``set()`` on
+    the result.
+
+    Used by both ``MarketDataService.get_symbols_for_strategy`` (resolves
+    the runtime fetch universe) and ``SpecReadinessGate._check_universe_set``
+    (decides whether a hypothesis-named ticker is reachable without explicit
+    ``target_symbols``). Centralising the mapping here is what keeps the
+    gate's pass rule and the fetcher's resolved universe in lockstep.
+    """
+    # Local import to avoid a circular dependency at module-import time —
+    # ``strategy_lab_context`` lives alongside ``symbols`` and is imported
+    # by callers that also import from here.
+    from .strategy_lab_context import normalize_asset_class
+
+    asset = normalize_asset_class(asset_class)
+    if asset == "crypto":
+        return list(CRYPTO_SYMBOLS)
+    if asset == "forex":
+        return list(FOREX_SYMBOLS)
+    if asset == "futures":
+        return list(FUTURES_SYMBOLS)
+    if asset == "commodities":
+        return list(COMMODITY_SYMBOLS)
+    if asset == "options":
+        return []
+    # "stocks" + defensive fallback for unknown classes.
+    return list(STOCK_SYMBOLS)
 
 
 def classify_symbol(symbol: str) -> Optional[str]:

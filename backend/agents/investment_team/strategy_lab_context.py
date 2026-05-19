@@ -45,6 +45,35 @@ def normalize_asset_class(ac: object) -> str:
     return "stocks"
 
 
+def normalize_asset_class_strict(ac: object) -> str:
+    """Strict variant of :func:`normalize_asset_class`.
+
+    Applies the same alias map (``equity``/``equities``/``stock`` → ``stocks``,
+    ``fx`` → ``forex``, ``commodity``/``metal``/``energy`` → ``commodities``)
+    so callers see the same canonical class the runtime fetch path does, but
+    raises :class:`ValueError` for truly unknown classes instead of silently
+    falling back to ``"stocks"``.
+
+    Use this in gates and other fail-closed paths where a typo'd
+    ``asset_class`` (``"bonds"``, ``"crpto"``) must surface as an error.
+    Runtime paths that need defense-in-depth keep using
+    :func:`normalize_asset_class`.
+    """
+    x = str(ac or "").lower().strip()
+    if x in ("equities", "equity", "stock"):
+        return "stocks"
+    if x in ("fx",):
+        return "forex"
+    if x in ("commodity", "metal", "energy"):
+        return "commodities"
+    if x in _CANONICAL_ASSET_CLASSES:
+        return x
+    raise ValueError(
+        f"unknown asset_class {ac!r}; expected one of {sorted(_CANONICAL_ASSET_CLASSES)} "
+        "or a known alias (equity/equities/stock, fx, commodity/metal/energy)"
+    )
+
+
 def format_prior_results(records: List[StrategyLabRecord], *, max_records: int = 50) -> str:
     if not records:
         return "None yet — this is the first strategy."
