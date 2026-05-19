@@ -1000,6 +1000,10 @@ def test_market_data_service_get_symbols_for_strategy() -> None:
     symbols = service.get_symbols_for_strategy(stock_strategy)
     assert "AAPL" in symbols
     assert "BTC" not in symbols
+    # #534 — common index / sector ETFs are reachable from the stocks default
+    # so theme-level hypotheses don't fall through to a TSLA/AAPL universe.
+    for etf in ("QQQ", "IWM", "TLT", "EEM", "GDX", "XLE", "XLF"):
+        assert etf in symbols, f"expected {etf} in stocks default, got {symbols}"
 
     crypto_strategy = StrategySpec(
         strategy_id="s2",
@@ -1207,10 +1211,13 @@ def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
         )
 
 
-def test_resolve_strategy_symbols_prefers_target_symbols() -> None:
-    """Issue #523 — resolve_strategy_symbols returns target_symbols verbatim
-    when set, regardless of asset_class."""
+def test_resolve_strategy_symbols_unions_target_symbols_with_default() -> None:
+    """Issue #534 — resolve_strategy_symbols returns the union of the
+    asset-class default universe and target_symbols, deduped. Defaults come
+    first (in declared order), then any target_symbols not already in the
+    default."""
     from investment_team.market_data_service import MarketDataService
+    from investment_team.symbols import STOCK_SYMBOLS
 
     service = MarketDataService()
     spec = StrategySpec(
@@ -1222,7 +1229,63 @@ def test_resolve_strategy_symbols_prefers_target_symbols() -> None:
         timeframe="1d",
         target_symbols=["QQQ", "GLD"],
     )
-    assert service.resolve_strategy_symbols(spec) == ["QQQ", "GLD"]
+    result = service.resolve_strategy_symbols(spec)
+    # QQQ is already in STOCK_SYMBOLS post-#534 (added to the default). GLD is
+    # the only true extra, so it must appear once, after the default block.
+    assert result == list(STOCK_SYMBOLS) + ["GLD"]
+    # Membership sanity: every default symbol and every target symbol present.
+    for sym in list(STOCK_SYMBOLS) + ["QQQ", "GLD"]:
+        assert sym in result
+    # Dedupe: QQQ appears exactly once even though it's in both lists.
+    assert result.count("QQQ") == 1
+
+
+def test_resolve_strategy_symbols_union_dedupes() -> None:
+    """Issue #534 — when a target symbol is already in the asset-class default,
+    the union dedupes it and the default's declared order is preserved."""
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.symbols import STOCK_SYMBOLS
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-dedupe",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="long SPY on dips",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["SPY"],  # already in STOCK_SYMBOLS
+    )
+    result = service.resolve_strategy_symbols(spec)
+    assert result == list(STOCK_SYMBOLS)
+    assert result.count("SPY") == 1
+
+
+def test_resolve_strategy_symbols_target_symbols_not_truncated_when_union_exceeds_cap(
+    monkeypatch,
+) -> None:
+    """Issue #525 / #534 — the cap applies only to the asset-class default;
+    target_symbols are unioned on top and are never truncated, even when the
+    resulting union exceeds the cap."""
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.symbols import STOCK_SYMBOLS
+
+    monkeypatch.setenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS", "2")
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-overflow",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="trade VTI, VOO, and ARKK alongside large caps",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["VTI", "VOO", "ARKK"],
+    )
+    result = service.resolve_strategy_symbols(spec)
+    # Default capped to first 2 entries, then all three target_symbols appended.
+    assert result == list(STOCK_SYMBOLS[:2]) + ["VTI", "VOO", "ARKK"]
+    for tgt in ("VTI", "VOO", "ARKK"):
+        assert tgt in result, f"target symbol {tgt} was truncated; result={result}"
 
 
 def test_classify_symbol_unambiguous_cases() -> None:
@@ -1276,8 +1339,9 @@ def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
         result = service.resolve_strategy_symbols(spec)
 
-    # The fetch still proceeds against the requested symbols.
-    assert result == ["BTC"]
+    # #534 — BTC is unioned onto the stocks default rather than replacing it,
+    # but the mismatched target is still present so the fetch attempts it.
+    assert "BTC" in result
     # But the operator sees the diagnostic.
     assert any(
         "s-mismatch" in r.message and "BTC" in r.message and "stocks" in r.message
@@ -1330,8 +1394,9 @@ def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> 
 
 
 def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
-    """Issue #525 — empty target_symbols returns the full asset-class default
-    universe when it fits under STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS (default 10)."""
+    """Issue #525 / #534 — empty target_symbols returns the full asset-class
+    default universe when it fits under STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS
+    (default 20 post-#534)."""
     from investment_team.market_data_service import MarketDataService
     from investment_team.symbols import STOCK_SYMBOLS
 
@@ -1344,7 +1409,8 @@ def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
         signal_definition="s",
         timeframe="1d",
     )
-    # STOCK_SYMBOLS has 10 entries; the default cap is 10 so nothing is dropped.
+    # STOCK_SYMBOLS has 17 entries (post-#534); the default cap is 20 so
+    # nothing is dropped.
     assert service.resolve_strategy_symbols(spec) == list(STOCK_SYMBOLS)
 
 
@@ -1397,7 +1463,8 @@ def test_resolve_strategy_symbols_invalid_env_var_falls_back(monkeypatch, caplog
     with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
         result = service.resolve_strategy_symbols(spec)
 
-    # Default cap is 10 — STOCK_SYMBOLS has exactly 10 entries.
+    # Default cap is 20 (post-#534); STOCK_SYMBOLS has 17 entries so the full
+    # default universe survives the fallback.
     assert result == list(STOCK_SYMBOLS)
     assert any(
         "Invalid STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS" in r.message and "not-a-number" in r.message
@@ -1457,8 +1524,10 @@ def test_resolve_strategy_symbols_stable_across_universe_reordering(
 
 
 def test_fetch_market_data_uses_target_symbols_when_set() -> None:
-    """Issue #523 — when spec.target_symbols is non-empty, the fetcher receives
-    it verbatim and the asset-class default universe is bypassed.
+    """Issue #523 / #534 — when spec.target_symbols is non-empty, the fetcher
+    receives the union of the asset-class default and target_symbols (#534).
+    The explicit target travels into the fetch alongside the ambient
+    comparison set.
 
     Issue #525 — the fetch returns a ``_MarketDataFetch`` envelope carrying
     requested/fetched audit lists alongside the OHLCV dict."""
@@ -1467,6 +1536,7 @@ def test_fetch_market_data_uses_target_symbols_when_set() -> None:
     from investment_team.market_data_service import MarketDataService
     from investment_team.models import BacktestConfig
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.symbols import STOCK_SYMBOLS
 
     orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
     orchestrator.market_data_service = MarketDataService()
@@ -1493,10 +1563,12 @@ def test_fetch_market_data_uses_target_symbols_when_set() -> None:
     ):
         fetch = orchestrator._fetch_market_data(spec, config)
 
-    assert captured["symbols"] == ["QQQ"]
-    assert fetch.data == {"QQQ": ["bar"]}
-    assert fetch.requested_symbols == ["QQQ"]
-    assert fetch.fetched_symbols == ["QQQ"]
+    # QQQ is in STOCK_SYMBOLS post-#534, so the union equals the default.
+    expected = list(STOCK_SYMBOLS)
+    assert captured["symbols"] == expected
+    assert fetch.requested_symbols == expected
+    assert "QQQ" in fetch.requested_symbols
+    assert fetch.fetched_symbols == sorted(expected)
 
 
 def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
@@ -1538,21 +1610,26 @@ def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
 
 
 def test_fetch_market_data_records_dropped_symbols() -> None:
-    """Issue #525 — when the fetch returns empty bars for some symbols, the
-    audit envelope's fetched_symbols reflects only the symbols that returned
-    usable data."""
+    """Issue #525 / #534 — when the fetch returns empty bars for some symbols,
+    the audit envelope's fetched_symbols reflects only the symbols that
+    returned usable data. AAPL and MSFT are both already in the stocks default
+    so the union is just the default and the fake provider can stick to two
+    explicit names."""
     from unittest.mock import patch
 
     from investment_team.market_data_service import MarketDataService
     from investment_team.models import BacktestConfig
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.symbols import STOCK_SYMBOLS
 
     orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
     orchestrator.market_data_service = MarketDataService()
 
     def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
-        # AAPL returns bars; MSFT returns an empty list (provider had no data).
-        return {"AAPL": ["bar"], "MSFT": []}
+        # Only AAPL returns bars; every other requested symbol comes back empty
+        # (provider had no data). MSFT is the explicit second name in the
+        # assertion but the fetcher still receives the full unioned universe.
+        return {sym: ["bar"] if sym == "AAPL" else [] for sym in symbols}
 
     spec = StrategySpec(
         strategy_id="s-partial",
@@ -1570,18 +1647,22 @@ def test_fetch_market_data_records_dropped_symbols() -> None:
     ):
         fetch = orchestrator._fetch_market_data(spec, config)
 
-    assert fetch.requested_symbols == ["AAPL", "MSFT"]
+    # AAPL and MSFT are both already in STOCK_SYMBOLS so the union dedupes to
+    # exactly the default universe.
+    assert fetch.requested_symbols == list(STOCK_SYMBOLS)
     assert fetch.fetched_symbols == ["AAPL"]
 
 
 def test_fetch_market_data_records_intent_on_provider_exception() -> None:
-    """Issue #525 — even when the provider raises, the envelope still carries
-    ``requested_symbols`` so the audit trail reflects intent."""
+    """Issue #525 / #534 — even when the provider raises, the envelope still
+    carries ``requested_symbols`` so the audit trail reflects intent. Under
+    union semantics that intent is the asset-class default ∪ target_symbols."""
     from unittest.mock import patch
 
     from investment_team.market_data_service import MarketDataService
     from investment_team.models import BacktestConfig
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.symbols import STOCK_SYMBOLS
 
     orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
     orchestrator.market_data_service = MarketDataService()
@@ -1606,7 +1687,9 @@ def test_fetch_market_data_records_intent_on_provider_exception() -> None:
         fetch = orchestrator._fetch_market_data(spec, config)
 
     assert fetch.data is None
-    assert fetch.requested_symbols == ["AAPL", "MSFT"]
+    # AAPL and MSFT are both already in STOCK_SYMBOLS so the union dedupes to
+    # exactly the default universe.
+    assert fetch.requested_symbols == list(STOCK_SYMBOLS)
     assert fetch.fetched_symbols == []
 
 

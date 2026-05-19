@@ -42,15 +42,20 @@ logger = logging.getLogger(__name__)
 
 _ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
 
-_DEFAULT_MAX_UNIVERSE_SYMBOLS = 10
+_DEFAULT_MAX_UNIVERSE_SYMBOLS = 20
 
 
 def _max_universe_symbols() -> int:
-    """Issue #525 — env-var ceiling on the asset-class default universe.
+    """Issue #525 / #534 — env-var ceiling on the asset-class default universe.
 
-    Replaces the previous magic literal ``5``. Invalid values fall back to
-    ``_DEFAULT_MAX_UNIVERSE_SYMBOLS`` with a warning. Values < 1 are clamped
-    to 1 so the fetch path is never asked to resolve an empty universe.
+    Replaces the previous magic literal ``5``. The default was raised from
+    ``10`` to ``20`` (#534) so the expanded stocks default — original 10 names
+    plus 7 index/sector ETFs — fits without truncation. Invalid values fall
+    back to ``_DEFAULT_MAX_UNIVERSE_SYMBOLS`` with a warning. Values < 1 are
+    clamped to 1 so the fetch path is never asked to resolve an empty universe.
+
+    Only the *asset-class default* is capped; ``spec.target_symbols`` is
+    unioned on top by ``resolve_strategy_symbols`` and is never truncated.
     """
     raw = os.getenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS")
     if not raw:
@@ -273,26 +278,33 @@ class MarketDataService:
         return list(symbol_map.get(asset, STOCK_SYMBOLS))
 
     def resolve_strategy_symbols(self, strategy: StrategySpec) -> List[str]:
-        """Issue #523 — pick the symbol universe a strategy should trade.
+        """Issue #523 / #534 — pick the symbol universe a strategy should trade.
 
-        When ``strategy.target_symbols`` is non-empty it is returned
-        verbatim, so a hypothesis naming QQQ is backtested and paper-traded
-        on QQQ instead of the asset-class default. Otherwise the
-        asset-class default universe is returned, capped by
-        ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`` (default 10). When the cap
-        actually truncates the universe a ``logger.warning`` is emitted
-        so the slice is never silent (#525).
+        Returns the **union** of the asset-class default universe and
+        ``strategy.target_symbols`` (deduplicated, defaults first in their
+        declared order, then any target_symbols not already in the default).
 
-        When the declared ``asset_class`` doesn't match the natural class
-        of a target symbol (e.g. ``asset_class="stocks"`` +
+        * Asset-class default is capped by ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS``
+          (default ``20``); when the cap actually truncates the default a
+          ``logger.warning`` is emitted so the slice is never silent (#525).
+        * ``strategy.target_symbols`` is **never truncated** — operator intent
+          to trade a specific ticker is preserved end-to-end.
+        * Empty ``target_symbols`` returns just the (capped) default.
+
+        Before #534 this was OR semantics: non-empty ``target_symbols`` would
+        replace the default entirely. Union semantics means a hypothesis like
+        "QQQ trend continuation" with ``target_symbols=["QQQ"]`` is now
+        backtested against the full stocks default *plus* QQQ rather than QQQ
+        alone, so the comparison set ("how does this signal fire on similar
+        stocks?") travels with the explicit pick.
+
+        When the declared ``asset_class`` doesn't match the natural class of
+        a target symbol (e.g. ``asset_class="stocks"`` +
         ``target_symbols=["BTC"]``), a warning is logged. The fetch still
         proceeds — operators see the warning instead of a silent empty
-        result. Ambiguous symbols (cross-asset ETFs like GLD, QQQ) are
-        not flagged.
+        result. Ambiguous symbols (cross-asset ETFs like GLD, QQQ) are not
+        flagged.
         """
-        if strategy.target_symbols:
-            self._warn_on_asset_class_mismatch(strategy)
-            return list(strategy.target_symbols)
         default = self.get_symbols_for_strategy(strategy)
         cap = _max_universe_symbols()
         if len(default) > cap:
@@ -306,8 +318,13 @@ class MarketDataService:
                 cap,
                 cap,
             )
-            return default[:cap]
-        return default
+            default = default[:cap]
+        if not strategy.target_symbols:
+            return default
+        self._warn_on_asset_class_mismatch(strategy)
+        seen = set(default)
+        extras = [s for s in strategy.target_symbols if s not in seen]
+        return default + extras
 
     def _warn_on_asset_class_mismatch(self, strategy: StrategySpec) -> None:
         declared = normalize_asset_class(strategy.asset_class)
