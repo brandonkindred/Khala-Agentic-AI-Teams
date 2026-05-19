@@ -89,6 +89,25 @@ class _MarketDataFetch:
 
 
 @dataclass
+class _VerificationOutcome:
+    """Bundle of state mutated by ``_run_verification_phase``.
+
+    The verification phase runs walk-forward (or its fallback anomaly
+    recheck), exit-rule conformance, resolves ``is_winning``, and
+    augments ``metrics.acceptance_reason`` with any veto causes.
+    Returning a dataclass keeps the boundary explicit without forcing
+    ``_run_design_attempt`` to learn the internal branches.
+    """
+
+    metrics: "BacktestResult"
+    is_winning: bool
+    upstream_admitted: bool
+    acceptance_results: List[QualityGateResult]
+    walk_forward_failed: bool
+    exit_rule_conformance_passed: bool
+
+
+@dataclass
 class _AlignmentLoopOutcome:
     """Bundle of state mutated by ``_run_trade_alignment_loop``.
 
@@ -830,6 +849,240 @@ class StrategyLabOrchestrator:
             trades_aligned=bool(alignment_reports and alignment_reports[-1].aligned),
         )
 
+    def _run_verification_phase(
+        self,
+        *,
+        spec: StrategySpec,
+        trades: List[TradeRecord],
+        metrics: BacktestResult,
+        market_data: Optional[Dict[str, List[OHLCVBar]]],
+        config: BacktestConfig,
+        execution_succeeded: bool,
+        trades_aligned: bool,
+        alignment_reports: List[TradeAlignmentReport],
+        all_gate_results: List[QualityGateResult],
+        emit: PhaseCallback,
+    ) -> _VerificationOutcome:
+        """Run walk-forward + acceptance, conformance, is_winning resolution.
+
+        Pre: synthesis + alignment loops have settled (``spec`` / ``trades``
+        / ``metrics`` are the known-good state). ``execution_succeeded``
+        tracks whether the last execution cleared the anomaly gates.
+        Post: returns a ``_VerificationOutcome`` carrying possibly-mutated
+        ``metrics`` (acceptance_reason / oos_* fields) plus the resolved
+        ``is_winning`` flag and the gate-level facts the caller persists.
+        Mutates ``all_gate_results`` in place (acceptance + conformance +
+        optional fallback gates appended).
+
+        The three is_winning branches mirror the orchestrator's three
+        publication-decision paths:
+          * Walk-forward succeeded → acceptance_gate verdict
+          * Walk-forward raised → anomaly recheck with ``dsr_aware=False``
+          * Walk-forward disabled / no trades → ``is_winning=False``
+        """
+        acceptance_results: List[QualityGateResult] = []
+        acceptance_reason: Optional[str] = None
+        walk_forward_failed = False
+        if (
+            execution_succeeded
+            and trades
+            and market_data is not None
+            and config.walk_forward_enabled
+        ):
+            try:
+                emit("backtesting", {"sub_phase": "walk_forward_started"})
+                metrics = self._evaluate_walk_forward(spec, market_data, config, trades, metrics)
+                acceptance_results = self.acceptance_gate.check(
+                    metrics,
+                    config,
+                    n_trials=self.convergence_tracker.trial_count,
+                )
+                all_gate_results.extend(acceptance_results)
+                acceptance_reason = summarize_acceptance_reason(acceptance_results)
+                metrics = metrics.model_copy(
+                    update={
+                        "n_trials_when_accepted": self.convergence_tracker.trial_count,
+                        "acceptance_reason": acceptance_reason,
+                    }
+                )
+                emit(
+                    "backtesting",
+                    {
+                        "sub_phase": "walk_forward_completed",
+                        "deflated_sharpe": metrics.deflated_sharpe,
+                        "oos_sharpe": metrics.oos_sharpe,
+                        "is_oos_degradation_pct": metrics.is_oos_degradation_pct,
+                        "oos_trade_count": metrics.oos_trade_count,
+                        "n_trials": self.convergence_tracker.trial_count,
+                        "acceptance_reason": acceptance_reason,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Walk-forward evaluation failed for %s; falling back to "
+                    "legacy single-window acceptance",
+                    spec.strategy_id,
+                )
+                acceptance_results = []
+                acceptance_reason = None
+                walk_forward_failed = True
+
+        # Issue #527 — deterministic check that the engine enforced
+        # ``spec.exit_rules`` against the FINAL trade ledger
+        # (post-alignment-loop). Critical failure vetoes ``is_winning``
+        # below; results are appended to ``all_gate_results`` for the
+        # persisted record.
+        exit_rule_conformance_passed = True
+        if execution_succeeded and trades:
+            conformance_gate = ExitRuleConformanceGate()
+            conformance_results = conformance_gate.check(
+                exit_rules=spec.exit_rules,
+                trades=trades,
+                diagnostics=metrics.execution_diagnostics,
+                config=config,
+                timeframe=spec.timeframe,
+            )
+            all_gate_results.extend(conformance_results)
+            exit_rule_conformance_passed = not any(
+                (not r.passed) and r.severity == "critical" for r in conformance_results
+            )
+
+        # Resolve is_winning across the three publication-decision paths.
+        # ``upstream_admitted`` records whether the upstream gate (walk-
+        # forward or fallback) said admit. It feeds the veto-augmentation
+        # block below: a success-style ``acceptance_reason`` is REPLACED
+        # by the veto cause; a failure-style reason is PRESERVED with the
+        # veto appended.
+        upstream_admitted = False
+        if acceptance_results:
+            acceptance_passed = all(r.passed for r in acceptance_results)
+            is_winning = (
+                execution_succeeded
+                and acceptance_passed
+                and trades_aligned
+                and exit_rule_conformance_passed
+            )
+            upstream_admitted = acceptance_passed
+        elif walk_forward_failed and execution_succeeded:
+            # Walk-forward fallback: anomaly recheck occurs after refinement
+            # in the verification phase. Anomaly checks during refinement
+            # ran with ``dsr_aware=True``, which downgraded ``Sharpe > 5.0``
+            # from critical to warning on the assumption that OOS DSR would
+            # adjudicate. Re-run with ``dsr_aware=False`` and reject if any
+            # critical fires — otherwise an obvious overfit could be marked
+            # winning on annualized return alone.
+            fallback_anomalies = self.anomaly_detector.check(
+                metrics,
+                trades,
+                dsr_aware=False,
+                coverage_report=metrics.coverage_report,
+                phase="verification",
+            )
+            fallback_criticals = [
+                g for g in fallback_anomalies if not g.passed and g.severity == "critical"
+            ]
+            return_ok = metrics.annualized_return_pct > WINNING_THRESHOLD
+            is_winning = (
+                return_ok
+                and not fallback_criticals
+                and trades_aligned
+                and exit_rule_conformance_passed
+            )
+            upstream_admitted = return_ok and not fallback_criticals
+            if fallback_criticals:
+                # Surface the upgraded severities so the persisted gate-
+                # result history reflects the true rejection reason.
+                self.record_gates(
+                    fallback_anomalies, all_gate_results, gate_name_prefix="fallback_"
+                )
+            # Mirror the fallback gate's own verdict onto
+            # ``acceptance_reason`` so consumers don't have to grep
+            # ``quality_gate_results`` for ``fallback_`` prefixes.
+            if upstream_admitted:
+                metrics = metrics.model_copy(
+                    update={
+                        "acceptance_reason": "walk_forward_fallback_passed: anomaly recheck clean"
+                    }
+                )
+            else:
+                fallback_reasons: List[str] = []
+                if fallback_criticals:
+                    fallback_reasons.append("; ".join(g.details for g in fallback_criticals))
+                if not return_ok:
+                    fallback_reasons.append(
+                        f"annualized_return {metrics.annualized_return_pct:.2f}% <= "
+                        f"{WINNING_THRESHOLD:g}% threshold"
+                    )
+                metrics = metrics.model_copy(
+                    update={
+                        "acceptance_reason": (
+                            "walk_forward_fallback_rejected: " + "; ".join(fallback_reasons)
+                        )
+                    }
+                )
+        else:
+            is_winning = False
+            # Self-document why publication was blocked on each else-branch
+            # entry path. Without this, the persisted record shows
+            # ``is_winning=False`` with an empty ``acceptance_reason``. The
+            # no-trades case is checked first because it's the more
+            # proximate cause when both conditions hold.
+            if execution_succeeded and not trades:
+                metrics = metrics.model_copy(
+                    update={"acceptance_reason": "publication_disabled: no trades produced"}
+                )
+            elif execution_succeeded and trades and not config.walk_forward_enabled:
+                metrics = metrics.model_copy(
+                    update={"acceptance_reason": "publication_disabled: walk_forward_enabled=False"}
+                )
+
+        # Publication vetoes — surface each veto's cause on
+        # ``acceptance_reason`` so the audit trail explains why publication
+        # was blocked even when the upstream acceptance gate passed.
+        # ``_apply_veto_to_acceptance_reason`` codifies the "replace stale
+        # success, append real rejection" rule.
+        if execution_succeeded and trades and not exit_rule_conformance_passed:
+            conformance_criticals = [
+                r
+                for r in all_gate_results
+                if r.gate_name == "exit_rule_conformance"
+                and not r.passed
+                and r.severity == "critical"
+            ]
+            detail = "; ".join(r.details for r in conformance_criticals)
+            suffix = (
+                f"exit_rule_conformance_failed: {detail}"
+                if detail
+                else "exit_rule_conformance_failed: engine enforcement leaked"
+            )
+            metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
+                metrics, suffix, upstream_admitted=upstream_admitted
+            )
+
+        if execution_succeeded and trades and alignment_reports and not trades_aligned:
+            last_report = alignment_reports[-1]
+            # NOTE: do NOT name this ``rationale`` — the strategy-rationale
+            # string is bound by the caller's ideation result and is also
+            # what gets persisted to ``StrategyLabRecord.strategy_rationale``.
+            align_rationale = (last_report.rationale or "").strip()
+            suffix = (
+                f"alignment_failed: {align_rationale}"
+                if align_rationale
+                else "alignment_failed: trades did not implement strategy spec"
+            )
+            metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
+                metrics, suffix, upstream_admitted=upstream_admitted
+            )
+
+        return _VerificationOutcome(
+            metrics=metrics,
+            is_winning=is_winning,
+            upstream_admitted=upstream_admitted,
+            acceptance_results=acceptance_results,
+            walk_forward_failed=walk_forward_failed,
+            exit_rule_conformance_passed=exit_rule_conformance_passed,
+        )
+
     def _run_design_attempt(
         self,
         *,
@@ -1330,251 +1583,27 @@ class StrategyLabOrchestrator:
         # round (which has no recorded "attempt") still counts.
         self.convergence_tracker.increment_trials(max(1, len(refinement_attempts) + 1))
 
-        # ── Phase 2.7: WALK-FORWARD + ACCEPTANCE GATE (issue #247) ────
-        # Replaces the legacy ``WINNING_THRESHOLD`` annualized-return scalar
-        # with a composite OOS gate evaluated on purged, embargoed K-fold
-        # walk-forward diagnostics. Skipped when walk-forward is disabled
-        # (legacy fallback) or there is no successful execution to evaluate.
-        acceptance_results: List[QualityGateResult] = []
-        acceptance_reason: Optional[str] = None
-        walk_forward_failed = False
-        if (
-            execution_succeeded
-            and trades
-            and market_data is not None
-            and config.walk_forward_enabled
-        ):
-            try:
-                emit("backtesting", {"sub_phase": "walk_forward_started"})
-                metrics = self._evaluate_walk_forward(spec, market_data, config, trades, metrics)
-                acceptance_results = self.acceptance_gate.check(
-                    metrics,
-                    config,
-                    n_trials=self.convergence_tracker.trial_count,
-                )
-                all_gate_results.extend(acceptance_results)
-                acceptance_reason = summarize_acceptance_reason(acceptance_results)
-                metrics = metrics.model_copy(
-                    update={
-                        "n_trials_when_accepted": self.convergence_tracker.trial_count,
-                        "acceptance_reason": acceptance_reason,
-                    }
-                )
-                emit(
-                    "backtesting",
-                    {
-                        "sub_phase": "walk_forward_completed",
-                        "deflated_sharpe": metrics.deflated_sharpe,
-                        "oos_sharpe": metrics.oos_sharpe,
-                        "is_oos_degradation_pct": metrics.is_oos_degradation_pct,
-                        "oos_trade_count": metrics.oos_trade_count,
-                        "n_trials": self.convergence_tracker.trial_count,
-                        "acceptance_reason": acceptance_reason,
-                    },
-                )
-            except Exception:
-                logger.exception(
-                    "Walk-forward evaluation failed for %s; falling back to "
-                    "legacy single-window acceptance",
-                    spec.strategy_id,
-                )
-                acceptance_results = []
-                acceptance_reason = None
-                walk_forward_failed = True
-
-        # ── Exit-rule conformance ─────────────────────────────────────
-        # Issue #527 — deterministic check that the engine actually
-        # enforced ``spec.exit_rules`` against the FINAL trade ledger
-        # (post-alignment-loop). Critical failure vetoes ``is_winning``
-        # below; results are appended to ``all_gate_results`` for the
-        # persisted record.
-        exit_rule_conformance_passed = True
-        if execution_succeeded and trades:
-            conformance_gate = ExitRuleConformanceGate()
-            conformance_results = conformance_gate.check(
-                exit_rules=spec.exit_rules,
-                trades=trades,
-                diagnostics=metrics.execution_diagnostics,
-                config=config,
-                timeframe=spec.timeframe,
-            )
-            all_gate_results.extend(conformance_results)
-            exit_rule_conformance_passed = not any(
-                (not r.passed) and r.severity == "critical" for r in conformance_results
-            )
-
-        # ── Resolve is_winning ────────────────────────────────────────
-        # Publication requires (a) the walk-forward acceptance gate (or
-        # its overfit-recheck fallback) AND (b) trade-alignment
-        # convergence (``trades_aligned``, #529). A strategy whose final
-        # ``TradeAlignmentReport.aligned`` is False — because the loop hit
-        # ``MAX_ALIGNMENT_ROUNDS`` or broke early with no proposed fix —
-        # cannot be marked winning regardless of metrics, since the
-        # executed trades do not implement the strategy spec.
-        #
-        # Walk-forward fallback: anomaly checks during refinement ran with
-        # ``dsr_aware=True``, which downgraded the ``Sharpe > 5.0`` flag
-        # from critical to warning on the assumption that the OOS DSR
-        # would adjudicate. With AcceptanceGate unavailable, re-run the
-        # anomaly checks with ``dsr_aware=False`` and reject if any
-        # critical fires — otherwise an obvious overfit could still be
-        # marked winning on annualized return alone.
-        #
-        # The legacy ``walk_forward_enabled=False`` single-window
-        # ``WINNING_THRESHOLD`` branch was removed (#529): a bare
-        # annualized-return scalar with no DSR correction is not a
-        # publication gate. Runs configured without walk-forward still
-        # execute and generate a narrative, but cannot be marked winning.
-        # ``upstream_admitted`` records whether the upstream publication
-        # gate (walk-forward acceptance, or its anomaly-recheck fallback)
-        # said "admit". It feeds the alignment-augmentation block below:
-        # a success-style ``acceptance_reason`` becomes stale the moment
-        # alignment vetoes a run, so we REPLACE it; a failure-style
-        # reason captures a real co-cause and is PRESERVED with the
-        # alignment cause appended.
-        upstream_admitted = False
-        if acceptance_results:
-            acceptance_passed = all(r.passed for r in acceptance_results)
-            is_winning = (
-                execution_succeeded
-                and acceptance_passed
-                and trades_aligned
-                and exit_rule_conformance_passed
-            )
-            upstream_admitted = acceptance_passed
-        elif walk_forward_failed and execution_succeeded:
-            # Walk-forward fallback: anomaly recheck occurs after refinement
-            # in the verification phase.
-            fallback_anomalies = self.anomaly_detector.check(
-                metrics,
-                trades,
-                dsr_aware=False,
-                coverage_report=metrics.coverage_report,
-                phase="verification",
-            )
-            fallback_criticals = [
-                g for g in fallback_anomalies if not g.passed and g.severity == "critical"
-            ]
-            return_ok = metrics.annualized_return_pct > WINNING_THRESHOLD
-            is_winning = (
-                return_ok
-                and not fallback_criticals
-                and trades_aligned
-                and exit_rule_conformance_passed
-            )
-            upstream_admitted = return_ok and not fallback_criticals
-            if fallback_criticals:
-                # Surface the upgraded severities so the persisted
-                # gate-result history reflects the true rejection reason.
-                self.record_gates(
-                    fallback_anomalies, all_gate_results, gate_name_prefix="fallback_"
-                )
-            # Gap 7 / 9: mirror the fallback gate's own verdict onto
-            # ``acceptance_reason`` so consumers don't have to grep
-            # ``quality_gate_results`` for ``fallback_`` prefixes to see
-            # why publication was admitted or rejected. The augmentation
-            # block below uses ``upstream_admitted`` to decide whether
-            # to replace this message (alignment vetoes a "passed"
-            # verdict) or to append (both gates fired their own reasons).
-            if upstream_admitted:
-                metrics = metrics.model_copy(
-                    update={
-                        "acceptance_reason": "walk_forward_fallback_passed: anomaly recheck clean"
-                    }
-                )
-            else:
-                fallback_reasons: List[str] = []
-                if fallback_criticals:
-                    fallback_reasons.append("; ".join(g.details for g in fallback_criticals))
-                if not return_ok:
-                    fallback_reasons.append(
-                        f"annualized_return {metrics.annualized_return_pct:.2f}% <= "
-                        f"{WINNING_THRESHOLD:g}% threshold"
-                    )
-                metrics = metrics.model_copy(
-                    update={
-                        "acceptance_reason": (
-                            "walk_forward_fallback_rejected: " + "; ".join(fallback_reasons)
-                        )
-                    }
-                )
-        else:
-            is_winning = False
-            # Gap 4 / 8: self-document why publication was blocked on
-            # each else-branch entry path. Without this, the persisted
-            # record shows ``is_winning=False`` with an empty
-            # ``acceptance_reason``. The no-trades case is checked first
-            # because it's the more proximate cause when both conditions
-            # hold (a run with no trades cannot publish regardless of
-            # ``walk_forward_enabled``). Execution-failure paths are
-            # handled by the elif-narrative branch in Phase 3 instead.
-            if execution_succeeded and not trades:
-                metrics = metrics.model_copy(
-                    update={"acceptance_reason": "publication_disabled: no trades produced"}
-                )
-            elif execution_succeeded and trades and not config.walk_forward_enabled:
-                metrics = metrics.model_copy(
-                    update={"acceptance_reason": "publication_disabled: walk_forward_enabled=False"}
-                )
-
-        # ── Publication vetoes ────────────────────────────────────────
-        # Surface each veto's cause on ``acceptance_reason`` so the
-        # audit trail explains why publication was blocked even when
-        # the upstream acceptance gate otherwise passed. Vetoes stack:
-        # the first to fire is treated as the upstream rejection by the
-        # second, so a multi-gate failure preserves both causes.
-        #
-        # Helper :func:`_apply_veto_to_acceptance_reason` codifies the
-        # "replace stale success, append real rejection" rule so adding
-        # a future veto is one new call here rather than another copy
-        # of the mutation shape.
-        #
-        # Each veto's ``execution_succeeded and trades`` precondition
-        # ensures the alignment / conformance verdicts are meaningful —
-        # both gates need a non-empty trade ledger to evaluate.
-        # ``alignment_reports`` is in the alignment guard so we only
-        # attribute the rejection to alignment when the audit actually
-        # ran (skipped when ``market_data is None``).
-
-        # Issue #527 — conformance veto.
-        if execution_succeeded and trades and not exit_rule_conformance_passed:
-            conformance_criticals = [
-                r
-                for r in all_gate_results
-                if r.gate_name == "exit_rule_conformance"
-                and not r.passed
-                and r.severity == "critical"
-            ]
-            detail = "; ".join(r.details for r in conformance_criticals)
-            suffix = (
-                f"exit_rule_conformance_failed: {detail}"
-                if detail
-                else "exit_rule_conformance_failed: engine enforcement leaked"
-            )
-            metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
-                metrics, suffix, upstream_admitted=upstream_admitted
-            )
-
-        # Issue #529 — alignment veto.
-        if execution_succeeded and trades and alignment_reports and not trades_aligned:
-            last_report = alignment_reports[-1]
-            # NOTE: do NOT name this ``rationale`` — that shadows the
-            # strategy-rationale string bound earlier from the ideation
-            # agent (and used positionally when calling
-            # ``self.analysis_agent.run`` plus persisted on
-            # ``StrategyLabRecord.strategy_rationale``). Shadowing would
-            # silently corrupt both the analysis prompt and the audit
-            # record on every alignment-failure path.
-            align_rationale = (last_report.rationale or "").strip()
-            suffix = (
-                f"alignment_failed: {align_rationale}"
-                if align_rationale
-                else "alignment_failed: trades did not implement strategy spec"
-            )
-            metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
-                metrics, suffix, upstream_admitted=upstream_admitted
-            )
-
+        # ── Phase 2.7: WALK-FORWARD + ACCEPTANCE + CONFORMANCE + is_winning ────
+        verification = self._run_verification_phase(
+            spec=spec,
+            trades=trades,
+            metrics=metrics,
+            market_data=market_data,
+            config=config,
+            execution_succeeded=execution_succeeded,
+            trades_aligned=trades_aligned,
+            alignment_reports=alignment_reports,
+            all_gate_results=all_gate_results,
+            emit=emit,
+        )
+        metrics = verification.metrics
+        is_winning = verification.is_winning
+        # The other ``_VerificationOutcome`` fields (acceptance_results,
+        # walk_forward_failed, upstream_admitted, exit_rule_conformance_passed)
+        # are unused beyond this point — the verification phase already
+        # extended ``all_gate_results`` and mutated ``metrics.acceptance_reason``
+        # to carry every downstream-visible signal. The fields stay on the
+        # dataclass for callers that want to inspect the outcome directly.
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────
         narrative = ""
         if execution_succeeded and trades:
