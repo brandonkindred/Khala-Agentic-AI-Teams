@@ -519,18 +519,29 @@ def test_misaligned_disclaimer_prepended_when_revised_drops_it(monkeypatch):
     assert "strong trend persistence" in narrative
 
 
-def test_misaligned_disclaimer_not_duplicated_when_opening_with_it(monkeypatch):
-    """If the LLM opens the narrative with the disclaimer verbatim, the
-    deterministic safety rail must NOT prepend a second copy — compliant
-    runs stay byte-identical."""
+def test_misaligned_no_modification_when_disclaimer_and_all_issues_present(monkeypatch):
+    """Fully-compliant LLM output (opens with the disclaimer AND includes
+    every concrete ``AlignmentIssue.description`` somewhere in the body)
+    must pass through the rail byte-identically — no duplicated
+    disclaimer, no appended issues block."""
 
     disclaimer = (
         "The executed trades did not faithfully implement the specification; "
         "interpretation is preliminary."
     )
+    # Fully compliant — opens with the disclaimer and mentions every issue.
     compliant_body = (
-        f"{disclaimer} The trades skipped the configured stop-loss; rerun once aligned."
+        f"{disclaimer} Specifically: "
+        "stop-loss did not fire on trade #4 despite -8% drawdown, "
+        "and trade #7 used symbol outside the spec universe. "
+        "Rerun once aligned."
     )
+    # Sanity-check the fixture so a refactor of _MISALIGNED_REPORT.issues
+    # surfaces in this test rather than as silent rail behaviour drift.
+    for issue in _MISALIGNED_REPORT.issues:
+        assert issue.description in compliant_body, (
+            f"Test fixture out of sync: {issue.description!r} missing from compliant_body."
+        )
 
     _install_compliant_review_recorder(monkeypatch, draft_body=compliant_body)
 
@@ -544,9 +555,84 @@ def test_misaligned_disclaimer_not_duplicated_when_opening_with_it(monkeypatch):
     )
 
     assert narrative.count(disclaimer) == 1
-    # The enumerated "Alignment issues:" block from format_misalignment_prefix
-    # must NOT be injected when the LLM already opened with the disclaimer.
-    assert "Alignment issues:\n- [" not in narrative
+    # Neither the prepend prefix nor the deterministic-append block must fire.
+    assert "Alignment issues:" not in narrative
+    assert "deterministically appended" not in narrative
+
+
+def test_misaligned_issues_appended_when_llm_opens_but_drops_issues(monkeypatch):
+    """Codex on PR #584 (commit 3518419): the LLM may open with the
+    disclaimer perfectly but then drop every concrete alignment issue
+    from the body. The rail must deterministically append the missing
+    issues so operators always see the audit facts — otherwise a
+    disclaimer-opening narrative could still bury the substance."""
+
+    disclaimer = (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary."
+    )
+    # LLM opens with the disclaimer but otherwise paraphrases vaguely
+    # without naming any of the concrete issues.
+    partial_body = (
+        f"{disclaimer} The trades diverged from the design in subtle ways. Rerun once aligned."
+    )
+
+    _install_compliant_review_recorder(monkeypatch, draft_body=partial_body)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    # Disclaimer still opens (rail didn't prepend a second one).
+    assert narrative.lstrip().startswith(disclaimer)
+    assert narrative.count(disclaimer) == 1
+    # Each missing issue must have been deterministically appended.
+    assert "Alignment issues (deterministically appended):" in narrative
+    for issue in _MISALIGNED_REPORT.issues:
+        assert issue.description in narrative
+
+
+def test_misaligned_only_missing_issues_appended(monkeypatch):
+    """If the LLM mentions *some* issues verbatim but drops others, only
+    the dropped ones must be appended — the rail must not duplicate
+    issues the LLM already surfaced."""
+
+    disclaimer = (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary."
+    )
+    # LLM mentions issue #1 verbatim but drops issue #2.
+    mentioned_issue = _MISALIGNED_REPORT.issues[0]
+    dropped_issue = _MISALIGNED_REPORT.issues[1]
+    partial_body = (
+        f"{disclaimer} The audit noted: {mentioned_issue.description}. Rerun once aligned."
+    )
+
+    _install_compliant_review_recorder(monkeypatch, draft_body=partial_body)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    # Mentioned issue must appear exactly once (LLM body); dropped issue
+    # must appear once (deterministic append).
+    assert narrative.count(mentioned_issue.description) == 1
+    assert narrative.count(dropped_issue.description) == 1
+    # The deterministic-append block must list ONLY the dropped issue.
+    append_idx = narrative.index("Alignment issues (deterministically appended):")
+    appended_block = narrative[append_idx:]
+    assert dropped_issue.description in appended_block
+    assert mentioned_issue.description not in appended_block
 
 
 def test_misaligned_disclaimer_enforced_when_buried_mid_narrative(monkeypatch):

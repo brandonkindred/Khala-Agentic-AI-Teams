@@ -301,31 +301,55 @@ def format_misalignment_prefix(report: Optional[TradeAlignmentReport]) -> str:
 def _ensure_misalignment_disclaimer(
     narrative: str, alignment_report: Optional[TradeAlignmentReport]
 ) -> str:
-    """Deterministically guarantee the misalignment disclaimer is present.
+    """Deterministically guarantee the misalignment disclaimer + audit
+    facts are visible on every published narrative.
 
     The LLM is *told* to open misaligned narratives with the disclaimer
-    verbatim, but cannot be trusted to comply — and the self-review pass
-    that's meant to enforce it may fail or return the raw draft. On
-    ``aligned=False`` runs this prepends the full ``format_misalignment_prefix``
-    block unless the narrative already **opens** with the disclaimer
-    string, so the safety rail holds even when the LLM ignores the
-    instruction or buries the disclaimer mid-narrative behind a causal
-    claim (#532, Codex follow-up on PR #584).
+    verbatim and to surface the concrete alignment issues, but cannot be
+    trusted to comply — and the self-review pass that's meant to enforce
+    it may fail or echo a non-compliant draft. The rail enforces two
+    deterministic guarantees on ``aligned=False`` runs:
 
-    No-ops on aligned / None reports and on narratives that already
-    *open* with the disclaimer (after stripping leading whitespace) — so
-    compliant LLM output and legacy callers stay byte-identical. A
-    narrative that mentions the disclaimer later in the body but opens
-    with anything else gets the full prefix prepended; the operator may
-    see the disclaimer twice, but it WILL appear before any
-    confident/causal framing.
+    1. **The disclaimer opens the narrative.** If the narrative does not
+       start with the disclaimer string (after ``lstrip``), the full
+       ``format_misalignment_prefix`` block is prepended. This catches
+       LLMs that buried the disclaimer mid-body behind a causal claim
+       (#532, Codex follow-up).
+    2. **Every concrete alignment issue is present somewhere in the
+       narrative.** If the LLM opened with the disclaimer but dropped
+       any ``AlignmentIssue.description`` strings, those issues are
+       deterministically appended to the narrative so operators always
+       see the audit facts — even if the LLM paraphrased the disclaimer
+       correctly but elided the issue list.
+
+    The rail intentionally cannot detect *causal claims* about strategy
+    design (e.g. "failed because of X") — that requires natural-language
+    understanding. The prompt + self-review pass remain the only
+    mitigation for that. What this helper guarantees is that the
+    operator always sees the disclaimer at the top and the concrete
+    audit facts somewhere below, regardless of LLM compliance.
+
+    No-ops on aligned / None reports so clean / legacy callers stay
+    byte-identical.
     """
     prefix = format_misalignment_prefix(alignment_report)
     if not prefix:
         return narrative
-    if narrative.lstrip().startswith(_MISALIGNED_DISCLAIMER):
-        return narrative
-    return f"{prefix}\n\n{narrative}"
+    # Guarantee #1: disclaimer opens the narrative.
+    if not narrative.lstrip().startswith(_MISALIGNED_DISCLAIMER):
+        return f"{prefix}\n\n{narrative}"
+    # Guarantee #2: every concrete alignment issue is somewhere in the body.
+    # ``alignment_report`` is non-None because ``prefix`` was non-empty.
+    assert alignment_report is not None
+    missing_issues = [
+        issue for issue in alignment_report.issues if issue.description not in narrative
+    ]
+    if missing_issues:
+        appended_lines = ["", "Alignment issues (deterministically appended):"]
+        for issue in missing_issues:
+            appended_lines.append(f"- [{issue.severity}] {issue.rule_type}: {issue.description}")
+        return narrative + "\n" + "\n".join(appended_lines)
+    return narrative
 
 
 def _fallback_narrative(
