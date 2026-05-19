@@ -629,6 +629,11 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
     monkeypatch.setattr(
         orch.refinement_agent, "run", lambda **kw: ({"changes_made": "x"}, overfit_code)
     )
+    # CodeConformanceGate (#541) rejects the minimal stub strategy code
+    # used here (qty=1, no entry conditional). Neutralise it the same
+    # way the other gates are neutralised — synthesis-phase code
+    # conformance is not the subject under test on the fallback path.
+    monkeypatch.setattr(orch.code_conformance_gate, "check", lambda *a, **kw: [])
     monkeypatch.setattr(
         orch.alignment_agent, "run", lambda **kw: TradeAlignmentReport(aligned=True, rationale="ok")
     )
@@ -757,6 +762,11 @@ def _wire_run_cycle_stubs(
     )
     monkeypatch.setattr(orch.ideation_agent, "run", lambda **kw: (spec_dict, code, "rationale"))
     monkeypatch.setattr(orch.refinement_agent, "run", lambda **kw: ({"changes_made": "x"}, code))
+    # CodeConformanceGate (#541) rejects the minimal stub strategy used in
+    # these tests (qty=1, no entry conditional). Neutralise it the same
+    # way other gates are neutralised — the walk-forward path is the
+    # subject under test, not synthesis-phase code conformance.
+    monkeypatch.setattr(orch.code_conformance_gate, "check", lambda *a, **kw: [])
     monkeypatch.setattr(
         orch.alignment_agent,
         "run",
