@@ -441,6 +441,79 @@ class StrategyLabOrchestrator:
             emit=emit,
         )
 
+    def _run_pre_synthesis_phase(
+        self,
+        *,
+        spec: StrategySpec,
+        config: BacktestConfig,
+        all_gate_results: List[QualityGateResult],
+        code: str,
+        original_spec: StrategySpec,
+        original_code: str,
+        rationale: str,
+        refinement_attempts: List[Dict[str, Any]],
+        emit: PhaseCallback,
+    ) -> Optional[StrategyLabRecord]:
+        """Run spec validation + readiness gate before the refinement loop.
+
+        Pre: ``spec`` is a constructed ``StrategySpec``; ``all_gate_results``
+        is the orchestrator's running gate list that the caller persists.
+        Post: returns a short-circuit ``StrategyLabRecord`` when a critical
+        gate fires (and ``all_gate_results`` is extended in place with the
+        pre-synthesis gates); returns ``None`` to signal the caller can
+        continue into the synthesis refinement loop.
+
+        The "strategy_code is missing" critical from StrategySpecValidator
+        is deliberately filtered: post-ideation we always have *some* code
+        (the loop's existing safety + regeneration paths repair degenerate
+        inputs), so short-circuiting on that critical would regress a
+        recoverable case into an outright failure.
+        """
+        pre_spec_gates_raw = self.strategy_validator.validate(spec)
+        pre_spec_gates = [
+            g
+            for g in pre_spec_gates_raw
+            if not (g.severity == "critical" and g.details.startswith("strategy_code is missing"))
+        ]
+        # SpecReadinessGate (design phase) — critical here flows into the
+        # same short-circuit path as StrategySpecValidator critical so the
+        # synthesis loop cannot run on an unimplementable spec.
+        readiness_design = self.spec_readiness_gate.validate(
+            spec, phase="design", backtest_config=config
+        )
+        pre_spec_gates.extend(readiness_design)
+        self.record_gates(pre_spec_gates, all_gate_results, refinement_round=-1)
+
+        criticals = [g for g in pre_spec_gates if not g.passed and g.severity == "critical"]
+        if not criticals:
+            return None
+
+        emit(
+            "coding",
+            {
+                "sub_phase": "failed",
+                "phase": "pre_synthesis",
+                "checks_total": len(pre_spec_gates),
+                "checks_passed": sum(1 for g in pre_spec_gates if g.passed),
+            },
+        )
+        return self._build_short_circuit_record(
+            spec=spec,
+            config=config,
+            code=code,
+            original_spec=original_spec,
+            original_code=original_code,
+            rationale=rationale,
+            all_gate_results=all_gate_results,
+            refinement_attempts=refinement_attempts,
+            short_circuit_status="failed: spec_validation",
+            short_circuit_reason=(
+                "Spec validation failed before code synthesis: "
+                + "; ".join(g.details for g in criticals)
+            ),
+            emit=emit,
+        )
+
     def _run_design_attempt(
         self,
         *,
@@ -545,50 +618,19 @@ class StrategyLabOrchestrator:
         # generic refinement loop never re-runs StrategySpecValidator),
         # which would also reach convergence_tracker.record() as an
         # unresolved spec failure.
-        pre_spec_gates_raw = self.strategy_validator.validate(spec)
-        pre_spec_gates = [
-            g
-            for g in pre_spec_gates_raw
-            if not (g.severity == "critical" and g.details.startswith("strategy_code is missing"))
-        ]
-        # SpecReadinessGate (design phase). Postcondition: any critical
-        # result here flows into the same short-circuit path that
-        # StrategySpecValidator's criticals already do, so the synthesis
-        # phase cannot be entered with an unimplementable spec.
-        readiness_design = self.spec_readiness_gate.validate(
-            spec, phase="design", backtest_config=config
+        pre_synthesis = self._run_pre_synthesis_phase(
+            spec=spec,
+            config=config,
+            all_gate_results=all_gate_results,
+            code=code,
+            original_spec=original_spec,
+            original_code=original_code,
+            rationale=rationale,
+            refinement_attempts=refinement_attempts,
+            emit=emit,
         )
-        pre_spec_gates.extend(readiness_design)
-        self.record_gates(pre_spec_gates, all_gate_results, refinement_round=-1)
-        pre_synthesis_criticals = [
-            g for g in pre_spec_gates if not g.passed and g.severity == "critical"
-        ]
-        if pre_synthesis_criticals:
-            emit(
-                "coding",
-                {
-                    "sub_phase": "failed",
-                    "phase": "pre_synthesis",
-                    "checks_total": len(pre_spec_gates),
-                    "checks_passed": sum(1 for g in pre_spec_gates if g.passed),
-                },
-            )
-            return self._build_short_circuit_record(
-                spec=spec,
-                config=config,
-                code=code,
-                original_spec=original_spec,
-                original_code=original_code,
-                rationale=rationale,
-                all_gate_results=all_gate_results,
-                refinement_attempts=refinement_attempts,
-                short_circuit_status="failed: spec_validation",
-                short_circuit_reason=(
-                    "Spec validation failed before code synthesis: "
-                    + "; ".join(g.details for g in pre_synthesis_criticals)
-                ),
-                emit=emit,
-            )
+        if pre_synthesis is not None:
+            return pre_synthesis
 
         # ── Phase 2: CODE REFINEMENT LOOP ─────────────────────────────
         # Iterate up to MAX_CODE_REFINEMENT_ROUNDS, refining the
