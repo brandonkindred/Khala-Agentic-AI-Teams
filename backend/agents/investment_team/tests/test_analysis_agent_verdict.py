@@ -519,10 +519,10 @@ def test_misaligned_disclaimer_prepended_when_revised_drops_it(monkeypatch):
     assert "strong trend persistence" in narrative
 
 
-def test_misaligned_disclaimer_not_duplicated_when_already_present(monkeypatch):
-    """If the LLM did include the disclaimer verbatim, the deterministic
-    safety rail must NOT prepend a second copy — otherwise compliant runs
-    get a duplicated header that looks broken to operators."""
+def test_misaligned_disclaimer_not_duplicated_when_opening_with_it(monkeypatch):
+    """If the LLM opens the narrative with the disclaimer verbatim, the
+    deterministic safety rail must NOT prepend a second copy — compliant
+    runs stay byte-identical."""
 
     disclaimer = (
         "The executed trades did not faithfully implement the specification; "
@@ -545,9 +545,52 @@ def test_misaligned_disclaimer_not_duplicated_when_already_present(monkeypatch):
 
     assert narrative.count(disclaimer) == 1
     # The enumerated "Alignment issues:" block from format_misalignment_prefix
-    # must NOT be injected when the disclaimer is already present, otherwise
-    # we'd be appending audit content the LLM may have already summarized.
+    # must NOT be injected when the LLM already opened with the disclaimer.
     assert "Alignment issues:\n- [" not in narrative
+
+
+def test_misaligned_disclaimer_enforced_when_buried_mid_narrative(monkeypatch):
+    """Codex on PR #584 (commit 2c8fcf3): a containment-only check would
+    accept narratives that mention the disclaimer *later* in the body but
+    open with a confident/causal claim. The safety rail must require the
+    disclaimer to OPEN the narrative — anything else gets the full
+    prefix prepended."""
+
+    disclaimer = (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary."
+    )
+    # LLM puts a causal claim first, then mentions the disclaimer later —
+    # exactly the bypass Codex flagged.
+    buried_body = (
+        f"The strategy succeeded because of strong trend persistence. (Aside: {disclaimer})"
+    )
+
+    _install_compliant_review_recorder(monkeypatch, draft_body=buried_body)
+
+    narrative = AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=_MISALIGNED_REPORT,
+    )
+
+    # The safety rail must have prepended the full prefix — narrative
+    # opens with the disclaimer, not the causal claim.
+    assert narrative.lstrip().startswith(disclaimer), (
+        "Misaligned narrative must OPEN with the disclaimer; a containment-"
+        "only check would let a causal claim slip in first (Codex PR #584)."
+    )
+    # And the alignment issues must precede the LLM's causal body.
+    causal_idx = narrative.index("strong trend persistence")
+    for issue in _MISALIGNED_REPORT.issues:
+        issue_idx = narrative.index(issue.description)
+        assert issue_idx < causal_idx, (
+            f"Alignment issue {issue.description!r} must appear before "
+            "the LLM's causal claim, not after."
+        )
 
 
 def test_misaligned_disclaimer_enforced_when_review_fails(monkeypatch):

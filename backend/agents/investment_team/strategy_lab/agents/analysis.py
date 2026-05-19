@@ -307,18 +307,23 @@ def _ensure_misalignment_disclaimer(
     verbatim, but cannot be trusted to comply — and the self-review pass
     that's meant to enforce it may fail or return the raw draft. On
     ``aligned=False`` runs this prepends the full ``format_misalignment_prefix``
-    block when the disclaimer string is missing, so the safety rail holds
-    even when the LLM ignores the instruction (#532, Codex follow-up on
-    PR #584).
+    block unless the narrative already **opens** with the disclaimer
+    string, so the safety rail holds even when the LLM ignores the
+    instruction or buries the disclaimer mid-narrative behind a causal
+    claim (#532, Codex follow-up on PR #584).
 
     No-ops on aligned / None reports and on narratives that already
-    contain the disclaimer string verbatim, so compliant LLM output and
-    legacy callers stay byte-identical.
+    *open* with the disclaimer (after stripping leading whitespace) — so
+    compliant LLM output and legacy callers stay byte-identical. A
+    narrative that mentions the disclaimer later in the body but opens
+    with anything else gets the full prefix prepended; the operator may
+    see the disclaimer twice, but it WILL appear before any
+    confident/causal framing.
     """
     prefix = format_misalignment_prefix(alignment_report)
     if not prefix:
         return narrative
-    if _MISALIGNED_DISCLAIMER in narrative:
+    if narrative.lstrip().startswith(_MISALIGNED_DISCLAIMER):
         return narrative
     return f"{prefix}\n\n{narrative}"
 
