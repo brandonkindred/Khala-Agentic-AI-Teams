@@ -1,8 +1,9 @@
 """Unit tests for the Repair Expert agent and crash handling.
 
-Spawns orchestrator worker threads that talk to the job store directly,
-so this currently needs the live job service.  Marked integration pending
-follow-up to mock those threads out.
+The orchestrator-worker-thread tests at the bottom of this file talk to the
+job store from background threads; the autouse ``_autouse_patched_job_store``
+fixture below applies the ``_client`` monkeypatch before threads spawn, so
+every write lands in the in-memory ``FakeJobServiceClient``.
 """
 
 import json
@@ -11,10 +12,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytestmark = [pytest.mark.integration]
+from agent_repair_team.agent import RepairExpertAgent
+from agent_repair_team.models import RepairInput, RepairOutput
 
-from agent_repair_team.agent import RepairExpertAgent  # noqa: E402
-from agent_repair_team.models import RepairInput, RepairOutput  # noqa: E402
+
+@pytest.fixture(autouse=True)
+def _autouse_patched_job_store(patched_job_store):
+    return patched_job_store
 
 
 class _FakeAgentResult:
