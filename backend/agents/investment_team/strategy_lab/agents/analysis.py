@@ -171,11 +171,11 @@ class AnalysisAgent:
             review_parsed = _extract_json(str(review_result))
             revised = review_parsed.get("revised_narrative", "")
             if revised:
-                return revised
+                return _ensure_misalignment_disclaimer(revised, alignment_report)
         except Exception:
             logger.exception("Self-review failed, using draft")
 
-        return draft_narrative
+        return _ensure_misalignment_disclaimer(draft_narrative, alignment_report)
 
 
 def _format_simulated_trades_summary(trades: List[TradeRecord], max_sample_rows: int = 14) -> str:
@@ -296,6 +296,31 @@ def format_misalignment_prefix(report: Optional[TradeAlignmentReport]) -> str:
         for issue in report.issues:
             parts.append(f"- [{issue.severity}] {issue.rule_type}: {issue.description}")
     return "\n".join(parts)
+
+
+def _ensure_misalignment_disclaimer(
+    narrative: str, alignment_report: Optional[TradeAlignmentReport]
+) -> str:
+    """Deterministically guarantee the misalignment disclaimer is present.
+
+    The LLM is *told* to open misaligned narratives with the disclaimer
+    verbatim, but cannot be trusted to comply — and the self-review pass
+    that's meant to enforce it may fail or return the raw draft. On
+    ``aligned=False`` runs this prepends the full ``format_misalignment_prefix``
+    block when the disclaimer string is missing, so the safety rail holds
+    even when the LLM ignores the instruction (#532, Codex follow-up on
+    PR #584).
+
+    No-ops on aligned / None reports and on narratives that already
+    contain the disclaimer string verbatim, so compliant LLM output and
+    legacy callers stay byte-identical.
+    """
+    prefix = format_misalignment_prefix(alignment_report)
+    if not prefix:
+        return narrative
+    if _MISALIGNED_DISCLAIMER in narrative:
+        return narrative
+    return f"{prefix}\n\n{narrative}"
 
 
 def _fallback_narrative(
