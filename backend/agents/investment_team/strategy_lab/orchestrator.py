@@ -43,7 +43,7 @@ from ..models import (
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..trade_simulator import compute_metrics
-from ..trading_service.modes.sandbox_compat import run_strategy_code
+from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
 from .agents.alignment import AlignmentAuditError, TradeAlignmentAgent, TradeAlignmentReport
 from .agents.analysis import AnalysisAgent
 from .agents.ideation import IdeationAgent
@@ -489,39 +489,24 @@ class StrategyLabOrchestrator:
                         "checks_total": checks_total,
                     },
                 )
-                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refining",
-                            "refinement_round": round_num,
-                            "failure_phase": "validation",
-                        },
-                    )
-                    failure_details = "\n".join(
-                        f"- [{g.gate_name}] {g.details}" for g in critical_failures
-                    )
-                    updates, code = self._refine(
-                        spec, code, "validation", failure_details, None, refinement_attempts
-                    )
-                    spec = self._apply_updates(spec, updates, code, failure_phase="validation")
-                    changes = updates.get("changes_made", "validation fix")
-                    refinement_attempts.append(changes)
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refined",
-                            "refinement_round": round_num,
-                            "changes_made": changes,
-                        },
-                    )
-                    continue
-                else:
-                    logger.warning(
-                        "Max code refinement rounds reached on validation for %s", spec.strategy_id
-                    )
+                failure_details = "\n".join(
+                    f"- [{g.gate_name}] {g.details}" for g in critical_failures
+                )
+                spec, code, exhausted = self._refine_or_exhaust(
+                    spec=spec,
+                    code=code,
+                    failure_phase="validation",
+                    failure_details=failure_details,
+                    metrics=None,
+                    refinement_attempts=refinement_attempts,
+                    round_num=round_num,
+                    default_change_label="validation fix",
+                    emit=emit,
+                )
+                if exhausted:
                     max_rounds_exhausted = True
                     break
+                continue
 
             emit(
                 "coding",
@@ -582,40 +567,25 @@ class StrategyLabOrchestrator:
                         refinement_round=round_num,
                     )
                 )
-                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refining",
-                            "refinement_round": round_num,
-                            "failure_phase": "execution",
-                        },
-                    )
-                    failure_details = (
-                        f"Error type: {exec_result.error_type}\n"
-                        f"stderr:\n{exec_result.stderr[:2000]}"
-                    )
-                    updates, code = self._refine(
-                        spec, code, "execution", failure_details, None, refinement_attempts
-                    )
-                    spec = self._apply_updates(spec, updates, code, failure_phase="execution")
-                    changes = updates.get("changes_made", "execution fix")
-                    refinement_attempts.append(changes)
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refined",
-                            "refinement_round": round_num,
-                            "changes_made": changes,
-                        },
-                    )
-                    continue
-                else:
-                    logger.warning(
-                        "Max code refinement rounds reached on execution for %s", spec.strategy_id
-                    )
+                failure_details = (
+                    f"Error type: {exec_result.error_type}\n"
+                    f"stderr:\n{exec_result.stderr[:2000]}"
+                )
+                spec, code, exhausted = self._refine_or_exhaust(
+                    spec=spec,
+                    code=code,
+                    failure_phase="execution",
+                    failure_details=failure_details,
+                    metrics=None,
+                    refinement_attempts=refinement_attempts,
+                    round_num=round_num,
+                    default_change_label="execution fix",
+                    emit=emit,
+                )
+                if exhausted:
                     max_rounds_exhausted = True
                     break
+                continue
 
             # ── 2d: COLLECT TRADES + target-symbol coverage on trades ─
             trades = exec_result.trades
@@ -663,94 +633,25 @@ class StrategyLabOrchestrator:
                 g for g in anomaly_gates if not g.passed and g.severity == "critical"
             ]
             if critical_anomalies:
-                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refining",
-                            "refinement_round": round_num,
-                            "failure_phase": "evaluation",
-                        },
-                    )
-                    failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
-                    diagnostics_block = _format_execution_diagnostics(
-                        exec_result.execution_diagnostics
-                    )
-                    if diagnostics_block:
-                        failure_details = f"{failure_details}\n{diagnostics_block}"
-                    coverage_block = format_coverage_report(metrics.coverage_report)
-                    if coverage_block:
-                        failure_details = f"{failure_details}\n{coverage_block}"
-
-                    diag = exec_result.execution_diagnostics
-                    if (
-                        diag is not None
-                        and diag.zero_trade_category is not None
-                        and market_data is not None
-                    ):
-                        zt_outcome = self.zero_trade_repairer.try_repair(
-                            spec=spec,
-                            code=code,
-                            exec_result=exec_result,
-                            coverage_report=metrics.coverage_report,
-                            market_data=market_data,
-                            config=config,
-                            zero_trade_attempts=zero_trade_attempts,
-                            round_num=round_num,
-                            emit=emit,
-                        )
-                        all_gate_results.extend(zt_outcome.new_gates)
-                        if zt_outcome.committed:
-                            assert zt_outcome.new_spec is not None
-                            assert zt_outcome.new_metrics is not None
-                            assert zt_outcome.new_exec_result is not None
-                            code = zt_outcome.new_code
-                            spec = zt_outcome.new_spec
-                            trades = zt_outcome.new_trades
-                            metrics = zt_outcome.new_metrics
-                            exec_result = zt_outcome.new_exec_result
-                            refinement_attempts.append(
-                                f"zero-trade repair: {zt_outcome.changes_made}"
-                                if zt_outcome.changes_made
-                                else "zero-trade repair"
-                            )
-                            emit(
-                                "coding",
-                                {
-                                    "sub_phase": "refined",
-                                    "refinement_round": round_num,
-                                    "changes_made": (
-                                        zt_outcome.changes_made or "zero-trade repair"
-                                    ),
-                                    "via": "zero_trade_repair",
-                                },
-                            )
-                            continue
-
-                    updates, code = self._refine(
-                        spec,
-                        code,
-                        "evaluation (backtest anomaly)",
-                        failure_details,
-                        metrics,
-                        refinement_attempts,
-                    )
-                    spec = self._apply_updates(spec, updates, code, failure_phase="evaluation")
-                    changes = updates.get("changes_made", "anomaly fix")
-                    refinement_attempts.append(changes)
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refined",
-                            "refinement_round": round_num,
-                            "changes_made": changes,
-                        },
-                    )
-                    continue
-                else:
-                    logger.warning(
-                        "Max code refinement rounds reached on evaluation for %s", spec.strategy_id
-                    )
+                recovery = self._handle_critical_anomalies(
+                    spec=spec,
+                    code=code,
+                    trades=trades,
+                    metrics=metrics,
+                    exec_result=exec_result,
+                    market_data=market_data,
+                    config=config,
+                    critical_anomalies=critical_anomalies,
+                    all_gate_results=all_gate_results,
+                    refinement_attempts=refinement_attempts,
+                    zero_trade_attempts=zero_trade_attempts,
+                    round_num=round_num,
+                    emit=emit,
+                )
+                spec, code = recovery.spec, recovery.code
+                trades, metrics = recovery.trades, recovery.metrics
+                exec_result = recovery.exec_result
+                if recovery.exhausted:
                     # Even if the code is technically correct, the cycle
                     # exhausted its rounds on an unresolved anomaly. Leaving
                     # execution_succeeded=False ensures is_winning stays False
@@ -758,6 +659,7 @@ class StrategyLabOrchestrator:
                     # "failed: max_refinement_rounds" record.
                     max_rounds_exhausted = True
                     break
+                continue
 
             # All gates passed — code is clean and backtest is sound
             execution_succeeded = True
@@ -777,6 +679,121 @@ class StrategyLabOrchestrator:
             fetched_symbols=fetched_symbols,
             execution_succeeded=execution_succeeded,
             max_rounds_exhausted=max_rounds_exhausted,
+        )
+
+    def _handle_critical_anomalies(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        trades: List[TradeRecord],
+        metrics: BacktestResult,
+        exec_result: StrategyRunResult,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+        critical_anomalies: List[QualityGateResult],
+        all_gate_results: List[QualityGateResult],
+        refinement_attempts: List[str],
+        zero_trade_attempts: List[str],
+        round_num: int,
+        emit: PhaseCallback,
+    ) -> _AnomalyRecoveryOutcome:
+        """Recover from critical backtest anomalies in the evaluation phase.
+
+        Pre: ``critical_anomalies`` is non-empty; the caller has already
+        run the anomaly detector and recorded its gates;
+        ``all_gate_results``, ``refinement_attempts``, ``zero_trade_attempts``
+        are running lists the helper mutates in place.
+        Post: returns an ``_AnomalyRecoveryOutcome``. On ``exhausted=False``
+        the spec/code/trades/metrics/exec_result fields carry the new
+        known-good state (either a committed zero-trade-repair proposal or
+        the source the generic refinement loop produced) and the caller
+        ``continue``s the synthesis loop. On ``exhausted=True`` the round
+        budget is spent and the caller breaks with
+        ``max_rounds_exhausted=True``.
+
+        Strategy:
+          1. If diagnostics carry a ``zero_trade_category`` AND there is
+             market data, ask the specialised repair agent first. A
+             committed proposal has already cleared safety + fresh
+             backtest + anomaly gates, so we use it directly.
+          2. Otherwise (or if the repair did not commit), fall through
+             to the generic refinement agent via ``_refine_or_exhaust``.
+        """
+        assert critical_anomalies, "_handle_critical_anomalies requires at least one critical"
+        assert isinstance(market_data, dict) and market_data, "market_data must be non-empty"
+
+        # ── 1: Build the failure-details prompt block (also used by generic refine) ──
+        failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
+        diagnostics_block = _format_execution_diagnostics(exec_result.execution_diagnostics)
+        if diagnostics_block:
+            failure_details = f"{failure_details}\n{diagnostics_block}"
+        coverage_block = format_coverage_report(metrics.coverage_report)
+        if coverage_block:
+            failure_details = f"{failure_details}\n{coverage_block}"
+
+        # ── 2: Specialised zero-trade repair (if diagnostics support it) ──
+        diag = exec_result.execution_diagnostics
+        if diag is not None and diag.zero_trade_category is not None:
+            zt_outcome = self.zero_trade_repairer.try_repair(
+                spec=spec,
+                code=code,
+                exec_result=exec_result,
+                coverage_report=metrics.coverage_report,
+                market_data=market_data,
+                config=config,
+                zero_trade_attempts=zero_trade_attempts,
+                round_num=round_num,
+                emit=emit,
+            )
+            all_gate_results.extend(zt_outcome.new_gates)
+            if zt_outcome.committed:
+                assert zt_outcome.new_spec is not None, "committed ZTR must carry new_spec"
+                assert zt_outcome.new_metrics is not None, "committed ZTR must carry new_metrics"
+                assert zt_outcome.new_exec_result is not None, "committed ZTR must carry new_exec_result"
+                refinement_attempts.append(
+                    f"zero-trade repair: {zt_outcome.changes_made}"
+                    if zt_outcome.changes_made
+                    else "zero-trade repair"
+                )
+                emit(
+                    "coding",
+                    {
+                        "sub_phase": "refined",
+                        "refinement_round": round_num,
+                        "changes_made": (zt_outcome.changes_made or "zero-trade repair"),
+                        "via": "zero_trade_repair",
+                    },
+                )
+                return _AnomalyRecoveryOutcome(
+                    spec=zt_outcome.new_spec,
+                    code=zt_outcome.new_code,
+                    trades=zt_outcome.new_trades,
+                    metrics=zt_outcome.new_metrics,
+                    exec_result=zt_outcome.new_exec_result,
+                    exhausted=False,
+                )
+
+        # ── 3: Generic refinement (or exhaust the round budget) ──
+        new_spec, new_code, exhausted = self._refine_or_exhaust(
+            spec=spec,
+            code=code,
+            failure_phase="evaluation",
+            refine_label="evaluation (backtest anomaly)",
+            failure_details=failure_details,
+            metrics=metrics,
+            refinement_attempts=refinement_attempts,
+            round_num=round_num,
+            default_change_label="anomaly fix",
+            emit=emit,
+        )
+        return _AnomalyRecoveryOutcome(
+            spec=new_spec,
+            code=new_code,
+            trades=trades,
+            metrics=metrics,
+            exec_result=exec_result,
+            exhausted=exhausted,
         )
 
     def _run_trade_alignment_loop(
@@ -833,233 +850,23 @@ class StrategyLabOrchestrator:
             )
 
         for align_round in range(MAX_ALIGNMENT_ROUNDS):
-            emit(
-                "aligning",
-                {
-                    "sub_phase": "evaluating",
-                    "alignment_round": align_round,
-                    "trades_count": len(trades),
-                },
-            )
-
-            report = self._run_alignment_audit(
+            round_outcome = self._run_alignment_round(
                 spec=spec,
                 code=code,
                 trades=trades,
                 metrics=metrics,
-                prior_attempts=alignment_attempts,
-            )
-            alignment_reports.append(report)
-
-            gate_severity = "info" if report.aligned else "critical"
-            gate_details = (
-                report.rationale or "Trades aligned with strategy."
-                if report.aligned
-                else (
-                    report.rationale
-                    or f"Trades did not align with strategy ({len(report.issues)} issues)."
-                )
-            )
-            all_gate_results.append(
-                self.build_orchestrator_gate(
-                    "trade_alignment",
-                    phase="verification",
-                    severity=gate_severity,  # type: ignore[arg-type]
-                    details=gate_details,
-                    refinement_round=align_round,
-                )
-            )
-
-            if report.aligned:
-                emit(
-                    "aligning",
-                    {"sub_phase": "aligned", "alignment_round": align_round},
-                )
-                break
-
-            emit(
-                "aligning",
-                {
-                    "sub_phase": "not_aligned",
-                    "alignment_round": align_round,
-                    "issues_count": len(report.issues),
-                    "issues_preview": [
-                        {
-                            "rule_type": i.rule_type,
-                            "severity": i.severity,
-                            "description": i.description[:160],
-                        }
-                        for i in report.issues[:5]
-                    ],
-                },
-            )
-
-            if not report.proposed_code:
-                emit(
-                    "aligning",
-                    {"sub_phase": "no_proposed_fix", "alignment_round": align_round},
-                )
-                break
-
-            if align_round >= MAX_ALIGNMENT_ROUNDS - 1:
-                emit(
-                    "aligning",
-                    {"sub_phase": "max_rounds_reached", "alignment_round": align_round},
-                )
-                logger.warning(
-                    "Max alignment rounds (%d) reached for %s",
-                    MAX_ALIGNMENT_ROUNDS,
-                    spec.strategy_id,
-                )
-                break
-
-            emit(
-                "aligning",
-                {
-                    "sub_phase": "refining_code",
-                    "alignment_round": align_round,
-                    "predicted_aligned_after_fix": report.predicted_aligned_after_fix,
-                },
-            )
-            proposed_code = report.proposed_code
-            proposed_spec = self._apply_updates(spec, {}, proposed_code)
-            change_summary = report.changes_made or "alignment fix"
-
-            # Re-validate code safety on the proposed code — alignment runs
-            # after backtest, so the phase tag is verification.
-            safety_gates = self.code_safety_checker.check(
-                proposed_code, proposed_spec, phase="verification"
-            )
-            self.record_gates(
-                safety_gates,
-                all_gate_results,
-                refinement_round=align_round,
-                gate_name_prefix="alignment_",
-            )
-            critical_safety = [
-                g for g in safety_gates if not g.passed and g.severity == "critical"
-            ]
-            if critical_safety:
-                emit(
-                    "aligning",
-                    {
-                        "sub_phase": "rejected_unsafe_code",
-                        "alignment_round": align_round,
-                        "details": "; ".join(g.details for g in critical_safety)[:400],
-                    },
-                )
-                logger.warning(
-                    "Alignment-proposed code failed safety gate for %s", spec.strategy_id
-                )
-                break
-
-            emit(
-                "backtesting",
-                {
-                    "sub_phase": "running_code",
-                    "alignment_round": align_round,
-                    "trigger": "trade_alignment_fix",
-                },
-            )
-            align_exec = run_strategy_code(proposed_code, market_data, config, strategy=spec)
-            if not align_exec.success:
-                all_gate_results.append(
-                    self.build_orchestrator_gate(
-                        "alignment_code_execution",
-                        phase="verification",
-                        details=(
-                            f"Re-execution after alignment fix failed "
-                            f"({align_exec.error_type}): {align_exec.stderr[:400]}"
-                        ),
-                        refinement_round=align_round,
-                    )
-                )
-                emit(
-                    "aligning",
-                    {
-                        "sub_phase": "re_execution_failed",
-                        "alignment_round": align_round,
-                        "error_type": align_exec.error_type,
-                    },
-                )
-                break
-
-            new_trades = align_exec.trades
-            new_metrics = compute_metrics(
-                new_trades, config.initial_capital, config.start_date, config.end_date
-            )
-
-            # Alignment re-backtest path attaches a CoverageReport when the
-            # fix produced zero/low trades. Pass ``proposed_spec`` (which
-            # carries ``proposed_code``) — the loop-level ``spec`` still
-            # holds the pre-alignment source.
-            _maybe_attach_coverage_report(
-                metrics=new_metrics,
-                spec=proposed_spec,
                 market_data=market_data,
                 config=config,
-                exec_result=align_exec,
+                align_round=align_round,
+                all_gate_results=all_gate_results,
+                alignment_attempts=alignment_attempts,
+                alignment_reports=alignment_reports,
+                emit=emit,
             )
-
-            anomaly_gates = self.anomaly_detector.check(
-                new_metrics,
-                new_trades,
-                dsr_aware=config.walk_forward_enabled,
-                diagnostics=align_exec.execution_diagnostics,
-                coverage_report=new_metrics.coverage_report,
-                phase="verification",
-            )
-            self.record_gates(
-                anomaly_gates,
-                all_gate_results,
-                refinement_round=align_round,
-                gate_name_prefix="alignment_",
-            )
-            critical_anomalies = [
-                g for g in anomaly_gates if not g.passed and g.severity == "critical"
-            ]
-            if critical_anomalies:
-                diagnostics_block = _format_execution_diagnostics(
-                    align_exec.execution_diagnostics
-                )
-                emit_payload: Dict[str, Any] = {
-                    "sub_phase": "anomaly_detected",
-                    "alignment_round": align_round,
-                    "details": "; ".join(g.details for g in critical_anomalies)[:400],
-                }
-                if diagnostics_block:
-                    emit_payload["execution_diagnostics"] = diagnostics_block
-                emit("aligning", emit_payload)
-                if diagnostics_block:
-                    logger.warning(
-                        "Alignment fix introduced backtest anomaly for %s — %s",
-                        spec.strategy_id,
-                        diagnostics_block,
-                    )
-                else:
-                    logger.warning(
-                        "Alignment fix introduced backtest anomaly for %s",
-                        spec.strategy_id,
-                    )
+            spec, code = round_outcome.spec, round_outcome.code
+            trades, metrics = round_outcome.trades, round_outcome.metrics
+            if round_outcome.terminate:
                 break
-
-            # All gates passed — commit the proposal as the new known-good
-            # state and continue to the next audit.
-            code = proposed_code
-            spec = proposed_spec
-            trades = new_trades
-            metrics = new_metrics
-            alignment_attempts.append(change_summary)
-
-            emit(
-                "aligning",
-                {
-                    "sub_phase": "refined",
-                    "alignment_round": align_round,
-                    "changes_made": change_summary,
-                    "trades_count": len(trades),
-                },
-            )
 
         return _AlignmentLoopOutcome(
             spec=spec,
@@ -1069,6 +876,273 @@ class StrategyLabOrchestrator:
             alignment_attempts=alignment_attempts,
             alignment_reports=alignment_reports,
             trades_aligned=bool(alignment_reports and alignment_reports[-1].aligned),
+        )
+
+    def _run_alignment_round(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        trades: List[TradeRecord],
+        metrics: BacktestResult,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+        align_round: int,
+        all_gate_results: List[QualityGateResult],
+        alignment_attempts: List[str],
+        alignment_reports: List[TradeAlignmentReport],
+        emit: PhaseCallback,
+    ) -> _AlignmentRoundOutcome:
+        """One iteration of ``_run_trade_alignment_loop``.
+
+        Pre: ``align_round`` is the current 0-indexed iteration;
+        ``alignment_reports``, ``alignment_attempts``, ``all_gate_results``
+        are running lists the helper mutates in place.
+        Post: returns an ``_AlignmentRoundOutcome``. On ``terminate=True``
+        the caller breaks (state carries the pre-iteration values);
+        on ``terminate=False`` the caller continues (state carries the
+        committed proposal as the new known-good baseline).
+
+        Step sequence:
+          1. Audit current trades → append report → record gate.
+          2. If aligned: terminate with success (no state change).
+          3. If no proposed fix: terminate.
+          4. If at max rounds: terminate.
+          5. Run code-safety on proposed code; if critical: terminate.
+          6. Re-execute proposed code; if failed: terminate.
+          7. Compute metrics + coverage; run anomaly gates;
+             if critical: terminate.
+          8. Commit proposal as new known-good state; continue.
+        """
+        assert align_round >= 0, "align_round must be non-negative"
+        assert isinstance(market_data, dict) and market_data, "market_data must be non-empty"
+
+        emit(
+            "aligning",
+            {
+                "sub_phase": "evaluating",
+                "alignment_round": align_round,
+                "trades_count": len(trades),
+            },
+        )
+        report = self._run_alignment_audit(
+            spec=spec,
+            code=code,
+            trades=trades,
+            metrics=metrics,
+            prior_attempts=alignment_attempts,
+        )
+        alignment_reports.append(report)
+
+        gate_severity = "info" if report.aligned else "critical"
+        gate_details = (
+            report.rationale or "Trades aligned with strategy."
+            if report.aligned
+            else (
+                report.rationale
+                or f"Trades did not align with strategy ({len(report.issues)} issues)."
+            )
+        )
+        all_gate_results.append(
+            self.build_orchestrator_gate(
+                "trade_alignment",
+                phase="verification",
+                severity=gate_severity,  # type: ignore[arg-type]
+                details=gate_details,
+                refinement_round=align_round,
+            )
+        )
+
+        def _terminate() -> _AlignmentRoundOutcome:
+            return _AlignmentRoundOutcome(
+                spec=spec, code=code, trades=trades, metrics=metrics, terminate=True
+            )
+
+        if report.aligned:
+            emit("aligning", {"sub_phase": "aligned", "alignment_round": align_round})
+            return _terminate()
+
+        emit(
+            "aligning",
+            {
+                "sub_phase": "not_aligned",
+                "alignment_round": align_round,
+                "issues_count": len(report.issues),
+                "issues_preview": [
+                    {
+                        "rule_type": i.rule_type,
+                        "severity": i.severity,
+                        "description": i.description[:160],
+                    }
+                    for i in report.issues[:5]
+                ],
+            },
+        )
+
+        if not report.proposed_code:
+            emit(
+                "aligning",
+                {"sub_phase": "no_proposed_fix", "alignment_round": align_round},
+            )
+            return _terminate()
+
+        if align_round >= MAX_ALIGNMENT_ROUNDS - 1:
+            emit(
+                "aligning",
+                {"sub_phase": "max_rounds_reached", "alignment_round": align_round},
+            )
+            logger.warning(
+                "Max alignment rounds (%d) reached for %s",
+                MAX_ALIGNMENT_ROUNDS,
+                spec.strategy_id,
+            )
+            return _terminate()
+
+        emit(
+            "aligning",
+            {
+                "sub_phase": "refining_code",
+                "alignment_round": align_round,
+                "predicted_aligned_after_fix": report.predicted_aligned_after_fix,
+            },
+        )
+        proposed_code = report.proposed_code
+        proposed_spec = self._apply_updates(spec, {}, proposed_code)
+        change_summary = report.changes_made or "alignment fix"
+
+        # Re-validate code safety on the proposed code — alignment runs
+        # after backtest, so the phase tag is verification.
+        safety_gates = self.code_safety_checker.check(
+            proposed_code, proposed_spec, phase="verification"
+        )
+        self.record_gates(
+            safety_gates,
+            all_gate_results,
+            refinement_round=align_round,
+            gate_name_prefix="alignment_",
+        )
+        critical_safety = [g for g in safety_gates if not g.passed and g.severity == "critical"]
+        if critical_safety:
+            emit(
+                "aligning",
+                {
+                    "sub_phase": "rejected_unsafe_code",
+                    "alignment_round": align_round,
+                    "details": "; ".join(g.details for g in critical_safety)[:400],
+                },
+            )
+            logger.warning(
+                "Alignment-proposed code failed safety gate for %s", spec.strategy_id
+            )
+            return _terminate()
+
+        emit(
+            "backtesting",
+            {
+                "sub_phase": "running_code",
+                "alignment_round": align_round,
+                "trigger": "trade_alignment_fix",
+            },
+        )
+        align_exec = run_strategy_code(proposed_code, market_data, config, strategy=spec)
+        if not align_exec.success:
+            all_gate_results.append(
+                self.build_orchestrator_gate(
+                    "alignment_code_execution",
+                    phase="verification",
+                    details=(
+                        f"Re-execution after alignment fix failed "
+                        f"({align_exec.error_type}): {align_exec.stderr[:400]}"
+                    ),
+                    refinement_round=align_round,
+                )
+            )
+            emit(
+                "aligning",
+                {
+                    "sub_phase": "re_execution_failed",
+                    "alignment_round": align_round,
+                    "error_type": align_exec.error_type,
+                },
+            )
+            return _terminate()
+
+        new_trades = align_exec.trades
+        new_metrics = compute_metrics(
+            new_trades, config.initial_capital, config.start_date, config.end_date
+        )
+
+        # Alignment re-backtest path attaches a CoverageReport when the
+        # fix produced zero/low trades. Pass ``proposed_spec`` (which
+        # carries ``proposed_code``) — the loop-level ``spec`` still
+        # holds the pre-alignment source.
+        _maybe_attach_coverage_report(
+            metrics=new_metrics,
+            spec=proposed_spec,
+            market_data=market_data,
+            config=config,
+            exec_result=align_exec,
+        )
+
+        anomaly_gates = self.anomaly_detector.check(
+            new_metrics,
+            new_trades,
+            dsr_aware=config.walk_forward_enabled,
+            diagnostics=align_exec.execution_diagnostics,
+            coverage_report=new_metrics.coverage_report,
+            phase="verification",
+        )
+        self.record_gates(
+            anomaly_gates,
+            all_gate_results,
+            refinement_round=align_round,
+            gate_name_prefix="alignment_",
+        )
+        critical_anomalies = [
+            g for g in anomaly_gates if not g.passed and g.severity == "critical"
+        ]
+        if critical_anomalies:
+            diagnostics_block = _format_execution_diagnostics(
+                align_exec.execution_diagnostics
+            )
+            emit_payload: Dict[str, Any] = {
+                "sub_phase": "anomaly_detected",
+                "alignment_round": align_round,
+                "details": "; ".join(g.details for g in critical_anomalies)[:400],
+            }
+            if diagnostics_block:
+                emit_payload["execution_diagnostics"] = diagnostics_block
+            emit("aligning", emit_payload)
+            if diagnostics_block:
+                logger.warning(
+                    "Alignment fix introduced backtest anomaly for %s — %s",
+                    spec.strategy_id,
+                    diagnostics_block,
+                )
+            else:
+                logger.warning(
+                    "Alignment fix introduced backtest anomaly for %s",
+                    spec.strategy_id,
+                )
+            return _terminate()
+
+        # All gates passed — commit the proposal as the new known-good state.
+        alignment_attempts.append(change_summary)
+        emit(
+            "aligning",
+            {
+                "sub_phase": "refined",
+                "alignment_round": align_round,
+                "changes_made": change_summary,
+                "trades_count": len(new_trades),
+            },
+        )
+        return _AlignmentRoundOutcome(
+            spec=proposed_spec,
+            code=proposed_code,
+            trades=new_trades,
+            metrics=new_metrics,
+            terminate=False,
         )
 
     def _run_verification_phase(
@@ -1703,6 +1777,77 @@ class StrategyLabOrchestrator:
             logger.exception("Refinement agent failed, returning original code")
             return {"changes_made": "refinement failed — no changes"}, code
 
+    def _refine_or_exhaust(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        failure_phase: str,
+        failure_details: str,
+        metrics: Optional[BacktestResult],
+        refinement_attempts: List[str],
+        round_num: int,
+        default_change_label: str,
+        emit: PhaseCallback,
+        refine_label: Optional[str] = None,
+    ) -> tuple[StrategySpec, str, bool]:
+        """Apply one refinement attempt or exhaust the round budget.
+
+        Pre: ``round_num`` is the current 0-indexed loop iteration;
+        ``refinement_attempts`` is the running change-log the caller persists.
+        Post: returns ``(new_spec, new_code, exhausted)``. When
+        ``exhausted=False`` the caller should ``continue`` (refinement was
+        applied and ``refinement_attempts`` was appended in-place); when
+        ``exhausted=True`` the caller should ``break`` (no state mutated
+        beyond a warning log).
+
+        ``refine_label`` overrides ``failure_phase`` for the ``_refine``
+        call only — used by the evaluation phase which passes
+        ``"evaluation (backtest anomaly)"`` to the refinement LLM while
+        emitting ``"evaluation"`` to the event stream.
+        """
+        assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
+        assert isinstance(code, str), "code must be a string"
+        assert isinstance(failure_phase, str) and failure_phase, "failure_phase must be non-empty"
+        assert round_num >= 0, "round_num must be non-negative"
+
+        if round_num >= MAX_CODE_REFINEMENT_ROUNDS - 1:
+            logger.warning(
+                "Max code refinement rounds reached on %s for %s",
+                failure_phase,
+                spec.strategy_id,
+            )
+            return spec, code, True
+
+        emit(
+            "coding",
+            {
+                "sub_phase": "refining",
+                "refinement_round": round_num,
+                "failure_phase": failure_phase,
+            },
+        )
+        updates, new_code = self._refine(
+            spec,
+            code,
+            refine_label or failure_phase,
+            failure_details,
+            metrics,
+            refinement_attempts,
+        )
+        new_spec = self._apply_updates(spec, updates, new_code, failure_phase=failure_phase)
+        changes = updates.get("changes_made", default_change_label)
+        refinement_attempts.append(changes)
+        emit(
+            "coding",
+            {
+                "sub_phase": "refined",
+                "refinement_round": round_num,
+                "changes_made": changes,
+            },
+        )
+        return new_spec, new_code, False
+
     def _run_alignment_audit(
         self,
         spec: StrategySpec,
@@ -2243,6 +2388,8 @@ class StrategyLabOrchestrator:
 # ──────────────────────────────────────────────────────────────────────────
 from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
     _AlignmentLoopOutcome,
+    _AlignmentRoundOutcome,
+    _AnomalyRecoveryOutcome,
     _apply_veto_to_acceptance_reason,
     _closes_to_equity,
     _daily_returns_from_trades,

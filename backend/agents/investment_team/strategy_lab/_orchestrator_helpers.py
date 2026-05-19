@@ -107,6 +107,58 @@ class _AlignmentLoopOutcome:
 
 
 @dataclass
+class _AlignmentRoundOutcome:
+    """One iteration of ``_run_trade_alignment_loop``.
+
+    Semantics:
+    - ``terminate=True`` ⇒ caller breaks the loop. The spec/code/trades/
+      metrics fields carry the pre-iteration state (either because the
+      audit reported aligned, the proposal was rejected, or the round
+      budget is spent).
+    - ``terminate=False`` ⇒ caller continues. The spec/code/trades/
+      metrics fields carry the just-committed proposal as the new
+      known-good state.
+
+    The helper mutates ``alignment_reports``, ``alignment_attempts``,
+    and ``all_gate_results`` in place; callers observe those lists
+    directly.
+    """
+
+    spec: StrategySpec
+    code: str
+    trades: List[TradeRecord]
+    metrics: BacktestResult
+    terminate: bool
+
+
+@dataclass
+class _AnomalyRecoveryOutcome:
+    """Bundle of state returned by ``_handle_critical_anomalies``.
+
+    The synthesis loop's evaluation phase delegates to that helper when
+    the backtest produces critical anomaly gates. The helper either
+    commits a zero-trade-repair proposal, applies a generic refinement,
+    or exhausts the round budget — and the loop body needs to know which
+    outcome happened so it can continue or break.
+
+    Invariants on return:
+    - ``exhausted=True`` ⇒ caller breaks the synthesis loop with
+      ``max_rounds_exhausted=True``; the spec/code/trades/metrics fields
+      carry the last failed-round values (callers should not commit them).
+    - ``exhausted=False`` ⇒ caller continues to the next round; the
+      spec/code/trades/metrics/exec_result fields carry the new known-good
+      state (either ZTR-committed proposal or generic-refined source).
+    """
+
+    spec: StrategySpec
+    code: str
+    trades: List[TradeRecord]
+    metrics: BacktestResult
+    exec_result: StrategyRunResult
+    exhausted: bool
+
+
+@dataclass
 class _SynthesisLoopOutcome:
     """Bundle of state mutated by ``_run_synthesis_loop``.
 
