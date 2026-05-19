@@ -21,11 +21,13 @@ Volatility: {volatility_pct:.1f}%
 ## Simulated trade ledger (evidence)
 {simulated_trades_section}
 
+{alignment_status_section}
 ## Instructions
 Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced for `StopLossRule` and `TakeProfitRule`: the parent engine emits closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. losing trades clustered near the stop-loss floor point to it firing). `SignalExitRule` entries in the list above are NOT yet engine-enforced — treat any predicate-based exit prose the same way as entry intent.
 Think step by step: what failure modes explain weak performance — signal timing, risk/reward asymmetry, cost drag, or rules misaligned with the market regime implied by the results?
 Use the trade-level evidence where it supports your reasoning.
 Write 5-8 sentences. Be specific about *why* this strategy underperformed.
+If an "Alignment status" section above marks the run as misaligned, you MUST open with the disclaimer verbatim and treat the strategy design as untested. Do not attribute the weak performance to any design choice; describe the execution gaps factually and recommend re-running once aligned.
 
 Return ONLY JSON with no markdown:
 {{"draft_narrative": "your draft analysis"}}

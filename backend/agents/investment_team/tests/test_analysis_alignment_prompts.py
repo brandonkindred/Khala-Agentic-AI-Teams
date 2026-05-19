@@ -30,7 +30,14 @@ from pathlib import Path
 
 import pytest
 
-from investment_team.strategy_lab.agents.analysis import _PROMPT_DIR
+from investment_team.strategy_lab.agents.alignment import (
+    AlignmentIssue,
+    TradeAlignmentReport,
+)
+from investment_team.strategy_lab.agents.analysis import (
+    _PROMPT_DIR,
+    _format_alignment_status_section,
+)
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     FixedFractionSizing,
@@ -80,7 +87,35 @@ def _render_inputs() -> dict[str, object]:
             "Trade 1: BUY AAA on 2024-01-15 @ 100.00, SELL on 2024-01-25 @ 102.50 (+2.5%)\n"
             "Trade 2: BUY BBB on 2024-02-01 @ 50.00, SELL on 2024-02-11 @ 49.00 (-2.0%)"
         ),
+        "alignment_status_section": _format_alignment_status_section(
+            TradeAlignmentReport(aligned=True)
+        ),
     }
+
+
+def _misaligned_report() -> TradeAlignmentReport:
+    """Stable misaligned fixture for the analysis-prompt golden tests."""
+    return TradeAlignmentReport(
+        aligned=False,
+        rationale=(
+            "Two trades skipped the stop-loss; one trade entered a symbol "
+            "outside the spec universe."
+        ),
+        issues=[
+            AlignmentIssue(
+                rule_type="exit_rules",
+                severity="critical",
+                description="stop-loss did not fire on trade #1 despite -8% drawdown",
+                affected_trades=[1],
+            ),
+            AlignmentIssue(
+                rule_type="universe",
+                severity="warning",
+                description="trade #2 used symbol BBB which is outside the spec universe",
+                affected_trades=[2],
+            ),
+        ],
+    )
 
 
 def _render_win() -> str:
@@ -105,6 +140,24 @@ def _render_lose() -> str:
     return template.format(**inputs)
 
 
+def _render_lose_misaligned() -> str:
+    template = (_PROMPT_DIR / "analysis_lose.md").read_text(encoding="utf-8")
+    inputs = _render_inputs()
+    inputs.update(
+        {
+            "annualized_return_pct": 3.1,
+            "total_return_pct": 4.2,
+            "sharpe_ratio": 0.42,
+            "max_drawdown_pct": 18.7,
+            "win_rate_pct": 38.0,
+            "profit_factor": 0.95,
+            "volatility_pct": 22.4,
+            "alignment_status_section": _format_alignment_status_section(_misaligned_report()),
+        }
+    )
+    return template.format(**inputs)
+
+
 def _render_alignment_system() -> str:
     return (_PROMPT_DIR / "alignment_system.md").read_text(encoding="utf-8")
 
@@ -114,6 +167,10 @@ _PromptRenderer = Callable[[], str]
 _RENDERERS: dict[str, tuple[str, _PromptRenderer]] = {
     "prompt_analysis_win.txt": ("analysis_win", _render_win),
     "prompt_analysis_lose.txt": ("analysis_lose", _render_lose),
+    "prompt_analysis_lose_misaligned.txt": (
+        "analysis_lose_misaligned",
+        _render_lose_misaligned,
+    ),
     "prompt_alignment_system.txt": ("alignment_system", _render_alignment_system),
 }
 
@@ -279,4 +336,78 @@ def test_no_mandatory_when_hold_days_mismatch() -> None:
     # The template itself must not introduce "mandatory" phrasing.
     assert not re.search(r"\bmandatory\b", rendered, flags=re.IGNORECASE), (
         "analysis_lose.md re-introduced 'mandatory' wording (issue #528)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #532: alignment status threaded into analysis prompts
+# ---------------------------------------------------------------------------
+
+
+def test_alignment_section_empty_when_no_report() -> None:
+    """Issue #532: callers that don't pass an ``alignment_report`` get an
+    empty section so legacy behaviour is preserved byte-for-byte."""
+    assert _format_alignment_status_section(None) == ""
+
+
+def test_aligned_section_contains_clean_affirmation() -> None:
+    """Issue #532: ``aligned=True`` produces a one-line audit-clean
+    affirmation rather than the disclaimer block, so winning runs aren't
+    accidentally injected with a misleading misalignment notice."""
+    rendered = _format_alignment_status_section(TradeAlignmentReport(aligned=True))
+    assert "## Alignment status" in rendered
+    assert "audit clean" in rendered
+    assert "did not faithfully implement" not in rendered
+    assert "DO NOT make causal claims" not in rendered
+
+
+def test_misaligned_section_contains_disclaimer_and_issues() -> None:
+    """Issue #532: ``aligned=False`` must surface the disclaimer verbatim,
+    enumerate every audit issue, and forbid causal claims about the design.
+    Guards the safety-rail wording so refactors of the section don't
+    silently delete it.
+    """
+    report = _misaligned_report()
+    rendered = _format_alignment_status_section(report)
+    assert "TRADES DID NOT IMPLEMENT THE SPEC" in rendered
+    assert (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary." in rendered
+    )
+    for issue in report.issues:
+        assert issue.description in rendered
+        assert issue.severity in rendered
+        assert issue.rule_type in rendered
+    assert report.rationale in rendered
+    assert "DO open the narrative with the disclaimer above" in rendered
+    assert "DO NOT make causal claims about strategy design" in rendered
+
+
+def test_misaligned_section_handles_empty_issue_list() -> None:
+    """Issue #532: even a degenerate ``aligned=False`` report with no
+    enumerated issues must still produce the disclaimer block (so a
+    fail-closed alignment retry path can't slip a confident narrative
+    through)."""
+    rendered = _format_alignment_status_section(TradeAlignmentReport(aligned=False))
+    assert "TRADES DID NOT IMPLEMENT THE SPEC" in rendered
+    assert "The executed trades did not faithfully implement the specification" in rendered
+    assert "aligned=False with no enumerated issues" in rendered
+
+
+@pytest.mark.parametrize(
+    "label,template_file",
+    [
+        pytest.param("analysis_win", "analysis_win.md", id="analysis_win"),
+        pytest.param("analysis_lose", "analysis_lose.md", id="analysis_lose"),
+    ],
+)
+def test_analysis_templates_expose_alignment_placeholder(label: str, template_file: str) -> None:
+    """Issue #532: both analysis prompt templates must expose the
+    ``{alignment_status_section}`` placeholder so the orchestrator can
+    inject the audit verdict + issues into the LLM context. Without this
+    placeholder the alignment_status arg is silently dropped on the floor.
+    """
+    template = (_PROMPT_DIR / template_file).read_text(encoding="utf-8")
+    assert "{alignment_status_section}" in template, (
+        f"{label} template missing {{alignment_status_section}} placeholder (issue #532)."
     )

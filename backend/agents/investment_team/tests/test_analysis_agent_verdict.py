@@ -27,6 +27,10 @@ from typing import Any, List
 
 from investment_team.models import BacktestResult, StrategySpec
 from investment_team.strategy_lab.agents import analysis as analysis_module
+from investment_team.strategy_lab.agents.alignment import (
+    AlignmentIssue,
+    TradeAlignmentReport,
+)
 from investment_team.strategy_lab.agents.analysis import AnalysisAgent
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -198,3 +202,108 @@ def test_analysis_agent_falls_back_to_metric_heuristic_when_unset(monkeypatch):
     assert "analysis_lose.md" not in rec.read_files
     prompts = "\n\n".join(rec.prompts)
     assert "Outcome label: WINNING" in prompts
+
+
+def test_misaligned_alignment_report_threads_disclaimer_into_draft_and_review(
+    monkeypatch,
+):
+    """Issue #532: when the orchestrator passes an ``alignment_report`` with
+    ``aligned=False``, both the draft template prompt and the self-review
+    prompt must surface the disclaimer + each concrete issue description.
+    Without this the LLM keeps writing confident causal narratives even when
+    the trades didn't implement the spec."""
+
+    rec = _install_recorder(monkeypatch)
+
+    report = TradeAlignmentReport(
+        aligned=False,
+        rationale="Stop-loss skipped; trade entered outside the universe.",
+        issues=[
+            AlignmentIssue(
+                rule_type="exit_rules",
+                severity="critical",
+                description="stop-loss did not fire on trade #4 despite -8% drawdown",
+                affected_trades=[4],
+            ),
+            AlignmentIssue(
+                rule_type="universe",
+                severity="warning",
+                description="trade #7 used symbol outside the spec universe",
+                affected_trades=[7],
+            ),
+        ],
+    )
+
+    AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=False,
+        alignment_report=report,
+    )
+
+    # Two prompts are expected: draft (Phase 1) and self-review (Phase 2).
+    assert len(rec.prompts) == 2, (
+        f"Expected exactly two LLM calls (draft + self-review); got {len(rec.prompts)}."
+    )
+    for label, prompt in zip(("draft", "self-review"), rec.prompts):
+        assert "TRADES DID NOT IMPLEMENT THE SPEC" in prompt, (
+            f"{label} prompt missing misalignment header (issue #532)."
+        )
+        assert (
+            "The executed trades did not faithfully implement the specification; "
+            "interpretation is preliminary." in prompt
+        ), f"{label} prompt missing verbatim disclaimer (issue #532)."
+        for issue in report.issues:
+            assert issue.description in prompt, (
+                f"{label} prompt dropped alignment issue {issue.description!r} (issue #532)."
+            )
+        assert "DO NOT make causal claims about strategy design" in prompt, (
+            f"{label} prompt missing 'no causal claims' instruction (issue #532)."
+        )
+
+
+def test_aligned_report_does_not_inject_disclaimer(monkeypatch):
+    """Issue #532: ``aligned=True`` must NOT inject the misalignment
+    disclaimer into either prompt (winning runs aren't disclaimed)."""
+
+    rec = _install_recorder(monkeypatch)
+
+    AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+        alignment_report=TradeAlignmentReport(aligned=True),
+    )
+
+    prompts = "\n\n".join(rec.prompts)
+    assert "TRADES DID NOT IMPLEMENT THE SPEC" not in prompts
+    assert "did not faithfully implement the specification" not in prompts
+    # The one-line clean affirmation IS expected on aligned runs.
+    assert "alignment audit clean" in prompts
+
+
+def test_no_alignment_report_omits_section_entirely(monkeypatch):
+    """Issue #532: legacy callers (and the orchestrator fallback path that
+    runs without any alignment report) must produce prompts that contain
+    neither the disclaimer nor the clean affirmation — just the legacy
+    body, byte-for-byte minus the empty placeholder."""
+
+    rec = _install_recorder(monkeypatch)
+
+    AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+        # alignment_report omitted (defaults to None)
+    )
+
+    prompts = "\n\n".join(rec.prompts)
+    assert "## Alignment status" not in prompts
+    assert "TRADES DID NOT IMPLEMENT THE SPEC" not in prompts
+    assert "alignment audit clean" not in prompts

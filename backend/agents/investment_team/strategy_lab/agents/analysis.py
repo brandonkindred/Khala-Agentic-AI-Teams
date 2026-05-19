@@ -12,6 +12,7 @@ from strands import Agent
 
 from ...models import BacktestResult, StrategySpec, TradeRecord
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+from .alignment import TradeAlignmentReport
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -36,10 +37,12 @@ Outcome label: {outcome_label}
 ## Simulated trades summary (source of truth)
 {simulated_trades_section}
 
+{alignment_status_section}
 ## Draft analysis to verify
 {draft_narrative}
 
 ## Instructions
+0. If an "Alignment status" section above marks the run as misaligned, ensure the polished narrative opens with the disclaimer verbatim and contains no causal claims about strategy design ("worked because of X", "failed because of Y"). Treat the listed alignment issues as facts; do not soften them.
 1. Check every substantive claim in the draft against the strategy, metrics, and trade evidence.
 2. Remove or rewrite anything that is unsupported, vague, or contradicts the numbers.
 3. Produce a single polished narrative (5-10 sentences) that a risk committee could rely on.
@@ -48,6 +51,11 @@ Outcome label: {outcome_label}
 Return ONLY JSON with no markdown:
 {{"revised_narrative": "...", "verification_notes": "..."}}
 """
+
+_MISALIGNED_DISCLAIMER = (
+    "The executed trades did not faithfully implement the specification; "
+    "interpretation is preliminary."
+)
 
 
 class AnalysisAgent:
@@ -61,6 +69,7 @@ class AnalysisAgent:
         rationale: str,
         on_sub_phase: Any = None,
         is_winning: Optional[bool] = None,
+        alignment_report: Optional[TradeAlignmentReport] = None,
     ) -> str:
         """Produce a polished analysis narrative via draft + self-review.
 
@@ -72,12 +81,19 @@ class AnalysisAgent:
                 gate / fallback anomalies (#529) must pass it explicitly so the
                 narrative template and ``outcome_label`` match the persisted
                 ``StrategyLabRecord.is_winning``.
+            alignment_report: Latest ``TradeAlignmentReport`` from the alignment
+                loop. When ``aligned=False``, both the draft and self-review
+                prompts surface a disclaimer + the concrete alignment issues and
+                forbid causal claims about strategy design (#532). When None or
+                ``aligned=True``, the section is empty / a one-line affirmation
+                so legacy callers and clean runs are unaffected.
 
         Returns the final narrative string.
         """
         if is_winning is None:
             is_winning = metrics.annualized_return_pct > 8.0
         trades_summary = _format_simulated_trades_summary(trades)
+        alignment_section = _format_alignment_status_section(alignment_report)
 
         # Phase 1: Draft
         template_file = "analysis_win.md" if is_winning else "analysis_lose.md"
@@ -100,6 +116,7 @@ class AnalysisAgent:
             profit_factor=metrics.profit_factor,
             volatility_pct=metrics.volatility_pct,
             simulated_trades_section=trades_summary,
+            alignment_status_section=alignment_section,
         )
 
         agent = Agent(
@@ -135,6 +152,7 @@ class AnalysisAgent:
             volatility_pct=metrics.volatility_pct,
             outcome_label="WINNING" if is_winning else "LOSING",
             simulated_trades_section=trades_summary,
+            alignment_status_section=alignment_section,
             draft_narrative=draft_narrative,
         )
 
@@ -208,6 +226,55 @@ def _format_simulated_trades_summary(trades: List[TradeRecord], max_sample_rows:
     if n > len(seen):
         lines.append(f"  ... ({n - len(seen)} additional trades not shown) ...")
 
+    return "\n".join(lines)
+
+
+def _format_alignment_status_section(report: Optional[TradeAlignmentReport]) -> str:
+    """Render the ``## Alignment status`` block injected into analysis prompts.
+
+    ``None`` produces an empty string so legacy callers (and fallback paths
+    where no alignment report exists) render byte-identical prompts to before
+    issue #532. ``aligned=True`` produces a one-line affirmation. ``aligned=
+    False`` produces a disclaimer, the enumerated audit issues, and explicit
+    instructions that forbid causal claims about strategy design — the trades
+    are not a valid test of the spec, so the narrative must not say it
+    "worked because of X" or "failed because of Y".
+    """
+    if report is None:
+        return ""
+
+    if report.aligned:
+        return (
+            "## Alignment status\n"
+            "The executed trades faithfully implement the specification "
+            "(alignment audit clean).\n"
+        )
+
+    lines: List[str] = [
+        "## Alignment status — TRADES DID NOT IMPLEMENT THE SPEC",
+        "",
+        f'Disclaimer to surface in the narrative: "{_MISALIGNED_DISCLAIMER}"',
+        "",
+        "Concrete alignment issues (facts; do not paraphrase away):",
+    ]
+    if report.issues:
+        for issue in report.issues:
+            lines.append(f"- [{issue.severity}] {issue.rule_type}: {issue.description}")
+    else:
+        lines.append("- (audit returned aligned=False with no enumerated issues)")
+    if report.rationale:
+        lines.append("")
+        lines.append(f"Audit rationale: {report.rationale}")
+    lines.extend(
+        [
+            "",
+            "Constraints for this analysis:",
+            "- DO open the narrative with the disclaimer above.",
+            '- DO NOT make causal claims about strategy design (e.g. "worked because of X", "failed because of Y") — the trades are not a valid test of the spec.',
+            "- DO describe execution gaps factually and recommend re-running once aligned.",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 

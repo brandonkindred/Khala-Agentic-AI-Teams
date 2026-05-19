@@ -1390,6 +1390,7 @@ class StrategyLabOrchestrator:
         execution_succeeded: bool,
         refinement_attempts: List[Dict[str, Any]],
         all_gate_results: List[QualityGateResult],
+        alignment_report: Optional[TradeAlignmentReport],
         emit: PhaseCallback,
     ) -> str:
         """Run the analysis agent and return the narrative string.
@@ -1416,6 +1417,7 @@ class StrategyLabOrchestrator:
                     rationale,
                     on_sub_phase=_on_analysis_sub,
                     is_winning=is_winning,
+                    alignment_report=alignment_report,
                 )
                 emit("analyzing", {"sub_phase": "completed", "is_winning": is_winning})
                 return narrative
@@ -1715,6 +1717,7 @@ class StrategyLabOrchestrator:
         # to carry every downstream-visible signal. The fields stay on the
         # dataclass for callers that want to inspect the outcome directly.
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────
+        latest_alignment_report = alignment_reports[-1] if alignment_reports else None
         narrative = self._run_analysis_phase(
             spec=spec,
             metrics=metrics,
@@ -1724,6 +1727,7 @@ class StrategyLabOrchestrator:
             execution_succeeded=execution_succeeded,
             refinement_attempts=refinement_attempts,
             all_gate_results=all_gate_results,
+            alignment_report=latest_alignment_report,
             emit=emit,
         )
 
