@@ -44,8 +44,13 @@ from ..models import (
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
-from .agents.alignment import AlignmentAuditError, TradeAlignmentAgent, TradeAlignmentReport
-from .agents.analysis import AnalysisAgent
+from .agents.alignment import (
+    AlignmentAuditError,
+    AlignmentIssue,
+    TradeAlignmentAgent,
+    TradeAlignmentReport,
+)
+from .agents.analysis import AnalysisAgent, format_misalignment_prefix
 from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
@@ -110,6 +115,50 @@ WINNING_THRESHOLD = 8.0
 # block. The model already trims to 20; 10 is enough signal for the LLM to
 # spot the failure pattern while keeping the JSON line under ~1 KB.
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
+
+
+def _resolve_alignment_report_for_analysis(
+    alignment_reports: List[TradeAlignmentReport],
+    *,
+    exit_rule_conformance_passed: bool,
+) -> Optional[TradeAlignmentReport]:
+    """Pick the alignment report fed into the analysis prompts.
+
+    Returns the most recent report from the alignment loop unless the
+    deterministic ``ExitRuleConformanceGate`` then vetoed publication after
+    the LLM audit had cleared the run — in which case a synthetic
+    misaligned report is substituted so the analysis prompt can't narrate
+    "audit clean" over the conformance veto (#532).
+
+    Returns ``None`` when the alignment loop never ran (no reports).
+    """
+    if not alignment_reports:
+        return None
+    latest = alignment_reports[-1]
+    if latest.aligned and not exit_rule_conformance_passed:
+        return TradeAlignmentReport(
+            aligned=False,
+            rationale=(
+                "ExitRuleConformanceGate vetoed publication: the LLM "
+                "alignment audit returned aligned=True, but the "
+                "deterministic conformance check then flagged "
+                "engine-enforced exit-rule violations in the final ledger "
+                "that the audit had missed."
+            ),
+            issues=[
+                AlignmentIssue(
+                    rule_type="exit_rules",
+                    severity="critical",
+                    description=(
+                        "ExitRuleConformanceGate failed: structured exit "
+                        "rules did not fire as required on at least one "
+                        "trade. Treat the executed trades as not a valid "
+                        "test of the spec."
+                    ),
+                )
+            ],
+        )
+    return latest
 
 
 class StrategyLabOrchestrator:
@@ -1424,11 +1473,17 @@ class StrategyLabOrchestrator:
             except Exception:
                 logger.exception("Analysis agent failed for %s", spec.strategy_id)
                 label = "winning" if is_winning else "losing"
-                return (
+                summary = (
                     f"Auto-summary: {spec.asset_class} strategy ({label}) with "
                     f"annualized return {metrics.annualized_return_pct:.1f}%. "
                     f"(Detailed narrative generation failed.)"
                 )
+                # When the agent raises before its internal _fallback_narrative
+                # path runs (model factory, prompt-file IO, etc.), the
+                # misalignment disclaimer would otherwise be lost on aligned=
+                # False runs (#532).
+                prefix = format_misalignment_prefix(alignment_report)
+                return f"{prefix}\n{summary}" if prefix else summary
         if not execution_succeeded:
             return (
                 f"Strategy failed to produce valid backtest results after "
@@ -1711,13 +1766,18 @@ class StrategyLabOrchestrator:
         metrics = verification.metrics
         is_winning = verification.is_winning
         # The other ``_VerificationOutcome`` fields (acceptance_results,
-        # walk_forward_failed, upstream_admitted, exit_rule_conformance_passed)
-        # are unused beyond this point — the verification phase already
-        # extended ``all_gate_results`` and mutated ``metrics.acceptance_reason``
-        # to carry every downstream-visible signal. The fields stay on the
-        # dataclass for callers that want to inspect the outcome directly.
+        # walk_forward_failed, upstream_admitted) are unused beyond this
+        # point — the verification phase already extended
+        # ``all_gate_results`` and mutated ``metrics.acceptance_reason`` to
+        # carry every downstream-visible signal. ``exit_rule_conformance_passed``
+        # is consumed inside ``_resolve_alignment_report_for_analysis`` to
+        # override the alignment report when the deterministic conformance
+        # gate vetoes a clean LLM audit (#532).
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────
-        latest_alignment_report = alignment_reports[-1] if alignment_reports else None
+        latest_alignment_report = _resolve_alignment_report_for_analysis(
+            alignment_reports,
+            exit_rule_conformance_passed=verification.exit_rule_conformance_passed,
+        )
         narrative = self._run_analysis_phase(
             spec=spec,
             metrics=metrics,

@@ -278,6 +278,26 @@ def _format_alignment_status_section(report: Optional[TradeAlignmentReport]) -> 
     return "\n".join(lines)
 
 
+def format_misalignment_prefix(report: Optional[TradeAlignmentReport]) -> str:
+    """Disclaimer + enumerated issues block for narrative outputs when
+    ``aligned=False``.
+
+    Returns an empty string for ``None`` or ``aligned=True`` so aligned and
+    legacy paths stay byte-identical. Shared between the agent's
+    ``_fallback_narrative`` and the orchestrator's analysis-phase exception
+    handler so a misaligned run cannot slip a confident auto-summary out
+    via either fallback path (#532).
+    """
+    if report is None or report.aligned:
+        return ""
+    parts: List[str] = [_MISALIGNED_DISCLAIMER]
+    if report.issues:
+        parts.append("Alignment issues:")
+        for issue in report.issues:
+            parts.append(f"- [{issue.severity}] {issue.rule_type}: {issue.description}")
+    return "\n".join(parts)
+
+
 def _fallback_narrative(
     spec: StrategySpec,
     metrics: BacktestResult,
@@ -301,16 +321,10 @@ def _fallback_narrative(
         f"max drawdown {metrics.max_drawdown_pct:.1f}%, win rate {metrics.win_rate_pct:.1f}%. "
         f"(Detailed narrative generation failed.)"
     )
-    if alignment_report is None or alignment_report.aligned:
+    prefix = format_misalignment_prefix(alignment_report)
+    if not prefix:
         return summary
-
-    parts: List[str] = [_MISALIGNED_DISCLAIMER]
-    if alignment_report.issues:
-        parts.append("Alignment issues:")
-        for issue in alignment_report.issues:
-            parts.append(f"- [{issue.severity}] {issue.rule_type}: {issue.description}")
-    parts.append(summary)
-    return "\n".join(parts)
+    return f"{prefix}\n{summary}"
 
 
 def _extract_json(text: str) -> Dict[str, Any]:

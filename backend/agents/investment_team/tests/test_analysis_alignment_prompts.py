@@ -37,6 +37,7 @@ from investment_team.strategy_lab.agents.alignment import (
 from investment_team.strategy_lab.agents.analysis import (
     _PROMPT_DIR,
     _format_alignment_status_section,
+    format_misalignment_prefix,
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -411,3 +412,45 @@ def test_analysis_templates_expose_alignment_placeholder(label: str, template_fi
     assert "{alignment_status_section}" in template, (
         f"{label} template missing {{alignment_status_section}} placeholder (issue #532)."
     )
+
+
+# ---------------------------------------------------------------------------
+# format_misalignment_prefix: shared between the agent fallback and the
+# orchestrator-level analysis-phase exception handler so the disclaimer can't
+# disappear via either fallback path (PR #584 Codex review).
+# ---------------------------------------------------------------------------
+
+
+def test_misalignment_prefix_empty_for_none() -> None:
+    assert format_misalignment_prefix(None) == ""
+
+
+def test_misalignment_prefix_empty_for_aligned() -> None:
+    assert format_misalignment_prefix(TradeAlignmentReport(aligned=True)) == ""
+
+
+def test_misalignment_prefix_lists_disclaimer_and_issues() -> None:
+    """Misaligned reports must emit the disclaimer first, then the
+    enumerated issues — anything else risks the prefix being silently
+    paraphrased away by downstream consumers."""
+    report = _misaligned_report()
+    prefix = format_misalignment_prefix(report)
+    lines = prefix.split("\n")
+    assert lines[0] == (
+        "The executed trades did not faithfully implement the "
+        "specification; interpretation is preliminary."
+    )
+    assert "Alignment issues:" in lines
+    for issue in report.issues:
+        assert any(
+            line == f"- [{issue.severity}] {issue.rule_type}: {issue.description}" for line in lines
+        ), f"Issue {issue.description!r} missing or malformed in prefix."
+
+
+def test_misalignment_prefix_handles_empty_issue_list() -> None:
+    """A degenerate ``aligned=False`` report with no enumerated issues
+    must still emit the disclaimer (so fail-closed alignment retries
+    can't slip through with a clean prefix)."""
+    prefix = format_misalignment_prefix(TradeAlignmentReport(aligned=False))
+    assert prefix.startswith("The executed trades did not faithfully implement the specification")
+    assert "Alignment issues:" not in prefix
