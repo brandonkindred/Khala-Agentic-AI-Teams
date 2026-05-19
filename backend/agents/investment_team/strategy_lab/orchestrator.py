@@ -1083,6 +1083,104 @@ class StrategyLabOrchestrator:
             exit_rule_conformance_passed=exit_rule_conformance_passed,
         )
 
+    def _assemble_record(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        config: BacktestConfig,
+        metrics: BacktestResult,
+        trades: List[TradeRecord],
+        narrative: str,
+        original_spec: StrategySpec,
+        original_code: str,
+        rationale: str,
+        requested_symbols: List[str],
+        fetched_symbols: List[str],
+        max_rounds_exhausted: bool,
+        execution_succeeded: bool,
+        is_winning: bool,
+        trades_aligned: bool,
+        refinement_rounds: int,
+        alignment_rounds: int,
+        all_gate_results: List[QualityGateResult],
+        emit: PhaseCallback,
+    ) -> StrategyLabRecord:
+        """Build the final ``StrategyLabRecord`` from a settled cycle.
+
+        Pre: ``spec`` / ``code`` / ``metrics`` / ``trades`` are the
+        known-good post-verification state. ``narrative`` came from the
+        analysis phase (or a synthetic auto-summary on failure).
+        Post: a ``BacktestRecord`` + ``StrategyLabRecord`` are constructed;
+        the convergence tracker is updated; a ``"complete"`` event is
+        emitted; the record is returned.
+
+        ``status`` resolution mirrors the three terminal-state branches:
+          * cap exhausted → ``"failed: max_refinement_rounds"``
+          * clean exit → ``"completed"``
+          * everything else → ``"failed"``
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Cap-exhaustion status: the evaluation-phase site sets
+        # ``execution_succeeded=True`` ("anomalous but code is correct"),
+        # so without this branch those cycles would silently report
+        # ``status="completed"`` despite never reaching a clean backtest.
+        if max_rounds_exhausted:
+            backtest_status = "failed: max_refinement_rounds"
+        elif execution_succeeded:
+            backtest_status = "completed"
+        else:
+            backtest_status = "failed"
+
+        backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
+        backtest_record = BacktestRecord(
+            backtest_id=backtest_id,
+            strategy_id=spec.strategy_id,
+            strategy=spec,
+            config=config,
+            submitted_by="strategy_lab_v2",
+            submitted_at=now_iso,
+            completed_at=now_iso,
+            status=backtest_status,
+            result=metrics,
+            trades=trades,
+            requested_symbols=requested_symbols,
+            fetched_symbols=fetched_symbols,
+        )
+
+        lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
+        record = StrategyLabRecord(
+            lab_record_id=lab_record_id,
+            strategy=spec,
+            backtest=backtest_record,
+            is_winning=is_winning,
+            strategy_rationale=rationale,
+            analysis_narrative=narrative,
+            created_at=now_iso,
+            refinement_rounds=refinement_rounds,
+            quality_gate_results=[g.model_dump() for g in all_gate_results],
+            strategy_code=code,
+            original_spec=original_spec,
+            original_code=original_code,
+        )
+
+        self.convergence_tracker.record(spec, all_gate_results)
+
+        emit(
+            "complete",
+            {
+                "record_id": lab_record_id,
+                "is_winning": is_winning,
+                "metrics": metrics.model_dump(),
+                "refinement_rounds": refinement_rounds,
+                "alignment_rounds": alignment_rounds,
+                "trades_aligned": trades_aligned,
+            },
+        )
+
+        return record
+
     def _run_design_attempt(
         self,
         *,
@@ -1638,69 +1736,27 @@ class StrategyLabOrchestrator:
             )
 
         # ── Phase 4: RECORD ───────────────────────────────────────────
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        # #547 item 7: queryable cap-exhaustion status. The evaluation-phase
-        # site sets ``execution_succeeded=True`` ("anomalous but code is
-        # correct"), so without this branch those cycles would silently
-        # report ``status="completed"`` despite never reaching a clean
-        # backtest. With the strict reading, all three exhaustion sites now
-        # flip status to ``failed: max_refinement_rounds``.
-        if max_rounds_exhausted:
-            backtest_status = "failed: max_refinement_rounds"
-        elif execution_succeeded:
-            backtest_status = "completed"
-        else:
-            backtest_status = "failed"
-
-        backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
-        backtest_record = BacktestRecord(
-            backtest_id=backtest_id,
-            strategy_id=spec.strategy_id,
-            strategy=spec,
+        return self._assemble_record(
+            spec=spec,
+            code=code,
             config=config,
-            submitted_by="strategy_lab_v2",
-            submitted_at=now_iso,
-            completed_at=now_iso,
-            status=backtest_status,
-            result=metrics,
+            metrics=metrics,
             trades=trades,
-            requested_symbols=requested_symbols,
-            fetched_symbols=fetched_symbols,
-        )
-
-        lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
-        record = StrategyLabRecord(
-            lab_record_id=lab_record_id,
-            strategy=spec,
-            backtest=backtest_record,
-            is_winning=is_winning,
-            strategy_rationale=rationale,
-            analysis_narrative=narrative,
-            created_at=now_iso,
-            refinement_rounds=len(refinement_attempts),
-            quality_gate_results=[g.model_dump() for g in all_gate_results],
-            strategy_code=code,
+            narrative=narrative,
             original_spec=original_spec,
             original_code=original_code,
+            rationale=rationale,
+            requested_symbols=requested_symbols,
+            fetched_symbols=fetched_symbols,
+            max_rounds_exhausted=max_rounds_exhausted,
+            execution_succeeded=execution_succeeded,
+            is_winning=is_winning,
+            trades_aligned=trades_aligned,
+            refinement_rounds=len(refinement_attempts),
+            alignment_rounds=alignment_rounds,
+            all_gate_results=all_gate_results,
+            emit=emit,
         )
-
-        # Update convergence tracker
-        self.convergence_tracker.record(spec, all_gate_results)
-
-        emit(
-            "complete",
-            {
-                "record_id": lab_record_id,
-                "is_winning": is_winning,
-                "metrics": metrics.model_dump(),
-                "refinement_rounds": len(refinement_attempts),
-                "alignment_rounds": alignment_rounds,
-                "trades_aligned": trades_aligned,
-            },
-        )
-
-        return record
 
     # ------------------------------------------------------------------
     # Helpers
