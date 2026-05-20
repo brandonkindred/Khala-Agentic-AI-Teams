@@ -70,21 +70,20 @@ describe('SprintsTabComponent', () => {
     expect(fixture.componentInstance.sprints()).toEqual([sprint]);
   });
 
-  it('degrades gracefully when the sprints endpoint 404s', () => {
-    api.listSprints = vi.fn().mockReturnValue(throwError(() => ({ status: 404 })));
+  it('renders the empty state when the product has no sprints', () => {
+    api.listSprints = vi.fn().mockReturnValue(of([]));
     const fixture = build();
     fixture.detectChanges();
-    expect(fixture.componentInstance.endpointMissing()).toBe(true);
     expect(fixture.componentInstance.sprints()).toEqual([]);
     expect(fixture.componentInstance.error()).toBeNull();
   });
 
-  it('surfaces non-404 sprint errors', () => {
+  it('surfaces sprint listing errors', () => {
     api.listSprints = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'boom' } })));
     const fixture = build();
     fixture.detectChanges();
     expect(fixture.componentInstance.error()).toBe('boom');
-    expect(fixture.componentInstance.endpointMissing()).toBe(false);
+    expect(fixture.componentInstance.sprints()).toEqual([]);
   });
 
   it('enables Plan only for draft/proposed/planning sprints', () => {
