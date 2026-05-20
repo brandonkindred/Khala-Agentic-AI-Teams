@@ -188,8 +188,16 @@ def compile_strategy(spec: Any) -> str:
         ref.name in ("sma", "ema", "rsi", "macd", "bollinger") for ref in indicator_refs
     )
 
-    window = max((_lookback_for(ref) for ref in indicator_refs), default=_MIN_WINDOW)
-    window = max(window, _MIN_WINDOW)
+    # History request depth and warm-up threshold are decoupled. VWAP
+    # wants the maximum retained depth (cumulative semantics) but its
+    # helper computes from any ≥ ``_MIN_WINDOW`` bars, so gating the
+    # whole strategy on 500 bars would silently block all trading on
+    # backtests with < 500 bars. Earlier rounds used a single ``WINDOW``
+    # for both and tripped this regression.
+    history_depth = max((_history_depth_for(ref) for ref in indicator_refs), default=_MIN_WINDOW)
+    history_depth = max(history_depth, _MIN_WINDOW)
+    warmup_min = max((_lookback_for(ref) for ref in indicator_refs), default=_MIN_WINDOW)
+    warmup_min = max(warmup_min, _MIN_WINDOW)
 
     parts: List[str] = []
     parts.append(_emit_header(spec))
@@ -197,7 +205,8 @@ def compile_strategy(spec: Any) -> str:
     parts.append(
         _emit_class(
             target_symbols=target_symbols,
-            window=window,
+            history_depth=history_depth,
+            warmup_min=warmup_min,
             cross_sides=cross_sides,
             indicator_bindings=indicator_bindings,
             entry_rules=entry_rules,
@@ -259,11 +268,12 @@ def _sigid_for_side(side: Any) -> str:
 
 
 def _lookback_for(ref: IndicatorRef) -> int:
-    """Return the maximum bar-history depth ``ref`` needs to be computable.
+    """Return the MINIMUM bar-history depth ``ref`` needs before its
+    value is meaningful — used to compute the strategy's warm-up gate.
 
-    Conservative: pulls from the indicator-specific params and pads
-    out the few cases where multiple params combine (MACD = slow +
-    signal, stochastic = k_period + d_period).
+    Different from :func:`_history_depth_for`: that returns the depth
+    to REQUEST from ``ctx.history``, which can be larger (VWAP wants
+    cumulative-style depth but only needs ≥1 bar to compute).
     """
     name = ref.name
     if name in ("sma", "ema"):
@@ -300,8 +310,26 @@ def _lookback_for(ref: IndicatorRef) -> int:
         # delay the first valid signal by one bar with no safety win.
         return int(ref.param("k_period")) + int(ref.param("d_period")) - 1
     if name == "vwap":
-        return _VWAP_HISTORY
+        # Helper returns a value at ≥1 bar (cumulative sum doesn't have
+        # a strict warm-up). Floor to ``_MIN_WINDOW`` for safety — the
+        # value at 1 bar is just (h+l+c)/3, not informative.
+        return _MIN_WINDOW
     raise CompilerError(f"unsupported indicator: {name!r}")
+
+
+def _history_depth_for(ref: IndicatorRef) -> int:
+    """Return the depth to REQUEST from ``ctx.history(symbol, n)``.
+
+    Same as :func:`_lookback_for` for most indicators — they only need
+    their lookback worth of bars. VWAP is the exception: the sandbox
+    helper computes a cumulative-over-the-series VWAP, so the strategy
+    should ask for as deep a history as the harness retains
+    (``_VWAP_HISTORY``). Using the lookback (≥1) here would request
+    only the minimum and silently make compiled VWAP a 1-bar value.
+    """
+    if ref.name == "vwap":
+        return _VWAP_HISTORY
+    return _lookback_for(ref)
 
 
 def _build_indicator_bindings(
@@ -800,7 +828,8 @@ def _indent_method(body: str, spaces: int = 4) -> str:
 def _emit_class(
     *,
     target_symbols: List[str],
-    window: int,
+    history_depth: int,
+    warmup_min: int,
     cross_sides: List[Tuple[str, str, str]],
     indicator_bindings: List[Tuple[str, IndicatorRef, str, str]],
     entry_rules: List[EntryRule],
@@ -835,8 +864,8 @@ def _emit_class(
     if target_symbols:
         on_bar_lines.append("        if bar.symbol not in self.UNIVERSE:")
         on_bar_lines.append("            return")
-    on_bar_lines.append(f"        history = ctx.history(bar.symbol, {window})")
-    on_bar_lines.append(f"        if len(history) < {window}:")
+    on_bar_lines.append(f"        history = ctx.history(bar.symbol, {history_depth})")
+    on_bar_lines.append(f"        if len(history) < {warmup_min}:")
     on_bar_lines.append("            return")
     # Always emit a ctx.equity reference — flows into fixed_fraction /
     # volatility_target sizing and satisfies the sizing-math conformance
@@ -960,7 +989,8 @@ def _emit_class(
 
     body_lines: List[str] = [
         f"    UNIVERSE = {universe_literal}",
-        f"    WINDOW = {window}",
+        f"    WINDOW = {history_depth}",
+        f"    WARMUP_MIN = {warmup_min}",
         "",
         *init_lines,
         "",

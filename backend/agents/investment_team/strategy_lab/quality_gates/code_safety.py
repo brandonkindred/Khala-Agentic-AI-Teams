@@ -87,12 +87,14 @@ def _spec_has_engine_handled_exit(spec: Any) -> bool:
     """True iff ``spec.exit_rules`` contains at least one rule kind that
     the trading service's ``_EngineExitDispatcher`` will enforce on the
     strategy's behalf via ``evaluate_exit_rules`` — currently
-    ``StopLossRule`` and ``TakeProfitRule``. ``SignalExitRule`` is a
-    no-op in the evaluator (see ``executor/rule_compiler.py``), so it
-    does NOT relax the order-flow-shape requirement.
+    ``StopLossRule`` (any basis) and ``TakeProfitRule``. ``SignalExitRule``
+    is a no-op in the evaluator (see ``executor/rule_compiler.py``), so
+    it does NOT relax the order-flow-shape requirement.
 
-    Used by ``_check_order_flow_shape`` to accept entries-only strategy
-    code when the engine will close the position from spec.
+    Caller is responsible for checking that the engine-handled exits
+    actually cover every entry side the strategy plans to open — see
+    :func:`_engine_exits_cover_all_entry_sides` (some StopLossRule
+    bases are side-specific in ``_stop_loss_triggers``).
     """
     if spec is None:
         return False
@@ -104,6 +106,95 @@ def _spec_has_engine_handled_exit(spec: Any) -> bool:
     from ..spec_dsl import StopLossRule, TakeProfitRule  # local import — see docstring
 
     return any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
+
+
+def _engine_exits_cover_all_entry_sides(spec: Any) -> bool:
+    """True iff every entry side declared in ``spec.entry_rules`` is
+    closeable by at least one rule the engine will enforce.
+
+    ``_stop_loss_triggers`` in ``executor/rule_compiler.py`` makes some
+    bases side-specific: ``trailing_low`` is a no-op for ``long`` (only
+    fires on shorts), ``trailing_high`` is a no-op for ``short``. A
+    long-only spec with only a ``StopLossRule(basis="trailing_low")``
+    has NO triggerable engine exit — entries would stay open forever.
+    The safety gate should refuse those rather than rubber-stamping
+    "engine handles it".
+
+    ``TakeProfitRule`` and ``StopLossRule(basis="entry_price")`` trigger
+    for both sides.
+    """
+    if spec is None:
+        return False
+    entry_rules = getattr(spec, "entry_rules", None) or []
+    exit_rules = getattr(spec, "exit_rules", None) or []
+    from ..spec_dsl import EntryRule, StopLossRule, TakeProfitRule  # local import
+
+    entry_sides: set[str] = set()
+    for rule in entry_rules:
+        if isinstance(rule, EntryRule):
+            entry_sides.add(rule.side)
+    if not entry_sides:
+        return False
+
+    def _rule_covers_side(rule: Any, side: str) -> bool:
+        if isinstance(rule, TakeProfitRule):
+            return True
+        if isinstance(rule, StopLossRule):
+            basis = rule.basis
+            if basis == "entry_price":
+                return True
+            if basis == "trailing_high":
+                return side == "long"
+            if basis == "trailing_low":
+                return side == "short"
+        return False
+
+    for side in entry_sides:
+        if not any(_rule_covers_side(r, side) for r in exit_rules):
+            return False
+    return True
+
+
+def _hook_calls_include_entry(calls: List[ast.Call]) -> bool:
+    """True iff at least one of the ``ctx.submit_order(...)`` calls
+    reachable from ``on_bar`` looks like an entry submission — has a
+    ``side=`` kwarg AND does not pass ``qty=position.qty`` /
+    ``qty=pos.qty`` (the close-shape from the conformance gate).
+
+    Used to gate the engine-handled-exit relaxation on actually having
+    an entry path: a strategy with only ``ctx.submit_order(qty=position.qty)``
+    closes (no entries) should still fail the order-flow check even
+    when ``spec.exit_rules`` has engine-handled rules — there's nothing
+    to open in the first place.
+    """
+    _position_receiver_names = frozenset({"position", "pos"})
+    for call in calls:
+        has_side_literal = any(kw.arg == "side" for kw in call.keywords)
+        if not has_side_literal:
+            # ``**kwargs`` spreads or fully-positional calls are
+            # treated optimistically — same lenient stance the
+            # CodeConformanceGate entry-coverage check takes.
+            if any(kw.arg is None for kw in call.keywords):
+                return True
+            continue
+        # Skip calls whose qty is ``position.qty`` / ``pos.qty`` — those
+        # are closes, not entries.
+        is_close = False
+        for kw in call.keywords:
+            if kw.arg != "qty":
+                continue
+            v = kw.value
+            if (
+                isinstance(v, ast.Attribute)
+                and v.attr == "qty"
+                and isinstance(v.value, ast.Name)
+                and v.value.id in _position_receiver_names
+            ):
+                is_close = True
+                break
+        if not is_close:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -331,7 +422,22 @@ class CodeSafetyChecker(GateResultsMixin):
             )
         if _calls_form_entry_exit_pair(hook_calls):
             return ()
-        if _spec_has_engine_handled_exit(ctx.spec):
+        # Engine-handled-exit relaxation. Three gates must all hold:
+        #   (a) ``spec.exit_rules`` declares at least one engine-handled
+        #       rule (StopLossRule / TakeProfitRule).
+        #   (b) Those rules actually cover EVERY entry side the spec
+        #       plans to open — some StopLossRule.basis values are
+        #       side-specific in ``evaluate_exit_rules`` (trailing_low
+        #       is a no-op for longs, trailing_high for shorts).
+        #   (c) The strategy code itself has at least one plausible
+        #       entry submission (side= literal AND not qty=position.qty).
+        #       A close-only / no-submit strategy still fails the gate
+        #       because there's nothing to open.
+        if (
+            _spec_has_engine_handled_exit(ctx.spec)
+            and _engine_exits_cover_all_entry_sides(ctx.spec)
+            and _hook_calls_include_entry(hook_calls)
+        ):
             return ()
         if len(hook_calls) == 1:
             detail = (

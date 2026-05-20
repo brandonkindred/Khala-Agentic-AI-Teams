@@ -1265,6 +1265,127 @@ def test_requires_custom_code_defensive_on_malformed_string() -> None:
     assert _coerce_requires_custom_code({"value": True}) is False
 
 
+def test_vwap_warmup_min_does_not_block_trading() -> None:
+    """Codex round-7 P2: VWAP needs deep history (cumulative semantics)
+    but only ≥ ``_MIN_WINDOW`` bars to start trading. Previous round
+    set WINDOW=500 AND gated all trading on having 500 bars — blocking
+    any backtest shorter than 500 bars entirely. Split into separate
+    ``WINDOW`` (history-request depth) and ``WARMUP_MIN`` (gate
+    threshold): VWAP requests 500 but trades from bar 20.
+    """
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="vwap"), op=">", rhs=0.0),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    # History request is the deep VWAP depth.
+    assert "WINDOW = 500" in code
+    # Warm-up gate is the modest floor — trading starts at bar 20.
+    assert "WARMUP_MIN = 20" in code
+    # The emitted on_bar gate uses the warmup_min, not the window.
+    assert "if len(history) < 20:" in code
+    # And it still asks for 500 bars of history.
+    assert "ctx.history(bar.symbol, 500)" in code
+
+
+def test_safety_gate_rejects_close_only_strategy_even_with_engine_exits() -> None:
+    """Codex round-7 P1: the engine-handled-exit relaxation must not
+    rubber-stamp a strategy that has NO entry submission. A code-only
+    close (or zero submits) is still broken even if spec.exit_rules
+    declares engine-handled rules — there's nothing for the engine
+    to close.
+    """
+    spec_payload = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    # Synthetic code: only emits a close (qty=position.qty), no entry.
+    close_only_code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        position = ctx.position(bar.symbol)
+        if position is not None:
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.SHORT,
+                qty=position.qty,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(close_only_code, spec_payload)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() or "side" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_rejects_long_only_entry_with_short_only_trailing_stop() -> None:
+    """Codex round-7 P1: ``StopLossRule(basis="trailing_low")`` is a
+    no-op for long positions in ``_stop_loss_triggers`` (only fires on
+    shorts). A long-only spec with only that exit rule has NO
+    triggerable engine exit — positions stay open forever. The widened
+    safety gate must refuse it.
+    """
+    long_entry = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(name="rsi", params={"period": 14}),
+            op="<",
+            rhs=30.0,
+        ),
+    )
+    spec = _spec(
+        entry_rules=[long_entry],
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_low")],
+    )
+    # Synthetic entries-only code (LLM might produce this; the
+    # compiler would too since it doesn't itself reason about
+    # side-vs-basis compatibility).
+    entry_only_code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        position = ctx.position(bar.symbol)
+        if position is None:
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.LONG,
+                qty=1,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(entry_only_code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_accepts_long_entry_with_trailing_high_stop() -> None:
+    """Sanity-check the side-coverage logic — a long entry with
+    ``trailing_high`` stop is well-formed and should pass.
+    """
+    long_entry = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(name="rsi", params={"period": 14}),
+            op="<",
+            rhs=30.0,
+        ),
+    )
+    spec = _spec(
+        entry_rules=[long_entry],
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+    )
+    code = compile_strategy(spec)
+    results = CodeSafetyChecker().check(code, spec)
+    assert _critical_details(results) == [], _critical_details(results)
+
+
 def test_spec_hash_invariant_to_rule_notes() -> None:
     """Codex P3: rule-level ``note`` text is author prose and never
     affects emitted code. Two specs differing only by ``note`` must
