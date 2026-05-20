@@ -807,6 +807,47 @@ def test_diagnostics_last_order_events_capped_at_twenty() -> None:
     assert len(diagnostics.last_order_events) == _MAX_ORDER_EVENTS
 
 
+def test_diagnostics_entry_filled_no_exit_classified() -> None:
+    """An entry that fills but never sees a matching exit lands in ENTRY_WITH_NO_EXIT.
+
+    Closes the last AC for #404: covers the fourth required category alongside
+    NO_ORDERS_EMITTED, ORDERS_REJECTED, and ORDERS_UNFILLED.
+    """
+    market_data: Dict[str, List[OHLCVBar]] = {}
+    _uptrend_then_down_bars(market_data)
+
+    # LateMarketStrategy emits a market BUY on bar 0 (no position yet); once
+    # the order fills on bar 1, every subsequent on_bar returns early. With
+    # an empty ``exit_rules`` list the engine injects no synthetic closes, so
+    # the position stays open through end-of-stream — exactly the scenario
+    # the ENTRY_WITH_NO_EXIT category is meant to classify.
+    strategy = StrategySpec(
+        strategy_id="strat-404-entry-no-exit",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="entry without exit",
+        signal_definition="buy once, never sell",
+        timeframe="1d",
+        entry_rules=[],
+        exit_rules=[],
+        strategy_code=_LATE_MARKET_ORDER_STRATEGY_CODE,
+    )
+
+    run = run_backtest(strategy=strategy, config=_config(), market_data=market_data)
+    diagnostics = run.service_result.execution_diagnostics
+
+    assert run.service_result.error is None, run.service_result.error
+    assert not run.trades
+    assert diagnostics.entries_filled >= 1
+    assert diagnostics.exits_emitted == 0
+    assert diagnostics.closed_trades == 0
+    assert diagnostics.orders_unfilled == 0
+    assert diagnostics.zero_trade_category == "ENTRY_WITH_NO_EXIT"
+    assert "filled but the strategy never emitted an exit" in diagnostics.summary
+    entry_events = [e for e in diagnostics.last_order_events if e.event_type == "entry_filled"]
+    assert entry_events, f"expected an entry_filled event, got {diagnostics.last_order_events}"
+
+
 def test_run_backtest_without_strategy_code_raises() -> None:
     """The LLM-per-bar fallback is removed; no strategy_code must fail fast."""
     strategy = StrategySpec(
