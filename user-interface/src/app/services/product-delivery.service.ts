@@ -84,14 +84,7 @@ export class ProductDeliveryService {
   // Sprints
   // -------------------------------------------------------------------------
 
-  /**
-   * The backend doesn't expose `GET /sprints?product_id=…` directly today;
-   * the canonical listing route is `GET /products/{id}/backlog` for stories
-   * and individual `GET /sprints/{id}` for sprint detail. We list per
-   * product via the dedicated sprints listing endpoint when one is added;
-   * meanwhile this method returns the empty list and components degrade
-   * gracefully (`Phase 2/3 ships sprints; UI degrades to empty on 404`).
-   */
+  /** List every sprint under a product, newest first. */
   listSprints(productId: string): Observable<Sprint[]> {
     let params = new HttpParams();
     params = params.set('product_id', productId);

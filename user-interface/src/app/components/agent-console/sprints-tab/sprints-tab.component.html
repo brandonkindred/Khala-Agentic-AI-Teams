@@ -61,13 +61,6 @@
     <div class="sprints-tab__loading">
       <mat-spinner diameter="32"></mat-spinner>
     </div>
-  } @else if (endpointMissing()) {
-    <div class="sprints-tab__empty">
-      Sprint listing endpoint isn't available on this deployment. Create sprints via
-      <code>POST /api/product-delivery/sprints</code> and use
-      <code>POST /sprints/{{ '{' }}id{{ '}' }}/plan</code> directly until the listing
-      route ships.
-    </div>
   } @else if (sprints().length === 0) {
     <div class="sprints-tab__empty">No sprints yet for this product.</div>
   } @else {

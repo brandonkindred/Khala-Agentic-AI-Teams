@@ -339,6 +339,18 @@ def create_sprint(body: CreateSprintRequest) -> Sprint:
     )
 
 
+@router.get("/sprints", response_model=list[Sprint])
+def list_sprints(product_id: str) -> list[Sprint]:
+    """List sprints under a product, newest first.
+
+    A missing product surfaces as 404 via ``UnknownProductDeliveryEntity``
+    (raised by ``store.list_sprints_for_product`` in the same
+    REPEATABLE READ transaction as the SELECT — no TOCTTOU window where a
+    concurrent product delete could turn a 404 into ``200 []``).
+    """
+    return get_store().list_sprints_for_product(product_id)
+
+
 @router.post("/sprints/{sprint_id}/plan", response_model=SprintPlanResult)
 def plan_sprint(
     sprint_id: str,
