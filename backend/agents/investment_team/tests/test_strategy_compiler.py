@@ -228,11 +228,15 @@ def test_multi_rule_full_spec() -> None:
     )
     code = compile_strategy(spec)
     assert _strategy_subclass_count(code) == 1
-    assert "self._prev_" in code  # cross_* state slot present
+    assert "self._cross_prev" in code  # per-symbol cross_* state dict present
     assert "position.entry_price" in code  # stop/take-profit gate compliance
 
 
-def test_cross_above_emits_prev_state() -> None:
+def test_cross_above_emits_per_symbol_prev_state() -> None:
+    """Codex P1 review: cross state must be keyed by ``bar.symbol`` so a
+    multi-symbol run can't compare this bar's value against a different
+    symbol's previous bar.
+    """
     entry = EntryRule(
         side="long",
         when=Predicate(
@@ -243,20 +247,23 @@ def test_cross_above_emits_prev_state() -> None:
     )
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
-    # __init__ assigns prev slots; on_bar updates them at the end.
+    # __init__ creates the per-symbol dict.
     tree = ast.parse(code)
     init_methods = [
         n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "__init__"
     ]
     assert init_methods, "compiled class must define __init__ for cross-state"
-    prev_attr_assignments = [
+    cross_prev_assignments = [
         node
         for method in init_methods
         for node in ast.walk(method)
         if isinstance(node, ast.Assign)
-        and any(isinstance(t, ast.Attribute) and t.attr.startswith("_prev_") for t in node.targets)
+        and any(isinstance(t, ast.Attribute) and t.attr == "_cross_prev" for t in node.targets)
     ]
-    assert len(prev_attr_assignments) >= 2
+    assert len(cross_prev_assignments) == 1, "expected `self._cross_prev = {}` in __init__"
+    # on_bar reads the per-symbol slice and writes back.
+    assert "self._cross_prev.get(bar.symbol" in code
+    assert "self._cross_prev.setdefault(bar.symbol" in code
 
 
 # ---------------------------------------------------------------------------
@@ -672,3 +679,166 @@ def test_no_indicators_import_in_emitted_code() -> None:
     # Only the canonical helpers actually used by the spec are emitted.
     assert "def rsi(self, history" in code
     assert "def sma(self, history" not in code  # rsi-only spec — no sma helper
+
+
+# ---------------------------------------------------------------------------
+# Codex P1 round-2: ADX window, MACD fast/slow guard, per-symbol cross state,
+# multi-entry guard. Codex P2: spec-hash field scope.
+# ---------------------------------------------------------------------------
+
+
+def test_adx_window_at_least_two_period_plus_one() -> None:
+    """ADX helper requires ``2 * period + 1`` bars before returning a
+    value (Wilder smoothing eats two windows). The emitted ``WINDOW``
+    must reflect that or the binding stays ``None`` forever.
+    """
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="adx", params={"period": 14}), op=">", rhs=25.0),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    # 2*14 + 1 = 29 ⇒ WINDOW >= 29
+    assert "WINDOW = 29" in code
+
+
+def test_macd_fast_greater_than_slow_raises() -> None:
+    """Codex P1: fast >= slow would IndexError inside the helper —
+    refuse the spec at compile time so the orchestrator falls back."""
+    entry = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(name="macd", params={"fast": 30, "slow": 10, "signal": 9}),
+            op=">",
+            rhs=0.0,
+        ),
+    )
+    spec = _spec(entry_rules=[entry])
+    with pytest.raises(CompilerError, match="fast < slow"):
+        compile_strategy(spec)
+
+
+def test_macd_helper_defensive_fast_slow_returns_none() -> None:
+    """Defense-in-depth: even if a spec slipped past the front-door
+    check, the helper must return None rather than IndexError."""
+    # Build the code via a valid spec, then exec the module and call
+    # the helper with a fast >= slow combo directly.
+    spec = _spec(
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=IndicatorRef(name="macd", params={}), op=">", rhs=0.0),
+            )
+        ]
+    )
+    code = compile_strategy(spec)
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    bars = [_SyntheticBar(close=100.0 + i) for i in range(60)]
+    assert strat.macd(bars, fast=30, slow=10, signal=9) is None
+
+
+def test_cross_state_isolated_per_symbol() -> None:
+    """Run on_bar for two different symbols and verify the second
+    symbol's first bar doesn't pick up the first symbol's prev value.
+    """
+    entry = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(name="sma", params={"period": 5}),
+            op="cross_above",
+            rhs=IndicatorRef(name="sma", params={"period": 10}),
+        ),
+    )
+    spec = _spec(
+        entry_rules=[entry],
+        # Two-symbol universe so the universe guard accepts both.
+        target_symbols=["AAA", "BBB"],
+    )
+    code = compile_strategy(spec)
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+
+    # Symbol A: descending closes — fast SMA below slow SMA on the
+    # latest bar. After on_bar, A's _cross_prev has its own values.
+    bars_a = [_SyntheticBar(symbol="AAA", close=100.0 - i) for i in range(30)]
+    ctx = _SyntheticContext(history=bars_a)
+    strat.on_bar(ctx, bars_a[-1])
+    # Symbol B's first bar should not see symbol A's previous values.
+    assert "AAA" in strat._cross_prev
+    assert "BBB" not in strat._cross_prev
+
+    bars_b = [_SyntheticBar(symbol="BBB", close=100.0 + i) for i in range(30)]
+    ctx_b = _SyntheticContext(history=bars_b)
+    strat.on_bar(ctx_b, bars_b[-1])
+    # Now both symbols have their own slots — no overlap.
+    assert "BBB" in strat._cross_prev
+    assert strat._cross_prev["AAA"] != strat._cross_prev["BBB"]
+
+
+def test_multiple_entry_rules_one_bar_emits_one_entry() -> None:
+    """Codex P1: when two entry predicates are true on the same bar
+    the compiled code must emit ONE entry, not two.
+    """
+    # Two entry rules; both will fire on a flat-history bar because
+    # each predicate threshold is generous.
+    rule_a = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=99.0),
+    )
+    rule_b = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.close", op=">", rhs=1.0),
+    )
+    spec = _spec(entry_rules=[rule_a, rule_b])
+    code = compile_strategy(spec)
+    assert "entry_submitted" in code
+    ns, _OrderSide, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    history = [_SyntheticBar(close=100.0) for _ in range(25)]
+    ctx = _SyntheticContext(history=history, position=None)
+    strat.on_bar(ctx, history[-1])
+    # Exactly ONE entry submission, not two.
+    assert len(ctx.orders) == 1, ctx.orders
+
+
+def test_spec_hash_ignores_non_dsl_fields() -> None:
+    """Codex P2: the spec-hash header must be invariant to non-DSL
+    fields (hypothesis prose, ``strategy_code``, audit) so semantically
+    identical rule specs produce byte-identical compiled output.
+    """
+    spec_a = _spec(entry_rules=[_rsi_lt_30_entry()], exit_rules=[_rsi_gt_70_exit()])
+    # Mutate non-DSL fields on a deep copy.
+    spec_b = spec_a.model_copy(deep=True)
+    spec_b.hypothesis = "different hypothesis prose"
+    spec_b.signal_definition = "different signal definition"
+    spec_b.strategy_code = "# placeholder LLM output that would change every run"
+    code_a = compile_strategy(spec_a)
+    code_b = compile_strategy(spec_b)
+    assert code_a == code_b, (
+        "compiler output must be invariant to non-DSL fields — same "
+        "rules + sizing + target_symbols must produce identical code"
+    )
+
+
+def test_requires_custom_code_string_false_does_not_disable_compile() -> None:
+    """Codex P2: ``bool('false')`` is ``True``; the orchestrator must
+    not coerce the raw value through ``bool(...)`` or any non-empty
+    string would silently disable deterministic compilation. The
+    StrategySpec field is ``bool`` so Pydantic's bool coercion handles
+    the string variants correctly.
+    """
+    spec = StrategySpec(
+        strategy_id="strat-test",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="test hypothesis",
+        signal_definition="test signal",
+        timeframe="1d",
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[_rsi_gt_70_exit()],
+        sizing=FixedFractionSizing(fraction=0.02),
+        target_symbols=["QQQ"],
+        requires_custom_code="false",  # type: ignore[arg-type]
+    )
+    assert spec.requires_custom_code is False

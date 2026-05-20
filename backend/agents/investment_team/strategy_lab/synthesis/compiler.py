@@ -134,6 +134,20 @@ def compile_strategy(spec: Any) -> str:
             )
 
     indicator_refs: List[IndicatorRef] = _collect_indicators(entry_rules, signal_exit_rules)
+    # MACD convention requires fast < slow; the DSL registry does not
+    # cross-check the two periods, so the validation lives here. With
+    # fast >= slow the helper's ``sub[-fast]`` index would walk off the
+    # left end of ``sub`` when ``len(sub) = slow``.
+    for ref in indicator_refs:
+        if ref.name == "macd":
+            fast = int(ref.param("fast"))
+            slow = int(ref.param("slow"))
+            if fast >= slow:
+                raise CompilerError(
+                    f"macd indicator requires fast < slow (got fast={fast}, "
+                    f"slow={slow}); falling back to LLM synthesis"
+                )
+
     if isinstance(sizing, VolatilityTargetSizing) and not any(
         ref.name == "atr" for ref in indicator_refs
     ):
@@ -237,8 +251,14 @@ def _lookback_for(ref: IndicatorRef) -> int:
         return int(ref.param("slow")) + int(ref.param("signal"))
     if name == "bollinger":
         return int(ref.param("period"))
-    if name in ("atr", "adx"):
+    if name == "atr":
         return int(ref.param("period")) + 1
+    if name == "adx":
+        # Helper needs 2 * period + 1 bars before returning a value
+        # (Wilder smoothing requires two DX windows). A smaller window
+        # leaves the binding permanently None and ADX predicates never
+        # fire even on otherwise-sufficient market history.
+        return 2 * int(ref.param("period")) + 1
     if name == "stochastic":
         return int(ref.param("k_period")) + int(ref.param("d_period"))
     if name == "vwap":
@@ -305,13 +325,14 @@ def _collect_cross_sides(
     signal_exit_rules: List[SignalExitRule],
     indicator_bindings: List[Tuple[str, IndicatorRef, str, str]],
 ) -> List[Tuple[str, str, str]]:
-    """Return ``(sigid, prev_attr, current_expr)`` for every side that
+    """Return ``(sigid, prev_var, current_expr)`` for every side that
     participates in any ``cross_above`` / ``cross_below`` predicate.
 
-    ``prev_attr`` is the ``self._prev_<sigid>`` slot name; ``current_expr``
-    is the expression yielding the side's current-bar value (an indicator
-    binding variable or a bar-field reference). De-duplicated by sigid;
-    sort order is sigid so emission is stable.
+    ``prev_var`` is the local variable name (``prev_<sigid>``) bound at
+    the top of ``on_bar`` from the per-symbol ``self._cross_prev`` dict;
+    ``current_expr`` is the expression yielding the side's current-bar
+    value (an indicator binding variable or a bar-field reference).
+    De-duplicated by sigid; sort order is sigid so emission is stable.
     """
     binding_by_sigid = {sigid: varname for varname, _ref, _call, sigid in indicator_bindings}
     out: dict[str, Tuple[str, str, str]] = {}
@@ -320,9 +341,9 @@ def _collect_cross_sides(
         sigid = _sigid_for_side(side)
         if sigid in out:
             return
-        prev_attr = f"_prev_{sigid}"
+        prev_var = f"prev_{sigid}"
         current_expr = _render_side(side, binding_by_sigid)
-        out[sigid] = (sigid, prev_attr, current_expr)
+        out[sigid] = (sigid, prev_var, current_expr)
 
     for rule in entry_rules:
         if rule.when.op in ("cross_above", "cross_below"):
@@ -385,19 +406,19 @@ def _render_predicate(
         clauses = guards + [f"{lhs_expr} {pred.op} {rhs_expr}"]
         return "(" + " and ".join(clauses) + ")"
 
-    prev_by_sigid = {sigid: prev_attr for sigid, prev_attr, _cur in cross_sides}
+    prev_by_sigid = {sigid: prev_var for sigid, prev_var, _cur in cross_sides}
     lhs_prev = prev_by_sigid[_sigid_for_side(pred.lhs)]
     rhs_prev = prev_by_sigid[_sigid_for_side(pred.rhs)]
     cross_clauses = guards + [
-        f"self.{lhs_prev} is not None",
-        f"self.{rhs_prev} is not None",
+        f"{lhs_prev} is not None",
+        f"{rhs_prev} is not None",
     ]
     if pred.op == "cross_above":
-        cross_clauses.append(f"self.{lhs_prev} <= self.{rhs_prev}")
+        cross_clauses.append(f"{lhs_prev} <= {rhs_prev}")
         cross_clauses.append(f"{lhs_expr} > {rhs_expr}")
         return "(" + " and ".join(cross_clauses) + ")"
     if pred.op == "cross_below":
-        cross_clauses.append(f"self.{lhs_prev} >= self.{rhs_prev}")
+        cross_clauses.append(f"{lhs_prev} >= {rhs_prev}")
         cross_clauses.append(f"{lhs_expr} < {rhs_expr}")
         return "(" + " and ".join(cross_clauses) + ")"
     raise CompilerError(f"unsupported predicate op: {pred.op!r}")
@@ -521,6 +542,10 @@ _HELPER_BODIES: dict[str, str] = {
     "macd": textwrap.dedent(
         """\
         def macd(self, history, fast=12, slow=26, signal=9, source="close", select="macd"):
+            # Defensive: the compile_strategy front-door rejects fast >= slow,
+            # but the helper guards too so a runtime bug never IndexErrors.
+            if fast >= slow:
+                return None
             if len(history) < slow + signal:
                 return None
             macd_line = []
@@ -659,14 +684,39 @@ _HELPER_BODIES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
+def _canonical_spec_payload(spec: Any) -> dict[str, Any]:
+    """Return a sort-stable dict of the DSL fields that determine
+    compiled output. Used by ``_emit_header`` so the spec-hash header
+    is invariant to non-DSL fields like ``strategy_code`` (which is
+    itself the compiler's output), ``hypothesis`` prose, ``audit``, etc.
+    """
+
+    def _dump(value: Any) -> Any:
+        if value is None:
+            return None
+        if hasattr(value, "model_dump"):
+            return value.model_dump(mode="json")
+        return value
+
+    return {
+        "target_symbols": list(getattr(spec, "target_symbols", []) or []),
+        "entry_rules": [_dump(r) for r in (getattr(spec, "entry_rules", []) or [])],
+        "exit_rules": [_dump(r) for r in (getattr(spec, "exit_rules", []) or [])],
+        "sizing": _dump(getattr(spec, "sizing", None)),
+    }
+
+
 def _emit_header(spec: Any) -> str:
     """Return the deterministic banner block.
 
-    ``spec_hash`` is sha256 of the spec's sorted JSON dump truncated to
-    12 hex chars — pure function of spec content so the compiled output
-    is byte-identical for identical specs.
+    ``spec_hash`` is sha256 of a canonical JSON dump of the DSL fields
+    the compiler actually consumes (``target_symbols``, ``entry_rules``,
+    ``exit_rules``, ``sizing``), truncated to 12 hex chars. Audit
+    metadata, prose, and ``strategy_code`` itself are intentionally
+    excluded so two semantically identical rule specs always produce
+    byte-identical compiled output regardless of surrounding metadata.
     """
-    payload = spec.model_dump_json() if hasattr(spec, "model_dump_json") else json.dumps(spec)
+    payload = json.dumps(_canonical_spec_payload(spec), sort_keys=True)
     spec_hash = hashlib.sha256(payload.encode()).hexdigest()[:12]
     return textwrap.dedent(
         f"""\
@@ -713,8 +763,11 @@ def _emit_class(
     init_lines: List[str] = ["    def __init__(self):"]
     init_lines.append("        super().__init__()")
     if cross_sides:
-        for _sigid, prev_attr, _cur in cross_sides:
-            init_lines.append(f"        self.{prev_attr} = None")
+        # ``self._cross_prev`` is keyed by ``bar.symbol`` so multi-symbol
+        # runs don't leak previous-bar state across tickers. Each value
+        # is a sigid → previous-value dict written at the end of every
+        # successful ``on_bar``.
+        init_lines.append("        self._cross_prev = {}")
     else:
         init_lines.append("        # No cross-* predicates — no prior-bar state.")
         init_lines.append("        pass")
@@ -739,6 +792,14 @@ def _emit_class(
     # Indicator binds — sigid-sorted (see _build_indicator_bindings).
     for varname, _ref, call_expr, _sigid in indicator_bindings:
         on_bar_lines.append(f"        {varname} = {call_expr}")
+    # Previous-bar snapshots used by cross_above/cross_below predicates.
+    # Per-symbol scope (``self._cross_prev[bar.symbol]``) so a multi-
+    # symbol run never compares this bar's value against another
+    # symbol's previous bar — that would forge false cross triggers.
+    if cross_sides:
+        on_bar_lines.append("        _prev_for_symbol = self._cross_prev.get(bar.symbol, {})")
+        for sigid, prev_var, _cur in cross_sides:
+            on_bar_lines.append(f"        {prev_var} = _prev_for_symbol.get({sigid!r})")
     on_bar_lines.append("        position = ctx.position(bar.symbol)")
     if stop_loss_rules or take_profit_rules or signal_exit_rules:
         # Per-bar guard so two exit thresholds firing on the same candle
@@ -815,12 +876,17 @@ def _emit_class(
     # entry-coverage gate counts them separately. Entry is naturally
     # exclusive with a same-bar exit because the snapshot ``position is
     # None`` check fails whenever an exit fired (the snapshot was taken
-    # while still in-position).
+    # while still in-position). A local ``entry_submitted`` flag also
+    # short-circuits multi-entry-rule specs so two predicates true on
+    # the same bar don't double-up entry orders (same blast-radius as
+    # the exit-submitted guard above).
+    if entry_rules:
+        on_bar_lines.append("        entry_submitted = False")
     for rule in entry_rules:
         pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
         side_literal = "OrderSide.LONG" if rule.side == "long" else "OrderSide.SHORT"
         sizing_stmt = _render_sizing(sizing, indicator_bindings)
-        on_bar_lines.append(f"        if position is None and {pred_src}:")
+        on_bar_lines.append(f"        if not entry_submitted and position is None and {pred_src}:")
         on_bar_lines.append(f"            {sizing_stmt}")
         on_bar_lines.append("            ctx.submit_order(")
         on_bar_lines.append("                symbol=bar.symbol,")
@@ -830,14 +896,16 @@ def _emit_class(
         on_bar_lines.append("                tif=TimeInForce.DAY,")
         on_bar_lines.append('                reason="compiled_entry",')
         on_bar_lines.append("            )")
+        on_bar_lines.append("            entry_submitted = True")
 
     # Cross-state update — must come AFTER all branches so the current
-    # bar's value is preserved for the next ``on_bar``. Order is
-    # sigid-sorted (already enforced by ``_collect_cross_sides``).
+    # bar's value is preserved for the next ``on_bar`` invocation on
+    # this symbol. Per-symbol dict scope (see ``self._cross_prev`` in
+    # __init__). Order is sigid-sorted via ``_collect_cross_sides``.
     if cross_sides:
-        on_bar_lines.append("        # update prev-bar snapshots for cross_* predicates")
-        for _sigid, prev_attr, current_expr in cross_sides:
-            on_bar_lines.append(f"        self.{prev_attr} = {current_expr}")
+        on_bar_lines.append("        _new_prev = self._cross_prev.setdefault(bar.symbol, {})")
+        for sigid, _prev_var, current_expr in cross_sides:
+            on_bar_lines.append(f"        _new_prev[{sigid!r}] = {current_expr}")
 
     # Method blocks — class constants, __init__, on_bar, then indicator
     # helpers (and the source helper) appended at the end so the class

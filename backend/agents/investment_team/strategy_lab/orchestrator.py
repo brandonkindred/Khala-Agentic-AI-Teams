@@ -1651,7 +1651,12 @@ class StrategyLabOrchestrator:
             target_symbols=strategy_dict.get("target_symbols", []),
             risk_limits=strategy_dict.get("risk_limits", {}),
             speculative=strategy_dict.get("speculative", False),
-            requires_custom_code=bool(strategy_dict.get("requires_custom_code", False)),
+            # Pass through raw — Pydantic's bool coercion handles
+            # explicit ``True``/``False`` plus the standard string
+            # variants ("true"/"false"/"yes"/"no"); ``bool(...)`` here
+            # would have flipped any non-empty string (e.g. ``"false"``)
+            # into ``True`` and silently disabled deterministic compile.
+            requires_custom_code=strategy_dict.get("requires_custom_code", False),
             strategy_code=code,
         )
 
