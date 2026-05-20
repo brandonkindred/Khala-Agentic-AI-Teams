@@ -50,6 +50,24 @@ def _is_empty_provenance(prov: dict[str, Any]) -> bool:
     )
 
 
+def _positive_int(value: str) -> int:
+    """``argparse`` type for ``--limit``: reject ``0`` and negatives.
+
+    Without this, ``--limit 0`` and any negative value would still print
+    exactly one row, because the in-loop check
+    ``len(divergent) >= args.limit`` happens *after* the row is appended.
+    Rejecting at parse time is simpler than papering over the off-by-one
+    inside the loop and matches the convention used by ``head -n``.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--limit must be an integer, got {value!r}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"--limit must be >= 1, got {parsed}")
+    return parsed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -59,9 +77,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--limit",
-        type=int,
+        type=_positive_int,
         default=None,
-        help="Stop after printing this many divergent rows.",
+        help="Stop after printing this many divergent rows (must be >= 1).",
     )
     args = parser.parse_args(argv)
 
