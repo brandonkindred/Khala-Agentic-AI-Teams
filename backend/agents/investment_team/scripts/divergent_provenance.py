@@ -8,12 +8,15 @@ the ledger traded TSLA".
 Run from ``backend/`` (same directory as ``Makefile``)::
 
     PYTHONPATH=agents python3 -m investment_team.scripts.divergent_provenance \\
-        [--strict] [--limit 50]
+        [--limit 50]
 
 Requires ``JOB_SERVICE_URL`` to be set (same env var as the running API).
 
-By default a row is "divergent" when ``set(target_symbols) != set(traded_symbols)``.
-``--strict`` switches to exact-list comparison (ordered, no dedup).
+A row is "divergent" when ``set(target_symbols) != set(traded_symbols)``.
+Set comparison is the only sensible compare because ``traded_symbols`` is
+persisted in canonical form (``sorted({t.symbol for t in trades})``) by
+``StrategyLabOrchestrator._assemble_record`` — an ordered list-compare
+would flag identical-set runs as divergent on ordering alone.
 
 Rows skipped from comparison (counted separately, never reported as divergent):
   * Legacy / short-circuit rows persisted before issue #533 — they carry a
@@ -34,9 +37,7 @@ from typing import Any, List, Tuple
 logger = logging.getLogger("divergent_provenance")
 
 
-def _diverges(target: List[str], traded: List[str], *, strict: bool) -> bool:
-    if strict:
-        return list(target) != list(traded)
+def _diverges(target: List[str], traded: List[str]) -> bool:
     return set(target) != set(traded)
 
 
@@ -70,11 +71,6 @@ def _positive_int(value: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Exact-list compare instead of set compare.",
-    )
     parser.add_argument(
         "--limit",
         type=_positive_int,
@@ -116,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         traded = list(provenance.get("traded_symbols") or [])
-        if not _diverges(target, traded, strict=args.strict):
+        if not _diverges(target, traded):
             continue
 
         strategy_id = (
@@ -143,12 +139,11 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     logger.info(
-        "scanned=%d divergent=%d skipped_legacy=%d skipped_universe_agnostic=%d mode=%s",
+        "scanned=%d divergent=%d skipped_legacy=%d skipped_universe_agnostic=%d",
         scanned,
         len(divergent),
         skipped_legacy,
         skipped_universe_agnostic,
-        "strict" if args.strict else "set",
     )
     return 0
 
