@@ -199,12 +199,52 @@ def _iter_strategy_methods(
             yield node
 
 
+def _methods_reachable_from_on_bar(cls: ast.ClassDef) -> frozenset[str]:
+    """Return the set of method names reachable from ``on_bar`` via
+    ``self.<method>(...)`` calls (transitively).
+
+    Entry/exit coverage checks must restrict their walk to reachable
+    code: an unused ``_dead`` helper containing
+    ``if ...: ctx.submit_order(...)`` would otherwise satisfy coverage
+    without actually being executed at runtime (PR #588 review).
+    """
+    methods = {m.name: m for m in _iter_strategy_methods(cls)}
+    if "on_bar" not in methods:
+        return frozenset()
+    reachable: set[str] = {"on_bar"}
+    worklist: List[str] = ["on_bar"]
+    while worklist:
+        name = worklist.pop()
+        method = methods.get(name)
+        if method is None:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"
+            ):
+                continue
+            callee = node.func.attr
+            if callee in methods and callee not in reachable:
+                reachable.add(callee)
+                worklist.append(callee)
+    return frozenset(reachable)
+
+
 def _find_if_branches_with_submit_order(
     cls: ast.ClassDef,
+    *,
+    reachable_method_names: Optional[frozenset[str]] = None,
 ) -> List[tuple[ast.If, List[ast.Call]]]:
-    """Walk every method on ``cls`` and yield ``(if_node, submit_calls)``
+    """Walk methods on ``cls`` and yield ``(if_node, submit_calls)``
     pairs where ``submit_calls`` is a non-empty list of ``submit_order``
     calls in that ``If``'s body or its ``orelse`` branches.
+
+    When ``reachable_method_names`` is supplied, methods not in that set
+    are skipped — used by entry/exit coverage so dead code in unused
+    helpers cannot satisfy the gate.
 
     Each top-level ``If`` body and each ``elif`` chain branch is treated
     as a separate "branch": ``if A: submit(); elif B: submit()`` yields
@@ -213,6 +253,8 @@ def _find_if_branches_with_submit_order(
     """
     out: List[tuple[ast.If, List[ast.Call]]] = []
     for method in _iter_strategy_methods(cls):
+        if reachable_method_names is not None and method.name not in reachable_method_names:
+            continue
         for node in _iter_method_body_nodes(method):
             if not isinstance(node, ast.If):
                 continue
@@ -408,7 +450,8 @@ class CodeConformanceGate(GateResultsMixin):
         if not entry_rules:
             return ()
 
-        branches = _find_if_branches_with_submit_order(cls)
+        reachable = _methods_reachable_from_on_bar(cls)
+        branches = _find_if_branches_with_submit_order(cls, reachable_method_names=reachable)
         entry_branches: List[tuple[ast.If, List[ast.Call]]] = []
         for if_node, calls in branches:
             if any(
@@ -421,9 +464,10 @@ class CodeConformanceGate(GateResultsMixin):
             return (
                 self._critical(
                     f"Spec declares {len(entry_rules)} entry rule(s) but no "
-                    "if/elif branch in the Strategy class contains a "
-                    "ctx.submit_order(..., side=...) entry call. Drop the "
-                    "entry path was likely removed during refinement."
+                    "if/elif branch reachable from on_bar contains a "
+                    "ctx.submit_order(..., side=...) entry call. The entry "
+                    "path was likely removed during refinement or lives in "
+                    "an unreachable helper."
                 ),
             )
 
@@ -431,9 +475,10 @@ class CodeConformanceGate(GateResultsMixin):
             return (
                 self._critical(
                     f"Spec declares {len(entry_rules)} entry rule(s) but only "
-                    f"{len(entry_branches)} entry branch(es) were found in the "
-                    "Strategy class. Each EntryRule needs its own if/elif "
-                    "branch with a ctx.submit_order(..., side=...) call."
+                    f"{len(entry_branches)} entry branch(es) were found "
+                    "reachable from on_bar. Each EntryRule needs its own "
+                    "if/elif branch with a ctx.submit_order(..., side=...) "
+                    "call."
                 ),
             )
         return ()
@@ -450,7 +495,8 @@ class CodeConformanceGate(GateResultsMixin):
         if not signal_exits:
             return ()
 
-        branches = _find_if_branches_with_submit_order(cls)
+        reachable = _methods_reachable_from_on_bar(cls)
+        branches = _find_if_branches_with_submit_order(cls, reachable_method_names=reachable)
         exit_branches = [
             (if_node, calls)
             for if_node, calls in branches
@@ -460,7 +506,7 @@ class CodeConformanceGate(GateResultsMixin):
             return (
                 self._critical(
                     f"Spec declares {len(signal_exits)} signal-exit rule(s) "
-                    "but no if/elif branch contains a "
+                    "but no if/elif branch reachable from on_bar contains a "
                     "ctx.submit_order(..., qty=position.qty) close call."
                 ),
             )
@@ -470,7 +516,7 @@ class CodeConformanceGate(GateResultsMixin):
                 self._critical(
                     f"Spec declares {len(signal_exits)} signal-exit rule(s) "
                     f"but only {len(exit_branches)} exit branch(es) were found "
-                    "in the Strategy class."
+                    "reachable from on_bar."
                 ),
             )
         return ()

@@ -293,6 +293,45 @@ def test_entry_coverage_fails_when_entry_submit_order_dropped() -> None:
     assert any("entry rule" in c.lower() for c in crits), crits
 
 
+def test_entry_coverage_ignores_unreachable_helper_branches() -> None:
+    """Codex P1 from PR #588: a branch in an unused helper must not
+    satisfy entry coverage. The submit_order in ``_dead`` is never
+    executed because nothing in on_bar calls ``self._dead(...)``."""
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def _dead(self, ctx, bar):
+                # Unreachable from on_bar — must NOT satisfy entry coverage.
+                if True:
+                    ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                # No entry submit_order in any on_bar branch.
+                pos = ctx.position(bar.symbol)
+                if pos is not None and bar.close < pos.entry_price * 0.95:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert any("entry rule" in c.lower() and "reachable" in c.lower() for c in crits), crits
+
+
 # ---------------------------------------------------------------------------
 # Check 4: signal-exit coverage
 # ---------------------------------------------------------------------------
