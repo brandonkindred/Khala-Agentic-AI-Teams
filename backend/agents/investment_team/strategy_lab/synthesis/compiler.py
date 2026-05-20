@@ -98,6 +98,14 @@ _BAR_FIELD_EXPR: dict[str, str] = {
 # small buffer; matches the floor in the ideation system prompt.
 _MIN_WINDOW: int = 20
 
+# Lookback for VWAP. The sandbox VWAP definition (``factors/primitives.py``,
+# ``executor/indicators.py``) is cumulative-over-the-series rather than
+# rolling-window; capping at ``_MIN_WINDOW`` would turn it into a 20-bar
+# rolling VWAP and silently change signal semantics. Use the harness's
+# own retention ceiling (500 bars; see ``StrategyContext._ingest_bar``)
+# so the strategy gets the deepest history the engine retains.
+_VWAP_HISTORY: int = 500
+
 
 def compile_strategy(spec: Any) -> str:
     """Compile ``spec`` into a canonical ``Strategy`` Python module.
@@ -146,13 +154,24 @@ def compile_strategy(spec: Any) -> str:
                     f"slow={slow}); falling back to LLM synthesis"
                 )
 
-    if isinstance(sizing, VolatilityTargetSizing) and not any(
-        ref.name == "atr" for ref in indicator_refs
-    ):
-        raise CompilerError(
-            "volatility_target sizing requires an 'atr' indicator referenced "
-            "by an entry or signal-exit rule; none found in spec"
-        )
+    if isinstance(sizing, VolatilityTargetSizing):
+        atr_refs = [ref for ref in indicator_refs if ref.name == "atr"]
+        if not atr_refs:
+            raise CompilerError(
+                "volatility_target sizing requires an 'atr' indicator referenced "
+                "by an entry or signal-exit rule; none found in spec"
+            )
+        # Multiple distinct ATR refs make the sizing choice ambiguous —
+        # the sigid-sort tiebreaker is deterministic but author-unaware,
+        # so adding an unrelated ATR predicate would silently change
+        # trade size. Refuse the spec and let LLM synthesis decide.
+        distinct = {ref.param("period") for ref in atr_refs}
+        if len(distinct) > 1:
+            raise CompilerError(
+                "volatility_target sizing is ambiguous when the spec references "
+                f"multiple ATR periods ({sorted(distinct)}); compiler "
+                "cannot pick one without author intent — falling back to LLM"
+            )
 
     indicator_bindings = _build_indicator_bindings(indicator_refs)
     cross_sides = _collect_cross_sides(entry_rules, signal_exit_rules, indicator_bindings)
@@ -244,7 +263,17 @@ def _lookback_for(ref: IndicatorRef) -> int:
     if name == "rsi":
         return int(ref.param("period")) + 1
     if name == "macd":
-        return int(ref.param("slow")) + int(ref.param("signal"))
+        # MACD warm-up depends on the selected output. ``output='macd'``
+        # only needs ``slow`` bars (the MACD line is computable at the
+        # first sub of length ``slow``). ``output ∈ {signal, histogram}``
+        # additionally needs ``signal`` macd-line samples to compute the
+        # signal-line EMA, so ``slow + signal - 1`` bars total.
+        slow = int(ref.param("slow"))
+        signal = int(ref.param("signal"))
+        select = str(ref.param("output"))
+        if select == "macd":
+            return slow
+        return slow + signal - 1
     if name == "bollinger":
         return int(ref.param("period"))
     if name == "atr":
@@ -256,9 +285,14 @@ def _lookback_for(ref: IndicatorRef) -> int:
         # fire even on otherwise-sufficient market history.
         return 2 * int(ref.param("period")) + 1
     if name == "stochastic":
-        return int(ref.param("k_period")) + int(ref.param("d_period"))
+        # Helper computes ``%D`` once it has ``k_period + d_period - 1``
+        # bars (the first ``%K`` is available at ``k_period`` and the
+        # SMA over ``d_period`` values needs ``d_period - 1`` more bars
+        # of ``%K`` history). Returning ``k_period + d_period`` would
+        # delay the first valid signal by one bar with no safety win.
+        return int(ref.param("k_period")) + int(ref.param("d_period")) - 1
     if name == "vwap":
-        return _MIN_WINDOW
+        return _VWAP_HISTORY
     raise CompilerError(f"unsupported indicator: {name!r}")
 
 
@@ -542,7 +576,11 @@ _HELPER_BODIES: dict[str, str] = {
             # but the helper guards too so a runtime bug never IndexErrors.
             if fast >= slow:
                 return None
-            if len(history) < slow + signal:
+            # Selector-aware warm-up: macd-line is computable at ``slow``
+            # bars; signal/histogram need an extra ``signal - 1`` bars of
+            # macd values to drive the EMA.
+            min_bars = slow if select == "macd" else slow + signal - 1
+            if len(history) < min_bars:
                 return None
             macd_line = []
             for end in range(slow, len(history) + 1):
@@ -684,15 +722,27 @@ def _canonical_spec_payload(spec: Any) -> dict[str, Any]:
     """Return a sort-stable dict of the DSL fields that determine
     compiled output. Used by ``_emit_header`` so the spec-hash header
     is invariant to non-DSL fields like ``strategy_code`` (which is
-    itself the compiler's output), ``hypothesis`` prose, ``audit``, etc.
+    itself the compiler's output), ``hypothesis`` prose, ``audit``,
+    and rule-level ``note`` text (author prose, never used in code-gen).
     """
+
+    def _strip_notes(value: Any) -> Any:
+        # ``note`` is author prose attached to rules / sizing /
+        # indicator-refs; it never affects emitted code. Drop it
+        # recursively so semantically identical specs hash the same
+        # regardless of comment churn.
+        if isinstance(value, dict):
+            return {k: _strip_notes(v) for k, v in value.items() if k != "note"}
+        if isinstance(value, list):
+            return [_strip_notes(v) for v in value]
+        return value
 
     def _dump(value: Any) -> Any:
         if value is None:
             return None
         if hasattr(value, "model_dump"):
-            return value.model_dump(mode="json")
-        return value
+            return _strip_notes(value.model_dump(mode="json"))
+        return _strip_notes(value)
 
     return {
         "target_symbols": list(getattr(spec, "target_symbols", []) or []),

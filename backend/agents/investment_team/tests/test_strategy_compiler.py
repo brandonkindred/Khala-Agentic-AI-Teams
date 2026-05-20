@@ -977,3 +977,166 @@ def test_requires_custom_code_string_false_does_not_disable_compile() -> None:
         requires_custom_code="false",  # type: ignore[arg-type]
     )
     assert spec.requires_custom_code is False
+
+
+# ---------------------------------------------------------------------------
+# Codex round-4: MACD/VWAP lookback, stochastic off-by-one, ATR ambiguity,
+# rule-note exclusion from spec hash.
+# ---------------------------------------------------------------------------
+
+
+def test_macd_lookback_for_macd_output_uses_slow_only() -> None:
+    """Codex P1: ``output='macd'`` only needs ``slow`` bars; previously
+    we returned ``slow + signal`` and delayed valid signals by 9 bars.
+    """
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="macd", params={"output": "macd"}), op=">", rhs=0.0),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    # Default fast=12 / slow=26 → WINDOW = max(slow, _MIN_WINDOW) = 26.
+    assert "WINDOW = 26" in code
+
+
+def test_macd_lookback_for_signal_output_uses_slow_plus_signal_minus_one() -> None:
+    """``output='signal'`` needs ``slow + signal - 1`` bars (one more
+    macd value than ``slow`` to drive the ``signal``-period EMA)."""
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="macd", params={"output": "signal"}), op=">", rhs=0.0),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    # 26 + 9 - 1 = 34
+    assert "WINDOW = 34" in code
+
+
+def test_macd_helper_signal_returns_at_minimum_history() -> None:
+    """Helper must produce a value at exactly the minimum bar count."""
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="macd", params={"output": "signal"}), op=">", rhs=0.0),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    bars = [_SyntheticBar(close=100.0 + i * 0.5) for i in range(34)]
+    assert strat.macd(bars, fast=12, slow=26, signal=9, select="signal") is not None
+    # One bar fewer than the minimum → None.
+    assert strat.macd(bars[:33], fast=12, slow=26, signal=9, select="signal") is None
+
+
+def test_vwap_lookback_uses_harness_history_cap() -> None:
+    """Codex P1: VWAP is cumulative in the sandbox indicator; capping at
+    ``_MIN_WINDOW`` (20) would silently make it a 20-bar rolling VWAP.
+    Use the harness retention cap (500 bars) so the helper sees the
+    deepest history the engine retains.
+    """
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="vwap"), op=">", rhs=0.0),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    assert "WINDOW = 500" in code
+
+
+def test_stochastic_lookback_off_by_one_fixed() -> None:
+    """Codex P3: ``%D`` is available at ``k_period + d_period - 1``;
+    previously returned ``k_period + d_period`` and delayed by one bar.
+    """
+    entry = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(
+                name="stochastic", params={"k_period": 14, "d_period": 3, "output": "d"}
+            ),
+            op=">",
+            rhs=80.0,
+        ),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    # 14 + 3 - 1 = 16, but floor to _MIN_WINDOW=20
+    assert "WINDOW = 20" in code  # floor wins
+    # Pick larger k_period so the floor doesn't dominate, to exercise the formula.
+    entry2 = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(
+                name="stochastic", params={"k_period": 30, "d_period": 5, "output": "d"}
+            ),
+            op=">",
+            rhs=80.0,
+        ),
+    )
+    spec2 = _spec(entry_rules=[entry2])
+    code2 = compile_strategy(spec2)
+    # 30 + 5 - 1 = 34
+    assert "WINDOW = 34" in code2
+
+
+def test_volatility_target_with_multiple_distinct_atr_raises() -> None:
+    """Codex P2: when sizing is volatility_target and the spec has more
+    than one ATR period, the choice is ambiguous — refuse to compile.
+    """
+    rules = [
+        EntryRule(
+            side="long",
+            when=Predicate(lhs=IndicatorRef(name="atr", params={"period": 14}), op=">", rhs=1.0),
+        ),
+        EntryRule(
+            side="long",
+            when=Predicate(lhs=IndicatorRef(name="atr", params={"period": 50}), op=">", rhs=2.0),
+        ),
+    ]
+    spec = _spec(
+        entry_rules=rules,
+        sizing=VolatilityTargetSizing(target_annual_vol=0.20),
+    )
+    with pytest.raises(CompilerError, match="ambiguous"):
+        compile_strategy(spec)
+
+
+def test_volatility_target_with_single_atr_period_used_twice_compiles() -> None:
+    """Two ATR refs with IDENTICAL params dedupe to one binding — no
+    ambiguity, so compile succeeds.
+    """
+    rules = [
+        EntryRule(
+            side="long",
+            when=Predicate(lhs=IndicatorRef(name="atr", params={"period": 14}), op=">", rhs=1.0),
+        ),
+        EntryRule(
+            side="long",
+            when=Predicate(lhs=IndicatorRef(name="atr", params={"period": 14}), op=">", rhs=2.0),
+        ),
+    ]
+    spec = _spec(
+        entry_rules=rules,
+        sizing=VolatilityTargetSizing(target_annual_vol=0.20),
+    )
+    code = compile_strategy(spec)
+    assert "_ind_atr_" in code
+
+
+def test_spec_hash_invariant_to_rule_notes() -> None:
+    """Codex P3: rule-level ``note`` text is author prose and never
+    affects emitted code. Two specs differing only by ``note`` must
+    produce byte-identical compiled output.
+    """
+    entry_with_note = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+        note="original note text",
+    )
+    entry_with_different_note = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+        note="completely different prose",
+    )
+    spec_a = _spec(entry_rules=[entry_with_note])
+    spec_b = _spec(entry_rules=[entry_with_different_note])
+    assert compile_strategy(spec_a) == compile_strategy(spec_b)
