@@ -82,18 +82,26 @@ def _coerce_requires_custom_code(raw: Any) -> bool:
 
     Accepts: ``True``/``False``, the common case-insensitive string
     variants (``"true"``/``"yes"``/``"on"``/``"1"`` → True, the falsey
-    counterparts → False), and ``0``/``1`` ints. Anything else
-    (``None``, empty string, arbitrary prose, ``"maybe"``) defaults to
-    ``False`` so a single typo in ideation JSON can't silently disable
-    deterministic compilation OR abort the design attempt with a
-    Pydantic ValidationError.
+    counterparts → False), and the integers ``0`` / ``1`` specifically.
+    Anything else (``None``, empty string, arbitrary prose, ``"maybe"``,
+    or off-spec ints like ``2`` / ``-1``) defaults to ``False`` so a
+    single typo in ideation JSON can't silently disable deterministic
+    compilation OR abort the design attempt with a Pydantic
+    ValidationError.
     """
     if raw is None:
         return False
     if isinstance(raw, bool):
         return raw
+    # Only the explicit 0/1 ints are recognised. ``bool(2)`` would
+    # silently flip a typo'd integer into ``True`` and disable the
+    # deterministic compile path.
     if isinstance(raw, int) and not isinstance(raw, bool):
-        return bool(raw)
+        if raw == 0:
+            return False
+        if raw == 1:
+            return True
+        return False
     if isinstance(raw, str):
         s = raw.strip().lower()
         if s in {"true", "yes", "on", "1"}:

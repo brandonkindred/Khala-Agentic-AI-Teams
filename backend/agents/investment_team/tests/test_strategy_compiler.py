@@ -119,59 +119,58 @@ def test_signal_exit_only() -> None:
     assert code.count("ctx.submit_order") == 2  # one entry, one signal exit
 
 
-def test_stop_loss_present_attaches_bracket_on_entry() -> None:
-    """Stop-loss is NOT inlined as a separate ``submit_order`` (that
-    would duplicate the engine's ``engine_exit:stop_loss`` from
-    ``evaluate_exit_rules``). Instead an ``attached_stop_loss``
-    bracket leg is added to the entry ``submit_order``, which satisfies
-    the safety gate's entry+exit pair check.
+def test_stop_loss_present_no_inline_or_bracket() -> None:
+    """Codex round-6: stop-loss is enforced ENTIRELY by the engine's
+    ``evaluate_exit_rules``. The compiler does NOT emit an inline
+    close (would duplicate engine_exit), NOR a bracket attachment
+    (which would use the wrong stop_price based on signal-bar close
+    instead of the actual post-fill ``position.entry_price``, and
+    silently downgrade trailing semantics to static stops). The
+    safety gate accepts entries-only flow when spec has engine-handled
+    exits — see ``_spec_has_engine_handled_exit``.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05)],
     )
     code = compile_strategy(spec)
-    # No inline ``compiled_stop_loss`` submit; bracket on entry instead.
     assert 'reason="compiled_stop_loss"' not in code
-    assert "attached_stop_loss=attached_stop" in code
-    assert "StopAttachment(stop_price=" in code
-    # Long entry → stop_price = bar.close * (1 - 0.05).
-    assert "bar.close * (1.0 - 0.05)" in code
+    assert "StopAttachment" not in code
+    assert "attached_stop_loss" not in code
     # Conformance gate's stop-loss enforcement check requires the class
     # to reference ``position.entry_price``; the benign ``_entry_ref``
     # read satisfies it without re-implementing exit math.
     assert "position.entry_price" in code
 
 
-def test_take_profit_present_attaches_bracket_on_entry() -> None:
+def test_take_profit_present_no_inline_or_bracket() -> None:
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[TakeProfitRule(pct=0.10)],
     )
     code = compile_strategy(spec)
     assert 'reason="compiled_take_profit"' not in code
-    assert "attached_take_profit=attached_tp" in code
-    assert "LimitAttachment(limit_price=" in code
-    # Long entry → limit_price = bar.close * (1 + 0.1).
-    assert "bar.close * (1.0 + 0.1)" in code
+    assert "LimitAttachment" not in code
+    assert "attached_take_profit" not in code
     assert "position.entry_price" in code
 
 
 def test_trailing_stop_loss_compiles_without_inline_emission() -> None:
     """Trailing-basis stop-loss specs are accepted (no CompilerError).
     The engine's ``evaluate_exit_rules`` honours the ``basis`` field
-    at runtime, so the compiler doesn't need to re-encode it. The
-    safety-gate bracket leg uses a conservative bar.close-based
-    stop_price; the engine drives the real trailing semantics.
+    at runtime against ``position.entry_price`` (and
+    ``position.high_since_entry`` / ``low_since_entry`` for trailing
+    variants), so the compiler doesn't need to re-encode any of it.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
     )
     code = compile_strategy(spec)
-    # Compiles cleanly.
     assert "CompiledStrategy" in code
-    assert "attached_stop_loss=attached_stop" in code
+    # No inline emission, no bracket attachment — engine handles it.
+    assert 'reason="compiled_stop_loss"' not in code
+    assert "StopAttachment" not in code
 
 
 def test_fixed_fraction_sizing() -> None:
@@ -1170,39 +1169,32 @@ def test_volatility_target_with_single_atr_period_used_twice_compiles() -> None:
     assert "_ind_atr_" in code
 
 
-def test_no_inline_engine_exits_when_stop_loss_present() -> None:
-    """Codex round-5 P1: with stop_loss / take_profit in spec, the
-    compiled strategy must NOT emit inline close orders for them — the
-    trading service's engine_exit dispatcher already enforces them via
-    ``evaluate_exit_rules`` (``trading_service/service.py:276``).
-    Inlining a parallel close would duplicate the exit and inflate
-    order lifecycle diagnostics.
+def test_no_inline_or_bracket_engine_exits_when_stop_loss_present() -> None:
+    """Codex round-6 P1: stop_loss / take_profit are enforced entirely
+    by the engine — no inline ``submit_order`` AND no bracket leg in
+    compiled code. Bracket prices computed at signal time were wrong
+    on gap opens; the engine uses post-fill ``position.entry_price``.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05), TakeProfitRule(pct=0.10)],
     )
     code = compile_strategy(spec)
-    # No ``compiled_stop_loss`` / ``compiled_take_profit`` reason markers
-    # (those came from the inline branches in earlier rounds).
     assert 'reason="compiled_stop_loss"' not in code
     assert 'reason="compiled_take_profit"' not in code
-    # The only strategy-emitted submit_order is the entry. Signal-exit
-    # branches (engine doesn't handle these) are absent — no SignalExitRule
-    # in this spec.
+    # The ONLY strategy-emitted submit_order is the entry — no bracket
+    # legs, no inline closes. Engine's evaluate_exit_rules handles both.
     assert code.count("ctx.submit_order") == 1
-    # And the entry carries an attached bracket leg so the safety
-    # gate's entry+exit pair check passes.
-    assert "attached_stop_loss=attached_stop" in code
-    assert "attached_take_profit=attached_tp" in code
+    assert "attached_stop_loss" not in code
+    assert "attached_take_profit" not in code
+    assert "StopAttachment" not in code
+    assert "LimitAttachment" not in code
 
 
 def test_trailing_stop_loss_compiles_via_engine() -> None:
-    """Codex round-5 P2: trailing-basis stop-loss specs were previously
-    rejected with CompilerError (round 2). The engine's
-    ``evaluate_exit_rules`` actually supports all three basis values, so
-    refusing the spec discards compilable entry/signal logic for no
-    reason. Drop the refusal; the engine drives the basis semantics.
+    """Trailing-basis stop-loss specs compile cleanly. Engine's
+    ``evaluate_exit_rules`` honours the basis at runtime; no bracket
+    attachment to downgrade trailing → static.
     """
     spec_long = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -1210,9 +1202,33 @@ def test_trailing_stop_loss_compiles_via_engine() -> None:
     )
     code_long = compile_strategy(spec_long)
     assert "CompiledStrategy" in code_long
-    # Entry-side bracket still attached so the safety gate is happy;
-    # the precise trailing semantics live in the engine.
-    assert "attached_stop_loss=attached_stop" in code_long
+    assert "StopAttachment" not in code_long
+
+
+def test_safety_gate_accepts_entries_only_when_spec_has_stop_loss() -> None:
+    """Codex round-6: ``CodeSafetyChecker._check_order_flow_shape`` is
+    widened to accept entries-only flow when ``spec.exit_rules`` has
+    an engine-handled rule. Without this, the bracket-less entry-only
+    emission would fail the gate.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = compile_strategy(spec)
+    results = CodeSafetyChecker().check(code, spec)
+    assert _critical_details(results) == [], _critical_details(results)
+
+
+def test_safety_gate_rejects_entries_only_without_engine_handled_exit() -> None:
+    """Sanity check: an entry-only spec with no engine-handled exit
+    rules (and no signal_exit) must still fail the safety gate.
+    """
+    spec = _spec(entry_rules=[_rsi_lt_30_entry()], exit_rules=[])
+    code = compile_strategy(spec)
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
 
 
 def test_requires_custom_code_defensive_on_malformed_string() -> None:
@@ -1236,6 +1252,12 @@ def test_requires_custom_code_defensive_on_malformed_string() -> None:
     assert _coerce_requires_custom_code(None) is False
     assert _coerce_requires_custom_code("") is False
     assert _coerce_requires_custom_code("no") is False
+    # Codex round-6 P2: off-spec ints (NOT exactly 0 or 1) default to
+    # False — ``bool(2)`` would have silently flipped a typo'd value
+    # into ``True`` and disabled deterministic compilation.
+    assert _coerce_requires_custom_code(2) is False
+    assert _coerce_requires_custom_code(-1) is False
+    assert _coerce_requires_custom_code(42) is False
     # Garbage defaults to False — does NOT raise.
     assert _coerce_requires_custom_code("maybe") is False
     assert _coerce_requires_custom_code("asdf") is False

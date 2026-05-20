@@ -23,17 +23,18 @@ Scope (#538 + locked decisions, post-codex P1 review):
     DSL's ``output`` / ``band`` selector through to the helper, which
     returns the single scalar component used in the predicate. The
     selector defaults match the DSL registry.
-  * Stop-loss / take-profit are NOT inlined as separate ``submit_order``
-    calls — the trading service's ``_EngineExitDispatcher`` already runs
+  * Stop-loss / take-profit (including trailing-basis variants) are
+    NOT inlined as ``submit_order`` calls AND not attached as bracket
+    legs. The trading service's ``_EngineExitDispatcher`` runs
     ``evaluate_exit_rules`` against ``spec.exit_rules`` on every bar
-    and emits ``engine_exit:<kind>`` orders, so inlining a parallel
-    close would duplicate the exit. Instead the compiler attaches
-    ``StopAttachment`` / ``LimitAttachment`` legs to the entry
-    ``submit_order``; the bracket-OCO machinery materialises the
-    exit on entry fill and the safety gate counts the bracket as the
-    entry+exit pair. Signal-exit rules (which the engine treats as a
-    no-op — see ``executor/rule_compiler.py``) are still inlined as
-    branches in ``on_bar``, gated by an ``exit_submitted`` flag.
+    and emits ``engine_exit:<kind>`` orders against the actual
+    post-fill ``position.entry_price`` (correct basis semantics).
+    The safety gate's order-flow check accepts entries-only flow
+    when ``spec.exit_rules`` has an engine-handled rule (see
+    ``code_safety._spec_has_engine_handled_exit``). Signal-exit
+    rules (a no-op in ``evaluate_exit_rules`` — see
+    ``executor/rule_compiler.py``) are still inlined as ``on_bar``
+    branches gated by an ``exit_submitted`` flag.
   * ``cross_above`` / ``cross_below`` predicates compare the current
     side value against ``self._prev_<sigid>`` snapshots updated at the
     end of every ``on_bar`` invocation where the universe and warm-up
@@ -134,17 +135,17 @@ def compile_strategy(spec: Any) -> str:
     signal_exit_rules = [r for r in exit_rules if isinstance(r, SignalExitRule)]
 
     # NOTE: stop-loss / take-profit (including trailing-basis variants)
-    # are NOT inlined in compiled code. The trading service's
+    # are NOT inlined in compiled code and NOT attached as bracket legs
+    # on the entry order. The trading service's
     # ``_EngineExitDispatcher`` runs ``evaluate_exit_rules`` against
     # ``spec.exit_rules`` on every bar (see ``trading_service/service.py``
-    # line 276 and ``modes/backtest.py`` line 185) — so all three
-    # ``StopLossRule.basis`` values fire from the engine, including
-    # ``trailing_high`` / ``trailing_low``. Emitting a parallel close
-    # from strategy code would duplicate the exit and inflate order-
-    # lifecycle diagnostics (codex round-5 review). The compiler
-    # contents itself with attaching bracket legs on the entry order so
-    # the safety gate's entry+exit pair check passes — those legs are
-    # part of the entry submission, not a separate exit submit.
+    # line 276 and ``modes/backtest.py`` line 185) and emits
+    # ``engine_exit:<kind>`` orders against the post-fill
+    # ``position.entry_price`` — correct basis semantics for all of
+    # ``entry_price`` / ``trailing_high`` / ``trailing_low``. The
+    # safety gate's order-flow check accepts entries-only flow when
+    # spec has at least one engine-handled rule (see
+    # ``code_safety._spec_has_engine_handled_exit``).
 
     indicator_refs: List[IndicatorRef] = _collect_indicators(entry_rules, signal_exit_rules)
     # MACD convention requires fast < slow; the DSL registry does not
@@ -785,20 +786,10 @@ def _emit_imports() -> str:
     # ``indicators`` module isn't imported — the sandbox's pandas-Series
     # signatures don't match the compiled call shape, so the strategy
     # carries its own inline implementations (see ``_HELPER_BODIES``).
-    # ``StopAttachment`` / ``LimitAttachment`` ship from ``contract`` and
-    # are referenced by the entry submit_order's bracket kwargs when the
-    # spec has stop-loss / take-profit rules.
-    return (
-        "import math\n"
-        "from contract import (\n"
-        "    LimitAttachment,\n"
-        "    OrderSide,\n"
-        "    OrderType,\n"
-        "    StopAttachment,\n"
-        "    Strategy,\n"
-        "    TimeInForce,\n"
-        ")\n"
-    )
+    # Bracket attachment classes (``StopAttachment`` / ``LimitAttachment``)
+    # are no longer needed since the compiler doesn't attach brackets —
+    # the engine enforces stop/take-profit from spec.exit_rules directly.
+    return "import math\nfrom contract import Strategy, OrderSide, OrderType, TimeInForce\n"
 
 
 def _indent_method(body: str, spaces: int = 4) -> str:
@@ -866,20 +857,13 @@ def _emit_class(
             on_bar_lines.append(f"        {prev_var} = _prev_for_symbol.get({sigid!r})")
     on_bar_lines.append("        position = ctx.position(bar.symbol)")
 
-    # First stop_loss / take_profit rule in spec order — used both for
-    # the entry-side bracket attachment (safety-gate satisfaction) and
-    # for emitting the conformance-gate's ``position.entry_price``
-    # reference. Engine-side ``evaluate_exit_rules`` runs against every
-    # rule in spec.exit_rules, so these are reference values only.
-    first_stop_loss = next((r for r in exit_rules if isinstance(r, StopLossRule)), None)
-    first_take_profit = next((r for r in exit_rules if isinstance(r, TakeProfitRule)), None)
-
     # Conformance gate's ``_check_stop_loss_enforcement`` /
     # ``_check_take_profit_enforcement`` require the class to reference
     # ``position.entry_price`` when those rule kinds are in the spec.
     # The runtime enforcement lives in the engine; emit a benign read
     # so the static check passes without re-implementing the exit math.
-    if first_stop_loss is not None or first_take_profit is not None:
+    has_engine_handled_exit = any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
+    if has_engine_handled_exit:
         on_bar_lines.append(
             "        _entry_ref = position.entry_price if position is not None else None"
         )
@@ -922,44 +906,35 @@ def _emit_class(
     # (the engine's evaluate_exit_rules drives the precise basis logic).
     if entry_rules:
         on_bar_lines.append("        entry_submitted = False")
+    # Entry submit_order — no bracket attachments. The previous round's
+    # ``attached_stop_loss=StopAttachment(stop_price=bar.close * (1-pct))``
+    # was semantically wrong on three fronts (codex round-6 review):
+    #   1. ``bar.close`` at signal time differs from the actual fill
+    #      price (market orders fill on the NEXT bar's open in the
+    #      trading service), so gap opens make the bracket distance
+    #      materially wrong vs. ``position.entry_price * (1-pct)``.
+    #   2. ``StopAttachment(stop_price=...)`` is a static stop and
+    #      silently downgrades ``StopLossRule.basis='trailing_high'`` /
+    #      ``'trailing_low'`` to fixed levels.
+    #   3. Only the first StopLossRule / TakeProfitRule fed the
+    #      bracket, so multi-rule specs lost the secondary rules.
+    # The engine's _EngineExitDispatcher already enforces every
+    # stop/take rule (with the correct basis) against the post-fill
+    # ``position.entry_price``; the safety gate has been widened to
+    # accept entries-only flow when ``spec.exit_rules`` contains an
+    # engine-handled rule (``_spec_has_engine_handled_exit``).
     for rule in entry_rules:
         pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
         side_literal = "OrderSide.LONG" if rule.side == "long" else "OrderSide.SHORT"
         sizing_stmt = _render_sizing(sizing, indicator_bindings)
         on_bar_lines.append(f"        if not entry_submitted and position is None and {pred_src}:")
         on_bar_lines.append(f"            {sizing_stmt}")
-        # Bracket bindings — per-entry-side maths against bar.close
-        # estimate. Only emit when the spec ACTUALLY has the rule —
-        # emitting ``attached_stop_loss=None`` (Name node) would still
-        # satisfy the safety gate's ``_has_attached_exit_kwarg`` and
-        # silently bypass the entry+exit pair check for genuinely
-        # entry-only specs.
-        bracket_kwargs: List[str] = []
-        if first_stop_loss is not None:
-            sl_pct = float(first_stop_loss.pct)
-            sign = "-" if rule.side == "long" else "+"
-            on_bar_lines.append(f"            _sl_stop_price = bar.close * (1.0 {sign} {sl_pct!r})")
-            on_bar_lines.append(
-                "            attached_stop = StopAttachment(stop_price=_sl_stop_price)"
-            )
-            bracket_kwargs.append("                attached_stop_loss=attached_stop,")
-        if first_take_profit is not None:
-            tp_pct = float(first_take_profit.pct)
-            sign = "+" if rule.side == "long" else "-"
-            on_bar_lines.append(
-                f"            _tp_limit_price = bar.close * (1.0 {sign} {tp_pct!r})"
-            )
-            on_bar_lines.append(
-                "            attached_tp = LimitAttachment(limit_price=_tp_limit_price)"
-            )
-            bracket_kwargs.append("                attached_take_profit=attached_tp,")
         on_bar_lines.append("            ctx.submit_order(")
         on_bar_lines.append("                symbol=bar.symbol,")
         on_bar_lines.append(f"                side={side_literal},")
         on_bar_lines.append("                qty=qty,")
         on_bar_lines.append("                order_type=OrderType.MARKET,")
         on_bar_lines.append("                tif=TimeInForce.DAY,")
-        on_bar_lines.extend(bracket_kwargs)
         on_bar_lines.append('                reason="compiled_entry",')
         on_bar_lines.append("            )")
         on_bar_lines.append("            entry_submitted = True")

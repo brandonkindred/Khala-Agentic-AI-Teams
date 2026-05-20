@@ -83,6 +83,28 @@ ALLOWED_IMPORTS = frozenset(
 )
 
 
+def _spec_has_engine_handled_exit(spec: Any) -> bool:
+    """True iff ``spec.exit_rules`` contains at least one rule kind that
+    the trading service's ``_EngineExitDispatcher`` will enforce on the
+    strategy's behalf via ``evaluate_exit_rules`` — currently
+    ``StopLossRule`` and ``TakeProfitRule``. ``SignalExitRule`` is a
+    no-op in the evaluator (see ``executor/rule_compiler.py``), so it
+    does NOT relax the order-flow-shape requirement.
+
+    Used by ``_check_order_flow_shape`` to accept entries-only strategy
+    code when the engine will close the position from spec.
+    """
+    if spec is None:
+        return False
+    exit_rules = getattr(spec, "exit_rules", None)
+    if not exit_rules:
+        return False
+    # Import lazily so this module stays importable even when the DSL
+    # types aren't available (legacy SQLite-only test contexts).
+    from ..spec_dsl import StopLossRule, TakeProfitRule  # local import — see docstring
+
+    return any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
+
 
 @dataclass(frozen=True)
 class CodeSafetyCtx:
@@ -272,9 +294,7 @@ class CodeSafetyChecker(GateResultsMixin):
         line_count = len(ctx.code.splitlines())
         if line_count > 1000:
             return (
-                self._warning(
-                    f"Code is {line_count} lines — consider simplifying (limit: 1000)."
-                ),
+                self._warning(f"Code is {line_count} lines — consider simplifying (limit: 1000)."),
             )
         return ()
 
@@ -284,6 +304,12 @@ class CodeSafetyChecker(GateResultsMixin):
         # calls must form an entry+exit pair — either two calls with
         # distinct ``side`` values, or a single call with a non-None
         # ``attached_stop_loss`` / ``attached_take_profit`` bracket leg.
+        # An entries-only flow is ALSO accepted when ``spec.exit_rules``
+        # contains an engine-handled rule (``StopLossRule`` /
+        # ``TakeProfitRule``), because the trading service's
+        # ``_EngineExitDispatcher`` (``trading_service/service.py``)
+        # fires ``engine_exit:<kind>`` orders against those rules every
+        # bar — the strategy doesn't need to declare a parallel exit.
         #
         # The trading service only processes ``HarnessResponse`` from
         # ``send_bar``; responses from ``send_start`` / ``send_fill`` /
@@ -305,20 +331,26 @@ class CodeSafetyChecker(GateResultsMixin):
             )
         if _calls_form_entry_exit_pair(hook_calls):
             return ()
+        if _spec_has_engine_handled_exit(ctx.spec):
+            return ()
         if len(hook_calls) == 1:
             detail = (
                 "Only one ctx.submit_order call found in the engine hooks "
                 "and no non-None attached bracket exit (attached_stop_loss "
-                "/ attached_take_profit) — strategy has no exit path."
+                "/ attached_take_profit) — strategy has no exit path. Either "
+                "submit an opposite-side close, attach a bracket leg, or "
+                "declare a StopLossRule / TakeProfitRule in spec.exit_rules "
+                "(the engine's evaluate_exit_rules will fire those)."
             )
         else:
             detail = (
                 "Multiple ctx.submit_order calls found but all use the same "
                 "OrderSide and no bracket exit is attached — strategy has no "
                 "real exit leg. Closing a position requires submitting the "
-                "opposite OrderSide (LONG closes SHORT, SHORT closes LONG) or "
+                "opposite OrderSide (LONG closes SHORT, SHORT closes LONG), "
                 "attaching an attached_stop_loss / attached_take_profit "
-                "bracket leg."
+                "bracket leg, or declaring a StopLossRule / TakeProfitRule "
+                "in spec.exit_rules for engine-side enforcement."
             )
         return (self._critical(detail),)
 
@@ -370,4 +402,3 @@ class CodeSafetyChecker(GateResultsMixin):
         _check_order_flow_shape,
         _check_universe_guard,
     )
-
