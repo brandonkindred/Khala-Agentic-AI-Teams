@@ -68,6 +68,7 @@ from .quality_gates.spec_readiness import SpecReadinessGate
 from .quality_gates.strategy_validator import StrategySpecValidator
 from .quality_gates.target_symbol_coverage import TargetSymbolCoverageGate
 from .spec_dsl import DEFAULT_SIZING_PAYLOAD
+from .synthesis import CompilerError, compile_strategy
 from .zero_trade_repair import ZeroTradeRepairer
 
 logger = logging.getLogger(__name__)
@@ -1650,8 +1651,25 @@ class StrategyLabOrchestrator:
             target_symbols=strategy_dict.get("target_symbols", []),
             risk_limits=strategy_dict.get("risk_limits", {}),
             speculative=strategy_dict.get("speculative", False),
+            requires_custom_code=bool(strategy_dict.get("requires_custom_code", False)),
             strategy_code=code,
         )
+
+        # Issue #538: deterministic compile by default. When the spec opts
+        # into LLM synthesis (``requires_custom_code=True``) or the
+        # compiler raises ``CompilerError``, the ideation-authored ``code``
+        # is kept verbatim and the LLM refinement path takes over.
+        if not spec.requires_custom_code:
+            try:
+                spec.strategy_code = compile_strategy(spec)
+            except CompilerError as exc:
+                logger.warning(
+                    "compiler_fallback strategy_id=%s reason=%s",
+                    spec.strategy_id,
+                    exc,
+                )
+                spec.requires_custom_code = True
+                spec.strategy_code = code
 
         # Snapshot ideation outputs so reviewers can compare against any
         # refinement-driven mutation persisted on the final record (#547).

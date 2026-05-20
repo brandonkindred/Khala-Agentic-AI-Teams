@@ -220,6 +220,13 @@ class StrategySpec(BaseModel):
     speculative: bool = False
     strategy_code: Optional[str] = None
     requires_redesign: bool = False
+    # Issue #538: when False (default), the orchestrator compiles
+    # ``strategy_code`` deterministically from the structured rules via
+    # ``strategy_lab.synthesis.compile_strategy``. When True, the LLM-authored
+    # code from ideation is kept verbatim — for specs whose semantics fall
+    # outside what the deterministic compiler can express. Orthogonal to
+    # ``requires_redesign`` (which signals "rerun ideation").
+    requires_custom_code: bool = False
     unparsed_rules: List[str] = Field(default_factory=list)
     audit: AuditContext = Field(default_factory=AuditContext)
 
