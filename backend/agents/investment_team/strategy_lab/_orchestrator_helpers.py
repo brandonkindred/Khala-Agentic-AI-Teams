@@ -56,11 +56,19 @@ class _MarketDataFetch:
     fetch was asked to retrieve and the symbols that actually returned
     usable bars. Both lists feed ``BacktestRecord`` so reviewers can see
     when a fetch silently dropped tickers without re-running the cycle.
+
+    Issue #533 — ``provider_used`` is a snapshot of
+    ``MarketDataService.provider_used`` taken at fetch-completion time and
+    filtered to the just-fetched symbols. Snapshotting here (rather than
+    reading the service attribute later) is required because the service's
+    ``provider_used`` dict is mutable shared state that accumulates across
+    fetches; a later cycle's fetch would otherwise pollute earlier rows.
     """
 
     data: Optional[Dict[str, List[OHLCVBar]]]
     requested_symbols: List[str]
     fetched_symbols: List[str]
+    provider_used: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -194,6 +202,9 @@ class _SynthesisLoopOutcome:
     fetched_symbols: List[str]
     execution_succeeded: bool
     max_rounds_exhausted: bool
+    # Issue #533 — per-symbol provider id, snapshotted at fetch time so it
+    # survives later fetches in the same orchestrator run.
+    provider_used: Dict[str, str] = field(default_factory=dict)
 
 
 # ──────────────────────────────────────────────────────────────────────────
