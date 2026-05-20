@@ -871,6 +871,16 @@ def _emit_class(
     # volatility_target sizing and satisfies the sizing-math conformance
     # check for fixed_notional, whose qty expression has no other
     # account-value touchpoint.
+    # Bar.close validity guard — every sizing variant divides by
+    # ``bar.close``, and a single bad tick (zero, negative, NaN) would
+    # otherwise raise ``ZeroDivisionError`` or propagate non-finite
+    # values into ``submit_order``, terminating the backtest /
+    # paper-trade session. Codex round-10 P2: skip the bar gracefully
+    # instead.
+    on_bar_lines.append(
+        "        if bar.close is None or not math.isfinite(bar.close) or bar.close <= 0:"
+    )
+    on_bar_lines.append("            return")
     on_bar_lines.append("        equity = ctx.equity")
     on_bar_lines.append("        _ = equity  # silence-unused; sizing math reads ctx.equity above")
     # Indicator binds — sigid-sorted (see _build_indicator_bindings).

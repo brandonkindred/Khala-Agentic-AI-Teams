@@ -1633,6 +1633,262 @@ class CompiledStrategy(Strategy):
     assert any("exit" in c.lower() for c in criticals), criticals
 
 
+def test_safety_gate_rejects_else_arm_of_position_is_none_as_in_position() -> None:
+    """Codex round-10 P1a: a submit_order inside the ELSE arm of
+    ``if position is None: return`` is reachable only when position
+    is not None — it's an add-on / close, not a flat entry.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        if bar.symbol not in self.UNIVERSE:
+            return
+        position = ctx.position(bar.symbol)
+        if position is None:
+            return
+        else:
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.LONG,
+                qty=1,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_recognises_position_neq_none_as_in_position_guard() -> None:
+    """Codex round-10 P1b: ``if position != None:`` must be treated
+    as in-position the same way ``is not None`` is.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        if bar.symbol not in self.UNIVERSE:
+            return
+        position = ctx.position(bar.symbol)
+        if position != None:  # noqa: E711 — intentional pattern
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.LONG,
+                qty=1,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_recognises_negated_is_none_as_in_position_guard() -> None:
+    """Codex round-10 P1c: ``if not (position is None):`` is logically
+    equivalent to ``is not None`` and must pin the body to in-position.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        if bar.symbol not in self.UNIVERSE:
+            return
+        position = ctx.position(bar.symbol)
+        if not (position is None):
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.LONG,
+                qty=1,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_recognises_aliased_position_qty_close() -> None:
+    """Codex round-10 P1d: ``p = ctx.position(...)`` then
+    ``qty=p.qty`` must be recognised as a close (not an entry).
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        if bar.symbol not in self.UNIVERSE:
+            return
+        p = ctx.position(bar.symbol)
+        if p is not None:
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.SHORT,
+                qty=p.qty,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_recognises_aliased_position_in_guard_matcher() -> None:
+    """Codex round-10 P1e: ``p = ctx.position(...)`` then
+    ``if p is not None:`` must pin the body to in-position.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        if bar.symbol not in self.UNIVERSE:
+            return
+        p = ctx.position(bar.symbol)
+        if p is not None:
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.LONG,
+                qty=1,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_dynamic_fallback_helper_requires_both_sides() -> None:
+    """Codex round-10 P1f: when emitted side= is dynamic and no explicit
+    literals are present, the widened relaxation must require BOTH
+    ``long`` and ``short`` to be covered by triggerable engine exits
+    — the runtime side could resolve either way. Tested at the helper
+    level because the broader ``_calls_form_entry_exit_pair`` check
+    short-circuits dynamic-side calls (treats any unknown side as a
+    valid pair) before the widening runs. The fix is preserved as
+    defense-in-depth in case that legacy check is tightened later.
+    """
+    from investment_team.strategy_lab.quality_gates.code_safety import (
+        _engine_exits_cover_sides,
+    )
+
+    # Only long-side trailing stop — SHORT positions would have no
+    # triggerable exit.
+    spec_long_only = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+    )
+    assert not _engine_exits_cover_sides(spec_long_only, {"long", "short"})
+    # Entry-price stop covers both sides → dynamic fallback would
+    # accept it.
+    spec_both = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05, basis="entry_price")],
+    )
+    assert _engine_exits_cover_sides(spec_both, {"long", "short"})
+
+
+def test_safety_gate_extractor_rejects_non_order_side_attributes() -> None:
+    """Codex round-10 P2: ``FakeSide.LONG`` is NOT a valid side literal
+    — only attributes rooted in ``OrderSide`` / ``contract.OrderSide``
+    count. The extractor must return ``None`` for unrelated enums.
+    """
+    from investment_team.strategy_lab.quality_gates.code_safety import (
+        _extract_side_literal,
+    )
+
+    # Real ``OrderSide.LONG`` — recognised.
+    tree_ok = ast.parse("OrderSide.LONG", mode="eval")
+    assert _extract_side_literal(tree_ok.body) == "long"
+    # ``contract.OrderSide.LONG`` — also recognised (dotted import).
+    tree_dotted = ast.parse("contract.OrderSide.LONG", mode="eval")
+    assert _extract_side_literal(tree_dotted.body) == "long"
+    # ``FakeSide.LONG`` — NOT recognised (root is FakeSide, not OrderSide).
+    tree_fake = ast.parse("FakeSide.LONG", mode="eval")
+    assert _extract_side_literal(tree_fake.body) is None
+    # ``somemodule.FakeSide.SHORT`` — not recognised.
+    tree_dotted_fake = ast.parse("somemodule.FakeSide.SHORT", mode="eval")
+    assert _extract_side_literal(tree_dotted_fake.body) is None
+
+
+def test_compiled_on_bar_skips_bar_when_close_is_zero() -> None:
+    """Codex round-10 P2 (sizing): bar.close <= 0 must not crash on_bar
+    via ZeroDivisionError from the sizing formula. The emitted guard
+    skips the bar gracefully.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        sizing=FixedFractionSizing(fraction=0.05),
+    )
+    code = compile_strategy(spec)
+    # Emitted guard present.
+    assert "bar.close is None" in code
+    assert "math.isfinite(bar.close)" in code
+    assert "bar.close <= 0" in code
+
+    ns, _OrderSide, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    history = [_SyntheticBar(close=100.0) for _ in range(25)]
+    # Bar with close=0 — would have raised ZeroDivisionError before.
+    bad_bar = _SyntheticBar(close=0.0)
+    history.append(bad_bar)
+    ctx = _SyntheticContext(history=history, position=None)
+    strat.on_bar(ctx, bad_bar)  # Must not raise.
+    assert ctx.orders == [], "bar.close=0 should be silently skipped, not produce an order"
+
+
+def test_compiled_on_bar_skips_bar_when_close_is_non_finite() -> None:
+    """NaN / inf close prices must also be skipped, not propagate
+    into the sizing formula.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        sizing=FixedNotionalSizing(notional_usd=10_000.0),
+    )
+    code = compile_strategy(spec)
+    ns, _OrderSide, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    history = [_SyntheticBar(close=100.0) for _ in range(25)]
+    bad_bar = _SyntheticBar(close=float("nan"))
+    history.append(bad_bar)
+    ctx = _SyntheticContext(history=history, position=None)
+    strat.on_bar(ctx, bad_bar)  # Must not raise.
+    assert ctx.orders == []
+
+
 def test_spec_hash_invariant_to_rule_notes() -> None:
     """Codex P3: rule-level ``note`` text is author prose and never
     affects emitted code. Two specs differing only by ``note`` must

@@ -131,11 +131,10 @@ def _hook_calls_include_entry(cls: ast.ClassDef, calls: List[ast.Call]) -> bool:
     """True iff at least one of the ``ctx.submit_order(...)`` calls
     reachable from ``on_bar`` is a plausible flat-position entry — has
     a ``side=`` kwarg, has no ``**kwargs`` spread (which could hide a
-    close shape in the spread), its ``qty=`` does not reference
-    ``position.qty`` / ``pos.qty`` anywhere in the expression, AND its
-    enclosing ``if`` chain does not pin ``position`` to non-None (a
-    call inside ``if position is not None:`` is an add-on / close,
-    not a flat-position entry).
+    close shape in the spread), its ``qty=`` does not reference any
+    position-receiver's ``.qty`` (canonical ``position`` / ``pos``
+    plus any ``<name> = ctx.position(...)`` alias), AND its enclosing
+    ``if`` chain does not pin position to non-None.
 
     Used to gate the engine-handled-exit relaxation on actually having
     an entry path. Each tightening below was driven by a codex P1:
@@ -150,22 +149,33 @@ def _hook_calls_include_entry(cls: ast.ClassDef, calls: List[ast.Call]) -> bool:
     * round-9 P1b: calls inside ``if position is not None:`` (add-only
       / close-only behaviour) no longer count — only calls reachable
       when ``position`` may still be ``None``.
+    * round-10 P1a: ``else``-arms of ``if position is None:`` are
+      treated as in-position (not flat-entry) — only the body of an
+      ``is None`` if and the unaliased control-flow paths count.
+    * round-10 P1b/P1c: ``position != None`` and ``not (position is None)``
+      are now recognised as in-position guards.
+    * round-10 P1d/P1e: aliases bound from ``<name> = ctx.position(...)``
+      are recognised in both the qty-close shape and the if-guard
+      matcher.
     """
+    position_names = _collect_position_aliases(cls)
     for call in calls:
-        if not _call_is_plausible_flat_entry(cls, call):
+        if not _call_is_plausible_flat_entry(cls, call, position_names):
             continue
         return True
     return False
 
 
-def _call_is_plausible_flat_entry(cls: ast.ClassDef, call: ast.Call) -> bool:
+def _call_is_plausible_flat_entry(
+    cls: ast.ClassDef, call: ast.Call, position_names: frozenset[str]
+) -> bool:
     """Per-call helper used by both :func:`_hook_calls_include_entry`
     and :func:`_entry_sides_emitted_by_calls` so the two stay in sync.
 
     All four checks must pass for the call to count as a flat-position
     entry: explicit ``side=`` kwarg, no ``**kwargs`` spread, qty does
-    not reference ``position.qty``, and the enclosing if-chain does
-    not pin position to non-None.
+    not reference ``<position-receiver>.qty``, and the enclosing
+    if-chain does not pin position to non-None.
     """
     has_side_literal = False
     has_kwargs_spread = False
@@ -176,41 +186,84 @@ def _call_is_plausible_flat_entry(cls: ast.ClassDef, call: ast.Call) -> bool:
             continue
         if kw.arg == "side":
             has_side_literal = True
-        if kw.arg == "qty" and _expr_references_position_qty(kw.value):
+        if kw.arg == "qty" and _expr_references_position_qty(kw.value, position_names):
             qty_is_close = True
     if not has_side_literal or has_kwargs_spread or qty_is_close:
         return False
-    return _call_reachable_when_position_may_be_none(cls, call)
+    return _call_reachable_when_position_may_be_none(cls, call, position_names)
 
 
-def _expr_references_position_qty(node: ast.AST) -> bool:
-    """True iff ``node`` (or any sub-expression) references
-    ``position.qty`` / ``pos.qty``. Catches the literal Attribute case
-    plus computed shapes like ``abs(position.qty)``, ``position.qty * 1``,
-    ``-position.qty``, etc.
+def _collect_position_aliases(cls: ast.ClassDef) -> frozenset[str]:
+    """Return the set of identifiers bound to ``ctx.position(...)`` calls
+    in ``cls``, always including the canonical ``"position"`` / ``"pos"``
+    names.
+
+    Walks assignments of the shape ``<name> = ctx.position(...)`` so
+    that downstream qty-close and pin-to-non-None checks recognise
+    aliases like ``p = ctx.position(bar.symbol); if p is not None: ...``
+    (codex round-10 P1d / P1e).
     """
-    _position_receiver_names = frozenset({"position", "pos"})
+    names: set[str] = {"position", "pos"}
+    for node in ast.walk(cls):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not _is_ctx_position_call(node.value):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return frozenset(names)
+
+
+def _is_ctx_position_call(node: ast.AST) -> bool:
+    """True iff ``node`` is a ``ctx.position(...)`` call expression."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if (
+        isinstance(func, ast.Attribute)
+        and func.attr == "position"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "ctx"
+    ):
+        return True
+    return False
+
+
+def _expr_references_position_qty(
+    node: ast.AST, position_names: frozenset[str] = frozenset({"position", "pos"})
+) -> bool:
+    """True iff ``node`` (or any sub-expression) references
+    ``<name>.qty`` where ``<name>`` is one of ``position_names``.
+    Catches the literal Attribute case plus computed shapes like
+    ``abs(position.qty)``, ``position.qty * 1``, ``-position.qty``,
+    etc.; with aliases supplied by :func:`_collect_position_aliases`
+    it also recognises ``p.qty`` when ``p = ctx.position(...)``.
+    """
     for sub in ast.walk(node):
         if (
             isinstance(sub, ast.Attribute)
             and sub.attr == "qty"
             and isinstance(sub.value, ast.Name)
-            and sub.value.id in _position_receiver_names
+            and sub.value.id in position_names
         ):
             return True
     return False
 
 
-def _call_reachable_when_position_may_be_none(cls: ast.ClassDef, call: ast.Call) -> bool:
+def _call_reachable_when_position_may_be_none(
+    cls: ast.ClassDef, call: ast.Call, position_names: frozenset[str]
+) -> bool:
     """True iff ``call`` can execute when ``position`` is ``None``.
 
     Walks ``cls`` looking for the enclosing ``if`` chain around the
-    call and refuses any branch whose ``test`` definitively pins
-    position to non-None (``position is not None``, bare ``position``
-    used as truthy check, ``and``-conjunctions containing either).
+    call and refuses any branch that definitively pins position to
+    non-None — including ``else`` arms of ``if position is None:``
+    (codex round-10 P1a). Recognises ``is None`` / ``== None`` / bare
+    truthy / ``not (position is None)`` etc. via the two pin-direction
+    matchers below.
 
-    Defaults to ``True`` when the call sits at method scope (no
-    enclosing if) or the if-chain doesn't pin position — the
+    Defaults to ``True`` when the if-chain doesn't pin position — the
     conformance gate / engine_exit dispatcher can still reject the
     strategy on other grounds; the safety gate's role here is just
     "does a flat entry exist at all".
@@ -218,15 +271,15 @@ def _call_reachable_when_position_may_be_none(cls: ast.ClassDef, call: ast.Call)
     chain = _enclosing_if_tests_for(cls, call)
     for test, branch_is_else in chain:
         if branch_is_else:
-            # Hit only when the call is in an ``else`` arm. The body
-            # of ``else`` of ``if position is None:`` does pin to
-            # non-None — but this is a rare shape and the conservative
-            # fallback (treat as may-be-None) is safe for the entry
-            # detection use case; over-rejecting here would refuse
-            # valid strategies with else-arm entries.
-            continue
-        if _test_pins_position_not_none(test):
-            return False
+            # else-arm of "pins to is-None" → reachable only when not-None.
+            if _test_pins_position_is_none(test, position_names):
+                return False
+            # else-arm of "pins to not-None" → reachable when is-None
+            # (this branch is the entry-from-flat path, so don't reject).
+        else:
+            # body of "pins to not-None" → reachable only when not-None.
+            if _test_pins_position_not_none(test, position_names):
+                return False
     return True
 
 
@@ -260,32 +313,66 @@ def _enclosing_if_tests_for(cls: ast.ClassDef, target: ast.AST) -> List[tuple[as
     return found
 
 
-def _test_pins_position_not_none(test: ast.AST) -> bool:
+def _test_pins_position_not_none(test: ast.AST, position_names: frozenset[str]) -> bool:
     """True iff entering the body of an ``if test:`` guarantees
     ``position`` is not ``None``.
 
-    Matches: ``position is not None`` / ``pos is not None``, bare
-    ``position`` (truthy check), and ``and``-conjunctions where any
-    operand pins. ``or``-disjunctions don't pin (other operand may
-    leave position None).
+    Matches: ``position is not None`` / ``pos is not None`` (and any
+    alias from ``position_names``), the equivalent ``position != None``
+    form, bare ``position`` (truthy check), ``not (position is None)``,
+    and ``and``-conjunctions where any operand pins. ``or``-disjunctions
+    don't pin (other operand may leave position None).
     """
-    _names = frozenset({"position", "pos"})
     if isinstance(test, ast.Compare):
         if (
             isinstance(test.left, ast.Name)
-            and test.left.id in _names
+            and test.left.id in position_names
             and len(test.ops) == 1
-            and isinstance(test.ops[0], ast.IsNot)
+            and isinstance(test.ops[0], (ast.IsNot, ast.NotEq))
             and len(test.comparators) == 1
             and isinstance(test.comparators[0], ast.Constant)
             and test.comparators[0].value is None
         ):
             return True
-    if isinstance(test, ast.Name) and test.id in _names:
+    if isinstance(test, ast.Name) and test.id in position_names:
         return True
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        if _test_pins_position_is_none(test.operand, position_names):
+            return True
     if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
         for sub in test.values:
-            if _test_pins_position_not_none(sub):
+            if _test_pins_position_not_none(sub, position_names):
+                return True
+    return False
+
+
+def _test_pins_position_is_none(test: ast.AST, position_names: frozenset[str]) -> bool:
+    """True iff entering the body of an ``if test:`` guarantees
+    ``position`` IS ``None``.
+
+    Matches: ``position is None`` / ``position == None`` (and aliases),
+    ``not position`` (None is falsy), ``not (position is not None)``,
+    and ``and``-conjunctions where any operand pins.
+    """
+    if isinstance(test, ast.Compare):
+        if (
+            isinstance(test.left, ast.Name)
+            and test.left.id in position_names
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], (ast.Is, ast.Eq))
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None
+        ):
+            return True
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        if isinstance(test.operand, ast.Name) and test.operand.id in position_names:
+            return True
+        if _test_pins_position_not_none(test.operand, position_names):
+            return True
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        for sub in test.values:
+            if _test_pins_position_is_none(sub, position_names):
                 return True
     return False
 
@@ -312,8 +399,9 @@ def _entry_sides_emitted_by_calls(
     """
     sides: set[str] = set()
     has_dynamic = False
+    position_names = _collect_position_aliases(cls)
     for call in calls:
-        if not _call_is_plausible_flat_entry(cls, call):
+        if not _call_is_plausible_flat_entry(cls, call, position_names):
             continue
         for kw in call.keywords:
             if kw.arg != "side":
@@ -330,16 +418,23 @@ def _entry_sides_emitted_by_calls(
 def _extract_side_literal(node: ast.AST) -> str | None:
     """Pull the ``"long"`` / ``"short"`` literal out of an
     ``OrderSide.LONG`` Attribute, an ``OrderSide("long")`` constructor
-    call (named exactly that), or a bare string Constant.
+    call (named exactly that), or a bare ``"LONG"`` / ``"SHORT"``
+    string Constant.
 
     Returns ``None`` for anything else — variables, function returns,
-    computed expressions. Codex round-9 P1c: the previous version
-    unwrapped any Call expression via its first arg, so ``pick("LONG")``
-    was interpreted as a literal LONG even though ``pick`` could
-    return SHORT at runtime. Restrict unwrap to the ``OrderSide``
-    constructor name only.
+    computed expressions, ``FakeSide.LONG`` attributes that aren't
+    rooted in ``OrderSide``, etc.
+
+    Round-9 P1c: restricted Call unwrap to ``OrderSide(...)`` only.
+    Round-10 P2: Attribute access is now restricted to roots that
+    look like ``OrderSide`` / ``contract.OrderSide`` so a stray
+    ``FakeSide.LONG`` with value ``"BUY"`` doesn't satisfy
+    side-coverage checks (then fail at runtime when ``submit_order``
+    coerces the value to a real ``OrderSide``).
     """
     if isinstance(node, ast.Attribute):
+        if not _attr_value_is_order_side(node.value):
+            return None
         if node.attr.upper() == "LONG":
             return "long"
         if node.attr.upper() == "SHORT":
@@ -359,6 +454,19 @@ def _extract_side_literal(node: ast.AST) -> str | None:
         if isinstance(func, ast.Attribute) and func.attr == "OrderSide":
             return _extract_side_literal(node.args[0])
     return None
+
+
+def _attr_value_is_order_side(node: ast.AST) -> bool:
+    """True iff ``node`` references the ``OrderSide`` enum root —
+    either a bare ``Name("OrderSide")`` or an ``Attribute`` whose final
+    attribute is ``"OrderSide"`` (``contract.OrderSide``,
+    ``foo.bar.OrderSide``).
+    """
+    if isinstance(node, ast.Name) and node.id == "OrderSide":
+        return True
+    if isinstance(node, ast.Attribute) and node.attr == "OrderSide":
+        return True
+    return False
 
 
 def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
@@ -637,23 +745,25 @@ class CodeSafetyChecker(GateResultsMixin):
         cls = ctx.strategy_classes[0]
         if _spec_has_engine_handled_exit(ctx.spec) and _hook_calls_include_entry(cls, hook_calls):
             emitted_sides, has_dynamic = _entry_sides_emitted_by_calls(cls, hook_calls)
+            # When any entry call uses a dynamic ``side=`` expression
+            # (variable, function return, kwargs spread), the runtime
+            # side could be EITHER ``long`` or ``short`` — we can't
+            # tell from the AST. Fail closed unless BOTH sides are
+            # covered by triggerable engine rules (codex round-10 P1f).
+            # A spec-level "covers all entry_rules sides" check is
+            # NOT enough here: refined code might emit a side that
+            # isn't in ``spec.entry_rules`` at all.
+            dynamic_ok = (not has_dynamic) or _engine_exits_cover_sides(ctx.spec, {"long", "short"})
             if emitted_sides:
                 # Every explicit emitted side must be covered. Dynamic
-                # side= elsewhere may also need to be checked against
-                # the spec — when both explicit AND dynamic appear,
-                # require explicit covered AND spec covers all.
-                explicit_covered = _engine_exits_cover_sides(ctx.spec, emitted_sides)
-                if explicit_covered:
-                    if has_dynamic:
-                        if _engine_exits_cover_all_entry_sides(ctx.spec):
-                            return ()
-                    else:
-                        return ()
-            elif has_dynamic:
-                # No explicit sides at all — fall back to spec.entry_rules
-                # as a conservative proxy.
-                if _engine_exits_cover_all_entry_sides(ctx.spec):
+                # side= elsewhere additionally requires both-sides
+                # coverage (above).
+                if _engine_exits_cover_sides(ctx.spec, emitted_sides) and dynamic_ok:
                     return ()
+            elif has_dynamic and dynamic_ok:
+                # No explicit sides at all — dynamic-only flow requires
+                # both-sides coverage to be safe.
+                return ()
         if len(hook_calls) == 1:
             detail = (
                 "Only one ctx.submit_order call found in the engine hooks "
