@@ -15,9 +15,13 @@ Requires ``JOB_SERVICE_URL`` to be set (same env var as the running API).
 By default a row is "divergent" when ``set(target_symbols) != set(traded_symbols)``.
 ``--strict`` switches to exact-list comparison (ordered, no dedup).
 
-Legacy rows persisted before issue #533 carry a default-empty
-``data_provenance`` block; those rows are skipped (there is nothing to
-compare).
+Rows skipped from comparison (counted separately, never reported as divergent):
+  * Legacy / short-circuit rows persisted before issue #533 — they carry a
+    default-empty ``data_provenance`` block; there is nothing to compare.
+  * Universe-agnostic runs — ``target_symbols`` is intentionally empty so
+    the backtester picks the asset-class fallback universe. Comparing
+    ``[]`` against the ledger would mark every such run as divergent and
+    drown out the real symbol-drift cases this script is meant to surface.
 """
 
 from __future__ import annotations
@@ -69,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
 
     scanned = 0
     skipped_legacy = 0
+    skipped_universe_agnostic = 0
     divergent: List[Tuple[str, str, dict[str, Any]]] = []
     for job in lab_client.list_jobs() or []:
         jid = job.get("job_id")
@@ -84,6 +89,14 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         target = list(provenance.get("target_symbols") or [])
+        # Universe-agnostic specs leave ``target_symbols`` empty by design
+        # so the backtester uses the asset-class fallback universe. There
+        # is no "intent" to compare against the ledger; reporting these
+        # would create systematic false positives.
+        if not target:
+            skipped_universe_agnostic += 1
+            continue
+
         traded = list(provenance.get("traded_symbols") or [])
         if not _diverges(target, traded, strict=args.strict):
             continue
@@ -112,10 +125,11 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     logger.info(
-        "scanned=%d divergent=%d skipped_legacy=%d mode=%s",
+        "scanned=%d divergent=%d skipped_legacy=%d skipped_universe_agnostic=%d mode=%s",
         scanned,
         len(divergent),
         skipped_legacy,
+        skipped_universe_agnostic,
         "strict" if args.strict else "set",
     )
     return 0
