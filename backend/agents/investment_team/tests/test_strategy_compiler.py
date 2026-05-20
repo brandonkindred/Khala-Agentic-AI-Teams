@@ -1386,6 +1386,92 @@ def test_safety_gate_accepts_long_entry_with_trailing_high_stop() -> None:
     assert _critical_details(results) == [], _critical_details(results)
 
 
+def test_safety_gate_rejects_emitted_short_with_long_only_trailing_stop() -> None:
+    """Codex round-8 P1: even if ``spec.entry_rules`` declares only
+    long entries, a refined strategy that actually emits
+    ``side=OrderSide.SHORT`` would have no triggerable exit when the
+    spec's stop-loss has ``basis="trailing_high"`` (long-only). The
+    safety gate must use the EMITTED sides, not just spec.entry_rules.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],  # declares long
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],  # long-only
+    )
+    # Code that emits SHORT (drifted from spec.entry_rules).
+    drift_code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        position = ctx.position(bar.symbol)
+        if position is None:
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.SHORT,
+                qty=1,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(drift_code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_rejects_close_with_computed_qty() -> None:
+    """Codex round-8 P1: ``qty=abs(position.qty)`` and similar
+    expression-wrapped close shapes were misclassified as entries
+    (only exact ``qty=position.qty`` was detected). With the
+    engine-handled-exit relaxation, that false positive let close-only
+    strategies pass the gate. ``_expr_references_position_qty`` now
+    walks the kwarg expression for any reference to
+    ``position.qty`` / ``pos.qty``.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        position = ctx.position(bar.symbol)
+        if position is not None:
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.SHORT,
+                qty=abs(position.qty),
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_requires_custom_code_short_form_strings() -> None:
+    """Codex round-8 P2: Pydantic's bool field accepts the single-letter
+    short forms ``t`` / ``f`` / ``y`` / ``n``. The defensive coercer
+    used to drop them and downgrade ``"y"`` to ``False``, silently
+    forcing deterministic compilation when the ideation output meant
+    the opposite.
+    """
+    from investment_team.strategy_lab.orchestrator import _coerce_requires_custom_code
+
+    assert _coerce_requires_custom_code("y") is True
+    assert _coerce_requires_custom_code("Y") is True
+    assert _coerce_requires_custom_code("t") is True
+    assert _coerce_requires_custom_code("T") is True
+    assert _coerce_requires_custom_code("n") is False
+    assert _coerce_requires_custom_code("N") is False
+    assert _coerce_requires_custom_code("f") is False
+    assert _coerce_requires_custom_code("F") is False
+
+
 def test_spec_hash_invariant_to_rule_notes() -> None:
     """Codex P3: rule-level ``note`` text is author prose and never
     affects emitted code. Two specs differing only by ``note`` must

@@ -103,10 +103,14 @@ def _coerce_requires_custom_code(raw: Any) -> bool:
             return True
         return False
     if isinstance(raw, str):
+        # Match Pydantic's bool string-coercion token set so an
+        # ideation output of ``"y"`` doesn't silently get downgraded to
+        # ``False`` (codex round-8 review). Empty string is treated as
+        # False for the optional-behaviour contract.
         s = raw.strip().lower()
-        if s in {"true", "yes", "on", "1"}:
+        if s in {"true", "yes", "on", "1", "t", "y"}:
             return True
-        if s in {"false", "no", "off", "0", ""}:
+        if s in {"false", "no", "off", "0", "f", "n", ""}:
             return False
     return False
 

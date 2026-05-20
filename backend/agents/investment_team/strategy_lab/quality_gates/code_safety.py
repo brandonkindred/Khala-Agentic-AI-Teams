@@ -109,32 +109,157 @@ def _spec_has_engine_handled_exit(spec: Any) -> bool:
 
 
 def _engine_exits_cover_all_entry_sides(spec: Any) -> bool:
-    """True iff every entry side declared in ``spec.entry_rules`` is
-    closeable by at least one rule the engine will enforce.
-
-    ``_stop_loss_triggers`` in ``executor/rule_compiler.py`` makes some
-    bases side-specific: ``trailing_low`` is a no-op for ``long`` (only
-    fires on shorts), ``trailing_high`` is a no-op for ``short``. A
-    long-only spec with only a ``StopLossRule(basis="trailing_low")``
-    has NO triggerable engine exit — entries would stay open forever.
-    The safety gate should refuse those rather than rubber-stamping
-    "engine handles it".
-
-    ``TakeProfitRule`` and ``StopLossRule(basis="entry_price")`` trigger
-    for both sides.
+    """Spec-level wrapper: every side in ``spec.entry_rules`` must be
+    closeable by at least one rule in ``spec.exit_rules``. Used as the
+    fallback when the emitted code has dynamic ``side=`` expressions
+    the AST can't resolve statically.
     """
     if spec is None:
         return False
-    entry_rules = getattr(spec, "entry_rules", None) or []
-    exit_rules = getattr(spec, "exit_rules", None) or []
-    from ..spec_dsl import EntryRule, StopLossRule, TakeProfitRule  # local import
+    from ..spec_dsl import EntryRule  # local import
 
     entry_sides: set[str] = set()
-    for rule in entry_rules:
+    for rule in getattr(spec, "entry_rules", None) or []:
         if isinstance(rule, EntryRule):
             entry_sides.add(rule.side)
     if not entry_sides:
         return False
+    return _engine_exits_cover_sides(spec, entry_sides)
+
+
+def _hook_calls_include_entry(calls: List[ast.Call]) -> bool:
+    """True iff at least one of the ``ctx.submit_order(...)`` calls
+    reachable from ``on_bar`` looks like an entry submission — has a
+    ``side=`` kwarg AND its ``qty=`` does not reference
+    ``position.qty`` / ``pos.qty`` anywhere in the expression tree.
+
+    Used to gate the engine-handled-exit relaxation on actually having
+    an entry path: a strategy with only ``ctx.submit_order(qty=position.qty)``
+    closes (no entries) should still fail the order-flow check even
+    when ``spec.exit_rules`` has engine-handled rules — there's nothing
+    to open in the first place.
+
+    Detects ``position.qty`` recursively (codex round-8 review): naive
+    "kw.value is exactly an Attribute" matching missed ``qty=abs(position.qty)``
+    or ``qty=position.qty * 1`` etc., which silently let close-only
+    strategies satisfy the entry check.
+    """
+    for call in calls:
+        has_side_literal = any(kw.arg == "side" for kw in call.keywords)
+        if not has_side_literal:
+            # ``**kwargs`` spreads or fully-positional calls are
+            # treated optimistically — same lenient stance the
+            # CodeConformanceGate entry-coverage check takes.
+            if any(kw.arg is None for kw in call.keywords):
+                return True
+            continue
+        # Skip calls whose qty references ``position.qty`` / ``pos.qty``
+        # anywhere in the expression — those are closes, not entries.
+        is_close = False
+        for kw in call.keywords:
+            if kw.arg != "qty":
+                continue
+            if _expr_references_position_qty(kw.value):
+                is_close = True
+                break
+        if not is_close:
+            return True
+    return False
+
+
+def _expr_references_position_qty(node: ast.AST) -> bool:
+    """True iff ``node`` (or any sub-expression) references
+    ``position.qty`` / ``pos.qty``. Catches the literal Attribute case
+    plus computed shapes like ``abs(position.qty)``, ``position.qty * 1``,
+    ``-position.qty``, etc.
+    """
+    _position_receiver_names = frozenset({"position", "pos"})
+    for sub in ast.walk(node):
+        if (
+            isinstance(sub, ast.Attribute)
+            and sub.attr == "qty"
+            and isinstance(sub.value, ast.Name)
+            and sub.value.id in _position_receiver_names
+        ):
+            return True
+    return False
+
+
+def _entry_sides_emitted_by_calls(calls: List[ast.Call]) -> tuple[set[str], bool]:
+    """Return ``(sides, has_dynamic)`` describing the entry sides the
+    strategy code actually submits.
+
+    ``sides`` is the set of ``"long"`` / ``"short"`` literals seen in
+    ``side=OrderSide.LONG`` / ``side="LONG"`` kwargs on calls that
+    aren't position closes. ``has_dynamic`` is True when any entry
+    call uses an expression (variable / computed) the AST can't
+    resolve statically — those calls relax side-coverage requirements
+    (the gate falls back to the spec's declared sides).
+
+    Codex round-8: the engine-handled-exit relaxation previously
+    checked ``_engine_exits_cover_all_entry_sides(spec)`` only, which
+    misses LLM refinement that emits a side different from what the
+    spec declares (e.g. spec says long but code submits SHORT). Using
+    the emitted sides catches that drift.
+    """
+    sides: set[str] = set()
+    has_dynamic = False
+    for call in calls:
+        # Position closes (qty references position.qty) don't count.
+        is_close = False
+        for kw in call.keywords:
+            if kw.arg == "qty" and _expr_references_position_qty(kw.value):
+                is_close = True
+                break
+        if is_close:
+            continue
+        # **kwargs spread: side could be anything; treat as dynamic.
+        if any(kw.arg is None for kw in call.keywords):
+            has_dynamic = True
+            continue
+        for kw in call.keywords:
+            if kw.arg != "side":
+                continue
+            literal = _extract_side_literal(kw.value)
+            if literal is not None:
+                sides.add(literal)
+            else:
+                has_dynamic = True
+            break
+    return sides, has_dynamic
+
+
+def _extract_side_literal(node: ast.AST) -> str | None:
+    """Pull the ``"long"`` / ``"short"`` literal out of an
+    ``OrderSide.LONG`` Attribute, an ``OrderSide("long")`` Call, or a
+    bare string Constant. Returns ``None`` for anything else
+    (variables, function returns, computed expressions).
+    """
+    if isinstance(node, ast.Attribute):
+        if node.attr.upper() == "LONG":
+            return "long"
+        if node.attr.upper() == "SHORT":
+            return "short"
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        v = node.value.strip().upper()
+        if v == "LONG":
+            return "long"
+        if v == "SHORT":
+            return "short"
+    if isinstance(node, ast.Call) and node.args:
+        return _extract_side_literal(node.args[0])
+    return None
+
+
+def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
+    """True iff every side in ``sides`` is closeable by at least one
+    rule in ``spec.exit_rules``, per ``_stop_loss_triggers`` /
+    ``_take_profit_triggers`` basis-vs-side compatibility.
+    """
+    if spec is None or not sides:
+        return False
+    exit_rules = getattr(spec, "exit_rules", None) or []
+    from ..spec_dsl import StopLossRule, TakeProfitRule  # local import
 
     def _rule_covers_side(rule: Any, side: str) -> bool:
         if isinstance(rule, TakeProfitRule):
@@ -149,52 +274,10 @@ def _engine_exits_cover_all_entry_sides(spec: Any) -> bool:
                 return side == "short"
         return False
 
-    for side in entry_sides:
+    for side in sides:
         if not any(_rule_covers_side(r, side) for r in exit_rules):
             return False
     return True
-
-
-def _hook_calls_include_entry(calls: List[ast.Call]) -> bool:
-    """True iff at least one of the ``ctx.submit_order(...)`` calls
-    reachable from ``on_bar`` looks like an entry submission — has a
-    ``side=`` kwarg AND does not pass ``qty=position.qty`` /
-    ``qty=pos.qty`` (the close-shape from the conformance gate).
-
-    Used to gate the engine-handled-exit relaxation on actually having
-    an entry path: a strategy with only ``ctx.submit_order(qty=position.qty)``
-    closes (no entries) should still fail the order-flow check even
-    when ``spec.exit_rules`` has engine-handled rules — there's nothing
-    to open in the first place.
-    """
-    _position_receiver_names = frozenset({"position", "pos"})
-    for call in calls:
-        has_side_literal = any(kw.arg == "side" for kw in call.keywords)
-        if not has_side_literal:
-            # ``**kwargs`` spreads or fully-positional calls are
-            # treated optimistically — same lenient stance the
-            # CodeConformanceGate entry-coverage check takes.
-            if any(kw.arg is None for kw in call.keywords):
-                return True
-            continue
-        # Skip calls whose qty is ``position.qty`` / ``pos.qty`` — those
-        # are closes, not entries.
-        is_close = False
-        for kw in call.keywords:
-            if kw.arg != "qty":
-                continue
-            v = kw.value
-            if (
-                isinstance(v, ast.Attribute)
-                and v.attr == "qty"
-                and isinstance(v.value, ast.Name)
-                and v.value.id in _position_receiver_names
-            ):
-                is_close = True
-                break
-        if not is_close:
-            return True
-    return False
 
 
 @dataclass(frozen=True)
@@ -422,23 +505,34 @@ class CodeSafetyChecker(GateResultsMixin):
             )
         if _calls_form_entry_exit_pair(hook_calls):
             return ()
-        # Engine-handled-exit relaxation. Three gates must all hold:
+        # Engine-handled-exit relaxation. Four gates must all hold:
         #   (a) ``spec.exit_rules`` declares at least one engine-handled
         #       rule (StopLossRule / TakeProfitRule).
-        #   (b) Those rules actually cover EVERY entry side the spec
-        #       plans to open — some StopLossRule.basis values are
-        #       side-specific in ``evaluate_exit_rules`` (trailing_low
-        #       is a no-op for longs, trailing_high for shorts).
-        #   (c) The strategy code itself has at least one plausible
+        #   (b) The strategy code itself has at least one plausible
         #       entry submission (side= literal AND not qty=position.qty).
         #       A close-only / no-submit strategy still fails the gate
         #       because there's nothing to open.
-        if (
-            _spec_has_engine_handled_exit(ctx.spec)
-            and _engine_exits_cover_all_entry_sides(ctx.spec)
-            and _hook_calls_include_entry(hook_calls)
-        ):
-            return ()
+        #   (c) Every side the code actually emits in entry calls is
+        #       covered by a triggerable engine-handled exit rule
+        #       (basis-vs-side compatibility from
+        #       ``_stop_loss_triggers``). This catches refinements
+        #       that drift away from ``spec.entry_rules`` — e.g.
+        #       a spec declaring long entries but emitting SHORT
+        #       in code, where a ``trailing_high`` stop wouldn't fire.
+        #   (d) When the emitted code has dynamic side= (variable /
+        #       computed), fall back to ``spec.entry_rules`` side
+        #       coverage so we still catch the basic regression.
+        if _spec_has_engine_handled_exit(ctx.spec) and _hook_calls_include_entry(hook_calls):
+            emitted_sides, has_dynamic = _entry_sides_emitted_by_calls(hook_calls)
+            covered = False
+            if emitted_sides and _engine_exits_cover_sides(ctx.spec, emitted_sides):
+                covered = True
+            if has_dynamic and _engine_exits_cover_all_entry_sides(ctx.spec):
+                # Dynamic side= can resolve to anything; trust the
+                # spec's declared sides as a conservative proxy.
+                covered = covered or True
+            if covered:
+                return ()
         if len(hook_calls) == 1:
             detail = (
                 "Only one ctx.submit_order call found in the engine hooks "
