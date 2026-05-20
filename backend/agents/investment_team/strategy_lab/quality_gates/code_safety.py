@@ -127,44 +127,60 @@ def _engine_exits_cover_all_entry_sides(spec: Any) -> bool:
     return _engine_exits_cover_sides(spec, entry_sides)
 
 
-def _hook_calls_include_entry(calls: List[ast.Call]) -> bool:
+def _hook_calls_include_entry(cls: ast.ClassDef, calls: List[ast.Call]) -> bool:
     """True iff at least one of the ``ctx.submit_order(...)`` calls
-    reachable from ``on_bar`` looks like an entry submission — has a
-    ``side=`` kwarg AND its ``qty=`` does not reference
-    ``position.qty`` / ``pos.qty`` anywhere in the expression tree.
+    reachable from ``on_bar`` is a plausible flat-position entry — has
+    a ``side=`` kwarg, has no ``**kwargs`` spread (which could hide a
+    close shape in the spread), its ``qty=`` does not reference
+    ``position.qty`` / ``pos.qty`` anywhere in the expression, AND its
+    enclosing ``if`` chain does not pin ``position`` to non-None (a
+    call inside ``if position is not None:`` is an add-on / close,
+    not a flat-position entry).
 
     Used to gate the engine-handled-exit relaxation on actually having
-    an entry path: a strategy with only ``ctx.submit_order(qty=position.qty)``
-    closes (no entries) should still fail the order-flow check even
-    when ``spec.exit_rules`` has engine-handled rules — there's nothing
-    to open in the first place.
+    an entry path. Each tightening below was driven by a codex P1:
 
-    Detects ``position.qty`` recursively (codex round-8 review): naive
-    "kw.value is exactly an Attribute" matching missed ``qty=abs(position.qty)``
-    or ``qty=position.qty * 1`` etc., which silently let close-only
-    strategies satisfy the entry check.
+    * round-7: reject any call whose qty references ``position.qty`` —
+      ``ctx.submit_order(qty=position.qty)`` closes don't count.
+    * round-8: walk the qty expression recursively so wrapped close
+      shapes (``abs(position.qty)``, ``position.qty * 1``) are caught.
+    * round-9 P1a: ``**kwargs`` spreads are NOT treated as entries
+      any more — a spread can carry ``qty=position.qty`` just as easily
+      as a side literal.
+    * round-9 P1b: calls inside ``if position is not None:`` (add-only
+      / close-only behaviour) no longer count — only calls reachable
+      when ``position`` may still be ``None``.
     """
     for call in calls:
-        has_side_literal = any(kw.arg == "side" for kw in call.keywords)
-        if not has_side_literal:
-            # ``**kwargs`` spreads or fully-positional calls are
-            # treated optimistically — same lenient stance the
-            # CodeConformanceGate entry-coverage check takes.
-            if any(kw.arg is None for kw in call.keywords):
-                return True
+        if not _call_is_plausible_flat_entry(cls, call):
             continue
-        # Skip calls whose qty references ``position.qty`` / ``pos.qty``
-        # anywhere in the expression — those are closes, not entries.
-        is_close = False
-        for kw in call.keywords:
-            if kw.arg != "qty":
-                continue
-            if _expr_references_position_qty(kw.value):
-                is_close = True
-                break
-        if not is_close:
-            return True
+        return True
     return False
+
+
+def _call_is_plausible_flat_entry(cls: ast.ClassDef, call: ast.Call) -> bool:
+    """Per-call helper used by both :func:`_hook_calls_include_entry`
+    and :func:`_entry_sides_emitted_by_calls` so the two stay in sync.
+
+    All four checks must pass for the call to count as a flat-position
+    entry: explicit ``side=`` kwarg, no ``**kwargs`` spread, qty does
+    not reference ``position.qty``, and the enclosing if-chain does
+    not pin position to non-None.
+    """
+    has_side_literal = False
+    has_kwargs_spread = False
+    qty_is_close = False
+    for kw in call.keywords:
+        if kw.arg is None:
+            has_kwargs_spread = True
+            continue
+        if kw.arg == "side":
+            has_side_literal = True
+        if kw.arg == "qty" and _expr_references_position_qty(kw.value):
+            qty_is_close = True
+    if not has_side_literal or has_kwargs_spread or qty_is_close:
+        return False
+    return _call_reachable_when_position_may_be_none(cls, call)
 
 
 def _expr_references_position_qty(node: ast.AST) -> bool:
@@ -185,16 +201,108 @@ def _expr_references_position_qty(node: ast.AST) -> bool:
     return False
 
 
-def _entry_sides_emitted_by_calls(calls: List[ast.Call]) -> tuple[set[str], bool]:
+def _call_reachable_when_position_may_be_none(cls: ast.ClassDef, call: ast.Call) -> bool:
+    """True iff ``call`` can execute when ``position`` is ``None``.
+
+    Walks ``cls`` looking for the enclosing ``if`` chain around the
+    call and refuses any branch whose ``test`` definitively pins
+    position to non-None (``position is not None``, bare ``position``
+    used as truthy check, ``and``-conjunctions containing either).
+
+    Defaults to ``True`` when the call sits at method scope (no
+    enclosing if) or the if-chain doesn't pin position — the
+    conformance gate / engine_exit dispatcher can still reject the
+    strategy on other grounds; the safety gate's role here is just
+    "does a flat entry exist at all".
+    """
+    chain = _enclosing_if_tests_for(cls, call)
+    for test, branch_is_else in chain:
+        if branch_is_else:
+            # Hit only when the call is in an ``else`` arm. The body
+            # of ``else`` of ``if position is None:`` does pin to
+            # non-None — but this is a rare shape and the conservative
+            # fallback (treat as may-be-None) is safe for the entry
+            # detection use case; over-rejecting here would refuse
+            # valid strategies with else-arm entries.
+            continue
+        if _test_pins_position_not_none(test):
+            return False
+    return True
+
+
+def _enclosing_if_tests_for(cls: ast.ClassDef, target: ast.AST) -> List[tuple[ast.AST, bool]]:
+    """Return ``[(test_expr, branch_is_else), ...]`` for every ``If``
+    whose body or orelse contains ``target`` (transitively), in
+    outer-to-inner order. Empty when ``target`` is at method scope.
+    """
+    found: List[tuple[ast.AST, bool]] = []
+
+    def _walk(node: ast.AST, stack: List[tuple[ast.AST, bool]]) -> bool:
+        if node is target:
+            found.extend(stack)
+            return True
+        if isinstance(node, ast.If):
+            for child in node.body:
+                if _walk(child, stack + [(node.test, False)]):
+                    return True
+            for child in node.orelse:
+                if _walk(child, stack + [(node.test, True)]):
+                    return True
+            return False
+        for child in ast.iter_child_nodes(node):
+            if _walk(child, stack):
+                return True
+        return False
+
+    for child in ast.iter_child_nodes(cls):
+        if _walk(child, []):
+            break
+    return found
+
+
+def _test_pins_position_not_none(test: ast.AST) -> bool:
+    """True iff entering the body of an ``if test:`` guarantees
+    ``position`` is not ``None``.
+
+    Matches: ``position is not None`` / ``pos is not None``, bare
+    ``position`` (truthy check), and ``and``-conjunctions where any
+    operand pins. ``or``-disjunctions don't pin (other operand may
+    leave position None).
+    """
+    _names = frozenset({"position", "pos"})
+    if isinstance(test, ast.Compare):
+        if (
+            isinstance(test.left, ast.Name)
+            and test.left.id in _names
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.IsNot)
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None
+        ):
+            return True
+    if isinstance(test, ast.Name) and test.id in _names:
+        return True
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        for sub in test.values:
+            if _test_pins_position_not_none(sub):
+                return True
+    return False
+
+
+def _entry_sides_emitted_by_calls(
+    cls: ast.ClassDef, calls: List[ast.Call]
+) -> tuple[set[str], bool]:
     """Return ``(sides, has_dynamic)`` describing the entry sides the
     strategy code actually submits.
 
     ``sides`` is the set of ``"long"`` / ``"short"`` literals seen in
-    ``side=OrderSide.LONG`` / ``side="LONG"`` kwargs on calls that
-    aren't position closes. ``has_dynamic`` is True when any entry
-    call uses an expression (variable / computed) the AST can't
-    resolve statically — those calls relax side-coverage requirements
-    (the gate falls back to the spec's declared sides).
+    ``side=OrderSide.LONG`` / ``side="LONG"`` kwargs on flat-entry
+    calls (per :func:`_call_is_plausible_flat_entry`). ``has_dynamic``
+    is True when any plausible entry call uses an expression
+    (variable / function return) the AST can't resolve statically —
+    those calls relax side-coverage requirements via the spec
+    fallback.
 
     Codex round-8: the engine-handled-exit relaxation previously
     checked ``_engine_exits_cover_all_entry_sides(spec)`` only, which
@@ -205,17 +313,7 @@ def _entry_sides_emitted_by_calls(calls: List[ast.Call]) -> tuple[set[str], bool
     sides: set[str] = set()
     has_dynamic = False
     for call in calls:
-        # Position closes (qty references position.qty) don't count.
-        is_close = False
-        for kw in call.keywords:
-            if kw.arg == "qty" and _expr_references_position_qty(kw.value):
-                is_close = True
-                break
-        if is_close:
-            continue
-        # **kwargs spread: side could be anything; treat as dynamic.
-        if any(kw.arg is None for kw in call.keywords):
-            has_dynamic = True
+        if not _call_is_plausible_flat_entry(cls, call):
             continue
         for kw in call.keywords:
             if kw.arg != "side":
@@ -231,9 +329,15 @@ def _entry_sides_emitted_by_calls(calls: List[ast.Call]) -> tuple[set[str], bool
 
 def _extract_side_literal(node: ast.AST) -> str | None:
     """Pull the ``"long"`` / ``"short"`` literal out of an
-    ``OrderSide.LONG`` Attribute, an ``OrderSide("long")`` Call, or a
-    bare string Constant. Returns ``None`` for anything else
-    (variables, function returns, computed expressions).
+    ``OrderSide.LONG`` Attribute, an ``OrderSide("long")`` constructor
+    call (named exactly that), or a bare string Constant.
+
+    Returns ``None`` for anything else — variables, function returns,
+    computed expressions. Codex round-9 P1c: the previous version
+    unwrapped any Call expression via its first arg, so ``pick("LONG")``
+    was interpreted as a literal LONG even though ``pick`` could
+    return SHORT at runtime. Restrict unwrap to the ``OrderSide``
+    constructor name only.
     """
     if isinstance(node, ast.Attribute):
         if node.attr.upper() == "LONG":
@@ -246,8 +350,14 @@ def _extract_side_literal(node: ast.AST) -> str | None:
             return "long"
         if v == "SHORT":
             return "short"
+    # Only unwrap ``OrderSide(...)`` / ``contract.OrderSide(...)`` — any
+    # other call is opaque.
     if isinstance(node, ast.Call) and node.args:
-        return _extract_side_literal(node.args[0])
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "OrderSide":
+            return _extract_side_literal(node.args[0])
+        if isinstance(func, ast.Attribute) and func.attr == "OrderSide":
+            return _extract_side_literal(node.args[0])
     return None
 
 
@@ -509,30 +619,41 @@ class CodeSafetyChecker(GateResultsMixin):
         #   (a) ``spec.exit_rules`` declares at least one engine-handled
         #       rule (StopLossRule / TakeProfitRule).
         #   (b) The strategy code itself has at least one plausible
-        #       entry submission (side= literal AND not qty=position.qty).
-        #       A close-only / no-submit strategy still fails the gate
-        #       because there's nothing to open.
-        #   (c) Every side the code actually emits in entry calls is
+        #       FLAT-position entry (side= literal AND not qty=position.qty
+        #       AND not ``**kwargs`` spread AND not inside an enclosing
+        #       ``if position is not None:`` guard).
+        #   (c) Every EXPLICIT side the code emits in entry calls is
         #       covered by a triggerable engine-handled exit rule
         #       (basis-vs-side compatibility from
-        #       ``_stop_loss_triggers``). This catches refinements
-        #       that drift away from ``spec.entry_rules`` — e.g.
-        #       a spec declaring long entries but emitting SHORT
-        #       in code, where a ``trailing_high`` stop wouldn't fire.
-        #   (d) When the emitted code has dynamic side= (variable /
-        #       computed), fall back to ``spec.entry_rules`` side
-        #       coverage so we still catch the basic regression.
-        if _spec_has_engine_handled_exit(ctx.spec) and _hook_calls_include_entry(hook_calls):
-            emitted_sides, has_dynamic = _entry_sides_emitted_by_calls(hook_calls)
-            covered = False
-            if emitted_sides and _engine_exits_cover_sides(ctx.spec, emitted_sides):
-                covered = True
-            if has_dynamic and _engine_exits_cover_all_entry_sides(ctx.spec):
-                # Dynamic side= can resolve to anything; trust the
-                # spec's declared sides as a conservative proxy.
-                covered = covered or True
-            if covered:
-                return ()
+        #       ``_stop_loss_triggers``). An explicit uncovered side
+        #       cannot be relaxed away by dynamic side= elsewhere
+        #       (codex round-9 P1d): a literal ``side=OrderSide.SHORT``
+        #       with only long-side trailing-stop coverage is a real
+        #       exit-coverage mismatch the gate must surface.
+        #   (d) When there's NO explicit emitted side but at least one
+        #       call uses a dynamic ``side=`` expression, fall back
+        #       to ``spec.entry_rules`` side coverage so the relaxation
+        #       can still apply for code we can't analyse statically.
+        cls = ctx.strategy_classes[0]
+        if _spec_has_engine_handled_exit(ctx.spec) and _hook_calls_include_entry(cls, hook_calls):
+            emitted_sides, has_dynamic = _entry_sides_emitted_by_calls(cls, hook_calls)
+            if emitted_sides:
+                # Every explicit emitted side must be covered. Dynamic
+                # side= elsewhere may also need to be checked against
+                # the spec — when both explicit AND dynamic appear,
+                # require explicit covered AND spec covers all.
+                explicit_covered = _engine_exits_cover_sides(ctx.spec, emitted_sides)
+                if explicit_covered:
+                    if has_dynamic:
+                        if _engine_exits_cover_all_entry_sides(ctx.spec):
+                            return ()
+                    else:
+                        return ()
+            elif has_dynamic:
+                # No explicit sides at all — fall back to spec.entry_rules
+                # as a conservative proxy.
+                if _engine_exits_cover_all_entry_sides(ctx.spec):
+                    return ()
         if len(hook_calls) == 1:
             detail = (
                 "Only one ctx.submit_order call found in the engine hooks "

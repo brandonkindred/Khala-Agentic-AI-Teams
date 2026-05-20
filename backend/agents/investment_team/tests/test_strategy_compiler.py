@@ -1472,6 +1472,167 @@ def test_requires_custom_code_short_form_strings() -> None:
     assert _coerce_requires_custom_code("F") is False
 
 
+def test_safety_gate_rejects_kwargs_spread_only_strategy() -> None:
+    """Codex round-9 P1a: a ``ctx.submit_order(**kwargs)`` spread can
+    carry ``qty=position.qty`` just as easily as a side literal. The
+    relaxation must NOT treat spread calls as entries — otherwise
+    close-only strategies pass the gate whenever spec has stop/TP.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        position = ctx.position(bar.symbol)
+        if position is not None:
+            kwargs = {
+                "symbol": bar.symbol,
+                "side": OrderSide.SHORT,
+                "qty": position.qty,
+                "order_type": OrderType.MARKET,
+                "tif": TimeInForce.DAY,
+            }
+            ctx.submit_order(**kwargs)
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_rejects_entry_only_reachable_when_in_position() -> None:
+    """Codex round-9 P1b: a ``ctx.submit_order(side=LONG, qty=10)`` call
+    inside ``if position is not None:`` is an add-on, not a flat entry.
+    The relaxation must require at least one call reachable when
+    position may still be ``None``.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        position = ctx.position(bar.symbol)
+        if position is not None:
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.LONG,
+                qty=1,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_safety_gate_accepts_entry_under_position_is_none_guard() -> None:
+    """Sanity-check the reachability logic — the canonical
+    ``if position is None: ctx.submit_order(side=LONG, qty=...)``
+    shape must still pass.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        if bar.symbol not in self.UNIVERSE:
+            return
+        position = ctx.position(bar.symbol)
+        if position is None:
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.LONG,
+                qty=10,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    assert _critical_details(results) == [], _critical_details(results)
+
+
+def test_safety_gate_does_not_extract_side_from_arbitrary_function_call() -> None:
+    """Codex round-9 P1c: ``side=pick("LONG")`` must NOT be statically
+    interpreted as a literal LONG — ``pick`` could return SHORT at
+    runtime. ``_extract_side_literal`` only unwraps ``OrderSide(...)``
+    constructor calls, not arbitrary function calls.
+    """
+    from investment_team.strategy_lab.quality_gates.code_safety import (
+        _extract_side_literal,
+    )
+
+    # ``OrderSide("LONG")`` IS recognised (canonical constructor).
+    tree_ok = ast.parse('OrderSide("LONG")', mode="eval")
+    assert _extract_side_literal(tree_ok.body) == "long"
+    # ``pick("LONG")`` is NOT recognised — opaque, returns None.
+    tree_bad = ast.parse('pick("LONG")', mode="eval")
+    assert _extract_side_literal(tree_bad.body) is None
+    # ``some_helper(OrderSide.LONG)`` likewise opaque.
+    tree_wrap = ast.parse("some_helper(OrderSide.LONG)", mode="eval")
+    assert _extract_side_literal(tree_wrap.body) is None
+
+
+def test_safety_gate_explicit_uncovered_side_not_masked_by_dynamic() -> None:
+    """Codex round-9 P1d: a literal ``side=OrderSide.SHORT`` with only
+    a long-side ``trailing_high`` stop in spec is a real coverage
+    mismatch. A SECOND call elsewhere with dynamic ``side=`` must NOT
+    let the gate pass via the spec-level fallback — the explicit
+    uncovered side wins.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],  # spec declares long
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],  # long-only stop
+    )
+    code = """from contract import Strategy, OrderSide, OrderType, TimeInForce
+
+class CompiledStrategy(Strategy):
+    UNIVERSE = frozenset({"QQQ"})
+
+    def on_bar(self, ctx, bar):
+        position = ctx.position(bar.symbol)
+        side_choice = self._pick_side(bar)
+        if position is None:
+            # Explicit SHORT entry — uncovered by trailing_high stop.
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.SHORT,
+                qty=1,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+            # Dynamic side= elsewhere — could be LONG but doesn't relax
+            # the explicit SHORT mismatch above.
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=side_choice,
+                qty=2,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+            )
+
+    def _pick_side(self, bar):
+        return OrderSide.LONG
+"""
+    results = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(results)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
 def test_spec_hash_invariant_to_rule_notes() -> None:
     """Codex P3: rule-level ``note`` text is author prose and never
     affects emitted code. Two specs differing only by ``note`` must
