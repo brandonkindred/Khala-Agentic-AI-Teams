@@ -76,6 +76,33 @@ logger = logging.getLogger(__name__)
 PhaseCallback = Callable[[str, Dict[str, Any]], None]
 
 
+def _coerce_requires_custom_code(raw: Any) -> bool:
+    """Defensively coerce an LLM-emitted value to ``bool`` for the
+    ``StrategySpec.requires_custom_code`` field.
+
+    Accepts: ``True``/``False``, the common case-insensitive string
+    variants (``"true"``/``"yes"``/``"on"``/``"1"`` → True, the falsey
+    counterparts → False), and ``0``/``1`` ints. Anything else
+    (``None``, empty string, arbitrary prose, ``"maybe"``) defaults to
+    ``False`` so a single typo in ideation JSON can't silently disable
+    deterministic compilation OR abort the design attempt with a
+    Pydantic ValidationError.
+    """
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return bool(raw)
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in {"true", "yes", "on", "1"}:
+            return True
+        if s in {"false", "no", "off", "0", ""}:
+            return False
+    return False
+
+
 # Refinement output is code-only post-#543. Anything else the LLM emits is
 # logged + discarded by ``_apply_updates``; ``risk_limits`` is the lone
 # exception, handled with tighten-only semantics.
@@ -1651,17 +1678,16 @@ class StrategyLabOrchestrator:
             target_symbols=strategy_dict.get("target_symbols", []),
             risk_limits=strategy_dict.get("risk_limits", {}),
             speculative=strategy_dict.get("speculative", False),
-            # Normalise to default ``False`` when the LLM emits explicit
-            # ``null`` (Pydantic's non-Optional bool would otherwise
-            # ValidationError and abort the design attempt). Pydantic's
-            # bool coercion then handles the standard string variants
-            # ("true"/"false"/"yes"/"no") correctly; ``bool(...)`` here
-            # would have flipped any non-empty string (e.g. ``"false"``)
-            # into ``True`` and silently disabled deterministic compile.
-            requires_custom_code=(
+            # Defensive coercion. The LLM-emitted JSON can pass anything
+            # here — ``None``, ``"false"``, empty string, prose — and a
+            # non-Optional ``bool`` field would either flip the wrong way
+            # (``bool("false")`` is ``True``) or ValidationError-abort the
+            # design attempt on garbage input. Normalise to a real bool
+            # before construction; default to ``False`` (deterministic
+            # compile) for anything that doesn't parse as an explicit
+            # truthy/falsey value.
+            requires_custom_code=_coerce_requires_custom_code(
                 strategy_dict.get("requires_custom_code")
-                if strategy_dict.get("requires_custom_code") is not None
-                else False
             ),
             strategy_code=code,
         )

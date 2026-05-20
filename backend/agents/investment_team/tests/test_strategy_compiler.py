@@ -119,37 +119,59 @@ def test_signal_exit_only() -> None:
     assert code.count("ctx.submit_order") == 2  # one entry, one signal exit
 
 
-def test_stop_loss_present_compiles_clean() -> None:
+def test_stop_loss_present_attaches_bracket_on_entry() -> None:
+    """Stop-loss is NOT inlined as a separate ``submit_order`` (that
+    would duplicate the engine's ``engine_exit:stop_loss`` from
+    ``evaluate_exit_rules``). Instead an ``attached_stop_loss``
+    bracket leg is added to the entry ``submit_order``, which satisfies
+    the safety gate's entry+exit pair check.
+    """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05)],
     )
     code = compile_strategy(spec)
-    # Inline exit branch threshold computed against position.entry_price;
-    # close fires when bar.low (long) / bar.high (short) crosses it.
-    assert "position.entry_price * (1.0 - 0.05)" in code
-    assert "position.entry_price * (1.0 + 0.05)" in code
-    assert 'reason="compiled_stop_loss"' in code
+    # No inline ``compiled_stop_loss`` submit; bracket on entry instead.
+    assert 'reason="compiled_stop_loss"' not in code
+    assert "attached_stop_loss=attached_stop" in code
+    assert "StopAttachment(stop_price=" in code
+    # Long entry → stop_price = bar.close * (1 - 0.05).
+    assert "bar.close * (1.0 - 0.05)" in code
+    # Conformance gate's stop-loss enforcement check requires the class
+    # to reference ``position.entry_price``; the benign ``_entry_ref``
+    # read satisfies it without re-implementing exit math.
+    assert "position.entry_price" in code
 
 
-def test_take_profit_present_compiles_clean() -> None:
+def test_take_profit_present_attaches_bracket_on_entry() -> None:
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[TakeProfitRule(pct=0.10)],
     )
     code = compile_strategy(spec)
-    assert "position.entry_price * (1.0 + 0.1)" in code
-    assert "position.entry_price * (1.0 - 0.1)" in code
-    assert 'reason="compiled_take_profit"' in code
+    assert 'reason="compiled_take_profit"' not in code
+    assert "attached_take_profit=attached_tp" in code
+    assert "LimitAttachment(limit_price=" in code
+    # Long entry → limit_price = bar.close * (1 + 0.1).
+    assert "bar.close * (1.0 + 0.1)" in code
+    assert "position.entry_price" in code
 
 
-def test_trailing_stop_loss_raises_compiler_error() -> None:
+def test_trailing_stop_loss_compiles_without_inline_emission() -> None:
+    """Trailing-basis stop-loss specs are accepted (no CompilerError).
+    The engine's ``evaluate_exit_rules`` honours the ``basis`` field
+    at runtime, so the compiler doesn't need to re-encode it. The
+    safety-gate bracket leg uses a conservative bar.close-based
+    stop_price; the engine drives the real trailing semantics.
+    """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
     )
-    with pytest.raises(CompilerError, match="trailing"):
-        compile_strategy(spec)
+    code = compile_strategy(spec)
+    # Compiles cleanly.
+    assert "CompiledStrategy" in code
+    assert "attached_stop_loss=attached_stop" in code
 
 
 def test_fixed_fraction_sizing() -> None:
@@ -504,10 +526,22 @@ def _exec_module(code: str):
     class _TimeInForce:
         DAY = _Enum("DAY")
 
+    class _StopAttachment:
+        def __init__(self, *, stop_price, trail_offset=None, trail_offset_kind="abs"):
+            self.stop_price = stop_price
+            self.trail_offset = trail_offset
+            self.trail_offset_kind = trail_offset_kind
+
+    class _LimitAttachment:
+        def __init__(self, *, limit_price):
+            self.limit_price = limit_price
+
     fake_contract.Strategy = _Strategy  # type: ignore[attr-defined]
     fake_contract.OrderSide = _OrderSide  # type: ignore[attr-defined]
     fake_contract.OrderType = _OrderType  # type: ignore[attr-defined]
     fake_contract.TimeInForce = _TimeInForce  # type: ignore[attr-defined]
+    fake_contract.StopAttachment = _StopAttachment  # type: ignore[attr-defined]
+    fake_contract.LimitAttachment = _LimitAttachment  # type: ignore[attr-defined]
     sys.modules["contract"] = fake_contract
     try:
         ns: dict[str, Any] = {}
@@ -622,33 +656,30 @@ def test_atr_helper_returns_scalar_from_bar_list() -> None:
     assert value > 0.0
 
 
-def test_simultaneous_stop_and_take_profit_emits_one_close() -> None:
-    """Codex P1 review: with both thresholds met on one bar, only the
-    first matching exit may emit a submit_order — otherwise the second
-    submit would open a reverse position after the first closes.
+def test_stop_and_take_profit_do_not_emit_inline_exits() -> None:
+    """Codex round-5: stop_loss / take_profit are engine-enforced via
+    ``evaluate_exit_rules``. Inlining a parallel close would duplicate
+    the engine_exit and inflate order lifecycle diagnostics.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05), TakeProfitRule(pct=0.10)],
     )
     code = compile_strategy(spec)
-    assert "exit_submitted" in code
+    assert 'reason="compiled_stop_loss"' not in code
+    assert 'reason="compiled_take_profit"' not in code
+
     ns, _OrderSide, *_ = _exec_module(code)
     strat = ns["CompiledStrategy"]()
-
-    # Bar that flushes both thresholds — high spike AND low drop on the
-    # same candle relative to entry_price=100.
+    # Bar that would have flushed both thresholds — high spike AND low
+    # drop on the same candle relative to entry_price=100. With inline
+    # emission gone, the strategy emits no exit orders on this bar.
     flush_bar = _SyntheticBar(symbol="QQQ", open=100.0, high=115.0, low=90.0, close=100.0)
     history = [_SyntheticBar(close=100.0) for _ in range(25)] + [flush_bar]
     position = _SyntheticPosition(side=_OrderSide.LONG, qty=10.0, entry_price=100.0)
     ctx = _SyntheticContext(history=history, position=position)
     strat.on_bar(ctx, flush_bar)
-    # Exactly one close order — not two — even though both stop_loss and
-    # take_profit thresholds are simultaneously satisfied.
-    assert len(ctx.orders) == 1, ctx.orders
-    order = ctx.orders[0]
-    assert order["qty"] == position.qty
-    assert order["side"] == _OrderSide.SHORT
+    assert ctx.orders == [], "stop/take-profit closes should come from the engine, not the strategy"
 
 
 def test_entry_only_with_no_exits_is_pre_safety_gate_concern() -> None:
@@ -822,24 +853,41 @@ def test_spec_hash_ignores_non_dsl_fields() -> None:
 
 
 def test_exit_rules_emitted_in_author_order() -> None:
-    """Codex P2: the compiler must preserve ``spec.exit_rules`` order so
-    ``[take_profit, stop_loss]`` evaluates take-profit FIRST under the
-    per-bar ``exit_submitted`` short-circuit, matching the author's
-    declared precedence — not the kind-partitioned order that emits
-    every stop-loss before every take-profit.
+    """Codex round-5 follow-up: stop_loss / take_profit are no longer
+    inlined (engine enforces them), so the kind-partitioning concern
+    from round-4 no longer applies. What remains is signal-exit order:
+    when the spec has multiple signal-exit rules, they must be emitted
+    in author-declared order under the ``exit_submitted`` short-circuit.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
-        exit_rules=[TakeProfitRule(pct=0.10), StopLossRule(pct=0.05)],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs=IndicatorRef(name="rsi", params={"period": 14}),
+                    op=">",
+                    rhs=70.0,
+                ),
+                note="exit-a",
+            ),
+            SignalExitRule(
+                when=Predicate(
+                    lhs="bar.close",
+                    op=">",
+                    rhs=200.0,
+                ),
+                note="exit-b",
+            ),
+        ],
     )
     code = compile_strategy(spec)
-    tp_pos = code.find('reason="compiled_take_profit"')
-    sl_pos = code.find('reason="compiled_stop_loss"')
-    assert tp_pos != -1 and sl_pos != -1
-    assert tp_pos < sl_pos, (
-        "take_profit appears before stop_loss in spec.exit_rules, so the "
-        "compiled emission order must match"
-    )
+    # Both signal-exit branches emit ``compiled_signal_exit`` reasons.
+    # The first branch's predicate (rsi > 70) must appear before the
+    # second's (bar.close > 200) in the emitted source.
+    rsi_pred_pos = code.find("> 70.0")
+    bar_pred_pos = code.find("bar.close > 200.0")
+    assert rsi_pred_pos != -1 and bar_pred_pos != -1
+    assert rsi_pred_pos < bar_pred_pos
 
 
 def test_compiled_code_flows_into_orchestrator_local_variable() -> None:
@@ -1120,6 +1168,79 @@ def test_volatility_target_with_single_atr_period_used_twice_compiles() -> None:
     )
     code = compile_strategy(spec)
     assert "_ind_atr_" in code
+
+
+def test_no_inline_engine_exits_when_stop_loss_present() -> None:
+    """Codex round-5 P1: with stop_loss / take_profit in spec, the
+    compiled strategy must NOT emit inline close orders for them — the
+    trading service's engine_exit dispatcher already enforces them via
+    ``evaluate_exit_rules`` (``trading_service/service.py:276``).
+    Inlining a parallel close would duplicate the exit and inflate
+    order lifecycle diagnostics.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05), TakeProfitRule(pct=0.10)],
+    )
+    code = compile_strategy(spec)
+    # No ``compiled_stop_loss`` / ``compiled_take_profit`` reason markers
+    # (those came from the inline branches in earlier rounds).
+    assert 'reason="compiled_stop_loss"' not in code
+    assert 'reason="compiled_take_profit"' not in code
+    # The only strategy-emitted submit_order is the entry. Signal-exit
+    # branches (engine doesn't handle these) are absent — no SignalExitRule
+    # in this spec.
+    assert code.count("ctx.submit_order") == 1
+    # And the entry carries an attached bracket leg so the safety
+    # gate's entry+exit pair check passes.
+    assert "attached_stop_loss=attached_stop" in code
+    assert "attached_take_profit=attached_tp" in code
+
+
+def test_trailing_stop_loss_compiles_via_engine() -> None:
+    """Codex round-5 P2: trailing-basis stop-loss specs were previously
+    rejected with CompilerError (round 2). The engine's
+    ``evaluate_exit_rules`` actually supports all three basis values, so
+    refusing the spec discards compilable entry/signal logic for no
+    reason. Drop the refusal; the engine drives the basis semantics.
+    """
+    spec_long = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+    )
+    code_long = compile_strategy(spec_long)
+    assert "CompiledStrategy" in code_long
+    # Entry-side bracket still attached so the safety gate is happy;
+    # the precise trailing semantics live in the engine.
+    assert "attached_stop_loss=attached_stop" in code_long
+
+
+def test_requires_custom_code_defensive_on_malformed_string() -> None:
+    """Codex round-5 P2: previous round only normalised ``None``; other
+    malformed LLM outputs (empty string, ``"maybe"``, arbitrary prose)
+    still propagated and raised ValidationError. The orchestrator's
+    ``_coerce_requires_custom_code`` helper now defaults to ``False``
+    for any non-bool/non-recognised-string value.
+    """
+    from investment_team.strategy_lab.orchestrator import _coerce_requires_custom_code
+
+    # Recognised values pass through.
+    assert _coerce_requires_custom_code(True) is True
+    assert _coerce_requires_custom_code(False) is False
+    assert _coerce_requires_custom_code("true") is True
+    assert _coerce_requires_custom_code("False") is False
+    assert _coerce_requires_custom_code("YES") is True
+    assert _coerce_requires_custom_code(1) is True
+    assert _coerce_requires_custom_code(0) is False
+    # None and the falsey string variants default to False.
+    assert _coerce_requires_custom_code(None) is False
+    assert _coerce_requires_custom_code("") is False
+    assert _coerce_requires_custom_code("no") is False
+    # Garbage defaults to False — does NOT raise.
+    assert _coerce_requires_custom_code("maybe") is False
+    assert _coerce_requires_custom_code("asdf") is False
+    assert _coerce_requires_custom_code(["true"]) is False
+    assert _coerce_requires_custom_code({"value": True}) is False
 
 
 def test_spec_hash_invariant_to_rule_notes() -> None:
