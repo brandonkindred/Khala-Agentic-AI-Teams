@@ -401,3 +401,274 @@ def test_sandbox_probe_runs_expected_trades() -> None:
     Placeholder — flip ``@pytest.mark.skip`` off once #E2 lands the
     probe fixtures.
     """
+
+
+# ---------------------------------------------------------------------------
+# Runtime semantics — exec the emitted module, call the indicator helpers
+# and on_bar against synthetic bars. Covers the codex P1 review findings:
+#   1. Helpers compute scalar values from a list[Bar] (no pandas).
+#   2. Tuple-valued indicators (macd / bollinger / stochastic) thread the
+#      selector and return ONE scalar matching the DSL selector.
+#   3. Two same-bar exit thresholds emit exactly one close order.
+# ---------------------------------------------------------------------------
+
+
+class _SyntheticBar:
+    __slots__ = ("symbol", "timestamp", "open", "high", "low", "close", "volume")
+
+    def __init__(
+        self,
+        *,
+        symbol: str = "QQQ",
+        timestamp: str = "2024-01-01",
+        open: float = 100.0,
+        high: float = 100.0,
+        low: float = 100.0,
+        close: float = 100.0,
+        volume: float = 1_000_000.0,
+    ) -> None:
+        self.symbol = symbol
+        self.timestamp = timestamp
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
+
+
+class _SyntheticPosition:
+    __slots__ = ("symbol", "side", "qty", "entry_price")
+
+    def __init__(self, *, side, qty: float = 10.0, entry_price: float = 100.0) -> None:
+        self.symbol = "QQQ"
+        self.side = side
+        self.qty = qty
+        self.entry_price = entry_price
+
+
+class _SyntheticContext:
+    def __init__(self, *, history, position=None, equity: float = 100_000.0) -> None:
+        self._history = list(history)
+        self._position = position
+        self.equity = equity
+        self.capital = equity
+        self.is_warmup = False
+        self.orders: list[dict] = []
+
+    def history(self, _symbol: str, n: int):
+        return self._history[-n:] if n > 0 else []
+
+    def position(self, _symbol: str):
+        return self._position
+
+    def submit_order(self, **kwargs):
+        self.orders.append(kwargs)
+        return f"c{len(self.orders)}"
+
+
+def _exec_module(code: str):
+    """Compile + exec the emitted module, returning the module globals.
+
+    Stubs out ``from contract import ...`` so the test runs without the
+    streaming-harness package layout: we inject a fake ``contract``
+    module with ``Strategy``, ``OrderSide``, ``OrderType``, ``TimeInForce``
+    that match the strategy-side shape.
+    """
+    import sys
+    import types
+
+    fake_contract = types.ModuleType("contract")
+
+    class _Strategy:
+        pass
+
+    class _Enum(str):
+        def __new__(cls, value):
+            inst = str.__new__(cls, value)
+            return inst
+
+    class _OrderSide:
+        LONG = _Enum("LONG")
+        SHORT = _Enum("SHORT")
+
+    class _OrderType:
+        MARKET = _Enum("MARKET")
+
+    class _TimeInForce:
+        DAY = _Enum("DAY")
+
+    fake_contract.Strategy = _Strategy  # type: ignore[attr-defined]
+    fake_contract.OrderSide = _OrderSide  # type: ignore[attr-defined]
+    fake_contract.OrderType = _OrderType  # type: ignore[attr-defined]
+    fake_contract.TimeInForce = _TimeInForce  # type: ignore[attr-defined]
+    sys.modules["contract"] = fake_contract
+    try:
+        ns: dict[str, Any] = {}
+        compiled = compile(code, "<compiled-strategy>", "exec")
+        exec(compiled, ns)
+        return ns, _OrderSide, _OrderType, _TimeInForce
+    finally:
+        sys.modules.pop("contract", None)
+
+
+def test_compiled_module_syntactically_valid() -> None:
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[_rsi_gt_70_exit(), StopLossRule(pct=0.05), TakeProfitRule(pct=0.10)],
+    )
+    code = compile_strategy(spec)
+    # Parse + compile + exec all succeed.
+    ns, _OrderSide, _OrderType, _TimeInForce = _exec_module(code)
+    assert "CompiledStrategy" in ns
+    strat = ns["CompiledStrategy"]()
+    # Helpers exist as callables on the class.
+    assert callable(getattr(strat, "rsi"))
+
+
+def test_rsi_helper_returns_scalar() -> None:
+    """RSI helper must return a float (not raise on list input)."""
+    spec = _spec(entry_rules=[_rsi_lt_30_entry()])
+    code = compile_strategy(spec)
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    # 30 bars of synthetic data with a clear uptrend → RSI well > 50.
+    bars = [_SyntheticBar(close=100.0 + i) for i in range(30)]
+    value = strat.rsi(bars, period=14, source="close")
+    assert isinstance(value, float)
+    assert 50.0 < value <= 100.0
+
+
+def test_sma_helper_returns_correct_average() -> None:
+    spec = _spec(
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="sma", params={"period": 5}), op="<", rhs=200.0
+                ),
+            )
+        ]
+    )
+    code = compile_strategy(spec)
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    bars = [_SyntheticBar(close=float(c)) for c in (10, 20, 30, 40, 50)]
+    value = strat.sma(bars, period=5, source="close")
+    assert value == pytest.approx(30.0)
+
+
+def test_macd_helper_threads_selector_returns_scalar() -> None:
+    """MACD must return ONE scalar component (the DSL ``output`` selector)."""
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="macd", params={"output": "signal"}), op=">", rhs=0.0),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    # Helper call must thread select="signal" through, so the runtime
+    # value compared in the predicate is a scalar (not a tuple).
+    assert "select='signal'" in code or 'select="signal"' in code
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    bars = [_SyntheticBar(close=100.0 + i * 0.5) for i in range(60)]
+    value = strat.macd(bars, fast=12, slow=26, signal=9, source="close", select="signal")
+    assert isinstance(value, float)
+
+
+def test_bollinger_helper_returns_band_scalar() -> None:
+    entry = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs="bar.close",
+            op="<",
+            rhs=IndicatorRef(name="bollinger", params={"band": "lower", "period": 20}),
+        ),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    assert "select='lower'" in code or 'select="lower"' in code
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    bars = [_SyntheticBar(close=100.0) for _ in range(25)]
+    lower = strat.bollinger_bands(bars, period=20, num_std=2.0, source="close", select="lower")
+    middle = strat.bollinger_bands(bars, period=20, num_std=2.0, source="close", select="middle")
+    upper = strat.bollinger_bands(bars, period=20, num_std=2.0, source="close", select="upper")
+    assert middle == pytest.approx(100.0)
+    # Constant series → zero std → all three bands collapse onto the mean.
+    assert lower == pytest.approx(100.0)
+    assert upper == pytest.approx(100.0)
+
+
+def test_atr_helper_returns_scalar_from_bar_list() -> None:
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="atr"), op=">", rhs=0.5),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+    # 20 bars, range 1.0 per bar.
+    bars = [_SyntheticBar(open=100.0, high=101.0, low=99.0, close=100.0) for _ in range(20)]
+    value = strat.atr(bars, period=14)
+    assert isinstance(value, float)
+    assert value > 0.0
+
+
+def test_simultaneous_stop_and_take_profit_emits_one_close() -> None:
+    """Codex P1 review: with both thresholds met on one bar, only the
+    first matching exit may emit a submit_order — otherwise the second
+    submit would open a reverse position after the first closes.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[StopLossRule(pct=0.05), TakeProfitRule(pct=0.10)],
+    )
+    code = compile_strategy(spec)
+    assert "exit_submitted" in code
+    ns, _OrderSide, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+
+    # Bar that flushes both thresholds — high spike AND low drop on the
+    # same candle relative to entry_price=100.
+    flush_bar = _SyntheticBar(symbol="QQQ", open=100.0, high=115.0, low=90.0, close=100.0)
+    history = [_SyntheticBar(close=100.0) for _ in range(25)] + [flush_bar]
+    position = _SyntheticPosition(side=_OrderSide.LONG, qty=10.0, entry_price=100.0)
+    ctx = _SyntheticContext(history=history, position=position)
+    strat.on_bar(ctx, flush_bar)
+    # Exactly one close order — not two — even though both stop_loss and
+    # take_profit thresholds are simultaneously satisfied.
+    assert len(ctx.orders) == 1, ctx.orders
+    order = ctx.orders[0]
+    assert order["qty"] == position.qty
+    assert order["side"] == _OrderSide.SHORT
+
+
+def test_entry_only_with_no_exits_is_pre_safety_gate_concern() -> None:
+    """Entry-only specs are valid input to the compiler; the safety
+    gate is what rejects them (no exit path). This test pins that
+    expectation so the compiler doesn't grow a silent reject.
+    """
+    spec = _spec(entry_rules=[_rsi_lt_30_entry()])
+    code = compile_strategy(spec)
+    # Compilation succeeds — module is valid Python.
+    ns, *_ = _exec_module(code)
+    assert "CompiledStrategy" in ns
+    # But CodeSafetyChecker rejects because there's no exit submit_order.
+    safety = CodeSafetyChecker().check(code, spec)
+    criticals = _critical_details(safety)
+    assert any("exit" in c.lower() for c in criticals), criticals
+
+
+def test_no_indicators_import_in_emitted_code() -> None:
+    """Codex P1 review: the sandbox's ``indicators`` module expects
+    pandas Series, not list[Bar]. Inline helpers replace the import."""
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[_rsi_gt_70_exit(), StopLossRule(pct=0.05)],
+    )
+    code = compile_strategy(spec)
+    assert "from indicators import" not in code
+    # Only the canonical helpers actually used by the spec are emitted.
+    assert "def rsi(self, history" in code
+    assert "def sma(self, history" not in code  # rsi-only spec — no sma helper

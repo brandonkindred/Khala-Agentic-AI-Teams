@@ -10,20 +10,29 @@ output. The header carries a SHA-256 content hash of the spec's sorted
 JSON dump for traceability; nothing else in the output varies between
 invocations.
 
-Scope (#538 + locked decisions):
-  * Stop-loss / take-profit ARE inlined in ``on_bar`` as explicit exit
-    branches that close the open position with the opposite side and
-    ``qty=position.qty``. The engine's ``evaluate_exit_rules`` is not
-    on the live runtime path today (only ``ctx.submit_order`` calls
-    from ``on_bar`` are processed), so the compiled class enforces the
-    thresholds directly against ``position.entry_price`` /
-    ``position.high_since_entry`` (the conformance gate also requires
-    this reference whenever the rule kind appears in the spec).
+Scope (#538 + locked decisions, post-codex P1 review):
+  * Indicator math is INLINED as helper methods on the compiled class
+    (``self.sma(history, period=14)`` etc.) rather than imported from
+    the sandbox's pandas-Series-based ``indicators`` module. The
+    factors compiler (``strategy_lab/factors/compiler.py``) follows the
+    same pattern. Helper names match the conformance gate's
+    ``_INDICATOR_ALLOWED_CALL_NAMES`` allow-list, so a ``self.sma(...)``
+    call inside ``on_bar`` is picked up as ``"sma"`` by
+    ``_get_call_name`` and credited by the gate.
+  * Tuple-valued indicators (MACD / Bollinger / Stochastic) thread the
+    DSL's ``output`` / ``band`` selector through to the helper, which
+    returns the single scalar component used in the predicate. The
+    selector defaults match the DSL registry.
+  * Stop-loss / take-profit ARE inlined in ``on_bar`` as explicit
+    exit branches that close the open position with the opposite side.
+    A per-bar ``exit_submitted`` flag short-circuits the rest of the
+    exit chain so two thresholds firing on the same candle can't emit
+    a reverse-position order on top of the close.
   * ``cross_above`` / ``cross_below`` predicates compare the current
     side value against ``self._prev_<sigid>`` snapshots updated at the
     end of every ``on_bar`` invocation where the universe and warm-up
-    guards passed. "Previous" means previous successful ``on_bar``, not
-    previous calendar bar.
+    guards passed. "Previous" means previous successful ``on_bar``,
+    not previous calendar bar.
   * ``volatility_target`` sizing requires an ``atr`` indicator in the
     spec (any rule). When absent, the compiler raises
     :class:`CompilerError`; the orchestrator catches it, sets
@@ -61,12 +70,11 @@ class CompilerError(Exception):
     """
 
 
-# DSL → canonical call name emitted in ``on_bar``. Mirrors
-# ``code_conformance._INDICATOR_ALLOWED_CALL_NAMES`` (the conformance gate
-# accepts either ``bollinger`` or ``bollinger_bands`` for the bollinger
-# DSL name; we pick ``bollinger_bands`` to match the canonical
-# ``from indicators import ...`` line below).
-_INDICATOR_CALL_NAME: dict[str, str] = {
+# DSL name → canonical method name emitted on the compiled class. Names
+# match the conformance gate's ``_INDICATOR_ALLOWED_CALL_NAMES`` so the
+# call name (``node.func.attr`` for ``self.<name>(...)``) is credited as
+# the indicator's named implementation.
+_INDICATOR_METHOD_NAME: dict[str, str] = {
     "sma": "sma",
     "ema": "ema",
     "rsi": "rsi",
@@ -78,19 +86,6 @@ _INDICATOR_CALL_NAME: dict[str, str] = {
     "vwap": "vwap",
 }
 
-# Source field → expression yielding the per-bar value used for
-# indicator inputs. ATR/ADX/Stochastic/VWAP read OHLC directly inside
-# the indicator function, so their bar list is always close-keyed.
-_SOURCE_EXPR: dict[str, str] = {
-    "close": "b.close",
-    "high": "b.high",
-    "low": "b.low",
-    "open": "b.open",
-    "volume": "b.volume",
-    "hl2": "((b.high + b.low) / 2)",
-    "ohlc4": "((b.open + b.high + b.low + b.close) / 4)",
-}
-
 _BAR_FIELD_EXPR: dict[str, str] = {
     "bar.close": "bar.close",
     "bar.high": "bar.high",
@@ -100,7 +95,7 @@ _BAR_FIELD_EXPR: dict[str, str] = {
 
 # Floor on the rolling-history window the strategy requests from
 # ``ctx.history``. Indicators with short lookbacks still benefit from a
-# little buffer; matches the floor in the ideation system prompt.
+# small buffer; matches the floor in the ideation system prompt.
 _MIN_WINDOW: int = 20
 
 
@@ -113,7 +108,7 @@ def compile_strategy(spec: Any) -> str:
     Post: returns a non-empty Python source string with exactly one
     ``Strategy`` subclass. Raises :class:`CompilerError` for specs the
     compiler cannot express (e.g. ``volatility_target`` sizing without
-    a matching ATR indicator).
+    a matching ATR indicator, trailing-basis stop-losses).
     """
     entry_rules: List[EntryRule] = list(getattr(spec, "entry_rules", []) or [])
     exit_rules: List[Any] = list(getattr(spec, "exit_rules", []) or [])
@@ -149,6 +144,10 @@ def compile_strategy(spec: Any) -> str:
 
     indicator_bindings = _build_indicator_bindings(indicator_refs)
     cross_sides = _collect_cross_sides(entry_rules, signal_exit_rules, indicator_bindings)
+    used_helper_names = sorted({_INDICATOR_METHOD_NAME[ref.name] for ref in indicator_refs})
+    needs_source_helper = any(
+        ref.name in ("sma", "ema", "rsi", "macd", "bollinger") for ref in indicator_refs
+    )
 
     window = max((_lookback_for(ref) for ref in indicator_refs), default=_MIN_WINDOW)
     window = max(window, _MIN_WINDOW)
@@ -167,6 +166,8 @@ def compile_strategy(spec: Any) -> str:
             stop_loss_rules=stop_loss_rules,
             take_profit_rules=take_profit_rules,
             sizing=sizing,
+            used_helper_names=used_helper_names,
+            needs_source_helper=needs_source_helper,
         )
     )
     return "\n".join(parts) + "\n"
@@ -263,40 +264,39 @@ def _build_indicator_bindings(
 
 
 def _emit_indicator_call(ref: IndicatorRef) -> str:
-    """Render the ``indicators.<fn>(...)`` call expression for one ref.
+    """Render the ``self.<name>(history, ...)`` call expression for one ref.
 
-    The bar list comprehension uses the indicator's declared ``source``
-    (close by default); ATR/ADX/Stochastic/VWAP read OHLC themselves
-    inside the indicator function but the wrapper-style call signature
-    is the same.
+    For tuple-returning indicators (macd, bollinger, stochastic) the
+    selector param (``output`` / ``band``) is threaded into the call so
+    the helper returns the single scalar the predicate compares against.
     """
-    fn = _INDICATOR_CALL_NAME[ref.name]
-    bar_expr = _SOURCE_EXPR[ref.source]
-    bar_list = f"[{bar_expr} for b in history]"
-
+    method = _INDICATOR_METHOD_NAME[ref.name]
     if ref.name in ("sma", "ema"):
-        return f"{fn}({bar_list}, period={int(ref.param('period'))})"
+        return f"self.{method}(history, period={int(ref.param('period'))}, source={ref.source!r})"
     if ref.name == "rsi":
-        return f"{fn}({bar_list}, period={int(ref.param('period'))})"
+        return f"self.{method}(history, period={int(ref.param('period'))}, source={ref.source!r})"
     if ref.name == "macd":
         return (
-            f"{fn}({bar_list}, fast={int(ref.param('fast'))}, "
-            f"slow={int(ref.param('slow'))}, signal={int(ref.param('signal'))})"
+            f"self.{method}(history, fast={int(ref.param('fast'))}, "
+            f"slow={int(ref.param('slow'))}, signal={int(ref.param('signal'))}, "
+            f"source={ref.source!r}, select={str(ref.param('output'))!r})"
         )
     if ref.name == "bollinger":
         return (
-            f"{fn}({bar_list}, period={int(ref.param('period'))}, "
-            f"num_std={float(ref.param('num_std'))!r})"
+            f"self.{method}(history, period={int(ref.param('period'))}, "
+            f"num_std={float(ref.param('num_std'))!r}, "
+            f"source={ref.source!r}, select={str(ref.param('band'))!r})"
         )
     if ref.name in ("atr", "adx"):
-        return f"{fn}([b for b in history], period={int(ref.param('period'))})"
+        return f"self.{method}(history, period={int(ref.param('period'))})"
     if ref.name == "stochastic":
         return (
-            f"{fn}([b for b in history], k_period={int(ref.param('k_period'))}, "
-            f"d_period={int(ref.param('d_period'))})"
+            f"self.{method}(history, k_period={int(ref.param('k_period'))}, "
+            f"d_period={int(ref.param('d_period'))}, "
+            f"select={str(ref.param('output'))!r})"
         )
     if ref.name == "vwap":
-        return f"{fn}([b for b in history])"
+        return f"self.{method}(history)"
     raise CompilerError(f"unsupported indicator: {ref.name!r}")
 
 
@@ -365,29 +365,41 @@ def _render_predicate(
     """Render one predicate as a boolean expression.
 
     Simple ops (``<``, ``>``, ``<=``, ``>=``, ``==``) emit straightforward
-    Python comparisons. Cross ops translate to a three-clause guard that
-    checks the previous-bar snapshot is non-None and that the inequality
-    flipped at this bar.
+    Python comparisons guarded against ``None`` only for indicator-ref
+    sides (a helper returns ``None`` during the warm-up window). Numeric
+    literals and bar-field references are never ``None`` so guarding
+    them would trip the ``is not None`` with a literal SyntaxWarning.
+
+    Cross ops translate to a guard that checks both previous-bar
+    snapshots are non-None and the inequality flipped at this bar.
     """
     lhs_expr = _render_side(pred.lhs, binding_by_sigid)
     rhs_expr = _render_side(pred.rhs, binding_by_sigid)
+    guards: List[str] = []
+    if isinstance(pred.lhs, IndicatorRef):
+        guards.append(f"{lhs_expr} is not None")
+    if isinstance(pred.rhs, IndicatorRef):
+        guards.append(f"{rhs_expr} is not None")
 
     if pred.op in ("<", ">", "<=", ">=", "=="):
-        return f"({lhs_expr} {pred.op} {rhs_expr})"
+        clauses = guards + [f"{lhs_expr} {pred.op} {rhs_expr}"]
+        return "(" + " and ".join(clauses) + ")"
 
     prev_by_sigid = {sigid: prev_attr for sigid, prev_attr, _cur in cross_sides}
     lhs_prev = prev_by_sigid[_sigid_for_side(pred.lhs)]
     rhs_prev = prev_by_sigid[_sigid_for_side(pred.rhs)]
+    cross_clauses = guards + [
+        f"self.{lhs_prev} is not None",
+        f"self.{rhs_prev} is not None",
+    ]
     if pred.op == "cross_above":
-        return (
-            f"(self.{lhs_prev} is not None and self.{rhs_prev} is not None "
-            f"and self.{lhs_prev} <= self.{rhs_prev} and {lhs_expr} > {rhs_expr})"
-        )
+        cross_clauses.append(f"self.{lhs_prev} <= self.{rhs_prev}")
+        cross_clauses.append(f"{lhs_expr} > {rhs_expr}")
+        return "(" + " and ".join(cross_clauses) + ")"
     if pred.op == "cross_below":
-        return (
-            f"(self.{lhs_prev} is not None and self.{rhs_prev} is not None "
-            f"and self.{lhs_prev} >= self.{rhs_prev} and {lhs_expr} < {rhs_expr})"
-        )
+        cross_clauses.append(f"self.{lhs_prev} >= self.{rhs_prev}")
+        cross_clauses.append(f"{lhs_expr} < {rhs_expr}")
+        return "(" + " and ".join(cross_clauses) + ")"
     raise CompilerError(f"unsupported predicate op: {pred.op!r}")
 
 
@@ -422,9 +434,224 @@ def _render_sizing(
             )
         return (
             f"qty = max(1, int((ctx.equity * {float(sizing.target_annual_vol)!r}) "
-            f"/ (bar.close * {atr_var}))) if {atr_var} > 0 else 1"
+            f"/ (bar.close * {atr_var}))) if {atr_var} and {atr_var} > 0 else 1"
         )
     raise CompilerError(f"unsupported sizing variant: {type(sizing).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# Inline indicator helper-method bodies. Each takes ``self``, a ``history``
+# list of ``Bar``-like objects, and the indicator's params; returns the
+# scalar value at the LAST bar (or ``None`` when there is insufficient
+# history). The math mirrors ``strategy_lab/factors/primitives.py`` so the
+# compiled output remains drop-in for the engine and the trade-alignment
+# loop never sees diverging "compiled vs. reference" semantics.
+# ---------------------------------------------------------------------------
+
+
+def _emit_source_helper() -> str:
+    return textwrap.dedent(
+        """\
+        def _src(self, bar, source):
+            if source == "close":
+                return bar.close
+            if source == "high":
+                return bar.high
+            if source == "low":
+                return bar.low
+            if source == "open":
+                return bar.open
+            if source == "volume":
+                return bar.volume
+            if source == "hl2":
+                return (bar.high + bar.low) / 2.0
+            if source == "ohlc4":
+                return (bar.open + bar.high + bar.low + bar.close) / 4.0
+            return bar.close
+        """
+    )
+
+
+_HELPER_BODIES: dict[str, str] = {
+    "sma": textwrap.dedent(
+        """\
+        def sma(self, history, period, source="close"):
+            if len(history) < period:
+                return None
+            vals = [self._src(b, source) for b in history[-period:]]
+            return sum(vals) / period
+        """
+    ),
+    "ema": textwrap.dedent(
+        """\
+        def ema(self, history, period, source="close"):
+            if len(history) < period:
+                return None
+            alpha = 2.0 / (period + 1.0)
+            vals = [self._src(b, source) for b in history[-period:]]
+            val = vals[0]
+            for v in vals[1:]:
+                val = alpha * v + (1.0 - alpha) * val
+            return val
+        """
+    ),
+    "rsi": textwrap.dedent(
+        """\
+        def rsi(self, history, period=14, source="close"):
+            if len(history) < period + 1:
+                return None
+            gains = 0.0
+            losses = 0.0
+            for i in range(len(history) - period, len(history)):
+                cur = self._src(history[i], source)
+                prev = self._src(history[i - 1], source)
+                delta = cur - prev
+                if delta > 0:
+                    gains += delta
+                else:
+                    losses += -delta
+            avg_gain = gains / period
+            avg_loss = losses / period
+            if avg_loss == 0:
+                return 100.0 if avg_gain > 0 else 50.0
+            rs = avg_gain / avg_loss
+            return 100.0 - (100.0 / (1.0 + rs))
+        """
+    ),
+    "macd": textwrap.dedent(
+        """\
+        def macd(self, history, fast=12, slow=26, signal=9, source="close", select="macd"):
+            if len(history) < slow + signal:
+                return None
+            macd_line = []
+            for end in range(slow, len(history) + 1):
+                sub = history[:end]
+                # EMA(fast) over sub
+                alpha_f = 2.0 / (fast + 1.0)
+                ef = self._src(sub[-fast], source)
+                for b in sub[-fast + 1:]:
+                    ef = alpha_f * self._src(b, source) + (1.0 - alpha_f) * ef
+                # EMA(slow) over sub
+                alpha_s = 2.0 / (slow + 1.0)
+                es = self._src(sub[-slow], source)
+                for b in sub[-slow + 1:]:
+                    es = alpha_s * self._src(b, source) + (1.0 - alpha_s) * es
+                macd_line.append(ef - es)
+            if select == "macd":
+                return macd_line[-1]
+            if len(macd_line) < signal:
+                return None
+            alpha_g = 2.0 / (signal + 1.0)
+            sig = macd_line[0]
+            for x in macd_line[1:]:
+                sig = alpha_g * x + (1.0 - alpha_g) * sig
+            if select == "signal":
+                return sig
+            if select == "histogram":
+                return macd_line[-1] - sig
+            return None
+        """
+    ),
+    "bollinger_bands": textwrap.dedent(
+        """\
+        def bollinger_bands(self, history, period=20, num_std=2.0, source="close", select="middle"):
+            if len(history) < period:
+                return None
+            vals = [self._src(b, source) for b in history[-period:]]
+            mean = sum(vals) / period
+            var = sum((v - mean) ** 2 for v in vals) / period
+            std = math.sqrt(var) if var > 0 else 0.0
+            if select == "middle":
+                return mean
+            if select == "upper":
+                return mean + num_std * std
+            if select == "lower":
+                return mean - num_std * std
+            return None
+        """
+    ),
+    "atr": textwrap.dedent(
+        """\
+        def atr(self, history, period=14):
+            if len(history) < period + 1:
+                return None
+            trs = []
+            for i in range(len(history) - period, len(history)):
+                h = history[i].high
+                low = history[i].low
+                prev_close = history[i - 1].close
+                trs.append(max(h - low, abs(h - prev_close), abs(low - prev_close)))
+            return sum(trs) / period
+        """
+    ),
+    "adx": textwrap.dedent(
+        """\
+        def adx(self, history, period=14):
+            if len(history) < 2 * period + 1:
+                return None
+            plus_dms = []
+            minus_dms = []
+            trs = []
+            for i in range(1, len(history)):
+                up = history[i].high - history[i - 1].high
+                down = history[i - 1].low - history[i].low
+                plus_dm = up if (up > down and up > 0) else 0.0
+                minus_dm = down if (down > up and down > 0) else 0.0
+                prev_close = history[i - 1].close
+                tr = max(
+                    history[i].high - history[i].low,
+                    abs(history[i].high - prev_close),
+                    abs(history[i].low - prev_close),
+                )
+                plus_dms.append(plus_dm)
+                minus_dms.append(minus_dm)
+                trs.append(tr)
+            tr_sum = sum(trs[-period:])
+            if tr_sum == 0:
+                return 0.0
+            plus_di = 100.0 * sum(plus_dms[-period:]) / tr_sum
+            minus_di = 100.0 * sum(minus_dms[-period:]) / tr_sum
+            denom = plus_di + minus_di
+            if denom == 0:
+                return 0.0
+            return 100.0 * abs(plus_di - minus_di) / denom
+        """
+    ),
+    "stochastic": textwrap.dedent(
+        """\
+        def stochastic(self, history, k_period=14, d_period=3, select="k"):
+            if len(history) < k_period:
+                return None
+            def _k_at(end):
+                w = history[end - k_period:end]
+                lowest = min(b.low for b in w)
+                highest = max(b.high for b in w)
+                rng = highest - lowest
+                if rng == 0:
+                    return 50.0
+                return 100.0 * (history[end - 1].close - lowest) / rng
+            k_val = _k_at(len(history))
+            if select == "k":
+                return k_val
+            if len(history) < k_period + d_period - 1:
+                return None
+            k_vals = [_k_at(end) for end in range(k_period, len(history) + 1)]
+            return sum(k_vals[-d_period:]) / d_period
+        """
+    ),
+    "vwap": textwrap.dedent(
+        """\
+        def vwap(self, history):
+            if not history:
+                return None
+            num = sum(((b.high + b.low + b.close) / 3.0) * b.volume for b in history)
+            den = sum(b.volume for b in history)
+            if den == 0:
+                return sum(b.close for b in history) / len(history)
+            return num / den
+        """
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -452,10 +679,15 @@ def _emit_header(spec: Any) -> str:
 
 
 def _emit_imports() -> str:
-    return (
-        "from contract import Strategy, OrderSide, OrderType, TimeInForce\n"
-        "from indicators import sma, ema, rsi, macd, bollinger_bands, atr, adx, stochastic, vwap\n"
-    )
+    # ``indicators`` module isn't imported — the sandbox's pandas-Series
+    # signatures don't match the compiled call shape, so the strategy
+    # carries its own inline implementations (see ``_HELPER_BODIES``).
+    return "import math\nfrom contract import Strategy, OrderSide, OrderType, TimeInForce\n"
+
+
+def _indent_method(body: str, spaces: int = 4) -> str:
+    """Indent a left-aligned method body by ``spaces`` columns."""
+    return textwrap.indent(body.rstrip() + "\n", " " * spaces)
 
 
 def _emit_class(
@@ -469,6 +701,8 @@ def _emit_class(
     stop_loss_rules: List[StopLossRule],
     take_profit_rules: List[TakeProfitRule],
     sizing: Any,
+    used_helper_names: List[str],
+    needs_source_helper: bool,
 ) -> str:
     universe_literal = (
         "frozenset({" + ", ".join(repr(s) for s in target_symbols) + "})"
@@ -496,75 +730,92 @@ def _emit_class(
     on_bar_lines.append(f"        history = ctx.history(bar.symbol, {window})")
     on_bar_lines.append(f"        if len(history) < {window}:")
     on_bar_lines.append("            return")
-    # ctx.equity reference — flows into sizing for fixed_fraction /
-    # volatility_target and satisfies the sizing-math conformance check
-    # for fixed_notional, which would otherwise have no account-value
-    # touchpoint anywhere in the class.
+    # Always emit a ctx.equity reference — flows into fixed_fraction /
+    # volatility_target sizing and satisfies the sizing-math conformance
+    # check for fixed_notional, whose qty expression has no other
+    # account-value touchpoint.
     on_bar_lines.append("        equity = ctx.equity")
     on_bar_lines.append("        _ = equity  # silence-unused; sizing math reads ctx.equity above")
     # Indicator binds — sigid-sorted (see _build_indicator_bindings).
     for varname, _ref, call_expr, _sigid in indicator_bindings:
         on_bar_lines.append(f"        {varname} = {call_expr}")
     on_bar_lines.append("        position = ctx.position(bar.symbol)")
+    if stop_loss_rules or take_profit_rules or signal_exit_rules:
+        # Per-bar guard so two exit thresholds firing on the same candle
+        # cannot emit a second submit_order — without this, the first
+        # close + second close would be filled as a close + reverse-
+        # position open by the engine. ``ctx.position`` doesn't update
+        # mid-``on_bar``, so the local flag is the only honest signal.
+        on_bar_lines.append("        exit_submitted = False")
 
     # Stop-loss branches — close the open position when bar.low (long) or
     # bar.high (short) crosses the threshold computed against
-    # ``position.entry_price``. Emitted BEFORE entry branches so a position
-    # closed this bar by a stop-loss does not re-enter on the same bar.
+    # ``position.entry_price``. Each branch is gated by ``exit_submitted``
+    # so a stop firing on the same bar as the take-profit only emits one
+    # close order.
     for rule in stop_loss_rules:
         pct = float(rule.pct)
-        on_bar_lines.append("        if position is not None and position.side == OrderSide.LONG:")
-        on_bar_lines.append(f"            if bar.low <= position.entry_price * (1.0 - {pct!r}):")
-        on_bar_lines.append("                ctx.submit_order(")
-        on_bar_lines.append("                    symbol=bar.symbol,")
-        on_bar_lines.append("                    side=OrderSide.SHORT,")
-        on_bar_lines.append("                    qty=position.qty,")
-        on_bar_lines.append("                    order_type=OrderType.MARKET,")
-        on_bar_lines.append("                    tif=TimeInForce.DAY,")
-        on_bar_lines.append('                    reason="compiled_stop_loss",')
-        on_bar_lines.append("                )")
-        on_bar_lines.append("                position = ctx.position(bar.symbol)")
-        on_bar_lines.append("        if position is not None and position.side == OrderSide.SHORT:")
-        on_bar_lines.append(f"            if bar.high >= position.entry_price * (1.0 + {pct!r}):")
-        on_bar_lines.append("                ctx.submit_order(")
-        on_bar_lines.append("                    symbol=bar.symbol,")
-        on_bar_lines.append("                    side=OrderSide.LONG,")
-        on_bar_lines.append("                    qty=position.qty,")
-        on_bar_lines.append("                    order_type=OrderType.MARKET,")
-        on_bar_lines.append("                    tif=TimeInForce.DAY,")
-        on_bar_lines.append('                    reason="compiled_stop_loss",')
-        on_bar_lines.append("                )")
-        on_bar_lines.append("                position = ctx.position(bar.symbol)")
+        on_bar_lines.append(
+            "        if not exit_submitted and position is not None "
+            "and position.side == OrderSide.LONG "
+            f"and bar.low <= position.entry_price * (1.0 - {pct!r}):"
+        )
+        _emit_close_order(on_bar_lines, exit_side="OrderSide.SHORT", reason="compiled_stop_loss")
+        on_bar_lines.append("            exit_submitted = True")
+        on_bar_lines.append(
+            "        if not exit_submitted and position is not None "
+            "and position.side == OrderSide.SHORT "
+            f"and bar.high >= position.entry_price * (1.0 + {pct!r}):"
+        )
+        _emit_close_order(on_bar_lines, exit_side="OrderSide.LONG", reason="compiled_stop_loss")
+        on_bar_lines.append("            exit_submitted = True")
 
     # Take-profit branches — symmetric to stop-loss, using bar.high
     # (long) / bar.low (short).
     for rule in take_profit_rules:
         pct = float(rule.pct)
-        on_bar_lines.append("        if position is not None and position.side == OrderSide.LONG:")
-        on_bar_lines.append(f"            if bar.high >= position.entry_price * (1.0 + {pct!r}):")
-        on_bar_lines.append("                ctx.submit_order(")
-        on_bar_lines.append("                    symbol=bar.symbol,")
-        on_bar_lines.append("                    side=OrderSide.SHORT,")
-        on_bar_lines.append("                    qty=position.qty,")
-        on_bar_lines.append("                    order_type=OrderType.MARKET,")
-        on_bar_lines.append("                    tif=TimeInForce.DAY,")
-        on_bar_lines.append('                    reason="compiled_take_profit",')
-        on_bar_lines.append("                )")
-        on_bar_lines.append("                position = ctx.position(bar.symbol)")
-        on_bar_lines.append("        if position is not None and position.side == OrderSide.SHORT:")
-        on_bar_lines.append(f"            if bar.low <= position.entry_price * (1.0 - {pct!r}):")
-        on_bar_lines.append("                ctx.submit_order(")
-        on_bar_lines.append("                    symbol=bar.symbol,")
-        on_bar_lines.append("                    side=OrderSide.LONG,")
-        on_bar_lines.append("                    qty=position.qty,")
-        on_bar_lines.append("                    order_type=OrderType.MARKET,")
-        on_bar_lines.append("                    tif=TimeInForce.DAY,")
-        on_bar_lines.append('                    reason="compiled_take_profit",')
-        on_bar_lines.append("                )")
-        on_bar_lines.append("                position = ctx.position(bar.symbol)")
+        on_bar_lines.append(
+            "        if not exit_submitted and position is not None "
+            "and position.side == OrderSide.LONG "
+            f"and bar.high >= position.entry_price * (1.0 + {pct!r}):"
+        )
+        _emit_close_order(on_bar_lines, exit_side="OrderSide.SHORT", reason="compiled_take_profit")
+        on_bar_lines.append("            exit_submitted = True")
+        on_bar_lines.append(
+            "        if not exit_submitted and position is not None "
+            "and position.side == OrderSide.SHORT "
+            f"and bar.low <= position.entry_price * (1.0 - {pct!r}):"
+        )
+        _emit_close_order(on_bar_lines, exit_side="OrderSide.LONG", reason="compiled_take_profit")
+        on_bar_lines.append("            exit_submitted = True")
+
+    # Signal-exit branches — close the open position with the opposite
+    # side. Also guarded by ``exit_submitted`` so a same-bar
+    # stop/take-profit short-circuits this branch.
+    for rule in signal_exit_rules:
+        pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
+        on_bar_lines.append(
+            f"        if not exit_submitted and position is not None and {pred_src}:"
+        )
+        on_bar_lines.append(
+            "            exit_side = OrderSide.SHORT if position.side == OrderSide.LONG "
+            "else OrderSide.LONG"
+        )
+        on_bar_lines.append("            ctx.submit_order(")
+        on_bar_lines.append("                symbol=bar.symbol,")
+        on_bar_lines.append("                side=exit_side,")
+        on_bar_lines.append("                qty=position.qty,")
+        on_bar_lines.append("                order_type=OrderType.MARKET,")
+        on_bar_lines.append("                tif=TimeInForce.DAY,")
+        on_bar_lines.append('                reason="compiled_signal_exit",')
+        on_bar_lines.append("            )")
+        on_bar_lines.append("            exit_submitted = True")
 
     # Entry branches — one per rule, distinct top-level ``if``s so the
-    # entry-coverage gate counts them separately.
+    # entry-coverage gate counts them separately. Entry is naturally
+    # exclusive with a same-bar exit because the snapshot ``position is
+    # None`` check fails whenever an exit fired (the snapshot was taken
+    # while still in-position).
     for rule in entry_rules:
         pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
         side_literal = "OrderSide.LONG" if rule.side == "long" else "OrderSide.SHORT"
@@ -580,23 +831,6 @@ def _emit_class(
         on_bar_lines.append('                reason="compiled_entry",')
         on_bar_lines.append("            )")
 
-    # Signal-exit branches — close the open position with the opposite side.
-    for rule in signal_exit_rules:
-        pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
-        on_bar_lines.append(f"        if position is not None and {pred_src}:")
-        on_bar_lines.append(
-            "            exit_side = OrderSide.SHORT if position.side == OrderSide.LONG "
-            "else OrderSide.LONG"
-        )
-        on_bar_lines.append("            ctx.submit_order(")
-        on_bar_lines.append("                symbol=bar.symbol,")
-        on_bar_lines.append("                side=exit_side,")
-        on_bar_lines.append("                qty=position.qty,")
-        on_bar_lines.append("                order_type=OrderType.MARKET,")
-        on_bar_lines.append("                tif=TimeInForce.DAY,")
-        on_bar_lines.append('                reason="compiled_signal_exit",')
-        on_bar_lines.append("            )")
-
     # Cross-state update — must come AFTER all branches so the current
     # bar's value is preserved for the next ``on_bar``. Order is
     # sigid-sorted (already enforced by ``_collect_cross_sides``).
@@ -604,6 +838,16 @@ def _emit_class(
         on_bar_lines.append("        # update prev-bar snapshots for cross_* predicates")
         for _sigid, prev_attr, current_expr in cross_sides:
             on_bar_lines.append(f"        self.{prev_attr} = {current_expr}")
+
+    # Method blocks — class constants, __init__, on_bar, then indicator
+    # helpers (and the source helper) appended at the end so the class
+    # body reads top-down: constants, lifecycle, decision logic, math.
+    helper_method_blocks: List[str] = []
+    if needs_source_helper:
+        helper_method_blocks.append(_indent_method(_emit_source_helper()))
+    for name in used_helper_names:
+        body = _HELPER_BODIES[name]
+        helper_method_blocks.append(_indent_method(body))
 
     body_lines: List[str] = [
         f"    UNIVERSE = {universe_literal}",
@@ -613,4 +857,19 @@ def _emit_class(
         "",
         *on_bar_lines,
     ]
-    return "class CompiledStrategy(Strategy):\n" + "\n".join(body_lines) + "\n"
+    class_src = "class CompiledStrategy(Strategy):\n" + "\n".join(body_lines) + "\n"
+    if helper_method_blocks:
+        class_src += "\n" + "\n".join(helper_method_blocks)
+    return class_src
+
+
+def _emit_close_order(lines: List[str], *, exit_side: str, reason: str) -> None:
+    """Append a close-position ``ctx.submit_order(...)`` block to ``lines``."""
+    lines.append("            ctx.submit_order(")
+    lines.append("                symbol=bar.symbol,")
+    lines.append(f"                side={exit_side},")
+    lines.append("                qty=position.qty,")
+    lines.append("                order_type=OrderType.MARKET,")
+    lines.append("                tif=TimeInForce.DAY,")
+    lines.append(f'                reason="{reason}",')
+    lines.append("            )")
