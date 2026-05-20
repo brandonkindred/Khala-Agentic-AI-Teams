@@ -36,6 +36,7 @@ from ..models import (
     BacktestConfig,
     BacktestRecord,
     BacktestResult,
+    DataProvenance,
     StrategyLabRecord,
     StrategySpec,
     TradeRecord,
@@ -500,13 +501,12 @@ class StrategyLabOrchestrator:
         assert isinstance(zero_trade_attempts, list), "zero_trade_attempts must be a list"
 
         trades: List[TradeRecord] = []
-        metrics = compute_metrics(
-            [], config.initial_capital, config.start_date, config.end_date
-        )
+        metrics = compute_metrics([], config.initial_capital, config.start_date, config.end_date)
         execution_succeeded = False
         market_data: Optional[Dict[str, List[OHLCVBar]]] = None
         requested_symbols: List[str] = []
         fetched_symbols: List[str] = []
+        provider_used: Dict[str, str] = {}
         max_rounds_exhausted = False
 
         for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
@@ -577,6 +577,7 @@ class StrategyLabOrchestrator:
                 fetch = self._fetch_market_data(spec, config)
                 requested_symbols = list(fetch.requested_symbols)
                 fetched_symbols = list(fetch.fetched_symbols)
+                provider_used = dict(fetch.provider_used)
                 market_data = fetch.data
                 if not market_data:
                     all_gate_results.append(
@@ -621,8 +622,7 @@ class StrategyLabOrchestrator:
                     )
                 )
                 failure_details = (
-                    f"Error type: {exec_result.error_type}\n"
-                    f"stderr:\n{exec_result.stderr[:2000]}"
+                    f"Error type: {exec_result.error_type}\nstderr:\n{exec_result.stderr[:2000]}"
                 )
                 spec, code, exhausted = self._refine_or_exhaust(
                     spec=spec,
@@ -644,9 +644,7 @@ class StrategyLabOrchestrator:
             trades = exec_result.trades
 
             trade_coverage_gates = self.target_symbol_coverage_gate.check_trades(spec, trades)
-            self.record_gates(
-                trade_coverage_gates, all_gate_results, refinement_round=round_num
-            )
+            self.record_gates(trade_coverage_gates, all_gate_results, refinement_round=round_num)
             if any(not g.passed and g.severity == "critical" for g in trade_coverage_gates):
                 max_rounds_exhausted = True
                 break
@@ -732,6 +730,7 @@ class StrategyLabOrchestrator:
             fetched_symbols=fetched_symbols,
             execution_succeeded=execution_succeeded,
             max_rounds_exhausted=max_rounds_exhausted,
+            provider_used=provider_used,
         )
 
     def _handle_critical_anomalies(
@@ -803,7 +802,9 @@ class StrategyLabOrchestrator:
             if zt_outcome.committed:
                 assert zt_outcome.new_spec is not None, "committed ZTR must carry new_spec"
                 assert zt_outcome.new_metrics is not None, "committed ZTR must carry new_metrics"
-                assert zt_outcome.new_exec_result is not None, "committed ZTR must carry new_exec_result"
+                assert zt_outcome.new_exec_result is not None, (
+                    "committed ZTR must carry new_exec_result"
+                )
                 refinement_attempts.append(
                     f"zero-trade repair: {zt_outcome.changes_made}"
                     if zt_outcome.changes_made
@@ -1084,9 +1085,7 @@ class StrategyLabOrchestrator:
                     "details": "; ".join(g.details for g in critical_safety)[:400],
                 },
             )
-            logger.warning(
-                "Alignment-proposed code failed safety gate for %s", spec.strategy_id
-            )
+            logger.warning("Alignment-proposed code failed safety gate for %s", spec.strategy_id)
             return _terminate()
 
         emit(
@@ -1151,13 +1150,9 @@ class StrategyLabOrchestrator:
             refinement_round=align_round,
             gate_name_prefix="alignment_",
         )
-        critical_anomalies = [
-            g for g in anomaly_gates if not g.passed and g.severity == "critical"
-        ]
+        critical_anomalies = [g for g in anomaly_gates if not g.passed and g.severity == "critical"]
         if critical_anomalies:
-            diagnostics_block = _format_execution_diagnostics(
-                align_exec.execution_diagnostics
-            )
+            diagnostics_block = _format_execution_diagnostics(align_exec.execution_diagnostics)
             emit_payload: Dict[str, Any] = {
                 "sub_phase": "anomaly_detected",
                 "alignment_round": align_round,
@@ -1510,6 +1505,7 @@ class StrategyLabOrchestrator:
         rationale: str,
         requested_symbols: List[str],
         fetched_symbols: List[str],
+        provider_used: Dict[str, str],
         max_rounds_exhausted: bool,
         execution_succeeded: bool,
         is_winning: bool,
@@ -1547,6 +1543,23 @@ class StrategyLabOrchestrator:
             backtest_status = "failed"
 
         backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
+        # Issue #533 — structured provenance block.
+        # ``target_symbols`` is the spec's explicit request (or [] when the
+        # spec relied on the asset-class fallback universe); it is *distinct*
+        # from ``requested_symbols`` (the resolved universe handed to the
+        # fetcher). ``as_of`` mirrors ``audit.data_snapshot_id`` so a re-run
+        # of the saved record replays the same snapshot. ``legacy_fingerprint``
+        # exposes the existing ``BacktestResult.dataset_fingerprint`` at the
+        # record level so the CLI doesn't need to dig into ``metrics``.
+        as_of = (getattr(spec, "audit", None) and spec.audit.data_snapshot_id) or None
+        data_provenance = DataProvenance(
+            target_symbols=list(spec.target_symbols or []),
+            fetched_symbols=list(fetched_symbols),
+            traded_symbols=sorted({t.symbol for t in trades}),
+            provider_used=dict(provider_used),
+            as_of=as_of,
+            legacy_fingerprint=metrics.dataset_fingerprint,
+        )
         backtest_record = BacktestRecord(
             backtest_id=backtest_id,
             strategy_id=spec.strategy_id,
@@ -1560,6 +1573,7 @@ class StrategyLabOrchestrator:
             trades=trades,
             requested_symbols=requested_symbols,
             fetched_symbols=fetched_symbols,
+            data_provenance=data_provenance,
         )
 
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
@@ -1721,6 +1735,7 @@ class StrategyLabOrchestrator:
         market_data = synthesis.market_data
         requested_symbols = synthesis.requested_symbols
         fetched_symbols = synthesis.fetched_symbols
+        provider_used = synthesis.provider_used
         execution_succeeded = synthesis.execution_succeeded
         max_rounds_exhausted = synthesis.max_rounds_exhausted
 
@@ -1808,6 +1823,7 @@ class StrategyLabOrchestrator:
             rationale=rationale,
             requested_symbols=requested_symbols,
             fetched_symbols=fetched_symbols,
+            provider_used=provider_used,
             max_rounds_exhausted=max_rounds_exhausted,
             execution_succeeded=execution_succeeded,
             is_winning=is_winning,
@@ -1984,7 +2000,6 @@ class StrategyLabOrchestrator:
                 f"{type(last_exc).__name__}: {last_exc}"
             ),
         )
-
 
     def _apply_updates(
         self,
@@ -2193,10 +2208,19 @@ class StrategyLabOrchestrator:
                 fetched_symbols=[],
             )
         fetched = sorted(sym for sym, bars in (data or {}).items() if bars)
+        # Issue #533 — snapshot ``provider_used`` for the just-fetched
+        # subset only. ``MarketDataService.provider_used`` is shared
+        # mutable state that accumulates across fetches; without the
+        # filter+copy here a later cycle's fetch would pollute this row.
+        service_provider_used = getattr(self.market_data_service, "provider_used", {}) or {}
+        provider_used = {
+            sym: service_provider_used[sym] for sym in fetched if sym in service_provider_used
+        }
         return _MarketDataFetch(
             data=data if data else None,
             requested_symbols=list(requested),
             fetched_symbols=fetched,
+            provider_used=provider_used,
         )
 
     # ------------------------------------------------------------------
@@ -2328,7 +2352,6 @@ class StrategyLabOrchestrator:
             }
         )
 
-
     def _evaluate_regimes(
         self,
         spec: StrategySpec,
@@ -2376,7 +2399,6 @@ class StrategyLabOrchestrator:
             logger.exception("Regime evaluation failed for %s", spec.strategy_id)
             return []
 
-
     def _build_benchmark_equity(
         self,
         spec: StrategySpec,
@@ -2412,12 +2434,8 @@ class StrategyLabOrchestrator:
                 spy_bars = blend["SPY"]
                 agg_bars = blend["AGG"]
                 spy_dates = [_parse_bar_date(b.date) for b in spy_bars]
-                spy_equity = _closes_to_equity(
-                    [b.close for b in spy_bars], config.initial_capital
-                )
-                agg_equity = _closes_to_equity(
-                    [b.close for b in agg_bars], config.initial_capital
-                )
+                spy_equity = _closes_to_equity([b.close for b in spy_bars], config.initial_capital)
+                agg_equity = _closes_to_equity([b.close for b in agg_bars], config.initial_capital)
                 blended = build_60_40_equity(
                     spy_equity, agg_equity, initial_capital=config.initial_capital
                 )
@@ -2444,8 +2462,6 @@ class StrategyLabOrchestrator:
             n = min(len(dates), len(equity))
             return dates[:n], equity[:n]
         return [], []
-
-
 
 
 # ──────────────────────────────────────────────────────────────────────────

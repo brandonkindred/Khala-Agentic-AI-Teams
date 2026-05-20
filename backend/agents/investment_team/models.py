@@ -690,6 +690,27 @@ class TradeRecord(BaseModel):
     exit_reason: Optional[str] = None
 
 
+class DataProvenance(BaseModel):
+    """Issue #533 — symbol & data-source audit trail for one backtest run.
+
+    Lets reviewers answer "spec asked for QQQ → fetcher returned
+    AAPL/MSFT/NVDA/TSLA/AMZN → ledger traded TSLA" from structured data
+    without grepping narrative prose or strategy code.
+
+    ``target_symbols`` is the explicit list the spec asked for
+    (``spec.target_symbols``); distinct from ``BacktestRecord.requested_symbols``
+    which is the *resolved* universe (may be the asset-class fallback when
+    ``target_symbols`` is empty).
+    """
+
+    target_symbols: List[str] = Field(default_factory=list)
+    fetched_symbols: List[str] = Field(default_factory=list)
+    traded_symbols: List[str] = Field(default_factory=list)
+    provider_used: Dict[str, str] = Field(default_factory=dict)
+    as_of: Optional[str] = None
+    legacy_fingerprint: Optional[str] = None
+
+
 class BacktestRecord(BaseModel):
     backtest_id: str
     strategy_id: str
@@ -709,6 +730,10 @@ class BacktestRecord(BaseModel):
     # default to ``[]`` so older persisted rows deserialize cleanly.
     requested_symbols: List[str] = Field(default_factory=list)
     fetched_symbols: List[str] = Field(default_factory=list)
+    # Issue #533 — structured provenance (target/fetched/traded symbols,
+    # per-symbol provider, ``as_of`` snapshot id, dataset fingerprint).
+    # Default-empty so legacy persisted rows deserialize cleanly.
+    data_provenance: DataProvenance = Field(default_factory=DataProvenance)
 
 
 class GateCheckResult(BaseModel):
