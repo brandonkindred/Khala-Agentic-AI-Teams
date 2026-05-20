@@ -1651,22 +1651,44 @@ class StrategyLabOrchestrator:
             target_symbols=strategy_dict.get("target_symbols", []),
             risk_limits=strategy_dict.get("risk_limits", {}),
             speculative=strategy_dict.get("speculative", False),
-            # Pass through raw — Pydantic's bool coercion handles
-            # explicit ``True``/``False`` plus the standard string
-            # variants ("true"/"false"/"yes"/"no"); ``bool(...)`` here
+            # Normalise to default ``False`` when the LLM emits explicit
+            # ``null`` (Pydantic's non-Optional bool would otherwise
+            # ValidationError and abort the design attempt). Pydantic's
+            # bool coercion then handles the standard string variants
+            # ("true"/"false"/"yes"/"no") correctly; ``bool(...)`` here
             # would have flipped any non-empty string (e.g. ``"false"``)
             # into ``True`` and silently disabled deterministic compile.
-            requires_custom_code=strategy_dict.get("requires_custom_code", False),
+            requires_custom_code=(
+                strategy_dict.get("requires_custom_code")
+                if strategy_dict.get("requires_custom_code") is not None
+                else False
+            ),
             strategy_code=code,
         )
+
+        # Snapshot ideation outputs FIRST so reviewers can compare against
+        # any refinement-driven mutation persisted on the final record
+        # (#547). The snapshot captures the LLM-authored code; the
+        # deterministic compile step below may replace ``code`` for the
+        # downstream pipeline, but ``original_code`` always reflects the
+        # ideation phase's output.
+        original_spec = spec.model_copy(deep=True)
+        original_code = code
 
         # Issue #538: deterministic compile by default. When the spec opts
         # into LLM synthesis (``requires_custom_code=True``) or the
         # compiler raises ``CompilerError``, the ideation-authored ``code``
         # is kept verbatim and the LLM refinement path takes over.
+        # We mirror the result into the local ``code`` variable too —
+        # downstream gates and ``_run_synthesis_loop`` consume ``code=...``
+        # directly (not ``spec.strategy_code``), so writing only to the
+        # spec would bypass the compiled output everywhere except the
+        # final persisted record.
         if not spec.requires_custom_code:
             try:
-                spec.strategy_code = compile_strategy(spec)
+                compiled = compile_strategy(spec)
+                spec.strategy_code = compiled
+                code = compiled
             except CompilerError as exc:
                 logger.warning(
                     "compiler_fallback strategy_id=%s reason=%s",
@@ -1675,11 +1697,6 @@ class StrategyLabOrchestrator:
                 )
                 spec.requires_custom_code = True
                 spec.strategy_code = code
-
-        # Snapshot ideation outputs so reviewers can compare against any
-        # refinement-driven mutation persisted on the final record (#547).
-        original_spec = spec.model_copy(deep=True)
-        original_code = code
 
         # Override generic fee defaults with asset-class-appropriate values
         if config.transaction_cost_bps == 5.0 and config.slippage_bps == 2.0:

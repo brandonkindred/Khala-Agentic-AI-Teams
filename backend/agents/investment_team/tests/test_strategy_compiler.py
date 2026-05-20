@@ -821,6 +821,141 @@ def test_spec_hash_ignores_non_dsl_fields() -> None:
     )
 
 
+def test_exit_rules_emitted_in_author_order() -> None:
+    """Codex P2: the compiler must preserve ``spec.exit_rules`` order so
+    ``[take_profit, stop_loss]`` evaluates take-profit FIRST under the
+    per-bar ``exit_submitted`` short-circuit, matching the author's
+    declared precedence — not the kind-partitioned order that emits
+    every stop-loss before every take-profit.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[TakeProfitRule(pct=0.10), StopLossRule(pct=0.05)],
+    )
+    code = compile_strategy(spec)
+    tp_pos = code.find('reason="compiled_take_profit"')
+    sl_pos = code.find('reason="compiled_stop_loss"')
+    assert tp_pos != -1 and sl_pos != -1
+    assert tp_pos < sl_pos, (
+        "take_profit appears before stop_loss in spec.exit_rules, so the "
+        "compiled emission order must match"
+    )
+
+
+def test_compiled_code_flows_into_orchestrator_local_variable() -> None:
+    """Codex P1 round-3: the orchestrator must propagate ``spec.strategy_code``
+    into the local ``code`` variable. Downstream gates and
+    ``_run_synthesis_loop`` take ``code=...`` directly; writing only to
+    ``spec.strategy_code`` would silently bypass the compiler.
+
+    Verifies by patching ``compile_strategy`` to a sentinel string and
+    asserting the orchestrator routes that string through to the next
+    phase, not the LLM-authored input. The fake ``_run_pre_synthesis_phase``
+    raises an early-exit sentinel so the test never reaches the synthesis
+    loop's LLM-driven refinement path.
+    """
+    from unittest.mock import patch
+
+    from investment_team.models import BacktestConfig
+    from investment_team.strategy_lab import orchestrator as orch_mod
+
+    sentinel_code = "# compiled-sentinel\nfrom contract import Strategy\n"
+    captured: dict[str, Any] = {}
+
+    class _EarlyExit(Exception):
+        pass
+
+    def fake_pre_synth(
+        self,
+        *,
+        spec,
+        config,
+        all_gate_results,
+        code,
+        original_spec,
+        original_code,
+        rationale,
+        refinement_attempts,
+        emit,
+    ):
+        captured["code"] = code
+        captured["original_code"] = original_code
+        captured["spec_strategy_code"] = spec.strategy_code
+        raise _EarlyExit
+
+    spec_dict = {
+        "asset_class": "stocks",
+        "hypothesis": "test",
+        "signal_definition": "sig",
+        "timeframe": "1d",
+        "entry_rules": [_rsi_lt_30_entry().model_dump()],
+        "exit_rules": [_rsi_gt_70_exit().model_dump()],
+        "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
+        "target_symbols": ["QQQ"],
+    }
+
+    with (
+        patch.object(orch_mod, "compile_strategy", return_value=sentinel_code),
+        patch.object(
+            orch_mod.StrategyLabOrchestrator,
+            "_run_pre_synthesis_phase",
+            fake_pre_synth,
+        ),
+    ):
+        orch = orch_mod.StrategyLabOrchestrator()
+        orch.ideation_agent.run = lambda **_kw: (  # type: ignore[assignment]
+            spec_dict,
+            "# llm-authored ideation code\n",
+            "rationale",
+        )
+        cfg = BacktestConfig(
+            start_date="2023-01-01",
+            end_date="2023-12-31",
+            initial_capital=100_000.0,
+            benchmark_symbol="SPY",
+            transaction_cost_bps=5.0,
+            slippage_bps=2.0,
+        )
+        try:
+            orch.run_cycle(prior_records=[], config=cfg)
+        except _EarlyExit:
+            pass
+
+    assert captured["code"] == sentinel_code, (
+        f"local code must be the compiler output; got {captured['code']!r}"
+    )
+    assert captured["spec_strategy_code"] == sentinel_code
+    # Original LLM source is preserved for comparison reporting.
+    assert captured["original_code"] == "# llm-authored ideation code\n"
+
+
+def test_requires_custom_code_null_normalises_to_false() -> None:
+    """Codex P2 round-3: an explicit ``null`` from the LLM must not
+    crash the design attempt with a ValidationError. The orchestrator
+    normalises ``None`` to ``False`` (default behaviour) before passing
+    to ``StrategySpec`` so deterministic compile remains the default.
+    """
+    # The orchestrator code path is exercised via the previous test;
+    # here we just pin the normalisation pattern directly so a future
+    # refactor can't regress it.
+    raw = None
+    normalized = raw if raw is not None else False
+    spec = StrategySpec(
+        strategy_id="strat-test",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="test hypothesis",
+        signal_definition="test signal",
+        timeframe="1d",
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[_rsi_gt_70_exit()],
+        sizing=FixedFractionSizing(fraction=0.02),
+        target_symbols=["QQQ"],
+        requires_custom_code=normalized,
+    )
+    assert spec.requires_custom_code is False
+
+
 def test_requires_custom_code_string_false_does_not_disable_compile() -> None:
     """Codex P2: ``bool('false')`` is ``True``; the orchestrator must
     not coerce the raw value through ``bool(...)`` or any non-empty

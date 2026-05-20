@@ -118,15 +118,13 @@ def compile_strategy(spec: Any) -> str:
         raise CompilerError("spec.sizing is required")
 
     signal_exit_rules = [r for r in exit_rules if isinstance(r, SignalExitRule)]
-    stop_loss_rules = [r for r in exit_rules if isinstance(r, StopLossRule)]
-    take_profit_rules = [r for r in exit_rules if isinstance(r, TakeProfitRule)]
 
     # Trailing-basis stop-losses need ``position.high_since_entry`` /
     # ``position.low_since_entry``, neither of which is on the
     # strategy-side ``_PositionSnapshot``. Fall back to LLM synthesis
     # rather than emit logic that silently uses entry_price instead.
-    for rule in stop_loss_rules:
-        if rule.basis != "entry_price":
+    for rule in exit_rules:
+        if isinstance(rule, StopLossRule) and rule.basis != "entry_price":
             raise CompilerError(
                 f"stop-loss basis {rule.basis!r} requires trailing-state "
                 "tracking not exposed on the strategy-side position "
@@ -176,9 +174,7 @@ def compile_strategy(spec: Any) -> str:
             cross_sides=cross_sides,
             indicator_bindings=indicator_bindings,
             entry_rules=entry_rules,
-            signal_exit_rules=signal_exit_rules,
-            stop_loss_rules=stop_loss_rules,
-            take_profit_rules=take_profit_rules,
+            exit_rules=exit_rules,
             sizing=sizing,
             used_helper_names=used_helper_names,
             needs_source_helper=needs_source_helper,
@@ -747,9 +743,7 @@ def _emit_class(
     cross_sides: List[Tuple[str, str, str]],
     indicator_bindings: List[Tuple[str, IndicatorRef, str, str]],
     entry_rules: List[EntryRule],
-    signal_exit_rules: List[SignalExitRule],
-    stop_loss_rules: List[StopLossRule],
-    take_profit_rules: List[TakeProfitRule],
+    exit_rules: List[Any],
     sizing: Any,
     used_helper_names: List[str],
     needs_source_helper: bool,
@@ -801,7 +795,7 @@ def _emit_class(
         for sigid, prev_var, _cur in cross_sides:
             on_bar_lines.append(f"        {prev_var} = _prev_for_symbol.get({sigid!r})")
     on_bar_lines.append("        position = ctx.position(bar.symbol)")
-    if stop_loss_rules or take_profit_rules or signal_exit_rules:
+    if exit_rules:
         # Per-bar guard so two exit thresholds firing on the same candle
         # cannot emit a second submit_order — without this, the first
         # close + second close would be filled as a close + reverse-
@@ -809,68 +803,73 @@ def _emit_class(
         # mid-``on_bar``, so the local flag is the only honest signal.
         on_bar_lines.append("        exit_submitted = False")
 
-    # Stop-loss branches — close the open position when bar.low (long) or
-    # bar.high (short) crosses the threshold computed against
-    # ``position.entry_price``. Each branch is gated by ``exit_submitted``
-    # so a stop firing on the same bar as the take-profit only emits one
-    # close order.
-    for rule in stop_loss_rules:
-        pct = float(rule.pct)
-        on_bar_lines.append(
-            "        if not exit_submitted and position is not None "
-            "and position.side == OrderSide.LONG "
-            f"and bar.low <= position.entry_price * (1.0 - {pct!r}):"
-        )
-        _emit_close_order(on_bar_lines, exit_side="OrderSide.SHORT", reason="compiled_stop_loss")
-        on_bar_lines.append("            exit_submitted = True")
-        on_bar_lines.append(
-            "        if not exit_submitted and position is not None "
-            "and position.side == OrderSide.SHORT "
-            f"and bar.high >= position.entry_price * (1.0 + {pct!r}):"
-        )
-        _emit_close_order(on_bar_lines, exit_side="OrderSide.LONG", reason="compiled_stop_loss")
-        on_bar_lines.append("            exit_submitted = True")
-
-    # Take-profit branches — symmetric to stop-loss, using bar.high
-    # (long) / bar.low (short).
-    for rule in take_profit_rules:
-        pct = float(rule.pct)
-        on_bar_lines.append(
-            "        if not exit_submitted and position is not None "
-            "and position.side == OrderSide.LONG "
-            f"and bar.high >= position.entry_price * (1.0 + {pct!r}):"
-        )
-        _emit_close_order(on_bar_lines, exit_side="OrderSide.SHORT", reason="compiled_take_profit")
-        on_bar_lines.append("            exit_submitted = True")
-        on_bar_lines.append(
-            "        if not exit_submitted and position is not None "
-            "and position.side == OrderSide.SHORT "
-            f"and bar.low <= position.entry_price * (1.0 - {pct!r}):"
-        )
-        _emit_close_order(on_bar_lines, exit_side="OrderSide.LONG", reason="compiled_take_profit")
-        on_bar_lines.append("            exit_submitted = True")
-
-    # Signal-exit branches — close the open position with the opposite
-    # side. Also guarded by ``exit_submitted`` so a same-bar
-    # stop/take-profit short-circuits this branch.
-    for rule in signal_exit_rules:
-        pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
-        on_bar_lines.append(
-            f"        if not exit_submitted and position is not None and {pred_src}:"
-        )
-        on_bar_lines.append(
-            "            exit_side = OrderSide.SHORT if position.side == OrderSide.LONG "
-            "else OrderSide.LONG"
-        )
-        on_bar_lines.append("            ctx.submit_order(")
-        on_bar_lines.append("                symbol=bar.symbol,")
-        on_bar_lines.append("                side=exit_side,")
-        on_bar_lines.append("                qty=position.qty,")
-        on_bar_lines.append("                order_type=OrderType.MARKET,")
-        on_bar_lines.append("                tif=TimeInForce.DAY,")
-        on_bar_lines.append('                reason="compiled_signal_exit",')
-        on_bar_lines.append("            )")
-        on_bar_lines.append("            exit_submitted = True")
+    # Exit branches — emitted in author-declared ``spec.exit_rules`` order.
+    # Each branch is gated by ``exit_submitted`` so two thresholds firing on
+    # the same bar only emit one close order, and the first matching rule
+    # in spec order wins — preserving author-intended precedence (e.g. a
+    # spec listing ``[take_profit, stop_loss]`` evaluates take-profit
+    # first, not stop-loss first like a kind-partitioned emission would).
+    for rule in exit_rules:
+        if isinstance(rule, StopLossRule):
+            pct = float(rule.pct)
+            on_bar_lines.append(
+                "        if not exit_submitted and position is not None "
+                "and position.side == OrderSide.LONG "
+                f"and bar.low <= position.entry_price * (1.0 - {pct!r}):"
+            )
+            _emit_close_order(
+                on_bar_lines, exit_side="OrderSide.SHORT", reason="compiled_stop_loss"
+            )
+            on_bar_lines.append("            exit_submitted = True")
+            on_bar_lines.append(
+                "        if not exit_submitted and position is not None "
+                "and position.side == OrderSide.SHORT "
+                f"and bar.high >= position.entry_price * (1.0 + {pct!r}):"
+            )
+            _emit_close_order(on_bar_lines, exit_side="OrderSide.LONG", reason="compiled_stop_loss")
+            on_bar_lines.append("            exit_submitted = True")
+            continue
+        if isinstance(rule, TakeProfitRule):
+            pct = float(rule.pct)
+            on_bar_lines.append(
+                "        if not exit_submitted and position is not None "
+                "and position.side == OrderSide.LONG "
+                f"and bar.high >= position.entry_price * (1.0 + {pct!r}):"
+            )
+            _emit_close_order(
+                on_bar_lines, exit_side="OrderSide.SHORT", reason="compiled_take_profit"
+            )
+            on_bar_lines.append("            exit_submitted = True")
+            on_bar_lines.append(
+                "        if not exit_submitted and position is not None "
+                "and position.side == OrderSide.SHORT "
+                f"and bar.low <= position.entry_price * (1.0 - {pct!r}):"
+            )
+            _emit_close_order(
+                on_bar_lines, exit_side="OrderSide.LONG", reason="compiled_take_profit"
+            )
+            on_bar_lines.append("            exit_submitted = True")
+            continue
+        if isinstance(rule, SignalExitRule):
+            pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
+            on_bar_lines.append(
+                f"        if not exit_submitted and position is not None and {pred_src}:"
+            )
+            on_bar_lines.append(
+                "            exit_side = OrderSide.SHORT if position.side == OrderSide.LONG "
+                "else OrderSide.LONG"
+            )
+            on_bar_lines.append("            ctx.submit_order(")
+            on_bar_lines.append("                symbol=bar.symbol,")
+            on_bar_lines.append("                side=exit_side,")
+            on_bar_lines.append("                qty=position.qty,")
+            on_bar_lines.append("                order_type=OrderType.MARKET,")
+            on_bar_lines.append("                tif=TimeInForce.DAY,")
+            on_bar_lines.append('                reason="compiled_signal_exit",')
+            on_bar_lines.append("            )")
+            on_bar_lines.append("            exit_submitted = True")
+            continue
+        raise CompilerError(f"unsupported exit-rule variant: {type(rule).__name__}")
 
     # Entry branches — one per rule, distinct top-level ``if``s so the
     # entry-coverage gate counts them separately. Entry is naturally
