@@ -556,3 +556,220 @@ def test_no_extra_side_effects_fails_when_submit_in_init() -> None:
     results = CodeConformanceGate().check(code, spec)
     crits = _critical_details(results)
     assert any("disallowed scope" in c and "__init__" in c for c in crits), crits
+
+
+# ---------------------------------------------------------------------------
+# PR #588 Codex review — follow-up regressions
+# ---------------------------------------------------------------------------
+
+
+def test_indicator_presence_ignores_calls_in_unreachable_methods() -> None:
+    """Codex P1: an ``sma(...)`` call in a never-called helper must not
+    satisfy the indicator-presence check. ``on_bar`` is what runs at
+    runtime, so calls only count when reachable from it."""
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def _dead(self, ctx, bar):
+                # Reference sma here only — never called from on_bar.
+                _ = sma(ctx.history(bar.symbol, 50), 50)
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                # Inline mean rather than calling sma() — and the spec's
+                # sma reference lives in the unreachable _dead helper.
+                fast = sum(b.close for b in bars[-50:]) / 50
+                slow = sum(b.close for b in bars[-200:]) / 200
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and bar.close < pos.entry_price * 0.95:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert any("indicator" in c.lower() and "sma" in c for c in crits), crits
+
+
+def test_branch_coverage_does_not_double_count_nested_branches() -> None:
+    """Codex P1: ``if A: if B: submit()`` is one logical entry, not two.
+
+    The strategy below has two entry rules in spec but only ONE nested
+    submit_order. Without the nested-branch fix, both the outer and the
+    inner If would count as entry branches (2 ≥ 2) and the test would
+    silently pass. With the fix, only the innermost If is credited,
+    leaving 1 < 2 entry branches — critical fires."""
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                r = rsi(bars, 14)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None:
+                    if fast > slow:
+                        ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif bar.close < pos.entry_price * 0.95:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry(), _sma_cross_entry(side="short")],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert any("2 entry rule" in c and "only 1" in c for c in crits), crits
+
+
+def test_no_extra_side_effects_flags_dead_helper_with_submit() -> None:
+    """Codex P2: an unreachable ``_helper`` containing a submit_order
+    must trip check #9 — the helper convention is only safe when the
+    helper is actually called from a hook."""
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def _dead(self, ctx, bar):
+                # Never called from any hook — stray order code that the
+                # gate must surface, not silently accept.
+                ctx.submit_order(symbol="QQQ", qty=1, side="LONG")
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and bar.close < pos.entry_price * 0.95:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert any("disallowed scope" in c and "_dead" in c for c in crits), crits
+
+
+def test_entry_coverage_accepts_kwargs_spread_submit() -> None:
+    """Codex P2: ``ctx.submit_order(**order_kwargs)`` may dynamically
+    carry ``side`` — the gate must treat the spread as a plausible entry
+    rather than failing closed."""
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    order_kwargs = {"symbol": bar.symbol, "qty": qty, "side": "LONG"}
+                    ctx.submit_order(**order_kwargs)
+                elif pos is not None and bar.close < pos.entry_price * 0.95:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry()],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert not any("entry rule" in c.lower() for c in crits), crits
+
+
+def test_signal_exit_coverage_accepts_kwargs_spread_submit() -> None:
+    """Codex P2: ``ctx.submit_order(**close_kwargs)`` may dynamically
+    carry ``qty=position.qty`` — the gate must treat the spread as a
+    plausible close."""
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                r = rsi(bars, 14)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    close_kwargs = {"symbol": bar.symbol, "qty": pos.qty, "side": "SHORT"}
+                    ctx.submit_order(**close_kwargs)
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry()],
+        exit_rules=[_rsi_signal_exit()],
+        target_symbols=["QQQ"],
+    )
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert not any("signal-exit" in c.lower() for c in crits), crits
+
+
+def test_sizing_does_not_flag_boolean_qty_as_hardcoded_int() -> None:
+    """Codex P3: ``True`` / ``False`` are ``int`` subclasses; the
+    hardcoded-int check must exclude them so a boolean qty (itself an
+    anti-pattern, but a different one) is not misreported."""
+    code = _HAPPY_CODE.replace(
+        'ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")',
+        'ctx.submit_order(symbol=bar.symbol, qty=True, side="LONG")',
+    )
+    results = CodeConformanceGate().check(code, _happy_spec())
+    crits = _critical_details(results)
+    # The "Every entry … literal integer ``qty=``" message must not fire
+    # for a boolean. ``ctx.equity`` is still referenced in the (unused)
+    # qty assignment, so the sizing fallback also passes — no sizing
+    # critical at all.
+    assert not any("literal integer" in c or "Every entry" in c for c in crits), crits

@@ -109,18 +109,26 @@ def _collect_required_indicators(spec: Any) -> set[str]:
     return refs
 
 
-def _collect_called_names(tree: ast.AST) -> set[str]:
-    """Return the set of function-call names anywhere in ``tree``.
+def _collect_called_names_in_methods(cls: ast.ClassDef, method_names: frozenset[str]) -> set[str]:
+    """Return the set of function-call names found inside the listed
+    methods of ``cls`` (descent stops at nested defs/classes/lambdas).
 
-    Uses ``_get_call_name`` so ``indicators.sma(...)`` and bare ``sma(...)``
-    both contribute ``"sma"``.
+    Used by check #1 (indicator presence) so that ``sma(...)`` called
+    only from a dead helper does not satisfy the requirement that
+    ``on_bar`` actually computes the indicator at runtime.
+
+    ``_get_call_name`` normalises ``indicators.sma(...)`` and bare
+    ``sma(...)`` to the same ``"sma"`` key.
     """
     out: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            name = _get_call_name(node)
-            if name:
-                out.add(name)
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if isinstance(node, ast.Call):
+                name = _get_call_name(node)
+                if name:
+                    out.add(name)
     return out
 
 
@@ -143,6 +151,18 @@ def _submit_order_has_side_literal(call: ast.Call) -> bool:
     detected by ``_submit_order_closes_position`` instead.
     """
     return any(kw.arg == "side" for kw in call.keywords)
+
+
+def _submit_order_is_kwargs_spread(call: ast.Call) -> bool:
+    """True iff the call uses a ``**kwargs`` expansion.
+
+    ``ctx.submit_order(**order_kwargs)`` cannot be statically resolved —
+    the spread may carry ``side`` (entry) or ``qty=position.qty`` (exit)
+    dynamically. Coverage checks credit a branch with such a call as
+    BOTH a plausible entry and a plausible exit so conformant code that
+    builds kwargs dynamically does not trip false-positive criticals.
+    """
+    return any(kw.arg is None for kw in call.keywords)
 
 
 def _submit_order_closes_position(call: ast.Call) -> bool:
@@ -182,11 +202,20 @@ def _node_references_ctx_equity(node: ast.AST) -> bool:
 
 
 def _qty_is_constant_int(call: ast.Call) -> bool:
-    """True iff the call's ``qty=`` is a literal int (the anti-pattern)."""
+    """True iff the call's ``qty=`` is a literal int (the anti-pattern).
+
+    Excludes ``bool`` even though ``True`` / ``False`` are ``int``
+    subclasses — a boolean qty is a different anti-pattern that the
+    sizing check would misreport as "literal integer" otherwise.
+    """
     for kw in call.keywords:
         if kw.arg != "qty":
             continue
-        return isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int)
+        return (
+            isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, int)
+            and not isinstance(kw.value.value, bool)
+        )
     return False
 
 
@@ -199,20 +228,18 @@ def _iter_strategy_methods(
             yield node
 
 
-def _methods_reachable_from_on_bar(cls: ast.ClassDef) -> frozenset[str]:
-    """Return the set of method names reachable from ``on_bar`` via
+def _methods_reachable_from(cls: ast.ClassDef, roots: Iterable[str]) -> frozenset[str]:
+    """Return method names reachable from ``roots`` via
     ``self.<method>(...)`` calls (transitively).
 
-    Entry/exit coverage checks must restrict their walk to reachable
-    code: an unused ``_dead`` helper containing
-    ``if ...: ctx.submit_order(...)`` would otherwise satisfy coverage
-    without actually being executed at runtime (PR #588 review).
+    Used by every check that needs "is this code actually executed at
+    runtime?" — entry/exit coverage walks from ``on_bar`` only, while
+    check #9 (side-effects) walks from every allowed hook so a private
+    helper reachable from ``on_fill`` is not flagged as a dead helper.
     """
     methods = {m.name: m for m in _iter_strategy_methods(cls)}
-    if "on_bar" not in methods:
-        return frozenset()
-    reachable: set[str] = {"on_bar"}
-    worklist: List[str] = ["on_bar"]
+    reachable: set[str] = {r for r in roots if r in methods}
+    worklist: List[str] = list(reachable)
     while worklist:
         name = worklist.pop()
         method = methods.get(name)
@@ -231,6 +258,19 @@ def _methods_reachable_from_on_bar(cls: ast.ClassDef) -> frozenset[str]:
                 reachable.add(callee)
                 worklist.append(callee)
     return frozenset(reachable)
+
+
+def _methods_reachable_from_on_bar(cls: ast.ClassDef) -> frozenset[str]:
+    """BFS from ``on_bar`` — used by entry/exit coverage checks."""
+    return _methods_reachable_from(cls, ("on_bar",))
+
+
+def _methods_reachable_from_hooks(cls: ast.ClassDef) -> frozenset[str]:
+    """BFS from every allowed hook (``on_bar`` / ``on_fill`` / ``on_end``)
+    — used by check #9 (side-effects) so a private helper reachable
+    from ``on_fill`` is not treated as dead code.
+    """
+    return _methods_reachable_from(cls, _ALLOWED_HOOK_NAMES)
 
 
 def _find_if_branches_with_submit_order(
@@ -287,13 +327,23 @@ def _iter_if_branches(node: ast.If) -> Iterable[ast.If]:
 
 
 def _iter_branch_body_nodes(branch: ast.If) -> Iterable[ast.AST]:
-    """Yield every node in ``branch.body`` without descending past nested
-    ``def`` / ``class`` / ``lambda`` boundaries."""
+    """Yield every node directly in ``branch.body`` without descending
+    past nested ``def`` / ``class`` / ``lambda`` / ``If`` boundaries.
+
+    Stopping at nested ``If`` boundaries is what makes branch-coverage
+    counts honest: ``if A: if B: submit()`` is one logical entry, not
+    two. The inner ``If`` is enumerated separately as its own branch
+    by ``_find_if_branches_with_submit_order``, so its ``submit_order``
+    is credited once — to the innermost branch — not double-counted
+    against both the outer and inner.
+    """
     stack: List[ast.AST] = list(branch.body)
     while stack:
         node = stack.pop()
         yield node
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.If)
+        ):
             continue
         for child in ast.iter_child_nodes(node):
             stack.append(child)
@@ -378,7 +428,7 @@ class CodeConformanceGate(GateResultsMixin):
             cls = strategy_classes[0]
 
             results: List[QualityGateResult] = []
-            results.extend(self._check_indicator_presence(tree, spec))
+            results.extend(self._check_indicator_presence(cls, spec))
             results.extend(self._check_symbol_gate(spec, cls))
             results.extend(self._check_entry_coverage(cls, spec))
             results.extend(self._check_signal_exit_coverage(cls, spec))
@@ -393,11 +443,16 @@ class CodeConformanceGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Check 1 — indicator presence
     # ------------------------------------------------------------------
-    def _check_indicator_presence(self, tree: ast.AST, spec: Any) -> Iterable[QualityGateResult]:
+    def _check_indicator_presence(
+        self, cls: ast.ClassDef, spec: Any
+    ) -> Iterable[QualityGateResult]:
         required = _collect_required_indicators(spec)
         if not required:
             return ()
-        called = _collect_called_names(tree)
+        # Indicator calls only count when they are actually executed at
+        # runtime: walk methods reachable from on_bar (Codex PR #588 P1).
+        reachable = _methods_reachable_from_on_bar(cls)
+        called = _collect_called_names_in_methods(cls, reachable)
         missing: List[str] = []
         for name in sorted(required):
             allowed = _INDICATOR_ALLOWED_CALL_NAMES.get(name, frozenset({name}))
@@ -407,10 +462,11 @@ class CodeConformanceGate(GateResultsMixin):
             return ()
         return (
             self._critical(
-                f"Spec references indicator(s) {missing} but the generated code "
-                f"contains no call to any of their named implementations. v1 "
-                "requires the named-call form (e.g. ``sma(bars, 50)``); inline "
-                "equivalents are not recognised."
+                f"Spec references indicator(s) {missing} but no method "
+                "reachable from on_bar calls any of their named "
+                "implementations. v1 requires the named-call form "
+                "(e.g. ``sma(bars, 50)``); inline equivalents and calls "
+                "in unreachable helpers are not recognised."
             ),
         )
 
@@ -454,8 +510,14 @@ class CodeConformanceGate(GateResultsMixin):
         branches = _find_if_branches_with_submit_order(cls, reachable_method_names=reachable)
         entry_branches: List[tuple[ast.If, List[ast.Call]]] = []
         for if_node, calls in branches:
+            # A branch counts as an entry path when it contains either:
+            # - an explicit ``side=`` literal that isn't a position close, OR
+            # - a ``**kwargs`` spread whose contents we can't statically
+            #   resolve (treat optimistically — same lenient stance the
+            #   CodeSafetyChecker order-flow gate takes on unknown sides).
             if any(
-                _submit_order_has_side_literal(c) and not _submit_order_closes_position(c)
+                _submit_order_is_kwargs_spread(c)
+                or (_submit_order_has_side_literal(c) and not _submit_order_closes_position(c))
                 for c in calls
             ):
                 entry_branches.append((if_node, calls))
@@ -500,7 +562,12 @@ class CodeConformanceGate(GateResultsMixin):
         exit_branches = [
             (if_node, calls)
             for if_node, calls in branches
-            if any(_submit_order_closes_position(c) for c in calls)
+            # Same lenient stance as entry coverage: a ``**kwargs`` spread
+            # may dynamically carry ``qty=position.qty`` so we can't fail
+            # closed on it.
+            if any(
+                _submit_order_closes_position(c) or _submit_order_is_kwargs_spread(c) for c in calls
+            )
         ]
         if not exit_branches:
             return (
@@ -652,6 +719,10 @@ class CodeConformanceGate(GateResultsMixin):
     def _check_no_extra_side_effects(
         self, tree: ast.AST, cls: ast.ClassDef
     ) -> Iterable[QualityGateResult]:
+        # ``_helper`` methods are only allowed when actually reachable
+        # from an allowed hook — a dead ``_helper`` containing
+        # ctx.submit_order would otherwise pass silently (Codex PR #588).
+        reachable_helpers = _methods_reachable_from_hooks(cls)
         offenders: List[str] = []
         for node in ast.walk(tree):
             if not _is_submit_order_call(node):
@@ -664,10 +735,14 @@ class CodeConformanceGate(GateResultsMixin):
             if name in _ALLOWED_HOOK_NAMES:
                 continue
             # ``_helper`` is the conventional name for hook-reachable
-            # closures, so a single leading underscore is allowed. Dunder
+            # closures; allow it only when actually reachable. Dunder
             # methods (``__init__`` / ``__call__`` / ``__enter__`` …) are
-            # never the right place for a submit_order — exclude them.
-            if name.startswith("_") and not (name.startswith("__") and name.endswith("__")):
+            # never the right place for a submit_order — exclude them
+            # outright.
+            is_helper_name = name.startswith("_") and not (
+                name.startswith("__") and name.endswith("__")
+            )
+            if is_helper_name and name in reachable_helpers:
                 continue
             offenders.append(name)
         if not offenders:
