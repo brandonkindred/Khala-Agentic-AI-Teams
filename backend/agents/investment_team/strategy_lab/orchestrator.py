@@ -58,6 +58,7 @@ from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
+from .quality_gates.code_conformance import CodeConformanceGate
 from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
@@ -177,6 +178,7 @@ class StrategyLabOrchestrator:
         self.analysis_agent = AnalysisAgent()
         self.strategy_validator = StrategySpecValidator()
         self.code_safety_checker = CodeSafetyChecker()
+        self.code_conformance_gate = CodeConformanceGate()
         self.anomaly_detector = BacktestAnomalyDetector()
         self.acceptance_gate = AcceptanceGate()
         self.target_symbol_coverage_gate = TargetSymbolCoverageGate()
@@ -520,6 +522,8 @@ class StrategyLabOrchestrator:
                 )
             code_gates = self.code_safety_checker.check(code, spec)
             round_gate_results.extend(code_gates)
+            conformance_gates = self.code_conformance_gate.check(code, spec)
+            round_gate_results.extend(conformance_gates)
             self.record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
 
             checks_total = len(round_gate_results)
