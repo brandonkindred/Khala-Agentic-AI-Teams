@@ -166,6 +166,22 @@ class _AnomalyRecoveryOutcome:
     exhausted: bool
 
 
+@dataclass(frozen=True)
+class _DesignPersistContext:
+    """Bundle of design-phase audit fields persisted onto the final record.
+
+    Threaded through both ``_build_short_circuit_record`` and
+    ``_assemble_record`` so the two persistence sites don't drift apart.
+    Empty (rounds=0, critiques=[]) on legacy paths that bypass the
+    design loop — pre-design short-circuits, callers from older tests.
+    """
+
+    rounds: int = 0
+    # ``Any`` to avoid a cycle with ``agents/design_review``; the orchestrator
+    # passes a ``List[SpecCritique]`` through.
+    critiques: List[Any] = field(default_factory=list)
+
+
 @dataclass
 class _DesignLoopOutcome:
     """Bundle returned by ``_run_design_loop``.

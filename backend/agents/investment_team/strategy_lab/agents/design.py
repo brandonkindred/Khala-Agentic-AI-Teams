@@ -33,6 +33,7 @@ from ._parse_helpers import (
     extract_json_object,
     validate_structured_rules,
 )
+from .design_review import format_prior_critiques
 from .model_factory import get_strands_model
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_SYSTEM_PROMPT = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
 
 _DESIGN_USER_TEMPLATE = """\
 Design ONE novel swing-style strategy (typical holds ~2-14 days unless the asset class implies shorter).
@@ -138,8 +140,6 @@ class DesignAgent:
         Returns: ``(strategy_dict, rationale)``. ``strategy_dict`` has no
         ``strategy_code`` key.
         """
-        system_prompt = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
-
         prior_text = (
             format_prior_results(prior_records)
             if prior_records
@@ -171,7 +171,7 @@ class DesignAgent:
             convergence_directives=directives_text,
         )
 
-        return self._invoke_and_parse(system_prompt, user_prompt)
+        return self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
 
     def revise(
         self,
@@ -184,11 +184,9 @@ class DesignAgent:
         Returns: ``(strategy_dict, rationale)``. ``strategy_dict`` has no
         ``strategy_code`` key.
         """
-        system_prompt = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
-
         spec_json = prior_spec.model_dump_json(indent=2, exclude={"strategy_code"})
         issues_block = _format_issues(critique)
-        prior_critiques_block = _format_prior_critiques(prior_critiques)
+        prior_critiques_block = format_prior_critiques(prior_critiques)
 
         user_prompt = _REVISION_USER_TEMPLATE.format(
             prior_spec_json=spec_json,
@@ -199,7 +197,7 @@ class DesignAgent:
             prior_critiques_block=prior_critiques_block,
         )
 
-        return self._invoke_and_parse(system_prompt, user_prompt)
+        return self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
 
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
         """Call the LLM, parse JSON, strip any stray ``strategy_code``, validate rules.
@@ -219,9 +217,8 @@ class DesignAgent:
         result = agent(user_prompt)
         parsed = extract_json_object(str(result))
 
-        # The design phase produces spec only. If the LLM still emits
-        # `strategy_code` we drop it loudly so reviewers see the prompt
-        # drift in logs, but the spec itself is still usable.
+        # Logged-and-dropped (not raised): a stray ``strategy_code`` is
+        # prompt drift, not a usable-spec failure.
         if "strategy_code" in parsed:
             parsed.pop("strategy_code", None)
             logger.warning(
@@ -249,18 +246,6 @@ def _format_issues(critique: "SpecCritique") -> str:
         lines.append(
             f"  {i}. [{issue.severity}] {issue.field}: {issue.description}"
             + (f"  Fix: {issue.suggested_fix}" if issue.suggested_fix else "")
-        )
-    return "\n".join(lines)
-
-
-def _format_prior_critiques(prior_critiques: Optional[List["SpecCritique"]]) -> str:
-    """Render prior critiques compactly so the LLM avoids redoing accepted fixes."""
-    if not prior_critiques:
-        return "None yet."
-    lines = []
-    for c in prior_critiques:
-        lines.append(
-            f"  Round {c.round}: ready={c.ready} ({len(c.issues)} issues) — {c.rationale[:160]}"
         )
     return "\n".join(lines)
 

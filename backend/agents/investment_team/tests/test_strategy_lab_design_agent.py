@@ -98,9 +98,7 @@ def _structured_sizing() -> Dict[str, Any]:
     return {"kind": "fixed_fraction", "fraction": 0.02}
 
 
-def _patch_design(
-    monkeypatch: pytest.MonkeyPatch, payload: str
-) -> _CapturingAgent:
+def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str) -> _CapturingAgent:
     """Replace the in-module ``Agent``/``get_strands_model`` with stubs.
 
     Returns the capturing agent so the test can inspect the prompt

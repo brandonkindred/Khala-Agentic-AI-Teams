@@ -29,6 +29,7 @@ from .model_factory import get_strands_model
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_SYSTEM_PROMPT = (_PROMPT_DIR / "code_synthesis_system.md").read_text(encoding="utf-8")
 
 _CODE_SYNTHESIS_USER_TEMPLATE = """\
 Implement the strategy specification below as a single Python module
@@ -87,7 +88,6 @@ class CodeSynthesisAgent:
         """Synthesise strategy code from a frozen spec."""
         assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
 
-        system_prompt = (_PROMPT_DIR / "code_synthesis_system.md").read_text(encoding="utf-8")
         user_prompt = _CODE_SYNTHESIS_USER_TEMPLATE.format(
             asset_class=spec.asset_class,
             hypothesis=spec.hypothesis,
@@ -102,7 +102,7 @@ class CodeSynthesisAgent:
 
         agent = Agent(
             model=get_strands_model("strategy_code_synthesis"),
-            system_prompt=system_prompt,
+            system_prompt=_SYSTEM_PROMPT,
             tools=[],
         )
 

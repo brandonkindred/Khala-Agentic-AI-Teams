@@ -176,6 +176,27 @@ WINNING_THRESHOLD = 8.0
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
 
 
+def _spec_readiness_signature(spec: StrategySpec) -> tuple:
+    """Hashable fingerprint of the spec fields :class:`SpecReadinessGate` consults.
+
+    Pre: ``spec`` is a constructed ``StrategySpec``.
+    Post: returns a tuple-of-tuples whose equality with a prior call's
+    result means the readiness gate would produce the same verdict
+    (modulo external state like live market data). Used by the design
+    loop to skip redundant gate calls when the reviser returns the same
+    readiness-relevant spec.
+    """
+    return (
+        spec.asset_class,
+        spec.timeframe,
+        tuple(spec.target_symbols),
+        spec.sizing.model_dump_json(),
+        spec.risk_limits.model_dump_json(),
+        tuple(r.model_dump_json() for r in spec.entry_rules),
+        tuple(r.model_dump_json() for r in spec.exit_rules),
+    )
+
+
 def _critique_from_readiness(
     readiness_results: List[QualityGateResult],
 ) -> "SpecCritique":
@@ -531,27 +552,38 @@ class StrategyLabOrchestrator:
 
         emit("designing", {"sub_phase": "started"})
 
+        # Stable across the design loop so revisions of the same lineage
+        # share an id — readiness gate failures, critiques, and final
+        # backtest record all refer to the same ``strategy_id``.
+        strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
+
         strategy_dict, rationale = self.design_agent.run(
             prior_records=prior_records,
             signal_brief=signal_brief,
             convergence_directives=directives or None,
             exclude_asset_classes=exclude_asset_classes,
         )
-        spec = self._build_spec_from_dict(strategy_dict)
+        spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
 
         critique_history: List[SpecCritique] = []
         ready = False
         rounds_run = 0
+        last_readiness_signature: Optional[tuple] = None
+        readiness_results: List[QualityGateResult] = []
 
         for review_round in range(max_rounds):
             rounds_run = review_round + 1
-            # Deterministic readiness gate. Critical findings here block
-            # the LLM reviewer call: there's no point asking a model to
-            # critique a spec that already fails a mechanical check.
-            readiness_results = self.spec_readiness_gate.validate(
-                spec, phase="design", backtest_config=config
-            )
-            self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
+            # Deterministic readiness gate. Skip re-validation when the
+            # revised spec's readiness-relevant signature is unchanged
+            # since the previous round — the gate would return the same
+            # verdict (including any live-market-data side effects).
+            signature = _spec_readiness_signature(spec)
+            if signature != last_readiness_signature:
+                readiness_results = self.spec_readiness_gate.validate(
+                    spec, phase="design", backtest_config=config
+                )
+                self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
+                last_readiness_signature = signature
             deterministic_ready = not any(
                 (not r.passed) and r.severity == "critical" for r in readiness_results
             )
@@ -618,7 +650,7 @@ class StrategyLabOrchestrator:
             strategy_dict, rationale = self.design_agent.revise(
                 spec, critique, prior_critiques=critique_history
             )
-            spec = self._build_spec_from_dict(strategy_dict)
+            spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
 
         return _DesignLoopOutcome(
             spec=spec,
@@ -628,18 +660,20 @@ class StrategyLabOrchestrator:
             critique_history=critique_history,
         )
 
-    def _build_spec_from_dict(self, strategy_dict: Dict[str, Any]) -> StrategySpec:
+    def _build_spec_from_dict(
+        self, strategy_dict: Dict[str, Any], *, strategy_id: str
+    ) -> StrategySpec:
         """Construct a ``StrategySpec`` from a design-agent JSON payload.
 
         Pre: ``strategy_dict`` is the JSON dict returned by
         :meth:`DesignAgent.run` or :meth:`DesignAgent.revise` — already
-        validated to carry structured-DSL rule shapes. May lack any field
-        the design agent omitted; the helper falls back to safe defaults
-        identical to the previous ideation path.
-        Post: returns a freshly constructed ``StrategySpec``. The caller
-        is responsible for any subsequent mutation (compile, fee defaults).
+        validated to carry structured-DSL rule shapes; ``strategy_id`` is
+        stable across the design loop so revisions of the same lineage
+        share an id.
+        Post: returns a freshly constructed ``StrategySpec`` carrying the
+        supplied ``strategy_id``. The caller is responsible for any
+        subsequent mutation (compile, fee defaults).
         """
-        strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
         return StrategySpec(
             strategy_id=strategy_id,
             authored_by="strategy_lab_v2",
@@ -1790,8 +1824,7 @@ class StrategyLabOrchestrator:
         alignment_rounds: int,
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
-        design_rounds: int = 0,
-        critiques: Optional[List[SpecCritique]] = None,
+        design_context: Optional[_DesignPersistContext] = None,
     ) -> StrategyLabRecord:
         """Build the final ``StrategyLabRecord`` from a settled cycle.
 
@@ -1854,6 +1887,7 @@ class StrategyLabOrchestrator:
             data_provenance=data_provenance,
         )
 
+        design_context = design_context or _DesignPersistContext()
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
         record = StrategyLabRecord(
             lab_record_id=lab_record_id,
@@ -1864,8 +1898,8 @@ class StrategyLabOrchestrator:
             analysis_narrative=narrative,
             created_at=now_iso,
             refinement_rounds=refinement_rounds,
-            design_rounds=design_rounds,
-            critiques=[c.model_dump() for c in (critiques or [])],
+            design_rounds=design_context.rounds,
+            critiques=[c.model_dump() for c in design_context.critiques],
             quality_gate_results=[g.model_dump() for g in all_gate_results],
             strategy_code=code,
             original_spec=original_spec,
@@ -1926,14 +1960,20 @@ class StrategyLabOrchestrator:
         )
         spec = design_outcome.spec
         rationale = design_outcome.rationale
-        critique_history = design_outcome.critique_history
-        design_rounds = design_outcome.rounds
+        design_context = _DesignPersistContext(
+            rounds=design_outcome.rounds,
+            critiques=list(design_outcome.critique_history),
+        )
 
         if not design_outcome.ready:
+            last_rationale = (
+                design_outcome.critique_history[-1].rationale
+                if design_outcome.critique_history
+                else "(none)"
+            )
             abort_reason = (
-                f"Design did not reach readiness after {design_rounds} "
-                f"round(s); last critique: "
-                f"{critique_history[-1].rationale if critique_history else '(none)'}"
+                f"Design did not reach readiness after {design_context.rounds} "
+                f"round(s); last critique: {last_rationale}"
             )
             emit("designing", {"sub_phase": "aborted", "reason": abort_reason})
             return self._build_short_circuit_record(
@@ -1948,8 +1988,7 @@ class StrategyLabOrchestrator:
                 short_circuit_status="failed: design_not_ready",
                 short_circuit_reason=abort_reason,
                 emit=emit,
-                design_rounds=design_rounds,
-                critiques=critique_history,
+                design_context=design_context,
             )
 
         # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
@@ -1989,8 +2028,7 @@ class StrategyLabOrchestrator:
                     short_circuit_status="failed: code_synthesis",
                     short_circuit_reason=abort_reason,
                     emit=emit,
-                    design_rounds=design_rounds,
-                    critiques=critique_history,
+                    design_context=design_context,
                 )
 
         spec.strategy_code = code
@@ -2013,7 +2051,7 @@ class StrategyLabOrchestrator:
                 "strategy": {
                     "asset_class": spec.asset_class,
                     "hypothesis": spec.hypothesis[:120],
-                    "design_rounds": design_rounds,
+                    "design_rounds": design_context.rounds,
                 },
             },
         )
@@ -2172,8 +2210,7 @@ class StrategyLabOrchestrator:
             alignment_rounds=alignment_rounds,
             all_gate_results=all_gate_results,
             emit=emit,
-            design_rounds=design_rounds,
-            critiques=critique_history,
+            design_context=design_context,
         )
 
     # ------------------------------------------------------------------
@@ -2436,8 +2473,7 @@ class StrategyLabOrchestrator:
         short_circuit_status: str,
         short_circuit_reason: str,
         emit: PhaseCallback,
-        design_rounds: int = 0,
-        critiques: Optional[List[SpecCritique]] = None,
+        design_context: Optional[_DesignPersistContext] = None,
     ) -> StrategyLabRecord:
         """Persist a failed cycle that exited before code execution.
 
@@ -2476,6 +2512,7 @@ class StrategyLabOrchestrator:
             trades=[],
         )
 
+        design_context = design_context or _DesignPersistContext()
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
         record = StrategyLabRecord(
             lab_record_id=lab_record_id,
@@ -2486,8 +2523,8 @@ class StrategyLabOrchestrator:
             analysis_narrative=short_circuit_reason,
             created_at=now_iso,
             refinement_rounds=len(refinement_attempts),
-            design_rounds=design_rounds,
-            critiques=[c.model_dump() for c in (critiques or [])],
+            design_rounds=design_context.rounds,
+            critiques=[c.model_dump() for c in design_context.critiques],
             quality_gate_results=[g.model_dump() for g in all_gate_results],
             strategy_code=code,
             original_spec=original_spec,
@@ -2824,6 +2861,7 @@ from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
     _closes_to_equity,
     _daily_returns_from_trades,
     _DesignLoopOutcome,
+    _DesignPersistContext,
     _equity_to_returns,
     _format_execution_diagnostics,
     _MarketDataFetch,

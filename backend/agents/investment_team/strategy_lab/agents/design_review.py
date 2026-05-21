@@ -29,6 +29,7 @@ from .model_factory import get_strands_model
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_SYSTEM_PROMPT = (_PROMPT_DIR / "design_review_system.md").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -187,10 +188,8 @@ class DesignReviewAgent:
         produce a fail-closed critique instead so the orchestrator's loop
         never stalls on a reviewer hiccup.
         """
-        system_prompt = (_PROMPT_DIR / "design_review_system.md").read_text(encoding="utf-8")
-
         readiness_block, readiness_findings = _format_readiness(readiness_results or [])
-        prior_block = _format_prior_critiques(prior_critiques or [])
+        prior_block = format_prior_critiques(prior_critiques)
 
         user_prompt = _REVIEW_USER_TEMPLATE.format(
             asset_class=spec.asset_class,
@@ -211,7 +210,7 @@ class DesignReviewAgent:
 
         agent = Agent(
             model=get_strands_model("strategy_design_review"),
-            system_prompt=system_prompt,
+            system_prompt=_SYSTEM_PROMPT,
             tools=[],
         )
 
@@ -251,8 +250,16 @@ def _format_readiness(results: List[QualityGateResult]) -> tuple[str, List[str]]
     return "\n".join(lines), findings
 
 
-def _format_prior_critiques(prior: List[SpecCritique]) -> str:
-    """Render past critiques so the reviewer does not re-raise resolved issues."""
+def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
+    """Render past critiques so the reviewer / designer does not re-raise resolved issues.
+
+    Pre: ``prior`` is ``None``, ``[]``, or a list of ``SpecCritique``.
+    Post: returns ``"None yet."`` when empty; otherwise one line per
+    critique (round, ready flag, issue count, truncated rationale).
+    Shared between :class:`DesignReviewAgent` (showing past rounds to
+    the reviewer) and :class:`DesignAgent.revise` (showing them to the
+    designer) so both see the same lineage view.
+    """
     if not prior:
         return "None yet."
     lines: List[str] = []
@@ -347,4 +354,5 @@ __all__ = [
     "DesignReviewAgent",
     "DesignReviewError",
     "SpecCritique",
+    "format_prior_critiques",
 ]

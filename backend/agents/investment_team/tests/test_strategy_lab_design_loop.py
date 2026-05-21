@@ -100,7 +100,9 @@ def _short_circuit_synthesis(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _force_synthesis_skip(monkeypatch: pytest.MonkeyPatch, orch: StrategyLabOrchestrator, code: str) -> None:
+def _force_synthesis_skip(
+    monkeypatch: pytest.MonkeyPatch, orch: StrategyLabOrchestrator, code: str
+) -> None:
     """Stub ``compile_strategy`` so we don't depend on the deterministic
     compiler's actual behaviour and ``code_synthesis_agent`` so the
     custom-code fallback never calls a real LLM.
@@ -159,9 +161,7 @@ def test_n_rounds_then_pass_records_round_count(
     ``design_rounds == 3`` and ``revise`` was called twice."""
     orch = StrategyLabOrchestrator()
 
-    monkeypatch.setattr(
-        orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted")
-    )
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
 
     review_calls = iter(
         [
@@ -301,9 +301,7 @@ def test_compiler_error_falls_back_to_code_synthesis_agent(
     orch = StrategyLabOrchestrator()
 
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True)
-    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True))
 
     def _compile_fails(_spec):
         raise CompilerError("unsupported indicator combo")
@@ -340,9 +338,7 @@ def test_code_synthesis_failure_short_circuits_cycle(
     orch = StrategyLabOrchestrator()
 
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True)
-    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True))
 
     def _compile_fails(_spec):
         raise CompilerError("compiler down")
