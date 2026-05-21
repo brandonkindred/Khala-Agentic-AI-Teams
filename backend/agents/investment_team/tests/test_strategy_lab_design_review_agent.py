@@ -338,3 +338,116 @@ def test_issue_with_missing_fields_is_tolerated(
     assert critique.issues[0].field == "hypothesis"
     assert critique.issues[0].severity == "warning"
     assert critique.issues[0].description == "thesis too thin"
+
+
+# ---------------------------------------------------------------------------
+# Strict-bool coercion and ready/issues-contradiction demotion
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ready_value", ["false", "False", "FALSE", "no", "", 0, 1, "yes", None])
+def test_ready_non_bool_values_default_to_false(
+    monkeypatch: pytest.MonkeyPatch, ready_value
+) -> None:
+    """``ready`` is only honoured when it's a real ``bool`` or the literal
+    strings ``"true"`` / ``"false"``. Everything else fails closed."""
+    payload = json.dumps({"ready": ready_value, "rationale": "ambiguous", "issues": []})
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is False
+
+
+def test_ready_true_string_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case-insensitive literal ``"true"`` (any case) is accepted."""
+    payload = json.dumps({"ready": "TRUE", "rationale": "ok", "issues": []})
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is True
+
+
+def test_ready_true_with_critical_issue_is_demoted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ready=True`` alongside a critical issue is self-contradictory; the
+    coercer demotes to ``ready=False`` and appends an audit-trail issue so
+    the design loop keeps iterating rather than advancing on the verdict."""
+    payload = json.dumps(
+        {
+            "ready": True,
+            "rationale": "ok",
+            "issues": [
+                {
+                    "field": "entry_rules",
+                    "severity": "critical",
+                    "description": "Mean-reversion entry on a trend hypothesis.",
+                    "suggested_fix": "Switch to SMA crossover entry.",
+                }
+            ],
+        }
+    )
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is False
+    # Original critical issue is preserved AND an audit issue is appended.
+    assert len(critique.issues) == 2
+    assert critique.issues[0].severity == "critical"
+    assert any(
+        "demoting" in i.description and "ready=true" in i.description.lower()
+        for i in critique.issues
+    )
+
+
+def test_ready_true_with_warning_issue_is_demoted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The demotion applies to any non-info severity, not just critical."""
+    payload = json.dumps(
+        {
+            "ready": True,
+            "rationale": "passing with concerns",
+            "issues": [
+                {
+                    "field": "sizing",
+                    "severity": "warning",
+                    "description": "fraction looks tight",
+                }
+            ],
+        }
+    )
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is False
+
+
+def test_ready_true_with_info_only_issues_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Info-only issues are advisory; they do not contradict ``ready=True``
+    and the verdict survives unchanged."""
+    payload = json.dumps(
+        {
+            "ready": True,
+            "rationale": "looks fine",
+            "issues": [
+                {
+                    "field": "hypothesis",
+                    "severity": "info",
+                    "description": "FYI: thesis aligns with prior winner",
+                }
+            ],
+        }
+    )
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is True
+    assert len(critique.issues) == 1
+    assert critique.issues[0].severity == "info"
+    assert "thesis aligns with prior winner" in critique.issues[0].description

@@ -277,8 +277,20 @@ def _coerce_critique(parsed: Dict[str, Any], readiness_findings: List[str]) -> S
     discard the rest of the review. Issues with unknown ``field`` values
     are remapped onto a permissive default (`hypothesis`) so the
     designer still sees the critique text.
+
+    Fail-closed coercions (both required so the design loop cannot
+    advance to code synthesis on a contradicted verdict):
+
+    * ``ready`` is parsed strictly — only real ``bool`` or the literal
+      strings ``"true"`` / ``"false"`` (case-insensitive) are honoured.
+      Anything else (including ``"yes"``, ``""``, an int) defaults to
+      ``False``.
+    * ``ready=True`` alongside any non-info issue is treated as
+      reviewer self-contradiction and demoted to ``ready=False``. The
+      loop then keeps iterating rather than promoting an unreviewed
+      spec on the strength of a flag that contradicts its own findings.
     """
-    ready = bool(parsed.get("ready", False))
+    ready = _coerce_strict_bool(parsed.get("ready"))
     rationale = str(parsed.get("rationale", "")).strip()
     raw_issues = parsed.get("issues") or []
 
@@ -306,6 +318,29 @@ def _coerce_critique(parsed: Dict[str, Any], readiness_findings: List[str]) -> S
             # Best-effort: one bad item shouldn't bin the rest.
             continue
 
+    # Contract: ready=True with any non-info issue is incoherent. Demote
+    # the verdict and append a synthetic issue so the lineage records
+    # *why* we overrode the reviewer, not just that we did.
+    blocking_issues = [i for i in issues if i.severity != "info"]
+    if ready and blocking_issues:
+        ready = False
+        issues.append(
+            CritiqueIssue(
+                field="hypothesis",
+                severity="critical",
+                description=(
+                    "Reviewer returned ready=true alongside "
+                    f"{len(blocking_issues)} non-info issue(s); demoting "
+                    "to ready=false so the contradicted verdict cannot "
+                    "promote an unreviewed spec."
+                ),
+                suggested_fix=(
+                    "Resolve the listed issues; the reviewer must only "
+                    "set ready=true when no critical or warning remains."
+                ),
+            )
+        )
+
     # Contract: ready=False but no issues is incoherent. Synthesise a
     # placeholder so the designer's `revise()` call has something to
     # act on, rather than looping with an empty critique.
@@ -325,6 +360,28 @@ def _coerce_critique(parsed: Dict[str, Any], readiness_findings: List[str]) -> S
         issues=issues,
         readiness_findings=list(readiness_findings),
     )
+
+
+def _coerce_strict_bool(raw: Any) -> bool:
+    """Strict-mode boolean coercion for reviewer ``ready`` flags.
+
+    Pre: ``raw`` is any value extracted from a parsed LLM JSON payload.
+    Post: returns a real ``bool``. Recognised:
+        * real ``True`` / ``False``
+        * case-insensitive ``"true"`` / ``"false"``
+    Everything else (``None``, ``""``, ``"yes"``, ``1``, etc.) defaults
+    to ``False`` — fail closed so a stray non-string never advances the
+    design loop past a reviewer that did not actually say "ready".
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s == "true":
+            return True
+        if s == "false":
+            return False
+    return False
 
 
 def _fail_closed_critique(exc: Exception, readiness_findings: List[str]) -> SpecCritique:
