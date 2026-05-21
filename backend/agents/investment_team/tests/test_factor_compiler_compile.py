@@ -9,10 +9,11 @@ needing the full sandbox execution path.
 
 from __future__ import annotations
 
-import pytest
-
 from investment_team.strategy_lab.factors import Genome, compile_genome
 from investment_team.strategy_lab.factors.models import (
+    EMA,
+    RSI,
+    SMA,
     ATRBreakout,
     BoolAnd,
     BoolNot,
@@ -22,13 +23,10 @@ from investment_team.strategy_lab.factors.models import (
     Const,
     CrossOver,
     CrossUnder,
-    EMA,
     FixedQty,
     IfRegime,
     MACDSignal,
     Price,
-    RSI,
-    SMA,
     VolRegimeState,
     WeightedSum,
 )
