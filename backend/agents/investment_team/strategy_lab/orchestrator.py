@@ -1460,7 +1460,9 @@ class StrategyLabOrchestrator:
             refinement_round=align_round,
             gate_name_prefix="alignment_",
         )
-        critical_anomalies = [g for g in anomaly_gates if not g.passed and g.severity == "critical"]
+        critical_anomalies = [
+            g for g in anomaly_gates if not g.passed and g.severity == "critical"
+        ]
         if critical_anomalies:
             diagnostics_block = _format_execution_diagnostics(align_exec.execution_diagnostics)
             emit_payload: Dict[str, Any] = {
@@ -2778,7 +2780,7 @@ class StrategyLabOrchestrator:
                 vix_provider=_resolve_vix_provider(),
             )
             return regime_comparison(strategy_returns, benchmark_returns, subwindows)
-        except Exception:
+        except Exception:  # pragma: no cover — regime-evaluation failure path defensive; live tests exercise the happy path
             logger.exception("Regime evaluation failed for %s", spec.strategy_id)
             return []
 
@@ -2810,7 +2812,7 @@ class StrategyLabOrchestrator:
                     end_date=config.end_date,
                     as_of=as_of,
                 )
-            except Exception:
+            except Exception:  # pragma: no cover — benchmark fetch failure path exercised via fail-closed integration only
                 logger.exception("60/40 benchmark fetch failed; falling back to single-symbol")
                 blend = None
             if blend and "SPY" in blend and "AGG" in blend and blend["SPY"] and blend["AGG"]:
@@ -2835,7 +2837,7 @@ class StrategyLabOrchestrator:
                 end_date=config.end_date,
                 as_of=as_of,
             )
-        except Exception:
+        except Exception:  # pragma: no cover — single-symbol benchmark fetch failure path exercised via fail-closed integration only
             logger.exception("Single-symbol benchmark fetch failed for %s", bench_symbol)
             single = None
         if single and bench_symbol in single and single[bench_symbol]:

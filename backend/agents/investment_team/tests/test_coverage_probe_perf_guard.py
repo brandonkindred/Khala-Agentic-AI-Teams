@@ -12,7 +12,6 @@ module pins the *quantitative* runtime bound called out in the issue.
 from __future__ import annotations
 
 import time
-from statistics import median
 from typing import Any
 
 import pytest
@@ -92,8 +91,8 @@ def test_success_path_does_not_invoke_probe_stage(
 def test_success_path_runtime_within_ten_percent_of_unprobed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Median runtime of (workload + helper-gated-off) must stay within
-    ``1.1×`` of (workload alone).
+    """Lower-quartile (P25) runtime of (workload + helper-gated-off) must
+    stay within ``1.1×`` of (workload alone).
 
     The helper itself is O(1) on success (one ``should_run_probes`` call
     plus a Python-level branch), so this is effectively a regression
@@ -104,6 +103,32 @@ def test_success_path_runtime_within_ten_percent_of_unprobed(
     Samples are interleaved so a transient CPU spike biases both
     populations equally — straight back-to-back loops let scheduler
     hiccups cluster on one side and flake CI.
+
+    Statistic choice — we compare the **lower quartile (P25)** rather
+    than ``min`` or ``median``:
+
+    * ``min`` (previously tried) is too lenient — one lucky probed
+      iteration is enough to satisfy the bound even when most probed
+      iterations are consistently slower, so meaningful overhead
+      regressions slip through.
+    * ``median`` (originally used) flaked under ``pytest-xdist`` with
+      3+ concurrent workers, where scheduler interrupts can land on
+      more than half the samples on one side and shift the median.
+    * **P25** is robust on *both* sides: it ignores the worst-75% of
+      scheduler noise (so xdist hiccups don't bias it) but is still a
+      typical-case statistic — beating it requires a 25%-of-samples
+      run, not a single lucky iteration. This catches a consistent
+      slowdown of ``_maybe_attach_coverage_report`` while staying
+      stable under parallel CI workers.
+
+    Preconditions:
+        ``_ITERATIONS`` is large enough (≥ 8) that ``sample[N // 4]``
+        is a meaningful quartile estimate. We use 200.
+
+    Postconditions:
+        Asserts that ``probed_p25 <= _RUNTIME_RATIO_BOUND *
+        max(baseline_p25, 1e-6)`` and that ``metrics.coverage_report
+        is None``.
     """
 
     def _must_not_run(**_kwargs: Any) -> None:
@@ -126,17 +151,19 @@ def test_success_path_runtime_within_ten_percent_of_unprobed(
         _maybe_attach_coverage_report(metrics=metrics, **kwargs)
         probed_samples.append(time.perf_counter() - t0)
 
-    baseline_med = median(baseline_samples)
-    probed_med = median(probed_samples)
+    # Lower quartile (P25) via sorted-index access — no numpy.
+    quartile_index = _ITERATIONS // 4
+    baseline_p25 = sorted(baseline_samples)[quartile_index]
+    probed_p25 = sorted(probed_samples)[quartile_index]
     # Floor the denominator at 1µs to defang the unlikely zero-baseline
     # corner case; real samples on any CI machine sit in the 50–500µs
     # band given _WORKLOAD_OPS=2000.
-    baseline_floor = max(baseline_med, 1e-6)
+    baseline_floor = max(baseline_p25, 1e-6)
 
-    assert probed_med <= _RUNTIME_RATIO_BOUND * baseline_floor, (
+    assert probed_p25 <= _RUNTIME_RATIO_BOUND * baseline_floor, (
         "coverage-probe gate added > "
         f"{(_RUNTIME_RATIO_BOUND - 1) * 100:.0f}% on successful backtest: "
-        f"baseline_med={baseline_med * 1e6:.2f}µs, "
-        f"probed_med={probed_med * 1e6:.2f}µs"
+        f"baseline_p25={baseline_p25 * 1e6:.2f}µs, "
+        f"probed_p25={probed_p25 * 1e6:.2f}µs"
     )
     assert metrics.coverage_report is None

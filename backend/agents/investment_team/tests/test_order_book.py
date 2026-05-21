@@ -2301,8 +2301,12 @@ def test_cancel_cost_is_constant_under_growing_bucket() -> None:
         timings.append(time.perf_counter() - t0)
 
     # Allow generous slack for noisy CI machines; a quadratic regression
-    # would land at ~25×, far beyond this bound.
-    assert timings[1] < timings[0] * 10, (
+    # would land at ~25×, far beyond this bound. Floor the smaller-sample
+    # timing to 1ms so sub-millisecond timer jitter on fast runners doesn't
+    # turn a near-zero baseline into a spurious "regression" — a real O(n²)
+    # blow-up at n=1000 lands far above 10ms regardless.
+    baseline = max(timings[0], 1e-3)
+    assert timings[1] < baseline * 10, (
         f"cancel scaling regressed: {sizes[0]} -> {timings[0]:.4f}s, "
         f"{sizes[1]} -> {timings[1]:.4f}s"
     )

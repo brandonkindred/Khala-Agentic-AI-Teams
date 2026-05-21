@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+import pytest
+
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import (
     BacktestConfig,
@@ -1112,3 +1114,334 @@ def test_coerce_report_tolerates_invalid_severity() -> None:
     assert len(report.issues) == 1
     # Falls back to "warning" rather than raising
     assert report.issues[0].severity == "warning"
+
+
+# ---------------------------------------------------------------------------
+# Tests that invoke ``_run_alignment_round`` directly.
+#
+# These cover the fix-then-re-validate branches (refining_code → safety →
+# re-execute → anomaly → commit) on the orchestrator's production helper.
+# They monkeypatch ``run_strategy_code`` at the orchestrator-module level
+# so the same code path the loop exercises end-to-end is taken — no
+# duplicated driver. Each test asserts both the returned outcome and the
+# emitted ``aligning`` sub-phase trace.
+# ---------------------------------------------------------------------------
+
+
+_FIXED_CODE = (
+    "from contract import Strategy\n\n"
+    "class S(Strategy):\n"
+    "    def on_bar(self, ctx, bar):\n"
+    "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+    "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
+)
+
+
+def _misaligned_with_fix(changes_made: str = "apply fix") -> TradeAlignmentReport:
+    return TradeAlignmentReport(
+        aligned=False,
+        rationale="off-spec",
+        issues=[AlignmentIssue(rule_type="entry_rules", description="x", severity="critical")],
+        proposed_code=_FIXED_CODE,
+        predicted_aligned_after_fix=True,
+        changes_made=changes_made,
+    )
+
+
+def _collect_emit() -> tuple[list[tuple[str, Dict[str, Any]]], Any]:
+    events: List[Tuple[str, Dict[str, Any]]] = []
+
+    def emit(phase: str, data: Dict[str, Any]) -> None:
+        events.append((phase, data))
+
+    return events, emit
+
+
+def test_run_alignment_round_commits_proposal_on_clean_path(monkeypatch) -> None:
+    """Misaligned audit + safe proposed code + clean re-execution + benign
+    metrics → ``terminate=False`` with the proposed code committed as the
+    new known-good state, ``alignment_attempts`` extended in place, and
+    the ``refining_code`` + ``refined`` sub-phases emitted in order."""
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+
+    orch, align_stub, _sandbox_stub = _make_orchestrator(
+        alignment_reports=[_misaligned_with_fix(changes_made="add RSI guard")],
+        sandbox_results=[],
+    )
+
+    sandbox_calls: List[str] = []
+
+    def _sandbox(code: str, _market_data, _config_arg, *, strategy=None):
+        sandbox_calls.append(code)
+        return _code_exec(success=True, raw_trades=_benign_sandbox_trades())
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _sandbox)
+
+    all_gate_results: List[QualityGateResult] = []
+    alignment_attempts: List[str] = []
+    alignment_reports: List[TradeAlignmentReport] = []
+    events, emit = _collect_emit()
+
+    outcome = orch._run_alignment_round(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        align_round=0,
+        all_gate_results=all_gate_results,
+        alignment_attempts=alignment_attempts,
+        alignment_reports=alignment_reports,
+        emit=emit,
+    )
+
+    # Audit ran exactly once; sandbox re-executed the proposed code.
+    assert len(align_stub.calls) == 1
+    assert sandbox_calls == [_FIXED_CODE]
+    # Committed proposal: outcome carries the new code/spec/trades, the
+    # caller may use these as the next iteration's baseline.
+    assert outcome.terminate is False
+    assert outcome.code == _FIXED_CODE
+    assert outcome.spec.strategy_code == _FIXED_CODE
+    assert len(outcome.trades) == len(_benign_sandbox_trades())
+    # alignment_attempts updated in place — the production loop relies on
+    # this for the next audit's ``prior_attempts`` thread.
+    assert alignment_attempts == ["add RSI guard"]
+    # alignment_reports also extended in place.
+    assert len(alignment_reports) == 1
+    assert alignment_reports[0].aligned is False
+    # Emit trace: every committed-path sub-phase appears.
+    aligning_subs = [d["sub_phase"] for p, d in events if p == "aligning"]
+    assert "evaluating" in aligning_subs
+    assert "not_aligned" in aligning_subs
+    assert "refining_code" in aligning_subs
+    assert "refined" in aligning_subs
+    # Code-safety gates recorded with the alignment_ prefix.
+    assert any(g.gate_name.startswith("alignment_") for g in all_gate_results)
+
+
+def test_run_alignment_round_terminates_at_max_rounds(monkeypatch) -> None:
+    """When ``align_round == MAX_ALIGNMENT_ROUNDS - 1`` and audit returns
+    misaligned-with-fix, the round must emit ``max_rounds_reached``,
+    return ``terminate=True``, and leave alignment_attempts untouched —
+    no sandbox re-execution, no gate recording past the audit."""
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+
+    orch, _align_stub, _sandbox_stub = _make_orchestrator(
+        alignment_reports=[_misaligned_with_fix()],
+        sandbox_results=[],
+    )
+
+    def _must_not_run(*_a, **_kw):
+        raise AssertionError("sandbox must not run at the max-rounds boundary")
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _must_not_run)
+
+    alignment_attempts: List[str] = []
+    alignment_reports: List[TradeAlignmentReport] = []
+    events, emit = _collect_emit()
+
+    outcome = orch._run_alignment_round(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        align_round=MAX_ALIGNMENT_ROUNDS - 1,
+        all_gate_results=[],
+        alignment_attempts=alignment_attempts,
+        alignment_reports=alignment_reports,
+        emit=emit,
+    )
+
+    assert outcome.terminate is True
+    assert outcome.code == "code-v0"  # baseline preserved
+    assert alignment_attempts == []
+    aligning_subs = [d["sub_phase"] for p, d in events if p == "aligning"]
+    assert "max_rounds_reached" in aligning_subs
+
+
+def test_run_alignment_round_rejects_unsafe_proposed_code(monkeypatch) -> None:
+    """A proposal that fails the code-safety gate must terminate without
+    re-execution and without overwriting the baseline state."""
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+
+    # Proposed fix contains a prohibited import → code_safety_checker flags
+    # it as critical, so the sandbox must never run.
+    unsafe_report = TradeAlignmentReport(
+        aligned=False,
+        rationale="off-spec",
+        issues=[AlignmentIssue(rule_type="entry_rules", description="x", severity="critical")],
+        proposed_code=(
+            "import os\n\n"
+            "from contract import Strategy\n\n"
+            "class S(Strategy):\n"
+            "    def on_bar(self, ctx, bar):\n"
+            "        os.system('rm -rf /')\n"
+        ),
+        predicted_aligned_after_fix=True,
+        changes_made="unsafe rewrite",
+    )
+    orch, _align_stub, _sandbox_stub = _make_orchestrator(
+        alignment_reports=[unsafe_report],
+        sandbox_results=[],
+    )
+
+    def _must_not_run(*_a, **_kw):
+        raise AssertionError("sandbox must not re-execute unsafe code")
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _must_not_run)
+
+    all_gate_results: List[QualityGateResult] = []
+    alignment_attempts: List[str] = []
+    events, emit = _collect_emit()
+
+    outcome = orch._run_alignment_round(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        align_round=0,
+        all_gate_results=all_gate_results,
+        alignment_attempts=alignment_attempts,
+        alignment_reports=[],
+        emit=emit,
+    )
+
+    assert outcome.terminate is True
+    assert outcome.code == "code-v0"
+    assert alignment_attempts == []
+    aligning_subs = [d["sub_phase"] for p, d in events if p == "aligning"]
+    assert aligning_subs[-1] == "rejected_unsafe_code"
+    # Code-safety gate failure recorded with the alignment_ prefix.
+    assert any(
+        g.gate_name.startswith("alignment_") and not g.passed and g.severity == "critical"
+        for g in all_gate_results
+    )
+
+
+def test_run_alignment_round_handles_re_execution_failure(monkeypatch) -> None:
+    """Sandbox returns ``success=False`` on the post-fix re-execution →
+    round emits ``re_execution_failed``, terminates, and appends a
+    failed ``alignment_code_execution`` gate to the running results."""
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+
+    orch, _align_stub, _sandbox_stub = _make_orchestrator(
+        alignment_reports=[_misaligned_with_fix()],
+        sandbox_results=[],
+    )
+
+    def _fail(*_a, **_kw):
+        return _code_exec(success=False, stderr="boom", error_type="runtime_error")
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _fail)
+
+    all_gate_results: List[QualityGateResult] = []
+    events, emit = _collect_emit()
+    outcome = orch._run_alignment_round(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        align_round=0,
+        all_gate_results=all_gate_results,
+        alignment_attempts=[],
+        alignment_reports=[],
+        emit=emit,
+    )
+
+    assert outcome.terminate is True
+    assert outcome.code == "code-v0"
+    aligning_subs = [d["sub_phase"] for p, d in events if p == "aligning"]
+    assert aligning_subs[-1] == "re_execution_failed"
+    assert any(g.gate_name == "alignment_code_execution" for g in all_gate_results)
+
+
+@pytest.mark.parametrize(
+    "with_diagnostics, expect_diag_in_emit",
+    [
+        # Without diagnostics → ``_format_execution_diagnostics`` returns ""
+        # and the WARN log + emit payload omits the diagnostics block.
+        (False, False),
+        # With diagnostics → the WARN log includes the formatted block and
+        # the emit payload exposes it on ``execution_diagnostics``.
+        (True, True),
+    ],
+)
+def test_run_alignment_round_rejects_anomalous_rerun(
+    monkeypatch, with_diagnostics: bool, expect_diag_in_emit: bool
+) -> None:
+    """Sandbox succeeds but the re-executed code emits zero trades → the
+    anomaly detector flags critical, the round terminates with
+    ``anomaly_detected``, and the proposal is NOT committed. Parameter-
+    ised across both diagnostics-present and diagnostics-absent paths so
+    both arms of the diagnostics-block branch are exercised.
+    """
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+
+    orch, _align_stub, _sandbox_stub = _make_orchestrator(
+        alignment_reports=[_misaligned_with_fix()],
+        sandbox_results=[],
+    )
+
+    def _zero_trades(*_a, **_kw):
+        result = _code_exec(success=True, raw_trades=[])
+        if with_diagnostics:
+            result.execution_diagnostics = BacktestExecutionDiagnostics(
+                zero_trade_category="NO_ORDERS_EMITTED",
+                summary="strategy emitted no orders",
+                bars_processed=20,
+            )
+        return result
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _zero_trades)
+
+    all_gate_results: List[QualityGateResult] = []
+    alignment_attempts: List[str] = []
+    events, emit = _collect_emit()
+    original_spec = _spec()
+    outcome = orch._run_alignment_round(
+        spec=original_spec,
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        align_round=0,
+        all_gate_results=all_gate_results,
+        alignment_attempts=alignment_attempts,
+        alignment_reports=[],
+        emit=emit,
+    )
+
+    assert outcome.terminate is True
+    # Baseline preserved — the anomalous proposal never overwrites known-good.
+    assert outcome.code == "code-v0"
+    assert outcome.spec is original_spec
+    assert alignment_attempts == []
+    aligning_subs = [d["sub_phase"] for p, d in events if p == "aligning"]
+    assert aligning_subs[-1] == "anomaly_detected"
+    # Anomaly gate failure recorded with the alignment_ prefix.
+    assert any(
+        g.gate_name.startswith("alignment_") and not g.passed and g.severity == "critical"
+        for g in all_gate_results
+    )
+    # Diagnostics-block branch: when execution_diagnostics is populated
+    # with a zero_trade_category, the final emit payload carries the
+    # ``execution_diagnostics`` key (used by the refinement prompt to
+    # classify the failure). When absent, the key is not emitted.
+    last_anomaly_payload = next(
+        d for p, d in reversed(events) if p == "aligning" and d.get("sub_phase") == "anomaly_detected"
+    )
+    if expect_diag_in_emit:
+        assert "execution_diagnostics" in last_anomaly_payload
+        assert "NO_ORDERS_EMITTED" in last_anomaly_payload["execution_diagnostics"]
+    else:
+        assert "execution_diagnostics" not in last_anomaly_payload

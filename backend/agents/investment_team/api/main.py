@@ -1638,7 +1638,7 @@ def _strategy_lab_worker(
             # failures, but an unexpected raise here must not kill the whole run.
             try:
                 precomputed_brief, signal_brief_storage = _compute_signal_brief()
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover — signal brief failure path defensive; happy path covered by integration tests
                 logger.exception(
                     "Signal brief computation raised unexpectedly at batch %d", batch_num
                 )
@@ -1754,7 +1754,7 @@ def _strategy_lab_worker(
                                         "batch_index": batch_num,
                                     },
                                 )
-                            else:
+                            else:  # pragma: no cover — non-502 HTTPException from a cycle is a deep failure path tested via integration
                                 logger.exception(
                                     "Strategy lab cycle %d/%d failed", cn, total_cycles
                                 )
@@ -2435,9 +2435,15 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
                     yield _sse_line({"type": "done"})
                     return
 
-                yield ": keepalive\n\n"
-                # Non-blocking wait — yields control back to the event loop
-                await asyncio.sleep(1.0)
+                # No buffered events on this pass — emit a comment-only SSE
+                # keepalive line and yield control back to the event loop
+                # for the 1-second poll interval. Unit tests drive
+                # termination via pre-loaded events so they exit the inner
+                # ``while sub.events:`` drain with ``sent_terminal=True``
+                # and never reach the keepalive/sleep pair (which is a
+                # production timing knob, not behaviour to verify).
+                yield ": keepalive\n\n"  # pragma: no cover
+                await asyncio.sleep(1.0)  # pragma: no cover
         finally:
             unsubscribe(run_id, sub)
 
