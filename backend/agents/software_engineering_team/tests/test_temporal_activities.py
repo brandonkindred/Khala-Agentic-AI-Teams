@@ -191,7 +191,14 @@ def test_parse_spec_activity_exception_path(monkeypatch, tmp_path, patched_job_s
 
 
 def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job_store) -> None:
-    """Cover the outer except in plan_project_activity."""
+    """Cover the outer except in plan_project_activity.
+
+    ``plan_project_activity`` calls ``parse_spec_with_llm(..., get_client("spec_intake"))``
+    before it ever reaches ``_check_cancellation``, so patching the cancellation
+    helper alone would let the activity make a real LLM call first and flake on
+    transport errors. Instead, patch ``parse_spec_with_llm`` to raise — this
+    deterministically drives the outer ``except`` branch without any network I/O.
+    """
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
 
@@ -200,7 +207,7 @@ def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job
     def boom(*a, **kw):
         raise RuntimeError("check failed")
 
-    monkeypatch.setattr("software_engineering_team.orchestrator._check_cancellation", boom)
+    monkeypatch.setattr("spec_parser.parse_spec_with_llm", boom)
     with pytest.raises(RuntimeError):
         activities.plan_project_activity(
             "pp-j",
