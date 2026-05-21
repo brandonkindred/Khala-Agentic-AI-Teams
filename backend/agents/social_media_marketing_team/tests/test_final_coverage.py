@@ -85,6 +85,8 @@ def test_job_manager_init_failure_is_caught(monkeypatch: pytest.MonkeyPatch) -> 
     real_client = jsc_mod.JobServiceClient
     monkeypatch.setattr(jsc_mod, "JobServiceClient", _BadClient)
 
+    import social_media_marketing_team.api as api_pkg
+
     # Remove module so reimport runs top-level body
     saved = sys.modules.pop("social_media_marketing_team.api.main", None)
     try:
@@ -99,11 +101,17 @@ def test_job_manager_init_failure_is_caught(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch.setattr(jsc_mod, "JobServiceClient", real_client)
         if saved is not None:
             sys.modules["social_media_marketing_team.api.main"] = saved
+            # Re-bind the attribute on the parent package so attribute lookups
+            # (`social_media_marketing_team.api.main`) and `sys.modules` agree
+            # — otherwise the reloaded module lingers as `api.main` and later
+            # monkeypatches hit the wrong object.
+            api_pkg.main = saved
         else:
             sys.modules.pop("social_media_marketing_team.api.main", None)
             import importlib
 
-            importlib.import_module("social_media_marketing_team.api.main")
+            fresh = importlib.import_module("social_media_marketing_team.api.main")
+            api_pkg.main = fresh
 
 
 # ---------------------------------------------------------------------------
