@@ -968,17 +968,29 @@ def test_redis_provision_full_path(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_redis_provision_handles_deluser_response_error(tmp_path: Path, monkeypatch) -> None:
-    import redis  # type: ignore[import-not-found]
-
     from agent_provisioning_team.tool_agents import redis_provisioner as rm
     from agent_provisioning_team.tool_agents.redis_provisioner import RedisProvisionerTool
 
+    # Avoid a hard dependency on the optional ``redis`` package: synthesize a
+    # local stub exposing ``exceptions.ResponseError`` and patch the module
+    # attribute so the production ``except redis.exceptions.ResponseError``
+    # clause catches our local exception type.
+    class _StubResponseError(Exception):
+        pass
+
+    class _StubExceptions:
+        ResponseError = _StubResponseError
+
+    class _StubRedis:
+        exceptions = _StubExceptions
+
+    monkeypatch.setattr(rm, "redis", _StubRedis, raising=False)
     monkeypatch.setattr(rm, "HAS_REDIS", True)
     prov = RedisProvisionerTool()
     prov._state = ProvisionerStateStore("redis_provisioner", storage_dir=tmp_path)
 
     fake_client = MagicMock()
-    fake_client.acl_deluser.side_effect = redis.exceptions.ResponseError("nope")
+    fake_client.acl_deluser.side_effect = _StubResponseError("nope")
     with patch.object(prov, "_get_admin_client", return_value=fake_client):
         result = prov.provision(
             "a1",
@@ -1008,18 +1020,30 @@ def test_redis_deprovision_full_path(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_redis_deprovision_handles_response_error(tmp_path: Path, monkeypatch) -> None:
-    import redis
-
     from agent_provisioning_team.tool_agents import redis_provisioner as rm
     from agent_provisioning_team.tool_agents.redis_provisioner import RedisProvisionerTool
 
+    # Avoid a hard dependency on the optional ``redis`` package: synthesize a
+    # local stub exposing ``exceptions.ResponseError`` and patch the module
+    # attribute so the production ``except redis.exceptions.ResponseError``
+    # clause catches our local exception type.
+    class _StubResponseError(Exception):
+        pass
+
+    class _StubExceptions:
+        ResponseError = _StubResponseError
+
+    class _StubRedis:
+        exceptions = _StubExceptions
+
+    monkeypatch.setattr(rm, "redis", _StubRedis, raising=False)
     monkeypatch.setattr(rm, "HAS_REDIS", True)
     prov = RedisProvisionerTool()
     prov._state = ProvisionerStateStore("redis_provisioner", storage_dir=tmp_path)
     prov._state.put("a1", {"username": "u1"})
 
     fake_client = MagicMock()
-    fake_client.acl_deluser.side_effect = redis.exceptions.ResponseError("missing user")
+    fake_client.acl_deluser.side_effect = _StubResponseError("missing user")
     with patch.object(prov, "_get_admin_client", return_value=fake_client):
         out = prov.deprovision("a1")
 
@@ -1051,9 +1075,11 @@ def test_redis_get_admin_client_no_lib(monkeypatch) -> None:
         prov._get_admin_client()
 
 
-def test_redis_on_reuse_populates_credentials(tmp_path: Path) -> None:
+def test_redis_on_reuse_populates_credentials(tmp_path: Path, monkeypatch) -> None:
+    from agent_provisioning_team.tool_agents import redis_provisioner as rm
     from agent_provisioning_team.tool_agents.redis_provisioner import RedisProvisionerTool
 
+    monkeypatch.setattr(rm, "HAS_REDIS", True)
     prov = RedisProvisionerTool()
     prov._state = ProvisionerStateStore("redis_provisioner", storage_dir=tmp_path)
     prov._state.put("a1", {"key_prefix": "k:", "permissions": ["+@all"]})
