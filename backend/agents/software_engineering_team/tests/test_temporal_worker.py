@@ -7,9 +7,8 @@ Exercises the public surface: ``create_se_worker``, ``start_se_temporal_worker_t
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock
-
-import pytest
 
 
 def test_create_se_worker_returns_none_when_disabled(monkeypatch) -> None:
@@ -105,8 +104,7 @@ def test_worker_thread_target_handles_exception(monkeypatch) -> None:
     worker._worker_thread_target()
 
 
-@pytest.mark.asyncio
-async def test_run_worker_async_no_client(monkeypatch) -> None:
+def test_run_worker_async_no_client(monkeypatch) -> None:
     from software_engineering_team.temporal import worker
 
     async def no_client():
@@ -116,11 +114,14 @@ async def test_run_worker_async_no_client(monkeypatch) -> None:
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda loop: None)
     monkeypatch.setattr(worker, "create_se_worker", lambda c: None)
-    await worker._run_worker_async()
+
+    async def _runner():
+        await worker._run_worker_async()
+
+    asyncio.run(_runner())
 
 
-@pytest.mark.asyncio
-async def test_run_worker_async_with_worker(monkeypatch) -> None:
+def test_run_worker_async_with_worker(monkeypatch) -> None:
     from software_engineering_team.temporal import worker
 
     fake_client = MagicMock(name="client")
@@ -139,4 +140,8 @@ async def test_run_worker_async_with_worker(monkeypatch) -> None:
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda loop: None)
     monkeypatch.setattr(worker, "create_se_worker", lambda c: fake_worker)
-    await worker._run_worker_async()
+
+    async def _runner():
+        await worker._run_worker_async()
+
+    asyncio.run(_runner())
