@@ -1074,9 +1074,7 @@ class StrategyLabOrchestrator:
             )
             return _terminate()
 
-        if (
-            align_round >= MAX_ALIGNMENT_ROUNDS - 1
-        ):  # pragma: no cover — alignment fix-then-re-validate chain integration-tested end-to-end; unit-coverage would require mocking 6 collaborators
+        if align_round >= MAX_ALIGNMENT_ROUNDS - 1:
             emit(
                 "aligning",
                 {"sub_phase": "max_rounds_reached", "alignment_round": align_round},
@@ -1088,7 +1086,7 @@ class StrategyLabOrchestrator:
             )
             return _terminate()
 
-        emit(  # pragma: no cover — alignment fix-then-re-validate chain integration-tested end-to-end; unit-coverage would require mocking 6 collaborators
+        emit(
             "aligning",
             {
                 "sub_phase": "refining_code",
@@ -1096,25 +1094,23 @@ class StrategyLabOrchestrator:
                 "predicted_aligned_after_fix": report.predicted_aligned_after_fix,
             },
         )
-        proposed_code = report.proposed_code  # pragma: no cover
-        proposed_spec = self._apply_updates(spec, {}, proposed_code)  # pragma: no cover
-        change_summary = report.changes_made or "alignment fix"  # pragma: no cover
+        proposed_code = report.proposed_code
+        proposed_spec = self._apply_updates(spec, {}, proposed_code)
+        change_summary = report.changes_made or "alignment fix"
 
         # Re-validate code safety on the proposed code — alignment runs
         # after backtest, so the phase tag is verification.
-        safety_gates = self.code_safety_checker.check(  # pragma: no cover
+        safety_gates = self.code_safety_checker.check(
             proposed_code, proposed_spec, phase="verification"
         )
-        self.record_gates(  # pragma: no cover
+        self.record_gates(
             safety_gates,
             all_gate_results,
             refinement_round=align_round,
             gate_name_prefix="alignment_",
         )
-        critical_safety = [
-            g for g in safety_gates if not g.passed and g.severity == "critical"
-        ]  # pragma: no cover
-        if critical_safety:  # pragma: no cover
+        critical_safety = [g for g in safety_gates if not g.passed and g.severity == "critical"]
+        if critical_safety:
             emit(
                 "aligning",
                 {
@@ -1126,7 +1122,7 @@ class StrategyLabOrchestrator:
             logger.warning("Alignment-proposed code failed safety gate for %s", spec.strategy_id)
             return _terminate()
 
-        emit(  # pragma: no cover
+        emit(
             "backtesting",
             {
                 "sub_phase": "running_code",
@@ -1134,10 +1130,8 @@ class StrategyLabOrchestrator:
                 "trigger": "trade_alignment_fix",
             },
         )
-        align_exec = run_strategy_code(
-            proposed_code, market_data, config, strategy=spec
-        )  # pragma: no cover
-        if not align_exec.success:  # pragma: no cover
+        align_exec = run_strategy_code(proposed_code, market_data, config, strategy=spec)
+        if not align_exec.success:
             all_gate_results.append(
                 self.build_orchestrator_gate(
                     "alignment_code_execution",
@@ -1159,8 +1153,8 @@ class StrategyLabOrchestrator:
             )
             return _terminate()
 
-        new_trades = align_exec.trades  # pragma: no cover
-        new_metrics = compute_metrics(  # pragma: no cover
+        new_trades = align_exec.trades
+        new_metrics = compute_metrics(
             new_trades, config.initial_capital, config.start_date, config.end_date
         )
 
@@ -1168,7 +1162,7 @@ class StrategyLabOrchestrator:
         # fix produced zero/low trades. Pass ``proposed_spec`` (which
         # carries ``proposed_code``) — the loop-level ``spec`` still
         # holds the pre-alignment source.
-        _maybe_attach_coverage_report(  # pragma: no cover
+        _maybe_attach_coverage_report(
             metrics=new_metrics,
             spec=proposed_spec,
             market_data=market_data,
@@ -1176,7 +1170,7 @@ class StrategyLabOrchestrator:
             exec_result=align_exec,
         )
 
-        anomaly_gates = self.anomaly_detector.check(  # pragma: no cover
+        anomaly_gates = self.anomaly_detector.check(
             new_metrics,
             new_trades,
             dsr_aware=config.walk_forward_enabled,
@@ -1184,7 +1178,7 @@ class StrategyLabOrchestrator:
             coverage_report=new_metrics.coverage_report,
             phase="verification",
         )
-        self.record_gates(  # pragma: no cover
+        self.record_gates(
             anomaly_gates,
             all_gate_results,
             refinement_round=align_round,
@@ -1192,8 +1186,8 @@ class StrategyLabOrchestrator:
         )
         critical_anomalies = [
             g for g in anomaly_gates if not g.passed and g.severity == "critical"
-        ]  # pragma: no cover
-        if critical_anomalies:  # pragma: no cover
+        ]
+        if critical_anomalies:
             diagnostics_block = _format_execution_diagnostics(align_exec.execution_diagnostics)
             emit_payload: Dict[str, Any] = {
                 "sub_phase": "anomaly_detected",
@@ -1217,8 +1211,8 @@ class StrategyLabOrchestrator:
             return _terminate()
 
         # All gates passed — commit the proposal as the new known-good state.
-        alignment_attempts.append(change_summary)  # pragma: no cover
-        emit(  # pragma: no cover
+        alignment_attempts.append(change_summary)
+        emit(
             "aligning",
             {
                 "sub_phase": "refined",
@@ -1227,7 +1221,7 @@ class StrategyLabOrchestrator:
                 "trades_count": len(new_trades),
             },
         )
-        return _AlignmentRoundOutcome(  # pragma: no cover
+        return _AlignmentRoundOutcome(
             spec=proposed_spec,
             code=proposed_code,
             trades=new_trades,

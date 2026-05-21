@@ -212,9 +212,7 @@ class LiveStream:
 
     def _live(
         self,
-    ) -> Iterator[
-        LiveStreamEvent
-    ]:  # pragma: no cover — live native-event pump requires a real provider stream; covered by integration tests
+    ) -> Iterator[LiveStreamEvent]:
         native_tf = self._provider.smallest_available(self._config.asset_class, live=True)
         if native_tf is None:
             yield LiveStreamError(
