@@ -61,8 +61,72 @@ describe('AgentProvisioningApiService', () => {
 
   it('should call GET /environments for listAgents', () => {
     service.listAgents().subscribe((res) => expect(res).toBeDefined());
-    const req = httpMock.expectOne(`${baseUrl}/environments`);
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/environments`);
     expect(req.request.method).toBe('GET');
     req.flush({ agents: [] });
+  });
+
+  it('listJobs with runningOnly=true', () => {
+    service.listJobs(true).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/provision/jobs`);
+    expect(req.request.params.get('running_only')).toBe('true');
+    req.flush({});
+  });
+
+  it('cancelJob', () => {
+    service.cancelJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/provision/job/j1/cancel`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('deleteJob', () => {
+    service.deleteJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/provision/job/j1`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush({});
+  });
+
+  it('resumeJob', () => {
+    service.resumeJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/provision/job/j1/resume`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('restartJob', () => {
+    service.restartJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/provision/job/j1/restart`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('getAgentStatus', () => {
+    service.getAgentStatus('a1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/environments/a1`);
+    expect(req.request.method).toBe('GET');
+    req.flush({});
+  });
+
+  it('listAgents with status filter', () => {
+    service.listAgents('running').subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/environments`);
+    expect(req.request.params.get('status')).toBe('running');
+    req.flush({});
+  });
+
+  it('deprovisionAgent default', () => {
+    service.deprovisionAgent('a1').subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/environments/a1`);
+    expect(req.request.method).toBe('DELETE');
+    expect(req.request.params.keys().length).toBe(0);
+    req.flush({});
+  });
+
+  it('deprovisionAgent force=true', () => {
+    service.deprovisionAgent('a1', true).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/environments/a1`);
+    expect(req.request.params.get('force')).toBe('true');
+    req.flush({});
   });
 });

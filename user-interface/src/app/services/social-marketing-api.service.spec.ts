@@ -55,4 +55,65 @@ describe('SocialMarketingApiService', () => {
       last_updated_at: new Date().toISOString(),
     });
   });
+
+  it('listJobs default', () => {
+    service.listJobs().subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/social-marketing/jobs`);
+    expect(req.request.params.keys().length).toBe(0);
+    req.flush([]);
+  });
+
+  it('listJobs runningOnly', () => {
+    service.listJobs(true).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/social-marketing/jobs`);
+    expect(req.request.params.get('running_only')).toBe('true');
+    req.flush([]);
+  });
+
+  it('cancelJob', () => {
+    service.cancelJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/social-marketing/job/j1/cancel`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('deleteJob', () => {
+    service.deleteJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/social-marketing/job/j1`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush({});
+  });
+
+  it('resumeJob', () => {
+    service.resumeJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/social-marketing/job/j1/resume`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('restartJob', () => {
+    service.restartJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/social-marketing/job/j1/restart`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('ingestPerformance', () => {
+    service.ingestPerformance('j1', {} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/social-marketing/performance/j1`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('revise', () => {
+    service.revise('j1', {} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/social-marketing/revise/j1`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('health', () => {
+    service.health().subscribe();
+    httpMock.expectOne(`${baseUrl}/health`).flush({});
+  });
 });

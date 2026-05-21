@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
@@ -44,5 +44,54 @@ describe('RunTeamFormComponent', () => {
     component.selectedFile = new File([''], 'spec.zip');
     component.onSubmit();
     expect(apiSpy.runTeamFromUpload).toHaveBeenCalledWith('my-project', expect.any(File));
+  });
+
+  it('onFileSelected updates state from input change', () => {
+    const file = new File(['x'], 'spec.zip');
+    const evt = { target: { files: [file] } } as unknown as Event;
+    component.onFileSelected(evt);
+    expect(component.selectedFile).toBe(file);
+    expect(component.selectedFileName()).toBe('spec.zip');
+  });
+
+  it('onFileSelected handles empty files array', () => {
+    const evt = { target: { files: [] } } as unknown as Event;
+    component.onFileSelected(evt);
+    expect(component.selectedFile).toBeNull();
+    expect(component.selectedFileName()).toBe('');
+  });
+
+  it('canSubmit requires file', () => {
+    component.form.patchValue({ project_name: 'p' });
+    expect(component.canSubmit).toBe(false);
+    component.selectedFile = new File([''], 'x.zip');
+    expect(component.canSubmit).toBe(true);
+  });
+
+  it('onSubmit error path with detail string', () => {
+    apiSpy.runTeamFromUpload.mockReturnValue(throwError(() => ({ error: { detail: 'boom' } })));
+    component.form.patchValue({ project_name: 'p' });
+    component.selectedFile = new File([''], 'spec.zip');
+    component.onSubmit();
+    expect(component.uploadError()).toBe('boom');
+    expect(component.isSubmitting()).toBe(false);
+  });
+
+  it('onSubmit error path with object detail', () => {
+    apiSpy.runTeamFromUpload.mockReturnValue(throwError(() => ({ error: { detail: { a: 1 } } })));
+    component.form.patchValue({ project_name: 'p' });
+    component.selectedFile = new File([''], 'spec.zip');
+    component.onSubmit();
+    expect(component.uploadError()).toContain('a');
+  });
+
+  it('onSubmit success emits and resets isSubmitting', () => {
+    const spy = vi.fn();
+    component.submitRequest.subscribe(spy);
+    component.form.patchValue({ project_name: 'p' });
+    component.selectedFile = new File([''], 'spec.zip');
+    component.onSubmit();
+    expect(spy).toHaveBeenCalled();
+    expect(component.isSubmitting()).toBe(false);
   });
 });

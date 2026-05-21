@@ -106,4 +106,105 @@ describe('PersonalAssistantApiService', () => {
     expect(req.request.method).toBe('GET');
     req.flush({ identity: {}, preferences: {} });
   });
+
+  it('updateProfile POST', () => {
+    service.updateProfile('u1', {} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/users/u1/profile`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('createEventFromText POST', () => {
+    service.createEventFromText('u1', {} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/users/u1/calendar/events/from-text`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('getWishlist GET', () => {
+    service.getWishlist('u1').subscribe();
+    httpMock.expectOne(`${baseUrl}/users/u1/deals/wishlist`).flush([]);
+  });
+
+  it('addToWishlist POST', () => {
+    service.addToWishlist('u1', {} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/users/u1/deals/wishlist`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('removeFromWishlist DELETE', () => {
+    service.removeFromWishlist('u1', 'i1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/users/u1/deals/wishlist/i1`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush(null);
+  });
+
+  it('searchDeals POST', () => {
+    service.searchDeals('u1', {} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/users/u1/deals/search`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('getReservations GET', () => {
+    service.getReservations('u1').subscribe();
+    httpMock.expectOne(`${baseUrl}/users/u1/reservations`).flush([]);
+  });
+
+  it('createReservation POST', () => {
+    service.createReservation('u1', {} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/users/u1/reservations`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('createReservationFromText POST', () => {
+    service.createReservationFromText('u1', {} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/users/u1/reservations/from-text`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('getDocuments GET', () => {
+    service.getDocuments('u1').subscribe();
+    httpMock.expectOne(`${baseUrl}/users/u1/documents`).flush([]);
+  });
+
+  it('generateDocument POST', () => {
+    service.generateDocument('u1', {} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/users/u1/documents`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('getDocument GET', () => {
+    service.getDocument('u1', 'd1').subscribe();
+    httpMock.expectOne(`${baseUrl}/users/u1/documents/d1`).flush({});
+  });
+
+  it('sendMessage errors when job fails', () => {
+    let err: Error | undefined;
+    service.sendMessage('u1', {} as never).subscribe({ error: (e) => (err = e as Error) });
+    httpMock.expectOne((r) => r.url === `${baseUrl}/assistant/jobs`).flush({ job_id: 'j1', status: 'pending' });
+    httpMock.expectOne(`${baseUrl}/assistant/jobs/j1`).flush({
+      job_id: 'j1',
+      user_id: 'u1',
+      status: 'failed',
+      error: 'boom',
+    });
+    expect(err!.message).toContain('boom');
+  });
+
+  it('sendMessage errors when cancelled without response', () => {
+    let err: Error | undefined;
+    service.sendMessage('u1', {} as never).subscribe({ error: (e) => (err = e as Error) });
+    httpMock.expectOne((r) => r.url === `${baseUrl}/assistant/jobs`).flush({ job_id: 'j1', status: 'pending' });
+    httpMock.expectOne(`${baseUrl}/assistant/jobs/j1`).flush({
+      job_id: 'j1',
+      user_id: 'u1',
+      status: 'cancelled',
+    });
+    expect(err).toBeDefined();
+  });
 });
