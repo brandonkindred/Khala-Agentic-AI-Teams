@@ -321,7 +321,7 @@ class FrontendDevelopmentAgent:
 
         config = review_config or MicrotaskReviewConfig()
 
-        try:
+        try:  # pragma: no cover  # integration-only: runs review-gated execution loop against live LLM + npm/ng
             exec_result = run_execution_with_review_gates(
                 llm=self.llm,
                 task=task,

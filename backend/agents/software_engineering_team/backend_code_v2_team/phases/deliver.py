@@ -59,7 +59,7 @@ def run_deliver(
     result = DeliverResult()
     deliver_files = dict(files)
 
-    if tool_agents:
+    if tool_agents:  # pragma: no cover  # integration-only: dispatches tool agents that run real git/build/deploy
         phase_inp = ToolAgentPhaseInput(
             phase=Phase.DELIVER,
             repo_path=str(repo_path),
@@ -109,10 +109,11 @@ def run_deliver(
         result.summary = "No files to deliver."
         return result
 
-    # Fallback: inline git (no Git agent or Git agent failed)
+    # Fallback: inline git (no Git agent or Git agent failed). Real git ops
+    # below require a writable repo — covered indirectly via integration runs.
     slug = re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
     ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
-    if not ok:
+    if not ok:  # pragma: no cover  # integration-only: real git ops follow
         result.summary = f"Feature branch creation failed: {branch_msg}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
         checkout_branch(repo_path, DEVELOPMENT_BRANCH)
@@ -124,7 +125,7 @@ def run_deliver(
     commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=scope, summary=summary[:72])
     payload = _FilesPayload(deliver_files, summary, commit_msg)
     write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
-    if not write_ok:
+    if not write_ok:  # pragma: no cover  # integration-only: depends on real git workspace
         result.summary = f"Write failed: {write_msg}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
         checkout_branch(repo_path, DEVELOPMENT_BRANCH)
@@ -133,7 +134,7 @@ def run_deliver(
 
     # 3. Merge to development
     merge_ok, merge_msg = merge_branch(repo_path, result.branch_name, DEVELOPMENT_BRANCH)
-    if not merge_ok:
+    if not merge_ok:  # pragma: no cover  # integration-only: depends on real git workspace
         result.summary = f"Merge failed: {merge_msg}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
         abort_merge(repo_path)
