@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -161,7 +162,7 @@ def test_run_audit_uses_temporal_when_enabled(
 
 
 def test_run_audit_falls_back_to_thread_on_temporal_import_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _patched
 ) -> None:
     """If the temporal modules can't be imported, the route should fall
     back to the threaded branch."""
@@ -193,3 +194,16 @@ def test_run_audit_falls_back_to_thread_on_temporal_import_error(
     assert body["status"] == "running"
     # Threaded message (no "Temporal" suffix)
     assert "(Temporal)" not in body["message"]
+
+    # Wait for the background thread to finish *while the stubs are still
+    # active*, so the real orchestrator / job-manager paths are never
+    # reached after fixture teardown.
+    job_id = body["job_id"]
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        job = _patched.get_job(job_id)
+        if job and job.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail(f"Audit job {job_id} did not reach a terminal state in 2s")
