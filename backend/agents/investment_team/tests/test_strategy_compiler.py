@@ -908,14 +908,16 @@ def test_compiled_code_flows_into_orchestrator_local_variable() -> None:
 
     Verified by patching ``compile_strategy`` to a sentinel string and
     asserting the orchestrator routes that string through to the next
-    phase, not the LLM-authored input. ``_run_pre_synthesis_phase`` is
-    stubbed to raise an early-exit sentinel so the test never reaches
-    the LLM-driven refinement path.
+    phase. ``_run_pre_synthesis_phase`` is stubbed to raise an
+    early-exit sentinel so the test never reaches the LLM-driven
+    refinement path. Under the split-design pipeline ``original_code``
+    is the compiler output too (the design agent never emits code).
     """
     from unittest.mock import patch
 
     from investment_team.models import BacktestConfig
     from investment_team.strategy_lab import orchestrator as orch_mod
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
 
     sentinel_code = "# compiled-sentinel\nfrom contract import Strategy\n"
     captured: dict[str, Any] = {}
@@ -961,11 +963,14 @@ def test_compiled_code_flows_into_orchestrator_local_variable() -> None:
         ),
     ):
         orch = orch_mod.StrategyLabOrchestrator()
-        orch.ideation_agent.run = lambda **_kw: (  # type: ignore[assignment]
-            spec_dict,
-            "# llm-authored ideation code\n",
-            "rationale",
-        )
+        # Drive the new split-design pipeline: design returns the spec,
+        # review immediately marks it ready, compile_strategy provides
+        # the sentinel code we want to track.
+        orch.design_agent.run = lambda **_kw: (spec_dict, "rationale")  # type: ignore[assignment]
+        orch.design_review_agent.run = lambda *a, **kw: SpecCritique(ready=True)  # type: ignore[assignment]
+        # SpecReadinessGate would otherwise critical-fail on this synthetic
+        # spec (no warm-up price); neutralise so the design loop converges.
+        orch.spec_readiness_gate.validate = lambda *a, **kw: []  # type: ignore[assignment]
         cfg = BacktestConfig(
             start_date="2023-01-01",
             end_date="2023-12-31",
@@ -983,8 +988,10 @@ def test_compiled_code_flows_into_orchestrator_local_variable() -> None:
         f"local code must be the compiler output; got {captured['code']!r}"
     )
     assert captured["spec_strategy_code"] == sentinel_code
-    # Original LLM source is preserved for comparison reporting.
-    assert captured["original_code"] == "# llm-authored ideation code\n"
+    # ``original_code`` is the post-design synthesised code — the design
+    # agent never emits code under the split pipeline, so this is also
+    # the sentinel value.
+    assert captured["original_code"] == sentinel_code
 
 
 def test_requires_custom_code_null_normalises_to_false() -> None:

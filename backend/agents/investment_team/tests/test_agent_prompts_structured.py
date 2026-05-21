@@ -1,7 +1,7 @@
-"""Structured-DSL contract for Strategy Lab LLM agents (#559).
+"""Structured-DSL contract for Strategy Lab LLM agents.
 
-After #551 swapped ``StrategySpec`` to structured DSL rule types, the
-LLM-driven agents that author specs must:
+After the structured-DSL migration, the LLM-driven agents that author
+specs must:
 
 1. Emit JSON with structured rule objects (every rule carries a ``kind``
    discriminator).
@@ -9,7 +9,8 @@ LLM-driven agents that author specs must:
    orchestrator does not propagate a malformed dict into ``StrategySpec``.
 
 This suite locks in that contract for the three agents that touch rule
-shapes: :class:`IdeationAgent` (authors specs from scratch),
+shapes: :class:`DesignAgent` (authors specs from scratch — the split-
+design replacement for the legacy single-call ideation agent),
 :class:`RefinementAgent` (code-only — must drop stray rule keys), and
 :class:`ZeroTradeRepairAgent` (may emit ``proposed_spec_updates``
 containing rule-shaped values).
@@ -27,7 +28,7 @@ from investment_team.models import (
     StrategySpec,
 )
 from investment_team.strategy_lab.agents._parse_helpers import StrategySpecParseError
-from investment_team.strategy_lab.agents.ideation import IdeationAgent
+from investment_team.strategy_lab.agents.design import DesignAgent
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
 from investment_team.strategy_lab.agents.zero_trade_repair import ZeroTradeRepairAgent
 from investment_team.strategy_lab.spec_dsl import (
@@ -107,13 +108,13 @@ def _spec() -> StrategySpec:
     )
 
 
-def _patch_ideation(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
+def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.ideation.Agent",
+        "investment_team.strategy_lab.agents.design.Agent",
         lambda **kwargs: _FakeStrandsAgentReturning(payload),
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.ideation.get_strands_model",
+        "investment_team.strategy_lab.agents.design.get_strands_model",
         lambda role: object(),
     )
 
@@ -159,18 +160,24 @@ def _zero_trade_diagnostics() -> BacktestExecutionDiagnostics:
 
 
 # ---------------------------------------------------------------------------
-# IdeationAgent — must accept structured, reject prose / invalid structured
+# DesignAgent — must accept structured, reject prose / invalid structured
 # ---------------------------------------------------------------------------
 
 
-def _ideation_payload(
+def _design_payload(
     *,
     entry_rules,
     exit_rules,
     sizing=None,
     extra=None,
+    include_strategy_code: bool = False,
 ) -> str:
-    """Build an LLM-style ideation JSON payload as a string."""
+    """Build an LLM-style design JSON payload as a string.
+
+    The design agent is contractually spec-only; ``include_strategy_code``
+    is the legacy "LLM emitted code anyway" path the agent strips with
+    a warning, kept for the defensive-strip test below.
+    """
     payload: dict = {
         "asset_class": "stocks",
         "hypothesis": "h",
@@ -181,8 +188,9 @@ def _ideation_payload(
         "risk_limits": {"max_position_pct": 5},
         "speculative": False,
         "rationale": "r",
-        "strategy_code": "# generated code",
     }
+    if include_strategy_code:
+        payload["strategy_code"] = "# legacy LLM emitted code"
     if sizing is not None:
         payload["sizing"] = sizing
     if extra:
@@ -190,60 +198,78 @@ def _ideation_payload(
     return json.dumps(payload)
 
 
-def test_ideation_accepts_structured_rules(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The structured-DSL shape round-trips through ``IdeationAgent.run``."""
-    payload = _ideation_payload(
+def test_design_accepts_structured_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The structured-DSL shape round-trips through ``DesignAgent.run``."""
+    payload = _design_payload(
         entry_rules=[_structured_entry_rule_dict()],
         exit_rules=[_structured_signal_exit_rule_dict(), {"kind": "stop_loss", "pct": 0.03}],
         sizing=_structured_sizing_dict(),
     )
-    _patch_ideation(monkeypatch, payload)
+    _patch_design(monkeypatch, payload)
 
-    parsed, code, rationale = IdeationAgent().run(prior_records=[])
+    parsed, rationale = DesignAgent().run(prior_records=[])
 
-    assert code == "# generated code"
     assert rationale == "r"
     # entry_rules round-trips through the DSL adapter.
     rule_model = EntryRuleAdapter.validate_python(parsed["entry_rules"][0])
     assert rule_model.kind == "entry"
     assert rule_model.side == "long"
     assert parsed["sizing"] == _structured_sizing_dict()
+    # The design agent NEVER returns strategy_code; even if the LLM
+    # emits it, the agent strips it (see strip test below).
+    assert "strategy_code" not in parsed
 
 
-def test_ideation_rejects_prose_entry_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_design_strips_stray_strategy_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the LLM emits ``strategy_code`` despite the spec-only contract,
+    the agent drops it with a warning so downstream gates never see it."""
+    payload = _design_payload(
+        entry_rules=[_structured_entry_rule_dict()],
+        exit_rules=[_structured_signal_exit_rule_dict()],
+        sizing=_structured_sizing_dict(),
+        include_strategy_code=True,
+    )
+    _patch_design(monkeypatch, payload)
+
+    parsed, _rationale = DesignAgent().run(prior_records=[])
+
+    assert "strategy_code" not in parsed
+
+
+def test_design_rejects_prose_entry_rules(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prose strings in ``entry_rules`` raise ``StrategySpecParseError``."""
-    payload = _ideation_payload(
+    payload = _design_payload(
         entry_rules=["close > sma(20)"],
         exit_rules=[_structured_signal_exit_rule_dict()],
         sizing=_structured_sizing_dict(),
     )
-    _patch_ideation(monkeypatch, payload)
+    _patch_design(monkeypatch, payload)
 
     with pytest.raises(StrategySpecParseError) as exc_info:
-        IdeationAgent().run(prior_records=[])
+        DesignAgent().run(prior_records=[])
 
     assert exc_info.value.field.startswith("entry_rules")
     assert "close > sma(20)" in str(exc_info.value)
 
 
-def test_ideation_rejects_legacy_sizing_rules_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The pre-#551 ``sizing_rules: list[str]`` shape is not silently passed
+def test_design_rejects_legacy_sizing_rules_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pre-DSL ``sizing_rules: list[str]`` shape is not silently passed
     through. With no ``sizing`` key the parser is forgiving (the orchestrator
     falls back to the DSL default), but prose rules still raise."""
-    payload = _ideation_payload(
+    payload = _design_payload(
         entry_rules=[_structured_entry_rule_dict()],
         exit_rules=["exit after 10 bars"],
         sizing=_structured_sizing_dict(),
     )
-    _patch_ideation(monkeypatch, payload)
+    _patch_design(monkeypatch, payload)
 
     with pytest.raises(StrategySpecParseError) as exc_info:
-        IdeationAgent().run(prior_records=[])
+        DesignAgent().run(prior_records=[])
 
     assert exc_info.value.field.startswith("exit_rules")
 
 
-def test_ideation_rejects_invalid_structured_indicator(
+def test_design_rejects_invalid_structured_indicator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Structured-but-invalid rules (unknown indicator ``kind``) raise with the
@@ -257,31 +283,31 @@ def test_ideation_rejects_invalid_structured_indicator(
             "rhs": {"kind": "const", "value": 30},
         },
     }
-    payload = _ideation_payload(
+    payload = _design_payload(
         entry_rules=[bad_entry],
         exit_rules=[_structured_signal_exit_rule_dict()],
         sizing=_structured_sizing_dict(),
     )
-    _patch_ideation(monkeypatch, payload)
+    _patch_design(monkeypatch, payload)
 
     with pytest.raises(StrategySpecParseError) as exc_info:
-        IdeationAgent().run(prior_records=[])
+        DesignAgent().run(prior_records=[])
 
     assert exc_info.value.field.startswith("entry_rules")
     assert exc_info.value.__cause__ is not None  # pydantic ValidationError chained
 
 
-def test_ideation_rejects_prose_sizing_object(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_design_rejects_prose_sizing_object(monkeypatch: pytest.MonkeyPatch) -> None:
     """``sizing`` as a prose string is rejected — only structured kinds parse."""
-    payload = _ideation_payload(
+    payload = _design_payload(
         entry_rules=[_structured_entry_rule_dict()],
         exit_rules=[_structured_signal_exit_rule_dict()],
         sizing="risk 2% per trade",
     )
-    _patch_ideation(monkeypatch, payload)
+    _patch_design(monkeypatch, payload)
 
     with pytest.raises(StrategySpecParseError) as exc_info:
-        IdeationAgent().run(prior_records=[])
+        DesignAgent().run(prior_records=[])
 
     assert exc_info.value.field == "sizing"
 

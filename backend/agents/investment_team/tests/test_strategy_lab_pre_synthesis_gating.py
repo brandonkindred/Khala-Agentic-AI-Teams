@@ -1,11 +1,12 @@
-"""Pre-synthesis spec gating in the Strategy Lab orchestrator (#547 item 1).
+"""Pre-synthesis spec gating in the Strategy Lab orchestrator.
 
-The orchestrator now runs ``StrategySpecValidator`` once, immediately
-after ideation and before the refinement loop. Critical failures
-short-circuit the cycle: no sandbox call, no market-data fetch, and the
-persisted record carries ``status="failed: spec_validation"``.
+The orchestrator runs ``StrategySpecValidator`` once, immediately after
+the design loop converges and before the refinement loop. Critical
+failures short-circuit the cycle: no sandbox call, no market-data fetch,
+and the persisted record carries ``status="failed: spec_validation"``.
 
-These tests stub ``IdeationAgent`` and patch
+These tests stub the new design pipeline (``DesignAgent`` +
+``DesignReviewAgent`` + ``compile_strategy``) and patch
 ``orchestrator_module.run_strategy_code`` so a failure trips the new
 short-circuit and the test fails loudly if the orchestrator ever calls
 the sandbox.
@@ -13,7 +14,7 @@ the sandbox.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import pytest
 
@@ -27,6 +28,7 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
     StopLossRule,
 )
+from investment_team.tests.conftest import stub_design_loop
 
 # Every test in this module drives `run_cycle` on a real
 # StrategyLabOrchestrator; the marker auto-applies the readiness fetch
@@ -62,15 +64,6 @@ def _config() -> BacktestConfig:
     )
 
 
-def _ideation_returning(strategy_dict: Dict[str, Any], code: str) -> Any:
-    """Build a stub ``IdeationAgent.run`` that returns scripted output."""
-
-    def _run(**_kwargs) -> Tuple[Dict[str, Any], str, str]:
-        return strategy_dict, code, "scripted rationale"
-
-    return _run
-
-
 _VALID_CODE = (
     "from contract import Strategy\n\n"
     "class S(Strategy):\n"
@@ -81,7 +74,14 @@ _VALID_CODE = (
 
 
 def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty entry_rules trips the validator → cycle exits without sandbox call."""
+    """Empty entry_rules trips the design-phase readiness gate → cycle exits
+    without sandbox call.
+
+    The split design pipeline moves the readiness check into the design ↔
+    review loop, so a spec with no entry rules now fails ``design_not_ready``
+    rather than the post-design ``spec_validation`` short-circuit. Either
+    way the contract is the same: no code execution, no market-data fetch.
+    """
     bad_spec_dict = {
         "asset_class": "stocks",
         "hypothesis": "test",
@@ -93,26 +93,28 @@ def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.Monke
     }
 
     orch = StrategyLabOrchestrator()
-    monkeypatch.setattr(orch.ideation_agent, "run", _ideation_returning(bad_spec_dict, _VALID_CODE))
+    stub_design_loop(monkeypatch, orch, bad_spec_dict, _VALID_CODE)
 
     def _sandbox_must_not_run(*_a, **_kw):
-        raise AssertionError("run_strategy_code must not be called when pre-synthesis gating fails")
+        raise AssertionError("run_strategy_code must not be called when design gating fails")
 
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", _sandbox_must_not_run)
 
     def _market_data_must_not_run(self, *_a, **_kw):
-        raise AssertionError(
-            "_fetch_market_data must not be called when pre-synthesis gating fails"
-        )
+        raise AssertionError("_fetch_market_data must not be called when design gating fails")
 
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_data_must_not_run)
 
     record = orch.run_cycle(prior_records=[], config=_config())
 
-    assert record.backtest.status == "failed: spec_validation"
+    # Either "design_not_ready" (caught in the new design loop) or
+    # "spec_validation" (caught by the legacy pre-synthesis gate) is a
+    # valid short-circuit outcome — both prove the sandbox was not touched.
+    assert record.backtest.status in {"failed: design_not_ready", "failed: spec_validation"}
     assert record.is_winning is False
     assert record.refinement_rounds == 0
-    # The pre-synthesis gate result must be persisted with refinement_round=-1
+    # The design loop persists readiness findings with refinement_round=-1
+    # alongside the new ``critiques`` audit trail.
     pre_synth_gates = [g for g in record.quality_gate_results if g.get("refinement_round") == -1]
     assert pre_synth_gates, record.quality_gate_results
     assert any(g.get("severity") == "critical" and not g.get("passed") for g in pre_synth_gates), (
@@ -133,14 +135,12 @@ def test_pre_synthesis_validator_persisted_even_on_pass(monkeypatch: pytest.Monk
     }
 
     orch = StrategyLabOrchestrator()
-    monkeypatch.setattr(
-        orch.ideation_agent, "run", _ideation_returning(valid_spec_dict, _VALID_CODE)
-    )
+    stub_design_loop(monkeypatch, orch, valid_spec_dict, _VALID_CODE)
 
     # The orchestrator will then enter the refinement loop. Short-circuit on
     # the first failed code_safety check so the test does not need a full
     # sandbox stack — record stays in scope to assert on the pre-synth gates.
-    # Issue #525 — return a _MarketDataFetch envelope with data=None to
+    # Return a _MarketDataFetch envelope with data=None to
     # trigger the no-market-data short-circuit.
     from investment_team.strategy_lab.orchestrator import _MarketDataFetch
 
@@ -182,16 +182,14 @@ def test_missing_strategy_code_does_not_short_circuit(monkeypatch: pytest.Monkey
     }
 
     orch = StrategyLabOrchestrator()
-    # Empty string — triggers the validator's "strategy_code is missing"
-    # critical but the spec itself is otherwise valid.
-    monkeypatch.setattr(
-        orch.ideation_agent,
-        "run",
-        _ideation_returning(valid_spec_dict_but_no_code, ""),
-    )
+    # Empty code string — the deterministic compiler will still synthesise
+    # canonical code for a valid spec, so we explicitly stub
+    # ``compile_strategy`` to "" via the design-loop helper to mirror the
+    # legacy "ideation produced empty code" path.
+    stub_design_loop(monkeypatch, orch, valid_spec_dict_but_no_code, "")
     # Short-circuit further down by returning no market data so the cycle
-    # exits cleanly without needing a full sandbox stack. Issue #525 — the
-    # fetch path now returns a _MarketDataFetch envelope.
+    # exits cleanly without needing a full sandbox stack. The fetch
+    # path returns a _MarketDataFetch envelope.
     from investment_team.strategy_lab.orchestrator import _MarketDataFetch
 
     monkeypatch.setattr(

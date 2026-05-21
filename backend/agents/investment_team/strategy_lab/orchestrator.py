@@ -52,7 +52,13 @@ from .agents.alignment import (
     TradeAlignmentReport,
 )
 from .agents.analysis import AnalysisAgent, format_misalignment_prefix
-from .agents.ideation import IdeationAgent
+from .agents.code_synthesis import CodeSynthesisAgent, CodeSynthesisError
+from .agents.design import DesignAgent
+from .agents.design_review import (
+    CritiqueIssue,
+    DesignReviewAgent,
+    SpecCritique,
+)
 from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .coverage_probe import format_coverage_report
@@ -126,10 +132,27 @@ _REFINEMENT_PASSTHROUGH_KEYS = frozenset({"risk_limits"})
 # cycle back to ideation.
 _SPEC_MUTATION_TRIP_THRESHOLD = 3
 
-# Outer-loop cap on how many times ``run_cycle`` re-enters ideation after a
-# ``SpecImplementabilityError``. ``MAX_DESIGN_REENTRIES = 2`` permits the
-# original ideation + 2 re-attempts before short-circuiting.
+# Outer-loop cap on how many times ``run_cycle`` re-enters the design
+# phase after a ``SpecImplementabilityError``. ``MAX_DESIGN_REENTRIES = 2``
+# permits the original design attempt + 2 re-attempts before short-circuiting.
 MAX_DESIGN_REENTRIES = 2
+
+
+def _design_review_rounds() -> int:
+    """Resolved per call so tests can override ``STRATEGY_LAB_DESIGN_REVIEW_ROUNDS``.
+
+    Pre: env value, when set, parses to ``int`` and is ``>= 1`` after the
+    ``max(.., 1)`` clamp.
+    Post: returns a positive integer cap on the number of design ↔ review
+    iterations per ``_run_design_attempt``. Default 5 mirrors the issue
+    spec; a sub-1 override floors to 1 so the loop runs at least once.
+    """
+    raw = os.environ.get("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "5")
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        return 5
+
 
 MAX_CODE_REFINEMENT_ROUNDS = 50
 # Maximum number of trade-alignment problem-solving rounds. Each round
@@ -151,6 +174,61 @@ WINNING_THRESHOLD = 8.0
 # block. The model already trims to 20; 10 is enough signal for the LLM to
 # spot the failure pattern while keeping the JSON line under ~1 KB.
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
+
+
+def _critique_from_readiness(
+    readiness_results: List[QualityGateResult],
+) -> "SpecCritique":
+    """Synthesise a :class:`SpecCritique` from deterministic readiness findings.
+
+    Pre: ``readiness_results`` carries at least one critical or warning
+    entry (the design loop only calls this helper when the deterministic
+    gate failed).
+    Post: returns a not-ready ``SpecCritique`` whose ``issues`` mirror the
+    readiness failures so ``DesignAgent.revise`` sees the same input shape
+    regardless of whether the verdict came from the LLM reviewer or a
+    mechanical gate.
+    """
+    issues: List[CritiqueIssue] = []
+    readiness_findings: List[str] = []
+    for r in readiness_results:
+        readiness_findings.append(f"{r.severity}: {r.details}")
+        if r.passed and r.severity == "info":
+            continue
+        issues.append(
+            CritiqueIssue(
+                field="hypothesis",  # readiness covers multiple fields — surface as cross-cutting
+                severity=r.severity,
+                description=r.details,
+                suggested_fix=(
+                    "Resolve the deterministic readiness check before "
+                    "the next review round can proceed."
+                ),
+            )
+        )
+    if not issues:
+        # All non-info entries skipped — pathological, but make the
+        # critique non-empty so the loop terminates cleanly via revise.
+        issues.append(
+            CritiqueIssue(
+                field="hypothesis",
+                severity="warning",
+                description=(
+                    "Readiness produced no critical finding but the "
+                    "deterministic gate did not pass. Re-examine the "
+                    "spec from scratch."
+                ),
+            )
+        )
+    return SpecCritique(
+        ready=False,
+        rationale=(
+            "SpecReadinessGate identified one or more critical "
+            "findings — LLM reviewer skipped this round."
+        ),
+        issues=issues,
+        readiness_findings=readiness_findings,
+    )
 
 
 def _resolve_alignment_report_for_analysis(
@@ -206,7 +284,13 @@ class StrategyLabOrchestrator:
     """
 
     def __init__(self, convergence_tracker: Optional[ConvergenceTracker] = None):
-        self.ideation_agent = IdeationAgent()
+        # Design phase is now two LLM agents (spec author + spec reviewer)
+        # plus a code-synthesis agent invoked only when the deterministic
+        # compiler cannot produce code for the approved spec. The split
+        # prevents the legacy "spec drifts to fit broken code" dynamic.
+        self.design_agent = DesignAgent()
+        self.design_review_agent = DesignReviewAgent()
+        self.code_synthesis_agent = CodeSynthesisAgent()
         self.refinement_agent = RefinementAgent()
         self.alignment_agent = TradeAlignmentAgent()
         self.zero_trade_repair_agent = ZeroTradeRepairAgent()
@@ -334,12 +418,12 @@ class StrategyLabOrchestrator:
         on_phase: Optional[PhaseCallback] = None,
         exclude_asset_classes: Optional[List[str]] = None,
     ) -> StrategyLabRecord:
-        """Run one full strategy lab cycle: ideate → code → backtest → analyze.
+        """Run one full strategy lab cycle: design → review → code → backtest → analyze.
 
         Wraps ``_run_design_attempt`` in an outer retry loop bounded by
-        ``MAX_DESIGN_REENTRIES`` (#543): when refinement detects the spec
+        ``MAX_DESIGN_REENTRIES``: when refinement detects the spec
         is unimplementable (`SpecImplementabilityError`), the cycle
-        re-enters ideation with the failure evidence appended as a
+        re-enters the design phase with the failure evidence appended as a
         convergence directive. On exhaustion, persists a short-circuit
         record with ``status='failed: spec_unimplementable'``.
 
@@ -379,7 +463,7 @@ class StrategyLabOrchestrator:
                 if design_attempt >= MAX_DESIGN_REENTRIES:
                     break
                 emit(
-                    "ideating",
+                    "designing",
                     {
                         "sub_phase": "loopback",
                         "design_attempt": design_attempt + 1,
@@ -419,6 +503,162 @@ class StrategyLabOrchestrator:
             emit=emit,
         )
 
+    def _run_design_loop(
+        self,
+        *,
+        prior_records: List[StrategyLabRecord],
+        signal_brief: Optional[SignalIntelligenceBriefV1],
+        directives: List[str],
+        exclude_asset_classes: Optional[List[str]],
+        config: BacktestConfig,
+        all_gate_results: List[QualityGateResult],
+        emit: PhaseCallback,
+    ) -> _DesignLoopOutcome:
+        """Drive the bounded design ↔ design-review loop.
+
+        Pre: ``self.design_agent`` and ``self.design_review_agent`` are
+        constructed; ``all_gate_results`` is the orchestrator's running
+        gate list (the loop appends readiness findings via
+        ``self.record_gates``).
+        Post: returns a :class:`_DesignLoopOutcome`. When ``ready=True``
+        the caller may advance to code synthesis; when ``ready=False``
+        the caller MUST short-circuit the cycle. The outcome is a value
+        type — no further mutation of orchestrator state happens after
+        return.
+        """
+        max_rounds = _design_review_rounds()
+        assert max_rounds >= 1, "design-review round cap must be ≥ 1"
+
+        emit("designing", {"sub_phase": "started"})
+
+        strategy_dict, rationale = self.design_agent.run(
+            prior_records=prior_records,
+            signal_brief=signal_brief,
+            convergence_directives=directives or None,
+            exclude_asset_classes=exclude_asset_classes,
+        )
+        spec = self._build_spec_from_dict(strategy_dict)
+
+        critique_history: List[SpecCritique] = []
+        ready = False
+        rounds_run = 0
+
+        for review_round in range(max_rounds):
+            rounds_run = review_round + 1
+            # Deterministic readiness gate. Critical findings here block
+            # the LLM reviewer call: there's no point asking a model to
+            # critique a spec that already fails a mechanical check.
+            readiness_results = self.spec_readiness_gate.validate(
+                spec, phase="design", backtest_config=config
+            )
+            self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
+            deterministic_ready = not any(
+                (not r.passed) and r.severity == "critical" for r in readiness_results
+            )
+
+            if deterministic_ready:
+                emit(
+                    "design_review",
+                    {"sub_phase": "started", "round": review_round},
+                )
+                critique = self.design_review_agent.run(
+                    spec,
+                    readiness_results,
+                    prior_critiques=critique_history,
+                )
+                critique.round = review_round
+                critique_history.append(critique)
+                emit(
+                    "design_review",
+                    {
+                        "sub_phase": "completed",
+                        "round": review_round,
+                        "ready": critique.ready,
+                        "issue_count": len(critique.issues),
+                    },
+                )
+                if critique.ready:
+                    ready = True
+                    emit(
+                        "designing",
+                        {"sub_phase": "ready", "rounds": rounds_run},
+                    )
+                    break
+            else:
+                # Synthesise a critique from the readiness findings so
+                # ``revise()`` sees the same shape regardless of which
+                # path produced the verdict. The reviewer is intentionally
+                # skipped this round.
+                critique = _critique_from_readiness(readiness_results)
+                critique.round = review_round
+                critique_history.append(critique)
+                emit(
+                    "design_review",
+                    {
+                        "sub_phase": "skipped",
+                        "round": review_round,
+                        "reason": "readiness_critical",
+                    },
+                )
+
+            emit(
+                "designing",
+                {
+                    "sub_phase": "round_completed",
+                    "round": review_round,
+                    "ready": False,
+                },
+            )
+
+            if review_round >= max_rounds - 1:
+                # Don't revise on the final iteration — the outer caller
+                # will short-circuit using the existing critique history.
+                break
+
+            strategy_dict, rationale = self.design_agent.revise(
+                spec, critique, prior_critiques=critique_history
+            )
+            spec = self._build_spec_from_dict(strategy_dict)
+
+        return _DesignLoopOutcome(
+            spec=spec,
+            rationale=rationale,
+            ready=ready,
+            rounds=rounds_run,
+            critique_history=critique_history,
+        )
+
+    def _build_spec_from_dict(self, strategy_dict: Dict[str, Any]) -> StrategySpec:
+        """Construct a ``StrategySpec`` from a design-agent JSON payload.
+
+        Pre: ``strategy_dict`` is the JSON dict returned by
+        :meth:`DesignAgent.run` or :meth:`DesignAgent.revise` — already
+        validated to carry structured-DSL rule shapes. May lack any field
+        the design agent omitted; the helper falls back to safe defaults
+        identical to the previous ideation path.
+        Post: returns a freshly constructed ``StrategySpec``. The caller
+        is responsible for any subsequent mutation (compile, fee defaults).
+        """
+        strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
+        return StrategySpec(
+            strategy_id=strategy_id,
+            authored_by="strategy_lab_v2",
+            asset_class=strategy_dict.get("asset_class", "stocks"),
+            hypothesis=strategy_dict.get("hypothesis", ""),
+            signal_definition=strategy_dict.get("signal_definition", ""),
+            timeframe=strategy_dict.get("timeframe") or "1d",
+            entry_rules=strategy_dict.get("entry_rules", []),
+            exit_rules=strategy_dict.get("exit_rules", []),
+            sizing=strategy_dict.get("sizing", DEFAULT_SIZING_PAYLOAD),
+            target_symbols=strategy_dict.get("target_symbols", []),
+            risk_limits=strategy_dict.get("risk_limits", {}),
+            speculative=strategy_dict.get("speculative", False),
+            requires_custom_code=_coerce_requires_custom_code(
+                strategy_dict.get("requires_custom_code")
+            ),
+            strategy_code=None,
+        )
+
     def _run_pre_synthesis_phase(
         self,
         *,
@@ -432,34 +672,36 @@ class StrategyLabOrchestrator:
         refinement_attempts: List[Dict[str, Any]],
         emit: PhaseCallback,
     ) -> Optional[StrategyLabRecord]:
-        """Run spec validation + readiness gate before the refinement loop.
+        """Run spec validation before the refinement loop.
 
-        Pre: ``spec`` is a constructed ``StrategySpec``; ``all_gate_results``
-        is the orchestrator's running gate list that the caller persists.
+        Pre: ``spec`` is a constructed ``StrategySpec`` that has already
+        passed the design-phase ``SpecReadinessGate`` check (the design
+        loop is the sole caller of that gate with ``phase="design"``);
+        ``all_gate_results`` is the orchestrator's running gate list that
+        the caller persists.
         Post: returns a short-circuit ``StrategyLabRecord`` when a critical
         gate fires (and ``all_gate_results`` is extended in place with the
         pre-synthesis gates); returns ``None`` to signal the caller can
         continue into the synthesis refinement loop.
 
         The "strategy_code is missing" critical from StrategySpecValidator
-        is deliberately filtered: post-ideation we always have *some* code
+        is deliberately filtered: post-design we always have *some* code
         (the loop's existing safety + regeneration paths repair degenerate
         inputs), so short-circuiting on that critical would regress a
         recoverable case into an outright failure.
         """
+        # ``config`` is intentionally not consulted by the readiness gate
+        # here — the design loop owns the ``phase="design"`` readiness
+        # check, and the round-0 readiness call inside ``_run_synthesis_loop``
+        # carries ``phase="synthesis"``. The argument is still threaded
+        # into the short-circuit record below so persistence sees the
+        # same config the design phase saw.
         pre_spec_gates_raw = self.strategy_validator.validate(spec)
         pre_spec_gates = [
             g
             for g in pre_spec_gates_raw
             if not (g.severity == "critical" and g.details.startswith("strategy_code is missing"))
         ]
-        # SpecReadinessGate (design phase) — critical here flows into the
-        # same short-circuit path as StrategySpecValidator critical so the
-        # synthesis loop cannot run on an unimplementable spec.
-        readiness_design = self.spec_readiness_gate.validate(
-            spec, phase="design", backtest_config=config
-        )
-        pre_spec_gates.extend(readiness_design)
         self.record_gates(pre_spec_gates, all_gate_results, refinement_round=-1)
 
         criticals = [g for g in pre_spec_gates if not g.passed and g.severity == "critical"]
@@ -1548,6 +1790,8 @@ class StrategyLabOrchestrator:
         alignment_rounds: int,
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
+        design_rounds: int = 0,
+        critiques: Optional[List[SpecCritique]] = None,
     ) -> StrategyLabRecord:
         """Build the final ``StrategyLabRecord`` from a settled cycle.
 
@@ -1620,6 +1864,8 @@ class StrategyLabOrchestrator:
             analysis_narrative=narrative,
             created_at=now_iso,
             refinement_rounds=refinement_rounds,
+            design_rounds=design_rounds,
+            critiques=[c.model_dump() for c in (critiques or [])],
             quality_gate_results=[g.model_dump() for g in all_gate_results],
             strategy_code=code,
             original_spec=original_spec,
@@ -1652,60 +1898,68 @@ class StrategyLabOrchestrator:
         exclude_asset_classes: Optional[List[str]],
         directives: List[str],
     ) -> StrategyLabRecord:
-        """One design+refinement attempt (#543). May raise
-        ``SpecImplementabilityError`` to signal a need to re-enter
-        ideation; the outer ``run_cycle`` catches and re-routes."""
+        """One design + refinement attempt. May raise
+        ``SpecImplementabilityError`` to signal a need to re-enter the
+        design phase; the outer ``run_cycle`` catches and re-routes.
+
+        The design phase runs a bounded loop of (DesignAgent → readiness
+        gate → DesignReviewAgent → DesignAgent.revise) until either the
+        reviewer marks the spec ready or the round budget is exhausted.
+        Exhaustion short-circuits the cycle without ever running code.
+        """
         # Reset per-attempt counters so a re-entry starts fresh.
         self._consecutive_spec_mutation_rounds = {}
 
-        # ── Phase 1: IDEATION ──────────────────────────────────────────
-        emit("ideating", {"sub_phase": "started"})
-        strategy_dict, code, rationale = self.ideation_agent.run(
+        all_gate_results: List[QualityGateResult] = []
+        refinement_attempts: List[str] = []
+        zero_trade_attempts: List[str] = []
+
+        # ── Phase 1: DESIGN + REVIEW LOOP ──────────────────────────────
+        design_outcome = self._run_design_loop(
             prior_records=prior_records,
             signal_brief=signal_brief,
-            convergence_directives=directives or None,
+            directives=directives,
             exclude_asset_classes=exclude_asset_classes,
+            config=config,
+            all_gate_results=all_gate_results,
+            emit=emit,
         )
+        spec = design_outcome.spec
+        rationale = design_outcome.rationale
+        critique_history = design_outcome.critique_history
+        design_rounds = design_outcome.rounds
 
-        # Build StrategySpec from ideation output
-        strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
-        spec = StrategySpec(
-            strategy_id=strategy_id,
-            authored_by="strategy_lab_v2",
-            asset_class=strategy_dict.get("asset_class", "stocks"),
-            hypothesis=strategy_dict.get("hypothesis", ""),
-            signal_definition=strategy_dict.get("signal_definition", ""),
-            # Issue #537: ideation must declare a timeframe. Default to "1d"
-            # if the LLM forgot the field — the prompt makes it mandatory.
-            timeframe=strategy_dict.get("timeframe") or "1d",
-            entry_rules=strategy_dict.get("entry_rules", []),
-            exit_rules=strategy_dict.get("exit_rules", []),
-            sizing=strategy_dict.get("sizing", DEFAULT_SIZING_PAYLOAD),
-            target_symbols=strategy_dict.get("target_symbols", []),
-            risk_limits=strategy_dict.get("risk_limits", {}),
-            speculative=strategy_dict.get("speculative", False),
-            requires_custom_code=_coerce_requires_custom_code(
-                strategy_dict.get("requires_custom_code")
-            ),
-            strategy_code=code,
-        )
+        if not design_outcome.ready:
+            abort_reason = (
+                f"Design did not reach readiness after {design_rounds} "
+                f"round(s); last critique: "
+                f"{critique_history[-1].rationale if critique_history else '(none)'}"
+            )
+            emit("designing", {"sub_phase": "aborted", "reason": abort_reason})
+            return self._build_short_circuit_record(
+                spec=spec,
+                config=config,
+                code="",
+                original_spec=spec,
+                original_code="",
+                rationale=rationale,
+                all_gate_results=all_gate_results,
+                refinement_attempts=[],
+                short_circuit_status="failed: design_not_ready",
+                short_circuit_reason=abort_reason,
+                emit=emit,
+                design_rounds=design_rounds,
+                critiques=critique_history,
+            )
 
-        # ``original_spec`` / ``original_code`` are snapshotted before the
-        # deterministic compile so reviewers can compare against any
-        # refinement-driven mutation persisted on the final record.
-        original_spec = spec.model_copy(deep=True)
-        original_code = code
-
-        # Deterministic compile by default. On ``requires_custom_code`` or
-        # ``CompilerError``, ideation-authored ``code`` is kept verbatim.
-        # The result is mirrored into the local ``code`` variable because
-        # downstream gates consume ``code=...`` directly, not
-        # ``spec.strategy_code``.
+        # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
+        # Deterministic compile by default; the LLM-driven synthesis
+        # agent is reserved for specs that genuinely cannot be compiled
+        # (``requires_custom_code=True`` or ``CompilerError``).
+        code = ""
         if not spec.requires_custom_code:
             try:
-                compiled = compile_strategy(spec)
-                spec.strategy_code = compiled
-                code = compiled
+                code = compile_strategy(spec)
             except CompilerError as exc:
                 logger.warning(
                     "compiler_fallback strategy_id=%s reason=%s",
@@ -1713,7 +1967,39 @@ class StrategyLabOrchestrator:
                     exc,
                 )
                 spec.requires_custom_code = True
-                spec.strategy_code = code
+
+        if not code:
+            # Custom-code path: hand the frozen spec to the synthesis
+            # agent. A failure here is terminal for the cycle — we will
+            # not silently advance into the synthesis loop with no code.
+            try:
+                code = self.code_synthesis_agent.run(spec)
+            except CodeSynthesisError as exc:
+                abort_reason = f"Code synthesis failed after design converged: {exc}"
+                emit("designing", {"sub_phase": "aborted", "reason": abort_reason})
+                return self._build_short_circuit_record(
+                    spec=spec,
+                    config=config,
+                    code="",
+                    original_spec=spec,
+                    original_code="",
+                    rationale=rationale,
+                    all_gate_results=all_gate_results,
+                    refinement_attempts=[],
+                    short_circuit_status="failed: code_synthesis",
+                    short_circuit_reason=abort_reason,
+                    emit=emit,
+                    design_rounds=design_rounds,
+                    critiques=critique_history,
+                )
+
+        spec.strategy_code = code
+        # ``original_spec`` / ``original_code`` are snapshotted after the
+        # design loop converges but before the refinement loop mutates
+        # anything, so reviewers can compare against any refinement-
+        # driven change persisted on the final record.
+        original_spec = spec.model_copy(deep=True)
+        original_code = code
 
         # Override generic fee defaults with asset-class-appropriate values
         if config.transaction_cost_bps == 5.0 and config.slippage_bps == 2.0:
@@ -1721,19 +2007,16 @@ class StrategyLabOrchestrator:
             config = config.model_copy(update=fee_defaults)
 
         emit(
-            "ideating",
+            "designing",
             {
-                "sub_phase": "completed",
+                "sub_phase": "synthesized",
                 "strategy": {
                     "asset_class": spec.asset_class,
                     "hypothesis": spec.hypothesis[:120],
+                    "design_rounds": design_rounds,
                 },
             },
         )
-
-        all_gate_results: List[QualityGateResult] = []
-        refinement_attempts: List[str] = []
-        zero_trade_attempts: List[str] = []
 
         # ── Phase 1b: PRE-SYNTHESIS SPEC GATING (#547 item 1) ─────────
         # Validate the ideation-time spec ONCE before entering the
@@ -1889,6 +2172,8 @@ class StrategyLabOrchestrator:
             alignment_rounds=alignment_rounds,
             all_gate_results=all_gate_results,
             emit=emit,
+            design_rounds=design_rounds,
+            critiques=critique_history,
         )
 
     # ------------------------------------------------------------------
@@ -2151,6 +2436,8 @@ class StrategyLabOrchestrator:
         short_circuit_status: str,
         short_circuit_reason: str,
         emit: PhaseCallback,
+        design_rounds: int = 0,
+        critiques: Optional[List[SpecCritique]] = None,
     ) -> StrategyLabRecord:
         """Persist a failed cycle that exited before code execution.
 
@@ -2199,6 +2486,8 @@ class StrategyLabOrchestrator:
             analysis_narrative=short_circuit_reason,
             created_at=now_iso,
             refinement_rounds=len(refinement_attempts),
+            design_rounds=design_rounds,
+            critiques=[c.model_dump() for c in (critiques or [])],
             quality_gate_results=[g.model_dump() for g in all_gate_results],
             strategy_code=code,
             original_spec=original_spec,
@@ -2534,6 +2823,7 @@ from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
     _apply_veto_to_acceptance_reason,
     _closes_to_equity,
     _daily_returns_from_trades,
+    _DesignLoopOutcome,
     _equity_to_returns,
     _format_execution_diagnostics,
     _MarketDataFetch,

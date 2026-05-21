@@ -850,15 +850,33 @@ class StrategyLabRecord(BaseModel):
     analysis_narrative: str  # LLM post-backtest analysis
     created_at: str
     refinement_rounds: int = 0
+    design_rounds: int = Field(
+        default=0,
+        description=(
+            "Number of design ↔ design-review iterations the cycle ran "
+            "before code synthesis. 0 on legacy rows; >=1 on rows from the "
+            "split design pipeline (one design call + zero or more review "
+            "rounds)."
+        ),
+    )
+    critiques: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Serialized SpecCritique entries (model_dump) the reviewer "
+            "produced during the design ↔ design-review loop. Empty on "
+            "legacy rows; carries one entry per round on rows from the "
+            "split design pipeline."
+        ),
+    )
     quality_gate_results: List[Dict[str, Any]] = Field(default_factory=list)
     strategy_code: Optional[str] = None
     original_spec: Optional[StrategySpec] = Field(
         default=None,
-        description="Ideation-time spec before any refinement-driven mutation; null on legacy rows.",
+        description="Design-time spec before any refinement-driven mutation; null on legacy rows.",
     )
     original_code: Optional[str] = Field(
         default=None,
-        description="Ideation-time strategy code before refinement; null on legacy rows.",
+        description="Design-time strategy code before refinement; null on legacy rows.",
     )
     signal_intelligence_brief: Optional[Dict[str, Any]] = Field(
         default=None,
