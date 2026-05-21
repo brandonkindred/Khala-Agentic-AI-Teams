@@ -96,7 +96,6 @@ def test_cancel_job_only_cancels_active(_reset_module_client) -> None:
     from investment_team.shared.job_store import (
         JOB_STATUS_CANCELLED,
         JOB_STATUS_COMPLETED,
-        JOB_STATUS_PENDING,
         JOB_STATUS_RUNNING,
         cancel_job,
         create_job,
