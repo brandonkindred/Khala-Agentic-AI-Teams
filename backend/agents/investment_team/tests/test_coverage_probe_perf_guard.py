@@ -12,7 +12,6 @@ module pins the *quantitative* runtime bound called out in the issue.
 from __future__ import annotations
 
 import time
-from statistics import median
 from typing import Any
 
 import pytest
@@ -92,7 +91,7 @@ def test_success_path_does_not_invoke_probe_stage(
 def test_success_path_runtime_within_ten_percent_of_unprobed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Median runtime of (workload + helper-gated-off) must stay within
+    """Minimum runtime of (workload + helper-gated-off) must stay within
     ``1.1×`` of (workload alone).
 
     The helper itself is O(1) on success (one ``should_run_probes`` call
@@ -103,7 +102,12 @@ def test_success_path_runtime_within_ten_percent_of_unprobed(
 
     Samples are interleaved so a transient CPU spike biases both
     populations equally — straight back-to-back loops let scheduler
-    hiccups cluster on one side and flake CI.
+    hiccups cluster on one side and flake CI. We compare ``min`` rather
+    than ``median`` because under ``pytest-xdist`` with 3+ concurrent
+    workers a CI host can deliver scheduler interrupts to more than
+    half the samples on one side, shifting the median. The minimum is
+    the truly-CPU-bound floor and is the standard robust statistic for
+    micro-benchmarks (see ``timeit.repeat`` docs).
     """
 
     def _must_not_run(**_kwargs: Any) -> None:
@@ -126,17 +130,17 @@ def test_success_path_runtime_within_ten_percent_of_unprobed(
         _maybe_attach_coverage_report(metrics=metrics, **kwargs)
         probed_samples.append(time.perf_counter() - t0)
 
-    baseline_med = median(baseline_samples)
-    probed_med = median(probed_samples)
+    baseline_min = min(baseline_samples)
+    probed_min = min(probed_samples)
     # Floor the denominator at 1µs to defang the unlikely zero-baseline
     # corner case; real samples on any CI machine sit in the 50–500µs
     # band given _WORKLOAD_OPS=2000.
-    baseline_floor = max(baseline_med, 1e-6)
+    baseline_floor = max(baseline_min, 1e-6)
 
-    assert probed_med <= _RUNTIME_RATIO_BOUND * baseline_floor, (
+    assert probed_min <= _RUNTIME_RATIO_BOUND * baseline_floor, (
         "coverage-probe gate added > "
         f"{(_RUNTIME_RATIO_BOUND - 1) * 100:.0f}% on successful backtest: "
-        f"baseline_med={baseline_med * 1e6:.2f}µs, "
-        f"probed_med={probed_med * 1e6:.2f}µs"
+        f"baseline_min={baseline_min * 1e6:.2f}µs, "
+        f"probed_min={probed_min * 1e6:.2f}µs"
     )
     assert metrics.coverage_report is None
