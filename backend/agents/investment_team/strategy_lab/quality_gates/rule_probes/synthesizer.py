@@ -32,7 +32,7 @@ from __future__ import annotations
 import ast
 import math
 from dataclasses import dataclass, field
-from typing import Any, List, Literal, Optional, Tuple
+from typing import Any, Callable, List, Literal, Optional, Tuple
 
 import pandas as pd
 
@@ -92,6 +92,14 @@ class ProbeRun:
     index in ``market_data[symbol]`` of the bar where the predicate is
     expected to evaluate True (i.e. where a trade should appear at or
     after).
+
+    ``post_clamp_verifier`` (when set) is a closure over the recipe's
+    target predicate/condition that ``_stamp_dates`` invokes after
+    ``_normalise_ohlc`` runs. Recipes that synthesise values close to the
+    clamp floor (or that build OHLC arrangements OHLC normalisation may
+    reshape) attach a verifier so a probe whose final post-clamp bars no
+    longer satisfy the rule is marked unprobeable rather than emitted as
+    a false critical against otherwise-correct strategy code.
     """
 
     rule_id: str
@@ -102,6 +110,9 @@ class ProbeRun:
     trigger_bar_index: int = 0
     synthesizable: bool = True
     unprobeable_reason: Optional[str] = None
+    post_clamp_verifier: Optional[Callable[[List[OHLCVBar], int], bool]] = field(
+        default=None, repr=False, compare=False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +150,8 @@ def generate_rule_probe_runs(spec: Any, *, compiled_code: str = "") -> List[Prob
 
 
 def _stamp_dates(probe: ProbeRun, start_date: str = "2024-01-01") -> ProbeRun:
-    """Rebuild a probe's bars with ascending calendar dates and validate
-    OHLC integrity.
+    """Rebuild a probe's bars with ascending calendar dates, clamp OHLC,
+    and re-verify the recipe's predicate post-clamp.
 
     Recipe authors emit bars with placeholder ``date`` values for clarity —
     the actual dates are not meaningful, only their ordering. This pass
@@ -148,6 +159,13 @@ def _stamp_dates(probe: ProbeRun, start_date: str = "2024-01-01") -> ProbeRun:
     sandbox harness) get real, parseable date strings. It also clamps each
     bar's OHLC values so the downstream market-data preflight (which
     rejects nan_or_negative_prices and ohlc_violations) accepts the run.
+
+    Normalisation can reshape values (close clamped to the floor;
+    high/low re-derived to preserve invariants), which may invalidate a
+    predicate the recipe verified against the pre-clamp series. If the
+    probe attached a ``post_clamp_verifier``, this pass calls it and
+    marks the probe unprobeable when the predicate no longer holds —
+    surfacing as a warning rather than a false critical.
     """
     if not probe.synthesizable or not probe.market_data:
         return probe
@@ -165,6 +183,19 @@ def _stamp_dates(probe: ProbeRun, start_date: str = "2024-01-01") -> ProbeRun:
         )
         for i, b in enumerate(probe.market_data)
     ]
+    if probe.post_clamp_verifier is not None:
+        try:
+            verified = probe.post_clamp_verifier(new_bars, probe.trigger_bar_index)
+        except Exception:
+            verified = False
+        if not verified:
+            return ProbeRun(
+                rule_id=probe.rule_id,
+                rule_kind=probe.rule_kind,
+                symbol=probe.symbol,
+                synthesizable=False,
+                unprobeable_reason="post_clamp_predicate_violation",
+            )
     return ProbeRun(
         rule_id=probe.rule_id,
         rule_kind=probe.rule_kind,
@@ -174,6 +205,7 @@ def _stamp_dates(probe: ProbeRun, start_date: str = "2024-01-01") -> ProbeRun:
         trigger_bar_index=probe.trigger_bar_index,
         synthesizable=probe.synthesizable,
         unprobeable_reason=probe.unprobeable_reason,
+        post_clamp_verifier=probe.post_clamp_verifier,
     )
 
 
@@ -284,6 +316,73 @@ def _extract_universe_literal(code: str) -> frozenset:
 # ---------------------------------------------------------------------------
 
 
+def _predicate_verifier(
+    pred: Predicate,
+) -> Callable[[List[OHLCVBar], int], bool]:
+    """Return a closure that evaluates ``pred`` on a list of bars at index.
+
+    Used as ``ProbeRun.post_clamp_verifier``: after :func:`_stamp_dates`
+    normalises OHLC, we re-evaluate the predicate to catch cases where
+    clamping invalidates a recipe that verified pre-clamp. ``cross_*``
+    predicates evaluate over the (prev, curr) pair at ``index``;
+    everything else evaluates at ``index`` directly.
+
+    The closure returns ``False`` on any exception (malformed bars,
+    unsupported predicate shape) so a verifier bug surfaces as
+    "unprobeable" rather than a hard crash inside the synthesis loop.
+    """
+
+    def _verify(bars: List[OHLCVBar], idx: int) -> bool:
+        if not bars or idx < 0 or idx >= len(bars):
+            return False
+        try:
+            return _eval_predicate_at(pred, bars, idx)
+        except Exception:
+            return False
+
+    return _verify
+
+
+def _eval_predicate_at(pred: Predicate, bars: List[OHLCVBar], idx: int) -> bool:
+    """Evaluate ``pred`` on ``bars`` at ``idx`` — mirror of the compiler's
+    runtime predicate semantics, used only for post-clamp verification."""
+    lhs, op, rhs = pred.lhs, pred.op, pred.rhs
+    if op in ("cross_above", "cross_below"):
+        if idx == 0:
+            return False
+        prev_l = _resolve_side(lhs, bars, idx - 1)
+        cur_l = _resolve_side(lhs, bars, idx)
+        prev_r = _resolve_side(rhs, bars, idx - 1)
+        cur_r = _resolve_side(rhs, bars, idx)
+        return _verify_cross(prev_l, cur_l, prev_r, cur_r, op)
+    lhs_val = _resolve_side(lhs, bars, idx)
+    rhs_val = _resolve_side(rhs, bars, idx)
+    if lhs_val is None or rhs_val is None:
+        return False
+    if not math.isfinite(lhs_val) or not math.isfinite(rhs_val):
+        return False
+    return _compare(lhs_val, op, rhs_val)
+
+
+def _resolve_side(side: Any, bars: List[OHLCVBar], idx: int) -> Optional[float]:
+    """Resolve a Predicate side (PriceRef string, IndicatorRef, or number)
+    to a float value at the given bar index. Returns None on indicator
+    failure or unsupported side shape."""
+    if isinstance(side, str):
+        field_name = side.split(".", 1)[1] if side.startswith("bar.") else None
+        if field_name is None:
+            return None
+        return float(getattr(bars[idx], field_name))
+    if isinstance(side, IndicatorRef):
+        value = _compute_indicator_at(side, bars, idx)
+        return None if value is None else float(value)
+    if isinstance(side, bool):
+        return None
+    if isinstance(side, (int, float)):
+        return float(side)
+    return None
+
+
 def _build_entry_probe(rule: EntryRule, idx: int, symbol: str) -> ProbeRun:
     rule_id = f"entry[{idx}]"
     bars, trigger_idx, reason = _synthesise_for_predicate(rule.when)
@@ -302,6 +401,7 @@ def _build_entry_probe(rule: EntryRule, idx: int, symbol: str) -> ProbeRun:
         market_data=bars,
         expected=ExpectedOutcome(kind="entry", side=rule.side),
         trigger_bar_index=trigger_idx,
+        post_clamp_verifier=_predicate_verifier(rule.when),
     )
 
 
@@ -359,6 +459,7 @@ def _build_exit_probe(
             market_data=full_bars,
             expected=ExpectedOutcome(kind="exit", exit_reason_contains="stop_loss"),
             trigger_bar_index=len(entry_bars) + tail_trigger_offset,
+            post_clamp_verifier=_stop_loss_verifier(rule, entry_close, entry_side),
         )
     if isinstance(rule, TakeProfitRule):
         tail, tail_trigger_offset = _synthesise_take_profit_tail(rule, entry_close, entry_side)
@@ -378,6 +479,7 @@ def _build_exit_probe(
             market_data=full_bars,
             expected=ExpectedOutcome(kind="exit", exit_reason_contains="take_profit"),
             trigger_bar_index=len(entry_bars) + tail_trigger_offset,
+            post_clamp_verifier=_take_profit_verifier(rule, entry_close, entry_side),
         )
     if isinstance(rule, SignalExitRule):
         tail_bars, tail_trigger_idx, tail_reason = _synthesise_for_predicate(
@@ -405,6 +507,7 @@ def _build_exit_probe(
             # prefix the engine might adopt later.
             expected=ExpectedOutcome(kind="exit", exit_reason_contains="signal_exit"),
             trigger_bar_index=len(entry_bars) + tail_trigger_idx,
+            post_clamp_verifier=_predicate_verifier(rule.when),
         )
     return ProbeRun(
         rule_id=rule_id,
@@ -419,6 +522,48 @@ def _stitch(prefix: List[OHLCVBar], suffix: List[OHLCVBar]) -> List[OHLCVBar]:
     """Concatenate two bar lists. Dates are re-stamped at the top level
     by :func:`_stamp_dates` so this helper does not touch ``date``."""
     return list(prefix) + list(suffix)
+
+
+def _stop_loss_verifier(
+    rule: StopLossRule, entry_close: float, entry_side: str
+) -> Callable[[List[OHLCVBar], int], bool]:
+    """Closure that re-checks the engine's stop-loss trigger condition on
+    the post-clamp trigger bar. Used by :func:`_stamp_dates` so a probe
+    whose adversarial low/high was clipped by ``_normalise_ohlc`` doesn't
+    ship a non-triggering bar to the sandbox."""
+    pct = rule.pct
+
+    def _verify(bars: List[OHLCVBar], idx: int) -> bool:
+        if not bars or idx < 0 or idx >= len(bars):
+            return False
+        bar = bars[idx]
+        if entry_side == "long":
+            floor = entry_close * (1.0 - pct)
+            return bar.low <= floor
+        ceiling = entry_close * (1.0 + pct)
+        return bar.high >= ceiling
+
+    return _verify
+
+
+def _take_profit_verifier(
+    rule: TakeProfitRule, entry_close: float, entry_side: str
+) -> Callable[[List[OHLCVBar], int], bool]:
+    """Closure that re-checks the engine's take-profit trigger condition
+    on the post-clamp trigger bar."""
+    pct = rule.pct
+
+    def _verify(bars: List[OHLCVBar], idx: int) -> bool:
+        if not bars or idx < 0 or idx >= len(bars):
+            return False
+        bar = bars[idx]
+        if entry_side == "long":
+            target = entry_close * (1.0 + pct)
+            return bar.high >= target
+        target = entry_close * (1.0 - pct)
+        return bar.low <= target
+
+    return _verify
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +844,16 @@ def _synth_priceref_vs_priceref(
                     volume=1_000_000.0,
                 )
             )
+    # Some PriceRef relations are structurally unsatisfiable under OHLC
+    # invariants (e.g. ``bar.high < bar.low``); :func:`_bar_with_priceref_relation`
+    # tries to adjust the lhs field but ``_normalise_ohlc`` then restores
+    # the invariant, leaving the predicate false. Verify here so the recipe
+    # marks the probe unprobeable instead of shipping a non-triggering bar.
+    trigger_bar = _normalise_ohlc(bars[trigger_idx])
+    lhs_val = getattr(trigger_bar, lhs_field)
+    rhs_val = getattr(trigger_bar, rhs_field)
+    if not _compare(float(lhs_val), op, float(rhs_val)):
+        return None, 0, "priceref_vs_priceref_invariant_conflict"
     return bars, trigger_idx, None
 
 

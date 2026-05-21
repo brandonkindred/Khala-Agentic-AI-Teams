@@ -915,6 +915,252 @@ def test_volume_priceref_in_spec_does_not_abort_synthesis_loop():
     assert "volume" in (probe.unprobeable_reason or "")
 
 
+def test_predicate_verifier_returns_false_on_out_of_range_index():
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _predicate_verifier,
+    )
+
+    pred = Predicate(lhs="bar.close", op=">", rhs=50.0)
+    verifier = _predicate_verifier(pred)
+    bars = [OHLCVBar(date="d", open=100, high=101, low=99, close=100, volume=1)]
+    assert verifier(bars, -1) is False
+    assert verifier(bars, 5) is False
+    assert verifier([], 0) is False
+
+
+def test_predicate_verifier_returns_false_on_eval_exception():
+    """If ``_eval_predicate_at`` raises (malformed predicate, etc.) the
+    verifier swallows the exception and returns False so a bug surfaces
+    as 'unprobeable' rather than crashing the synthesis loop."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _predicate_verifier,
+    )
+
+    # Construct an in-memory predicate with a side that bypasses DSL
+    # validation but breaks ``_resolve_side``.
+    class _BrokenSide:
+        pass
+
+    class _BrokenPredicate:
+        lhs = _BrokenSide()
+        op = ">"
+        rhs = 0.0
+
+    verifier = _predicate_verifier(_BrokenPredicate())
+    bars = [OHLCVBar(date="d", open=1, high=1.1, low=0.9, close=1, volume=1)]
+    assert verifier(bars, 0) is False
+
+
+def test_eval_predicate_at_cross_above_returns_false_at_index_zero():
+    """``cross_*`` requires a (prev, curr) pair — at index 0 there's no
+    prev, so the predicate is False."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    bars = [OHLCVBar(date="d", open=10, high=11, low=9, close=10, volume=1)]
+    pred = Predicate(
+        lhs="bar.close",
+        op="cross_above",
+        rhs=IndicatorRef(name="sma", params={"period": 5}),
+    )
+    assert _eval_predicate_at(pred, bars, 0) is False
+
+
+def test_resolve_side_numeric_float_path():
+    """Numeric (int/float) sides resolve to their float value at any bar."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _resolve_side,
+    )
+
+    bars = [OHLCVBar(date="d", open=1, high=1.1, low=0.9, close=1, volume=1)]
+    assert _resolve_side(42.5, bars, 0) == 42.5
+    assert _resolve_side(7, bars, 0) == 7.0
+
+
+def test_resolve_side_unsupported_string_returns_none():
+    """Non-``bar.`` string sides aren't a known PriceRef shape."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _resolve_side,
+    )
+
+    bars = [OHLCVBar(date="d", open=1, high=1.1, low=0.9, close=1, volume=1)]
+    assert _resolve_side("not_a_bar_ref", bars, 0) is None
+
+
+def test_resolve_side_bool_returns_none():
+    """Booleans are technically int subclasses; reject them explicitly."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _resolve_side,
+    )
+
+    bars = [OHLCVBar(date="d", open=1, high=1.1, low=0.9, close=1, volume=1)]
+    assert _resolve_side(True, bars, 0) is None
+    assert _resolve_side(False, bars, 0) is None
+
+
+def test_resolve_side_unsupported_type_returns_none():
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _resolve_side,
+    )
+
+    bars = [OHLCVBar(date="d", open=1, high=1.1, low=0.9, close=1, volume=1)]
+    assert _resolve_side(object(), bars, 0) is None
+
+
+def test_stop_loss_verifier_long_position_triggers_on_floor_breach():
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _stop_loss_verifier,
+    )
+
+    rule = StopLossRule(pct=0.05)
+    verify = _stop_loss_verifier(rule, entry_close=100.0, entry_side="long")
+    # Trigger: low <= 100 * 0.95 = 95
+    bars_trigger = [OHLCVBar(date="d", open=96, high=97, low=94.5, close=96, volume=1)]
+    assert verify(bars_trigger, 0) is True
+    # No trigger: low above floor
+    bars_safe = [OHLCVBar(date="d", open=96, high=97, low=96, close=96, volume=1)]
+    assert verify(bars_safe, 0) is False
+
+
+def test_stop_loss_verifier_short_position_triggers_on_ceiling_breach():
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _stop_loss_verifier,
+    )
+
+    rule = StopLossRule(pct=0.05)
+    verify = _stop_loss_verifier(rule, entry_close=100.0, entry_side="short")
+    bars_trigger = [OHLCVBar(date="d", open=104, high=106, low=103, close=104, volume=1)]
+    assert verify(bars_trigger, 0) is True
+    bars_safe = [OHLCVBar(date="d", open=104, high=104.5, low=103, close=104, volume=1)]
+    assert verify(bars_safe, 0) is False
+
+
+def test_take_profit_verifier_long_and_short():
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _take_profit_verifier,
+    )
+
+    rule = TakeProfitRule(pct=0.05)
+    verify_long = _take_profit_verifier(rule, entry_close=100.0, entry_side="long")
+    assert verify_long([OHLCVBar(date="d", open=104, high=106, low=103, close=105, volume=1)], 0) is True
+    assert verify_long([OHLCVBar(date="d", open=104, high=104.5, low=103, close=104, volume=1)], 0) is False
+    verify_short = _take_profit_verifier(rule, entry_close=100.0, entry_side="short")
+    assert verify_short([OHLCVBar(date="d", open=96, high=97, low=94, close=95, volume=1)], 0) is True
+    assert verify_short([OHLCVBar(date="d", open=96, high=97, low=96, close=96, volume=1)], 0) is False
+
+
+def test_exit_verifiers_return_false_on_out_of_range_index():
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _stop_loss_verifier,
+        _take_profit_verifier,
+    )
+
+    sl = _stop_loss_verifier(StopLossRule(pct=0.05), entry_close=100.0, entry_side="long")
+    tp = _take_profit_verifier(TakeProfitRule(pct=0.05), entry_close=100.0, entry_side="long")
+    assert sl([], 0) is False
+    assert tp([], 0) is False
+    assert sl([OHLCVBar(date="d", open=1, high=1, low=1, close=1, volume=1)], 5) is False
+
+
+def test_priceref_high_lt_low_is_unprobeable():
+    """``bar.high < bar.low`` is structurally impossible under OHLC
+    invariants. The recipe builds a bar with adjusted lhs, but
+    ``_normalise_ohlc`` restores ``high >= low``, leaving the predicate
+    false. The recipe must detect this and mark the probe unprobeable
+    rather than ship a non-triggering bar."""
+    pred = Predicate(lhs="bar.high", op="<", rhs="bar.low")
+    bars, _trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is None
+    assert reason == "priceref_vs_priceref_invariant_conflict"
+
+
+def test_priceref_low_gt_high_is_unprobeable():
+    """Symmetric case to ``bar.high < bar.low``: ``bar.low > bar.high``
+    can't satisfy the OHLC invariant."""
+    pred = Predicate(lhs="bar.low", op=">", rhs="bar.high")
+    bars, _trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is None
+    assert reason == "priceref_vs_priceref_invariant_conflict"
+
+
+def test_post_clamp_verifier_marks_probe_unprobeable_when_clamping_breaks_predicate():
+    """``sma < 0.5`` synthesises a sub-zero flat-line; ``_normalise_ohlc``
+    clamps closes to the floor, so SMA == ``_MIN_PRICE`` (0.01) >= 0.5 is
+    false and 0.01 < 0.5 is true. With ``rhs`` chosen so the floor sits
+    *above* the predicate's truth region, the clamped bars no longer
+    satisfy the predicate, and the probe must be marked unprobeable."""
+    # Pick rhs s.t. recipe synthesises a level at rhs-1.0 = -0.99 (clamped
+    # to _MIN_PRICE=0.01). SMA computed on clamped closes == 0.01.
+    # Predicate "0.01 < 0.01" is False -> unprobeable.
+    pred = Predicate(
+        lhs=IndicatorRef(name="sma", params={"period": 5}),
+        op="<",
+        rhs=0.01,
+    )
+    # The probe goes through `_build_entry_probe` + `_stamp_dates`; with
+    # the verifier wired we expect the final `ProbeRun` to be marked
+    # unprobeable rather than emitted with bars that won't trigger.
+    rule = EntryRule(side="long", when=pred)
+    spec = _spec_with(entry_rules=[rule])
+    [probe] = generate_rule_probe_runs(spec)
+    assert probe.synthesizable is False
+    assert (
+        probe.unprobeable_reason == "post_clamp_predicate_violation"
+        # Recipe may also bail earlier with its own pre-clamp signal.
+        or "below_clamp_floor" in (probe.unprobeable_reason or "")
+        or "verification_failed" in (probe.unprobeable_reason or "")
+        or "unreachable" in (probe.unprobeable_reason or "")
+    )
+
+
+def test_post_clamp_verifier_passes_for_well_formed_recipe():
+    """A normal predicate (well above clamp floor) survives normalisation:
+    the post-clamp verifier confirms the predicate still holds and the
+    probe ships its bars."""
+    rule = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(name="sma", params={"period": 5}),
+            op=">",
+            rhs=100.0,
+        ),
+    )
+    spec = _spec_with(entry_rules=[rule])
+    [probe] = generate_rule_probe_runs(spec)
+    assert probe.synthesizable is True
+    assert probe.unprobeable_reason is None
+    assert probe.post_clamp_verifier is not None
+    # The stored verifier evaluates the post-clamp bars at the trigger:
+    assert probe.post_clamp_verifier(probe.market_data, probe.trigger_bar_index) is True
+
+
+def test_post_clamp_verifier_raising_marks_unprobeable_not_crash():
+    """A buggy verifier must not propagate exceptions out of the
+    synthesis loop. ``_stamp_dates`` catches and marks unprobeable."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _stamp_dates,
+    )
+
+    def _explode(_bars, _idx):
+        raise RuntimeError("verifier bug")
+
+    probe = ProbeRun(
+        rule_id="entry[0]",
+        rule_kind="entry",
+        symbol="PROBE",
+        market_data=[
+            OHLCVBar(date="placeholder", open=1, high=1.1, low=0.9, close=1, volume=1)
+        ],
+        trigger_bar_index=0,
+        synthesizable=True,
+        post_clamp_verifier=_explode,
+    )
+    stamped = _stamp_dates(probe)
+    assert stamped.synthesizable is False
+    assert stamped.unprobeable_reason == "post_clamp_predicate_violation"
+
+
 def test_assess_probe_exit_rejects_trade_closed_before_trigger():
     """An exit-substring match alone isn't evidence the targeted rule fired —
     a strategy that always exits at bar 2 for unrelated reasons can collide
