@@ -16,11 +16,46 @@ message that names the offending field and quotes the failing payload.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, Iterable
 
 from pydantic import ValidationError
 
 from ..spec_dsl import EntryRuleAdapter, ExitRuleAdapter, SizingRuleAdapter
+
+
+def extract_json_object(text: str) -> Dict[str, Any]:
+    """Extract a JSON object from an LLM response, tolerating markdown fences.
+
+    Preconditions: ``text`` is a string (possibly empty).
+    Postconditions: returns the parsed dict for the outermost ``{...}`` in
+    the response. Raises ``ValueError`` when no JSON object is present or
+    the substring is not valid JSON. Used by every spec-authoring or
+    spec-reviewing agent in this package — keep behaviour stable.
+    """
+    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1)
+
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in LLM response")
+
+    depth = 0
+    end = start
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+
+    try:
+        return json.loads(text[start:end])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse JSON from LLM response: {exc}") from exc
 
 
 class StrategySpecParseError(ValueError):
@@ -100,5 +135,6 @@ def _snippet(value: Any, limit: int = 200) -> str:
 
 __all__: Iterable[str] = (
     "StrategySpecParseError",
+    "extract_json_object",
     "validate_structured_rules",
 )

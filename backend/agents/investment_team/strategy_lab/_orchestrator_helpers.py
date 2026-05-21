@@ -166,6 +166,53 @@ class _AnomalyRecoveryOutcome:
     exhausted: bool
 
 
+@dataclass(frozen=True)
+class _DesignPersistContext:
+    """Bundle of design-phase audit fields persisted onto the final record.
+
+    Threaded through both ``_build_short_circuit_record`` and
+    ``_assemble_record`` so the two persistence sites don't drift apart.
+    Empty (rounds=0, critiques=[]) on legacy paths that bypass the
+    design loop — pre-design short-circuits, callers from older tests.
+    """
+
+    rounds: int = 0
+    # ``Any`` to avoid a cycle with ``agents/design_review``; the orchestrator
+    # passes a ``List[SpecCritique]`` through.
+    critiques: List[Any] = field(default_factory=list)
+
+
+@dataclass
+class _DesignLoopOutcome:
+    """Bundle returned by ``_run_design_loop``.
+
+    The design loop iterates (DesignAgent → SpecReadinessGate →
+    DesignReviewAgent → DesignAgent.revise) until either the reviewer
+    marks the spec ready or the configured round budget is exhausted.
+
+    Invariants on return:
+    - ``ready=True`` ⇒ ``spec`` passed both the deterministic readiness
+      gate and the LLM reviewer on the most recent round; downstream
+      code synthesis may proceed.
+    - ``ready=False`` ⇒ the round budget exhausted; ``critique_history``
+      carries one entry per round (synthetic critiques produced from
+      readiness findings count); the orchestrator must short-circuit
+      the cycle rather than running code against a not-ready spec.
+    - ``rounds`` equals ``len(critique_history)`` in both branches.
+    - ``spec`` is the final candidate the loop produced (whether ready
+      or not), so the audit trail always carries the spec the cycle
+      stopped on.
+    """
+
+    spec: StrategySpec
+    rationale: str
+    ready: bool
+    rounds: int
+    # NB: typed as ``Any`` to avoid a cycle with ``agents/design_review``.
+    # The orchestrator passes a ``List[SpecCritique]`` through.
+    critique_history: List[Any]
+
+
 @dataclass
 class _SynthesisLoopOutcome:
     """Bundle of state mutated by ``_run_synthesis_loop``.

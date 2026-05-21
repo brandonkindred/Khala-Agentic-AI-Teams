@@ -22,12 +22,12 @@ fail-closed path itself (regression tests in ``test_spec_readiness.py``)
 must NOT carry the marker; they override
 ``orch.market_data_service.fetch_ohlcv`` per-instance instead.
 
-Stub-builder helpers (``ideation_returning``, ``noop_refine``,
-``empty_market_data``, ``failing_sandbox``) are exported so individual
-test files don't redefine the same boilerplate. Use them to mock
-``orch.ideation_agent.run`` / ``orch.refinement_agent.run`` /
-``_fetch_market_data`` / ``run_strategy_code`` with one-line monkeypatch
-calls.
+Stub-builder helpers are exported so individual test files don't
+redefine the same boilerplate. The split-design pipeline uses
+``design_returning``, ``review_returning``, ``code_synthesis_returning``,
+and the ``stub_design_loop`` convenience that wires all three at once.
+``noop_refine``, ``empty_market_data``, and ``failing_sandbox`` stay
+unchanged for the synthesis-loop tests.
 """
 
 from __future__ import annotations
@@ -45,9 +45,7 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Auto-apply ``stub_readiness_market_data_fetch`` to every
     ``strategy_lab_integration`` test.
 
@@ -61,7 +59,10 @@ def pytest_collection_modifyitems(
             continue
         # pytest fixtures are requested by name. Appending to ``fixturenames``
         # only works on Function items; non-function items don't have the slot.
-        if hasattr(item, "fixturenames") and "stub_readiness_market_data_fetch" not in item.fixturenames:  # type: ignore[attr-defined]
+        if (
+            hasattr(item, "fixturenames")
+            and "stub_readiness_market_data_fetch" not in item.fixturenames
+        ):  # type: ignore[attr-defined]
             item.fixturenames.append("stub_readiness_market_data_fetch")  # type: ignore[attr-defined]
 
 
@@ -100,35 +101,114 @@ def stub_readiness_market_data_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def ideation_returning(
-    spec_dict: Dict[str, Any], code: str, *, rationale: str = "scripted rationale"
-) -> Callable[..., Tuple[Dict[str, Any], str, str]]:
-    """Build a stub ``IdeationAgent.run`` that returns scripted output.
+def design_returning(
+    spec_dict: Dict[str, Any], *, rationale: str = "scripted rationale"
+) -> Callable[..., Tuple[Dict[str, Any], str]]:
+    """Build a stub ``DesignAgent.run`` that returns scripted output.
 
-    Tests call ``monkeypatch.setattr(orch.ideation_agent, "run",
-    ideation_returning(spec, code))`` to bypass the LLM and pin the spec
-    + code the orchestrator's design phase sees.
-    """
-
-    def _run(**_kwargs) -> Tuple[Dict[str, Any], str, str]:
-        return spec_dict, code, rationale
-
-    return _run
-
-
-def noop_refine(code: str) -> Callable[..., Tuple[Dict[str, Any], str]]:
-    """Build a stub ``RefinementAgent.run`` that returns the same code unchanged.
-
-    Useful when a test forces the refinement loop to exhaust on the same
-    failure mode — refinement must produce something or the orchestrator
-    would early-exit, but the something must be the unchanged input so the
-    loop re-fails the gate it's testing.
+    Tests call ``monkeypatch.setattr(orch.design_agent, "run",
+    design_returning(spec))`` to bypass the LLM and pin the spec the
+    orchestrator's design phase sees. The returned tuple matches the
+    new agent contract: ``(spec_dict, rationale)`` — no ``strategy_code``.
     """
 
     def _run(**_kwargs) -> Tuple[Dict[str, Any], str]:
-        return {"changes_made": "no-op"}, code
+        return dict(spec_dict), rationale
 
     return _run
+
+
+def design_revising(
+    spec_dicts: List[Dict[str, Any]], *, rationale: str = "scripted revision"
+) -> Callable[..., Tuple[Dict[str, Any], str]]:
+    """Build a stub ``DesignAgent.revise`` that yields successive specs.
+
+    Each call returns the next entry in ``spec_dicts``; raises
+    ``StopIteration`` when exhausted so a test that runs the loop too
+    long fails loudly instead of getting a stale spec.
+    """
+    iterator = iter(spec_dicts)
+
+    def _revise(**_kwargs) -> Tuple[Dict[str, Any], str]:
+        return dict(next(iterator)), rationale
+
+    return _revise
+
+
+def review_returning(*critiques: Any) -> Callable[..., Any]:
+    """Build a stub ``DesignReviewAgent.run`` that yields successive critiques.
+
+    Each call returns the next critique in order. When the iterator is
+    exhausted the last critique is returned again — handy for "stays
+    ready / stays unready" loops that may overrun by one round during
+    a test refactor.
+    """
+    if not critiques:
+        raise ValueError("review_returning requires at least one critique")
+    queue = list(critiques)
+
+    def _run(*_a, **_kw) -> Any:
+        if len(queue) > 1:
+            return queue.pop(0)
+        return queue[0]
+
+    return _run
+
+
+def code_synthesis_returning(code: str) -> Callable[..., str]:
+    """Build a stub ``CodeSynthesisAgent.run`` that returns scripted code.
+
+    Tests that drive the ``requires_custom_code`` path call
+    ``monkeypatch.setattr(orch.code_synthesis_agent, "run",
+    code_synthesis_returning(_VALID_CODE))``. The orchestrator passes a
+    frozen ``StrategySpec`` in; the stub ignores it.
+    """
+
+    def _run(_spec) -> str:
+        return code
+
+    return _run
+
+
+def stub_design_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    orch: Any,
+    spec_dict: Dict[str, Any],
+    code: str,
+    *,
+    rationale: str = "scripted rationale",
+) -> None:
+    """Wire the full split-design path in one call for synthesis-loop tests.
+
+    Pre: ``orch`` is a constructed ``StrategyLabOrchestrator``.
+    Post: ``orch.design_agent.run`` returns ``spec_dict``; review returns
+    ``ready=True`` on the first call; ``compile_strategy`` is replaced
+    with a stub that returns ``code`` so the test's synthesis loop sees
+    the scripted code without depending on the deterministic compiler's
+    actual behaviour.
+    """
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
+    monkeypatch.setattr(orch.design_agent, "run", design_returning(spec_dict, rationale=rationale))
+
+    # ``revise`` is also stubbed so a spec that fails the deterministic
+    # readiness gate (e.g. an intentionally-broken test fixture) exhausts
+    # the design loop by re-emitting the same bad spec instead of calling
+    # the real LLM. Tests that want the design loop to converge wire a
+    # spec that *passes* readiness; the review stub then short-circuits
+    # on the first round.
+    def _revise(*_a, **_kw) -> Tuple[Dict[str, Any], str]:
+        return dict(spec_dict), rationale
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    monkeypatch.setattr(orch.design_review_agent, "run", review_returning(SpecCritique(ready=True)))
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: code)
+    # If compile_strategy returns an empty string (test scenario for
+    # "ideation produced no code"), the orchestrator falls through to
+    # code_synthesis_agent. Stub that too so the test does not depend
+    # on the real LLM path.
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", code_synthesis_returning(code))
 
 
 def empty_market_data(
@@ -159,6 +239,21 @@ def empty_market_data(
         )
 
     return _fetch
+
+
+def noop_refine(code: str) -> Callable[..., Tuple[Dict[str, Any], str]]:
+    """Build a stub ``RefinementAgent.run`` that returns the same code unchanged.
+
+    Useful when a test forces the refinement loop to exhaust on the same
+    failure mode — refinement must produce something or the orchestrator
+    would early-exit, but the something must be the unchanged input so the
+    loop re-fails the gate it's testing.
+    """
+
+    def _run(**_kwargs) -> Tuple[Dict[str, Any], str]:
+        return {"changes_made": "no-op"}, code
+
+    return _run
 
 
 def failing_sandbox(

@@ -197,9 +197,7 @@ def test_refinement_agent_passes_risk_limits_through(
 
 def test_merge_risk_limits_tightening_accepted() -> None:
     current = RiskLimits()  # default max_position_pct = 6.0
-    merged, loosened, unknown = _merge_risk_limits_tighten_only(
-        current, {"max_position_pct": 3.0}
-    )
+    merged, loosened, unknown = _merge_risk_limits_tighten_only(current, {"max_position_pct": 3.0})
     assert loosened == []
     assert unknown == []
     assert merged.max_position_pct == 3.0
@@ -207,18 +205,14 @@ def test_merge_risk_limits_tightening_accepted() -> None:
 
 def test_merge_risk_limits_loosening_rejected() -> None:
     current = RiskLimits()
-    _, loosened, unknown = _merge_risk_limits_tighten_only(
-        current, {"max_position_pct": 99.0}
-    )
+    _, loosened, unknown = _merge_risk_limits_tighten_only(current, {"max_position_pct": 99.0})
     assert loosened == ["max_position_pct"]
     assert unknown == []
 
 
 def test_merge_risk_limits_unknown_key_discarded() -> None:
     current = RiskLimits()
-    merged, loosened, unknown = _merge_risk_limits_tighten_only(
-        current, {"made_up_field": 0.1}
-    )
+    merged, loosened, unknown = _merge_risk_limits_tighten_only(current, {"made_up_field": 0.1})
     assert loosened == []
     assert unknown == ["made_up_field"]
     assert merged == current
@@ -227,9 +221,7 @@ def test_merge_risk_limits_unknown_key_discarded() -> None:
 def test_merge_risk_limits_immutable_key_discarded() -> None:
     """``vol_lookback_days`` is mapped to ``None`` direction → discard, not trip."""
     current = RiskLimits()
-    _, loosened, unknown = _merge_risk_limits_tighten_only(
-        current, {"vol_lookback_days": 50}
-    )
+    _, loosened, unknown = _merge_risk_limits_tighten_only(current, {"vol_lookback_days": 50})
     assert loosened == []
     assert unknown == ["vol_lookback_days"]
 
@@ -238,9 +230,7 @@ def test_merge_risk_limits_target_vol_none_to_value_is_loosening() -> None:
     """Going from None (flat sizing) to a vol target changes sizing model."""
     current = RiskLimits()
     assert current.target_annual_vol is None
-    _, loosened, _ = _merge_risk_limits_tighten_only(
-        current, {"target_annual_vol": 0.10}
-    )
+    _, loosened, _ = _merge_risk_limits_tighten_only(current, {"target_annual_vol": 0.10})
     assert loosened == ["target_annual_vol"]
 
 
@@ -297,23 +287,21 @@ def test_apply_updates_interleaved_phases_do_not_trip() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeIdeationAgent:
-    """Returns a fixed ideation tuple every call."""
+class _FakeDesignAgent:
+    """Returns a fixed design spec every call.
+
+    Each ``run`` produces the same spec dict (the test forces re-entries
+    via downstream refinement failures). ``revise`` returns the same
+    dict so the design loop converges on the first review round once
+    the deterministic readiness gate passes.
+    """
 
     def __init__(self, spec: StrategySpec) -> None:
         self._spec = spec
         self.call_count = 0
 
-    def run(
-        self,
-        *,
-        prior_records: List[Any],
-        signal_brief: Any = None,
-        convergence_directives: Optional[List[str]] = None,
-        exclude_asset_classes: Optional[List[str]] = None,
-    ) -> Tuple[Dict[str, Any], str, str]:
-        self.call_count += 1
-        strategy_dict = {
+    def _spec_dict(self) -> Dict[str, Any]:
+        return {
             "asset_class": self._spec.asset_class,
             "hypothesis": self._spec.hypothesis,
             "signal_definition": self._spec.signal_definition,
@@ -323,7 +311,25 @@ class _FakeIdeationAgent:
             "risk_limits": self._spec.risk_limits.model_dump(),
             "target_symbols": list(self._spec.target_symbols),
         }
-        return strategy_dict, "# ideation code", "test rationale"
+
+    def run(
+        self,
+        *,
+        prior_records: List[Any],
+        signal_brief: Any = None,
+        convergence_directives: Optional[List[str]] = None,
+        exclude_asset_classes: Optional[List[str]] = None,
+    ) -> Tuple[Dict[str, Any], str]:
+        self.call_count += 1
+        return self._spec_dict(), "test rationale"
+
+    def revise(
+        self,
+        prior_spec: Any,
+        critique: Any,
+        prior_critiques: Optional[List[Any]] = None,
+    ) -> Tuple[Dict[str, Any], str]:
+        return self._spec_dict(), "test rationale"
 
 
 class _LoosenOnceRefinementAgent:
@@ -387,10 +393,20 @@ def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
     """If every design attempt's refinement tries to loosen risk limits,
     ``run_cycle`` emits loopback events and persists a
     ``failed: spec_unimplementable`` record after exhaustion."""
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
     spec = _spec()
     orch = StrategyLabOrchestrator()
-    orch.ideation_agent = _FakeIdeationAgent(spec)  # type: ignore[assignment]
+    orch.design_agent = _FakeDesignAgent(spec)  # type: ignore[assignment]
     orch.refinement_agent = _LoosenOnceRefinementAgent()  # type: ignore[assignment]
+
+    # Design review converges on the first round so the test focuses on
+    # the refinement re-entry loop, not the design loop.
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True))
+    # Force the deterministic compiler to return a fixed payload so the
+    # synthesis loop has code to evaluate.
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "# design code")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "# design code")
 
     # Make code-safety pass so the loop reaches refinement.
     monkeypatch.setattr(
@@ -404,6 +420,10 @@ def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
         "validate",
         lambda s: [],
     )
+    # SpecReadinessGate would otherwise critical-fail on the synthetic test
+    # spec (no warm-up data, etc.). Neutralise it — the design re-entry
+    # path is what's under test, not the readiness gate.
+    monkeypatch.setattr(orch.spec_readiness_gate, "validate", lambda *a, **kw: [])
 
     # Force execution to fail so the refinement path fires.
     def _failed_run(
@@ -443,15 +463,14 @@ def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
     )
 
     loopback_events = [
-        d for phase, d in emitted if phase == "ideating" and d.get("sub_phase") == "loopback"
+        d for phase, d in emitted if phase == "designing" and d.get("sub_phase") == "loopback"
     ]
     assert len(loopback_events) == MAX_DESIGN_REENTRIES
-    assert orch.ideation_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
+    assert orch.design_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
     assert record.backtest.status == "failed: spec_unimplementable"
-    # PR #573 round-5 Note 2: short-circuit records must populate
-    # ``acceptance_reason`` so a reader of the persisted record sees
-    # the rejection cause without having to inspect ``status`` or
-    # ``quality_gate_results`` separately.
+    # Short-circuit records must populate ``acceptance_reason`` so a
+    # reader of the persisted record sees the rejection cause without
+    # having to inspect ``status`` or ``quality_gate_results`` separately.
     ar = record.backtest.result.acceptance_reason or ""
     assert "publication_disabled" in ar and "spec_unimplementable" in ar, (
         f"expected publication_disabled / spec_unimplementable in {ar!r}"
@@ -464,13 +483,19 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
     """End-to-end coverage for the threshold-trip path (non-risk-limits):
     when refinement emits stray spec keys for ``_SPEC_MUTATION_TRIP_THRESHOLD``
     consecutive rounds on the same ``failure_phase``, ``run_cycle``
-    re-enters ideation and ultimately persists a
+    re-enters the design phase and ultimately persists a
     ``failed: spec_unimplementable`` record."""
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
     spec = _spec()
     orch = StrategyLabOrchestrator()
-    orch.ideation_agent = _FakeIdeationAgent(spec)  # type: ignore[assignment]
+    orch.design_agent = _FakeDesignAgent(spec)  # type: ignore[assignment]
     orch.refinement_agent = _StraySpecRefinementAgent()  # type: ignore[assignment]
 
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True))
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "# design code")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "# design code")
+    monkeypatch.setattr(orch.spec_readiness_gate, "validate", lambda *a, **kw: [])
     monkeypatch.setattr(orch.code_safety_checker, "check", lambda code, spec=None: [])
     monkeypatch.setattr(orch.strategy_validator, "validate", lambda s: [])
 
@@ -512,7 +537,7 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
     )
 
     loopback_events = [
-        d for phase, d in emitted if phase == "ideating" and d.get("sub_phase") == "loopback"
+        d for phase, d in emitted if phase == "designing" and d.get("sub_phase") == "loopback"
     ]
     assert len(loopback_events) == MAX_DESIGN_REENTRIES
     # Each loopback's evidence references the threshold-path message, not
@@ -520,7 +545,7 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
     for ev in loopback_events:
         assert "consecutive mutation attempts" in ev["evidence"]
         assert ev["failure_phase"] == "execution"
-    assert orch.ideation_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
+    assert orch.design_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
     assert record.backtest.status == "failed: spec_unimplementable"
     assert "spec_unimplementable" in record.backtest.status
     # PR #573 round-5 Note 2: short-circuit records must populate

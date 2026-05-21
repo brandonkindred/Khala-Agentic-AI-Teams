@@ -212,9 +212,7 @@ def _orchestrator(
     # ``NaN``, tripping SpecReadinessGate Rule 5 before the test's
     # walk-forward path can run. Stamp a fixed sentinel directly on the
     # gate's bound slot so readiness sees a usable price.
-    orch.spec_readiness_gate._market_sample_provider = (
-        lambda symbol, asset_class: 100.0
-    )
+    orch.spec_readiness_gate._market_sample_provider = lambda symbol, asset_class: 100.0
     return orch
 
 
@@ -456,9 +454,7 @@ def test_acceptance_gate_rejects_overfit_pattern():
 
 def test_daily_returns_from_trades_handles_empty_input():
     """Returns an empty list rather than raising on an empty trade ledger."""
-    out = _daily_returns_from_trades(
-        [], 100_000.0, "2022-01-03", "2022-12-30"
-    )
+    out = _daily_returns_from_trades([], 100_000.0, "2022-01-03", "2022-12-30")
     assert out == [] or all(r == 0.0 for r in out)
 
 
@@ -477,9 +473,7 @@ def test_daily_returns_from_trades_emits_log_returns():
             symbol="TST",
         )
     ]
-    out = _daily_returns_from_trades(
-        trades, 100_000.0, "2023-01-03", "2023-01-05"
-    )
+    out = _daily_returns_from_trades(trades, 100_000.0, "2023-01-03", "2023-01-05")
     assert len(out) >= 1
     nonzero = [r for r in out if r != 0.0]
     assert len(nonzero) == 1
@@ -504,9 +498,7 @@ def test_daily_returns_from_trades_invalidates_ruin_series():
             symbol="TST",
         )
     ]
-    out = _daily_returns_from_trades(
-        trades, 100_000.0, "2023-01-03", "2023-01-06"
-    )
+    out = _daily_returns_from_trades(trades, 100_000.0, "2023-01-03", "2023-01-06")
     assert out == []
 
 
@@ -623,9 +615,9 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
         "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
         "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
     )
-    monkeypatch.setattr(
-        orch.ideation_agent, "run", lambda **kw: (spec_dict, overfit_code, "rationale")
-    )
+    from investment_team.tests.conftest import stub_design_loop
+
+    stub_design_loop(monkeypatch, orch, spec_dict, overfit_code)
     monkeypatch.setattr(
         orch.refinement_agent, "run", lambda **kw: ({"changes_made": "x"}, overfit_code)
     )
@@ -736,9 +728,7 @@ def _wire_run_cycle_stubs(
     # the gate's slot directly because the bound reference was captured
     # at ``__init__`` time — patching ``orch._readiness_price_provider``
     # alone does not redirect it.
-    orch.spec_readiness_gate._market_sample_provider = (
-        lambda symbol, asset_class: 100.0
-    )
+    orch.spec_readiness_gate._market_sample_provider = lambda symbol, asset_class: 100.0
 
     spec_dict = {
         "asset_class": "stocks",
@@ -760,7 +750,9 @@ def _wire_run_cycle_stubs(
         "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
         "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
     )
-    monkeypatch.setattr(orch.ideation_agent, "run", lambda **kw: (spec_dict, code, "rationale"))
+    from investment_team.tests.conftest import stub_design_loop
+
+    stub_design_loop(monkeypatch, orch, spec_dict, code, rationale="rationale")
     monkeypatch.setattr(orch.refinement_agent, "run", lambda **kw: ({"changes_made": "x"}, code))
     # CodeConformanceGate (#541) rejects the minimal stub strategy used in
     # these tests (qty=1, no entry conditional). Neutralise it the same
@@ -1187,7 +1179,13 @@ def test_walk_forward_fallback_passed_records_provenance(monkeypatch):
         orch.anomaly_detector,
         "check",
         lambda *a, **kw: [
-            _QGR(gate_name="sharpe_sane", passed=True, severity="info", phase="verification", details="ok")
+            _QGR(
+                gate_name="sharpe_sane",
+                passed=True,
+                severity="info",
+                phase="verification",
+                details="ok",
+            )
         ],
     )
 

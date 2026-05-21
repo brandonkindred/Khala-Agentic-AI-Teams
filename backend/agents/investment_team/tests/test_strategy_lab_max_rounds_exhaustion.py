@@ -84,10 +84,10 @@ def test_validation_phase_exhaustion_sets_max_rounds_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Code-safety always critical → loop exhausts validation phase."""
-    from investment_team.tests.conftest import ideation_returning, noop_refine
+    from investment_team.tests.conftest import noop_refine, stub_design_loop
 
     orch = StrategyLabOrchestrator()
-    monkeypatch.setattr(orch.ideation_agent, "run", ideation_returning(_spec_dict(), _VALID_CODE))
+    stub_design_loop(monkeypatch, orch, _spec_dict(), _VALID_CODE)
     monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
 
     def _always_critical(_code: str, _spec=None):
@@ -119,12 +119,12 @@ def test_execution_phase_exhaustion_sets_max_rounds_status(
     from investment_team.tests.conftest import (
         empty_market_data,
         failing_sandbox,
-        ideation_returning,
         noop_refine,
+        stub_design_loop,
     )
 
     orch = StrategyLabOrchestrator()
-    monkeypatch.setattr(orch.ideation_agent, "run", ideation_returning(_spec_dict(), _VALID_CODE))
+    stub_design_loop(monkeypatch, orch, _spec_dict(), _VALID_CODE)
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", empty_market_data())
     monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", failing_sandbox())
@@ -144,8 +144,8 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult
     from investment_team.tests.conftest import (
         empty_market_data,
-        ideation_returning,
         noop_refine,
+        stub_design_loop,
     )
     from investment_team.tests.test_strategy_lab_alignment import (
         _benign_sandbox_trades,
@@ -153,7 +153,7 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
     )
 
     orch = StrategyLabOrchestrator()
-    monkeypatch.setattr(orch.ideation_agent, "run", ideation_returning(_spec_dict(), _VALID_CODE))
+    stub_design_loop(monkeypatch, orch, _spec_dict(), _VALID_CODE)
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", empty_market_data())
 
     # Sandbox always succeeds with benign trades — execution itself is fine.
