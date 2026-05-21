@@ -501,3 +501,146 @@ def test_stream_strategy_lab_run_terminal_short_circuit(
     body = resp.text
     assert "snapshot" in body
     assert "done" in body
+
+
+# ---------------------------------------------------------------------------
+# stream_strategy_lab_run — active (non-terminal) event_generator path
+# ---------------------------------------------------------------------------
+#
+# The generator subscribes to the per-job event bus, yields an initial
+# "snapshot", drains any buffered events, and terminates as soon as it sees a
+# "complete" or "error" event (followed by a "done" sentinel). These tests
+# pre-load the subscription's deque so the loop drains and returns on the
+# first pass, never sleeping. Runtime is bounded by both the synchronous
+# pre-load and a 2s ``read`` timeout on the TestClient stream so a regression
+# can't hang CI.
+
+
+def _wait_for_terminal_sse(
+    body_iter, *, max_chunks: int = 50, timeout_seconds: float = 2.0
+) -> str:
+    """Read SSE chunks until the terminal ``data: {"type": "done"}`` line.
+
+    Preconditions:
+        * ``body_iter`` is an iterator over UTF-8 string chunks (TestClient
+          ``iter_text()``).
+        * ``max_chunks`` and ``timeout_seconds`` are positive.
+
+    Postconditions:
+        * Returns the concatenated body up to and including the ``done`` line.
+        * Raises ``AssertionError`` if the terminal line is not seen within
+          ``max_chunks`` chunks or ``timeout_seconds`` wall-clock seconds.
+    """
+    import time as _time
+
+    assert max_chunks > 0
+    assert timeout_seconds > 0
+    buf = ""
+    deadline = _time.monotonic() + timeout_seconds
+    seen = 0
+    for chunk in body_iter:
+        buf += chunk
+        seen += 1
+        if '"type": "done"' in buf or '"type":"done"' in buf:
+            return buf
+        assert seen <= max_chunks, f"SSE stream exceeded {max_chunks} chunks without terminating"
+        assert _time.monotonic() < deadline, "SSE stream did not terminate within timeout"
+    return buf
+
+
+def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Drive the live event_generator path end-to-end.
+
+    Pre-loads the subscription deque with one ``progress`` update and one
+    ``complete`` terminal so the generator drains and exits on its first
+    iteration, never reaching ``await asyncio.sleep``.
+    """
+    from collections import deque
+
+    from investment_team.api import job_event_bus
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["active"] = {
+        "run_id": "active",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 2,
+        "completed_cycles": 0,
+    }
+
+    pre_events = deque(
+        [
+            {"type": "progress", "phase": "design", "cycle_index": 1},
+            {"type": "complete", "summary": "ok"},
+        ]
+    )
+
+    class _Sub:
+        def __init__(self) -> None:
+            self.events = pre_events
+
+    sub_holder = {"sub": None, "unsubscribed": False}
+
+    def _fake_subscribe(rid: str):
+        assert rid == "active"
+        sub_holder["sub"] = _Sub()
+        return sub_holder["sub"]
+
+    def _fake_unsubscribe(rid: str, sub) -> None:
+        sub_holder["unsubscribed"] = True
+
+    monkeypatch.setattr(job_event_bus, "subscribe", _fake_subscribe)
+    monkeypatch.setattr(job_event_bus, "unsubscribe", _fake_unsubscribe)
+
+    with api_client.stream("GET", "/strategy-lab/runs/active/stream", timeout=2.0) as resp:
+        assert resp.status_code == 200
+        assert resp.headers.get("content-type", "").startswith("text/event-stream")
+        body = _wait_for_terminal_sse(resp.iter_text())
+
+    # Snapshot, the in-flight progress update, the terminal "complete",
+    # and the final "done" sentinel must all have been streamed.
+    assert '"type": "snapshot"' in body
+    assert '"type": "progress"' in body
+    assert '"type": "complete"' in body
+    assert '"type": "done"' in body
+    # ``finally`` branch must have run, releasing the bus subscription.
+    assert sub_holder["unsubscribed"] is True
+
+
+def test_stream_strategy_lab_run_terminates_on_error_event(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """An ``error`` event must also trigger the terminal ``done`` sentinel."""
+    from collections import deque
+
+    from investment_team.api import job_event_bus
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["boom"] = {
+        "run_id": "boom",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 1,
+        "completed_cycles": 0,
+    }
+
+    pre_events = deque([{"type": "error", "error": "kaboom"}])
+
+    class _Sub:
+        def __init__(self) -> None:
+            self.events = pre_events
+
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
+
+    with api_client.stream("GET", "/strategy-lab/runs/boom/stream", timeout=2.0) as resp:
+        assert resp.status_code == 200
+        body = _wait_for_terminal_sse(resp.iter_text())
+
+    assert '"type": "snapshot"' in body
+    assert '"type": "error"' in body
+    assert '"type": "done"' in body
+
+

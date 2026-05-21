@@ -2412,7 +2412,7 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
-    async def event_generator():  # pragma: no cover — async SSE generator covered by E2E streaming integration tests; long-running 4-hour loop not unit-testable
+    async def event_generator():
         sub = subscribe(run_id)
         try:
             # Initial snapshot
@@ -2435,9 +2435,15 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
                     yield _sse_line({"type": "done"})
                     return
 
-                yield ": keepalive\n\n"
-                # Non-blocking wait — yields control back to the event loop
-                await asyncio.sleep(1.0)
+                # No buffered events on this pass — emit a comment-only SSE
+                # keepalive line and yield control back to the event loop
+                # for the 1-second poll interval. Unit tests drive
+                # termination via pre-loaded events so they exit the inner
+                # ``while sub.events:`` drain with ``sent_terminal=True``
+                # and never reach the keepalive/sleep pair (which is a
+                # production timing knob, not behaviour to verify).
+                yield ": keepalive\n\n"  # pragma: no cover
+                await asyncio.sleep(1.0)  # pragma: no cover
         finally:
             unsubscribe(run_id, sub)
 
