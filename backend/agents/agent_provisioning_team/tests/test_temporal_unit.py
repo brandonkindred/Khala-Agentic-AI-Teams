@@ -147,8 +147,12 @@ def test_run_async_raises_without_client(monkeypatch) -> None:
         patch.object(sw, "get_temporal_loop", return_value=None),
         patch.object(sw, "get_temporal_client", return_value=None),
     ):
-        with pytest.raises(RuntimeError, match="Temporal client not available"):
-            sw._run_async(asyncio.sleep(0))
+        coro = asyncio.sleep(0)
+        try:
+            with pytest.raises(RuntimeError, match="Temporal client not available"):
+                sw._run_async(coro)
+        finally:
+            coro.close()
 
 
 def test_start_provisioning_workflow_passes_args(monkeypatch) -> None:
