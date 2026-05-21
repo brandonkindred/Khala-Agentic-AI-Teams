@@ -19,7 +19,7 @@ export default defineConfig({
       include: ['src/app/**/*.ts'],
       exclude: ['**/*.spec.ts', '**/*.model.ts', '**/environments/*.ts', '**/index.ts', '**/*.module.ts'],
       thresholds: {
-        lines: 60,
+        lines: 95,
       },
     },
   },
