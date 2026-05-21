@@ -39,12 +39,16 @@ class _FakeResult:
 def _trade(
     *,
     side: str = "long",
-    entry_date: str = "2024-01-50",
-    exit_date: str = "2024-02-01",
+    entry_date: str = "9999-01-01",
+    exit_date: str = "9999-12-31",
     exit_reason: Optional[str] = None,
     shares: float = 10.0,
     symbol: str = "PROBE",
 ) -> TradeRecord:
+    """Build a fake TradeRecord. Default dates are deliberately well after
+    any plausible probe trigger so the asserter's trigger-timing checks
+    accept the trade — tests that need to exercise the early-trade
+    rejection paths pass explicit early dates."""
     return TradeRecord(
         trade_num=1,
         entry_date=entry_date,

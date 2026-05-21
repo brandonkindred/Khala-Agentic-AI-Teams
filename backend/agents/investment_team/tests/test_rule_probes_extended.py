@@ -885,6 +885,80 @@ def test_priceref_vs_priceref_eq_falls_through_to_else_branch():
     assert bar.close == bar.high
 
 
+def test_volume_priceref_comparison_marks_unprobeable_without_crashing():
+    """``bar.volume`` is a valid PriceRef in the DSL but doesn't fit the
+    OHLC default-fields model. The synthesiser must mark the probe
+    unprobeable instead of raising a KeyError."""
+    pred = Predicate(lhs="bar.volume", op=">", rhs="bar.close")
+    bars, _trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is None
+    assert reason == "priceref_volume_comparison_unprobeable"
+
+
+def test_volume_priceref_on_either_side_marks_unprobeable():
+    pred = Predicate(lhs="bar.close", op=">", rhs="bar.volume")
+    bars, _trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is None
+    assert reason == "priceref_volume_comparison_unprobeable"
+
+
+def test_volume_priceref_in_spec_does_not_abort_synthesis_loop():
+    """End-to-end: a spec with a volume-PriceRef rule generates a probe
+    run with synthesizable=False rather than crashing the synthesis loop."""
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.volume", op=">", rhs="bar.close"),
+    )
+    spec = _spec_with(entry_rules=[entry])
+    [probe] = generate_rule_probe_runs(spec)
+    assert probe.synthesizable is False
+    assert "volume" in (probe.unprobeable_reason or "")
+
+
+def test_assess_probe_exit_rejects_trade_closed_before_trigger():
+    """An exit-substring match alone isn't evidence the targeted rule fired —
+    a strategy that always exits at bar 2 for unrelated reasons can collide
+    with the substring. Reject trades whose exit_date precedes the
+    synthesised trigger bar."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        ExpectedOutcome,
+    )
+
+    probe = ProbeRun(
+        rule_id="exit[0]:stop_loss",
+        rule_kind="stop_loss",
+        symbol="PROBE",
+        market_data=[
+            OHLCVBar(date="2024-06-01", open=1, high=1.1, low=0.9, close=1, volume=1)
+        ],
+        expected=ExpectedOutcome(kind="exit", exit_reason_contains="stop_loss"),
+        trigger_bar_index=0,
+    )
+    early_trade = TradeRecord(
+        trade_num=1,
+        entry_date="2024-01-01",
+        exit_date="2024-01-02",  # before trigger
+        symbol="PROBE",
+        side="long",
+        entry_price=100.0,
+        exit_price=90.0,
+        shares=1.0,
+        position_value=100.0,
+        gross_pnl=-10.0,
+        net_pnl=-10.0,
+        return_pct=-0.10,
+        hold_days=1,
+        outcome="loss",
+        cumulative_pnl=-10.0,
+        exit_reason="engine_exit:stop_loss",
+    )
+    g = RuleProbesGate(runner=lambda *a, **k: _Stub())
+    with g._using_phase("synthesis"):
+        result = assess_probe(probe, _Stub(success=True, trades=[early_trade]), emitter=g)
+    assert result.passed is False
+    assert "before trigger bar" in result.details
+
+
 def test_priceref_below_clamp_floor_marks_unprobeable():
     """``bar.close < 0.005`` would synthesise a trigger value below
     ``_MIN_PRICE``; the recipe must refuse rather than ship a probe whose

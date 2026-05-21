@@ -135,12 +135,30 @@ def _check_exit(
     if not trades:
         return False, (
             f"expected one trade closed with exit_reason containing "
-            f"'{expected_substr}' but no trades were recorded"
+            f"'{expected_substr}' on/after trigger bar {trigger_date} "
+            "but no trades were recorded"
         )
+    early_matches_seen = 0
     for trade in trades:
         exit_reason = getattr(trade, "exit_reason", None) or ""
-        if expected_substr in str(exit_reason):
-            return True, f"trade closed with exit_reason='{exit_reason}'"
+        if expected_substr not in str(exit_reason):
+            continue
+        exit_date = getattr(trade, "exit_date", None)
+        if trigger_date is not None and exit_date is not None and str(exit_date) < trigger_date:
+            # The trade closed *before* the synthesised exit-trigger bar.
+            # An exit_reason substring match alone isn't evidence the
+            # targeted rule fired — a strategy that always exits at bar 2
+            # for unrelated reasons can collide with the substring. Skip
+            # and keep scanning.
+            early_matches_seen += 1
+            continue
+        return True, f"trade closed with exit_reason='{exit_reason}' on {exit_date}"
+    if early_matches_seen:
+        return False, (
+            f"found {early_matches_seen} trade(s) with exit_reason matching "
+            f"'{expected_substr}' but all closed before trigger bar {trigger_date}; "
+            "targeted rule likely not the actual exit cause"
+        )
     return False, (
         f"no trade closed with exit_reason containing '{expected_substr}'"
     )

@@ -672,6 +672,13 @@ def _synth_priceref_vs_priceref(
 ) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
     if lhs == rhs:
         return None, 0, "priceref_vs_self_unsatisfiable"
+    # ``bar.volume`` is a valid PriceRef per the DSL but doesn't fit the
+    # synthesiser's OHLC default model (volume is on a different scale and
+    # rarely comparable against prices). Treat volume-mixed predicates as
+    # unprobeable rather than risking a KeyError or producing meaningless
+    # synthetic bars.
+    if "bar.volume" in (lhs, rhs):
+        return None, 0, "priceref_volume_comparison_unprobeable"
     n = max(min_bars, 30)
     trigger_idx = n - _BARS_AFTER_TRIGGER - 1
     bars: List[OHLCVBar] = []
