@@ -1148,7 +1148,7 @@ class _PaperTradingDataUnavailable(Exception):
     """
 
 
-def _run_paper_trading_step(  # pragma: no cover — paper-trading data fetch + sandbox exercise covered by integration tests; live MarketDataService unmockable here
+def _run_paper_trading_step(
     *,
     strategy: StrategySpec,
     strategy_code: str,
@@ -2724,7 +2724,7 @@ def _run_paper_trading_background(
                     _paper_trading_sessions[session_id] = session
             return
 
-        agent = PaperTradingAgent()  # pragma: no cover — background worker happy path covered by integration tests; live MarketDataService unmockable here
+        agent = PaperTradingAgent()
         result_session = agent.run_session(
             strategy=strategy,
             strategy_code=strategy_code,
