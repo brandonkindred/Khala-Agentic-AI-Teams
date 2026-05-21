@@ -388,3 +388,117 @@ def test_applicable_dietary_forbid_ambiguous_default_strict_ignores_exemptions()
         ]
     )
     assert rr.applicable_dietary_forbid({AllergenTag.fish}) == {DietaryTag.animal}
+
+
+# --- SPEC-007 W8: guardrail response fields ------------------------------
+
+
+def test_dropped_suggestion_defaults():
+    from nutrition_meal_planning_team.models import DroppedSuggestion
+
+    d = DroppedSuggestion()
+    assert d.name == ""
+    assert d.reasons == []
+    assert d.detail == []
+
+
+def test_dropped_suggestion_round_trip():
+    from nutrition_meal_planning_team.models import DroppedSuggestion
+
+    d = DroppedSuggestion(
+        name="Pesto Pasta",
+        reasons=["allergen:tree_nut", "dietary_forbid:gluten"],
+        detail=["Contains pine nuts (tree_nut allergen).", "Uses wheat pasta."],
+    )
+    restored = DroppedSuggestion.model_validate(d.model_dump())
+    assert restored.name == "Pesto Pasta"
+    assert restored.reasons == ["allergen:tree_nut", "dietary_forbid:gluten"]
+    assert restored.detail == [
+        "Contains pine nuts (tree_nut allergen).",
+        "Uses wheat pasta.",
+    ]
+
+
+def test_meal_recommendation_with_id_new_fields_defaults():
+    from nutrition_meal_planning_team.models import MealRecommendationWithId
+
+    r = MealRecommendationWithId()
+    assert r.clinical_flags == []
+    assert r.parsed_ingredients_present is True
+
+
+def test_meal_recommendation_with_id_round_trip():
+    from nutrition_meal_planning_team.models import MealRecommendationWithId
+
+    r = MealRecommendationWithId(
+        recommendation_id="r1",
+        clinical_flags=["interaction:warfarin"],
+        parsed_ingredients_present=False,
+    )
+    restored = MealRecommendationWithId.model_validate(r.model_dump())
+    assert restored.recommendation_id == "r1"
+    assert restored.clinical_flags == ["interaction:warfarin"]
+    assert restored.parsed_ingredients_present is False
+
+
+def test_meal_plan_response_new_fields_defaults():
+    from nutrition_meal_planning_team.models import MealPlanResponse
+
+    resp = MealPlanResponse(client_id="c1")
+    assert resp.dropped == []
+    assert resp.flags_by_recommendation == {}
+    assert resp.guardrail_version == ""
+    assert resp.restrictions_best_effort is False
+
+
+def test_meal_plan_response_round_trip():
+    from nutrition_meal_planning_team.models import (
+        DroppedSuggestion,
+        MealPlanResponse,
+        MealRecommendationWithId,
+    )
+
+    resp = MealPlanResponse(
+        client_id="c1",
+        suggestions=[
+            MealRecommendationWithId(
+                recommendation_id="r1",
+                clinical_flags=["interaction:warfarin"],
+                parsed_ingredients_present=False,
+            )
+        ],
+        dropped=[
+            DroppedSuggestion(
+                name="Pesto Pasta",
+                reasons=["allergen:tree_nut"],
+                detail=["Contains pine nuts (tree_nut allergen)."],
+            )
+        ],
+        flags_by_recommendation={"r1": ["advisory:vitamin_k"]},
+        guardrail_version="2026.05.0",
+        restrictions_best_effort=True,
+    )
+    payload = resp.model_dump()
+    restored = MealPlanResponse.model_validate(payload)
+    assert restored.model_dump() == payload
+    assert restored.suggestions[0].clinical_flags == ["interaction:warfarin"]
+    assert restored.suggestions[0].parsed_ingredients_present is False
+    assert restored.dropped[0].name == "Pesto Pasta"
+    assert restored.dropped[0].reasons == ["allergen:tree_nut"]
+    assert restored.flags_by_recommendation == {"r1": ["advisory:vitamin_k"]}
+    assert restored.guardrail_version == "2026.05.0"
+    assert restored.restrictions_best_effort is True
+
+
+def test_meal_plan_response_backwards_compat():
+    """Pre-W8 payloads (missing new fields) deserialize with safe defaults."""
+    from nutrition_meal_planning_team.models import MealPlanResponse
+
+    legacy_payload = {"client_id": "c1", "suggestions": []}
+    resp = MealPlanResponse.model_validate(legacy_payload)
+    assert resp.client_id == "c1"
+    assert resp.suggestions == []
+    assert resp.dropped == []
+    assert resp.flags_by_recommendation == {}
+    assert resp.guardrail_version == ""
+    assert resp.restrictions_best_effort is False
