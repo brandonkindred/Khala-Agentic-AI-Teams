@@ -73,4 +73,39 @@ describe('AISystemsApiService', () => {
     expect(req.request.method).toBe('GET');
     req.flush({ project_name: projectName });
   });
+
+  it('listJobs with runningOnly=true', () => {
+    service.listJobs(true).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/build/jobs`);
+    expect(req.request.params.get('running_only')).toBe('true');
+    req.flush({});
+  });
+
+  it('cancelJob', () => {
+    service.cancelJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/build/job/j1/cancel`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('deleteJob', () => {
+    service.deleteJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/build/job/j1`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush({});
+  });
+
+  it('resumeJob', () => {
+    service.resumeJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/build/job/j1/resume`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('restartJob', () => {
+    service.restartJob('j1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/build/job/j1/restart`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
 });
