@@ -133,7 +133,7 @@ npm ci
 npm start             # Dev server at localhost:4200
 npm run build         # Production build
 npm test              # Vitest (requires Chrome)
-npm run test:coverage # 80% line coverage target
+npm run test:coverage # 95% line coverage target
 ```
 
 ### Docker (Full Stack)
@@ -227,6 +227,16 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 - Per-file ignores exist for tests and `agent_implementations/`
 - **TypeScript**: Angular style; SCSS for styling
 
+### Project Rules
+
+- **Never reference GitHub issues.** Do not mention issue numbers (e.g. `#243`, `#369`, `Issue #531`), issue URLs, or "see issue X" anywhere in source code, comments, docstrings, commit messages, PR titles/bodies, changelogs, or documentation. Describe the change on its own terms — what it does and why — without pointing at an external tracker. This rule applies to *new* writing; existing references in this file and historical docs are grandfathered until the surrounding section is rewritten.
+- **Design by Contract (DbC) is mandatory for all code and comments.** Every function, method, and module must make its contract explicit:
+  - **Preconditions** — what callers must guarantee about inputs (types, ranges, invariants, required state). Enforce with `assert` or explicit validation that raises on violation at boundaries.
+  - **Postconditions** — what the function guarantees about its return value and observable side effects when preconditions hold.
+  - **Invariants** — properties of a class/module that hold before and after every public operation.
+  - Document the contract in the docstring under explicit `Preconditions:`, `Postconditions:`, and (where relevant) `Invariants:` sections. Comments that are not part of a contract should still respect the existing "only write a comment when the WHY is non-obvious" rule.
+  - Violations are bugs in the *caller* (precondition) or *callee* (postcondition/invariant) — never silently coerce, never `try`/`except` around a contract failure to hide it.
+
 ## Key Environment Variables
 
 | Variable | Purpose |
@@ -277,9 +287,10 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 
 ## Testing
 
-- **Backend**: `pytest` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning v3, sales, deepthought, etc.)
-- **Frontend**: Vitest + Angular testing utilities; 80% line coverage target for `src/app`
-- **CI**: GitHub Actions — ruff lint must pass first, then parallel test jobs, then docker smoke test
+- **Coverage requirement: tests must cover at least 95% of code (line coverage) on both backend and frontend.** This is a hard floor for new and modified code; CI enforces it. If a file or branch cannot reach 95%, document the reason explicitly in the PR and add a targeted `# pragma: no cover` (Python) or `/* istanbul ignore next */` (TypeScript) with a one-line justification — do not lower the global threshold.
+- **Backend**: `pytest` with `pytest-cov` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning v3, sales, deepthought, etc.) and fails the build below 95% line coverage.
+- **Frontend**: Vitest + Angular testing utilities; **95% line coverage target** for `src/app`.
+- **CI**: GitHub Actions — ruff lint must pass first, then parallel test jobs (coverage-gated at 95%), then docker smoke test.
 
 ## Reference Docs
 
