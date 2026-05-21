@@ -37,8 +37,13 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     result = 100 - (100 / (1 + rs))
-    # When avg_loss is zero (sustained uptrend) RS is infinite → RSI = 100
-    result = result.fillna(np.where(avg_loss == 0, 100.0, np.nan))
+    # When avg_loss is zero (sustained uptrend) RS is infinite → RSI = 100.
+    # pandas 3.x requires a Series here (rejects raw ndarray), so wrap the
+    # np.where result with the same index as ``result``.
+    fill_values = pd.Series(
+        np.where(avg_loss == 0, 100.0, np.nan), index=result.index
+    )
+    result = result.fillna(fill_values)
     return result
 
 

@@ -70,6 +70,7 @@ from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult, StrategyLabPhase
+from .quality_gates.rule_probes import RuleProbesGate
 from .quality_gates.spec_readiness import SpecReadinessGate
 from .quality_gates.strategy_validator import StrategySpecValidator
 from .quality_gates.target_symbol_coverage import TargetSymbolCoverageGate
@@ -152,6 +153,16 @@ def _design_review_rounds() -> int:
         return max(int(raw), 1)
     except ValueError:
         return 5
+
+
+def _orchestrator_runner(code, market_data, config, *, strategy=None, **kwargs):
+    """Late-binding adapter so ``RuleProbesGate`` resolves
+    ``run_strategy_code`` through this module's namespace at call time —
+    test monkey-patches of ``investment_team.strategy_lab.orchestrator.
+    run_strategy_code`` therefore apply to probe execution as well as
+    the main pipeline.
+    """
+    return run_strategy_code(code, market_data, config, strategy=strategy, **kwargs)
 
 
 MAX_CODE_REFINEMENT_ROUNDS = 50
@@ -319,6 +330,14 @@ class StrategyLabOrchestrator:
         self.strategy_validator = StrategySpecValidator()
         self.code_safety_checker = CodeSafetyChecker()
         self.code_conformance_gate = CodeConformanceGate()
+        # Behavioural complement to CodeConformanceGate: runs the compiled
+        # strategy against per-rule synthetic-bar sequences and asserts
+        # each rule actually fires. Critical failures route back to
+        # refinement with the failing rule_id (see line ~836). The gate's
+        # runner is wired through this module so test monkey-patches of
+        # ``investment_team.strategy_lab.orchestrator.run_strategy_code``
+        # apply to probe execution as well as the main pipeline.
+        self.rule_probes_gate = RuleProbesGate(runner=_orchestrator_runner)
         self.anomaly_detector = BacktestAnomalyDetector()
         self.acceptance_gate = AcceptanceGate()
         self.target_symbol_coverage_gate = TargetSymbolCoverageGate()
@@ -834,6 +853,14 @@ class StrategyLabOrchestrator:
             round_gate_results.extend(code_gates)
             conformance_gates = self.code_conformance_gate.check(code, spec)
             round_gate_results.extend(conformance_gates)
+            # Behavioural rule probes only run when conformance is clean.
+            # Probing code that already failed structural checks adds noisy
+            # rule_id criticals on top of the cleaner conformance critical.
+            if not any(
+                not g.passed and g.severity == "critical" for g in conformance_gates
+            ):
+                probe_gates = self.rule_probes_gate.check(code, spec)
+                round_gate_results.extend(probe_gates)
             self.record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
 
             checks_total = len(round_gate_results)
@@ -853,7 +880,8 @@ class StrategyLabOrchestrator:
                     },
                 )
                 failure_details = "\n".join(
-                    f"- [{g.gate_name}] {g.details}" for g in critical_failures
+                    f"- [{g.gate_name}{(':' + g.rule_id) if g.rule_id else ''}] {g.details}"
+                    for g in critical_failures
                 )
                 spec, code, exhausted = self._refine_or_exhaust(
                     spec=spec,
