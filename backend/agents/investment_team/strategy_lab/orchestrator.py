@@ -68,11 +68,45 @@ from .quality_gates.spec_readiness import SpecReadinessGate
 from .quality_gates.strategy_validator import StrategySpecValidator
 from .quality_gates.target_symbol_coverage import TargetSymbolCoverageGate
 from .spec_dsl import DEFAULT_SIZING_PAYLOAD
+from .synthesis import CompilerError, compile_strategy
 from .zero_trade_repair import ZeroTradeRepairer
 
 logger = logging.getLogger(__name__)
 
 PhaseCallback = Callable[[str, Dict[str, Any]], None]
+
+
+def _coerce_requires_custom_code(raw: Any) -> bool:
+    """Coerce an arbitrary value to ``bool`` for ``StrategySpec.requires_custom_code``.
+
+    Pre:  ``raw`` is any value from an untrusted JSON source.
+    Post: returns a real ``bool``. Recognised truthy: ``True``, ``1``
+          (int), and case-insensitive ``"true"`` / ``"yes"`` / ``"on"``
+          / ``"1"`` / ``"t"`` / ``"y"``. Recognised falsey: ``False``,
+          ``0`` (int), and case-insensitive ``"false"`` / ``"no"`` /
+          ``"off"`` / ``"0"`` / ``"f"`` / ``"n"`` / ``""``. Everything
+          else (``None``, prose, off-spec ints) → ``False``.
+    Invariant: never raises. Default ``False`` keeps the deterministic
+          compile path on for malformed input rather than aborting the
+          attempt with a Pydantic ValidationError.
+    """
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        if raw == 0:
+            return False
+        if raw == 1:
+            return True
+        return False
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in {"true", "yes", "on", "1", "t", "y"}:
+            return True
+        if s in {"false", "no", "off", "0", "f", "n", ""}:
+            return False
+    return False
 
 
 # Refinement output is code-only post-#543. Anything else the LLM emits is
@@ -1650,13 +1684,36 @@ class StrategyLabOrchestrator:
             target_symbols=strategy_dict.get("target_symbols", []),
             risk_limits=strategy_dict.get("risk_limits", {}),
             speculative=strategy_dict.get("speculative", False),
+            requires_custom_code=_coerce_requires_custom_code(
+                strategy_dict.get("requires_custom_code")
+            ),
             strategy_code=code,
         )
 
-        # Snapshot ideation outputs so reviewers can compare against any
-        # refinement-driven mutation persisted on the final record (#547).
+        # ``original_spec`` / ``original_code`` are snapshotted before the
+        # deterministic compile so reviewers can compare against any
+        # refinement-driven mutation persisted on the final record.
         original_spec = spec.model_copy(deep=True)
         original_code = code
+
+        # Deterministic compile by default. On ``requires_custom_code`` or
+        # ``CompilerError``, ideation-authored ``code`` is kept verbatim.
+        # The result is mirrored into the local ``code`` variable because
+        # downstream gates consume ``code=...`` directly, not
+        # ``spec.strategy_code``.
+        if not spec.requires_custom_code:
+            try:
+                compiled = compile_strategy(spec)
+                spec.strategy_code = compiled
+                code = compiled
+            except CompilerError as exc:
+                logger.warning(
+                    "compiler_fallback strategy_id=%s reason=%s",
+                    spec.strategy_id,
+                    exc,
+                )
+                spec.requires_custom_code = True
+                spec.strategy_code = code
 
         # Override generic fee defaults with asset-class-appropriate values
         if config.transaction_cost_bps == 5.0 and config.slippage_bps == 2.0:

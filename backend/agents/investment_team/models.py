@@ -220,6 +220,11 @@ class StrategySpec(BaseModel):
     speculative: bool = False
     strategy_code: Optional[str] = None
     requires_redesign: bool = False
+    # False: orchestrator compiles ``strategy_code`` deterministically
+    # from the structured rules. True: keep LLM-authored code verbatim
+    # because the spec falls outside the deterministic compiler's
+    # expressible subset. Orthogonal to ``requires_redesign``.
+    requires_custom_code: bool = False
     unparsed_rules: List[str] = Field(default_factory=list)
     audit: AuditContext = Field(default_factory=AuditContext)
 
