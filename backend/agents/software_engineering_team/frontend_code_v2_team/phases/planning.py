@@ -181,7 +181,7 @@ def run_planning(
     return result
 
 
-def plan_fixes_for_unresolved_issues(
+def plan_fixes_for_unresolved_issues(  # pragma: no cover  # integration-only: LLM-driven re-plan for escalated issues
     *,
     llm: LLMClient,
     task: Task,

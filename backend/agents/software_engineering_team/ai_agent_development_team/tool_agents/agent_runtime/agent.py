@@ -24,7 +24,7 @@ class AgentRuntimeToolAgent:
 
         self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
 
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
+    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:  # pragma: no cover  # integration-only: runs live LLM agent
         agent = Agent(model=self._model)
         prompt = PROMPT.format(
             microtask=inp.microtask.description or inp.microtask.title,
