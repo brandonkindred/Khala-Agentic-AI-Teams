@@ -265,6 +265,15 @@ jobs:
                   "name": "Software Engineering Team",
                   "tests": "software_engineering_team/tests/",
                   "source": "software_engineering_team",
+                  # SE-specific coverage config: the team owns a large surface area
+                  # of integration-only modules (live LLM / git / npm / Temporal)
+                  # that are exercised end-to-end rather than by unit tests. The
+                  # per-file omits live in software_engineering_team/pyproject.toml
+                  # under [tool.coverage.run] omit; pointing --cov-config at that
+                  # file here makes them take effect for the CI invocation, which
+                  # runs from backend/agents/ where coverage's default config
+                  # search does not pick up software_engineering_team/pyproject.toml.
+                  "cov_config": "software_engineering_team/pyproject.toml",
                   "extra_requirements": "software_engineering_team/requirements.txt",
                   "editable_install": "software_engineering_team",
                   "needs_node": True,
@@ -514,11 +523,20 @@ jobs:
       # Unit tests only — anything that needs Postgres or the job service is
       # marked `@pytest.mark.integration` and runs in `test-integration`.
       # Coverage gate is enforced per team at 90% line coverage; see CLAUDE.md.
-      - run: >-
-          pytest ${{ matrix.tests }} -v --tb=short -n auto -m "not integration"
-          --cov=${{ matrix.source }}
-          --cov-report=term-missing
-          --cov-fail-under=90
+      # `matrix.cov_config` is optional: when set (e.g. SE team), pass
+      # `--cov-config=<path>` so coverage picks up the team's per-file omit
+      # list. Empty matrix fields expand to empty strings; the conditional
+      # keeps the flag out of the command when no config is provided.
+      - run: |
+          COV_CONFIG_ARG=""
+          if [ -n "${{ matrix.cov_config }}" ]; then
+            COV_CONFIG_ARG="--cov-config=${{ matrix.cov_config }}"
+          fi
+          pytest ${{ matrix.tests }} -v --tb=short -n auto -m "not integration" \
+            --cov=${{ matrix.source }} \
+            $COV_CONFIG_ARG \
+            --cov-report=term-missing \
+            --cov-fail-under=90
 
   # Integration suite: real Postgres + real job service. Currently a sentinel
   # job that boots the infra and runs the marker; per-team integration suites
