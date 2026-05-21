@@ -101,18 +101,28 @@ def _check_entry(
             f"expected at least one {expected_side} trade to open on/after "
             f"trigger bar {trigger_date}, but no trades were recorded"
         )
+    early_trades_seen = 0
     for trade in trades:
         side = getattr(trade, "side", None)
         entry_date = getattr(trade, "entry_date", None)
         if expected_side is not None and side != expected_side:
             continue
         if trigger_date is not None and entry_date is not None and str(entry_date) < trigger_date:
-            # The opening trade happened *before* the trigger bar — that
-            # might still be the rule under test (entry bars often satisfy
-            # the predicate earlier than the planned trigger when the
-            # binary search lands a touch high). Accept it.
-            return True, f"trade opened {side} on {entry_date}"
+            # The opening trade happened *before* the synthesised trigger bar.
+            # The recipe verified the predicate becomes True at trigger_date,
+            # so a trade opened earlier is unrelated activity (e.g. an
+            # always-on entry on bar 0) and is not evidence the rule under
+            # test actually fires. Skip and keep scanning for a later
+            # correctly-sided trade.
+            early_trades_seen += 1
+            continue
         return True, f"trade opened {side} on {entry_date}"
+    if early_trades_seen:
+        return False, (
+            f"found {early_trades_seen} {expected_side} trade(s) but all opened "
+            f"before trigger bar {trigger_date}; rule predicate likely not the "
+            "actual entry signal"
+        )
     return False, f"no trade with side={expected_side} found"
 
 

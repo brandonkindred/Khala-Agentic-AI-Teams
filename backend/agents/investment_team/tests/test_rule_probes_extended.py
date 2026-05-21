@@ -768,10 +768,11 @@ def test_compute_indicator_at_returns_none_for_unsupported_name():
 # ===========================================================================
 
 
-def test_assess_probe_entry_with_correct_side_but_early_date_passes():
-    """A trade opened before the probe's trigger date is still accepted —
-    binary-search recipes can over-shoot, and an early but correctly-sided
-    fill is still evidence the rule fires."""
+def test_assess_probe_entry_rejects_trade_opened_before_trigger():
+    """A correctly-sided trade opened *before* the probe's trigger bar is
+    not evidence the rule under test fires — it's more likely an unrelated
+    always-on entry. The asserter must reject it so swapped/negated
+    predicates can't slip past the gate."""
     from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
         ExpectedOutcome,
     )
@@ -806,7 +807,8 @@ def test_assess_probe_entry_with_correct_side_but_early_date_passes():
     g = RuleProbesGate(runner=lambda *a, **k: _Stub())
     with g._using_phase("synthesis"):
         result = assess_probe(probe, _Stub(success=True, trades=[early_trade]), emitter=g)
-    assert result.passed is True
+    assert result.passed is False
+    assert "before trigger bar" in result.details
 
 
 def test_series_for_source_open_high_low_columns():
@@ -881,6 +883,59 @@ def test_priceref_vs_priceref_eq_falls_through_to_else_branch():
     bar = _bar_with_priceref_relation("close", "high", "==")
     # The adjustment makes close == high (the rhs value).
     assert bar.close == bar.high
+
+
+def test_priceref_below_clamp_floor_marks_unprobeable():
+    """``bar.close < 0.005`` would synthesise a trigger value below
+    ``_MIN_PRICE``; the recipe must refuse rather than ship a probe whose
+    post-clamp bars no longer satisfy the predicate."""
+    pred = Predicate(lhs="bar.close", op="<", rhs=0.005)
+    bars, _trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is None
+    assert reason is not None
+    assert "clamp_floor" in reason
+
+
+def test_priceref_above_clamp_floor_still_probeable():
+    """``bar.close > 50`` is safe — trigger value rhs+1=51 and baseline
+    rhs-5=45 both clear the clamp floor, so the post-clamp bars still
+    satisfy the predicate."""
+    pred = Predicate(lhs="bar.close", op=">", rhs=50.0)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None
+    # Critical: the post-clamp trigger bar must still satisfy the predicate.
+    assert bars[trigger].close > 50.0
+
+
+def test_priceref_baseline_below_clamp_floor_marks_unprobeable():
+    """``bar.close > -10`` would set baseline to ``rhs - 5 = -15``, below
+    the clamp floor. Refuse the probe."""
+    pred = Predicate(lhs="bar.close", op=">", rhs=-10.0)
+    bars, _trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is None
+    assert reason is not None
+
+
+def test_indicator_trigger_idx_points_at_first_satisfying_bar():
+    """For an SMA flat-line recipe, the predicate is satisfied at every
+    post-warmup bar. The recipe must set ``trigger_bar_index`` to the
+    earliest such bar so the asserter's stricter timing check still
+    accepts a strategy that opens at the rule's first-fire bar."""
+    pred = Predicate(
+        lhs=IndicatorRef(name="sma", params={"period": 5}),
+        op=">",
+        rhs=50.0,
+    )
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None
+    series = _bars_to_df(bars)["close"]
+    # The earliest SMA-finite bar that satisfies the predicate.
+    sma_series = sma(series, 5)
+    earliest = next(
+        i for i, v in enumerate(sma_series.tolist())
+        if isinstance(v, float) and v == v and v > 50.0  # not-NaN, satisfies
+    )
+    assert trigger == earliest
 
 
 def test_assess_probe_entry_with_wrong_side_then_right_side_still_passes():

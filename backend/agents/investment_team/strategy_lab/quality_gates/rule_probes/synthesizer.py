@@ -581,29 +581,43 @@ def _synthesise_for_predicate(
 def _synth_priceref_vs_number(
     lhs: str, op: str, rhs: float, base_close: float, min_bars: int
 ) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
-    """Generate bars where the bar's price field satisfies ``lhs op rhs``."""
+    """Generate bars where the bar's price field satisfies ``lhs op rhs``.
+
+    Bails out (unprobeable) when the synthesised values would be clamped
+    by :func:`_normalise_ohlc` (every OHLC value floored to ``_MIN_PRICE``).
+    Verifying on raw bars and shipping clamped bars to the sandbox would
+    produce a false probe failure (e.g. ``bar.close < 0.005`` synthesised
+    as ``-0.995`` but seen as ``0.01`` post-clamp).
+    """
     n = max(min_bars, 30)
     trigger_idx = n - _BARS_AFTER_TRIGGER - 1
     bars: List[OHLCVBar] = []
     field_name = lhs.split(".", 1)[1]  # "bar.close" -> "close"
     # Baseline closes that don't satisfy the predicate.
     baseline = rhs - 5.0 if op in (">", ">=") else rhs + 5.0
+    if op == ">":
+        trigger_value = rhs + 1.0
+    elif op == ">=":
+        trigger_value = rhs + 0.5
+    elif op == "<":
+        trigger_value = rhs - 1.0
+    elif op == "<=":
+        trigger_value = rhs - 0.5
+    elif op == "==":
+        trigger_value = rhs
+    else:
+        return None, 0, f"unsupported_priceref_op:{op}"
+    # ``_normalise_ohlc`` floors every OHLC value to ``_MIN_PRICE`` and may
+    # round high/low up/down around the field's adjacent values; the
+    # critical case is the trigger value itself becoming ``_MIN_PRICE`` and
+    # no longer satisfying the predicate. Refuse the probe in that case.
+    if trigger_value < _MIN_PRICE and not _compare(_MIN_PRICE, op, rhs):
+        return None, 0, "priceref_value_below_clamp_floor"
+    if baseline < _MIN_PRICE and field_name != "volume":
+        return None, 0, "priceref_baseline_below_clamp_floor"
     for i in range(n):
         if i == trigger_idx:
-            # Move the relevant field across the threshold.
-            if op == ">":
-                value = rhs + 1.0
-            elif op == ">=":
-                value = rhs + 0.5
-            elif op == "<":
-                value = rhs - 1.0
-            elif op == "<=":
-                value = rhs - 0.5
-            elif op == "==":
-                value = rhs
-            else:
-                return None, 0, f"unsupported_priceref_op:{op}"
-            bars.append(_bar_with_field(field_name, value))
+            bars.append(_bar_with_field(field_name, trigger_value))
         else:
             bars.append(_bar_with_field(field_name, baseline))
     if not _verify_priceref_vs_number(bars, field_name, op, rhs, trigger_idx):
@@ -768,6 +782,13 @@ def _synth_indicator_vs_number(
 
     if not _verify_indicator_vs_number(bars, ref, op, rhs, trigger_idx):
         return None, 0, f"indicator_predicate_verification_failed:{ref.name}_{op}"
+    # Refine trigger_idx to the earliest bar the predicate actually holds at —
+    # the asserter requires entry_date >= trigger_date, and a correctly-built
+    # strategy opens at the rule's first-fire bar, not at the recipe's
+    # constructed end-of-window bar.
+    earliest = _earliest_indicator_satisfying_index(ref, bars, op, rhs)
+    if earliest is not None:
+        trigger_idx = earliest
     return bars, trigger_idx, None
 
 
@@ -917,6 +938,25 @@ def _verify_indicator_vs_number(
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
         return False
     return _compare(value, op, rhs)
+
+
+def _earliest_indicator_satisfying_index(
+    ref: IndicatorRef, bars: List[OHLCVBar], op: str, rhs: float
+) -> Optional[int]:
+    """Scan the bar series for the first index where ``indicator(bars) op rhs``
+    holds. Used to align the probe's ``trigger_bar_index`` with the bar a
+    correctly-built strategy would actually open on (the rule's first-fire
+    bar). Returns ``None`` if no bar satisfies the predicate.
+    """
+    for i in range(len(bars)):
+        value = _compute_indicator_at(ref, bars, i)
+        if value is None:
+            continue
+        if not math.isfinite(value):
+            continue
+        if _compare(value, op, rhs):
+            return i
+    return None
 
 
 def _compute_indicator_at(ref: IndicatorRef, bars: List[OHLCVBar], idx: int) -> Optional[float]:
