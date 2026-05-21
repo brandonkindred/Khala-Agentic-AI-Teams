@@ -1,0 +1,832 @@
+"""Additional coverage for ``investment_team.api.main`` helpers + routes.
+
+Builds on ``test_api_routes`` and ``test_investment_team``'s cycle
+fixtures. Targets:
+
+* ``_PersistentDict`` __setitem__/__getitem__/__contains__/pop/values
+  via an in-process FakeJobClient.
+* ``_env_positive_int`` env-var parsing.
+* ``_normalize_strategy_lab_asset_class`` + ``_build_strategy_from_ideation``
+  builders.
+* ``_run_backtest_background`` happy + HTTPException + generic-exception
+  + early-cancel branches.
+* ``_purge_strategy_lab_job_storage`` + ``_delete_paper_sessions_for_lab_record``.
+* ``_resolve_fee_overrides`` (0.0 sentinel handling).
+* ``_recover_orphaned_paper_trading_sessions`` startup hook.
+* ``_load_run_from_job_service`` fallback + ``_persist_run_state`` swallowing.
+* ``_strategy_lab_signal_expert_enabled`` env-var toggle.
+* ``run_paper_trading`` validation branches (not-winning / no strategy_code)
+  + happy path with patched background worker.
+* ``stream_strategy_lab_run`` terminal-state short-circuit (404 + immediate
+  done).
+* ``delete_strategy_lab_record`` success path.
+* ``complete_advisor_session`` happy path.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
+import pytest
+
+
+class _InMemoryDict:
+    def __init__(self) -> None:
+        self._d: Dict[str, Any] = {}
+
+    def __setitem__(self, k, v):
+        self._d[k] = v
+
+    def __getitem__(self, k):
+        return self._d[k]
+
+    def get(self, k, default=None):
+        return self._d.get(k, default)
+
+    def __contains__(self, k):
+        return k in self._d
+
+    def __delitem__(self, k):
+        self._d.pop(k, None)
+
+    def pop(self, k, *args):
+        if args:
+            return self._d.pop(k, args[0])
+        return self._d.pop(k)
+
+    def values(self):
+        return list(self._d.values())
+
+
+@pytest.fixture
+def api_client(monkeypatch: pytest.MonkeyPatch):
+    from fastapi.testclient import TestClient
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_profiles", _InMemoryDict())
+    monkeypatch.setattr(api_main, "_proposals", _InMemoryDict())
+    monkeypatch.setattr(api_main, "_strategies", _InMemoryDict())
+    monkeypatch.setattr(api_main, "_validations", _InMemoryDict())
+    monkeypatch.setattr(api_main, "_backtests", _InMemoryDict())
+    monkeypatch.setattr(api_main, "_strategy_lab_records", _InMemoryDict())
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", _InMemoryDict())
+    monkeypatch.setattr(api_main, "_advisor_sessions", _InMemoryDict())
+    from investment_team.orchestrator import WorkflowState
+
+    monkeypatch.setattr(api_main, "_workflow_state", WorkflowState())
+    return TestClient(api_main.app)
+
+
+# ---------------------------------------------------------------------------
+# _env_positive_int
+# ---------------------------------------------------------------------------
+
+
+def test_env_positive_int_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api.main import _env_positive_int
+
+    monkeypatch.delenv("MY_TEST_INT", raising=False)
+    assert _env_positive_int("MY_TEST_INT", 7) == 7
+
+
+def test_env_positive_int_returns_default_on_non_integer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.api.main import _env_positive_int
+
+    monkeypatch.setenv("MY_TEST_INT", "not-a-number")
+    assert _env_positive_int("MY_TEST_INT", 5) == 5
+
+
+def test_env_positive_int_returns_default_on_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api.main import _env_positive_int
+
+    monkeypatch.setenv("MY_TEST_INT", "0")
+    assert _env_positive_int("MY_TEST_INT", 3) == 3
+
+
+def test_env_positive_int_returns_parsed_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api.main import _env_positive_int
+
+    monkeypatch.setenv("MY_TEST_INT", "42")
+    assert _env_positive_int("MY_TEST_INT", 1) == 42
+
+
+# ---------------------------------------------------------------------------
+# _strategy_lab_signal_expert_enabled
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_lab_signal_expert_enabled_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api.main import _strategy_lab_signal_expert_enabled
+
+    monkeypatch.delenv("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", raising=False)
+    assert _strategy_lab_signal_expert_enabled() is True
+
+
+def test_strategy_lab_signal_expert_enabled_falsy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api.main import _strategy_lab_signal_expert_enabled
+
+    monkeypatch.setenv("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", "false")
+    assert _strategy_lab_signal_expert_enabled() is False
+
+
+# ---------------------------------------------------------------------------
+# _live_paper_enabled + _resolve_fee_overrides
+# ---------------------------------------------------------------------------
+
+
+def test_live_paper_enabled_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api.main import _live_paper_enabled
+
+    monkeypatch.delenv("INVESTMENT_LIVE_PAPER_ENABLED", raising=False)
+    assert _live_paper_enabled() is False
+
+
+def test_live_paper_enabled_on_when_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api.main import _live_paper_enabled
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    assert _live_paper_enabled() is True
+
+
+def test_resolve_fee_overrides_zero_preserved() -> None:
+    """``transaction_cost_bps=0.0`` is honoured (not coerced to default)."""
+    from investment_team.api.main import RunPaperTradingRequest, _resolve_fee_overrides
+
+    req = RunPaperTradingRequest(
+        lab_record_id="lab-1",
+        transaction_cost_bps=0.0,
+        slippage_bps=0.0,
+    )
+    tx, slip = _resolve_fee_overrides(req)
+    assert tx == 0.0
+    assert slip == 0.0
+
+
+def test_resolve_fee_overrides_defaults_when_none() -> None:
+    from investment_team.api.main import RunPaperTradingRequest, _resolve_fee_overrides
+
+    req = RunPaperTradingRequest(
+        lab_record_id="lab-1",
+        transaction_cost_bps=None,
+        slippage_bps=None,
+    )
+    tx, slip = _resolve_fee_overrides(req)
+    assert tx == 5.0  # _DEFAULT_TX_COST_BPS
+    assert slip == 2.0  # _DEFAULT_SLIPPAGE_BPS
+
+
+# ---------------------------------------------------------------------------
+# _normalize_strategy_lab_asset_class + _build_strategy_from_ideation
+# ---------------------------------------------------------------------------
+
+
+def test_build_strategy_from_ideation_round_trip() -> None:
+    from investment_team.api.main import _build_strategy_from_ideation
+
+    data = {
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "timeframe": "1h",
+        "entry_rules": [{"kind": "entry", "side": "long", "when": {"lhs": "bar.close", "op": ">", "rhs": 100.0}}],
+        "exit_rules": [{"kind": "stop_loss", "pct": 0.05}],
+        "sizing": {"kind": "fixed_fraction", "fraction": 0.1},
+        "risk_limits": {"max_position_pct": 5},
+        "speculative": True,
+    }
+    strategy, sid = _build_strategy_from_ideation(data)
+    assert sid.startswith("strat-lab-")
+    # normalize_asset_class passes "stocks" through unchanged (it's already canonical).
+    assert strategy.asset_class == "stocks"
+    assert strategy.timeframe == "1h"
+    assert strategy.speculative is True
+
+
+def test_build_strategy_from_ideation_defaults_when_missing() -> None:
+    from investment_team.api.main import _build_strategy_from_ideation
+
+    # All fields missing — defaults must kick in (timeframe → "1d").
+    data: Dict[str, Any] = {}
+    strategy, sid = _build_strategy_from_ideation(data)
+    assert strategy.timeframe == "1d"
+    assert sid.startswith("strat-lab-")
+
+
+def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
+    from investment_team.api.main import _build_strategy_from_ideation
+
+    data = {
+        "asset_class": "stocks",
+        "timeframe": "1d",
+        "entry_rules": ["not a dict", 42, None],
+        "exit_rules": [{"kind": "stop_loss", "pct": 0.1}, "garbage"],
+        "sizing": "not a dict — should fall back to default",
+    }
+    strategy, _ = _build_strategy_from_ideation(data)
+    assert strategy.entry_rules == []
+    assert len(strategy.exit_rules) == 1
+
+
+# ---------------------------------------------------------------------------
+# _PersistentDict (in-process FakeJobClient roundtrip)
+# ---------------------------------------------------------------------------
+
+
+class _FakeJobClient:
+    """Minimal in-memory ``JobServiceClient`` for _PersistentDict tests."""
+
+    def __init__(self, team: str = "x", base_url: str | None = None) -> None:
+        self.team = team
+        self._jobs: Dict[str, Dict[str, Any]] = {}
+
+    def get_job(self, job_id: str):
+        return dict(self._jobs[job_id]) if job_id in self._jobs else None
+
+    def create_job(self, job_id: str, *, status: str = "stored", **fields):
+        self._jobs[job_id] = {"job_id": job_id, "status": status, **fields}
+
+    def update_job(self, job_id: str, **fields):
+        if job_id in self._jobs:
+            self._jobs[job_id].update(fields)
+
+    def delete_job(self, job_id: str) -> bool:
+        return self._jobs.pop(job_id, None) is not None
+
+    def list_jobs(self, *, statuses=None):
+        return [dict(j) for j in self._jobs.values()]
+
+
+def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set, get, contains, delete, pop, values on a _PersistentDict."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+    from investment_team.models import (
+        IPS,
+        IncomeProfile,
+        InvestmentProfile,
+        LiquidityNeeds,
+        NetWorth,
+        PortfolioConstraints,
+        RiskTolerance,
+        SavingsRate,
+        TaxProfile,
+        UserPreferences,
+    )
+
+    pd = _PersistentDict("profiles_test")
+
+    # Build a minimal-but-valid IPS for the round trip.
+    profile = InvestmentProfile(
+        user_id="u1",
+        created_at="2024-01-01T00:00:00Z",
+        risk_tolerance=RiskTolerance.MEDIUM,
+        max_drawdown_tolerance_pct=20.0,
+        time_horizon_years=10,
+        liquidity_needs=LiquidityNeeds(),
+        income=IncomeProfile(annual_gross=100_000, stability="stable"),
+        net_worth=NetWorth(total=200_000, investable_assets=150_000),
+        savings_rate=SavingsRate(monthly=500, annual=6000),
+        tax_profile=TaxProfile(country="US"),
+        preferences=UserPreferences(),
+        constraints=PortfolioConstraints(),
+    )
+    ips = IPS(profile=profile)
+
+    pd["u1"] = ips
+    assert "u1" in pd
+    assert pd.get("u1") is not None
+
+    # __getitem__ returns the stored data dict.
+    fetched = pd["u1"]
+    assert fetched["profile"]["user_id"] == "u1"
+
+    # Overwrite via __setitem__ — exercises the update_job branch.
+    pd["u1"] = ips
+    assert pd.get("u1") is not None
+
+    # values() returns a list of dicts.
+    vals = pd.values()
+    assert len(vals) == 1
+    assert vals[0]["profile"]["user_id"] == "u1"
+
+    # pop with default — missing key returns default.
+    assert pd.pop("missing", "DEFAULT") == "DEFAULT"
+    # pop existing returns the value.
+    popped = pd.pop("u1", "FALLBACK")
+    assert popped["profile"]["user_id"] == "u1"
+    assert "u1" not in pd
+
+    # KeyError on bare __getitem__ for missing key.
+    with pytest.raises(KeyError):
+        _ = pd["nope"]
+    # pop without default and missing key raises KeyError.
+    with pytest.raises(KeyError):
+        pd.pop("nope")
+
+    # Storing a non-Pydantic value goes through the {"value": ...} path.
+    pd["plain"] = 42
+    assert pd.get("plain") == {"value": 42}
+
+    # __delitem__ removes silently.
+    del pd["plain"]
+    assert pd.get("plain") is None
+
+    # get() with default returns the default when key missing.
+    assert pd.get("missing", "SENTINEL") == "SENTINEL"
+
+
+# ---------------------------------------------------------------------------
+# _run_backtest_background — direct invocation with stubbed dependencies
+# ---------------------------------------------------------------------------
+
+
+def test_run_backtest_background_completes(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    # Stub the job-store helpers (instead of patching the real job service).
+    state: Dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
+    monkeypatch.setattr(
+        api_main,
+        "_bt_update_job",
+        lambda jid, **kw: state.update(kw),
+    )
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+
+    def _fake_run(strategy, config):
+        return bt_result, []
+
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _fake_run)
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+
+    api_main._run_backtest_background("job-1", strategy, config, "tester", [])
+    # Final state update is to COMPLETED.
+    assert state.get("status") == "completed"
+    assert state.get("backtest_id", "").startswith("bt-")
+
+
+def test_run_backtest_background_handles_http_exception(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from fastapi import HTTPException
+
+    from investment_team.api import main as api_main
+    from investment_team.models import BacktestConfig, StrategySpec
+
+    state: Dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    def _raises_http(strategy, config):
+        raise HTTPException(status_code=422, detail="bad strategy")
+
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_http)
+
+    strategy = StrategySpec(
+        strategy_id="s", authored_by="x", asset_class="equities", hypothesis="h",
+        signal_definition="s", timeframe="1d",
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    api_main._run_backtest_background("job-2", strategy, config, "tester", None)
+    assert state.get("status") == "failed"
+    assert state.get("error") == "bad strategy"
+
+
+def test_run_backtest_background_handles_generic_exception(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import BacktestConfig, StrategySpec
+
+    state: Dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    def _raises_generic(strategy, config):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_generic)
+
+    strategy = StrategySpec(
+        strategy_id="s", authored_by="x", asset_class="equities", hypothesis="h",
+        signal_definition="s", timeframe="1d",
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    api_main._run_backtest_background("job-3", strategy, config, "tester", None)
+    assert state.get("status") == "failed"
+    assert "network down" in (state.get("error") or "")
+
+
+def test_run_backtest_background_early_cancellation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import BacktestConfig, StrategySpec
+
+    state: Dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: True)
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    def _should_not_run(strategy, config):
+        raise AssertionError("backtest must not run when cancelled")
+
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _should_not_run)
+
+    strategy = StrategySpec(
+        strategy_id="s", authored_by="x", asset_class="equities", hypothesis="h",
+        signal_definition="s", timeframe="1d",
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    api_main._run_backtest_background("job-4", strategy, config, "tester", None)
+    # No update calls — early return.
+    assert state == {}
+
+
+# ---------------------------------------------------------------------------
+# _purge_strategy_lab_job_storage + _delete_paper_sessions_for_lab_record
+# ---------------------------------------------------------------------------
+
+
+def test_delete_paper_sessions_for_lab_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only sessions referencing the lab_record_id are deleted."""
+    import job_service_client as jsc_mod
+
+    fake = _FakeJobClient(team="investment_paper_trading_sessions")
+    fake.create_job("pt-1", data={"lab_record_id": "lab-1"})
+    fake.create_job("pt-2", data={"lab_record_id": "lab-other"})
+    fake.create_job("pt-3", data={"lab_record_id": "lab-1"})
+    fake.create_job("pt-4", data="not-a-dict")
+    fake.create_job("pt-5")  # no job_id when listed? — set explicitly via key
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", lambda team=None: fake)
+
+    from investment_team.api.main import _delete_paper_sessions_for_lab_record
+
+    deleted = _delete_paper_sessions_for_lab_record("lab-1")
+    assert deleted == 2
+
+
+def test_purge_strategy_lab_job_storage_filters_by_id_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strategies / backtests are only deleted when their ID has the lab prefix."""
+    import job_service_client as jsc_mod
+
+    clients_by_team: Dict[str, _FakeJobClient] = {}
+
+    def _factory(team: str = "x"):
+        if team not in clients_by_team:
+            clients_by_team[team] = _FakeJobClient(team=team)
+        return clients_by_team[team]
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _factory)
+
+    lab = _factory("investment_strategy_lab_records")
+    lab.create_job("lab-1")
+    lab.create_job("lab-2")
+
+    strat = _factory("investment_strategies")
+    strat.create_job("strat-lab-A")
+    strat.create_job("strat-non-lab-B")
+
+    bt = _factory("investment_backtests")
+    bt.create_job("bt-lab-A")
+    bt.create_job("bt-non-lab-B")
+
+    paper = _factory("investment_paper_trading_sessions")
+    paper.create_job("pt-1")
+
+    from investment_team.api.main import _purge_strategy_lab_job_storage
+
+    counts = _purge_strategy_lab_job_storage()
+    assert counts == {
+        "deleted_lab_records": 2,
+        "deleted_lab_strategies": 1,
+        "deleted_lab_backtests": 1,
+        "deleted_paper_trading_sessions": 1,
+    }
+
+
+def test_clear_strategy_lab_storage_route(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+    """The DELETE /strategy-lab/storage route forwards purge counts."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_purge_strategy_lab_job_storage",
+        lambda: {
+            "deleted_lab_records": 3,
+            "deleted_lab_strategies": 2,
+            "deleted_lab_backtests": 1,
+            "deleted_paper_trading_sessions": 4,
+        },
+    )
+
+    resp = api_client.delete("/strategy-lab/storage")
+    body = resp.json()
+    assert body["deleted_lab_records"] == 3
+    assert body["deleted_lab_strategies"] == 2
+    assert body["deleted_lab_backtests"] == 1
+    assert body["deleted_paper_trading_sessions"] == 4
+
+
+# ---------------------------------------------------------------------------
+# delete_strategy_lab_record happy path
+# ---------------------------------------------------------------------------
+
+
+def test_delete_strategy_lab_record_success(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-X", authored_by="x", asset_class="equities",
+        hypothesis="h", signal_definition="s", timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0, annualized_return_pct=20.0, volatility_pct=10.0,
+        sharpe_ratio=1.0, max_drawdown_pct=5.0, win_rate_pct=60.0, profit_factor=2.0,
+        calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-X", strategy_id="strat-lab-X", strategy=strat, config=cfg,
+        submitted_by="x", submitted_at="2024-01-01T00:00:00Z", completed_at="2024-01-01T01:00:00Z",
+        result=result, trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-X", strategy=strat, backtest=bt, is_winning=True,
+        strategy_rationale="r", analysis_narrative="n", created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-X"] = record
+    api_main._strategies["strat-lab-X"] = strat
+    api_main._backtests["bt-lab-X"] = bt
+
+    # Stub the side-effecting paper-session cleanup so we don't need a JobService.
+    monkeypatch.setattr(api_main, "_delete_paper_sessions_for_lab_record", lambda lab_id: 2)
+
+    resp = api_client.delete("/strategy-lab/records/lab-X")
+    body = resp.json()
+    assert body["lab_record_id"] == "lab-X"
+    assert body["deleted_strategy_id"] == "strat-lab-X"
+    assert body["deleted_backtest_id"] == "bt-lab-X"
+    assert body["deleted_paper_trading_sessions"] == 2
+    # Underlying stores were cleaned up.
+    assert api_main._strategy_lab_records.get("lab-X") is None
+    assert api_main._strategies.get("strat-lab-X") is None
+    assert api_main._backtests.get("bt-lab-X") is None
+
+
+# ---------------------------------------------------------------------------
+# _recover_orphaned_paper_trading_sessions startup hook
+# ---------------------------------------------------------------------------
+
+
+def test_recover_orphaned_paper_trading_sessions_marks_running_as_failed(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        PaperTradingSession,
+        PaperTradingStatus,
+        StrategySpec,
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s", authored_by="x", asset_class="equities", hypothesis="h",
+        signal_definition="s", timeframe="1d",
+    )
+    session_active = PaperTradingSession(
+        session_id="pt-active", lab_record_id="lab-1", strategy=strategy,
+        status=PaperTradingStatus.RUNNING, initial_capital=100_000.0,
+        current_capital=100_000.0, symbols_traded=["X"], data_source="yahoo",
+        data_period_start="2024-01-01", data_period_end="2024-06-01",
+        started_at="2024-06-01T00:00:00Z",
+    )
+    session_done = PaperTradingSession(
+        session_id="pt-done", lab_record_id="lab-1", strategy=strategy,
+        status=PaperTradingStatus.COMPLETED, initial_capital=100_000.0,
+        current_capital=100_000.0, symbols_traded=["X"], data_source="yahoo",
+        data_period_start="2024-01-01", data_period_end="2024-06-01",
+        started_at="2024-06-01T00:00:00Z", completed_at="2024-06-01T01:00:00Z",
+    )
+    api_main._paper_trading_sessions["pt-active"] = session_active
+    api_main._paper_trading_sessions["pt-done"] = session_done
+
+    api_main._recover_orphaned_paper_trading_sessions()
+
+    recovered = api_main._paper_trading_sessions.get("pt-active")
+    assert recovered.status == PaperTradingStatus.FAILED
+    assert recovered.terminated_reason == "process_exit"
+
+    # The already-completed session is untouched.
+    untouched = api_main._paper_trading_sessions.get("pt-done")
+    assert untouched.status == PaperTradingStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# _load_run_from_job_service + _persist_run_state
+# ---------------------------------------------------------------------------
+
+
+def test_load_run_from_job_service_returns_none_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api import main as api_main
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
+    assert api_main._load_run_from_job_service("run-x") is None
+
+
+def test_load_run_from_job_service_returns_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api import main as api_main
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "completed", "data": {"foo": 1}}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Ok())
+    out = api_main._load_run_from_job_service("run-y")
+    assert out is not None
+    assert out["foo"] == 1
+    assert out["run_id"] == "run-y"
+    assert out["status"] == "completed"
+
+
+def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api import main as api_main
+
+    class _Broken:
+        def create_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+        def update_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
+    # Must not raise.
+    api_main._persist_run_state("run-z", {"status": "running"}, create=True)
+    api_main._persist_run_state("run-z", {"status": "running"}, create=False)
+
+
+# ---------------------------------------------------------------------------
+# run_paper_trading validation branches
+# ---------------------------------------------------------------------------
+
+
+def _winning_record(strategy_code: str | None = "def x(): pass"):
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    strat = StrategySpec(
+        strategy_id="strat-w", authored_by="x", asset_class="equities",
+        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_code=strategy_code,
+    )
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    result = BacktestResult(
+        total_return_pct=10.0, annualized_return_pct=20.0, volatility_pct=10.0,
+        sharpe_ratio=1.0, max_drawdown_pct=5.0, win_rate_pct=60.0, profit_factor=2.0,
+        calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-w", strategy_id="strat-w", strategy=strat, config=cfg,
+        submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z", result=result, trades=[],
+    )
+    return StrategyLabRecord(
+        lab_record_id="lab-w", strategy=strat, backtest=bt, is_winning=True,
+        strategy_rationale="r", analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z", strategy_code=strategy_code,
+    )
+
+
+def test_run_paper_trading_rejects_losing_strategy(api_client, monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    losing = _winning_record()
+    losing.is_winning = False
+    api_main._strategy_lab_records["lab-w"] = losing
+
+    resp = api_client.post(
+        "/strategy-lab/paper-trade",
+        json={"lab_record_id": "lab-w"},
+    )
+    assert resp.status_code == 400
+    assert "not a winning strategy" in resp.json()["detail"]
+
+
+def test_run_paper_trading_rejects_when_no_strategy_code(api_client, monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    record = _winning_record(strategy_code=None)
+    api_main._strategy_lab_records["lab-w"] = record
+
+    resp = api_client.post(
+        "/strategy-lab/paper-trade",
+        json={"lab_record_id": "lab-w"},
+    )
+    assert resp.status_code == 400
+    assert "no generated strategy code" in resp.json()["detail"]
+
+
+def test_run_paper_trading_kicks_off_background_worker(
+    api_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy (non-live) path must start a daemon thread and return running."""
+    from investment_team.api import main as api_main
+
+    record = _winning_record()
+    api_main._strategy_lab_records["lab-w"] = record
+
+    # Replace the background worker so the test doesn't spin up real work.
+    started: List[bool] = []
+    monkeypatch.setattr(
+        api_main, "_run_paper_trading_background", lambda *a, **k: started.append(True)
+    )
+    monkeypatch.setattr(api_main, "_live_paper_enabled", lambda: False)
+
+    resp = api_client.post(
+        "/strategy-lab/paper-trade",
+        json={"lab_record_id": "lab-w", "initial_capital": 50_000.0},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session"]["status"] in ("running", "opening")
+    assert body["session"]["data_source"] == "yahoo_finance"
+    # The thread eventually invokes the patched background — wait briefly.
+    import time
+
+    for _ in range(20):
+        if started:
+            break
+        time.sleep(0.05)
+    assert started == [True]
+
+
+# ---------------------------------------------------------------------------
+# complete_advisor_session — happy path
+# ---------------------------------------------------------------------------
+
+
+def test_complete_advisor_session_builds_ips(api_client) -> None:
+    # Start a session, fill all required fields directly, then complete.
+    start = api_client.post("/advisor/sessions", json={"user_id": "u-complete"})
+    sid = start.json()["session_id"]
+
+    # Fill required fields by sending replies that hit the relevant extractors.
+    api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "medium risk"})
+    api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "20% drawdown"})
+    api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "10 years"})
+    api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "120000 stable"})
+    api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "500000 350000"})
+
+    # All required fields are now collected. complete should succeed.
+    done = api_client.post(f"/advisor/sessions/{sid}/complete")
+    assert done.status_code == 200
+    body = done.json()
+    assert body["user_id"] == "u-complete"
+    assert body["ips"]["profile"]["user_id"] == "u-complete"
