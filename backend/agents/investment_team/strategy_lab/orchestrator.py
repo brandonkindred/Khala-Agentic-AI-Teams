@@ -77,25 +77,23 @@ PhaseCallback = Callable[[str, Dict[str, Any]], None]
 
 
 def _coerce_requires_custom_code(raw: Any) -> bool:
-    """Defensively coerce an LLM-emitted value to ``bool`` for the
-    ``StrategySpec.requires_custom_code`` field.
+    """Coerce an arbitrary value to ``bool`` for ``StrategySpec.requires_custom_code``.
 
-    Accepts: ``True``/``False``, the common case-insensitive string
-    variants (``"true"``/``"yes"``/``"on"``/``"1"`` → True, the falsey
-    counterparts → False), and the integers ``0`` / ``1`` specifically.
-    Anything else (``None``, empty string, arbitrary prose, ``"maybe"``,
-    or off-spec ints like ``2`` / ``-1``) defaults to ``False`` so a
-    single typo in ideation JSON can't silently disable deterministic
-    compilation OR abort the design attempt with a Pydantic
-    ValidationError.
+    Pre:  ``raw`` is any value from an untrusted JSON source.
+    Post: returns a real ``bool``. Recognised truthy: ``True``, ``1``
+          (int), and case-insensitive ``"true"`` / ``"yes"`` / ``"on"``
+          / ``"1"`` / ``"t"`` / ``"y"``. Recognised falsey: ``False``,
+          ``0`` (int), and case-insensitive ``"false"`` / ``"no"`` /
+          ``"off"`` / ``"0"`` / ``"f"`` / ``"n"`` / ``""``. Everything
+          else (``None``, prose, off-spec ints) → ``False``.
+    Invariant: never raises. Default ``False`` keeps the deterministic
+          compile path on for malformed input rather than aborting the
+          attempt with a Pydantic ValidationError.
     """
     if raw is None:
         return False
     if isinstance(raw, bool):
         return raw
-    # Only the explicit 0/1 ints are recognised. ``bool(2)`` would
-    # silently flip a typo'd integer into ``True`` and disable the
-    # deterministic compile path.
     if isinstance(raw, int) and not isinstance(raw, bool):
         if raw == 0:
             return False
@@ -103,10 +101,6 @@ def _coerce_requires_custom_code(raw: Any) -> bool:
             return True
         return False
     if isinstance(raw, str):
-        # Match Pydantic's bool string-coercion token set so an
-        # ideation output of ``"y"`` doesn't silently get downgraded to
-        # ``False`` (codex round-8 review). Empty string is treated as
-        # False for the optional-behaviour contract.
         s = raw.strip().lower()
         if s in {"true", "yes", "on", "1", "t", "y"}:
             return True
@@ -1690,38 +1684,23 @@ class StrategyLabOrchestrator:
             target_symbols=strategy_dict.get("target_symbols", []),
             risk_limits=strategy_dict.get("risk_limits", {}),
             speculative=strategy_dict.get("speculative", False),
-            # Defensive coercion. The LLM-emitted JSON can pass anything
-            # here — ``None``, ``"false"``, empty string, prose — and a
-            # non-Optional ``bool`` field would either flip the wrong way
-            # (``bool("false")`` is ``True``) or ValidationError-abort the
-            # design attempt on garbage input. Normalise to a real bool
-            # before construction; default to ``False`` (deterministic
-            # compile) for anything that doesn't parse as an explicit
-            # truthy/falsey value.
             requires_custom_code=_coerce_requires_custom_code(
                 strategy_dict.get("requires_custom_code")
             ),
             strategy_code=code,
         )
 
-        # Snapshot ideation outputs FIRST so reviewers can compare against
-        # any refinement-driven mutation persisted on the final record
-        # (#547). The snapshot captures the LLM-authored code; the
-        # deterministic compile step below may replace ``code`` for the
-        # downstream pipeline, but ``original_code`` always reflects the
-        # ideation phase's output.
+        # ``original_spec`` / ``original_code`` are snapshotted before the
+        # deterministic compile so reviewers can compare against any
+        # refinement-driven mutation persisted on the final record.
         original_spec = spec.model_copy(deep=True)
         original_code = code
 
-        # Issue #538: deterministic compile by default. When the spec opts
-        # into LLM synthesis (``requires_custom_code=True``) or the
-        # compiler raises ``CompilerError``, the ideation-authored ``code``
-        # is kept verbatim and the LLM refinement path takes over.
-        # We mirror the result into the local ``code`` variable too —
-        # downstream gates and ``_run_synthesis_loop`` consume ``code=...``
-        # directly (not ``spec.strategy_code``), so writing only to the
-        # spec would bypass the compiled output everywhere except the
-        # final persisted record.
+        # Deterministic compile by default. On ``requires_custom_code`` or
+        # ``CompilerError``, ideation-authored ``code`` is kept verbatim.
+        # The result is mirrored into the local ``code`` variable because
+        # downstream gates consume ``code=...`` directly, not
+        # ``spec.strategy_code``.
         if not spec.requires_custom_code:
             try:
                 compiled = compile_strategy(spec)

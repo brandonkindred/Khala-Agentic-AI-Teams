@@ -84,39 +84,39 @@ ALLOWED_IMPORTS = frozenset(
 
 
 def _spec_has_engine_handled_exit(spec: Any) -> bool:
-    """True iff ``spec.exit_rules`` contains at least one rule kind that
-    the trading service's ``_EngineExitDispatcher`` will enforce on the
-    strategy's behalf via ``evaluate_exit_rules`` — currently
-    ``StopLossRule`` (any basis) and ``TakeProfitRule``. ``SignalExitRule``
-    is a no-op in the evaluator (see ``executor/rule_compiler.py``), so
-    it does NOT relax the order-flow-shape requirement.
+    """True iff ``spec.exit_rules`` contains a rule the engine enforces.
 
-    Caller is responsible for checking that the engine-handled exits
-    actually cover every entry side the strategy plans to open — see
-    :func:`_engine_exits_cover_all_entry_sides` (some StopLossRule
-    bases are side-specific in ``_stop_loss_triggers``).
+    Pre:  ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: True only when ``spec.exit_rules`` contains at least one
+          ``StopLossRule`` or ``TakeProfitRule`` (rule kinds enforced
+          engine-side via ``evaluate_exit_rules``). ``SignalExitRule``
+          is a no-op in the evaluator and never satisfies this check.
+    Invariant: stop-loss/take-profit basis-vs-side coverage is NOT
+          checked here — callers must additionally invoke
+          :func:`_engine_exits_cover_sides` against the relevant
+          entry sides.
     """
     if spec is None:
         return False
     exit_rules = getattr(spec, "exit_rules", None)
     if not exit_rules:
         return False
-    # Import lazily so this module stays importable even when the DSL
-    # types aren't available (legacy SQLite-only test contexts).
-    from ..spec_dsl import StopLossRule, TakeProfitRule  # local import — see docstring
+    from ..spec_dsl import StopLossRule, TakeProfitRule
 
     return any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
 
 
 def _engine_exits_cover_all_entry_sides(spec: Any) -> bool:
-    """Spec-level wrapper: every side in ``spec.entry_rules`` must be
-    closeable by at least one rule in ``spec.exit_rules``. Used as the
-    fallback when the emitted code has dynamic ``side=`` expressions
-    the AST can't resolve statically.
+    """True iff every side in ``spec.entry_rules`` is closeable by some ``spec.exit_rules`` entry.
+
+    Pre:  ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: False when ``spec`` is None or has no entry rules; otherwise
+          delegates to :func:`_engine_exits_cover_sides` for the union
+          of declared entry sides.
     """
     if spec is None:
         return False
-    from ..spec_dsl import EntryRule  # local import
+    from ..spec_dsl import EntryRule
 
     entry_sides: set[str] = set()
     for rule in getattr(spec, "entry_rules", None) or []:
@@ -128,35 +128,12 @@ def _engine_exits_cover_all_entry_sides(spec: Any) -> bool:
 
 
 def _hook_calls_include_entry(cls: ast.ClassDef, calls: List[ast.Call]) -> bool:
-    """True iff at least one of the ``ctx.submit_order(...)`` calls
-    reachable from ``on_bar`` is a plausible flat-position entry — has
-    a ``side=`` kwarg, has no ``**kwargs`` spread (which could hide a
-    close shape in the spread), its ``qty=`` does not reference any
-    position-receiver's ``.qty`` (canonical ``position`` / ``pos``
-    plus any ``<name> = ctx.position(...)`` alias), AND its enclosing
-    ``if`` chain does not pin position to non-None.
+    """True iff any ``ctx.submit_order(...)`` reachable from ``on_bar`` looks like a flat entry.
 
-    Used to gate the engine-handled-exit relaxation on actually having
-    an entry path. Each tightening below was driven by a codex P1:
-
-    * round-7: reject any call whose qty references ``position.qty`` —
-      ``ctx.submit_order(qty=position.qty)`` closes don't count.
-    * round-8: walk the qty expression recursively so wrapped close
-      shapes (``abs(position.qty)``, ``position.qty * 1``) are caught.
-    * round-9 P1a: ``**kwargs`` spreads are NOT treated as entries
-      any more — a spread can carry ``qty=position.qty`` just as easily
-      as a side literal.
-    * round-9 P1b: calls inside ``if position is not None:`` (add-only
-      / close-only behaviour) no longer count — only calls reachable
-      when ``position`` may still be ``None``.
-    * round-10 P1a: ``else``-arms of ``if position is None:`` are
-      treated as in-position (not flat-entry) — only the body of an
-      ``is None`` if and the unaliased control-flow paths count.
-    * round-10 P1b/P1c: ``position != None`` and ``not (position is None)``
-      are now recognised as in-position guards.
-    * round-10 P1d/P1e: aliases bound from ``<name> = ctx.position(...)``
-      are recognised in both the qty-close shape and the if-guard
-      matcher.
+    Pre:  ``cls`` is the single ``Strategy`` subclass; ``calls`` is the
+          submit-order calls reachable from the engine hooks on that class.
+    Post: True iff at least one call in ``calls`` satisfies
+          :func:`_call_is_plausible_flat_entry`.
     """
     position_names = _collect_position_aliases(cls)
     for call in calls:
@@ -169,13 +146,18 @@ def _hook_calls_include_entry(cls: ast.ClassDef, calls: List[ast.Call]) -> bool:
 def _call_is_plausible_flat_entry(
     cls: ast.ClassDef, call: ast.Call, position_names: frozenset[str]
 ) -> bool:
-    """Per-call helper used by both :func:`_hook_calls_include_entry`
-    and :func:`_entry_sides_emitted_by_calls` so the two stay in sync.
+    """True iff ``call`` is a flat-position entry.
 
-    All four checks must pass for the call to count as a flat-position
-    entry: explicit ``side=`` kwarg, no ``**kwargs`` spread, qty does
-    not reference ``<position-receiver>.qty``, and the enclosing
-    if-chain does not pin position to non-None.
+    Pre:  ``call`` is a ``ctx.submit_order(...)`` call inside ``cls``;
+          ``position_names`` is the set of identifiers bound to
+          ``ctx.position(...)`` results in ``cls``.
+    Post: True iff ALL of: (a) ``call`` has a ``side=`` kwarg, (b) no
+          ``**kwargs`` spread (which could hide a close shape), (c)
+          ``qty=`` does not reference ``<name>.qty`` for any
+          ``<name>`` in ``position_names``, (d) the enclosing ``if``
+          chain does not pin ``position`` to non-None.
+    Invariant: shared by :func:`_hook_calls_include_entry` and
+          :func:`_entry_sides_emitted_by_calls` so both views agree.
     """
     has_side_literal = False
     has_kwargs_spread = False
@@ -194,14 +176,12 @@ def _call_is_plausible_flat_entry(
 
 
 def _collect_position_aliases(cls: ast.ClassDef) -> frozenset[str]:
-    """Return the set of identifiers bound to ``ctx.position(...)`` calls
-    in ``cls``, always including the canonical ``"position"`` / ``"pos"``
-    names.
+    """Return the identifiers bound to ``ctx.position(...)`` calls in ``cls``.
 
-    Walks assignments of the shape ``<name> = ctx.position(...)`` so
-    that downstream qty-close and pin-to-non-None checks recognise
-    aliases like ``p = ctx.position(bar.symbol); if p is not None: ...``
-    (codex round-10 P1d / P1e).
+    Pre:  ``cls`` is a parsed ``ClassDef``.
+    Post: result always contains ``{"position", "pos"}`` plus the LHS
+          name of every ``<name> = ctx.position(...)`` assignment found
+          anywhere in ``cls`` (any method, any nested scope).
     """
     names: set[str] = {"position", "pos"}
     for node in ast.walk(cls):
@@ -233,12 +213,13 @@ def _is_ctx_position_call(node: ast.AST) -> bool:
 def _expr_references_position_qty(
     node: ast.AST, position_names: frozenset[str] = frozenset({"position", "pos"})
 ) -> bool:
-    """True iff ``node`` (or any sub-expression) references
-    ``<name>.qty`` where ``<name>`` is one of ``position_names``.
-    Catches the literal Attribute case plus computed shapes like
-    ``abs(position.qty)``, ``position.qty * 1``, ``-position.qty``,
-    etc.; with aliases supplied by :func:`_collect_position_aliases`
-    it also recognises ``p.qty`` when ``p = ctx.position(...)``.
+    """True iff any sub-expression of ``node`` is ``<name>.qty`` for ``<name>`` in ``position_names``.
+
+    Pre:  ``node`` is an AST expression; ``position_names`` is the
+          alias set from :func:`_collect_position_aliases`.
+    Post: True for the literal ``Attribute`` case and any wrapping
+          expression that contains it — ``abs(p.qty)``, ``p.qty * 1``,
+          ``-p.qty``, ``p.qty if cond else q.qty``, etc.
     """
     for sub in ast.walk(node):
         if (
@@ -254,39 +235,38 @@ def _expr_references_position_qty(
 def _call_reachable_when_position_may_be_none(
     cls: ast.ClassDef, call: ast.Call, position_names: frozenset[str]
 ) -> bool:
-    """True iff ``call`` can execute when ``position`` is ``None``.
+    """True iff ``call`` can execute when ``position`` may be ``None``.
 
-    Walks ``cls`` looking for the enclosing ``if`` chain around the
-    call and refuses any branch that definitively pins position to
-    non-None — including ``else`` arms of ``if position is None:``
-    (codex round-10 P1a). Recognises ``is None`` / ``== None`` / bare
-    truthy / ``not (position is None)`` etc. via the two pin-direction
-    matchers below.
-
-    Defaults to ``True`` when the if-chain doesn't pin position — the
-    conformance gate / engine_exit dispatcher can still reject the
-    strategy on other grounds; the safety gate's role here is just
-    "does a flat entry exist at all".
+    Pre:  ``call`` is inside ``cls``; ``position_names`` is the alias
+          set from :func:`_collect_position_aliases`.
+    Post: False iff some enclosing ``if`` branch around ``call`` pins
+          one of ``position_names`` to non-None: either the body of
+          a test matched by :func:`_test_pins_position_not_none`, or
+          the ``else``-arm of a test matched by
+          :func:`_test_pins_position_is_none`.
+    Invariant: defaults to True when there is no pinning if-chain.
+          False positives are corrected by the conformance gate /
+          engine-exit dispatcher; the safety gate's role here is only
+          "does a flat entry exist at all".
     """
     chain = _enclosing_if_tests_for(cls, call)
     for test, branch_is_else in chain:
         if branch_is_else:
-            # else-arm of "pins to is-None" → reachable only when not-None.
             if _test_pins_position_is_none(test, position_names):
                 return False
-            # else-arm of "pins to not-None" → reachable when is-None
-            # (this branch is the entry-from-flat path, so don't reject).
         else:
-            # body of "pins to not-None" → reachable only when not-None.
             if _test_pins_position_not_none(test, position_names):
                 return False
     return True
 
 
 def _enclosing_if_tests_for(cls: ast.ClassDef, target: ast.AST) -> List[tuple[ast.AST, bool]]:
-    """Return ``[(test_expr, branch_is_else), ...]`` for every ``If``
-    whose body or orelse contains ``target`` (transitively), in
-    outer-to-inner order. Empty when ``target`` is at method scope.
+    """Return ``[(test_expr, branch_is_else), ...]`` for every ``If`` whose body or orelse transitively contains ``target``.
+
+    Pre:  ``cls`` is the class containing ``target``.
+    Post: list is outer-to-inner; ``branch_is_else`` is True iff
+          ``target`` reached the ``If`` via its ``orelse`` branch.
+          Empty when ``target`` is at method scope.
     """
     found: List[tuple[ast.AST, bool]] = []
 
@@ -314,14 +294,15 @@ def _enclosing_if_tests_for(cls: ast.ClassDef, target: ast.AST) -> List[tuple[as
 
 
 def _test_pins_position_not_none(test: ast.AST, position_names: frozenset[str]) -> bool:
-    """True iff entering the body of an ``if test:`` guarantees
-    ``position`` is not ``None``.
+    """True iff entering the body of ``if test:`` guarantees a position name is not None.
 
-    Matches: ``position is not None`` / ``pos is not None`` (and any
-    alias from ``position_names``), the equivalent ``position != None``
-    form, bare ``position`` (truthy check), ``not (position is None)``,
-    and ``and``-conjunctions where any operand pins. ``or``-disjunctions
-    don't pin (other operand may leave position None).
+    Pre:  ``test`` is an AST expression; ``position_names`` is the
+          set of names treated as position bindings.
+    Post: True for any of the following shapes against a name in
+          ``position_names``: ``<name> is not None``, ``<name> != None``,
+          bare ``<name>`` (truthy check), ``not (<name> is None)``,
+          and ``and``-conjunctions where any operand pins. ``or``
+          never pins.
     """
     if isinstance(test, ast.Compare):
         if (
@@ -347,12 +328,15 @@ def _test_pins_position_not_none(test: ast.AST, position_names: frozenset[str]) 
 
 
 def _test_pins_position_is_none(test: ast.AST, position_names: frozenset[str]) -> bool:
-    """True iff entering the body of an ``if test:`` guarantees
-    ``position`` IS ``None``.
+    """True iff entering the body of ``if test:`` guarantees a position name IS None.
 
-    Matches: ``position is None`` / ``position == None`` (and aliases),
-    ``not position`` (None is falsy), ``not (position is not None)``,
-    and ``and``-conjunctions where any operand pins.
+    Pre:  ``test`` is an AST expression; ``position_names`` is the
+          set of names treated as position bindings.
+    Post: True for any of the following shapes against a name in
+          ``position_names``: ``<name> is None``, ``<name> == None``,
+          ``not <name>`` (None is falsy), ``not (<name> is not None)``,
+          and ``and``-conjunctions where any operand pins. ``or``
+          never pins.
     """
     if isinstance(test, ast.Compare):
         if (
@@ -380,22 +364,16 @@ def _test_pins_position_is_none(test: ast.AST, position_names: frozenset[str]) -
 def _entry_sides_emitted_by_calls(
     cls: ast.ClassDef, calls: List[ast.Call]
 ) -> tuple[set[str], bool]:
-    """Return ``(sides, has_dynamic)`` describing the entry sides the
-    strategy code actually submits.
+    """Return ``(sides, has_dynamic)`` for the entry sides actually submitted in ``calls``.
 
-    ``sides`` is the set of ``"long"`` / ``"short"`` literals seen in
-    ``side=OrderSide.LONG`` / ``side="LONG"`` kwargs on flat-entry
-    calls (per :func:`_call_is_plausible_flat_entry`). ``has_dynamic``
-    is True when any plausible entry call uses an expression
-    (variable / function return) the AST can't resolve statically —
-    those calls relax side-coverage requirements via the spec
-    fallback.
-
-    Codex round-8: the engine-handled-exit relaxation previously
-    checked ``_engine_exits_cover_all_entry_sides(spec)`` only, which
-    misses LLM refinement that emits a side different from what the
-    spec declares (e.g. spec says long but code submits SHORT). Using
-    the emitted sides catches that drift.
+    Pre:  ``cls`` is the strategy class; ``calls`` are
+          ``ctx.submit_order(...)`` calls reachable from engine hooks.
+    Post: ``sides`` ⊆ ``{"long", "short"}``, drawn from the literal
+          ``side=`` kwargs on calls satisfying
+          :func:`_call_is_plausible_flat_entry` and resolvable by
+          :func:`_extract_side_literal`. ``has_dynamic`` is True iff
+          at least one plausible entry call carries a non-literal
+          ``side=`` expression (variable, opaque call, etc.).
     """
     sides: set[str] = set()
     has_dynamic = False
@@ -416,21 +394,18 @@ def _entry_sides_emitted_by_calls(
 
 
 def _extract_side_literal(node: ast.AST) -> str | None:
-    """Pull the ``"long"`` / ``"short"`` literal out of an
-    ``OrderSide.LONG`` Attribute, an ``OrderSide("long")`` constructor
-    call (named exactly that), or a bare ``"LONG"`` / ``"SHORT"``
-    string Constant.
+    """Return ``"long"`` / ``"short"`` if ``node`` is a recognisable side literal, else ``None``.
 
-    Returns ``None`` for anything else — variables, function returns,
-    computed expressions, ``FakeSide.LONG`` attributes that aren't
-    rooted in ``OrderSide``, etc.
-
-    Round-9 P1c: restricted Call unwrap to ``OrderSide(...)`` only.
-    Round-10 P2: Attribute access is now restricted to roots that
-    look like ``OrderSide`` / ``contract.OrderSide`` so a stray
-    ``FakeSide.LONG`` with value ``"BUY"`` doesn't satisfy
-    side-coverage checks (then fail at runtime when ``submit_order``
-    coerces the value to a real ``OrderSide``).
+    Pre:  ``node`` is an AST expression used as the value of a ``side=`` kwarg.
+    Post: returns ``"long"`` / ``"short"`` for: an ``OrderSide.LONG`` /
+          ``contract.OrderSide.SHORT`` attribute whose root is
+          ``OrderSide``; an ``OrderSide(...)`` call whose first arg is
+          itself a recognisable literal; or a bare ``"LONG"`` /
+          ``"SHORT"`` string constant. Returns ``None`` for variables,
+          opaque calls, computed expressions, and attributes whose
+          root is not the bound ``OrderSide`` (so a user-defined
+          ``FakeSide.LONG`` with arbitrary value never satisfies
+          side-coverage statically).
     """
     if isinstance(node, ast.Attribute):
         if not _attr_value_is_order_side(node.value):
@@ -445,8 +420,6 @@ def _extract_side_literal(node: ast.AST) -> str | None:
             return "long"
         if v == "SHORT":
             return "short"
-    # Only unwrap ``OrderSide(...)`` / ``contract.OrderSide(...)`` — any
-    # other call is opaque.
     if isinstance(node, ast.Call) and node.args:
         func = node.func
         if isinstance(func, ast.Name) and func.id == "OrderSide":
@@ -457,10 +430,13 @@ def _extract_side_literal(node: ast.AST) -> str | None:
 
 
 def _attr_value_is_order_side(node: ast.AST) -> bool:
-    """True iff ``node`` references the ``OrderSide`` enum root —
-    either a bare ``Name("OrderSide")`` or an ``Attribute`` whose final
-    attribute is ``"OrderSide"`` (``contract.OrderSide``,
-    ``foo.bar.OrderSide``).
+    """True iff ``node`` references the ``OrderSide`` enum root.
+
+    Pre:  ``node`` is an AST expression — the receiver side of an
+          ``Attribute`` access being inspected as a side literal.
+    Post: True iff ``node`` is ``Name("OrderSide")`` or an
+          ``Attribute`` whose final attribute name is ``"OrderSide"``
+          (``contract.OrderSide``, ``foo.bar.OrderSide``).
     """
     if isinstance(node, ast.Name) and node.id == "OrderSide":
         return True
@@ -470,14 +446,22 @@ def _attr_value_is_order_side(node: ast.AST) -> bool:
 
 
 def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
-    """True iff every side in ``sides`` is closeable by at least one
-    rule in ``spec.exit_rules``, per ``_stop_loss_triggers`` /
-    ``_take_profit_triggers`` basis-vs-side compatibility.
+    """True iff every side in ``sides`` is closeable by at least one ``spec.exit_rules`` entry.
+
+    Pre:  ``spec`` is a ``StrategySpec`` or ``None``; ``sides`` ⊆
+          ``{"long", "short"}``.
+    Post: False if ``spec`` is None or ``sides`` is empty. Otherwise
+          True iff for every side ∈ ``sides`` there exists a rule
+          in ``spec.exit_rules`` that triggers on that side per the
+          basis-vs-side compatibility map: ``TakeProfitRule`` and
+          ``StopLossRule(basis="entry_price")`` cover both sides;
+          ``StopLossRule(basis="trailing_high")`` covers only long;
+          ``StopLossRule(basis="trailing_low")`` covers only short.
     """
     if spec is None or not sides:
         return False
     exit_rules = getattr(spec, "exit_rules", None) or []
-    from ..spec_dsl import StopLossRule, TakeProfitRule  # local import
+    from ..spec_dsl import StopLossRule, TakeProfitRule
 
     def _rule_covers_side(rule: Any, side: str) -> bool:
         if isinstance(rule, TakeProfitRule):
@@ -692,21 +676,16 @@ class CodeSafetyChecker(GateResultsMixin):
 
     def _check_order_flow_shape(self, ctx: CodeSafetyCtx) -> Iterable[QualityGateResult]:
         # Every viable strategy must call ``ctx.submit_order(...)`` from
-        # inside ``on_bar`` (directly or via a helper), and the reachable
-        # calls must form an entry+exit pair — either two calls with
-        # distinct ``side`` values, or a single call with a non-None
-        # ``attached_stop_loss`` / ``attached_take_profit`` bracket leg.
-        # An entries-only flow is ALSO accepted when ``spec.exit_rules``
-        # contains an engine-handled rule (``StopLossRule`` /
-        # ``TakeProfitRule``), because the trading service's
-        # ``_EngineExitDispatcher`` (``trading_service/service.py``)
-        # fires ``engine_exit:<kind>`` orders against those rules every
-        # bar — the strategy doesn't need to declare a parallel exit.
-        #
-        # The trading service only processes ``HarnessResponse`` from
-        # ``send_bar``; responses from ``send_start`` / ``send_fill`` /
-        # ``send_end`` are discarded, so submissions outside ``on_bar`` are
-        # silently dropped — they don't count here.
+        # inside ``on_bar`` (directly or via a helper). The trading
+        # service only consumes ``HarnessResponse`` from ``send_bar`` —
+        # submissions reached from ``send_start`` / ``send_fill`` /
+        # ``send_end`` are silently dropped — so only ``on_bar``-reachable
+        # calls count. The reachable calls must form one of:
+        #   - an entry+exit pair (two calls with distinct ``side``);
+        #   - a single entry with an ``attached_stop_loss`` /
+        #     ``attached_take_profit`` bracket leg;
+        #   - an entries-only flow whose missing exit is supplied by
+        #     ``spec.exit_rules`` (engine-handled relaxation below).
         if len(ctx.strategy_classes) != 1:
             return ()
         hook_calls = _collect_hook_submit_calls(ctx.strategy_classes[0])
@@ -723,46 +702,26 @@ class CodeSafetyChecker(GateResultsMixin):
             )
         if _calls_form_entry_exit_pair(hook_calls):
             return ()
-        # Engine-handled-exit relaxation. Four gates must all hold:
-        #   (a) ``spec.exit_rules`` declares at least one engine-handled
-        #       rule (StopLossRule / TakeProfitRule).
-        #   (b) The strategy code itself has at least one plausible
-        #       FLAT-position entry (side= literal AND not qty=position.qty
-        #       AND not ``**kwargs`` spread AND not inside an enclosing
-        #       ``if position is not None:`` guard).
-        #   (c) Every EXPLICIT side the code emits in entry calls is
-        #       covered by a triggerable engine-handled exit rule
-        #       (basis-vs-side compatibility from
-        #       ``_stop_loss_triggers``). An explicit uncovered side
-        #       cannot be relaxed away by dynamic side= elsewhere
-        #       (codex round-9 P1d): a literal ``side=OrderSide.SHORT``
-        #       with only long-side trailing-stop coverage is a real
-        #       exit-coverage mismatch the gate must surface.
-        #   (d) When there's NO explicit emitted side but at least one
-        #       call uses a dynamic ``side=`` expression, fall back
-        #       to ``spec.entry_rules`` side coverage so the relaxation
-        #       can still apply for code we can't analyse statically.
+        # Engine-handled-exit relaxation. All of the following must hold
+        # to accept an entries-only flow:
+        #   (1) spec has an engine-handled exit rule
+        #       (:func:`_spec_has_engine_handled_exit`);
+        #   (2) the strategy has at least one plausible flat entry
+        #       (:func:`_hook_calls_include_entry`);
+        #   (3) every explicit ``side=`` literal in entry calls is
+        #       covered by a triggerable rule in ``spec.exit_rules``;
+        #   (4) any dynamic ``side=`` expression (variable, opaque
+        #       call) requires BOTH ``"long"`` and ``"short"`` coverage,
+        #       because the runtime value is unresolvable here and
+        #       refined code may emit a side outside ``spec.entry_rules``.
         cls = ctx.strategy_classes[0]
         if _spec_has_engine_handled_exit(ctx.spec) and _hook_calls_include_entry(cls, hook_calls):
             emitted_sides, has_dynamic = _entry_sides_emitted_by_calls(cls, hook_calls)
-            # When any entry call uses a dynamic ``side=`` expression
-            # (variable, function return, kwargs spread), the runtime
-            # side could be EITHER ``long`` or ``short`` — we can't
-            # tell from the AST. Fail closed unless BOTH sides are
-            # covered by triggerable engine rules (codex round-10 P1f).
-            # A spec-level "covers all entry_rules sides" check is
-            # NOT enough here: refined code might emit a side that
-            # isn't in ``spec.entry_rules`` at all.
             dynamic_ok = (not has_dynamic) or _engine_exits_cover_sides(ctx.spec, {"long", "short"})
             if emitted_sides:
-                # Every explicit emitted side must be covered. Dynamic
-                # side= elsewhere additionally requires both-sides
-                # coverage (above).
                 if _engine_exits_cover_sides(ctx.spec, emitted_sides) and dynamic_ok:
                     return ()
             elif has_dynamic and dynamic_ok:
-                # No explicit sides at all — dynamic-only flow requires
-                # both-sides coverage to be safe.
                 return ()
         if len(hook_calls) == 1:
             detail = (

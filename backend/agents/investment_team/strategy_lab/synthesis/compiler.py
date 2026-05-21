@@ -1,51 +1,33 @@
-"""Spec → canonical Python compiler (issue #538).
+"""Deterministic ``StrategySpec`` → canonical Python compiler.
 
-Pure function ``compile_strategy(spec)`` that turns a structured
-``StrategySpec`` into the ``Strategy`` subclass the streaming harness
-expects. The emitted module is shaped to pass ``CodeSafetyChecker`` and
-``CodeConformanceGate`` by construction.
+``compile_strategy(spec)`` turns a structured ``StrategySpec`` into the
+``Strategy`` subclass the streaming harness expects.
 
-Determinism contract: the same spec always produces byte-identical
-output. The header carries a SHA-256 content hash of the spec's sorted
-JSON dump for traceability; nothing else in the output varies between
-invocations.
-
-Scope (#538 + locked decisions, post-codex P1 review):
-  * Indicator math is INLINED as helper methods on the compiled class
-    (``self.sma(history, period=14)`` etc.) rather than imported from
-    the sandbox's pandas-Series-based ``indicators`` module. The
-    factors compiler (``strategy_lab/factors/compiler.py``) follows the
-    same pattern. Helper names match the conformance gate's
-    ``_INDICATOR_ALLOWED_CALL_NAMES`` allow-list, so a ``self.sma(...)``
-    call inside ``on_bar`` is picked up as ``"sma"`` by
-    ``_get_call_name`` and credited by the gate.
-  * Tuple-valued indicators (MACD / Bollinger / Stochastic) thread the
-    DSL's ``output`` / ``band`` selector through to the helper, which
-    returns the single scalar component used in the predicate. The
-    selector defaults match the DSL registry.
-  * Stop-loss / take-profit (including trailing-basis variants) are
-    NOT inlined as ``submit_order`` calls AND not attached as bracket
-    legs. The trading service's ``_EngineExitDispatcher`` runs
-    ``evaluate_exit_rules`` against ``spec.exit_rules`` on every bar
-    and emits ``engine_exit:<kind>`` orders against the actual
-    post-fill ``position.entry_price`` (correct basis semantics).
-    The safety gate's order-flow check accepts entries-only flow
-    when ``spec.exit_rules`` has an engine-handled rule (see
-    ``code_safety._spec_has_engine_handled_exit``). Signal-exit
-    rules (a no-op in ``evaluate_exit_rules`` — see
-    ``executor/rule_compiler.py``) are still inlined as ``on_bar``
-    branches gated by an ``exit_submitted`` flag.
-  * ``cross_above`` / ``cross_below`` predicates compare the current
-    side value against ``self._prev_<sigid>`` snapshots updated at the
-    end of every ``on_bar`` invocation where the universe and warm-up
-    guards passed. "Previous" means previous successful ``on_bar``,
-    not previous calendar bar.
-  * ``volatility_target`` sizing requires an ``atr`` indicator in the
-    spec (any rule). When absent, the compiler raises
-    :class:`CompilerError`; the orchestrator catches it, sets
-    ``requires_custom_code = True``, and falls back to the LLM output.
-  * Empty ``spec.target_symbols`` is supported (no universe guard);
-    other gates downgrade their universe checks in that case.
+Module contract:
+  Determinism: the same spec always produces byte-identical output.
+    The header carries a SHA-256 content hash of a canonical DSL dump
+    for traceability; no other source of variation is admitted (no
+    ``datetime.now()``, no ``uuid``, no ``id()``).
+  Static gates: emitted output is shaped to pass ``CodeSafetyChecker``
+    and ``CodeConformanceGate`` by construction.
+  Engine contract: ``on_bar`` covers universe guard, warm-up gate,
+    bar-close validity, indicator binds, entries, and signal-exits.
+    Stop-loss / take-profit (including trailing variants) are NOT
+    inlined — they are enforced engine-side by ``evaluate_exit_rules``
+    against the post-fill ``position.entry_price``, which alone has
+    the correct basis semantics.
+  Indicator math: helper bodies are inlined as class methods, not
+    imported, because the sandbox's ``indicators`` module uses
+    pandas-Series signatures incompatible with the per-bar call shape.
+    Method names match ``CodeConformanceGate._INDICATOR_ALLOWED_CALL_NAMES``.
+  Tuple indicators: MACD / Bollinger / Stochastic thread the DSL's
+    ``output`` / ``band`` selector into the helper and return a scalar.
+  Cross predicates: ``cross_above`` / ``cross_below`` compare current
+    against ``self._cross_prev[symbol][sigid]`` — "previous" means the
+    previous successful ``on_bar`` for the same symbol.
+  ``volatility_target`` sizing requires an ``atr`` indicator in the
+    spec; absent or ambiguous ATR raises :class:`CompilerError`.
+  Empty ``spec.target_symbols`` is supported (no universe guard emitted).
 """
 
 from __future__ import annotations
@@ -71,16 +53,15 @@ from ..spec_dsl import (
 class CompilerError(Exception):
     """Raised when a spec cannot be expressed by the deterministic compiler.
 
-    The orchestrator treats this as the signal to fall back to LLM-authored
-    code: it sets ``spec.requires_custom_code = True`` and keeps the
+    The orchestrator treats this as a signal to fall back to LLM-authored
+    code: it sets ``spec.requires_custom_code = True`` and retains the
     ideation-generated ``strategy_code`` instead of the compiled output.
     """
 
 
-# DSL name → canonical method name emitted on the compiled class. Names
-# match the conformance gate's ``_INDICATOR_ALLOWED_CALL_NAMES`` so the
-# call name (``node.func.attr`` for ``self.<name>(...)``) is credited as
-# the indicator's named implementation.
+# DSL name → emitted method name. Names must match
+# ``CodeConformanceGate._INDICATOR_ALLOWED_CALL_NAMES`` so the
+# conformance gate credits ``self.<name>(...)`` as the named indicator.
 _INDICATOR_METHOD_NAME: dict[str, str] = {
     "sma": "sma",
     "ema": "ema",
@@ -100,30 +81,28 @@ _BAR_FIELD_EXPR: dict[str, str] = {
     "bar.volume": "bar.volume",
 }
 
-# Floor on the rolling-history window the strategy requests from
-# ``ctx.history``. Indicators with short lookbacks still benefit from a
-# small buffer; matches the floor in the ideation system prompt.
 _MIN_WINDOW: int = 20
 
-# Lookback for VWAP. The sandbox VWAP definition (``factors/primitives.py``,
-# ``executor/indicators.py``) is cumulative-over-the-series rather than
-# rolling-window; capping at ``_MIN_WINDOW`` would turn it into a 20-bar
-# rolling VWAP and silently change signal semantics. Use the harness's
-# own retention ceiling (500 bars; see ``StrategyContext._ingest_bar``)
-# so the strategy gets the deepest history the engine retains.
+# VWAP requests the deepest retained history. Sandbox VWAP is
+# cumulative-over-the-series, not rolling, so a smaller request would
+# silently change signal semantics; 500 matches the harness retention
+# ceiling in ``StrategyContext._ingest_bar``.
 _VWAP_HISTORY: int = 500
 
 
 def compile_strategy(spec: Any) -> str:
     """Compile ``spec`` into a canonical ``Strategy`` Python module.
 
-    Pre: ``spec`` is a ``StrategySpec`` (duck-typed; only the public
-    fields ``target_symbols``, ``entry_rules``, ``exit_rules``,
-    ``sizing`` are read).
-    Post: returns a non-empty Python source string with exactly one
-    ``Strategy`` subclass. Raises :class:`CompilerError` for specs the
-    compiler cannot express (e.g. ``volatility_target`` sizing without
-    a matching ATR indicator, trailing-basis stop-losses).
+    Pre:  ``spec`` is a ``StrategySpec`` (duck-typed: only the public
+          fields ``target_symbols``, ``entry_rules``, ``exit_rules``,
+          ``sizing`` are read).
+    Post: returns a non-empty Python source string defining exactly one
+          ``Strategy`` subclass. Output is byte-identical for any two
+          calls with semantically equal specs.
+    Raises: :class:`CompilerError` when the spec falls outside the
+          expressible subset, e.g. ``volatility_target`` sizing without
+          a matching ``atr`` indicator, MACD with ``fast >= slow``,
+          unsupported indicator / predicate / sizing variants.
     """
     entry_rules: List[EntryRule] = list(getattr(spec, "entry_rules", []) or [])
     exit_rules: List[Any] = list(getattr(spec, "exit_rules", []) or [])
@@ -134,24 +113,10 @@ def compile_strategy(spec: Any) -> str:
 
     signal_exit_rules = [r for r in exit_rules if isinstance(r, SignalExitRule)]
 
-    # NOTE: stop-loss / take-profit (including trailing-basis variants)
-    # are NOT inlined in compiled code and NOT attached as bracket legs
-    # on the entry order. The trading service's
-    # ``_EngineExitDispatcher`` runs ``evaluate_exit_rules`` against
-    # ``spec.exit_rules`` on every bar (see ``trading_service/service.py``
-    # line 276 and ``modes/backtest.py`` line 185) and emits
-    # ``engine_exit:<kind>`` orders against the post-fill
-    # ``position.entry_price`` — correct basis semantics for all of
-    # ``entry_price`` / ``trailing_high`` / ``trailing_low``. The
-    # safety gate's order-flow check accepts entries-only flow when
-    # spec has at least one engine-handled rule (see
-    # ``code_safety._spec_has_engine_handled_exit``).
-
     indicator_refs: List[IndicatorRef] = _collect_indicators(entry_rules, signal_exit_rules)
-    # MACD convention requires fast < slow; the DSL registry does not
-    # cross-check the two periods, so the validation lives here. With
-    # fast >= slow the helper's ``sub[-fast]`` index would walk off the
-    # left end of ``sub`` when ``len(sub) = slow``.
+    # MACD with ``fast >= slow`` would IndexError in the helper's
+    # ``sub[-fast]`` slicing when ``len(sub) == slow``. The DSL registry
+    # doesn't cross-check the two periods, so the validation lives here.
     for ref in indicator_refs:
         if ref.name == "macd":
             fast = int(ref.param("fast"))
@@ -169,10 +134,10 @@ def compile_strategy(spec: Any) -> str:
                 "volatility_target sizing requires an 'atr' indicator referenced "
                 "by an entry or signal-exit rule; none found in spec"
             )
-        # Multiple distinct ATR refs make the sizing choice ambiguous —
-        # the sigid-sort tiebreaker is deterministic but author-unaware,
-        # so adding an unrelated ATR predicate would silently change
-        # trade size. Refuse the spec and let LLM synthesis decide.
+        # Multiple distinct ATR periods make the sizing choice ambiguous
+        # — picking one by sigid would be deterministic but invisible to
+        # the spec author, so adding an unrelated ATR predicate would
+        # silently change trade size.
         distinct = {ref.param("period") for ref in atr_refs}
         if len(distinct) > 1:
             raise CompilerError(
@@ -188,12 +153,9 @@ def compile_strategy(spec: Any) -> str:
         ref.name in ("sma", "ema", "rsi", "macd", "bollinger") for ref in indicator_refs
     )
 
-    # History request depth and warm-up threshold are decoupled. VWAP
-    # wants the maximum retained depth (cumulative semantics) but its
-    # helper computes from any ≥ ``_MIN_WINDOW`` bars, so gating the
-    # whole strategy on 500 bars would silently block all trading on
-    # backtests with < 500 bars. Earlier rounds used a single ``WINDOW``
-    # for both and tripped this regression.
+    # ``history_depth`` (request) and ``warmup_min`` (gate) are decoupled
+    # so VWAP's cumulative-style depth request doesn't bind the warm-up
+    # threshold of every other indicator to 500 bars.
     history_depth = max((_history_depth_for(ref) for ref in indicator_refs), default=_MIN_WINDOW)
     history_depth = max(history_depth, _MIN_WINDOW)
     warmup_min = max((_lookback_for(ref) for ref in indicator_refs), default=_MIN_WINDOW)
@@ -220,19 +182,20 @@ def compile_strategy(spec: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helpers — indicator collection, sigid generation, lookback math.
+# Indicator collection, sigid generation, lookback math.
 # ---------------------------------------------------------------------------
 
 
 def _collect_indicators(
     entry_rules: List[EntryRule], signal_exit_rules: List[SignalExitRule]
 ) -> List[IndicatorRef]:
-    """Walk every predicate on every entry / signal-exit rule and return
-    the de-duplicated, sort-stable list of ``IndicatorRef`` instances.
+    """Return the de-duplicated, sigid-sorted ``IndicatorRef`` set from the rules.
 
-    Two refs with the same ``(name, params, source)`` deduplicate; sort
-    order is the sigid (sha256 of the canonical JSON dump) so binding
-    emission is stable across runs.
+    Pre:  predicates are well-formed; sides are ``IndicatorRef`` /
+          bar-field literal / numeric literal.
+    Post: refs with the same ``(name, params, source)`` deduplicate
+          to one entry; result order is sigid-sorted so binding
+          emission is byte-stable.
     """
     seen: dict[str, IndicatorRef] = {}
     for rule in entry_rules:
@@ -251,9 +214,11 @@ def _collect_indicators(
 def _sigid_for_side(side: Any) -> str:
     """Return a stable 8-char hex id for one predicate side.
 
-    Used both to key indicator binding variables (so two refs with the
-    same params share a binding) and to name ``self._prev_<sigid>``
-    state slots when a cross-* predicate references the side.
+    Pre:  ``side`` is ``IndicatorRef``, bar-field string, or numeric.
+    Post: equal sides → equal sigids; different sides differ with
+          cryptographic probability. ``IndicatorRef`` sigids are
+          invariant under field reordering (JSON dump uses sort_keys).
+    Raises: :class:`CompilerError` for any other side type.
     """
     if isinstance(side, IndicatorRef):
         payload = json.dumps(side.model_dump(mode="json"), sort_keys=True)
@@ -268,12 +233,15 @@ def _sigid_for_side(side: Any) -> str:
 
 
 def _lookback_for(ref: IndicatorRef) -> int:
-    """Return the MINIMUM bar-history depth ``ref`` needs before its
-    value is meaningful — used to compute the strategy's warm-up gate.
+    """Return the minimum bar-history depth before ``ref`` yields a non-None value.
 
-    Different from :func:`_history_depth_for`: that returns the depth
-    to REQUEST from ``ctx.history``, which can be larger (VWAP wants
-    cumulative-style depth but only needs ≥1 bar to compute).
+    Pre:  ``ref.name`` is one of the supported indicator names.
+    Post: returned value matches the first ``len(history)`` at which
+          the corresponding helper in :data:`_HELPER_BODIES` stops
+          returning ``None``. Used as the warm-up gate threshold.
+    Invariant: never smaller than the helper's actual requirement —
+          a too-low value would leave bindings permanently ``None``
+          and predicates never fire.
     """
     name = ref.name
     if name in ("sma", "ema"):
@@ -281,11 +249,8 @@ def _lookback_for(ref: IndicatorRef) -> int:
     if name == "rsi":
         return int(ref.param("period")) + 1
     if name == "macd":
-        # MACD warm-up depends on the selected output. ``output='macd'``
-        # only needs ``slow`` bars (the MACD line is computable at the
-        # first sub of length ``slow``). ``output ∈ {signal, histogram}``
-        # additionally needs ``signal`` macd-line samples to compute the
-        # signal-line EMA, so ``slow + signal - 1`` bars total.
+        # MACD line is computable at ``slow`` bars; signal/histogram
+        # additionally need ``signal - 1`` macd-line samples.
         slow = int(ref.param("slow"))
         signal = int(ref.param("signal"))
         select = str(ref.param("output"))
@@ -297,35 +262,26 @@ def _lookback_for(ref: IndicatorRef) -> int:
     if name == "atr":
         return int(ref.param("period")) + 1
     if name == "adx":
-        # Helper needs 2 * period + 1 bars before returning a value
-        # (Wilder smoothing requires two DX windows). A smaller window
-        # leaves the binding permanently None and ADX predicates never
-        # fire even on otherwise-sufficient market history.
+        # Wilder smoothing requires two DX windows: ``2 * period + 1``.
         return 2 * int(ref.param("period")) + 1
     if name == "stochastic":
-        # Helper computes ``%D`` once it has ``k_period + d_period - 1``
-        # bars (the first ``%K`` is available at ``k_period`` and the
-        # SMA over ``d_period`` values needs ``d_period - 1`` more bars
-        # of ``%K`` history). Returning ``k_period + d_period`` would
-        # delay the first valid signal by one bar with no safety win.
+        # %K available at ``k_period``; %D smoothing needs ``d_period - 1``
+        # additional bars of %K history.
         return int(ref.param("k_period")) + int(ref.param("d_period")) - 1
     if name == "vwap":
-        # Helper returns a value at ≥1 bar (cumulative sum doesn't have
-        # a strict warm-up). Floor to ``_MIN_WINDOW`` for safety — the
-        # value at 1 bar is just (h+l+c)/3, not informative.
+        # Cumulative sum has no strict warm-up, but a 1-bar VWAP is just
+        # (h+l+c)/3 and not informative — floor to ``_MIN_WINDOW``.
         return _MIN_WINDOW
     raise CompilerError(f"unsupported indicator: {name!r}")
 
 
 def _history_depth_for(ref: IndicatorRef) -> int:
-    """Return the depth to REQUEST from ``ctx.history(symbol, n)``.
+    """Return the depth to request from ``ctx.history(symbol, n)``.
 
-    Same as :func:`_lookback_for` for most indicators — they only need
-    their lookback worth of bars. VWAP is the exception: the sandbox
-    helper computes a cumulative-over-the-series VWAP, so the strategy
-    should ask for as deep a history as the harness retains
-    (``_VWAP_HISTORY``). Using the lookback (≥1) here would request
-    only the minimum and silently make compiled VWAP a 1-bar value.
+    Pre:  ``ref.name`` is one of the supported indicator names.
+    Post: for non-VWAP indicators, equals :func:`_lookback_for`.
+          For VWAP, returns ``_VWAP_HISTORY`` so the cumulative-style
+          helper sees the deepest history the harness retains.
     """
     if ref.name == "vwap":
         return _VWAP_HISTORY
@@ -337,8 +293,8 @@ def _build_indicator_bindings(
 ) -> List[Tuple[str, IndicatorRef, str, str]]:
     """Return ``(varname, ref, call_expr, sigid)`` for every indicator.
 
-    Sort order matches ``_collect_indicators`` (sigid-sorted) so emission
-    is byte-stable.
+    Pre:  ``refs`` is sigid-sorted (i.e. comes from :func:`_collect_indicators`).
+    Post: result order matches ``refs`` order, so emission is byte-stable.
     """
     out: List[Tuple[str, IndicatorRef, str, str]] = []
     for ref in refs:
@@ -352,9 +308,12 @@ def _build_indicator_bindings(
 def _emit_indicator_call(ref: IndicatorRef) -> str:
     """Render the ``self.<name>(history, ...)`` call expression for one ref.
 
-    For tuple-returning indicators (macd, bollinger, stochastic) the
-    selector param (``output`` / ``band``) is threaded into the call so
-    the helper returns the single scalar the predicate compares against.
+    Pre:  ``ref.name`` is one of the supported indicator names; required
+          DSL params are present.
+    Post: returned expression evaluates to a single scalar (or ``None``
+          during warm-up) of the type the corresponding predicate
+          compares against. Tuple-valued indicators (macd, bollinger,
+          stochastic) thread their selector kwarg through to the helper.
     """
     method = _INDICATOR_METHOD_NAME[ref.name]
     if ref.name in ("sma", "ema"):
@@ -391,14 +350,14 @@ def _collect_cross_sides(
     signal_exit_rules: List[SignalExitRule],
     indicator_bindings: List[Tuple[str, IndicatorRef, str, str]],
 ) -> List[Tuple[str, str, str]]:
-    """Return ``(sigid, prev_var, current_expr)`` for every side that
-    participates in any ``cross_above`` / ``cross_below`` predicate.
+    """Return ``(sigid, prev_var, current_expr)`` for every cross-predicate side.
 
-    ``prev_var`` is the local variable name (``prev_<sigid>``) bound at
-    the top of ``on_bar`` from the per-symbol ``self._cross_prev`` dict;
-    ``current_expr`` is the expression yielding the side's current-bar
-    value (an indicator binding variable or a bar-field reference).
-    De-duplicated by sigid; sort order is sigid so emission is stable.
+    Pre:  ``indicator_bindings`` covers every indicator referenced by
+          a cross predicate in the rules.
+    Post: result is de-duplicated by sigid and sigid-sorted. Each
+          tuple supplies the names needed by ``on_bar`` to read the
+          previous bar's value (``self._cross_prev[symbol][sigid]``)
+          and emit the current bar's value.
     """
     binding_by_sigid = {sigid: varname for varname, _ref, _call, sigid in indicator_bindings}
     out: dict[str, Tuple[str, str, str]] = {}
@@ -425,8 +384,13 @@ def _collect_cross_sides(
 def _render_side(side: Any, binding_by_sigid: dict[str, str]) -> str:
     """Render one predicate side as a Python expression.
 
-    Indicator refs resolve to their binding variable; bar-field literals
-    pass through; numeric literals render as ``repr(float(value))``.
+    Pre:  ``side`` is ``IndicatorRef`` / bar-field literal / numeric;
+          every ``IndicatorRef`` side has a binding in ``binding_by_sigid``.
+    Post: ``IndicatorRef`` → the binding variable; bar-field literal
+          → the corresponding bar attribute expression; numeric →
+          ``repr(float(value))``.
+    Raises: :class:`CompilerError` for missing bindings, unsupported
+          price-ref literals, or unsupported side types.
     """
     if isinstance(side, IndicatorRef):
         sigid = _sigid_for_side(side)
@@ -451,14 +415,15 @@ def _render_predicate(
 ) -> str:
     """Render one predicate as a boolean expression.
 
-    Simple ops (``<``, ``>``, ``<=``, ``>=``, ``==``) emit straightforward
-    Python comparisons guarded against ``None`` only for indicator-ref
-    sides (a helper returns ``None`` during the warm-up window). Numeric
-    literals and bar-field references are never ``None`` so guarding
-    them would trip the ``is not None`` with a literal SyntaxWarning.
-
-    Cross ops translate to a guard that checks both previous-bar
-    snapshots are non-None and the inequality flipped at this bar.
+    Pre:  ``pred.op`` ∈ ``{"<", ">", "<=", ">=", "==", "cross_above", "cross_below"}``;
+          for cross ops, both sides have entries in ``cross_sides``.
+    Post: returned expression is parenthesised and safe to evaluate
+          during warm-up: indicator-ref sides are guarded with
+          ``is not None`` (bar-field and numeric literals are never
+          None, so guarding them would emit a literal SyntaxWarning).
+          Cross ops additionally require both previous snapshots to
+          be non-None and the inequality to have flipped at this bar.
+    Raises: :class:`CompilerError` for unsupported ops.
     """
     lhs_expr = _render_side(pred.lhs, binding_by_sigid)
     rhs_expr = _render_side(pred.rhs, binding_by_sigid)
@@ -491,7 +456,7 @@ def _render_predicate(
 
 
 # ---------------------------------------------------------------------------
-# Sizing — render the ``qty = ...`` expression for an entry submit_order.
+# Sizing.
 # ---------------------------------------------------------------------------
 
 
@@ -500,17 +465,23 @@ def _render_sizing(
 ) -> str:
     """Return a Python statement that assigns ``qty`` from the sizing rule.
 
-    All variants clamp to ``max(1, int(...))`` so the engine receives a
-    positive integer qty.
+    Pre:  ``sizing`` is a known sizing variant; for
+          ``VolatilityTargetSizing``, an ``atr`` binding exists in
+          ``indicator_bindings`` (caller-side gate in
+          :func:`compile_strategy`).
+    Post: emitted ``qty`` is always a positive integer
+          (``max(1, int(...))``). The caller guarantees ``bar.close``
+          is non-None, finite, and positive at the point the emitted
+          statement executes — see the validity guard at the top of
+          ``on_bar``.
+    Raises: :class:`CompilerError` for unsupported variants, or
+          internally if an ATR binding is unexpectedly missing.
     """
     if isinstance(sizing, FixedFractionSizing):
         return f"qty = max(1, int((ctx.equity * {float(sizing.fraction)!r}) / bar.close))"
     if isinstance(sizing, FixedNotionalSizing):
-        # ctx.equity reference added separately (see _emit_on_bar) so the
-        # CodeConformanceGate sizing-math check passes for this variant too.
         return f"qty = max(1, int({float(sizing.notional_usd)!r} / bar.close))"
     if isinstance(sizing, VolatilityTargetSizing):
-        # ATR binding guaranteed by the caller-side gate in compile_strategy.
         atr_var = next(
             (varname for varname, ref, _call, _sigid in indicator_bindings if ref.name == "atr"),
             None,
@@ -527,12 +498,14 @@ def _render_sizing(
 
 
 # ---------------------------------------------------------------------------
-# Inline indicator helper-method bodies. Each takes ``self``, a ``history``
-# list of ``Bar``-like objects, and the indicator's params; returns the
-# scalar value at the LAST bar (or ``None`` when there is insufficient
-# history). The math mirrors ``strategy_lab/factors/primitives.py`` so the
-# compiled output remains drop-in for the engine and the trade-alignment
-# loop never sees diverging "compiled vs. reference" semantics.
+# Inline indicator helper-method bodies.
+#
+# Each takes ``self``, a ``history`` list of ``Bar``-like objects, and the
+# indicator's params; returns the scalar value at the last bar (or
+# ``None`` when there is insufficient history). The math mirrors
+# ``strategy_lab/factors/primitives.py`` so the compiled output remains
+# drop-in for the engine and the trade-alignment loop never sees
+# diverging "compiled vs. reference" semantics.
 # ---------------------------------------------------------------------------
 
 
@@ -608,25 +581,19 @@ _HELPER_BODIES: dict[str, str] = {
     "macd": textwrap.dedent(
         """\
         def macd(self, history, fast=12, slow=26, signal=9, source="close", select="macd"):
-            # Defensive: the compile_strategy front-door rejects fast >= slow,
-            # but the helper guards too so a runtime bug never IndexErrors.
+            # Defence-in-depth — front-door rejects fast >= slow.
             if fast >= slow:
                 return None
-            # Selector-aware warm-up: macd-line is computable at ``slow``
-            # bars; signal/histogram need an extra ``signal - 1`` bars of
-            # macd values to drive the EMA.
             min_bars = slow if select == "macd" else slow + signal - 1
             if len(history) < min_bars:
                 return None
             macd_line = []
             for end in range(slow, len(history) + 1):
                 sub = history[:end]
-                # EMA(fast) over sub
                 alpha_f = 2.0 / (fast + 1.0)
                 ef = self._src(sub[-fast], source)
                 for b in sub[-fast + 1:]:
                     ef = alpha_f * self._src(b, source) + (1.0 - alpha_f) * ef
-                # EMA(slow) over sub
                 alpha_s = 2.0 / (slow + 1.0)
                 es = self._src(sub[-slow], source)
                 for b in sub[-slow + 1:]:
@@ -755,18 +722,17 @@ _HELPER_BODIES: dict[str, str] = {
 
 
 def _canonical_spec_payload(spec: Any) -> dict[str, Any]:
-    """Return a sort-stable dict of the DSL fields that determine
-    compiled output. Used by ``_emit_header`` so the spec-hash header
-    is invariant to non-DSL fields like ``strategy_code`` (which is
-    itself the compiler's output), ``hypothesis`` prose, ``audit``,
-    and rule-level ``note`` text (author prose, never used in code-gen).
+    """Return a sort-stable dict of the DSL fields that determine compiled output.
+
+    Pre:  ``spec`` has the public DSL fields.
+    Post: result is JSON-serialisable with sort_keys. Excludes:
+          ``strategy_code`` (the compiler's own output), audit
+          metadata, ``hypothesis`` prose, and rule-level ``note``
+          fields (author prose, never consumed by code-gen). Two
+          semantically identical specs always yield equal payloads.
     """
 
     def _strip_notes(value: Any) -> Any:
-        # ``note`` is author prose attached to rules / sizing /
-        # indicator-refs; it never affects emitted code. Drop it
-        # recursively so semantically identical specs hash the same
-        # regardless of comment churn.
         if isinstance(value, dict):
             return {k: _strip_notes(v) for k, v in value.items() if k != "note"}
         if isinstance(value, list):
@@ -791,12 +757,9 @@ def _canonical_spec_payload(spec: Any) -> dict[str, Any]:
 def _emit_header(spec: Any) -> str:
     """Return the deterministic banner block.
 
-    ``spec_hash`` is sha256 of a canonical JSON dump of the DSL fields
-    the compiler actually consumes (``target_symbols``, ``entry_rules``,
-    ``exit_rules``, ``sizing``), truncated to 12 hex chars. Audit
-    metadata, prose, and ``strategy_code`` itself are intentionally
-    excluded so two semantically identical rule specs always produce
-    byte-identical compiled output regardless of surrounding metadata.
+    Post: includes a ``spec_hash`` (sha256 over
+          :func:`_canonical_spec_payload`, truncated to 12 hex chars).
+          Two semantically equal specs always emit the same banner.
     """
     payload = json.dumps(_canonical_spec_payload(spec), sort_keys=True)
     spec_hash = hashlib.sha256(payload.encode()).hexdigest()[:12]
@@ -811,12 +774,10 @@ def _emit_header(spec: Any) -> str:
 
 
 def _emit_imports() -> str:
-    # ``indicators`` module isn't imported — the sandbox's pandas-Series
-    # signatures don't match the compiled call shape, so the strategy
-    # carries its own inline implementations (see ``_HELPER_BODIES``).
-    # Bracket attachment classes (``StopAttachment`` / ``LimitAttachment``)
-    # are no longer needed since the compiler doesn't attach brackets —
-    # the engine enforces stop/take-profit from spec.exit_rules directly.
+    # The sandbox ``indicators`` module uses pandas-Series signatures
+    # incompatible with the compiled per-bar call shape, so it is
+    # deliberately NOT imported — helper bodies are inlined as class
+    # methods instead.
     return "import math\nfrom contract import Strategy, OrderSide, OrderType, TimeInForce\n"
 
 
@@ -838,6 +799,18 @@ def _emit_class(
     used_helper_names: List[str],
     needs_source_helper: bool,
 ) -> str:
+    """Emit the ``CompiledStrategy`` class source.
+
+    Pre:  inputs are produced by :func:`compile_strategy` after its
+          gating checks; ``indicator_bindings`` and ``cross_sides`` are
+          sigid-sorted.
+    Post: returned source defines exactly one ``class
+          CompiledStrategy(Strategy)`` with constants, ``__init__``,
+          ``on_bar``, and (when needed) indicator helper methods. The
+          body shape satisfies ``CodeSafetyChecker`` (universe guard,
+          order-flow shape) and ``CodeConformanceGate`` (indicator
+          name match, sizing-math hooks).
+    """
     universe_literal = (
         "frozenset({" + ", ".join(repr(s) for s in target_symbols) + "})"
         if target_symbols
@@ -847,10 +820,9 @@ def _emit_class(
     init_lines: List[str] = ["    def __init__(self):"]
     init_lines.append("        super().__init__()")
     if cross_sides:
-        # ``self._cross_prev`` is keyed by ``bar.symbol`` so multi-symbol
-        # runs don't leak previous-bar state across tickers. Each value
-        # is a sigid → previous-value dict written at the end of every
-        # successful ``on_bar``.
+        # Per-symbol scope: keyed by ``bar.symbol`` so multi-symbol
+        # runs don't leak previous-bar state across tickers (which
+        # would forge false cross triggers).
         init_lines.append("        self._cross_prev = {}")
     else:
         init_lines.append("        # No cross-* predicates — no prior-bar state.")
@@ -867,40 +839,29 @@ def _emit_class(
     on_bar_lines.append(f"        history = ctx.history(bar.symbol, {history_depth})")
     on_bar_lines.append(f"        if len(history) < {warmup_min}:")
     on_bar_lines.append("            return")
-    # Always emit a ctx.equity reference — flows into fixed_fraction /
-    # volatility_target sizing and satisfies the sizing-math conformance
-    # check for fixed_notional, whose qty expression has no other
-    # account-value touchpoint.
-    # Bar.close validity guard — every sizing variant divides by
-    # ``bar.close``, and a single bad tick (zero, negative, NaN) would
-    # otherwise raise ``ZeroDivisionError`` or propagate non-finite
-    # values into ``submit_order``, terminating the backtest /
-    # paper-trade session. Codex round-10 P2: skip the bar gracefully
-    # instead.
+    # Bar-close validity guard. Every sizing variant divides by
+    # ``bar.close``; a single bad tick (zero, negative, NaN, missing)
+    # would otherwise raise ``ZeroDivisionError`` or propagate
+    # non-finite values into ``submit_order`` and terminate the run.
     on_bar_lines.append(
         "        if bar.close is None or not math.isfinite(bar.close) or bar.close <= 0:"
     )
     on_bar_lines.append("            return")
     on_bar_lines.append("        equity = ctx.equity")
     on_bar_lines.append("        _ = equity  # silence-unused; sizing math reads ctx.equity above")
-    # Indicator binds — sigid-sorted (see _build_indicator_bindings).
     for varname, _ref, call_expr, _sigid in indicator_bindings:
         on_bar_lines.append(f"        {varname} = {call_expr}")
-    # Previous-bar snapshots used by cross_above/cross_below predicates.
-    # Per-symbol scope (``self._cross_prev[bar.symbol]``) so a multi-
-    # symbol run never compares this bar's value against another
-    # symbol's previous bar — that would forge false cross triggers.
     if cross_sides:
         on_bar_lines.append("        _prev_for_symbol = self._cross_prev.get(bar.symbol, {})")
         for sigid, prev_var, _cur in cross_sides:
             on_bar_lines.append(f"        {prev_var} = _prev_for_symbol.get({sigid!r})")
     on_bar_lines.append("        position = ctx.position(bar.symbol)")
 
-    # Conformance gate's ``_check_stop_loss_enforcement`` /
-    # ``_check_take_profit_enforcement`` require the class to reference
-    # ``position.entry_price`` when those rule kinds are in the spec.
-    # The runtime enforcement lives in the engine; emit a benign read
-    # so the static check passes without re-implementing the exit math.
+    # ``CodeConformanceGate`` requires the class to reference
+    # ``position.entry_price`` whenever the spec contains a stop-loss
+    # or take-profit rule (runtime enforcement is engine-side). Emit
+    # a benign read so the static check passes without re-implementing
+    # the exit math.
     has_engine_handled_exit = any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
     if has_engine_handled_exit:
         on_bar_lines.append(
@@ -910,10 +871,8 @@ def _emit_class(
 
     signal_exits_in_order = [r for r in exit_rules if isinstance(r, SignalExitRule)]
     if signal_exits_in_order:
-        # Per-bar guard so multiple signal-exit predicates firing on the
-        # same candle only emit one close order. Stop-loss / take-profit
-        # are NOT inlined (see module docstring) so the flag scope is
-        # narrower than in earlier rounds.
+        # Per-bar guard: multiple signal-exit predicates firing on the
+        # same candle emit one close order, not several.
         on_bar_lines.append("        exit_submitted = False")
     for rule in signal_exits_in_order:
         pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
@@ -934,34 +893,16 @@ def _emit_class(
         on_bar_lines.append("            )")
         on_bar_lines.append("            exit_submitted = True")
 
-    # Entry branches — one per rule, distinct top-level ``if``s so the
-    # entry-coverage gate counts them separately. A local
-    # ``entry_submitted`` flag short-circuits multi-entry-rule specs so
-    # two predicates true on the same bar don't double-up entry orders.
-    # Bracket attachments (``attached_stop_loss`` / ``attached_take_profit``)
-    # are added when the spec has the corresponding rule kinds — the
-    # safety gate counts a non-None bracket leg as the entry+exit pair,
-    # and the bracket prices are conservative bar.close-based estimates
-    # (the engine's evaluate_exit_rules drives the precise basis logic).
     if entry_rules:
+        # Per-bar guard: short-circuits multi-entry-rule specs so two
+        # predicates true on the same bar don't double-up entry orders.
         on_bar_lines.append("        entry_submitted = False")
-    # Entry submit_order — no bracket attachments. The previous round's
-    # ``attached_stop_loss=StopAttachment(stop_price=bar.close * (1-pct))``
-    # was semantically wrong on three fronts (codex round-6 review):
-    #   1. ``bar.close`` at signal time differs from the actual fill
-    #      price (market orders fill on the NEXT bar's open in the
-    #      trading service), so gap opens make the bracket distance
-    #      materially wrong vs. ``position.entry_price * (1-pct)``.
-    #   2. ``StopAttachment(stop_price=...)`` is a static stop and
-    #      silently downgrades ``StopLossRule.basis='trailing_high'`` /
-    #      ``'trailing_low'`` to fixed levels.
-    #   3. Only the first StopLossRule / TakeProfitRule fed the
-    #      bracket, so multi-rule specs lost the secondary rules.
-    # The engine's _EngineExitDispatcher already enforces every
-    # stop/take rule (with the correct basis) against the post-fill
-    # ``position.entry_price``; the safety gate has been widened to
-    # accept entries-only flow when ``spec.exit_rules`` contains an
-    # engine-handled rule (``_spec_has_engine_handled_exit``).
+    # Entry calls carry no bracket attachments. Bracket prices derived
+    # from signal-bar close are wrong on gap opens (market orders fill
+    # on the next bar's open), and a static StopAttachment silently
+    # downgrades trailing-basis stop-losses. The engine's
+    # ``_EngineExitDispatcher`` enforces every stop/take rule with the
+    # correct basis against the post-fill ``position.entry_price``.
     for rule in entry_rules:
         pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
         side_literal = "OrderSide.LONG" if rule.side == "long" else "OrderSide.SHORT"
@@ -978,18 +919,14 @@ def _emit_class(
         on_bar_lines.append("            )")
         on_bar_lines.append("            entry_submitted = True")
 
-    # Cross-state update — must come AFTER all branches so the current
+    # Cross-state update MUST come after all branches so the current
     # bar's value is preserved for the next ``on_bar`` invocation on
-    # this symbol. Per-symbol dict scope (see ``self._cross_prev`` in
-    # __init__). Order is sigid-sorted via ``_collect_cross_sides``.
+    # this symbol.
     if cross_sides:
         on_bar_lines.append("        _new_prev = self._cross_prev.setdefault(bar.symbol, {})")
         for sigid, _prev_var, current_expr in cross_sides:
             on_bar_lines.append(f"        _new_prev[{sigid!r}] = {current_expr}")
 
-    # Method blocks — class constants, __init__, on_bar, then indicator
-    # helpers (and the source helper) appended at the end so the class
-    # body reads top-down: constants, lifecycle, decision logic, math.
     helper_method_blocks: List[str] = []
     if needs_source_helper:
         helper_method_blocks.append(_indent_method(_emit_source_helper()))

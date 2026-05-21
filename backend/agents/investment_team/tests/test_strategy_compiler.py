@@ -1,4 +1,4 @@
-"""Tests for the deterministic StrategySpec → Python compiler (issue #538).
+"""Tests for the deterministic ``StrategySpec`` → Python compiler.
 
 Scope:
   * ``compile_strategy`` produces a valid Python module with exactly one
@@ -120,14 +120,14 @@ def test_signal_exit_only() -> None:
 
 
 def test_stop_loss_present_no_inline_or_bracket() -> None:
-    """Codex round-6: stop-loss is enforced ENTIRELY by the engine's
-    ``evaluate_exit_rules``. The compiler does NOT emit an inline
-    close (would duplicate engine_exit), NOR a bracket attachment
-    (which would use the wrong stop_price based on signal-bar close
-    instead of the actual post-fill ``position.entry_price``, and
-    silently downgrade trailing semantics to static stops). The
-    safety gate accepts entries-only flow when spec has engine-handled
-    exits — see ``_spec_has_engine_handled_exit``.
+    """Stop-loss is enforced entirely by the engine's ``evaluate_exit_rules``.
+
+    The compiler does NOT emit an inline close (would duplicate
+    ``engine_exit``) nor a bracket attachment (would use the wrong
+    stop_price based on signal-bar close instead of post-fill
+    ``position.entry_price``, and silently downgrade trailing semantics
+    to static stops). ``_spec_has_engine_handled_exit`` lets the safety
+    gate accept the entries-only flow.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -254,9 +254,10 @@ def test_multi_rule_full_spec() -> None:
 
 
 def test_cross_above_emits_per_symbol_prev_state() -> None:
-    """Codex P1 review: cross state must be keyed by ``bar.symbol`` so a
-    multi-symbol run can't compare this bar's value against a different
-    symbol's previous bar.
+    """Cross state must be keyed by ``bar.symbol``.
+
+    Otherwise a multi-symbol run would compare this bar's value against
+    a different symbol's previous bar and forge false cross triggers.
     """
     entry = EntryRule(
         side="long",
@@ -433,7 +434,7 @@ def test_sandbox_probe_runs_expected_trades() -> None:
 
 # ---------------------------------------------------------------------------
 # Runtime semantics — exec the emitted module, call the indicator helpers
-# and on_bar against synthetic bars. Covers the codex P1 review findings:
+# and on_bar against synthetic bars. Verifies:
 #   1. Helpers compute scalar values from a list[Bar] (no pandas).
 #   2. Tuple-valued indicators (macd / bollinger / stochastic) thread the
 #      selector and return ONE scalar matching the DSL selector.
@@ -656,9 +657,11 @@ def test_atr_helper_returns_scalar_from_bar_list() -> None:
 
 
 def test_stop_and_take_profit_do_not_emit_inline_exits() -> None:
-    """Codex round-5: stop_loss / take_profit are engine-enforced via
-    ``evaluate_exit_rules``. Inlining a parallel close would duplicate
-    the engine_exit and inflate order lifecycle diagnostics.
+    """``stop_loss`` / ``take_profit`` are engine-enforced.
+
+    The engine runs ``evaluate_exit_rules`` on every bar; inlining a
+    parallel close would duplicate the ``engine_exit`` order and inflate
+    order lifecycle diagnostics.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -698,8 +701,11 @@ def test_entry_only_with_no_exits_is_pre_safety_gate_concern() -> None:
 
 
 def test_no_indicators_import_in_emitted_code() -> None:
-    """Codex P1 review: the sandbox's ``indicators`` module expects
-    pandas Series, not list[Bar]. Inline helpers replace the import."""
+    """The sandbox ``indicators`` module expects pandas Series, not list[Bar].
+
+    Inline helpers replace the import so per-bar calls work without
+    materialising a DataFrame.
+    """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[_rsi_gt_70_exit(), StopLossRule(pct=0.05)],
@@ -712,8 +718,8 @@ def test_no_indicators_import_in_emitted_code() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Codex P1 round-2: ADX window, MACD fast/slow guard, per-symbol cross state,
-# multi-entry guard. Codex P2: spec-hash field scope.
+# Edge cases: ADX window, MACD fast/slow guard, multi-entry guard,
+# spec-hash field scope.
 # ---------------------------------------------------------------------------
 
 
@@ -733,8 +739,11 @@ def test_adx_window_at_least_two_period_plus_one() -> None:
 
 
 def test_macd_fast_greater_than_slow_raises() -> None:
-    """Codex P1: fast >= slow would IndexError inside the helper —
-    refuse the spec at compile time so the orchestrator falls back."""
+    """``fast >= slow`` would IndexError inside the helper.
+
+    Refuse the spec at compile time so the orchestrator falls back to
+    LLM synthesis.
+    """
     entry = EntryRule(
         side="long",
         when=Predicate(
@@ -807,9 +816,7 @@ def test_cross_state_isolated_per_symbol() -> None:
 
 
 def test_multiple_entry_rules_one_bar_emits_one_entry() -> None:
-    """Codex P1: when two entry predicates are true on the same bar
-    the compiled code must emit ONE entry, not two.
-    """
+    """Two entry predicates true on the same bar must emit one entry, not two."""
     # Two entry rules; both will fire on a flat-history bar because
     # each predicate threshold is generous.
     rule_a = EntryRule(
@@ -833,9 +840,11 @@ def test_multiple_entry_rules_one_bar_emits_one_entry() -> None:
 
 
 def test_spec_hash_ignores_non_dsl_fields() -> None:
-    """Codex P2: the spec-hash header must be invariant to non-DSL
-    fields (hypothesis prose, ``strategy_code``, audit) so semantically
-    identical rule specs produce byte-identical compiled output.
+    """spec-hash header is invariant to non-DSL fields.
+
+    Hypothesis prose, ``strategy_code``, audit metadata, and rule-level
+    notes change frequently without altering compiled semantics; the
+    output must be byte-identical for any two specs with equal DSL.
     """
     spec_a = _spec(entry_rules=[_rsi_lt_30_entry()], exit_rules=[_rsi_gt_70_exit()])
     # Mutate non-DSL fields on a deep copy.
@@ -852,11 +861,11 @@ def test_spec_hash_ignores_non_dsl_fields() -> None:
 
 
 def test_exit_rules_emitted_in_author_order() -> None:
-    """Codex round-5 follow-up: stop_loss / take_profit are no longer
-    inlined (engine enforces them), so the kind-partitioning concern
-    from round-4 no longer applies. What remains is signal-exit order:
-    when the spec has multiple signal-exit rules, they must be emitted
-    in author-declared order under the ``exit_submitted`` short-circuit.
+    """Multiple signal-exit rules are emitted in author-declared order.
+
+    Stop-loss and take-profit are engine-enforced and not inlined;
+    only signal-exit rules appear in the emitted ``on_bar``. They
+    must execute in spec order, guarded by ``exit_submitted``.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -890,16 +899,17 @@ def test_exit_rules_emitted_in_author_order() -> None:
 
 
 def test_compiled_code_flows_into_orchestrator_local_variable() -> None:
-    """Codex P1 round-3: the orchestrator must propagate ``spec.strategy_code``
-    into the local ``code`` variable. Downstream gates and
-    ``_run_synthesis_loop`` take ``code=...`` directly; writing only to
-    ``spec.strategy_code`` would silently bypass the compiler.
+    """Orchestrator propagates compiled code into the local ``code`` variable.
 
-    Verifies by patching ``compile_strategy`` to a sentinel string and
+    Downstream gates and ``_run_synthesis_loop`` take ``code=...``
+    directly. Writing only to ``spec.strategy_code`` would silently
+    bypass the compiler everywhere except the final persisted record.
+
+    Verified by patching ``compile_strategy`` to a sentinel string and
     asserting the orchestrator routes that string through to the next
-    phase, not the LLM-authored input. The fake ``_run_pre_synthesis_phase``
-    raises an early-exit sentinel so the test never reaches the synthesis
-    loop's LLM-driven refinement path.
+    phase, not the LLM-authored input. ``_run_pre_synthesis_phase`` is
+    stubbed to raise an early-exit sentinel so the test never reaches
+    the LLM-driven refinement path.
     """
     from unittest.mock import patch
 
@@ -977,14 +987,12 @@ def test_compiled_code_flows_into_orchestrator_local_variable() -> None:
 
 
 def test_requires_custom_code_null_normalises_to_false() -> None:
-    """Codex P2 round-3: an explicit ``null`` from the LLM must not
-    crash the design attempt with a ValidationError. The orchestrator
-    normalises ``None`` to ``False`` (default behaviour) before passing
-    to ``StrategySpec`` so deterministic compile remains the default.
+    """An explicit ``null`` from the LLM must not crash the design attempt.
+
+    The orchestrator normalises ``None`` to ``False`` (default
+    behaviour) before passing to ``StrategySpec`` so deterministic
+    compile remains the default.
     """
-    # The orchestrator code path is exercised via the previous test;
-    # here we just pin the normalisation pattern directly so a future
-    # refactor can't regress it.
     raw = None
     normalized = raw if raw is not None else False
     spec = StrategySpec(
@@ -1004,11 +1012,11 @@ def test_requires_custom_code_null_normalises_to_false() -> None:
 
 
 def test_requires_custom_code_string_false_does_not_disable_compile() -> None:
-    """Codex P2: ``bool('false')`` is ``True``; the orchestrator must
-    not coerce the raw value through ``bool(...)`` or any non-empty
-    string would silently disable deterministic compilation. The
-    StrategySpec field is ``bool`` so Pydantic's bool coercion handles
-    the string variants correctly.
+    """``bool('false')`` is ``True``, so raw bool() coercion would silently disable compilation.
+
+    The orchestrator must route through Pydantic's string-bool coercion
+    (which handles ``"true"``/``"false"`` correctly) rather than naive
+    ``bool(value)``.
     """
     spec = StrategySpec(
         strategy_id="strat-test",
@@ -1027,14 +1035,16 @@ def test_requires_custom_code_string_false_does_not_disable_compile() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Codex round-4: MACD/VWAP lookback, stochastic off-by-one, ATR ambiguity,
-# rule-note exclusion from spec hash.
+# Lookback math: MACD selector-aware, VWAP cumulative depth, stochastic
+# %D formula, ATR ambiguity.
 # ---------------------------------------------------------------------------
 
 
 def test_macd_lookback_for_macd_output_uses_slow_only() -> None:
-    """Codex P1: ``output='macd'`` only needs ``slow`` bars; previously
-    we returned ``slow + signal`` and delayed valid signals by 9 bars.
+    """``output='macd'`` only needs ``slow`` bars.
+
+    Using ``slow + signal`` would delay valid signals by ``signal``
+    bars even though the MACD line is computable at ``slow``.
     """
     entry = EntryRule(
         side="long",
@@ -1076,10 +1086,11 @@ def test_macd_helper_signal_returns_at_minimum_history() -> None:
 
 
 def test_vwap_lookback_uses_harness_history_cap() -> None:
-    """Codex P1: VWAP is cumulative in the sandbox indicator; capping at
-    ``_MIN_WINDOW`` (20) would silently make it a 20-bar rolling VWAP.
-    Use the harness retention cap (500 bars) so the helper sees the
-    deepest history the engine retains.
+    """VWAP requests the harness retention cap (500 bars).
+
+    The sandbox VWAP is cumulative-over-the-series; capping the request
+    at ``_MIN_WINDOW`` (20) would silently make it a 20-bar rolling
+    VWAP and change signal semantics.
     """
     entry = EntryRule(
         side="long",
@@ -1091,8 +1102,10 @@ def test_vwap_lookback_uses_harness_history_cap() -> None:
 
 
 def test_stochastic_lookback_off_by_one_fixed() -> None:
-    """Codex P3: ``%D`` is available at ``k_period + d_period - 1``;
-    previously returned ``k_period + d_period`` and delayed by one bar.
+    """``%D`` is available at ``k_period + d_period - 1``.
+
+    Using ``k_period + d_period`` would delay the first valid signal
+    by one bar with no safety benefit.
     """
     entry = EntryRule(
         side="long",
@@ -1126,8 +1139,10 @@ def test_stochastic_lookback_off_by_one_fixed() -> None:
 
 
 def test_volatility_target_with_multiple_distinct_atr_raises() -> None:
-    """Codex P2: when sizing is volatility_target and the spec has more
-    than one ATR period, the choice is ambiguous — refuse to compile.
+    """``volatility_target`` with multiple ATR periods is ambiguous; refuse to compile.
+
+    The compiler cannot pick which ATR to use without author intent;
+    falling back to LLM synthesis preserves visibility.
     """
     rules = [
         EntryRule(
@@ -1170,10 +1185,11 @@ def test_volatility_target_with_single_atr_period_used_twice_compiles() -> None:
 
 
 def test_no_inline_or_bracket_engine_exits_when_stop_loss_present() -> None:
-    """Codex round-6 P1: stop_loss / take_profit are enforced entirely
-    by the engine — no inline ``submit_order`` AND no bracket leg in
-    compiled code. Bracket prices computed at signal time were wrong
-    on gap opens; the engine uses post-fill ``position.entry_price``.
+    """Stop-loss / take-profit emit no inline close and no bracket leg.
+
+    Bracket prices computed at signal time are wrong on gap opens
+    (market orders fill on the next bar's open). The engine uses the
+    post-fill ``position.entry_price``.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -1206,10 +1222,10 @@ def test_trailing_stop_loss_compiles_via_engine() -> None:
 
 
 def test_safety_gate_accepts_entries_only_when_spec_has_stop_loss() -> None:
-    """Codex round-6: ``CodeSafetyChecker._check_order_flow_shape`` is
-    widened to accept entries-only flow when ``spec.exit_rules`` has
-    an engine-handled rule. Without this, the bracket-less entry-only
-    emission would fail the gate.
+    """``_check_order_flow_shape`` accepts entries-only when spec has an engine-handled exit.
+
+    Without the relaxation, the bracket-less entry-only emission would
+    fail the gate because the strategy has no explicit exit leg.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -1232,11 +1248,12 @@ def test_safety_gate_rejects_entries_only_without_engine_handled_exit() -> None:
 
 
 def test_requires_custom_code_defensive_on_malformed_string() -> None:
-    """Codex round-5 P2: previous round only normalised ``None``; other
-    malformed LLM outputs (empty string, ``"maybe"``, arbitrary prose)
-    still propagated and raised ValidationError. The orchestrator's
-    ``_coerce_requires_custom_code`` helper now defaults to ``False``
-    for any non-bool/non-recognised-string value.
+    """``_coerce_requires_custom_code`` accepts arbitrary input without raising.
+
+    Recognised truthy/falsey values map correctly; everything else
+    (off-spec ints, arbitrary prose, lists, dicts) defaults to
+    ``False`` so a single typo in ideation JSON can't abort the design
+    attempt with a ValidationError.
     """
     from investment_team.strategy_lab.orchestrator import _coerce_requires_custom_code
 
@@ -1252,9 +1269,9 @@ def test_requires_custom_code_defensive_on_malformed_string() -> None:
     assert _coerce_requires_custom_code(None) is False
     assert _coerce_requires_custom_code("") is False
     assert _coerce_requires_custom_code("no") is False
-    # Codex round-6 P2: off-spec ints (NOT exactly 0 or 1) default to
-    # False — ``bool(2)`` would have silently flipped a typo'd value
-    # into ``True`` and disabled deterministic compilation.
+    # Off-spec ints default to False rather than ``bool(value)``, which
+    # would silently flip a typo'd ``2`` into ``True`` and disable the
+    # deterministic compile path.
     assert _coerce_requires_custom_code(2) is False
     assert _coerce_requires_custom_code(-1) is False
     assert _coerce_requires_custom_code(42) is False
@@ -1266,12 +1283,12 @@ def test_requires_custom_code_defensive_on_malformed_string() -> None:
 
 
 def test_vwap_warmup_min_does_not_block_trading() -> None:
-    """Codex round-7 P2: VWAP needs deep history (cumulative semantics)
-    but only ≥ ``_MIN_WINDOW`` bars to start trading. Previous round
-    set WINDOW=500 AND gated all trading on having 500 bars — blocking
-    any backtest shorter than 500 bars entirely. Split into separate
+    """VWAP requests deep history (cumulative) but trades from bar 20.
+
     ``WINDOW`` (history-request depth) and ``WARMUP_MIN`` (gate
-    threshold): VWAP requests 500 but trades from bar 20.
+    threshold) are decoupled: using a single value would either give
+    VWAP a 20-bar window (wrong semantics) or block every shorter-
+    history backtest entirely.
     """
     entry = EntryRule(
         side="long",
@@ -1290,11 +1307,11 @@ def test_vwap_warmup_min_does_not_block_trading() -> None:
 
 
 def test_safety_gate_rejects_close_only_strategy_even_with_engine_exits() -> None:
-    """Codex round-7 P1: the engine-handled-exit relaxation must not
-    rubber-stamp a strategy that has NO entry submission. A code-only
-    close (or zero submits) is still broken even if spec.exit_rules
-    declares engine-handled rules — there's nothing for the engine
-    to close.
+    """The engine-handled-exit relaxation requires an entry submission.
+
+    A close-only strategy (or zero submits) is still broken even if
+    ``spec.exit_rules`` declares engine-handled rules — there's
+    nothing for the engine to close.
     """
     spec_payload = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -1323,11 +1340,11 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_rejects_long_only_entry_with_short_only_trailing_stop() -> None:
-    """Codex round-7 P1: ``StopLossRule(basis="trailing_low")`` is a
-    no-op for long positions in ``_stop_loss_triggers`` (only fires on
-    shorts). A long-only spec with only that exit rule has NO
-    triggerable engine exit — positions stay open forever. The widened
-    safety gate must refuse it.
+    """Long entries with only a ``trailing_low`` stop have no triggerable exit.
+
+    ``StopLossRule(basis="trailing_low")`` fires only on shorts (per
+    ``_stop_loss_triggers``); a long position would stay open forever
+    if it were the only exit rule.
     """
     long_entry = EntryRule(
         side="long",
@@ -1387,11 +1404,12 @@ def test_safety_gate_accepts_long_entry_with_trailing_high_stop() -> None:
 
 
 def test_safety_gate_rejects_emitted_short_with_long_only_trailing_stop() -> None:
-    """Codex round-8 P1: even if ``spec.entry_rules`` declares only
-    long entries, a refined strategy that actually emits
-    ``side=OrderSide.SHORT`` would have no triggerable exit when the
-    spec's stop-loss has ``basis="trailing_high"`` (long-only). The
-    safety gate must use the EMITTED sides, not just spec.entry_rules.
+    """Side coverage uses emitted sides, not just ``spec.entry_rules``.
+
+    A refined strategy can emit ``side=OrderSide.SHORT`` even when
+    ``spec.entry_rules`` declares only long; only checking the spec
+    would miss the resulting exit-coverage gap when the stop-loss is
+    ``basis="trailing_high"`` (long-only).
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],  # declares long
@@ -1420,13 +1438,11 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_rejects_close_with_computed_qty() -> None:
-    """Codex round-8 P1: ``qty=abs(position.qty)`` and similar
-    expression-wrapped close shapes were misclassified as entries
-    (only exact ``qty=position.qty`` was detected). With the
-    engine-handled-exit relaxation, that false positive let close-only
-    strategies pass the gate. ``_expr_references_position_qty`` now
-    walks the kwarg expression for any reference to
-    ``position.qty`` / ``pos.qty``.
+    """Wrapped close shapes (``abs(position.qty)``) are recognised as closes.
+
+    ``_expr_references_position_qty`` walks the kwarg expression
+    recursively, so any reference to ``position.qty`` / ``pos.qty``
+    (direct, wrapped in ``abs()``, multiplied, etc.) is detected.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -1454,11 +1470,11 @@ class CompiledStrategy(Strategy):
 
 
 def test_requires_custom_code_short_form_strings() -> None:
-    """Codex round-8 P2: Pydantic's bool field accepts the single-letter
-    short forms ``t`` / ``f`` / ``y`` / ``n``. The defensive coercer
-    used to drop them and downgrade ``"y"`` to ``False``, silently
-    forcing deterministic compilation when the ideation output meant
-    the opposite.
+    """Single-letter short forms ``t`` / ``f`` / ``y`` / ``n`` are recognised.
+
+    Pydantic's bool field accepts them; the coercer must too, or
+    ``"y"`` would silently downgrade to ``False`` and force the
+    deterministic compile path opposite to ideation's intent.
     """
     from investment_team.strategy_lab.orchestrator import _coerce_requires_custom_code
 
@@ -1473,10 +1489,11 @@ def test_requires_custom_code_short_form_strings() -> None:
 
 
 def test_safety_gate_rejects_kwargs_spread_only_strategy() -> None:
-    """Codex round-9 P1a: a ``ctx.submit_order(**kwargs)`` spread can
-    carry ``qty=position.qty`` just as easily as a side literal. The
-    relaxation must NOT treat spread calls as entries — otherwise
-    close-only strategies pass the gate whenever spec has stop/TP.
+    """``ctx.submit_order(**kwargs)`` spreads are not treated as entries.
+
+    A spread can carry ``qty=position.qty`` just as easily as a side
+    literal; if it counted as an entry, close-only strategies would
+    pass the gate whenever spec has stop/TP.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -1505,10 +1522,11 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_rejects_entry_only_reachable_when_in_position() -> None:
-    """Codex round-9 P1b: a ``ctx.submit_order(side=LONG, qty=10)`` call
-    inside ``if position is not None:`` is an add-on, not a flat entry.
-    The relaxation must require at least one call reachable when
-    position may still be ``None``.
+    """A call inside ``if position is not None:`` is an add-on, not a flat entry.
+
+    The relaxation requires at least one submit_order call reachable
+    when ``position`` may still be ``None``; otherwise the strategy
+    never opens a fresh position.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -1567,10 +1585,10 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_does_not_extract_side_from_arbitrary_function_call() -> None:
-    """Codex round-9 P1c: ``side=pick("LONG")`` must NOT be statically
-    interpreted as a literal LONG — ``pick`` could return SHORT at
-    runtime. ``_extract_side_literal`` only unwraps ``OrderSide(...)``
-    constructor calls, not arbitrary function calls.
+    """Only the ``OrderSide(...)`` constructor unwraps to a literal.
+
+    Any other call (``pick("LONG")``, ``helper(OrderSide.LONG)``) is
+    opaque — the runtime value could differ from the syntactic arg.
     """
     from investment_team.strategy_lab.quality_gates.code_safety import (
         _extract_side_literal,
@@ -1588,11 +1606,11 @@ def test_safety_gate_does_not_extract_side_from_arbitrary_function_call() -> Non
 
 
 def test_safety_gate_explicit_uncovered_side_not_masked_by_dynamic() -> None:
-    """Codex round-9 P1d: a literal ``side=OrderSide.SHORT`` with only
-    a long-side ``trailing_high`` stop in spec is a real coverage
-    mismatch. A SECOND call elsewhere with dynamic ``side=`` must NOT
-    let the gate pass via the spec-level fallback — the explicit
-    uncovered side wins.
+    """An explicit uncovered side is never masked by a dynamic ``side=`` elsewhere.
+
+    A literal ``side=OrderSide.SHORT`` with only a long-side
+    ``trailing_high`` stop is a real coverage mismatch; a second
+    submit_order with a runtime-computed side cannot relax it.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],  # spec declares long
@@ -1634,9 +1652,10 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_rejects_else_arm_of_position_is_none_as_in_position() -> None:
-    """Codex round-10 P1a: a submit_order inside the ELSE arm of
-    ``if position is None: return`` is reachable only when position
-    is not None — it's an add-on / close, not a flat entry.
+    """``else`` arm of ``if position is None:`` is reachable only when not-None.
+
+    A submit_order placed there is an add-on / close, not a flat
+    entry, and must not satisfy the entry-existence check.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -1668,9 +1687,7 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_recognises_position_neq_none_as_in_position_guard() -> None:
-    """Codex round-10 P1b: ``if position != None:`` must be treated
-    as in-position the same way ``is not None`` is.
-    """
+    """``if position != None:`` pins position to not-None just like ``is not None``."""
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05)],
@@ -1699,9 +1716,7 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_recognises_negated_is_none_as_in_position_guard() -> None:
-    """Codex round-10 P1c: ``if not (position is None):`` is logically
-    equivalent to ``is not None`` and must pin the body to in-position.
-    """
+    """``if not (position is None):`` pins position to not-None like ``is not None``."""
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05)],
@@ -1730,9 +1745,7 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_recognises_aliased_position_qty_close() -> None:
-    """Codex round-10 P1d: ``p = ctx.position(...)`` then
-    ``qty=p.qty`` must be recognised as a close (not an entry).
-    """
+    """Aliased ``p = ctx.position(...)`` then ``qty=p.qty`` counts as a close, not an entry."""
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05)],
@@ -1761,9 +1774,7 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_recognises_aliased_position_in_guard_matcher() -> None:
-    """Codex round-10 P1e: ``p = ctx.position(...)`` then
-    ``if p is not None:`` must pin the body to in-position.
-    """
+    """Aliased ``p = ctx.position(...)`` then ``if p is not None:`` pins to in-position."""
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[StopLossRule(pct=0.05)],
@@ -1792,14 +1803,14 @@ class CompiledStrategy(Strategy):
 
 
 def test_safety_gate_dynamic_fallback_helper_requires_both_sides() -> None:
-    """Codex round-10 P1f: when emitted side= is dynamic and no explicit
-    literals are present, the widened relaxation must require BOTH
-    ``long`` and ``short`` to be covered by triggerable engine exits
-    — the runtime side could resolve either way. Tested at the helper
-    level because the broader ``_calls_form_entry_exit_pair`` check
-    short-circuits dynamic-side calls (treats any unknown side as a
-    valid pair) before the widening runs. The fix is preserved as
-    defense-in-depth in case that legacy check is tightened later.
+    """Dynamic-only ``side=`` requires both ``long`` and ``short`` coverage.
+
+    The runtime value could resolve either way; failing closed unless
+    both sides are covered by triggerable engine exits keeps the
+    relaxation sound. Tested at the helper level because the broader
+    ``_calls_form_entry_exit_pair`` check short-circuits dynamic-side
+    calls today (treats unknown side as a valid pair); the helper-level
+    invariant is preserved as defence-in-depth.
     """
     from investment_team.strategy_lab.quality_gates.code_safety import (
         _engine_exits_cover_sides,
@@ -1822,9 +1833,10 @@ def test_safety_gate_dynamic_fallback_helper_requires_both_sides() -> None:
 
 
 def test_safety_gate_extractor_rejects_non_order_side_attributes() -> None:
-    """Codex round-10 P2: ``FakeSide.LONG`` is NOT a valid side literal
-    — only attributes rooted in ``OrderSide`` / ``contract.OrderSide``
-    count. The extractor must return ``None`` for unrelated enums.
+    """Only attributes rooted in ``OrderSide`` / ``contract.OrderSide`` count as side literals.
+
+    A user-defined ``FakeSide.LONG`` with arbitrary value must NOT
+    satisfy side-coverage statically.
     """
     from investment_team.strategy_lab.quality_gates.code_safety import (
         _extract_side_literal,
@@ -1845,10 +1857,7 @@ def test_safety_gate_extractor_rejects_non_order_side_attributes() -> None:
 
 
 def test_compiled_on_bar_skips_bar_when_close_is_zero() -> None:
-    """Codex round-10 P2 (sizing): bar.close <= 0 must not crash on_bar
-    via ZeroDivisionError from the sizing formula. The emitted guard
-    skips the bar gracefully.
-    """
+    """``bar.close <= 0`` must skip the bar, not ZeroDivisionError out of sizing."""
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         sizing=FixedFractionSizing(fraction=0.05),
@@ -1890,9 +1899,10 @@ def test_compiled_on_bar_skips_bar_when_close_is_non_finite() -> None:
 
 
 def test_spec_hash_invariant_to_rule_notes() -> None:
-    """Codex P3: rule-level ``note`` text is author prose and never
-    affects emitted code. Two specs differing only by ``note`` must
-    produce byte-identical compiled output.
+    """Rule-level ``note`` text never affects emitted code.
+
+    Author prose isn't part of the DSL semantics; two specs differing
+    only by ``note`` must produce byte-identical compiled output.
     """
     entry_with_note = EntryRule(
         side="long",
