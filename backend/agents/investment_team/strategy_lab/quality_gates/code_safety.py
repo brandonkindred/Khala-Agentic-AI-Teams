@@ -6,6 +6,7 @@ import ast
 from dataclasses import dataclass
 from typing import Any, ClassVar, Iterable, List
 
+from ..spec_dsl import StopLossRule, TakeProfitRule
 from .code_safety_ast import (
     _BANNED_CALL_PATTERNS,
     _LOOKAHEAD_PATTERNS,
@@ -101,30 +102,7 @@ def _spec_has_engine_handled_exit(spec: Any) -> bool:
     exit_rules = getattr(spec, "exit_rules", None)
     if not exit_rules:
         return False
-    from ..spec_dsl import StopLossRule, TakeProfitRule
-
     return any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
-
-
-def _engine_exits_cover_all_entry_sides(spec: Any) -> bool:
-    """True iff every side in ``spec.entry_rules`` is closeable by some ``spec.exit_rules`` entry.
-
-    Pre:  ``spec`` is a ``StrategySpec`` or ``None``.
-    Post: False when ``spec`` is None or has no entry rules; otherwise
-          delegates to :func:`_engine_exits_cover_sides` for the union
-          of declared entry sides.
-    """
-    if spec is None:
-        return False
-    from ..spec_dsl import EntryRule
-
-    entry_sides: set[str] = set()
-    for rule in getattr(spec, "entry_rules", None) or []:
-        if isinstance(rule, EntryRule):
-            entry_sides.add(rule.side)
-    if not entry_sides:
-        return False
-    return _engine_exits_cover_sides(spec, entry_sides)
 
 
 def _hook_calls_include_entry(cls: ast.ClassDef, calls: List[ast.Call]) -> bool:
@@ -197,17 +175,13 @@ def _collect_position_aliases(cls: ast.ClassDef) -> frozenset[str]:
 
 def _is_ctx_position_call(node: ast.AST) -> bool:
     """True iff ``node`` is a ``ctx.position(...)`` call expression."""
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    if (
-        isinstance(func, ast.Attribute)
-        and func.attr == "position"
-        and isinstance(func.value, ast.Name)
-        and func.value.id == "ctx"
-    ):
-        return True
-    return False
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "position"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "ctx"
+    )
 
 
 def _expr_references_position_qty(
@@ -430,19 +404,10 @@ def _extract_side_literal(node: ast.AST) -> str | None:
 
 
 def _attr_value_is_order_side(node: ast.AST) -> bool:
-    """True iff ``node`` references the ``OrderSide`` enum root.
-
-    Pre:  ``node`` is an AST expression — the receiver side of an
-          ``Attribute`` access being inspected as a side literal.
-    Post: True iff ``node`` is ``Name("OrderSide")`` or an
-          ``Attribute`` whose final attribute name is ``"OrderSide"``
-          (``contract.OrderSide``, ``foo.bar.OrderSide``).
-    """
-    if isinstance(node, ast.Name) and node.id == "OrderSide":
-        return True
-    if isinstance(node, ast.Attribute) and node.attr == "OrderSide":
-        return True
-    return False
+    """True iff ``node`` is ``Name("OrderSide")`` or an ``Attribute`` ending in ``.OrderSide``."""
+    return (isinstance(node, ast.Name) and node.id == "OrderSide") or (
+        isinstance(node, ast.Attribute) and node.attr == "OrderSide"
+    )
 
 
 def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
@@ -461,7 +426,6 @@ def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
     if spec is None or not sides:
         return False
     exit_rules = getattr(spec, "exit_rules", None) or []
-    from ..spec_dsl import StopLossRule, TakeProfitRule
 
     def _rule_covers_side(rule: Any, side: str) -> bool:
         if isinstance(rule, TakeProfitRule):
@@ -709,19 +673,14 @@ class CodeSafetyChecker(GateResultsMixin):
         #   (2) the strategy has at least one plausible flat entry
         #       (:func:`_hook_calls_include_entry`);
         #   (3) every explicit ``side=`` literal in entry calls is
-        #       covered by a triggerable rule in ``spec.exit_rules``;
-        #   (4) any dynamic ``side=`` expression (variable, opaque
-        #       call) requires BOTH ``"long"`` and ``"short"`` coverage,
-        #       because the runtime value is unresolvable here and
-        #       refined code may emit a side outside ``spec.entry_rules``.
+        #       covered by a triggerable rule in ``spec.exit_rules``.
+        # Dynamic ``side=`` expressions cannot reach this branch in
+        # practice — :func:`_calls_form_entry_exit_pair` treats them
+        # optimistically and short-circuits above.
         cls = ctx.strategy_classes[0]
         if _spec_has_engine_handled_exit(ctx.spec) and _hook_calls_include_entry(cls, hook_calls):
-            emitted_sides, has_dynamic = _entry_sides_emitted_by_calls(cls, hook_calls)
-            dynamic_ok = (not has_dynamic) or _engine_exits_cover_sides(ctx.spec, {"long", "short"})
-            if emitted_sides:
-                if _engine_exits_cover_sides(ctx.spec, emitted_sides) and dynamic_ok:
-                    return ()
-            elif has_dynamic and dynamic_ok:
+            emitted_sides, _ = _entry_sides_emitted_by_calls(cls, hook_calls)
+            if emitted_sides and _engine_exits_cover_sides(ctx.spec, emitted_sides):
                 return ()
         if len(hook_calls) == 1:
             detail = (

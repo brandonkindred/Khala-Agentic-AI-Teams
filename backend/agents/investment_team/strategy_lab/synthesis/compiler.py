@@ -730,21 +730,22 @@ def _canonical_spec_payload(spec: Any) -> dict[str, Any]:
           metadata, ``hypothesis`` prose, and rule-level ``note``
           fields (author prose, never consumed by code-gen). Two
           semantically identical specs always yield equal payloads.
+    Invariant: ``note`` is stripped only from the top-level rule /
+          sizing dict, not from nested ``params`` — a future indicator
+          param literally named ``"note"`` would survive the strip
+          and remain in the hash.
     """
-
-    def _strip_notes(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {k: _strip_notes(v) for k, v in value.items() if k != "note"}
-        if isinstance(value, list):
-            return [_strip_notes(v) for v in value]
-        return value
 
     def _dump(value: Any) -> Any:
         if value is None:
             return None
         if hasattr(value, "model_dump"):
-            return _strip_notes(value.model_dump(mode="json"))
-        return _strip_notes(value)
+            payload = value.model_dump(mode="json")
+        else:
+            payload = value
+        if isinstance(payload, dict):
+            return {k: v for k, v in payload.items() if k != "note"}
+        return payload
 
     return {
         "target_symbols": list(getattr(spec, "target_symbols", []) or []),
@@ -782,7 +783,6 @@ def _emit_imports() -> str:
 
 
 def _indent_method(body: str, spaces: int = 4) -> str:
-    """Indent a left-aligned method body by ``spaces`` columns."""
     return textwrap.indent(body.rstrip() + "\n", " " * spaces)
 
 
@@ -847,8 +847,10 @@ def _emit_class(
         "        if bar.close is None or not math.isfinite(bar.close) or bar.close <= 0:"
     )
     on_bar_lines.append("            return")
-    on_bar_lines.append("        equity = ctx.equity")
-    on_bar_lines.append("        _ = equity  # silence-unused; sizing math reads ctx.equity above")
+    # ``CodeConformanceGate`` requires a top-of-on_bar ``ctx.equity``
+    # reference; sizing variants that ignore equity (e.g. fixed_notional)
+    # still need it to satisfy the static sizing-math check.
+    on_bar_lines.append("        _ = ctx.equity")
     for varname, _ref, call_expr, _sigid in indicator_bindings:
         on_bar_lines.append(f"        {varname} = {call_expr}")
     if cross_sides:
@@ -936,7 +938,6 @@ def _emit_class(
 
     body_lines: List[str] = [
         f"    UNIVERSE = {universe_literal}",
-        f"    WINDOW = {history_depth}",
         f"    WARMUP_MIN = {warmup_min}",
         "",
         *init_lines,

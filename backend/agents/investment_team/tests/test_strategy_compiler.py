@@ -734,8 +734,9 @@ def test_adx_window_at_least_two_period_plus_one() -> None:
     )
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
-    # 2*14 + 1 = 29 ⇒ WINDOW >= 29
-    assert "WINDOW = 29" in code
+    # 2*14 + 1 = 29 ⇒ history depth and warm-up gate both >= 29.
+    assert "ctx.history(bar.symbol, 29)" in code
+    assert "WARMUP_MIN = 29" in code
 
 
 def test_macd_fast_greater_than_slow_raises() -> None:
@@ -1052,8 +1053,9 @@ def test_macd_lookback_for_macd_output_uses_slow_only() -> None:
     )
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
-    # Default fast=12 / slow=26 → WINDOW = max(slow, _MIN_WINDOW) = 26.
-    assert "WINDOW = 26" in code
+    # Default fast=12 / slow=26 → history depth = max(slow, _MIN_WINDOW) = 26.
+    assert "ctx.history(bar.symbol, 26)" in code
+    assert "WARMUP_MIN = 26" in code
 
 
 def test_macd_lookback_for_signal_output_uses_slow_plus_signal_minus_one() -> None:
@@ -1066,7 +1068,8 @@ def test_macd_lookback_for_signal_output_uses_slow_plus_signal_minus_one() -> No
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
     # 26 + 9 - 1 = 34
-    assert "WINDOW = 34" in code
+    assert "ctx.history(bar.symbol, 34)" in code
+    assert "WARMUP_MIN = 34" in code
 
 
 def test_macd_helper_signal_returns_at_minimum_history() -> None:
@@ -1098,7 +1101,7 @@ def test_vwap_lookback_uses_harness_history_cap() -> None:
     )
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
-    assert "WINDOW = 500" in code
+    assert "ctx.history(bar.symbol, 500)" in code
 
 
 def test_stochastic_lookback_off_by_one_fixed() -> None:
@@ -1119,8 +1122,9 @@ def test_stochastic_lookback_off_by_one_fixed() -> None:
     )
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
-    # 14 + 3 - 1 = 16, but floor to _MIN_WINDOW=20
-    assert "WINDOW = 20" in code  # floor wins
+    # 14 + 3 - 1 = 16, but floor to _MIN_WINDOW=20 wins.
+    assert "ctx.history(bar.symbol, 20)" in code
+    assert "WARMUP_MIN = 20" in code
     # Pick larger k_period so the floor doesn't dominate, to exercise the formula.
     entry2 = EntryRule(
         side="long",
@@ -1135,7 +1139,8 @@ def test_stochastic_lookback_off_by_one_fixed() -> None:
     spec2 = _spec(entry_rules=[entry2])
     code2 = compile_strategy(spec2)
     # 30 + 5 - 1 = 34
-    assert "WINDOW = 34" in code2
+    assert "ctx.history(bar.symbol, 34)" in code2
+    assert "WARMUP_MIN = 34" in code2
 
 
 def test_volatility_target_with_multiple_distinct_atr_raises() -> None:
@@ -1297,13 +1302,10 @@ def test_vwap_warmup_min_does_not_block_trading() -> None:
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
     # History request is the deep VWAP depth.
-    assert "WINDOW = 500" in code
+    assert "ctx.history(bar.symbol, 500)" in code
     # Warm-up gate is the modest floor — trading starts at bar 20.
     assert "WARMUP_MIN = 20" in code
-    # The emitted on_bar gate uses the warmup_min, not the window.
     assert "if len(history) < 20:" in code
-    # And it still asks for 500 bars of history.
-    assert "ctx.history(bar.symbol, 500)" in code
 
 
 def test_safety_gate_rejects_close_only_strategy_even_with_engine_exits() -> None:
@@ -1800,36 +1802,6 @@ class CompiledStrategy(Strategy):
     results = CodeSafetyChecker().check(code, spec)
     criticals = _critical_details(results)
     assert any("exit" in c.lower() for c in criticals), criticals
-
-
-def test_safety_gate_dynamic_fallback_helper_requires_both_sides() -> None:
-    """Dynamic-only ``side=`` requires both ``long`` and ``short`` coverage.
-
-    The runtime value could resolve either way; failing closed unless
-    both sides are covered by triggerable engine exits keeps the
-    relaxation sound. Tested at the helper level because the broader
-    ``_calls_form_entry_exit_pair`` check short-circuits dynamic-side
-    calls today (treats unknown side as a valid pair); the helper-level
-    invariant is preserved as defence-in-depth.
-    """
-    from investment_team.strategy_lab.quality_gates.code_safety import (
-        _engine_exits_cover_sides,
-    )
-
-    # Only long-side trailing stop — SHORT positions would have no
-    # triggerable exit.
-    spec_long_only = _spec(
-        entry_rules=[_rsi_lt_30_entry()],
-        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
-    )
-    assert not _engine_exits_cover_sides(spec_long_only, {"long", "short"})
-    # Entry-price stop covers both sides → dynamic fallback would
-    # accept it.
-    spec_both = _spec(
-        entry_rules=[_rsi_lt_30_entry()],
-        exit_rules=[StopLossRule(pct=0.05, basis="entry_price")],
-    )
-    assert _engine_exits_cover_sides(spec_both, {"long", "short"})
 
 
 def test_safety_gate_extractor_rejects_non_order_side_attributes() -> None:
