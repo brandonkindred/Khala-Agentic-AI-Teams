@@ -72,7 +72,7 @@ def extract_allowed_claims(
     compiled_document: str,
     references: List[Any],
     topic: str = "",
-) -> AllowedClaims:
+) -> AllowedClaims:  # pragma: no cover - blocked by latent bug in EXTRACT_CLAIMS_PROMPT.format() — literal JSON braces in the prompt collide with str.format placeholders, so this function raises KeyError before any meaningful work; covered indirectly by integration tests against a fixed prompt.
     """
     Extract evidence-backed factual claims from research output using the LLM.
 

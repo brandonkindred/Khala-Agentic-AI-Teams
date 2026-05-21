@@ -151,6 +151,7 @@ def test_complete_plan_json_raises_after_max_parse_retries(monkeypatch) -> None:
 def test_run_refines_with_critic_feedback(monkeypatch) -> None:
     """Iteration 2 uses critic feedback (last_critic_report path)."""
     from blog_plan_critic_agent.models import PlanCriticReport
+
     from llm_service import DummyLLMClient
 
     bad = _bad_plan_dict()
