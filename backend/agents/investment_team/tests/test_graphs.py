@@ -95,7 +95,7 @@ def test_build_investment_graph_topology(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_build_ideation_swarm_has_three_specialists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Strategy Lab ideation swarm wires ideator → refiner → analyst.
+    """The Strategy Lab ideation swarm wires designer → reviewer → analyst.
 
     Strands' real ``Swarm`` constructor does deep-copy work on each node's
     ``messages`` attribute, so we'd need a much heavier ``_FakeAgent`` to
@@ -116,18 +116,18 @@ def test_build_ideation_swarm_has_three_specialists(
     swarm = ideation_mod.build_ideation_swarm()
 
     names = [r["name"] for r in recorded]
-    assert names == ["strategy_ideator", "strategy_refiner", "strategy_analyst"]
+    assert names == ["strategy_designer", "strategy_reviewer", "strategy_analyst"]
     for r in recorded:
         assert r["system_prompt"].strip()
         assert r["description"].strip()
 
     # Verify the swarm wiring exposes the entry-point and bounded handoff cap.
     assert isinstance(swarm, _StubSwarm)
-    assert captured["entry_point"].name == "strategy_ideator"
+    assert captured["entry_point"].name == "strategy_designer"
     assert captured["max_handoffs"] == 10
     assert captured["execution_timeout"] == 300.0
     assert [n.name for n in captured["nodes"]] == [
-        "strategy_ideator",
-        "strategy_refiner",
+        "strategy_designer",
+        "strategy_reviewer",
         "strategy_analyst",
     ]
