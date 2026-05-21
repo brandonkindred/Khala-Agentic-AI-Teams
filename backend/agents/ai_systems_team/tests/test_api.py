@@ -1,17 +1,18 @@
 """Tests for ai_systems_team API endpoints.
 
-Hits the team API which calls the real job service.  Marked integration
-pending follow-up to mock the team's ``_client`` factory.
+Drives the team API through ``TestClient``. The autouse fixture in
+``tests/conftest.py`` swaps ``ai_systems_team.shared.job_store._client`` for an
+in-memory ``FakeJobServiceClient``, so any endpoint path that reaches the
+job_store helpers stays off the network. A few tests additionally patch the
+``api.main`` module-level imports of those helpers to assert specific return
+values; both layers cooperate.
 """
 
 from unittest.mock import patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from ai_systems_team.api.main import app
-
-pytestmark = [pytest.mark.integration]
 
 client = TestClient(app)
 

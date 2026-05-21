@@ -1,8 +1,8 @@
 """Tests for ai_systems_team job store.
 
-Exercises the team's job_store helpers directly; relied on the file
-fallback that is now removed.  Marked integration until follow-up
-conversion to the in-memory fake.
+Exercises the team's job_store helpers directly. The autouse fixture in
+``tests/conftest.py`` swaps ``_client`` for an in-memory ``FakeJobServiceClient``,
+so these tests do not require a live job service or Postgres.
 """
 
 import pytest
@@ -23,8 +23,6 @@ from ai_systems_team.shared.job_store import (
     mark_job_failed,
     mark_job_running,
 )
-
-pytestmark = [pytest.mark.integration]
 
 
 @pytest.fixture()
