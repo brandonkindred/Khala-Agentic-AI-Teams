@@ -2,6 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of, Subject, throwError } from 'rxjs';
 import { ActivatedRoute, provideRouter } from '@angular/router';
 import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi, beforeEach, afterEach } from 'vitest';
 import { AISystemsApiService } from '../../services/ai-systems-api.service';
@@ -40,6 +41,7 @@ describe('AISystemsDashboardComponent (extra coverage)', () => {
       imports: [AISystemsDashboardComponent, NoopAnimationsModule],
       providers: [
         provideHttpClient(),
+        provideHttpClientTesting(),
         provideRouter([]),
         { provide: AISystemsApiService, useValue: api },
         { provide: ActivatedRoute, useValue: { queryParams: queryParams$.asObservable() } },
