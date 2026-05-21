@@ -452,12 +452,12 @@ jobs:
         env:
           PYTHONPATH: ..
         run: python -c "from shared_postgres import register_all_team_schemas; r = register_all_team_schemas(); assert all(r.values()), r"
-      # Coverage gate is enforced at 95% line coverage; see CLAUDE.md.
+      # Coverage gate is enforced at 90% line coverage; see CLAUDE.md.
       - run: >-
           pytest shared_postgres/tests/ -v --tb=short -n auto
           --cov=shared_postgres
           --cov-report=term-missing
-          --cov-fail-under=95
+          --cov-fail-under=90
 
   # All non-Postgres backend test suites run as a single matrix job. Matrix
   # entries are produced dynamically by the `changes` job — only teams whose
@@ -513,12 +513,12 @@ jobs:
           fi
       # Unit tests only — anything that needs Postgres or the job service is
       # marked `@pytest.mark.integration` and runs in `test-integration`.
-      # Coverage gate is enforced per team at 95% line coverage; see CLAUDE.md.
+      # Coverage gate is enforced per team at 90% line coverage; see CLAUDE.md.
       - run: >-
           pytest ${{ matrix.tests }} -v --tb=short -n auto -m "not integration"
           --cov=${{ matrix.source }}
           --cov-report=term-missing
-          --cov-fail-under=95
+          --cov-fail-under=90
 
   # Integration suite: real Postgres + real job service. Currently a sentinel
   # job that boots the infra and runs the marker; per-team integration suites

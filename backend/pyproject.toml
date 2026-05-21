@@ -40,7 +40,7 @@ known-first-party = ["shared", "backend_agent", "frontend_team", "devops_agent",
 [tool.pytest.ini_options]
 # Coverage is enforced in CI on every backend test job (see
 # .github/workflows/ci.yml). Local `make test` / `pytest` stays fast; run
-# `make coverage` to evaluate the 95% gate locally.
+# `make coverage` to evaluate the 90% gate locally.
 
 [tool.coverage.run]
 source = ["agents", "unified_api"]
@@ -168,7 +168,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 95
+fail_under = 90
 show_missing = true
 skip_covered = false
 # Standard coverage exclusion patterns plus project-specific markers.

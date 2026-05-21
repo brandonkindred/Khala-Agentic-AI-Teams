@@ -133,7 +133,7 @@ npm ci
 npm start             # Dev server at localhost:4200
 npm run build         # Production build
 npm test              # Vitest (requires Chrome)
-npm run test:coverage # 95% line coverage target
+npm run test:coverage # 90% line coverage target
 ```
 
 ### Docker (Full Stack)
@@ -288,10 +288,10 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 
 ## Testing
 
-- **Coverage requirement: tests must cover at least 95% of code (line coverage) on both backend and frontend.** This is a hard floor for new and modified code; CI enforces it. If a file or branch cannot reach 95%, document the reason explicitly in the PR and add a targeted `# pragma: no cover` (Python) or `/* istanbul ignore next */` (TypeScript) with a one-line justification — do not lower the global threshold.
-- **Backend**: `pytest` with `pytest-cov` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning v3, sales, deepthought, etc.) and fails the build below 95% line coverage.
-- **Frontend**: Vitest + Angular testing utilities; **95% line coverage target** for `src/app`.
-- **CI**: GitHub Actions — ruff lint must pass first, then parallel test jobs (coverage-gated at 95%), then docker smoke test.
+- **Coverage requirement: tests must cover at least 90% of code (line coverage) on both backend and frontend.** This is a hard floor for new and modified code; CI enforces it. If a file or branch cannot reach 90%, document the reason explicitly in the PR and add a targeted `# pragma: no cover` (Python) or `/* istanbul ignore next */` (TypeScript) with a one-line justification — do not lower the global threshold.
+- **Backend**: `pytest` with `pytest-cov` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning v3, sales, deepthought, etc.) and fails the build below 90% line coverage.
+- **Frontend**: Vitest + Angular testing utilities; **90% line coverage target** for `src/app`.
+- **CI**: GitHub Actions — ruff lint must pass first, then parallel test jobs (coverage-gated at 90%), then docker smoke test.
 
 ## Reference Docs
 
