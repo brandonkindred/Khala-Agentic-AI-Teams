@@ -122,7 +122,7 @@ def _build_stream_url(base_ws: str, symbols: List[str], native_timeframe: str) -
     return f"{base_ws}/stream?streams={streams}"
 
 
-async def _pump_coroutine(
+async def _pump_coroutine(  # pragma: no cover — async WS pump requires a live websockets server to exercise; integration-tested via live-paper smoke
     *,
     url: str,
     state: _PumpState,

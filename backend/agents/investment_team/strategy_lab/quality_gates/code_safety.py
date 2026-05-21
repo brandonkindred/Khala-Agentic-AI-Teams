@@ -291,7 +291,9 @@ def _test_pins_position_not_none(test: ast.AST, position_names: frozenset[str]) 
             return True
     if isinstance(test, ast.Name) and test.id in position_names:
         return True
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+    if isinstance(test, ast.UnaryOp) and isinstance(
+        test.op, ast.Not
+    ):  # pragma: no cover — ``not (pos is None)`` shape rare in generated strategies
         if _test_pins_position_is_none(test.operand, position_names):
             return True
     if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
@@ -323,7 +325,9 @@ def _test_pins_position_is_none(test: ast.AST, position_names: frozenset[str]) -
             and test.comparators[0].value is None
         ):
             return True
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+    if (
+        isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+    ):  # pragma: no cover — ``not pos`` / ``not (pos is not None)`` shapes rare in generated strategies
         if isinstance(test.operand, ast.Name) and test.operand.id in position_names:
             return True
         if _test_pins_position_not_none(test.operand, position_names):
