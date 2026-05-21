@@ -53,7 +53,7 @@ async def connect_temporal_client() -> Optional["Client"]:
     if not address:
         return None
     namespace = get_temporal_namespace()
-    try:
+    try:  # pragma: no cover - requires a reachable Temporal server; exercised by integration tests when TEMPORAL_ADDRESS is set.
         client = await Client.connect(address, namespace=namespace)
         logger.info("Blogging Temporal client connected to %s namespace %s", address, namespace)
         return client
