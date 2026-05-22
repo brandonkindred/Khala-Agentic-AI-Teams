@@ -8,8 +8,9 @@ Covers:
   legacy RUNNING state, so SIGKILL orphans cannot block the new
   per-strategy concurrency guard.
 
-Calls real ``investment_team.shared.job_store``.  Marked integration
-pending follow-up to use the in-memory fake.
+The recovery tests run against an in-memory ``FakeJobServiceClient`` swapped
+into the module-level ``_paper_trading_sessions`` ``_PersistentDict`` so the
+suite no longer requires Postgres or a live job-service.
 """
 
 from __future__ import annotations
@@ -28,7 +29,21 @@ from investment_team.models import (
     StrategySpec,
 )
 
-pytestmark = [pytest.mark.integration]
+
+@pytest.fixture(autouse=True)
+def _patched_paper_trading_client(monkeypatch, fake_job_client):
+    """Redirect the paper-trading ``_PersistentDict`` at the in-memory fake.
+
+    Preconditions: ``_paper_trading_sessions`` exposes a ``_client`` attribute
+    matching the ``JobServiceClient`` interface (``get_job``, ``create_job``,
+    ``update_job``, ``delete_job``, ``list_jobs``).
+    Postconditions: every ``_paper_trading_sessions`` read/write inside this
+    test routes through ``fake_job_client``; the original client is restored
+    after the test by ``monkeypatch``.
+    """
+    monkeypatch.setattr(_paper_trading_sessions, "_client", fake_job_client)
+    return fake_job_client
+
 
 # ---------------------------------------------------------------------------
 # Fee-override resolution
