@@ -853,11 +853,13 @@ class StrategyLabOrchestrator:
             round_gate_results.extend(code_gates)
             conformance_gates = self.code_conformance_gate.check(code, spec)
             round_gate_results.extend(conformance_gates)
-            # Behavioural rule probes only run when conformance is clean.
-            # Probing code that already failed structural checks adds noisy
-            # rule_id criticals on top of the cleaner conformance critical.
+            # Behavioural rule probes only run when every prior validation
+            # gate (spec readiness, code safety, code conformance) is clean.
+            # Probing code that an earlier gate already flagged as critical
+            # wastes sandbox subprocess time and adds noisy rule_id criticals
+            # on top of the cleaner upstream critical.
             if not any(
-                not g.passed and g.severity == "critical" for g in conformance_gates
+                not g.passed and g.severity == "critical" for g in round_gate_results
             ):
                 probe_gates = self.rule_probes_gate.check(code, spec)
                 round_gate_results.extend(probe_gates)

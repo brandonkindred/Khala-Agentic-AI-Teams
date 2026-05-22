@@ -143,6 +143,70 @@ def test_probe_gate_runs_when_conformance_is_clean(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_probe_gate_skipped_when_any_prior_validation_gate_emits_critical():
+    """Probe execution is bounded behind *every* prior validation gate,
+    not just conformance. A critical from code_safety, spec_readiness, or
+    any earlier emitter must short-circuit the probe to avoid sandbox
+    cost on code we already know is rejected."""
+    orch = StrategyLabOrchestrator()
+    # spec_readiness emits a critical — code_safety/conformance happen to
+    # be clean. Probe must not run.
+    orch.spec_readiness_gate.validate = lambda spec, **kw: [
+        _critical_result("spec_readiness")
+    ]
+    orch.code_safety_checker.check = lambda code, spec: [_info_result("code_safety")]
+    orch.code_conformance_gate.check = lambda code, spec: [_info_result("code_conformance")]
+
+    probe_called = []
+    orch.rule_probes_gate.check = lambda code, spec, **kw: (
+        probe_called.append(True) or [_info_result("rule_probes")]
+    )
+    orch._refine_or_exhaust = lambda **kw: (kw["spec"], kw["code"], True)
+
+    spec = _minimal_spec()
+    orch._run_synthesis_loop(
+        spec=spec,
+        code=spec.strategy_code,
+        config=_minimal_config(),
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *args, **kwargs: None,
+    )
+    assert probe_called == [], (
+        "rule_probes_gate.check must not run when an earlier validation gate "
+        "(spec_readiness, code_safety) emitted a critical"
+    )
+
+
+def test_probe_gate_skipped_when_code_safety_emits_critical():
+    """Same invariant for code_safety: probe must not pay sandbox cost
+    when code_safety has already produced a critical that drives the
+    refinement loop."""
+    orch = StrategyLabOrchestrator()
+    orch.spec_readiness_gate.validate = lambda spec, **kw: [_info_result("spec_readiness")]
+    orch.code_safety_checker.check = lambda code, spec: [_critical_result("code_safety")]
+    orch.code_conformance_gate.check = lambda code, spec: [_info_result("code_conformance")]
+
+    probe_called = []
+    orch.rule_probes_gate.check = lambda code, spec, **kw: (
+        probe_called.append(True) or [_info_result("rule_probes")]
+    )
+    orch._refine_or_exhaust = lambda **kw: (kw["spec"], kw["code"], True)
+
+    spec = _minimal_spec()
+    orch._run_synthesis_loop(
+        spec=spec,
+        code=spec.strategy_code,
+        config=_minimal_config(),
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *args, **kwargs: None,
+    )
+    assert probe_called == []
+
+
 def test_probe_gate_skipped_when_conformance_emits_critical():
     orch = StrategyLabOrchestrator()
     orch.spec_readiness_gate.validate = lambda spec, **kw: [_info_result("spec_readiness")]

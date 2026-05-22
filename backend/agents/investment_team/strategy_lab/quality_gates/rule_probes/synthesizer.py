@@ -275,8 +275,15 @@ def _resolve_probe_symbol(spec: Any, compiled_code: str) -> str:
 
 
 def _extract_universe_literal(code: str) -> frozenset:
-    """Parse ``UNIVERSE = frozenset({...})`` (or assignment to ``self.UNIVERSE``)
+    """Parse ``UNIVERSE = frozenset({...})`` (or assignment to ``self.UNIVERSE``,
+    or an annotated assignment ``UNIVERSE: frozenset[str] = frozenset({...})``)
     from compiled-strategy source. Returns an empty frozenset on any failure.
+
+    Plain ``Assign`` and annotated ``AnnAssign`` are both accepted because
+    the deterministic compiler emits the bare form but hand-written or
+    LLM-authored strategies often use the typed form, and a mismatched
+    fallback to the ``"PROBE"`` sentinel would hit the strategy's
+    universe-guard at the top of ``on_bar`` and produce a false critical.
     """
     if not code:
         return frozenset()
@@ -285,11 +292,22 @@ def _extract_universe_literal(code: str) -> frozenset:
     except SyntaxError:
         return frozenset()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
+        target = None
+        value = None
+        if isinstance(node, ast.Assign):
+            if len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            # Bare annotations like ``UNIVERSE: frozenset[str]`` (no
+            # ``value``) carry no literal to parse — skip.
+            if node.value is None:
+                continue
+            target = node.target
+            value = node.value
+        else:
             continue
-        if len(node.targets) != 1:
-            continue
-        target = node.targets[0]
         target_name = None
         if isinstance(target, ast.Name):
             target_name = target.id
@@ -297,7 +315,6 @@ def _extract_universe_literal(code: str) -> frozenset:
             target_name = target.attr
         if target_name != "UNIVERSE":
             continue
-        value = node.value
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "frozenset":
             if not value.args:
                 return frozenset()

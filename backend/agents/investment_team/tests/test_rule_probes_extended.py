@@ -187,6 +187,34 @@ def test_cross_with_unsupported_indicator_pair_marks_unprobeable():
 # ===========================================================================
 
 
+def test_extract_universe_literal_handles_annotated_assignment():
+    """LLM-authored or hand-written strategies often use the typed form
+    ``UNIVERSE: frozenset[str] = frozenset({...})`` (AnnAssign), not the
+    bare ``Assign`` the deterministic compiler emits. Missing this path
+    causes a fallback to the ``"PROBE"`` sentinel that hits the strategy's
+    universe-guard and produces a false critical."""
+    code = "UNIVERSE: frozenset[str] = frozenset({'AAPL', 'MSFT'})\n"
+    parsed = _extract_universe_literal(code)
+    assert parsed == frozenset({"AAPL", "MSFT"})
+
+
+def test_extract_universe_literal_handles_class_level_annotated_assignment():
+    code = (
+        "class S:\n"
+        "    UNIVERSE: frozenset[str] = frozenset({'NVDA'})\n"
+    )
+    parsed = _extract_universe_literal(code)
+    assert parsed == frozenset({"NVDA"})
+
+
+def test_extract_universe_literal_skips_bare_annotation_without_value():
+    """``UNIVERSE: frozenset[str]`` (no assignment) carries no literal —
+    treat as unset rather than erroring."""
+    code = "UNIVERSE: frozenset[str]\nUNIVERSE = frozenset({'FOO'})\n"
+    parsed = _extract_universe_literal(code)
+    assert parsed == frozenset({"FOO"})
+
+
 def test_extract_universe_literal_from_self_universe_assignment():
     code = "class S:\n    def __init__(self):\n        self.UNIVERSE = frozenset({'AAA'})\n"
     parsed = _extract_universe_literal(code)
