@@ -572,6 +572,15 @@ class StrategyLabOrchestrator:
         last_spec: Optional[StrategySpec] = None
         last_code: str = ""
         last_failure_phase: Optional[str] = None
+        # Counts every ``SpecImplementabilityError`` raised within this
+        # ``run_cycle``, including the final raise that exhausts the
+        # re-entry budget. Threaded into ``_run_design_attempt`` so the
+        # persisted record (success or short-circuit) reflects the
+        # phase-back history, and used to advance the DSR trial counter
+        # by one per phase-back: each failed attempt consumed real LLM
+        # work on the same evaluation window and so contributes to the
+        # multiple-testing burden that DSR deflation corrects for.
+        phase_back_count: int = 0
         for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
             try:
                 return self._run_design_attempt(
@@ -582,12 +591,15 @@ class StrategyLabOrchestrator:
                     exclude_asset_classes=exclude_asset_classes,
                     directives=directives,
                     design_attempt=design_attempt,
+                    phase_back_count=phase_back_count,
                 )
             except SpecImplementabilityError as exc:
                 last_evidence = exc.evidence
                 last_spec = exc.last_spec
                 last_code = exc.last_code
                 last_failure_phase = exc.failure_phase
+                phase_back_count += 1
+                self.convergence_tracker.increment_trials(1)
                 if design_attempt >= MAX_DESIGN_REENTRIES:
                     break
                 emit(
@@ -595,6 +607,7 @@ class StrategyLabOrchestrator:
                     {
                         "sub_phase": "loopback",
                         "design_attempt": design_attempt + 1,
+                        "phase_back_count": phase_back_count,
                         "evidence": exc.evidence,
                         "failure_phase": exc.failure_phase,
                     },
@@ -629,6 +642,7 @@ class StrategyLabOrchestrator:
                 f"(last failure_phase={last_failure_phase}): {last_evidence}"
             ),
             emit=emit,
+            phase_back_count=phase_back_count,
         )
 
     def _run_design_loop(
@@ -826,6 +840,7 @@ class StrategyLabOrchestrator:
         rationale: str,
         refinement_attempts: List[Dict[str, Any]],
         emit: PhaseCallback,
+        phase_back_count: int = 0,
     ) -> Optional[StrategyLabRecord]:
         """Run spec validation before the refinement loop.
 
@@ -887,6 +902,7 @@ class StrategyLabOrchestrator:
                 + "; ".join(g.details for g in criticals)
             ),
             emit=emit,
+            phase_back_count=phase_back_count,
         )
 
     def _run_synthesis_loop(
@@ -1984,6 +2000,7 @@ class StrategyLabOrchestrator:
         emit: PhaseCallback,
         design_context: Optional[_DesignPersistContext] = None,
         alignment_findings: Optional[List[AlignmentFinding]] = None,
+        phase_back_count: int = 0,
     ) -> StrategyLabRecord:
         """Build the final ``StrategyLabRecord`` from a settled cycle.
 
@@ -2064,6 +2081,7 @@ class StrategyLabOrchestrator:
             strategy_code=code,
             original_spec=original_spec,
             original_code=original_code,
+            spec_implementability_phase_backs=phase_back_count,
         )
 
         self.convergence_tracker.record(spec, all_gate_results)
@@ -2077,6 +2095,7 @@ class StrategyLabOrchestrator:
                 "refinement_rounds": refinement_rounds,
                 "alignment_rounds": alignment_rounds,
                 "trades_aligned": trades_aligned,
+                "phase_back_count": phase_back_count,
             },
         )
 
@@ -2092,6 +2111,7 @@ class StrategyLabOrchestrator:
         exclude_asset_classes: Optional[List[str]],
         directives: List[str],
         design_attempt: int = 0,
+        phase_back_count: int = 0,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -2101,6 +2121,11 @@ class StrategyLabOrchestrator:
         gate → DesignReviewAgent → DesignAgent.revise) until either the
         reviewer marks the spec ready or the round budget is exhausted.
         Exhaustion short-circuits the cycle without ever running code.
+
+        ``phase_back_count`` is the number of prior phase-backs in the
+        enclosing ``run_cycle`` and is stamped onto the persisted record
+        so the breakdown (success after N phase-backs, short-circuit
+        after N phase-backs) is observable post hoc.
         """
         # Reset per-attempt counters so a re-entry starts fresh.
         self._consecutive_spec_mutation_rounds = {}
@@ -2151,6 +2176,7 @@ class StrategyLabOrchestrator:
                 short_circuit_reason=abort_reason,
                 emit=emit,
                 design_context=design_context,
+                phase_back_count=phase_back_count,
             )
 
         # ═══ Phase 2 → 3 transition: DESIGN_REVIEW → CODE_SYNTHESIS ═══
@@ -2212,6 +2238,7 @@ class StrategyLabOrchestrator:
                     short_circuit_reason=abort_reason,
                     emit=emit,
                     design_context=design_context,
+                    phase_back_count=phase_back_count,
                 )
 
         spec.strategy_code = code
@@ -2268,6 +2295,7 @@ class StrategyLabOrchestrator:
             rationale=rationale,
             refinement_attempts=refinement_attempts,
             emit=emit,
+            phase_back_count=phase_back_count,
         )
         if pre_synthesis is not None:
             return pre_synthesis
@@ -2439,6 +2467,7 @@ class StrategyLabOrchestrator:
             emit=emit,
             design_context=design_context,
             alignment_findings=alignment_findings,
+            phase_back_count=phase_back_count,
         )
 
     # ------------------------------------------------------------------
@@ -2749,6 +2778,7 @@ class StrategyLabOrchestrator:
         short_circuit_reason: str,
         emit: PhaseCallback,
         design_context: Optional[_DesignPersistContext] = None,
+        phase_back_count: int = 0,
     ) -> StrategyLabRecord:
         """Persist a failed cycle that exited before code execution.
 
@@ -2804,6 +2834,7 @@ class StrategyLabOrchestrator:
             strategy_code=code,
             original_spec=original_spec,
             original_code=original_code,
+            spec_implementability_phase_backs=phase_back_count,
         )
 
         self.convergence_tracker.record(spec, all_gate_results)
@@ -2816,6 +2847,7 @@ class StrategyLabOrchestrator:
                 "metrics": backtest_record.result.model_dump(),
                 "refinement_rounds": len(refinement_attempts),
                 "short_circuit": short_circuit_status,
+                "phase_back_count": phase_back_count,
             },
         )
 
