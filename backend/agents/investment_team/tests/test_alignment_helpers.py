@@ -9,6 +9,7 @@ import pytest
 from investment_team.strategy_lab.agents.alignment import (
     _coerce_report,
     _extract_json,
+    _parse_legitimate,
 )
 
 # ---------------------------------------------------------------------------
@@ -128,3 +129,38 @@ def test_extract_json_raises_when_no_object() -> None:
 def test_extract_json_raises_on_malformed_json() -> None:
     with pytest.raises(ValueError):
         _extract_json('{"missing_closing_quote: 1}')
+
+
+# ---------------------------------------------------------------------------
+# _parse_legitimate — strict near-miss verdict parsing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (True, True),
+        (False, False),
+        ("true", True),
+        ("True", True),
+        ("  TRUE  ", True),
+        ("false", False),
+        ("False", False),
+        # Anything that isn't an unambiguous "yes" must fail closed
+        # so a misaligned trade is never waved through by the near-miss
+        # adjudicator.
+        ("yes", False),
+        ("1", False),
+        ("0", False),
+        ("", False),
+        (None, False),
+        (1, False),
+        (0, False),
+        ({"nested": True}, False),
+    ],
+)
+def test_parse_legitimate_strict(raw, expected: bool) -> None:
+    """Regression for the ``bool('false') == True`` trap. The near-miss
+    parser must read only real ``bool`` or the case-insensitive string
+    literals ``true`` / ``false``; everything else fails closed."""
+    assert _parse_legitimate(raw) is expected

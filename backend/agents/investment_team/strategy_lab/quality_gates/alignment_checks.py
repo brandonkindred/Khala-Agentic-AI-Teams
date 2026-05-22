@@ -398,20 +398,24 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 symbol: {} for symbol in market_data
             }
 
-            # Running equity tracker for sizing check #3. Each trade's
-            # expected position value is computed against the equity that
-            # was available at the moment of entry — i.e.
-            # ``initial_capital + sum(prior_net_pnl)``. Because the trade
-            # ledger is chronological, this is a left-fold over net_pnl.
-            running_equity = float(initial_capital)
-            # Sort by entry_date so the equity walk respects chronology
-            # even if the ledger was emitted out of order by the engine.
-            ordered = sorted(trades, key=lambda t: (t.entry_date, t.trade_num))
-
+            # Entry-equity tracker for sizing check #3. Each trade's
+            # expected position value is computed against the equity
+            # *realized* at the moment of entry — i.e. ``initial_capital
+            # + sum(prior.net_pnl for prior in trades if prior.exit_date
+            # <= current.entry_date)``. A naive left-fold over net_pnl
+            # in entry-date order would leak future PnL from still-open
+            # overlapping trades into earlier entries (trade A entering
+            # before trade B but exiting after B's entry must not
+            # contribute its PnL to B's equity baseline).
             entry_equity_by_trade: Dict[int, float] = {}
-            for trade in ordered:
-                entry_equity_by_trade[trade.trade_num] = running_equity
-                running_equity += float(trade.net_pnl)
+            initial = float(initial_capital)
+            for trade in trades:
+                realized_pnl = sum(
+                    float(prior.net_pnl)
+                    for prior in trades
+                    if prior.exit_date <= trade.entry_date and prior.trade_num != trade.trade_num
+                )
+                entry_equity_by_trade[trade.trade_num] = initial + realized_pnl
 
             if not trades:
                 # No trades to check — the orchestrator will treat this

@@ -826,6 +826,51 @@ def test_findings_have_consistent_trade_num_column() -> None:
     assert trade_nums == {1, 2}
 
 
+def test_sizing_equity_walk_realizes_pnl_only_after_exit() -> None:
+    """Overlapping trades: trade A enters first but exits AFTER trade B's
+    entry. Trade B's sizing must NOT see trade A's net_pnl yet — that
+    PnL is unrealized at B's entry. Regression for the entry-date
+    walk that leaked future PnL into overlapping entries (PR #613
+    review)."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        target_symbols=["AAPL"],
+    )
+    # Trade A: 2023-01-05 → 2023-01-20 (still open when B enters)
+    # Trade B: 2023-01-10 → 2023-01-15 (overlaps with A)
+    # At B's entry, A is still open → B's equity baseline = initial only.
+    trade_a = _trade(
+        trade_num=1,
+        position_value=10_000.0,  # 10% of $100k → expected at entry
+        net_pnl=10_000.0,
+        entry_date="2023-01-05",
+        exit_date="2023-01-20",
+    )
+    trade_b = _trade(
+        trade_num=2,
+        position_value=10_000.0,  # 10% of $100k (A's PnL not yet realized)
+        net_pnl=500.0,
+        entry_date="2023-01-10",
+        exit_date="2023-01-15",
+    )
+    result = gate.check(
+        spec=spec,
+        trades=[trade_a, trade_b],
+        market_data=_market_data_rsi_oversold(),
+        initial_capital=100_000.0,
+    )
+    sizing_findings = sorted(
+        (f for f in result.findings if f.check_name == "sizing"),
+        key=lambda f: f.trade_num,
+    )
+    # Both trades sized against $100k, not $110k — A's PnL is still
+    # unrealized at B's entry.
+    assert sizing_findings[0].expected_value == 10_000.0
+    assert sizing_findings[1].expected_value == 10_000.0
+    assert all(f.passed for f in sizing_findings)
+
+
 def test_findings_emit_for_multiple_trades_track_running_equity() -> None:
     """Sequential trades' sizing checks use a running-equity walk so
     each trade's expected position value reflects accumulated net pnl

@@ -297,7 +297,7 @@ class TradeAlignmentAgent:
             )
             raise AlignmentAuditError(f"{type(exc).__name__}: {exc}") from exc
 
-        legitimate = bool(parsed.get("legitimate", False))
+        legitimate = _parse_legitimate(parsed.get("legitimate", False))
         rationale = str(parsed.get("rationale", "")).strip()
         return NearMissVerdict(legitimate=legitimate, rationale=rationale)
 
@@ -478,6 +478,28 @@ def _coerce_report(parsed: Dict[str, Any], fallback_code: str) -> TradeAlignment
         predicted_aligned_after_fix=predicted,
         changes_made=changes,
     )
+
+
+def _parse_legitimate(raw: Any) -> bool:
+    """Strict parse of the LLM's ``legitimate`` field.
+
+    Plain ``bool(raw)`` would treat ``"false"`` (the string) as truthy
+    and wave through a misaligned trade. Accept only real ``bool``s and
+    the case-insensitive string literals ``"true"`` / ``"false"``;
+    anything else (including unexpected ints, None, malformed JSON
+    types) falls closed to ``False``. The near-miss path is a
+    correctness boundary — never legitimise without an unambiguous
+    yes.
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        normalised = raw.strip().lower()
+        if normalised == "true":
+            return True
+        if normalised == "false":
+            return False
+    return False
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
