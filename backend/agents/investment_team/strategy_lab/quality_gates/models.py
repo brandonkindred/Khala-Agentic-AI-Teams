@@ -13,7 +13,13 @@ _VALID_PHASES: frozenset[str] = frozenset(StrategyLabPhase.__args__)  # type: ig
 
 
 class QualityGateResult(BaseModel):
-    """Result of a single quality gate check."""
+    """Result of a single quality gate check.
+
+    ``rule_id`` is an optional human-readable handle for gates whose checks
+    map 1:1 onto spec rules (e.g. ``"entry[0]"``, ``"exit[1]:stop_loss"``).
+    The orchestrator includes it in the aggregated failure-details string
+    so refinement prompts can target the specific branch that failed.
+    """
 
     gate_name: str
     passed: bool
@@ -21,6 +27,7 @@ class QualityGateResult(BaseModel):
     severity: Literal["info", "warning", "critical"]
     phase: StrategyLabPhase
     refinement_round: int = 0
+    rule_id: Optional[str] = None
 
 
 class GateResultsMixin:
@@ -63,17 +70,22 @@ class GateResultsMixin:
             # that throws never leaves stale state visible to the next caller.
             self._phase = prev
 
-    def _critical(self, details: str) -> QualityGateResult:
-        return self._emit(passed=False, severity="critical", details=details)
+    def _critical(self, details: str, *, rule_id: Optional[str] = None) -> QualityGateResult:
+        return self._emit(passed=False, severity="critical", details=details, rule_id=rule_id)
 
-    def _warning(self, details: str) -> QualityGateResult:
-        return self._emit(passed=False, severity="warning", details=details)
+    def _warning(self, details: str, *, rule_id: Optional[str] = None) -> QualityGateResult:
+        return self._emit(passed=False, severity="warning", details=details, rule_id=rule_id)
 
-    def _info(self, details: str = "") -> QualityGateResult:
-        return self._emit(passed=True, severity="info", details=details)
+    def _info(self, details: str = "", *, rule_id: Optional[str] = None) -> QualityGateResult:
+        return self._emit(passed=True, severity="info", details=details, rule_id=rule_id)
 
     def _emit(
-        self, *, passed: bool, severity: Literal["info", "warning", "critical"], details: str
+        self,
+        *,
+        passed: bool,
+        severity: Literal["info", "warning", "critical"],
+        details: str,
+        rule_id: Optional[str] = None,
     ) -> QualityGateResult:
         # Pre: ``_using_phase`` is active.
         assert self._phase is not None, (
@@ -86,4 +98,5 @@ class GateResultsMixin:
             passed=passed,
             severity=severity,
             details=details,
+            rule_id=rule_id,
         )

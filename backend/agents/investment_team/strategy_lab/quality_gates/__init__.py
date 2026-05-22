@@ -5,6 +5,7 @@ from .backtest_anomaly import BacktestAnomalyDetector
 from .code_safety import CodeSafetyChecker
 from .convergence_tracker import ConvergenceTracker
 from .models import QualityGateResult, StrategyLabPhase
+from .rule_probes import RuleProbesGate
 from .spec_readiness import SpecReadinessGate
 from .strategy_validator import StrategySpecValidator
 from .target_symbol_coverage import TargetSymbolCoverageGate
@@ -15,6 +16,7 @@ __all__ = [
     "CodeSafetyChecker",
     "ConvergenceTracker",
     "QualityGateResult",
+    "RuleProbesGate",
     "SpecReadinessGate",
     "StrategyLabPhase",
     "StrategySpecValidator",
