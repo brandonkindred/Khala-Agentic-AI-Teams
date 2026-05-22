@@ -27,6 +27,7 @@ from investment_team.strategy_lab.spec_dsl import (
     FixedNotionalSizing,
     IndicatorRef,
     Predicate,
+    SignalExitRule,
     StopLossRule,
     TakeProfitRule,
     VolatilityTargetSizing,
@@ -994,6 +995,136 @@ def test_entry_signal_missing_bars_flagged_critical() -> None:
     assert entry.passed is False
     assert entry.severity == "critical"
     assert "no market_data bars" in entry.details
+
+
+# ---------------------------------------------------------------------------
+# Check 8 — signal-exit correlation
+# ---------------------------------------------------------------------------
+
+
+def _rsi_gt_70_signal_exit() -> SignalExitRule:
+    return SignalExitRule(
+        when=Predicate(
+            lhs=IndicatorRef(name="rsi", params={"period": 14}),
+            op=">",
+            rhs=70.0,
+        ),
+    )
+
+
+def test_signal_exit_no_finding_when_spec_has_none() -> None:
+    """Spec has no SignalExitRule — the check is a no-op."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
+    trade = _trade(entry_date="2023-02-01", exit_date="2023-02-10")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=_market_data_rsi_oversold(),
+        initial_capital=100_000.0,
+    )
+    signal_exit_findings = [f for f in result.findings if f.check_name == "signal_exit"]
+    assert signal_exit_findings == []
+
+
+def test_signal_exit_info_skip_when_engine_attributed_close() -> None:
+    """Engine-attributed close (``exit_reason='engine_exit:...''``) → info
+    skip; the matching structured-exit check carries the alignment."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(exit_rules=[_rsi_gt_70_signal_exit()])
+    trade = _trade(
+        entry_date="2023-02-01",
+        exit_date="2023-02-10",
+        exit_reason="engine_exit:stop_loss",
+    )
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=_market_data_rsi_oversold(),
+        initial_capital=100_000.0,
+    )
+    signal_exit = next(f for f in result.findings if f.check_name == "signal_exit")
+    assert signal_exit.passed is True
+    assert signal_exit.severity == "info"
+    assert "engine_exit:stop_loss" in signal_exit.details
+
+
+def test_signal_exit_satisfied_when_predicate_fires_at_exit_bar() -> None:
+    """SignalExitRule's predicate fires at exit bar → info pass.
+
+    Spec exits when RSI > 70. The fixture's overbought market drives
+    RSI above 70 by the last bar; the trade exits on that bar with
+    no engine attribution.
+    """
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(exit_rules=[_rsi_gt_70_signal_exit()])
+    md = _market_data_rsi_overbought()
+    last_date = md["AAPL"][-1].date
+    trade = _trade(
+        entry_date=md["AAPL"][20].date,  # enter mid-uptrend
+        exit_date=last_date,
+        exit_reason=None,  # strategy-emitted close
+    )
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    signal_exit = next(f for f in result.findings if f.check_name == "signal_exit")
+    assert signal_exit.passed is True
+    assert signal_exit.severity == "info"
+    assert "signal-exit satisfied" in signal_exit.details
+
+
+def test_signal_exit_critical_when_no_predicate_fires_at_exit_bar() -> None:
+    """SignalExitRule defined, no engine attribution, predicate does NOT
+    fire at the exit bar → critical. The strategy closed for some
+    other reason than the declared exit signal — alignment broken.
+    """
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(exit_rules=[_rsi_gt_70_signal_exit()])
+    # Oversold market keeps RSI well below 70 throughout → exit
+    # predicate never fires.
+    md = _market_data_rsi_oversold()
+    last_date = md["AAPL"][-1].date
+    trade = _trade(
+        entry_date=md["AAPL"][20].date,
+        exit_date=last_date,
+        exit_reason=None,
+    )
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    signal_exit = next(f for f in result.findings if f.check_name == "signal_exit")
+    assert signal_exit.passed is False
+    assert signal_exit.severity == "critical"
+    assert "no SignalExitRule predicate fires" in signal_exit.details
+
+
+def test_signal_exit_critical_when_exit_bar_missing_from_market_data() -> None:
+    """Strategy-emitted close on a date the gate has no bars for —
+    cannot reproduce, fall closed."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(exit_rules=[_rsi_gt_70_signal_exit()])
+    md = _market_data_rsi_oversold()
+    trade = _trade(
+        entry_date=md["AAPL"][20].date,
+        exit_date="2099-12-31",  # not in market_data
+        exit_reason=None,
+    )
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    signal_exit = next(f for f in result.findings if f.check_name == "signal_exit")
+    assert signal_exit.passed is False
+    assert signal_exit.severity == "critical"
 
 
 # ---------------------------------------------------------------------------

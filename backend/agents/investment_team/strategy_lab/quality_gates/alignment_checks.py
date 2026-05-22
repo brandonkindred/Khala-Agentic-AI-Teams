@@ -2,7 +2,7 @@
 
 Runs inside the orchestrator's trade-alignment loop, replacing the LLM
 audit's "read the ledger and write prose" inner step. Each executed
-``TradeRecord`` is run through seven deterministic checks against the
+``TradeRecord`` is run through eight deterministic checks against the
 structured :class:`StrategySpec`:
 
   1. Universe — ``trade.symbol in spec.target_symbols``
@@ -15,6 +15,10 @@ structured :class:`StrategySpec`:
      entry bar; near-misses (within
      ``STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT``) optionally route to a
      narrow LLM adjudicator.
+  8. Signal-exit correlation — when the spec carries
+     :class:`SignalExitRule` and the engine did not attribute the
+     close to a structured exit, at least one signal-exit predicate
+     must evaluate ``True`` at the exit bar.
 
 Results are emitted as per-rule :class:`AlignmentFinding`s for the
 record-level ``BacktestRecord.alignment_findings`` field and as
@@ -48,6 +52,7 @@ from ..spec_dsl import (
     FixedNotionalSizing,
     IndicatorRef,
     Predicate,
+    SignalExitRule,
     StopLossRule,
     TakeProfitRule,
     VolatilityTargetSizing,
@@ -476,6 +481,14 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     indicator_caches,
                     near_miss_pct,
                     near_miss_adjudicator,
+                    findings,
+                    gate_results,
+                )
+                self._check_signal_exit(
+                    spec,
+                    trade,
+                    frames,
+                    indicator_caches,
                     findings,
                     gate_results,
                 )
@@ -1044,6 +1057,157 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             details=details,
             computed_value=primary.get("lhs"),
             expected_value=primary.get("rhs"),
+        )
+        findings.append(finding)
+        gate_results.append(self._emit_for_finding(finding))
+
+    # ------------------------------------------------------------------
+    # Check 8 — signal-exit correlation
+    # ------------------------------------------------------------------
+    def _check_signal_exit(
+        self,
+        spec: Any,
+        trade: Any,
+        frames: Dict[str, pd.DataFrame],
+        indicator_caches: Dict[str, Dict[str, pd.Series]],
+        findings: List[AlignmentFinding],
+        gate_results: List[QualityGateResult],
+    ) -> None:
+        """Validate that strategy-emitted closes match a SignalExitRule.
+
+        Pre: ``frames`` is the per-symbol OHLCV map; ``indicator_caches``
+        is the per-trade cache the entry-signal check populates.
+        Post: emits zero-or-more findings:
+          - no SignalExitRule in spec → no-op (other exit checks cover
+            stop_loss / take_profit / time_stop)
+          - engine-attributed close (``exit_reason`` starts with
+            ``engine_exit:``) → info skip (signal-exit check N/A)
+          - strategy-emitted close (or unknown attribution) without
+            any SignalExitRule predicate firing at the exit bar →
+            critical
+          - first SignalExitRule whose predicate fires → info pass
+        """
+        signal_exit_rules = [
+            r for r in (getattr(spec, "exit_rules", []) or []) if isinstance(r, SignalExitRule)
+        ]
+        if not signal_exit_rules:
+            return
+
+        exit_reason = getattr(trade, "exit_reason", None) or ""
+        if exit_reason.startswith("engine_exit:"):
+            # Engine attribution already covered by the matching
+            # structured-exit check (stop_loss / take_profit /
+            # time_stop). Emit a single info row so the audit ledger
+            # records that the signal-exit check was reached and
+            # deliberately skipped.
+            finding = AlignmentFinding(
+                trade_num=trade.trade_num,
+                rule_id="exit:signal_exit",
+                check_name="signal_exit",
+                passed=True,
+                severity="info",
+                details=(
+                    f"Trade #{trade.trade_num} closed via engine "
+                    f"attribution {exit_reason!r}; signal-exit check N/A."
+                ),
+            )
+            findings.append(finding)
+            gate_results.append(self._emit_for_finding(finding))
+            return
+
+        df = frames.get(trade.symbol)
+        if df is None or df.empty:
+            finding = AlignmentFinding(
+                trade_num=trade.trade_num,
+                rule_id="exit:signal_exit:bars_missing",
+                check_name="signal_exit",
+                passed=False,
+                severity="critical",
+                details=(
+                    f"Trade #{trade.trade_num}: no market_data bars for "
+                    f"{trade.symbol!r}. Cannot reproduce signal exit."
+                ),
+            )
+            findings.append(finding)
+            gate_results.append(self._emit_for_finding(finding))
+            return
+
+        matching_positions = np.where(df.index.to_numpy() == trade.exit_date)[0]
+        if matching_positions.size == 0:
+            finding = AlignmentFinding(
+                trade_num=trade.trade_num,
+                rule_id="exit:signal_exit:bar_missing",
+                check_name="signal_exit",
+                passed=False,
+                severity="critical",
+                details=(
+                    f"Trade #{trade.trade_num}: exit_date {trade.exit_date!r} "
+                    f"is not present in market_data for {trade.symbol!r}."
+                ),
+            )
+            findings.append(finding)
+            gate_results.append(self._emit_for_finding(finding))
+            return
+
+        exit_idx = int(matching_positions[0])
+        cache = indicator_caches.setdefault(trade.symbol, {})
+
+        # Try each signal-exit rule in spec order — the first one whose
+        # predicate fires at the exit bar wins the alignment.
+        for rule_idx, rule in enumerate(signal_exit_rules):
+            try:
+                lhs_value = _resolve_side_value(rule.when.lhs, df, exit_idx, cache)
+                rhs_value = _resolve_side_value(rule.when.rhs, df, exit_idx, cache)
+                prev_lhs: Optional[float] = None
+                prev_rhs: Optional[float] = None
+                if rule.when.op in ("cross_above", "cross_below") and exit_idx > 0:
+                    prev_lhs = _resolve_side_value(rule.when.lhs, df, exit_idx - 1, cache)
+                    prev_rhs = _resolve_side_value(rule.when.rhs, df, exit_idx - 1, cache)
+            except (ValueError, TypeError):
+                continue
+
+            if lhs_value is None or rhs_value is None:
+                continue  # warmup NaN at exit bar — try next rule
+
+            if _compare(
+                rule.when.op,
+                lhs_value,
+                rhs_value,
+                prev_lhs=prev_lhs,
+                prev_rhs=prev_rhs,
+            ):
+                finding = AlignmentFinding(
+                    trade_num=trade.trade_num,
+                    rule_id=f"exit:signal_exit[{rule_idx}]",
+                    check_name="signal_exit",
+                    passed=True,
+                    severity="info",
+                    details=(
+                        f"Trade #{trade.trade_num} signal-exit satisfied by "
+                        f"exit[{rule_idx}]: {_format_predicate(rule.when)} → "
+                        f"lhs={lhs_value:.6g}, rhs={rhs_value:.6g}."
+                    ),
+                    computed_value=lhs_value,
+                    expected_value=rhs_value,
+                )
+                findings.append(finding)
+                gate_results.append(self._emit_for_finding(finding))
+                return
+
+        # No SignalExitRule fired at the exit bar, but the engine did
+        # not attribute the close to a structured rule — the strategy
+        # closed without a matching signal.
+        finding = AlignmentFinding(
+            trade_num=trade.trade_num,
+            rule_id="exit:signal_exit",
+            check_name="signal_exit",
+            passed=False,
+            severity="critical",
+            details=(
+                f"Trade #{trade.trade_num} exited on {trade.exit_date} without "
+                "engine attribution, but no SignalExitRule predicate fires at "
+                "the exit bar."
+            ),
         )
         findings.append(finding)
         gate_results.append(self._emit_for_finding(finding))
