@@ -559,3 +559,102 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
     assert "publication_disabled" in ar and "spec_unimplementable" in ar, (
         f"expected publication_disabled / spec_unimplementable in {ar!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase-back trial accounting (DSR n_trials)
+# ---------------------------------------------------------------------------
+
+
+def test_phase_backs_count_as_dsr_trials_and_surface_on_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each ``SpecImplementabilityError`` phase-back contributes one trial
+    to the convergence tracker (so DSR deflation reflects the failed
+    attempts) and the count surfaces on the persisted short-circuit
+    record.
+
+    Preconditions:
+      - Every design attempt's refinement loop loosens risk-limits, so
+        ``_apply_updates`` raises ``SpecImplementabilityError`` and
+        ``run_cycle`` exhausts ``MAX_DESIGN_REENTRIES`` re-entries.
+
+    Postconditions:
+      - The persisted record's ``spec_implementability_phase_backs`` is
+        exactly ``MAX_DESIGN_REENTRIES + 1`` (every attempt phase-backed).
+      - The convergence tracker's ``trial_count`` advanced by at least
+        ``MAX_DESIGN_REENTRIES + 1`` (one per phase-back; the failed
+        attempts never reach the synthesis-loop trial-count site, so
+        the new accounting is the only contributor).
+      - Every loopback event carries ``phase_back_count`` matching the
+        running counter so dashboards can render the breakdown.
+    """
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
+    spec = _spec()
+    orch = StrategyLabOrchestrator()
+    orch.design_agent = _FakeDesignAgent(spec)  # type: ignore[assignment]
+    orch.refinement_agent = _LoosenOnceRefinementAgent()  # type: ignore[assignment]
+
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True))
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "# design code")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "# design code")
+    monkeypatch.setattr(orch.code_safety_checker, "check", lambda code, spec=None: [])
+    monkeypatch.setattr(orch.strategy_validator, "validate", lambda s: [])
+    monkeypatch.setattr(orch.spec_readiness_gate, "validate", lambda *a, **kw: [])
+
+    def _failed_run(
+        code: str, market_data: Any, config: Any, strategy: Any = None
+    ) -> StrategyRunResult:
+        return StrategyRunResult(
+            success=False,
+            error_type="runtime_error",
+            stderr="forced failure for test",
+            stdout="",
+        )
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _failed_run)
+    monkeypatch.setattr(
+        orch,
+        "_fetch_market_data",
+        lambda spec_arg, config_arg: orchestrator_module._MarketDataFetch(
+            data={
+                "SPY": [
+                    OHLCVBar(
+                        symbol="SPY", date="2023-01-01", open=1, high=1, low=1, close=1, volume=1
+                    )
+                ]
+            },
+            requested_symbols=["SPY"],
+            fetched_symbols=["SPY"],
+        ),
+    )
+
+    trial_count_before = orch.convergence_tracker.trial_count
+    emitted: List[Tuple[str, Dict[str, Any]]] = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        on_phase=lambda phase, data: emitted.append((phase, data)),
+    )
+
+    expected_phase_backs = MAX_DESIGN_REENTRIES + 1
+    assert record.spec_implementability_phase_backs == expected_phase_backs, (
+        f"expected {expected_phase_backs} phase-backs on the short-circuit record, "
+        f"got {record.spec_implementability_phase_backs}"
+    )
+
+    trial_delta = orch.convergence_tracker.trial_count - trial_count_before
+    assert trial_delta == expected_phase_backs, (
+        f"expected convergence tracker to advance by {expected_phase_backs} trials "
+        f"(one per phase-back), got delta={trial_delta}"
+    )
+
+    loopback_events = [
+        d for phase, d in emitted if phase == "designing" and d.get("sub_phase") == "loopback"
+    ]
+    assert len(loopback_events) == MAX_DESIGN_REENTRIES
+    for idx, ev in enumerate(loopback_events, start=1):
+        assert ev["phase_back_count"] == idx, (
+            f"loopback #{idx} should report phase_back_count={idx}, got {ev['phase_back_count']}"
+        )

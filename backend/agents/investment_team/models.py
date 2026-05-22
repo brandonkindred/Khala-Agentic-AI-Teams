@@ -867,6 +867,16 @@ class StrategyLabRecord(BaseModel):
             "rounds)."
         ),
     )
+    spec_implementability_phase_backs: int = Field(
+        default=0,
+        description=(
+            "Number of times this cycle phased back to the design step "
+            "because a downstream phase raised SpecImplementabilityError. "
+            "Each phase-back also contributes one trial to the convergence "
+            "tracker so DSR deflation reflects the multiple-testing cost "
+            "of the failed attempts. 0 on the happy path and on legacy rows."
+        ),
+    )
     critiques: List[Dict[str, Any]] = Field(
         default_factory=list,
         description=(
