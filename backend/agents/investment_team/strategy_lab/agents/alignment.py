@@ -118,6 +118,7 @@ _CHECK_TO_RULE_TYPE: Dict[str, str] = {
     "stop_loss": "exit_rules",
     "take_profit": "exit_rules",
     "time_stop": "exit_rules",
+    "signal_exit": "exit_rules",
     "entry_signal": "entry_rules",
 }
 

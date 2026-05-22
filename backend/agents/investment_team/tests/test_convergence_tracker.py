@@ -350,3 +350,53 @@ def test_strategy_signature_includes_asset_class_token():
     sig_crypto = ConvergenceTracker._strategy_signature(_mk_spec("crypto"))
 
     assert sig_stocks ^ sig_crypto == {"ac:stocks", "ac:crypto"}
+
+
+def _failing_gate(name: str = "trade_alignment") -> QualityGateResult:
+    return QualityGateResult(
+        gate_name=name,
+        passed=False,
+        severity="critical",
+        phase="verification",
+        details="",
+    )
+
+
+def test_record_dedupes_failures_by_gate_name_per_cycle():
+    """Regression for PR #613 review: many failed rows under the same
+    ``gate_name`` in a single cycle count as ONE cycle-level failure.
+
+    ``DeterministicAlignmentChecker`` emits one row per trade × per
+    check, so a single misaligned cycle can produce dozens of failing
+    rows tagged ``alignment_finding``. ``_failure_modes`` is supposed
+    to track cross-cycle failure frequency for
+    ``get_failure_directives(min_occurrences=3)``; without deduping,
+    one bad cycle with three failed findings would prematurely trip
+    the directive.
+    """
+    t = ConvergenceTracker()
+    # One cycle with 10 failing rows under the same gate name.
+    rows = [_failing_gate("alignment_finding") for _ in range(10)]
+    t.record(_mk_spec(), rows)
+    assert t._failure_modes["alignment_finding"] == 1
+
+    # Second cycle, same shape — count goes to 2, not 12.
+    t.record(_mk_spec(), rows)
+    assert t._failure_modes["alignment_finding"] == 2
+
+
+def test_record_counts_distinct_gate_names_separately_in_one_cycle():
+    """Distinct gate names in the same cycle each count once."""
+    t = ConvergenceTracker()
+    t.record(
+        _mk_spec(),
+        [
+            _failing_gate("trade_alignment"),
+            _failing_gate("alignment_finding"),
+            _failing_gate("alignment_finding"),  # dedupes
+            _failing_gate("code_safety"),
+        ],
+    )
+    assert t._failure_modes["trade_alignment"] == 1
+    assert t._failure_modes["alignment_finding"] == 1
+    assert t._failure_modes["code_safety"] == 1

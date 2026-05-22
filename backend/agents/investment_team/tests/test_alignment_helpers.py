@@ -189,3 +189,33 @@ def test_parse_legitimate_strict(raw, expected: bool) -> None:
     parser must read only real ``bool`` or the case-insensitive string
     literals ``true`` / ``false``; everything else fails closed."""
     assert _parse_legitimate(raw) is expected
+
+
+# ---------------------------------------------------------------------------
+# findings_to_issues — check_name → rule_type mapping
+# ---------------------------------------------------------------------------
+
+
+def test_findings_to_issues_maps_signal_exit_to_exit_rules() -> None:
+    """Regression for PR #613 review: signal-exit findings must
+    classify as ``exit_rules`` (not the default ``entry_rules``
+    fallback). The deterministic checker added check #8 emitting
+    ``check_name="signal_exit"`` for signal-exit violations; the
+    rule-type aggregator was not updated alongside, mislabeling
+    those issues in downstream analysis prompts."""
+    from investment_team.strategy_lab.agents.alignment import findings_to_issues
+    from investment_team.strategy_lab.alignment_findings import AlignmentFinding
+
+    findings = [
+        AlignmentFinding(
+            trade_num=1,
+            rule_id="exit:signal_exit",
+            check_name="signal_exit",
+            passed=False,
+            severity="critical",
+            details="strategy closed without a signal-exit fire",
+        )
+    ]
+    issues = findings_to_issues(findings)
+    assert len(issues) == 1
+    assert issues[0].rule_type == "exit_rules"
