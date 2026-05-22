@@ -445,6 +445,42 @@ def test_audit_misaligned_calls_propose_code_fix() -> None:
     assert report.alignment_findings[0].check_name == "entry_signal"
 
 
+def test_audit_preserves_proposed_code_when_llm_overclaims_aligned() -> None:
+    """LLM over-claim of ``aligned=true`` while still supplying a patch
+    must not strand the loop: the orchestrator clamps ``aligned=False``
+    and the patch is preserved so the next iteration can re-execute it.
+    Regression for the PR #613 review (LLM over-claim path)."""
+    overclaim = TradeAlignmentReport(
+        # The LLM defied the deterministic verdict by claiming aligned.
+        aligned=True,
+        rationale="model thinks it's aligned",
+        proposed_code=_FIXED_CODE,
+        predicted_aligned_after_fix=True,
+        changes_made="apply real fix",
+    )
+    orch, align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_misaligned_check_result()],
+        propose_results=[overclaim],
+    )
+
+    report, _gates = orch._run_alignment_audit(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        prior_attempts=[],
+        market_data=_market_data(),
+        config=_config(),
+    )
+
+    # Aligned clamped to False (deterministic gate is authoritative)
+    # AND the LLM's proposed patch survives intact.
+    assert report.aligned is False
+    assert report.proposed_code == _FIXED_CODE
+    assert report.changes_made == "apply real fix"
+    assert len(align_stub.calls) == 1
+
+
 def test_audit_fails_closed_on_unexpected_agent_exception(monkeypatch) -> None:
     """An unexpected (non-``AlignmentAuditError``) exception inside
     ``propose_code_fix`` must NOT silently default to aligned. The audit

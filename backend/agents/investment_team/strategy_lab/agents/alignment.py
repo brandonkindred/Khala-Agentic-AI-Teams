@@ -372,7 +372,15 @@ class TradeAlignmentAgent:
             )
             raise AlignmentAuditError(f"{type(exc).__name__}: {exc}") from exc
 
-        report = _coerce_report(parsed, fallback_code=code)
+        # ``preserve_proposed_code=True``: the deterministic gate has
+        # already decided misaligned, so an LLM that over-claims
+        # ``aligned=True`` while supplying a patch should not silently
+        # drop the patch. The orchestrator clamps ``aligned`` to
+        # ``False`` itself and uses the patch on the next iteration —
+        # without this, the loop would dead-end at ``no_proposed_fix``
+        # on the very first LLM over-claim and leave the deterministic
+        # critical findings unrepaired.
+        report = _coerce_report(parsed, fallback_code=code, preserve_proposed_code=True)
         # Preserve the deterministic findings on the returned report so
         # the orchestrator's persistence path sees them regardless of
         # what the LLM echoed back.
@@ -415,13 +423,26 @@ def _format_findings_section(findings: List[AlignmentFinding], max_rows: int = 6
     return "\n".join(lines)
 
 
-def _coerce_report(parsed: Dict[str, Any], fallback_code: str) -> TradeAlignmentReport:
+def _coerce_report(
+    parsed: Dict[str, Any],
+    fallback_code: str,
+    *,
+    preserve_proposed_code: bool = False,
+) -> TradeAlignmentReport:
     """Convert raw LLM JSON into a :class:`TradeAlignmentReport`.
 
     Tolerates loose schemas (missing fields, snake_case vs camelCase
     issues) so a small format drift in the LLM does not abort the
     alignment loop. The deterministic findings list is *not* read from
     the LLM — it is preserved by the caller (``propose_code_fix``).
+
+    ``preserve_proposed_code=True`` skips the defensive
+    "aligned=true ⇒ null proposed_code" coercion. The fix-proposer
+    path sets this because the deterministic gate has already decided
+    misaligned; an LLM that over-claims ``aligned=true`` while still
+    supplying a patch should not silently drop the patch — the
+    orchestrator clamps ``aligned`` to ``False`` afterwards and the
+    patch is still worth a re-execution.
     """
     aligned = bool(parsed.get("aligned", False))
     rationale = str(parsed.get("rationale", "")).strip()
@@ -456,11 +477,13 @@ def _coerce_report(parsed: Dict[str, Any], fallback_code: str) -> TradeAlignment
     predicted = bool(parsed.get("predicted_aligned_after_fix", False))
     changes = str(parsed.get("changes_made", "")).strip()
 
-    if aligned:
+    if aligned and not preserve_proposed_code:
         # Defensive: ignore proposed_code / changes when the LLM says
-        # aligned — the deterministic gate's verdict is what counts on
-        # this path; an LLM ``aligned=True`` on the fix-proposer path
-        # is a no-op.
+        # aligned — used on the standalone-helper path where
+        # ``aligned=True`` means "no fix needed". On the fix-proposer
+        # path callers pass ``preserve_proposed_code=True`` so an
+        # over-claimed ``aligned=True`` doesn't strip a usable patch
+        # (the orchestrator clamps ``aligned`` to ``False`` itself).
         proposed_code = None
         predicted = False
         changes = ""

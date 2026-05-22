@@ -87,6 +87,31 @@ def test_coerce_report_passes_through_proposed_code_when_misaligned() -> None:
     assert report.changes_made == "y"
 
 
+def test_coerce_report_preserve_proposed_code_keeps_patch_on_aligned_true() -> None:
+    """``preserve_proposed_code=True`` on the fix-proposer path keeps
+    the LLM's patch even when it over-claims ``aligned=true``.
+
+    Without this flag, an LLM that confidently returns aligned=true
+    with a usable patch would dead-end the alignment loop at
+    ``no_proposed_fix``, leaving the deterministic critical findings
+    unrepaired. Regression for PR #613 review.
+    """
+    raw = {
+        "aligned": True,
+        "rationale": "model thinks aligned",
+        "issues": [],
+        "proposed_code": "def fix(): pass",
+        "predicted_aligned_after_fix": True,
+        "changes_made": "real fix",
+    }
+    report = _coerce_report(raw, fallback_code="orig", preserve_proposed_code=True)
+    # Patch survives the aligned=true LLM over-claim.
+    assert report.aligned is True
+    assert report.proposed_code == "def fix(): pass"
+    assert report.changes_made == "real fix"
+    assert report.predicted_aligned_after_fix is True
+
+
 def test_coerce_report_blank_proposed_code_treated_as_none() -> None:
     report = _coerce_report(
         {
