@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Iterable, List, Optional
+from datetime import date, datetime
+from typing import ClassVar, Dict, Iterable, List, Optional
 
+from ...market_data_service import OHLCVBar
 from ...models import BacktestExecutionDiagnostics, BacktestResult, CoverageReport, TradeRecord
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
@@ -25,6 +27,11 @@ class BacktestAnomalyCtx:
     dsr_aware: bool
     diagnostics: Optional[BacktestExecutionDiagnostics]
     coverage_report: Optional[CoverageReport]
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    timeframe: Optional[str] = None
+    market_data: Optional[Dict[str, List[OHLCVBar]]] = None
+
 
 GATE = "backtest_anomaly"
 
@@ -113,6 +120,10 @@ class BacktestAnomalyDetector(GateResultsMixin):
         diagnostics: Optional[BacktestExecutionDiagnostics] = None,
         coverage_report: Optional[CoverageReport] = None,
         phase: StrategyLabPhase = "synthesis",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        market_data: Optional[Dict[str, List[OHLCVBar]]] = None,
     ) -> List[QualityGateResult]:
         """Run anomaly checks and tag every result with ``phase``.
 
@@ -132,14 +143,20 @@ class BacktestAnomalyDetector(GateResultsMixin):
         ``diagnostics`` and ``coverage_report`` enrich the zero-trade gate
         result with a deterministic failure category and order counters.
         Other rules ignore them.
+
+        ``start_date`` / ``end_date`` / ``timeframe`` are required by the
+        frequency-aware trade-count gate. When omitted the gate falls back
+        to the legacy ``< 5 trades`` floor so callers that don't yet wire
+        them through keep their previous behaviour.
+
+        ``market_data`` is required by the look-ahead pattern gate (needs
+        entry-bar OHLC). When omitted the gate emits no result.
         """
         with self._using_phase(phase):
             # Zero trades is a hard short-circuit — every downstream statistic
             # is meaningless without trades, so we return immediately.
             if not trades:
-                return [
-                    self._critical(_format_zero_trade_details(diagnostics, coverage_report))
-                ]
+                return [self._critical(_format_zero_trade_details(diagnostics, coverage_report))]
             ctx = BacktestAnomalyCtx(
                 metrics=metrics,
                 trades=trades,
@@ -147,6 +164,10 @@ class BacktestAnomalyDetector(GateResultsMixin):
                 dsr_aware=dsr_aware,
                 diagnostics=diagnostics,
                 coverage_report=coverage_report,
+                start_date=start_date,
+                end_date=end_date,
+                timeframe=timeframe,
+                market_data=market_data,
             )
             results = [r for rule in self._RULES for r in rule(self, ctx)]
             return results or [self._info("Backtest results passed all anomaly checks.")]
@@ -156,19 +177,68 @@ class BacktestAnomalyDetector(GateResultsMixin):
     # or more results. Listed in ``_RULES`` below.
     # ------------------------------------------------------------------
     def _check_trade_count_floor(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
-        # Paper sessions run over short windows (a few weeks at most) so a
-        # <5-trade minimum is inappropriate; the signals_per_bar floor is the
-        # paper-mode equivalent.
-        if ctx.mode != "paper" and len(ctx.trades) < 5:
+        """Frequency-aware trade-count adequacy gate.
+
+        Preconditions:
+          - ``ctx.trades`` is non-empty (the ``check`` zero-trade short-circuit
+            handles the empty case before this rule fires).
+        Postconditions:
+          - Returns an empty tuple in ``paper`` mode (legacy behaviour).
+          - When ``start_date`` / ``end_date`` / ``timeframe`` are missing,
+            falls back to the legacy ``< 5 trades → critical`` floor so
+            callers that haven't yet wired the new kwargs keep their prior
+            verdicts.
+          - When all three are supplied, the expected trade count is
+            ``window_days / expected_hold_days``: realised count below
+            ``25 %`` of expected → critical, ``25–50 %`` → warning, above
+            50 % → pass.
+        Invariants:
+          - Never returns more than one result.
+        """
+        if ctx.mode == "paper":
+            return ()
+
+        observed = len(ctx.trades)
+        expected = _expected_trade_count(
+            start_date=ctx.start_date,
+            end_date=ctx.end_date,
+            timeframe=ctx.timeframe,
+            trades=ctx.trades,
+        )
+        if expected is None:
+            # Legacy fallback: callers that don't yet pass dates/timeframe
+            # still get the original floor so behaviour is unchanged.
+            if observed < 5:
+                return (
+                    self._critical(
+                        f"Only {observed} trades — "
+                        "statistically meaningless for a multi-year backtest."
+                    ),
+                )
+            return ()
+
+        ratio = observed / expected if expected > 0 else 0.0
+        if ratio < 0.25:
             return (
                 self._critical(
-                    f"Only {len(ctx.trades)} trades — "
-                    "statistically meaningless for a multi-year backtest."
+                    f"Observed {observed} trades vs ~{expected} expected "
+                    f"({ratio:.0%} of expected) given window and holding period — "
+                    "well below the 25% floor for a meaningful sample."
+                ),
+            )
+        if ratio < 0.50:
+            return (
+                self._warning(
+                    f"Observed {observed} trades vs ~{expected} expected "
+                    f"({ratio:.0%} of expected) — review whether the signal "
+                    "is firing as designed."
                 ),
             )
         return ()
 
-    def _check_annualized_return_ceiling(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
+    def _check_annualized_return_ceiling(
+        self, ctx: BacktestAnomalyCtx
+    ) -> Iterable[QualityGateResult]:
         if ctx.metrics.annualized_return_pct > 200:
             return (
                 self._critical(
@@ -189,9 +259,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
             )
         if wr > 90:
             return (
-                self._warning(
-                    f"Win rate {wr:.1f}% exceeds 90% — review for possible overfitting."
-                ),
+                self._warning(f"Win rate {wr:.1f}% exceeds 90% — review for possible overfitting."),
             )
         return ()
 
@@ -228,8 +296,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
         if sr > 3.0:
             return (
                 self._warning(
-                    f"Sharpe ratio {sr:.2f} exceeds 3.0 — review for overfitting "
-                    "or data snooping."
+                    f"Sharpe ratio {sr:.2f} exceeds 3.0 — review for overfitting or data snooping."
                 ),
             )
         return ()
@@ -274,6 +341,89 @@ class BacktestAnomalyDetector(GateResultsMixin):
             )
         return ()
 
+    def _check_lookahead_bar_predictability(
+        self, ctx: BacktestAnomalyCtx
+    ) -> Iterable[QualityGateResult]:
+        """Flag trades whose sign agrees suspiciously well with the entry bar's
+        intrabar direction — a heuristic for look-ahead bias that AST checks
+        miss.
+
+        Preconditions:
+          - ``ctx.trades`` is non-empty.
+          - ``ctx.market_data`` is provided; otherwise the rule emits nothing
+            (the synthesis-loop call site doesn't always have it in scope).
+        Postconditions:
+          - Returns at most one result.
+          - Critical when ``n_eligible >= 20`` and agreement rate ``>= 95%``,
+            OR when ``n_eligible < 20`` and agreement is perfect across at
+            least 5 trades (smaller-sample backstop).
+          - Warning when ``n_eligible >= 20`` and ``80% <= agreement < 95%``.
+        Invariants:
+          - Trades whose entry bar can't be located in ``market_data`` (or
+            whose entry-bar ``close == open``) are skipped — they contribute
+            no agreement signal.
+        """
+        if ctx.market_data is None or ctx.mode == "paper":
+            return ()
+        agreements = 0
+        eligible = 0
+        bar_dirs: set[int] = set()
+        ret_dirs: set[int] = set()
+        for trade in ctx.trades:
+            bars = ctx.market_data.get(trade.symbol)
+            if not bars:
+                continue
+            entry_bar = _find_bar_by_date(bars, trade.entry_date)
+            if entry_bar is None:
+                continue
+            bar_dir = _sign(entry_bar.close - entry_bar.open)
+            ret_dir = _sign(trade.return_pct)
+            if bar_dir == 0 or ret_dir == 0:
+                continue
+            eligible += 1
+            bar_dirs.add(bar_dir)
+            ret_dirs.add(ret_dir)
+            if bar_dir == ret_dir:
+                agreements += 1
+        if eligible == 0:
+            return ()
+        # Degenerate samples (every eligible bar moves the same direction, or
+        # every eligible trade returns the same sign) make the agreement
+        # statistic uninformative — a fixture where every bar is positive
+        # and every trade is a winner trivially scores 100% without any
+        # look-ahead. Require both sides of the sign distribution before
+        # promoting agreement to a finding.
+        if len(bar_dirs) < 2 or len(ret_dirs) < 2:
+            return ()
+        rate = agreements / eligible
+        if eligible >= 20 and rate >= 0.95:
+            return (
+                self._critical(
+                    f"Entry-bar direction agrees with trade return on "
+                    f"{agreements}/{eligible} trades ({rate:.0%}) — perfectly "
+                    "predictable from the entry bar's close-minus-open indicates "
+                    "intrabar look-ahead bias."
+                ),
+            )
+        if eligible < 20 and eligible >= 5 and rate >= 0.999:
+            return (
+                self._critical(
+                    f"Entry-bar direction matches trade return on every "
+                    f"eligible trade ({agreements}/{eligible}) — perfect "
+                    "agreement at small sample is consistent with intrabar "
+                    "look-ahead bias; collect more trades to disambiguate."
+                ),
+            )
+        if eligible >= 20 and rate >= 0.80:
+            return (
+                self._warning(
+                    f"Entry-bar direction agrees with trade return on "
+                    f"{agreements}/{eligible} trades ({rate:.0%}) — review the "
+                    "entry-signal computation for subtle look-ahead."
+                ),
+            )
+        return ()
+
     def _check_cost_sensitivity(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
         gross_wins = sum(t.gross_pnl for t in ctx.trades if t.gross_pnl > 0)
         gross_losses = abs(sum(t.gross_pnl for t in ctx.trades if t.gross_pnl <= 0))
@@ -298,5 +448,110 @@ class BacktestAnomalyDetector(GateResultsMixin):
         _check_avg_hold_time,
         _check_trade_concentration,
         _check_trade_diversification,
+        _check_lookahead_bar_predictability,
         _check_cost_sensitivity,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Module-level helpers used by the rules above.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# Default expected holding period in CALENDAR DAYS per spec timeframe.
+# Daily-bar swing strategies hold roughly two weeks; intraday holds collapse
+# to fractions of a day. These defaults are the fallback when neither the
+# average observed hold nor a structured TimeStopRule supplies a value.
+_DEFAULT_EXPECTED_HOLD_DAYS: Dict[str, float] = {
+    "1d": 10.0,
+    "1h": 0.5,
+    "15m": 0.1,
+    "5m": 0.04,
+    "1m": 0.01,
+}
+
+
+def _expected_trade_count(
+    *,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    timeframe: Optional[str],
+    trades: List[TradeRecord],
+) -> Optional[int]:
+    """Estimate the expected number of trades over the backtest window.
+
+    Preconditions:
+      - ``trades`` is non-empty (callers skip the empty-ledger case before
+        invoking this helper).
+    Postconditions:
+      - Returns ``None`` whenever any required input is missing or unparseable
+        — the gate then falls back to its legacy floor.
+      - Returns ``max(1, round(window_days / expected_hold_days))`` when the
+        inputs are usable. ``expected_hold_days`` is the average observed
+        hold when at least one trade reports ``hold_days > 0``, otherwise the
+        per-timeframe default.
+    Invariants:
+      - Never returns a value ``<= 0``.
+    """
+    if not start_date or not end_date or not timeframe:
+        return None
+    window_days = _window_days(start_date, end_date)
+    if window_days is None or window_days <= 0:
+        return None
+
+    observed_holds = [t.hold_days for t in trades if t.hold_days and t.hold_days > 0]
+    if observed_holds:
+        expected_hold = sum(observed_holds) / len(observed_holds)
+    else:
+        expected_hold = _DEFAULT_EXPECTED_HOLD_DAYS.get(timeframe)
+    if not expected_hold or expected_hold <= 0:
+        return None
+
+    expected = round(window_days / expected_hold)
+    return max(1, expected)
+
+
+def _window_days(start_date: str, end_date: str) -> Optional[int]:
+    start = _parse_iso_date(start_date)
+    end = _parse_iso_date(end_date)
+    if start is None or end is None:
+        return None
+    return (end - start).days
+
+
+def _parse_iso_date(value: str) -> Optional[date]:
+    """Parse ``YYYY-MM-DD`` or full ISO datetime strings; returns ``None`` on
+    malformed input rather than raising so the gate can fall back gracefully.
+    """
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except (TypeError, ValueError):
+        try:
+            return datetime.fromisoformat(value).date()
+        except (TypeError, ValueError):
+            return None
+
+
+def _sign(value: float) -> int:
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
+
+
+def _find_bar_by_date(bars: List[OHLCVBar], target: str) -> Optional[OHLCVBar]:
+    """Return the bar whose ``date`` matches ``target`` (date-prefix match).
+
+    Postconditions:
+      - Returns ``None`` when ``target`` is empty or no bar matches.
+    """
+    if not target:
+        return None
+    head = target[:10]
+    for bar in bars:
+        if bar.date.startswith(head):
+            return bar
+    return None
