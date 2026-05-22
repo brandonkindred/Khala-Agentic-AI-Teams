@@ -811,11 +811,13 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         if not entry_rules:
             return
 
-        # Restrict to entry rules whose side matches the trade's side.
-        # When no side-matched rule exists, check #2 (side) has already
-        # flagged the trade — we still emit an info row here so the
-        # entry-rule view is non-empty.
-        matching = [r for r in entry_rules if r.side == trade.side]
+        # Restrict to entry rules whose side matches the trade's side,
+        # preserving each rule's original index in ``spec.entry_rules``
+        # so ``rule_id`` values like ``entry[2]`` map back to the spec
+        # the operator actually wrote. Renumbering relative to the
+        # filtered subset would silently misattribute findings on the
+        # second side when a spec mixes long/short rules.
+        matching = [(orig_idx, r) for orig_idx, r in enumerate(entry_rules) if r.side == trade.side]
         if not matching:
             finding = AlignmentFinding(
                 trade_num=trade.trade_num,
@@ -881,9 +883,9 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         ] = []  # one entry per matching rule, with eval outcome.
 
         any_satisfied = False
-        for rule_idx, rule in enumerate(matching):
+        for orig_idx, rule in matching:
             outcome = self._evaluate_entry_rule_predicate(
-                rule, df, entry_idx, cache, rule_idx=rule_idx
+                rule, df, entry_idx, cache, rule_idx=orig_idx
             )
             rule_evaluations.append(outcome)
             if outcome["status"] == "satisfied":

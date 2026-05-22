@@ -639,6 +639,32 @@ def test_entry_signal_near_miss_skipped_when_pct_zero(monkeypatch) -> None:
     assert record["calls"] == []
 
 
+def test_entry_signal_rule_id_uses_original_spec_index() -> None:
+    """Mixed long/short spec: a SHORT trade's finding must cite the
+    rule's index in ``spec.entry_rules``, not its position in the
+    side-filtered subset. Regression for the rule-renumbering bug
+    raised in PR review (#613 review)."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(
+        entry_rules=[
+            _rsi_lt_30(side="long"),  # spec.entry_rules[0]
+            _rsi_lt_30(side="short"),  # spec.entry_rules[1]
+            _rsi_lt_30(side="long"),  # spec.entry_rules[2]
+        ],
+    )
+    # SHORT trade — only entry_rules[1] is side-matching. The finding
+    # rule_id must read ``entry[1]``, not ``entry[0]``.
+    trade = _trade(side="short", entry_date="2023-02-01")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=_market_data_rsi_oversold(),
+        initial_capital=100_000.0,
+    )
+    entry = next(f for f in result.findings if f.check_name == "entry_signal")
+    assert entry.rule_id == "entry[1]"
+
+
 def test_entry_signal_missing_bars_flagged_critical() -> None:
     gate = DeterministicAlignmentChecker()
     spec = _spec(entry_rules=[_rsi_lt_30()])
