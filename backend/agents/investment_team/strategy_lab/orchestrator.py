@@ -50,6 +50,8 @@ from .agents.alignment import (
     AlignmentIssue,
     TradeAlignmentAgent,
     TradeAlignmentReport,
+    findings_to_issues,
+    synthesize_aligned_report,
 )
 from .agents.analysis import AnalysisAgent, format_misalignment_prefix
 from .agents.code_synthesis import CodeSynthesisAgent, CodeSynthesisError
@@ -61,6 +63,7 @@ from .agents.design_review import (
 )
 from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
+from .alignment_findings import AlignmentFinding
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
 from .phases import (
@@ -71,6 +74,7 @@ from .phases import (
     hash_spec,
 )
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
+from .quality_gates.alignment_checks import DeterministicAlignmentChecker
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_conformance import CodeConformanceGate
 from .quality_gates.code_safety import CodeSafetyChecker
@@ -371,6 +375,7 @@ class StrategyLabOrchestrator:
         self.code_synthesis_agent = CodeSynthesisAgent()
         self.refinement_agent = RefinementAgent()
         self.alignment_agent = TradeAlignmentAgent()
+        self.deterministic_alignment_checker = DeterministicAlignmentChecker()
         self.zero_trade_repair_agent = ZeroTradeRepairAgent()
         self.analysis_agent = AnalysisAgent()
         self.strategy_validator = StrategySpecValidator()
@@ -955,9 +960,7 @@ class StrategyLabOrchestrator:
             # Probing code that an earlier gate already flagged as critical
             # wastes sandbox subprocess time and adds noisy rule_id criticals
             # on top of the cleaner upstream critical.
-            if not any(
-                not g.passed and g.severity == "critical" for g in round_gate_results
-            ):
+            if not any(not g.passed and g.severity == "critical" for g in round_gate_results):
                 probe_gates = self.rule_probes_gate.check(code, spec)
                 round_gate_results.extend(probe_gates)
             self.record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
@@ -1416,15 +1419,27 @@ class StrategyLabOrchestrator:
                 "trades_count": len(trades),
             },
         )
-        report = self._run_alignment_audit(
+        report, gate_results = self._run_alignment_audit(
             spec=spec,
             code=code,
             trades=trades,
             metrics=metrics,
             prior_attempts=alignment_attempts,
+            market_data=market_data,
+            config=config,
         )
         alignment_reports.append(report)
 
+        # Per-rule gate rows from the deterministic checker. Stamp the
+        # round number so the dashboard renders them under the right
+        # alignment-iteration column.
+        for g in gate_results:
+            g.refinement_round = align_round
+        all_gate_results.extend(gate_results)
+
+        # Aggregate gate row for the existing "trade_alignment" roll-up
+        # — same shape as before so downstream consumers that only look
+        # at the single row don't break.
         gate_severity = "info" if report.aligned else "critical"
         gate_details = (
             report.rationale or "Trades aligned with strategy."
@@ -1467,6 +1482,22 @@ class StrategyLabOrchestrator:
                     }
                     for i in report.issues[:5]
                 ],
+                # Per-rule deterministic findings preview. The full
+                # ledger lives on the persisted ``BacktestRecord``;
+                # surface only the first 10 here so the SSE payload
+                # stays bounded.
+                "findings_preview": [
+                    {
+                        "trade_num": f.trade_num,
+                        "check_name": f.check_name,
+                        "rule_id": f.rule_id,
+                        "severity": f.severity,
+                        "passed": f.passed,
+                        "details": f.details[:160],
+                    }
+                    for f in report.alignment_findings[:10]
+                ],
+                "findings_count": len(report.alignment_findings),
             },
         )
 
@@ -1952,6 +1983,7 @@ class StrategyLabOrchestrator:
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
         design_context: Optional[_DesignPersistContext] = None,
+        alignment_findings: Optional[List[AlignmentFinding]] = None,
     ) -> StrategyLabRecord:
         """Build the final ``StrategyLabRecord`` from a settled cycle.
 
@@ -2012,6 +2044,7 @@ class StrategyLabOrchestrator:
             requested_symbols=requested_symbols,
             fetched_symbols=fetched_symbols,
             data_provenance=data_provenance,
+            alignment_findings=list(alignment_findings or []),
         )
 
         design_context = design_context or _DesignPersistContext()
@@ -2372,6 +2405,16 @@ class StrategyLabOrchestrator:
             attempt=design_attempt,
         )
 
+        # Final-iteration per-rule findings from the deterministic
+        # alignment gate. The orchestrator's loop produces one report
+        # per iteration; the last one carries the ledger as it stood
+        # against the known-good code/trades that ``trades_aligned``
+        # was computed from. When the alignment loop never ran (no
+        # market_data, no trades) the list is empty.
+        alignment_findings: List[AlignmentFinding] = (
+            list(alignment_reports[-1].alignment_findings) if alignment_reports else []
+        )
+
         # ── Phase 4: RECORD ───────────────────────────────────────────
         return self._assemble_record(
             spec=spec,
@@ -2395,6 +2438,7 @@ class StrategyLabOrchestrator:
             all_gate_results=all_gate_results,
             emit=emit,
             design_context=design_context,
+            alignment_findings=alignment_findings,
         )
 
     # ------------------------------------------------------------------
@@ -2502,16 +2546,43 @@ class StrategyLabOrchestrator:
         trades: List[TradeRecord],
         metrics: BacktestResult,
         prior_attempts: List[str],
-    ) -> TradeAlignmentReport:
-        """Call the alignment agent with retries on transient errors.
+        *,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+    ) -> Tuple[TradeAlignmentReport, List[QualityGateResult]]:
+        """Run the deterministic alignment gate, then optionally the LLM fix proposer.
 
-        On ``AlignmentAuditError`` (LLM transport / JSON parse failure),
-        retries up to ``STRATEGY_LAB_ALIGNMENT_RETRIES`` times (default 2),
-        then falls **closed** with ``aligned=False`` so the orchestrator's
-        ``no_proposed_fix`` exit fires and a misaligned strategy whose
-        audit happens to throw is not silently waved through (issue #531).
-        The rationale captures the underlying error for the audit trail.
+        Pre: ``trades`` is the executed ledger, ``market_data`` is the
+        same in-memory OHLCV dictionary the sandbox consumed.
+        Post: returns a ``(TradeAlignmentReport, gate_results)`` pair.
+        When the gate finds ``aligned=True``, the report is synthesised
+        from the deterministic findings with no LLM call. When the gate
+        finds critical misalignments, the LLM ``propose_code_fix`` is
+        invoked with retries; on parse-failure exhaustion the report
+        falls closed (``aligned=False``, ``proposed_code=None``) so the
+        loop's existing ``no_proposed_fix`` exit fires.
+
+        ``gate_results`` is the per-rule :class:`QualityGateResult` list
+        the gate emitted; the caller appends them to ``all_gate_results``
+        so the dashboard sees every check that ran.
         """
+        check_result = self.deterministic_alignment_checker.check(
+            spec=spec,
+            trades=trades,
+            market_data=market_data,
+            initial_capital=config.initial_capital,
+            near_miss_adjudicator=self.alignment_agent.adjudicate_near_miss,
+        )
+
+        if check_result.aligned:
+            report = synthesize_aligned_report(check_result.findings)
+            return report, check_result.gate_results
+
+        # Misaligned: ask the LLM for a code patch grounded in the
+        # structured findings. Retries cover transient LLM transport /
+        # parse failures only; non-AlignmentAuditError exceptions fall
+        # closed immediately so a bug in the agent does not silently
+        # produce a green audit.
         try:
             retries = max(int(os.environ.get("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")), 0)
         except ValueError:
@@ -2520,49 +2591,69 @@ class StrategyLabOrchestrator:
         last_exc: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
-                return self.alignment_agent.run(
+                report = self.alignment_agent.propose_code_fix(
                     spec=spec,
                     code=code,
-                    trades=trades,
-                    metrics=metrics,
+                    findings=check_result.findings,
                     prior_attempts=prior_attempts,
                 )
+                # The LLM might echo ``aligned=True`` on this path
+                # (the fix-proposer parse keeps ``proposed_code`` via
+                # ``preserve_proposed_code=True`` so an over-claim
+                # doesn't strip a usable patch). The deterministic
+                # gate's verdict is authoritative — clamp ``aligned``
+                # to ``False`` so the loop keeps driving.
+                if report.aligned:
+                    report.aligned = False
+                report.alignment_findings = list(check_result.findings)
+                # The deterministic findings are the authoritative
+                # description of what went wrong. The LLM's narrative
+                # ``issues`` may omit, under-specify, or rephrase them,
+                # which would leave downstream analysis prompts
+                # (``analysis.py``'s alignment-status section) with
+                # nothing concrete to cite. Always re-derive ``issues``
+                # from the structured findings so the deterministic-
+                # first contract holds end-to-end.
+                report.issues = findings_to_issues(check_result.findings)
+                return report, check_result.gate_results
             except AlignmentAuditError as exc:
                 last_exc = exc
                 logger.warning(
-                    "Alignment audit attempt %d/%d failed: %s",
+                    "Alignment fix-proposer attempt %d/%d failed: %s",
                     attempt + 1,
                     retries + 1,
                     exc,
                 )
             except Exception as exc:
-                # Unexpected error from the agent (not a transport / parse
-                # failure). Don't retry — surface immediately, fail closed.
                 logger.exception("Alignment agent raised unexpected error; failing closed")
-                return TradeAlignmentReport(
+                fail_closed = TradeAlignmentReport(
                     aligned=False,
                     proposed_code=None,
-                    rationale=(f"Alignment audit error (fail-closed): {type(exc).__name__}: {exc}"),
+                    rationale=(
+                        f"Alignment fix-proposer error (fail-closed): {type(exc).__name__}: {exc}"
+                    ),
+                    issues=findings_to_issues(check_result.findings),
+                    alignment_findings=list(check_result.findings),
                 )
+                return fail_closed, check_result.gate_results
 
-        # All retries exhausted — emit a terminal ERROR so ops alerting
-        # rules keyed on ERROR-level logs still fire (the per-attempt
-        # WARNING above is intentionally low-severity for transient
-        # hiccups).
         assert last_exc is not None, "loop ran at least once; last_exc must be set"
         logger.error(
-            "Alignment audit error after %d attempts; failing closed: %s",
+            "Alignment fix-proposer error after %d attempts; failing closed: %s",
             retries + 1,
             last_exc,
         )
-        return TradeAlignmentReport(
+        fail_closed = TradeAlignmentReport(
             aligned=False,
             proposed_code=None,
             rationale=(
-                f"Alignment audit error after {retries + 1} attempts (fail-closed): "
+                f"Alignment fix-proposer error after {retries + 1} attempts (fail-closed): "
                 f"{type(last_exc).__name__}: {last_exc}"
             ),
+            issues=findings_to_issues(check_result.findings),
+            alignment_findings=list(check_result.findings),
         )
+        return fail_closed, check_result.gate_results
 
     def _apply_updates(
         self,

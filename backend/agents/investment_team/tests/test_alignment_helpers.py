@@ -6,60 +6,11 @@ from __future__ import annotations
 
 import pytest
 
-from investment_team.models import TradeRecord
 from investment_team.strategy_lab.agents.alignment import (
     _coerce_report,
     _extract_json,
-    _format_trades_section,
+    _parse_legitimate,
 )
-
-
-def _trade(n: int = 1, outcome: str = "win") -> TradeRecord:
-    return TradeRecord(
-        trade_num=n,
-        symbol="AAA",
-        side="long",
-        entry_date="2024-01-01",
-        exit_date="2024-01-05",
-        entry_price=100.0,
-        exit_price=101.0,
-        shares=1.0,
-        position_value=100.0,
-        gross_pnl=1.0,
-        net_pnl=1.0,
-        return_pct=1.0,
-        hold_days=4,
-        cumulative_pnl=1.0,
-        outcome=outcome,
-    )
-
-
-# ---------------------------------------------------------------------------
-# _format_trades_section
-# ---------------------------------------------------------------------------
-
-
-def test_format_trades_section_no_trades() -> None:
-    assert _format_trades_section([]) == "No trades produced by this backtest."
-
-
-def test_format_trades_section_short_lists_all_trades() -> None:
-    trades = [_trade(i + 1) for i in range(5)]
-    out = _format_trades_section(trades, max_sample_rows=10)
-    assert "Aggregate: 5 trades" in out
-    # Every trade num appears.
-    for i in range(5):
-        assert f"#{i + 1}" in out
-
-
-def test_format_trades_section_long_uses_head_tail_split() -> None:
-    trades = [_trade(i + 1) for i in range(30)]
-    out = _format_trades_section(trades, max_sample_rows=8)
-    # Head + tail appear, middle is elided.
-    assert "#1 " in out
-    assert "#30" in out
-    assert "additional trades not shown" in out
-
 
 # ---------------------------------------------------------------------------
 # _coerce_report
@@ -136,6 +87,31 @@ def test_coerce_report_passes_through_proposed_code_when_misaligned() -> None:
     assert report.changes_made == "y"
 
 
+def test_coerce_report_preserve_proposed_code_keeps_patch_on_aligned_true() -> None:
+    """``preserve_proposed_code=True`` on the fix-proposer path keeps
+    the LLM's patch even when it over-claims ``aligned=true``.
+
+    Without this flag, an LLM that confidently returns aligned=true
+    with a usable patch would dead-end the alignment loop at
+    ``no_proposed_fix``, leaving the deterministic critical findings
+    unrepaired. Regression for PR #613 review.
+    """
+    raw = {
+        "aligned": True,
+        "rationale": "model thinks aligned",
+        "issues": [],
+        "proposed_code": "def fix(): pass",
+        "predicted_aligned_after_fix": True,
+        "changes_made": "real fix",
+    }
+    report = _coerce_report(raw, fallback_code="orig", preserve_proposed_code=True)
+    # Patch survives the aligned=true LLM over-claim.
+    assert report.aligned is True
+    assert report.proposed_code == "def fix(): pass"
+    assert report.changes_made == "real fix"
+    assert report.predicted_aligned_after_fix is True
+
+
 def test_coerce_report_blank_proposed_code_treated_as_none() -> None:
     report = _coerce_report(
         {
@@ -159,7 +135,7 @@ def test_extract_json_plain_object() -> None:
 
 
 def test_extract_json_handles_markdown_fence() -> None:
-    text = "```json\n{\"aligned\": true}\n```"
+    text = '```json\n{"aligned": true}\n```'
     data = _extract_json(text)
     assert data == {"aligned": True}
 
@@ -178,3 +154,68 @@ def test_extract_json_raises_when_no_object() -> None:
 def test_extract_json_raises_on_malformed_json() -> None:
     with pytest.raises(ValueError):
         _extract_json('{"missing_closing_quote: 1}')
+
+
+# ---------------------------------------------------------------------------
+# _parse_legitimate — strict near-miss verdict parsing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (True, True),
+        (False, False),
+        ("true", True),
+        ("True", True),
+        ("  TRUE  ", True),
+        ("false", False),
+        ("False", False),
+        # Anything that isn't an unambiguous "yes" must fail closed
+        # so a misaligned trade is never waved through by the near-miss
+        # adjudicator.
+        ("yes", False),
+        ("1", False),
+        ("0", False),
+        ("", False),
+        (None, False),
+        (1, False),
+        (0, False),
+        ({"nested": True}, False),
+    ],
+)
+def test_parse_legitimate_strict(raw, expected: bool) -> None:
+    """Regression for the ``bool('false') == True`` trap. The near-miss
+    parser must read only real ``bool`` or the case-insensitive string
+    literals ``true`` / ``false``; everything else fails closed."""
+    assert _parse_legitimate(raw) is expected
+
+
+# ---------------------------------------------------------------------------
+# findings_to_issues — check_name → rule_type mapping
+# ---------------------------------------------------------------------------
+
+
+def test_findings_to_issues_maps_signal_exit_to_exit_rules() -> None:
+    """Regression for PR #613 review: signal-exit findings must
+    classify as ``exit_rules`` (not the default ``entry_rules``
+    fallback). The deterministic checker added check #8 emitting
+    ``check_name="signal_exit"`` for signal-exit violations; the
+    rule-type aggregator was not updated alongside, mislabeling
+    those issues in downstream analysis prompts."""
+    from investment_team.strategy_lab.agents.alignment import findings_to_issues
+    from investment_team.strategy_lab.alignment_findings import AlignmentFinding
+
+    findings = [
+        AlignmentFinding(
+            trade_num=1,
+            rule_id="exit:signal_exit",
+            check_name="signal_exit",
+            passed=False,
+            severity="critical",
+            details="strategy closed without a signal-exit fire",
+        )
+    ]
+    issues = findings_to_issues(findings)
+    assert len(issues) == 1
+    assert issues[0].rule_type == "exit_rules"

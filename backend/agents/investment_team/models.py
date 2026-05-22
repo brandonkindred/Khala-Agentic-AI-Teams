@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .execution.risk_filter import RiskLimits
+from .strategy_lab.alignment_findings import AlignmentFinding
 from .strategy_lab.spec_dsl import (
     EntryRule,
     ExitRule,
@@ -739,6 +740,13 @@ class BacktestRecord(BaseModel):
     # per-symbol provider, ``as_of`` snapshot id, dataset fingerprint).
     # Default-empty so legacy persisted rows deserialize cleanly.
     data_provenance: DataProvenance = Field(default_factory=DataProvenance)
+    # Per-trade, per-rule alignment findings emitted by the deterministic
+    # ``DeterministicAlignmentChecker``. Carries the final-iteration
+    # ledger of which alignment checks passed / failed on each trade so
+    # the Strategy Lab dashboard can render fine-grained pass/fail rows
+    # instead of a single LLM verdict. Default-empty so legacy persisted
+    # rows deserialize cleanly.
+    alignment_findings: List[AlignmentFinding] = Field(default_factory=list)
 
 
 class GateCheckResult(BaseModel):

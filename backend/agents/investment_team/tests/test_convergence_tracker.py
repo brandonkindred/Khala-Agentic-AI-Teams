@@ -350,3 +350,84 @@ def test_strategy_signature_includes_asset_class_token():
     sig_crypto = ConvergenceTracker._strategy_signature(_mk_spec("crypto"))
 
     assert sig_stocks ^ sig_crypto == {"ac:stocks", "ac:crypto"}
+
+
+def _failing_gate(name: str = "trade_alignment") -> QualityGateResult:
+    return QualityGateResult(
+        gate_name=name,
+        passed=False,
+        severity="critical",
+        phase="verification",
+        details="",
+    )
+
+
+def test_record_dedupes_failures_by_gate_name_per_cycle():
+    """Regression for PR #613 review: many failed rows under the same
+    ``gate_name`` in a single cycle count as ONE cycle-level failure.
+
+    ``DeterministicAlignmentChecker`` emits one row per trade × per
+    check, so a single misaligned cycle can produce dozens of failing
+    rows tagged ``alignment_finding``. ``_failure_modes`` is supposed
+    to track cross-cycle failure frequency for
+    ``get_failure_directives(min_occurrences=3)``; without deduping,
+    one bad cycle with three failed findings would prematurely trip
+    the directive.
+    """
+    t = ConvergenceTracker()
+    # One cycle with 10 failing rows under the same gate name.
+    rows = [_failing_gate("alignment_finding") for _ in range(10)]
+    t.record(_mk_spec(), rows)
+    assert t._failure_modes["alignment_finding"] == 1
+
+    # Second cycle, same shape — count goes to 2, not 12.
+    t.record(_mk_spec(), rows)
+    assert t._failure_modes["alignment_finding"] == 2
+
+
+def test_record_counts_distinct_gate_names_separately_in_one_cycle():
+    """Distinct gate names in the same cycle each count once."""
+    t = ConvergenceTracker()
+    t.record(
+        _mk_spec(),
+        [
+            _failing_gate("trade_alignment"),
+            _failing_gate("alignment_finding"),
+            _failing_gate("alignment_finding"),  # dedupes
+            _failing_gate("code_safety"),
+        ],
+    )
+    assert t._failure_modes["trade_alignment"] == 1
+    assert t._failure_modes["alignment_finding"] == 1
+    assert t._failure_modes["code_safety"] == 1
+
+
+def test_record_inserts_failed_gates_in_deterministic_order():
+    """Regression for PR #613 review: failed gates with the same count
+    must surface in deterministic order in ``get_failure_directives``.
+
+    ``Counter.most_common`` breaks ties by first-seen insertion order;
+    iterating an unordered set across runs would make equal-count
+    directives appear in different orders, polluting ideation prompts
+    and snapshot tests. The tracker now sorts the failed-gate names
+    before incrementing the counter.
+    """
+    # Build two trackers from independently-shuffled gate-result lists
+    # that share the same set of failing gate names. Insertion order
+    # into _failure_modes must match because the tracker sorts.
+    rows = [_failing_gate(name) for name in ["zeta_gate", "alpha_gate", "mu_gate", "beta_gate"]]
+    rows_reversed = list(reversed(rows))
+
+    t1 = ConvergenceTracker()
+    t1.record(_mk_spec(), rows)
+    t2 = ConvergenceTracker()
+    t2.record(_mk_spec(), rows_reversed)
+
+    # Same insertion order in both — sorted alphabetically.
+    assert list(t1._failure_modes.keys()) == list(t2._failure_modes.keys())
+    assert list(t1._failure_modes.keys()) == [
+        "alpha_gate",
+        "beta_gate",
+        "mu_gate",
+        "zeta_gate",
+    ]

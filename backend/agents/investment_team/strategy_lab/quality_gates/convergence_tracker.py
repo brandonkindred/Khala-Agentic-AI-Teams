@@ -49,14 +49,30 @@ class ConvergenceTracker:
     # ------------------------------------------------------------------
 
     def record(self, spec: StrategySpec, gate_results: List[QualityGateResult]) -> None:
-        """Record one completed cycle's strategy and gate outcomes."""
+        """Record one completed cycle's strategy and gate outcomes.
+
+        Failure modes count each cycle that failed a gate, not each
+        failed row. Gates like ``DeterministicAlignmentChecker`` emit
+        one row per trade × per check, so a single misaligned cycle
+        can produce dozens of failing rows under the same gate name;
+        crediting every row would prematurely trip
+        ``get_failure_directives(min_occurrences=3)`` after one bad
+        cycle. Deduping by ``gate_name`` per call gives each cycle at
+        most one count per distinct failing gate — the right semantic
+        for cross-cycle failure frequency.
+        """
         sig = self._strategy_signature(spec)
         self._signatures.append(sig)
         self._asset_class_history.append(spec.asset_class.lower())
 
-        for g in gate_results:
-            if not g.passed:
-                self._failure_modes[g.gate_name] += 1
+        # Iterate sorted so insertion order into ``_failure_modes`` is
+        # deterministic across interpreter runs. ``Counter.most_common``
+        # breaks ties by first-seen order; without sorting, equal-count
+        # gates could appear in different order across runs and produce
+        # nondeterministic ideation prompts / snapshot-test flakes.
+        failed_gate_names = {g.gate_name for g in gate_results if not g.passed}
+        for gate_name in sorted(failed_gate_names):
+            self._failure_modes[gate_name] += 1
 
         # Trim to max history
         if len(self._signatures) > self._max_history:
