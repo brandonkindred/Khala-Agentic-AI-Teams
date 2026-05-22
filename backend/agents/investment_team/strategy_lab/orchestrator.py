@@ -63,6 +63,13 @@ from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
+from .phases import (
+    PHASE_TRANSITION_EVENT_NAME,
+    Phase,
+    PhaseTransition,
+    hash_code,
+    hash_spec,
+)
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_conformance import CodeConformanceGate
@@ -174,6 +181,45 @@ WINNING_THRESHOLD = 8.0
 # block. The model already trims to 20; 10 is enough signal for the LLM to
 # spot the failure pattern while keeping the JSON line under ~1 KB.
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
+
+
+def _emit_phase_transition(
+    emit: PhaseCallback,
+    *,
+    from_phase: Phase,
+    to_phase: Optional[Phase],
+    spec: StrategySpec,
+    code: str,
+    attempt: int,
+) -> None:
+    """Emit a :class:`PhaseTransition` event through the orchestrator callback.
+
+    Preconditions:
+      - ``emit`` is a no-op-safe ``PhaseCallback``.
+      - ``from_phase`` is a member of :data:`PHASES`.
+      - ``to_phase`` is the next member of :data:`PHASES` after
+        ``from_phase``, or ``None`` for the terminal boundary.
+      - ``spec`` is the spec as it exists at the boundary; ``code`` is
+        the strategy code as it exists at the boundary (empty string
+        before ``CODE_SYNTHESIS`` exits).
+      - ``attempt`` is the zero-indexed ``run_cycle`` design-attempt
+        counter.
+
+    Postconditions:
+      - Emits exactly one event via ``emit`` with name
+        :data:`PHASE_TRANSITION_EVENT_NAME` and payload equal to
+        ``PhaseTransition.model_dump(mode="json")``.
+      - The payload carries SHA-256 ``spec_hash`` and ``code_hash``
+        computed by :func:`hash_spec` / :func:`hash_code`.
+    """
+    transition = PhaseTransition(
+        from_phase=from_phase,
+        to_phase=to_phase,
+        spec_hash=hash_spec(spec),
+        code_hash=hash_code(code),
+        attempt=attempt,
+    )
+    emit(PHASE_TRANSITION_EVENT_NAME, transition.model_dump(mode="json"))
 
 
 def _spec_readiness_signature(spec: StrategySpec) -> tuple:
@@ -439,16 +485,52 @@ class StrategyLabOrchestrator:
         on_phase: Optional[PhaseCallback] = None,
         exclude_asset_classes: Optional[List[str]] = None,
     ) -> StrategyLabRecord:
-        """Run one full strategy lab cycle: design → review → code → backtest → analyze.
+        """Run one full strategy lab cycle, enumerated as exactly four phases.
 
-        Wraps ``_run_design_attempt`` in an outer retry loop bounded by
-        ``MAX_DESIGN_REENTRIES``: when refinement detects the spec
-        is unimplementable (`SpecImplementabilityError`), the cycle
-        re-enters the design phase with the failure evidence appended as a
-        convergence directive. On exhaustion, persists a short-circuit
-        record with ``status='failed: spec_unimplementable'``.
+        The pipeline exposes the four named phases in :data:`PHASES`:
 
-        Returns a StrategyLabRecord with the final result.
+            1. ``DESIGN`` — initial :class:`DesignAgent` invocation.
+            2. ``DESIGN_REVIEW`` — bounded design ↔ review loop gated by
+               ``SpecReadinessGate``; advances to synthesis only when the
+               gate passes and the reviewer marks the spec ready.
+            3. ``CODE_SYNTHESIS`` — deterministic compile or LLM synthesis
+               + refinement loop gated by ``CodeConformanceGate``; advances
+               to verification only when synthesis converges
+               (``execution_succeeded=True``), which structurally requires
+               conformance to have passed.
+            4. ``BACKTEST_AND_VERIFICATION`` — trade alignment loop,
+               walk-forward, acceptance gate, ``is_winning`` resolution,
+               and the post-backtest analysis narrative.
+
+        Each phase exit fires a :class:`PhaseTransition` event through the
+        ``on_phase`` callback (event name :data:`PHASE_TRANSITION_EVENT_NAME`)
+        carrying SHA-256 hashes of the spec and code at that boundary, so
+        consumers can detect upstream-artefact drift.
+
+        Preconditions:
+          - ``prior_records`` is the (possibly empty) sequence of previously
+            persisted ``StrategyLabRecord`` rows.
+          - ``config`` is a constructed :class:`BacktestConfig`.
+
+        Postconditions:
+          - Returns a :class:`StrategyLabRecord` with the final result.
+          - Exactly four ``PhaseTransition`` events are emitted on the
+            happy path; short-circuit paths emit only the prefix of
+            boundaries actually reached.
+          - On ``SpecImplementabilityError`` from a downstream phase,
+            ``run_cycle`` wraps ``_run_design_attempt`` in an outer retry
+            loop bounded by :data:`MAX_DESIGN_REENTRIES`, re-firing the
+            full transition sequence with ``attempt`` incremented. On
+            exhaustion, persists a short-circuit record with
+            ``status='failed: spec_unimplementable'``.
+
+        Invariants:
+          - ``spec_hash`` on transitions is stable from the
+            ``DESIGN_REVIEW → CODE_SYNTHESIS`` boundary onward within a
+            single design attempt (spec frozen post-design).
+          - ``code_hash`` on transitions is stable from the
+            ``CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION`` boundary onward
+            within a single design attempt.
         """
         emit = on_phase or (lambda phase, data: None)
 
@@ -475,6 +557,7 @@ class StrategyLabOrchestrator:
                     emit=emit,
                     exclude_asset_classes=exclude_asset_classes,
                     directives=directives,
+                    design_attempt=design_attempt,
                 )
             except SpecImplementabilityError as exc:
                 last_evidence = exc.evidence
@@ -534,6 +617,7 @@ class StrategyLabOrchestrator:
         config: BacktestConfig,
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
+        design_attempt: int = 0,
     ) -> _DesignLoopOutcome:
         """Drive the bounded design ↔ design-review loop.
 
@@ -564,6 +648,19 @@ class StrategyLabOrchestrator:
             exclude_asset_classes=exclude_asset_classes,
         )
         spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+
+        # ═══ Phase 1 → 2 transition: DESIGN → DESIGN_REVIEW ═══════════
+        # The initial DesignAgent invocation has produced a spec draft;
+        # the bounded design ↔ review loop is about to start. No code
+        # exists yet, so code_hash is the empty-string SHA-256.
+        _emit_phase_transition(
+            emit,
+            from_phase=Phase.DESIGN,
+            to_phase=Phase.DESIGN_REVIEW,
+            spec=spec,
+            code="",
+            attempt=design_attempt,
+        )
 
         critique_history: List[SpecCritique] = []
         ready = False
@@ -1460,9 +1557,7 @@ class StrategyLabOrchestrator:
             refinement_round=align_round,
             gate_name_prefix="alignment_",
         )
-        critical_anomalies = [
-            g for g in anomaly_gates if not g.passed and g.severity == "critical"
-        ]
+        critical_anomalies = [g for g in anomaly_gates if not g.passed and g.severity == "critical"]
         if critical_anomalies:
             diagnostics_block = _format_execution_diagnostics(align_exec.execution_diagnostics)
             emit_payload: Dict[str, Any] = {
@@ -1933,6 +2028,7 @@ class StrategyLabOrchestrator:
         emit: PhaseCallback,
         exclude_asset_classes: Optional[List[str]],
         directives: List[str],
+        design_attempt: int = 0,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -1959,6 +2055,7 @@ class StrategyLabOrchestrator:
             config=config,
             all_gate_results=all_gate_results,
             emit=emit,
+            design_attempt=design_attempt,
         )
         spec = design_outcome.spec
         rationale = design_outcome.rationale
@@ -1992,6 +2089,27 @@ class StrategyLabOrchestrator:
                 emit=emit,
                 design_context=design_context,
             )
+
+        # ═══ Phase 2 → 3 transition: DESIGN_REVIEW → CODE_SYNTHESIS ═══
+        # Boundary invariant (AC2): the design phase exit is structurally
+        # gated on ``design_outcome.ready``, which is True only when
+        # ``SpecReadinessGate`` passed (no critical failures) AND the
+        # ``DesignReviewAgent`` marked the spec ready. The short-circuit
+        # branch above returns before reaching this point, so reaching
+        # this line implies the gate has passed for this design attempt.
+        assert design_outcome.ready, (
+            "DESIGN_REVIEW → CODE_SYNTHESIS boundary invariant violated: "
+            "design_outcome.ready is False but the short-circuit branch "
+            "did not return. This is a bug in _run_design_attempt."
+        )
+        _emit_phase_transition(
+            emit,
+            from_phase=Phase.DESIGN_REVIEW,
+            to_phase=Phase.CODE_SYNTHESIS,
+            spec=spec,
+            code="",
+            attempt=design_attempt,
+        )
 
         # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
         # Deterministic compile by default; the LLM-driven synthesis
@@ -2119,6 +2237,25 @@ class StrategyLabOrchestrator:
         execution_succeeded = synthesis.execution_succeeded
         max_rounds_exhausted = synthesis.max_rounds_exhausted
 
+        # ═══ Phase 3 → 4 transition: CODE_SYNTHESIS → ═════════════════
+        # ═══                         BACKTEST_AND_VERIFICATION ════════
+        # Boundary invariant (AC3): synthesis advancing with
+        # ``execution_succeeded=True`` structurally requires that
+        # ``CodeConformanceGate.check`` passed in the final round (it is
+        # one of the critical gates the refinement loop must clear before
+        # executing). When synthesis short-circuits (max-rounds exhausted
+        # or fatal fetch failure), we still cross into the verification
+        # phase but the boundary event reflects the un-converged code
+        # hash and downstream gates handle the rest.
+        _emit_phase_transition(
+            emit,
+            from_phase=Phase.CODE_SYNTHESIS,
+            to_phase=Phase.BACKTEST_AND_VERIFICATION,
+            spec=spec,
+            code=code,
+            attempt=design_attempt,
+        )
+
         # ── Phase 2.5: TRADE ALIGNMENT LOOP ───────────────────────────
         alignment_outcome = self._run_trade_alignment_loop(
             spec=spec,
@@ -2188,6 +2325,21 @@ class StrategyLabOrchestrator:
             all_gate_results=all_gate_results,
             alignment_report=latest_alignment_report,
             emit=emit,
+        )
+
+        # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
+        # Terminal transition out of the last named phase. ``to_phase``
+        # is ``None``; ``spec_hash``/``code_hash`` must match the values
+        # emitted on the previous two boundaries within this design
+        # attempt — the integration test in
+        # ``test_strategy_lab_phase_transitions.py`` asserts this.
+        _emit_phase_transition(
+            emit,
+            from_phase=Phase.BACKTEST_AND_VERIFICATION,
+            to_phase=None,
+            spec=spec,
+            code=code,
+            attempt=design_attempt,
         )
 
         # ── Phase 4: RECORD ───────────────────────────────────────────
