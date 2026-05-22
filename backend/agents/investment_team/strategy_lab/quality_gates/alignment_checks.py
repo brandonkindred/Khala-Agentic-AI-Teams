@@ -616,20 +616,43 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 f"±{_SIZING_TOL * 100:.1f}% of expected ${expected:,.2f}."
             )
         else:
-            # Execution caveats downgrade an out-of-tolerance result to
-            # informational — engine-side participation clipping /
-            # partial fills can legitimately shrink the realised
-            # position size below the sizing formula's intent.
-            execution_caveat = bool(trade.participation_clipped) or (
+            # ``TradeRecord`` documents ``participation_clipped`` /
+            # ``partial_fill_count`` as ``None`` when the engine hasn't
+            # annotated the trade — distinct from "annotated as no
+            # caveat". Treating unknown as known-false would mark every
+            # legacy / pre-annotation trade with sizing drift as
+            # critical and trigger needless alignment-fix iterations.
+            # Three-way classification:
+            #   - explicit caveat present (clipped=True or partial>0)
+            #     → info (engine-attested explanation)
+            #   - explicit no-caveat (clipped=False AND partial==0)
+            #     → critical (engine attested execution was clean,
+            #     so the drift is a real misalignment)
+            #   - unknown (either field is None) → warning (flag the
+            #     drift but don't claim it's definitively misaligned)
+            explicit_caveat = bool(trade.participation_clipped) or (
                 trade.partial_fill_count is not None and trade.partial_fill_count > 0
             )
-            severity = "info" if execution_caveat else "critical"
-            passed = bool(execution_caveat)
-            caveat_msg = ""
-            if trade.participation_clipped:
-                caveat_msg = " (participation_clipped=True)"
-            elif trade.partial_fill_count is not None and trade.partial_fill_count > 0:
-                caveat_msg = f" (partial_fill_count={trade.partial_fill_count})"
+            explicit_no_caveat = (
+                trade.participation_clipped is False and trade.partial_fill_count == 0
+            )
+            if explicit_caveat:
+                severity = "info"
+                passed = True
+                caveat_msg = ""
+                if trade.participation_clipped:
+                    caveat_msg = " (participation_clipped=True)"
+                elif trade.partial_fill_count is not None and trade.partial_fill_count > 0:
+                    caveat_msg = f" (partial_fill_count={trade.partial_fill_count})"
+            elif explicit_no_caveat:
+                severity = "critical"
+                passed = False
+                caveat_msg = " (no execution caveat reported)"
+            else:
+                # Unknown execution metadata — downgrade to warning.
+                severity = "warning"
+                passed = False
+                caveat_msg = " (execution metadata not annotated; unknown)"
             details = (
                 f"Trade #{trade.trade_num} position_value=${actual:,.2f} differs "
                 f"from expected ${expected:,.2f} by "

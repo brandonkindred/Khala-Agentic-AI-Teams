@@ -317,10 +317,16 @@ def test_sizing_passes_when_position_value_within_one_percent() -> None:
 
 
 def test_sizing_critical_when_position_value_outside_tolerance_and_no_caveat() -> None:
+    """``participation_clipped=False`` AND ``partial_fill_count=0`` is
+    an explicit no-caveat annotation from the engine; an out-of-
+    tolerance sizing miss then is a real misalignment → critical."""
     gate = DeterministicAlignmentChecker()
     spec = _spec(sizing=FixedFractionSizing(fraction=0.02))
-    # Expected $2,000; trade at $2,800 = 40% off, no execution caveat.
-    trade = _trade(position_value=2_800.0)
+    trade = _trade(
+        position_value=2_800.0,
+        participation_clipped=False,
+        partial_fill_count=0,
+    )
     result = gate.check(
         spec=spec,
         trades=[trade],
@@ -332,6 +338,34 @@ def test_sizing_critical_when_position_value_outside_tolerance_and_no_caveat() -
     assert sizing.severity == "critical"
     assert sizing.expected_value == 2_000.0
     assert sizing.computed_value == 2_800.0
+
+
+def test_sizing_warning_when_outside_tolerance_with_unknown_fill_metadata() -> None:
+    """``participation_clipped=None`` / ``partial_fill_count=None`` means
+    the engine hasn't annotated the trade — distinct from "annotated
+    as no caveat". Sizing drift on an unannotated trade downgrades
+    from critical to warning so legacy / pre-annotation trades don't
+    trigger needless alignment-fix iterations. Regression for PR #613
+    review."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(sizing=FixedFractionSizing(fraction=0.02))
+    # Both fill fields default to None on _trade() — unknown metadata.
+    trade = _trade(position_value=2_800.0)
+    assert trade.participation_clipped is None
+    assert trade.partial_fill_count is None
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=_market_data_rsi_oversold(),
+        initial_capital=100_000.0,
+    )
+    sizing = next(f for f in result.findings if f.check_name == "sizing")
+    assert sizing.passed is False
+    assert sizing.severity == "warning"
+    assert "execution metadata not annotated" in sizing.details
+    # Critical aggregation: warning does NOT trip ``aligned=False``
+    # — only critical does.
+    assert result.aligned is True
 
 
 def test_sizing_info_when_outside_tolerance_but_participation_clipped() -> None:

@@ -2598,13 +2598,23 @@ class StrategyLabOrchestrator:
                     prior_attempts=prior_attempts,
                 )
                 # The LLM might echo ``aligned=True`` on this path
-                # (defensive coercion in ``_coerce_report`` already
-                # neutralises ``proposed_code``). The gate's verdict is
-                # authoritative — clamp the report to the deterministic
-                # ``aligned=False`` so the loop body keeps driving.
+                # (the fix-proposer parse keeps ``proposed_code`` via
+                # ``preserve_proposed_code=True`` so an over-claim
+                # doesn't strip a usable patch). The deterministic
+                # gate's verdict is authoritative — clamp ``aligned``
+                # to ``False`` so the loop keeps driving.
                 if report.aligned:
                     report.aligned = False
                 report.alignment_findings = list(check_result.findings)
+                # The deterministic findings are the authoritative
+                # description of what went wrong. The LLM's narrative
+                # ``issues`` may omit, under-specify, or rephrase them,
+                # which would leave downstream analysis prompts
+                # (``analysis.py``'s alignment-status section) with
+                # nothing concrete to cite. Always re-derive ``issues``
+                # from the structured findings so the deterministic-
+                # first contract holds end-to-end.
+                report.issues = findings_to_issues(check_result.findings)
                 return report, check_result.gate_results
             except AlignmentAuditError as exc:
                 last_exc = exc

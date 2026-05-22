@@ -445,6 +445,44 @@ def test_audit_misaligned_calls_propose_code_fix() -> None:
     assert report.alignment_findings[0].check_name == "entry_signal"
 
 
+def test_audit_overwrites_issues_with_deterministic_findings() -> None:
+    """The LLM may omit or under-specify ``report.issues``. The audit
+    must always re-derive issues from the deterministic findings so
+    downstream analysis prompts see the concrete misalignment facts.
+    Regression for PR #613 review (deterministic-first contract)."""
+    # LLM returns a misaligned report with NO issues — only the patch.
+    no_issues_report = TradeAlignmentReport(
+        aligned=False,
+        rationale="patch attached",
+        issues=[],
+        proposed_code=_FIXED_CODE,
+        predicted_aligned_after_fix=True,
+        changes_made="apply real fix",
+    )
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        # Misaligned with a populated critical finding.
+        check_results=[_misaligned_check_result()],
+        propose_results=[no_issues_report],
+    )
+
+    report, _gates = orch._run_alignment_audit(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        prior_attempts=[],
+        market_data=_market_data(),
+        config=_config(),
+    )
+
+    # The deterministic finding was rolled up into an AlignmentIssue
+    # so downstream analysis prompts have something concrete to cite.
+    assert len(report.issues) >= 1
+    issue_descriptions = " ".join(i.description for i in report.issues)
+    # The finding's details ("rsi above 30 at entry") survives the roll-up.
+    assert "rsi above 30 at entry" in issue_descriptions
+
+
 def test_audit_preserves_proposed_code_when_llm_overclaims_aligned() -> None:
     """LLM over-claim of ``aligned=true`` while still supplying a patch
     must not strand the loop: the orchestrator clamps ``aligned=False``
