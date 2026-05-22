@@ -68,6 +68,19 @@ _SIZING_TOL = 0.01
 
 _DEFAULT_NEAR_MISS_PCT = 0.01
 
+# The execution engine uses a ``signal-on-T / fill-on-T+1`` contract:
+# the strategy sees bar T and submits an order; the engine fills on bar
+# T+1; the resulting ``TradeRecord.entry_date`` / ``TradeRecord.exit_date``
+# record the FILL bar (T+1), not the signal bar (T). Verified against
+# ``backend/agents/investment_team/trading_service/engine/fill_simulator.py``
+# where ``Position.entry_timestamp`` and the emitted ``TradeRecord`` are
+# both stamped from the bar that fills the order. The alignment gate
+# must therefore evaluate spec predicates at the SIGNAL bar (one before
+# the recorded entry/exit date), or transient signals (cross events,
+# threshold-touches) will be marked misaligned even when execution was
+# correct.
+_FILL_DELAY_BARS = 1
+
 
 # ---------------------------------------------------------------------------
 # Adjudicator protocol
@@ -954,7 +967,30 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         # Duplicate dates are vanishingly rare in real backtest data —
         # if they exist, the first occurrence is the one the engine
         # would have fired on.
-        entry_idx = int(matching_positions[0])
+        fill_idx = int(matching_positions[0])
+
+        # Shift to the SIGNAL bar (engine fills the next bar after the
+        # signal fires; see ``_FILL_DELAY_BARS`` constant). When the
+        # fill bar is the first bar in market_data we have no signal
+        # bar to verify — fall closed (warmup-style) rather than mark
+        # the trade as critical for lack of data.
+        signal_idx = fill_idx - _FILL_DELAY_BARS
+        if signal_idx < 0:
+            finding = AlignmentFinding(
+                trade_num=trade.trade_num,
+                rule_id="entry:signal_bar_missing",
+                check_name="entry_signal",
+                passed=False,
+                severity="critical",
+                details=(
+                    f"Trade #{trade.trade_num}: fill bar {trade.entry_date!r} "
+                    "is the first bar in market_data; the signal bar (one "
+                    "before) is not present, cannot reproduce entry signal."
+                ),
+            )
+            findings.append(finding)
+            gate_results.append(self._emit_for_finding(finding))
+            return
 
         cache = indicator_caches.setdefault(trade.symbol, {})
 
@@ -969,7 +1005,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         any_satisfied = False
         for orig_idx, rule in matching:
             outcome = self._evaluate_entry_rule_predicate(
-                rule, df, entry_idx, cache, rule_idx=orig_idx
+                rule, df, signal_idx, cache, rule_idx=orig_idx
             )
             rule_evaluations.append(outcome)
             if outcome["status"] == "satisfied":
@@ -1149,20 +1185,43 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             gate_results.append(self._emit_for_finding(finding))
             return
 
-        exit_idx = int(matching_positions[0])
+        fill_idx = int(matching_positions[0])
+
+        # Shift to the SIGNAL bar — same engine contract as the entry
+        # check (``_FILL_DELAY_BARS``). ``trade.exit_date`` is the fill
+        # bar where the close completed; the strategy's signal-exit
+        # predicate fired one bar earlier.
+        signal_idx = fill_idx - _FILL_DELAY_BARS
+        if signal_idx < 0:
+            finding = AlignmentFinding(
+                trade_num=trade.trade_num,
+                rule_id="exit:signal_exit:signal_bar_missing",
+                check_name="signal_exit",
+                passed=False,
+                severity="critical",
+                details=(
+                    f"Trade #{trade.trade_num}: fill bar {trade.exit_date!r} "
+                    "is the first bar in market_data; the signal bar (one "
+                    "before) is not present, cannot reproduce signal exit."
+                ),
+            )
+            findings.append(finding)
+            gate_results.append(self._emit_for_finding(finding))
+            return
+
         cache = indicator_caches.setdefault(trade.symbol, {})
 
         # Try each signal-exit rule in spec order — the first one whose
-        # predicate fires at the exit bar wins the alignment.
+        # predicate fires at the signal bar wins the alignment.
         for rule_idx, rule in enumerate(signal_exit_rules):
             try:
-                lhs_value = _resolve_side_value(rule.when.lhs, df, exit_idx, cache)
-                rhs_value = _resolve_side_value(rule.when.rhs, df, exit_idx, cache)
+                lhs_value = _resolve_side_value(rule.when.lhs, df, signal_idx, cache)
+                rhs_value = _resolve_side_value(rule.when.rhs, df, signal_idx, cache)
                 prev_lhs: Optional[float] = None
                 prev_rhs: Optional[float] = None
-                if rule.when.op in ("cross_above", "cross_below") and exit_idx > 0:
-                    prev_lhs = _resolve_side_value(rule.when.lhs, df, exit_idx - 1, cache)
-                    prev_rhs = _resolve_side_value(rule.when.rhs, df, exit_idx - 1, cache)
+                if rule.when.op in ("cross_above", "cross_below") and signal_idx > 0:
+                    prev_lhs = _resolve_side_value(rule.when.lhs, df, signal_idx - 1, cache)
+                    prev_rhs = _resolve_side_value(rule.when.rhs, df, signal_idx - 1, cache)
             except (ValueError, TypeError):
                 continue
 
@@ -1221,7 +1280,12 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         *,
         rule_idx: int,
     ) -> Dict[str, Any]:
-        """Evaluate one entry rule's predicate at the entry bar.
+        """Evaluate one entry rule's predicate at the SIGNAL bar.
+
+        Pre: the caller has already shifted from the fill bar (where
+        ``TradeRecord.entry_date`` points) back to the signal bar
+        (``signal_idx = fill_idx - _FILL_DELAY_BARS``); the
+        ``entry_idx`` parameter here is the resolved signal bar.
 
         Returns a dict with:
           - ``status``: ``"satisfied"`` | ``"miss"`` | ``"warmup"``

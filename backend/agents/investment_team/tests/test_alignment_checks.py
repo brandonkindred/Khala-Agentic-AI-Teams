@@ -625,13 +625,19 @@ def test_entry_signal_passes_when_predicate_satisfied_at_entry_bar() -> None:
 
 
 def test_entry_signal_cross_above_satisfied_only_on_real_transition() -> None:
-    """``cross_above`` requires prev_lhs <= prev_rhs AND curr_lhs > curr_rhs.
+    """``cross_above`` requires prev_lhs <= prev_rhs AND curr_lhs > curr_rhs
+    AT THE SIGNAL BAR. With the engine's ``signal-on-T / fill-on-T+1``
+    contract, ``trade.entry_date`` is the fill bar; the gate evaluates
+    one bar earlier (the signal bar).
 
-    Two-bar fixture: prior bar close=99 (below 100 threshold), entry
-    bar close=101 (above) → true crossover, must satisfy. Regression
-    for PR #613 review — the old implementation collapsed cross_above
-    to ``lhs > rhs`` and would have marked any sustained-above bar
-    as a crossover.
+    Three-bar fixture:
+      - T-1 (pre-signal): close=99 (below 100 threshold)
+      - T   (signal): close=101 (above) → cross fires HERE
+      - T+1 (fill): close=101.5 (sustained above), ``trade.entry_date``
+
+    Regression for PR #613 reviews: cross-op requires prior-bar
+    transition (not single-bar inequality), and the gate must
+    evaluate at the signal bar (fill_idx - 1), not the fill bar.
     """
     gate = DeterministicAlignmentChecker()
     rule = EntryRule(
@@ -641,25 +647,33 @@ def test_entry_signal_cross_above_satisfied_only_on_real_transition() -> None:
     spec = _spec(entry_rules=[rule])
     md = {
         "AAPL": [
-            OHLCVBar(
+            OHLCVBar(  # T-1
                 date="2023-01-01",
                 open=98.0,
                 high=99.5,
                 low=98.0,
-                close=99.0,  # below threshold (prev)
+                close=99.0,
                 volume=1_000_000,
             ),
-            OHLCVBar(
+            OHLCVBar(  # T (signal — cross fires)
                 date="2023-01-02",
                 open=99.5,
                 high=101.5,
                 low=99.5,
-                close=101.0,  # above threshold (curr) → cross fires
+                close=101.0,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T+1 (fill — entry_date)
+                date="2023-01-03",
+                open=101.0,
+                high=102.0,
+                low=100.5,
+                close=101.5,
                 volume=1_000_000,
             ),
         ]
     }
-    trade = _trade(entry_date="2023-01-02")
+    trade = _trade(entry_date="2023-01-03")
     result = gate.check(
         spec=spec,
         trades=[trade],
@@ -671,9 +685,10 @@ def test_entry_signal_cross_above_satisfied_only_on_real_transition() -> None:
 
 
 def test_entry_signal_cross_above_misses_on_sustained_above() -> None:
-    """``cross_above`` must NOT fire when both prior and current bars
+    """``cross_above`` must NOT fire when both pre-signal and signal bars
     are already above the threshold — that's a sustained state, not a
-    crossover. Regression for PR #613 review.
+    crossover. Three-bar fixture (T-1 / T / T+1) reflects the
+    ``signal-on-T / fill-on-T+1`` engine contract.
     """
     gate = DeterministicAlignmentChecker()
     rule = EntryRule(
@@ -683,25 +698,33 @@ def test_entry_signal_cross_above_misses_on_sustained_above() -> None:
     spec = _spec(entry_rules=[rule])
     md = {
         "AAPL": [
-            OHLCVBar(
+            OHLCVBar(  # T-1: already above threshold
                 date="2023-01-01",
                 open=101.0,
                 high=102.0,
                 low=100.5,
-                close=101.5,  # already above threshold (prev)
+                close=101.5,
                 volume=1_000_000,
             ),
-            OHLCVBar(
+            OHLCVBar(  # T (signal): still above — no crossover
                 date="2023-01-02",
                 open=101.5,
                 high=103.0,
                 low=101.0,
-                close=102.5,  # still above (curr) — no crossover
+                close=102.5,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T+1 (fill): still above, entry_date
+                date="2023-01-03",
+                open=102.5,
+                high=103.5,
+                low=101.5,
+                close=103.0,
                 volume=1_000_000,
             ),
         ]
     }
-    trade = _trade(entry_date="2023-01-02")
+    trade = _trade(entry_date="2023-01-03")
     result = gate.check(
         spec=spec,
         trades=[trade],
@@ -714,7 +737,9 @@ def test_entry_signal_cross_above_misses_on_sustained_above() -> None:
 
 
 def test_entry_signal_cross_below_satisfied_only_on_real_transition() -> None:
-    """Mirror of cross_above: prior bar above, current bar below → fire."""
+    """Mirror of cross_above: T-1 above, T (signal) below → fire. The
+    ``signal-on-T / fill-on-T+1`` engine contract puts ``entry_date``
+    at T+1."""
     gate = DeterministicAlignmentChecker()
     rule = EntryRule(
         side="short",
@@ -723,25 +748,33 @@ def test_entry_signal_cross_below_satisfied_only_on_real_transition() -> None:
     spec = _spec(entry_rules=[rule])
     md = {
         "AAPL": [
-            OHLCVBar(
+            OHLCVBar(  # T-1
                 date="2023-01-01",
                 open=101.0,
                 high=102.0,
                 low=100.5,
-                close=101.0,  # above threshold (prev)
+                close=101.0,
                 volume=1_000_000,
             ),
-            OHLCVBar(
+            OHLCVBar(  # T (signal — cross fires)
                 date="2023-01-02",
                 open=100.5,
                 high=100.5,
                 low=98.0,
-                close=99.0,  # below threshold (curr) → cross fires
+                close=99.0,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T+1 (fill — entry_date)
+                date="2023-01-03",
+                open=99.0,
+                high=99.5,
+                low=97.5,
+                close=98.0,
                 volume=1_000_000,
             ),
         ]
     }
-    trade = _trade(side="short", entry_date="2023-01-02")
+    trade = _trade(side="short", entry_date="2023-01-03")
     result = gate.check(
         spec=spec,
         trades=[trade],
@@ -875,8 +908,10 @@ def test_entry_signal_near_miss_consults_adjudicator(monkeypatch) -> None:
         NearMissVerdict(legitimate=True, rationale="one-cent rounding noise"),
     ]
     gate = DeterministicAlignmentChecker()
-    # Spec: enter long when ``bar.close < 100``. The entry bar's close
-    # will be 100.5 — a 0.5% relative miss, inside the 1% tolerance.
+    # Spec: enter long when ``bar.close < 100``. The SIGNAL bar's close
+    # is 100.5 — a 0.5% relative miss, inside the 1% tolerance. With
+    # the engine's signal-on-T / fill-on-T+1 contract, ``entry_date``
+    # is the fill bar (T+1).
     rule = EntryRule(
         side="long",
         when=Predicate(lhs="bar.close", op="<", rhs=100.0),
@@ -884,17 +919,25 @@ def test_entry_signal_near_miss_consults_adjudicator(monkeypatch) -> None:
     spec = _spec(entry_rules=[rule])
     md = {
         "AAPL": [
-            OHLCVBar(
+            OHLCVBar(  # T (signal — close=100.5 is the near-miss)
                 date="2023-01-01",
                 open=99.0,
                 high=101.0,
                 low=98.0,
-                close=100.5,  # 0.5% above the 100 threshold — tight miss
+                close=100.5,
                 volume=1_000_000,
-            )
+            ),
+            OHLCVBar(  # T+1 (fill — entry_date)
+                date="2023-01-02",
+                open=100.5,
+                high=101.0,
+                low=99.5,
+                close=100.0,
+                volume=1_000_000,
+            ),
         ]
     }
-    trade = _trade(entry_date="2023-01-01")
+    trade = _trade(entry_date="2023-01-02")
     result = gate.check(
         spec=spec,
         trades=[trade],
@@ -929,17 +972,25 @@ def test_entry_signal_near_miss_skipped_when_pct_zero(monkeypatch) -> None:
     spec = _spec(entry_rules=[rule])
     md = {
         "AAPL": [
-            OHLCVBar(
+            OHLCVBar(  # T (signal — tight miss; would invoke LLM at >0 tol)
                 date="2023-01-01",
                 open=99.0,
                 high=101.0,
                 low=98.0,
-                close=100.5,  # tight miss — would invoke LLM with tolerance > 0
+                close=100.5,
                 volume=1_000_000,
-            )
+            ),
+            OHLCVBar(  # T+1 (fill — entry_date)
+                date="2023-01-02",
+                open=100.5,
+                high=101.0,
+                low=99.5,
+                close=100.0,
+                volume=1_000_000,
+            ),
         ]
     }
-    trade = _trade(entry_date="2023-01-01")
+    trade = _trade(entry_date="2023-01-02")
     result = gate.check(
         spec=spec,
         trades=[trade],
@@ -1047,6 +1098,138 @@ def test_signal_exit_info_skip_when_engine_attributed_close() -> None:
     assert signal_exit.passed is True
     assert signal_exit.severity == "info"
     assert "engine_exit:stop_loss" in signal_exit.details
+
+
+def test_entry_signal_evaluated_at_signal_bar_not_fill_bar() -> None:
+    """Regression for PR #613 review: the engine uses
+    ``signal-on-T / fill-on-T+1``, so ``trade.entry_date`` is the
+    fill bar. The gate must evaluate the entry predicate at the
+    signal bar (one earlier), or transient signals get marked
+    misaligned even when execution was correct.
+
+    Three-bar fixture: signal predicate ``bar.close < 30`` fires at T
+    (signal bar). By T+1 (fill bar) the close has popped back above
+    30 — a sustained-non-signal state. If the gate evaluated at the
+    fill bar, this would be flagged critical even though the entry
+    was a legitimate, executed-correctly signal fire.
+    """
+    gate = DeterministicAlignmentChecker()
+    rule = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.close", op="<", rhs=30.0),
+    )
+    spec = _spec(entry_rules=[rule])
+    md = {
+        "AAPL": [
+            OHLCVBar(
+                date="2023-01-01",
+                open=40.0,
+                high=42.0,
+                low=39.0,
+                close=41.0,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T (signal — predicate fires here)
+                date="2023-01-02",
+                open=30.5,
+                high=31.0,
+                low=28.0,
+                close=29.0,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T+1 (fill — entry_date; close popped back above 30)
+                date="2023-01-03",
+                open=29.5,
+                high=33.0,
+                low=29.5,
+                close=32.0,
+                volume=1_000_000,
+            ),
+        ]
+    }
+    trade = _trade(entry_date="2023-01-03")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    entry = next(f for f in result.findings if f.check_name == "entry_signal")
+    # Evaluating at the SIGNAL bar (close=29.0 < 30) → satisfied.
+    # If the gate were evaluating at the fill bar (close=32.0), this
+    # would be flagged critical.
+    assert entry.passed is True
+    assert entry.severity == "info"
+
+
+def test_signal_exit_evaluated_at_signal_bar_not_fill_bar() -> None:
+    """Mirror of the entry test for the signal-exit check #8. The
+    exit predicate fires at the signal bar; ``trade.exit_date`` is
+    the fill bar one later. The gate must evaluate at the signal bar.
+    """
+    gate = DeterministicAlignmentChecker()
+    exit_rule = SignalExitRule(
+        when=Predicate(lhs="bar.close", op=">", rhs=70.0),
+    )
+    # Entry rule satisfied at the entry bar (close=20 < 30 well below).
+    entry_rule = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.close", op="<", rhs=30.0),
+    )
+    spec = _spec(entry_rules=[entry_rule], exit_rules=[exit_rule])
+    md = {
+        "AAPL": [
+            OHLCVBar(
+                date="2023-01-01",
+                open=25.0,
+                high=26.0,
+                low=18.0,
+                close=20.0,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T (entry-fill bar) — entry_date
+                date="2023-01-02",
+                open=20.0,
+                high=22.0,
+                low=19.0,
+                close=21.0,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T (exit-signal bar) — predicate fires here
+                date="2023-01-03",
+                open=68.0,
+                high=72.0,
+                low=67.0,
+                close=71.0,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T+1 (exit-fill bar) — exit_date; close reverted below 70
+                date="2023-01-04",
+                open=71.0,
+                high=72.0,
+                low=65.0,
+                close=68.0,
+                volume=1_000_000,
+            ),
+        ]
+    }
+    trade = _trade(
+        entry_date="2023-01-02",
+        exit_date="2023-01-04",
+        exit_reason=None,  # strategy-emitted close
+    )
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    signal_exit = next(f for f in result.findings if f.check_name == "signal_exit")
+    # Evaluating at the SIGNAL bar (close=71.0 > 70) → satisfied.
+    # If the gate were evaluating at the fill bar (close=68.0), this
+    # would be flagged critical.
+    assert signal_exit.passed is True
+    assert signal_exit.severity == "info"
 
 
 def test_signal_exit_satisfied_when_predicate_fires_at_exit_bar() -> None:
