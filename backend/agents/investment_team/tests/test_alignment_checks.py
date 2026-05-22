@@ -527,6 +527,167 @@ def test_entry_signal_passes_when_predicate_satisfied_at_entry_bar() -> None:
     assert entry.passed is True
 
 
+def test_entry_signal_cross_above_satisfied_only_on_real_transition() -> None:
+    """``cross_above`` requires prev_lhs <= prev_rhs AND curr_lhs > curr_rhs.
+
+    Two-bar fixture: prior bar close=99 (below 100 threshold), entry
+    bar close=101 (above) → true crossover, must satisfy. Regression
+    for PR #613 review — the old implementation collapsed cross_above
+    to ``lhs > rhs`` and would have marked any sustained-above bar
+    as a crossover.
+    """
+    gate = DeterministicAlignmentChecker()
+    rule = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.close", op="cross_above", rhs=100.0),
+    )
+    spec = _spec(entry_rules=[rule])
+    md = {
+        "AAPL": [
+            OHLCVBar(
+                date="2023-01-01",
+                open=98.0,
+                high=99.5,
+                low=98.0,
+                close=99.0,  # below threshold (prev)
+                volume=1_000_000,
+            ),
+            OHLCVBar(
+                date="2023-01-02",
+                open=99.5,
+                high=101.5,
+                low=99.5,
+                close=101.0,  # above threshold (curr) → cross fires
+                volume=1_000_000,
+            ),
+        ]
+    }
+    trade = _trade(entry_date="2023-01-02")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    entry = next(f for f in result.findings if f.check_name == "entry_signal")
+    assert entry.passed is True
+
+
+def test_entry_signal_cross_above_misses_on_sustained_above() -> None:
+    """``cross_above`` must NOT fire when both prior and current bars
+    are already above the threshold — that's a sustained state, not a
+    crossover. Regression for PR #613 review.
+    """
+    gate = DeterministicAlignmentChecker()
+    rule = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.close", op="cross_above", rhs=100.0),
+    )
+    spec = _spec(entry_rules=[rule])
+    md = {
+        "AAPL": [
+            OHLCVBar(
+                date="2023-01-01",
+                open=101.0,
+                high=102.0,
+                low=100.5,
+                close=101.5,  # already above threshold (prev)
+                volume=1_000_000,
+            ),
+            OHLCVBar(
+                date="2023-01-02",
+                open=101.5,
+                high=103.0,
+                low=101.0,
+                close=102.5,  # still above (curr) — no crossover
+                volume=1_000_000,
+            ),
+        ]
+    }
+    trade = _trade(entry_date="2023-01-02")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    entry = next(f for f in result.findings if f.check_name == "entry_signal")
+    assert entry.passed is False
+    assert entry.severity == "critical"
+
+
+def test_entry_signal_cross_below_satisfied_only_on_real_transition() -> None:
+    """Mirror of cross_above: prior bar above, current bar below → fire."""
+    gate = DeterministicAlignmentChecker()
+    rule = EntryRule(
+        side="short",
+        when=Predicate(lhs="bar.close", op="cross_below", rhs=100.0),
+    )
+    spec = _spec(entry_rules=[rule])
+    md = {
+        "AAPL": [
+            OHLCVBar(
+                date="2023-01-01",
+                open=101.0,
+                high=102.0,
+                low=100.5,
+                close=101.0,  # above threshold (prev)
+                volume=1_000_000,
+            ),
+            OHLCVBar(
+                date="2023-01-02",
+                open=100.5,
+                high=100.5,
+                low=98.0,
+                close=99.0,  # below threshold (curr) → cross fires
+                volume=1_000_000,
+            ),
+        ]
+    }
+    trade = _trade(side="short", entry_date="2023-01-02")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    entry = next(f for f in result.findings if f.check_name == "entry_signal")
+    assert entry.passed is True
+
+
+def test_entry_signal_cross_falls_closed_when_entry_is_first_bar() -> None:
+    """Cross at the very first bar in market_data has no previous-bar
+    context — fall closed (warmup-style) rather than fabricating a
+    satisfied outcome from the current bar alone."""
+    gate = DeterministicAlignmentChecker()
+    rule = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.close", op="cross_above", rhs=100.0),
+    )
+    spec = _spec(entry_rules=[rule])
+    md = {
+        "AAPL": [
+            OHLCVBar(
+                date="2023-01-02",
+                open=99.0,
+                high=101.0,
+                low=99.0,
+                close=101.0,  # above threshold, but no prior bar
+                volume=1_000_000,
+            ),
+        ]
+    }
+    trade = _trade(entry_date="2023-01-02")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    entry = next(f for f in result.findings if f.check_name == "entry_signal")
+    assert entry.passed is False
+
+
 def test_entry_signal_critical_when_predicate_far_off() -> None:
     """RSI well above 30 at entry → critical finding, LLM never invoked."""
     record, adjudicator = _counting_adjudicator()

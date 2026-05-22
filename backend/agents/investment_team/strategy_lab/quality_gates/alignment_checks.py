@@ -274,14 +274,26 @@ def _resolve_side_value(
     raise TypeError(f"unsupported predicate side type: {type(side).__name__}")
 
 
-def _compare(op: str, lhs: float, rhs: float) -> bool:
+def _compare(
+    op: str,
+    lhs: float,
+    rhs: float,
+    *,
+    prev_lhs: Optional[float] = None,
+    prev_rhs: Optional[float] = None,
+) -> bool:
     """Evaluate a comparison op on two scalars.
 
-    ``cross_above`` / ``cross_below`` collapse to ``>`` / ``<`` at a
-    single-bar resolution; the engine semantics treat them as state
-    transitions but the alignment gate only observes the entry-bar
-    snapshot, so a "crossed above" check reduces to "lhs > rhs at the
-    entry bar". This matches what the engine actually fires on.
+    ``cross_above`` / ``cross_below`` are state transitions: the
+    previous bar must have been on or below (resp. on or above) the
+    threshold AND the current bar must be strictly above (resp.
+    below) it. Collapsing them to ``>`` / ``<`` at the entry bar
+    alone would mark any sustained-above strategy as having "crossed
+    above" on every bar, letting non-cross strategies wave through
+    the gate. When the previous-bar values are not available (e.g.
+    entry is the first bar in market_data, or warmup left an
+    indicator NaN), the cross is treated as not satisfied —
+    deterministic-fail-closed.
     """
     if op == "<":
         return lhs < rhs
@@ -294,9 +306,13 @@ def _compare(op: str, lhs: float, rhs: float) -> bool:
     if op == "==":
         return math.isclose(lhs, rhs, rel_tol=1e-9, abs_tol=1e-12)
     if op == "cross_above":
-        return lhs > rhs
+        if prev_lhs is None or prev_rhs is None:
+            return False
+        return prev_lhs <= prev_rhs and lhs > rhs
     if op == "cross_below":
-        return lhs < rhs
+        if prev_lhs is None or prev_rhs is None:
+            return False
+        return prev_lhs >= prev_rhs and lhs < rhs
     raise ValueError(f"unknown comparison op: {op!r}")
 
 
@@ -1002,9 +1018,20 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         """
         rule_id = f"entry[{rule_idx}]"
         predicate_repr = _format_predicate(rule.when)
+        op = rule.when.op
         try:
             lhs_value = _resolve_side_value(rule.when.lhs, df, entry_idx, cache)
             rhs_value = _resolve_side_value(rule.when.rhs, df, entry_idx, cache)
+            # Cross ops need previous-bar state to distinguish a real
+            # state transition from a sustained inequality. Resolving
+            # the previous bar adds one extra series lookup per side;
+            # the cache hits on the indicator path so the cost is the
+            # ``iloc[entry_idx - 1]`` access, not a full recompute.
+            prev_lhs: Optional[float] = None
+            prev_rhs: Optional[float] = None
+            if op in ("cross_above", "cross_below") and entry_idx > 0:
+                prev_lhs = _resolve_side_value(rule.when.lhs, df, entry_idx - 1, cache)
+                prev_rhs = _resolve_side_value(rule.when.rhs, df, entry_idx - 1, cache)
         except (ValueError, TypeError) as exc:
             return {
                 "status": "warmup",
@@ -1026,7 +1053,31 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 "rel_miss": None,
             }
 
-        satisfied = _compare(rule.when.op, lhs_value, rhs_value)
+        # For cross ops we additionally need the previous-bar values
+        # to evaluate. ``entry_idx == 0`` or a NaN warmup on the prior
+        # bar produces ``None`` previous values; ``_compare`` then
+        # treats the cross as not satisfied, which downstream becomes
+        # a normal "miss" finding (the gate falls closed on
+        # indeterminate crosses rather than fabricating a satisfied
+        # outcome).
+        is_cross = op in ("cross_above", "cross_below")
+        if is_cross and (prev_lhs is None or prev_rhs is None) and entry_idx == 0:
+            return {
+                "status": "warmup",
+                "rule_id": rule_id,
+                "predicate_repr": predicate_repr,
+                "lhs": lhs_value,
+                "rhs": rhs_value,
+                "rel_miss": None,
+            }
+
+        satisfied = _compare(
+            op,
+            lhs_value,
+            rhs_value,
+            prev_lhs=prev_lhs,
+            prev_rhs=prev_rhs,
+        )
         if satisfied:
             return {
                 "status": "satisfied",
