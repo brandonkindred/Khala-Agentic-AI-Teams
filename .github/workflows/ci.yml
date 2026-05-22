@@ -264,6 +264,16 @@ jobs:
               "software_engineering": {
                   "name": "Software Engineering Team",
                   "tests": "software_engineering_team/tests/",
+                  "source": "software_engineering_team",
+                  # SE-specific coverage config: the team owns a large surface area
+                  # of integration-only modules (live LLM / git / npm / Temporal)
+                  # that are exercised end-to-end rather than by unit tests. The
+                  # per-file omits live in software_engineering_team/pyproject.toml
+                  # under [tool.coverage.run] omit; pointing --cov-config at that
+                  # file here makes them take effect for the CI invocation, which
+                  # runs from backend/agents/ where coverage's default config
+                  # search does not pick up software_engineering_team/pyproject.toml.
+                  "cov_config": "software_engineering_team/pyproject.toml",
                   "extra_requirements": "software_engineering_team/requirements.txt",
                   "editable_install": "software_engineering_team",
                   "needs_node": True,
@@ -271,33 +281,40 @@ jobs:
               "blogging": {
                   "name": "Blogging",
                   "tests": "blogging/tests/",
+                  "source": "blogging",
                   "extra_requirements": "blogging/requirements.txt",
               },
               "market_research": {
                   "name": "Market Research",
                   "tests": "market_research_team/tests/",
+                  "source": "market_research_team",
               },
               "soc2": {
                   "name": "SOC2 Compliance",
                   "tests": "soc2_compliance_team/tests/",
+                  "source": "soc2_compliance_team",
               },
               "investment": {
                   "name": "Investment Strategy Lab",
                   "tests": "investment_team/tests/",
+                  "source": "investment_team",
                   "extra_requirements": "investment_team/requirements-test.txt",
               },
               "social_marketing": {
                   "name": "Social Marketing",
                   "tests": "social_media_marketing_team/tests/",
+                  "source": "social_media_marketing_team",
               },
               "agent_provisioning": {
                   "name": "Agent Provisioning",
                   "tests": "agent_provisioning_team/tests/",
+                  "source": "agent_provisioning_team",
                   "extra_requirements": "agent_provisioning_team/requirements.txt",
               },
               "sales": {
                   "name": "Sales Team",
                   "tests": "sales_team/tests/",
+                  "source": "sales_team",
               },
           }
 
@@ -444,7 +461,12 @@ jobs:
         env:
           PYTHONPATH: ..
         run: python -c "from shared_postgres import register_all_team_schemas; r = register_all_team_schemas(); assert all(r.values()), r"
-      - run: pytest shared_postgres/tests/ -v --tb=short -n auto
+      # Coverage gate is enforced at 90% line coverage; see CLAUDE.md.
+      - run: >-
+          pytest shared_postgres/tests/ -v --tb=short -n auto
+          --cov=shared_postgres
+          --cov-report=term-missing
+          --cov-fail-under=90
 
   # All non-Postgres backend test suites run as a single matrix job. Matrix
   # entries are produced dynamically by the `changes` job — only teams whose
@@ -500,7 +522,21 @@ jobs:
           fi
       # Unit tests only — anything that needs Postgres or the job service is
       # marked `@pytest.mark.integration` and runs in `test-integration`.
-      - run: pytest ${{ matrix.tests }} -v --tb=short -n auto -m "not integration"
+      # Coverage gate is enforced per team at 90% line coverage; see CLAUDE.md.
+      # `matrix.cov_config` is optional: when set (e.g. SE team), pass
+      # `--cov-config=<path>` so coverage picks up the team's per-file omit
+      # list. Empty matrix fields expand to empty strings; the conditional
+      # keeps the flag out of the command when no config is provided.
+      - run: |
+          COV_CONFIG_ARG=""
+          if [ -n "${{ matrix.cov_config }}" ]; then
+            COV_CONFIG_ARG="--cov-config=${{ matrix.cov_config }}"
+          fi
+          pytest ${{ matrix.tests }} -v --tb=short -n auto -m "not integration" \
+            --cov=${{ matrix.source }} \
+            $COV_CONFIG_ARG \
+            --cov-report=term-missing \
+            --cov-fail-under=90
 
   # Integration suite: real Postgres + real job service. Currently a sentinel
   # job that boots the infra and runs the marker; per-team integration suites

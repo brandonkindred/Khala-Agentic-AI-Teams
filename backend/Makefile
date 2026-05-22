@@ -52,7 +52,7 @@ test:
 	$(VENV_PYTHON) -m pytest -v -n auto
 
 coverage:
-	$(VENV_PYTHON) -m pytest -n auto --cov=agents --cov=unified_api --cov-report=term-missing --cov-fail-under=85
+	$(VENV_PYTHON) -m pytest -n auto --cov=agents --cov=unified_api --cov-report=term-missing --cov-fail-under=90
 
 coverage-html:
 	$(VENV_PYTHON) -m pytest -n auto --cov=agents --cov=unified_api --cov-report=html --cov-report=term-missing
