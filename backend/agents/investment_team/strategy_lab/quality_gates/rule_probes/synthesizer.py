@@ -443,21 +443,62 @@ def _build_exit_probe(
             synthesizable=False,
             unprobeable_reason="no_entry_rules_to_open_position",
         )
-    # Reuse entry[0]'s recipe to open the position, then append an exit
-    # tail. The opening trigger bar becomes our entry reference for the
-    # exit recipe.
-    entry_bars, entry_trigger_idx, entry_reason = _synthesise_for_predicate(entry_rules[0].when)
-    if entry_bars is None:
-        return ProbeRun(
-            rule_id=rule_id,
-            rule_kind=kind or "signal_exit",
-            symbol=symbol,
-            synthesizable=False,
-            unprobeable_reason=f"entry_prefix_not_synthesizable: {entry_reason}",
+    # Walk every entry rule and pick the first whose entry-prefix synthesises
+    # *and* whose side is compatible with the exit rule under test. Hard-coding
+    # ``entry_rules[0]`` would downgrade exit probes to unprobeable whenever
+    # the first rule's predicate isn't synthesisable, or use the wrong side
+    # (e.g. a long ``entry_rules[0]`` paired with a ``StopLossRule(basis=
+    # "trailing_low")`` that the engine treats as a no-op for longs) — both
+    # cases would hide real exit-rule regressions.
+    last_failure = "no_compatible_entry_rule"
+    for entry_rule in entry_rules:
+        entry_bars, entry_trigger_idx, entry_reason = _synthesise_for_predicate(
+            entry_rule.when
         )
-    entry_close = entry_bars[entry_trigger_idx].close
-    entry_side = entry_rules[0].side
+        if entry_bars is None:
+            last_failure = f"entry_prefix_not_synthesizable: {entry_reason}"
+            continue
+        entry_close = entry_bars[entry_trigger_idx].close
+        entry_side = entry_rule.side
+        probe = _build_exit_probe_with_prefix(
+            rule=rule,
+            rule_id=rule_id,
+            kind=kind,
+            symbol=symbol,
+            entry_bars=entry_bars,
+            entry_close=entry_close,
+            entry_side=entry_side,
+        )
+        if probe.synthesizable:
+            return probe
+        last_failure = probe.unprobeable_reason or last_failure
+    return ProbeRun(
+        rule_id=rule_id,
+        rule_kind=kind or "signal_exit",
+        symbol=symbol,
+        synthesizable=False,
+        unprobeable_reason=last_failure,
+    )
 
+
+def _build_exit_probe_with_prefix(
+    *,
+    rule: Any,
+    rule_id: str,
+    kind: Optional[str],
+    symbol: str,
+    entry_bars: List[OHLCVBar],
+    entry_close: float,
+    entry_side: str,
+) -> ProbeRun:
+    """Build the exit probe given a successfully-synthesised entry prefix.
+
+    Returns ``synthesizable=False`` with a descriptive reason when the
+    chosen ``(rule, entry_side)`` pair has no valid tail (e.g. a
+    ``trailing_low`` stop on a long entry — the engine's no-op case).
+    Callers iterate across entry rules and pick the first probe that
+    comes back ``synthesizable=True``.
+    """
     if isinstance(rule, StopLossRule):
         tail, tail_trigger_offset = _synthesise_stop_loss_tail(rule, entry_close, entry_side)
         if tail is None:
@@ -466,7 +507,7 @@ def _build_exit_probe(
                 rule_kind="stop_loss",
                 symbol=symbol,
                 synthesizable=False,
-                unprobeable_reason="stop_loss_tail_not_synthesizable",
+                unprobeable_reason=f"stop_loss_tail_not_synthesizable_for_side={entry_side}",
             )
         full_bars = _stitch(entry_bars, tail)
         return ProbeRun(
@@ -486,7 +527,7 @@ def _build_exit_probe(
                 rule_kind="take_profit",
                 symbol=symbol,
                 synthesizable=False,
-                unprobeable_reason="take_profit_tail_not_synthesizable",
+                unprobeable_reason=f"take_profit_tail_not_synthesizable_for_side={entry_side}",
             )
         full_bars = _stitch(entry_bars, tail)
         return ProbeRun(
@@ -1498,5 +1539,10 @@ def _compare(lhs: float, op: str, rhs: float) -> bool:
     if op == ">=":
         return lhs >= rhs
     if op == "==":
-        return math.isclose(lhs, rhs, rel_tol=1e-6, abs_tol=1e-6)
+        # Exact equality mirrors the compiler's raw ``lhs == rhs`` emission
+        # (see ``strategy_lab/synthesis/compiler.py``). Using ``math.isclose``
+        # here would make the probe accept near-equal floats that the
+        # compiled strategy wouldn't — a recipe-vs-runtime mismatch that
+        # surfaces as a false critical for any ``op == "=="`` predicate.
+        return lhs == rhs
     return False

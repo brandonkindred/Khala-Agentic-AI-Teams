@@ -1091,6 +1091,101 @@ def test_exit_verifiers_return_false_on_out_of_range_index():
     assert sl([OHLCVBar(date="d", open=1, high=1, low=1, close=1, volume=1)], 5) is False
 
 
+def test_compare_eq_uses_exact_equality_not_isclose():
+    """``op == "=="`` mirrors the compiler's raw ``lhs == rhs``. Near-equal
+    floats must NOT pass; using ``math.isclose`` would let the probe accept
+    values the compiled strategy doesn't, producing false criticals."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _compare,
+    )
+
+    assert _compare(5.0, "==", 5.0) is True
+    # Near-equal but not exactly equal — must be False to match runtime.
+    assert _compare(0.1 + 0.2, "==", 0.3) is False
+    assert _compare(1.0 - 1e-9, "==", 1.0) is False
+
+
+def test_exit_probe_skips_unsynthesizable_entry_rule_and_uses_next():
+    """When ``entry_rules[0]`` can't be synthesised but ``entry_rules[1]``
+    can, the exit probe must use the second rule rather than reporting
+    ``entry_prefix_not_synthesizable`` and hiding the real exit-rule
+    behaviour."""
+    # First rule: rsi < -5 (unreachable; RSI bounded in [0,100]).
+    bad_entry = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(name="rsi", params={"period": 14}),
+            op="<",
+            rhs=-5.0,
+        ),
+    )
+    # Second rule: synthesisable price-ref predicate.
+    good_entry = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.close", op=">", rhs=50.0),
+    )
+    spec = _spec_with(
+        entry_rules=[bad_entry, good_entry],
+        exit_rules=[TakeProfitRule(pct=0.05)],
+    )
+    runs = generate_rule_probe_runs(spec)
+    # 2 entry probes + 1 exit probe.
+    assert len(runs) == 3
+    exit_probe = runs[-1]
+    assert exit_probe.synthesizable is True
+    assert exit_probe.rule_id == "exit[0]:take_profit"
+
+
+def test_exit_probe_picks_entry_rule_whose_side_is_compatible_with_exit():
+    """Multi-entry spec: rule[0] is long but ``StopLossRule(basis=
+    "trailing_low")`` is a no-op for longs. The exit probe must pick
+    ``entry_rules[1]`` (short) rather than mark itself unprobeable."""
+    long_entry = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.close", op=">", rhs=50.0),
+    )
+    short_entry = EntryRule(
+        side="short",
+        when=Predicate(lhs="bar.close", op="<", rhs=200.0),
+    )
+    spec = _spec_with(
+        entry_rules=[long_entry, short_entry],
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_low")],
+    )
+    runs = generate_rule_probe_runs(spec)
+    exit_probe = next(r for r in runs if r.rule_id.startswith("exit["))
+    assert exit_probe.synthesizable is True
+
+
+def test_exit_probe_reports_last_failure_when_no_entry_rule_works():
+    """When every entry rule is unsynthesisable, the exit probe surfaces
+    the most recent failure reason rather than a generic message."""
+    bad1 = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(name="rsi", params={"period": 14}),
+            op="<",
+            rhs=-5.0,
+        ),
+    )
+    bad2 = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs=IndicatorRef(name="rsi", params={"period": 14}),
+            op=">",
+            rhs=200.0,  # > 100 also unreachable
+        ),
+    )
+    spec = _spec_with(
+        entry_rules=[bad1, bad2],
+        exit_rules=[TakeProfitRule(pct=0.05)],
+    )
+    runs = generate_rule_probe_runs(spec)
+    exit_probe = next(r for r in runs if r.rule_id.startswith("exit["))
+    assert exit_probe.synthesizable is False
+    assert "entry_prefix_not_synthesizable" in (exit_probe.unprobeable_reason or "")
+
+
 def test_priceref_high_lt_low_is_unprobeable():
     """``bar.high < bar.low`` is structurally impossible under OHLC
     invariants. The recipe builds a bar with adjusted lhs, but
