@@ -1192,14 +1192,29 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         """Translate one :class:`AlignmentFinding` into a
         :class:`QualityGateResult` row for the gate-result stream.
 
-        Both objects carry the same logical state — the duplication
-        exists because ``alignment_findings`` rides on
-        :class:`BacktestRecord` and ``quality_gate_results`` rides on
-        :class:`StrategyLabRecord` (one is per-trade detail, the other
-        per-gate roll-up).
+        The per-finding row uses ``gate_name="alignment_finding"`` —
+        deliberately distinct from the gate's ``GATE="trade_alignment"``
+        cycle-level aggregate. A misaligned cycle with N trades × 7
+        checks can emit dozens of per-finding rows, and
+        :class:`ConvergenceTracker.record` increments
+        ``_failure_modes[gate_name]`` per failed row. Sharing the
+        ``trade_alignment`` name would inflate the cycle-level failure
+        count by the per-finding fan-out and prematurely trip
+        ``get_failure_directives(min_occurrences=3)`` after a single
+        bad cycle. The orchestrator builds a separate aggregate
+        ``trade_alignment`` row per cycle that the tracker keys on
+        instead.
         """
+        # ``_using_phase`` is active because callers wrap the public
+        # ``check()`` body in ``with self._using_phase("verification")``;
+        # mirror its assertion here for the same fail-fast contract.
+        assert self._phase is not None, (
+            f"{type(self).__name__}._emit_for_finding must be inside `with self._using_phase(...)`"
+        )
         details = f"[{finding.check_name}] {finding.details}"
-        return self._emit(
+        return QualityGateResult(
+            gate_name="alignment_finding",
+            phase=self._phase,
             passed=finding.passed,
             severity=finding.severity,
             details=details,

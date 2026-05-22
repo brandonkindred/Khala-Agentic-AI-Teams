@@ -1021,7 +1021,13 @@ def test_check_returns_aligned_for_empty_trade_ledger() -> None:
 def test_check_emits_quality_gate_result_per_finding() -> None:
     """Every :class:`AlignmentFinding` has a paired
     :class:`QualityGateResult` row for the dashboard stream, stamped
-    with phase=verification and gate_name=trade_alignment."""
+    with phase=verification and gate_name=alignment_finding.
+
+    The distinct gate_name (vs. the cycle-level ``trade_alignment``
+    aggregate the orchestrator emits separately) prevents the
+    per-trade × per-check fan-out from inflating
+    ``ConvergenceTracker``'s cycle-level failure counts.
+    """
     gate = DeterministicAlignmentChecker()
     spec = _spec(target_symbols=["AAPL"])
     trade = _trade(symbol="AAPL", entry_date="2023-02-01")
@@ -1033,8 +1039,36 @@ def test_check_emits_quality_gate_result_per_finding() -> None:
     )
     assert len(result.findings) == len(result.gate_results) > 0
     for g in result.gate_results:
-        assert g.gate_name == "trade_alignment"
+        assert g.gate_name == "alignment_finding"
         assert g.phase == "verification"
+
+
+def test_check_per_finding_gate_name_does_not_collide_with_cycle_aggregate() -> None:
+    """Regression for PR #613 review: per-finding rows must NOT use
+    ``gate_name="trade_alignment"``.
+
+    ``ConvergenceTracker.record`` increments ``_failure_modes[gate_name]``
+    per failed row. The orchestrator separately appends a single
+    cycle-level ``trade_alignment`` aggregate row per alignment round;
+    sharing the name on per-finding rows would multiply the cycle-level
+    failure count by the per-trade × per-check fan-out and prematurely
+    trip ``get_failure_directives(min_occurrences=3)``.
+    """
+    gate = DeterministicAlignmentChecker()
+    # Multiple misaligned trades to ensure many failed per-finding rows.
+    spec = _spec(target_symbols=["SPY"])  # all trades on AAPL fail universe
+    trades = [_trade(trade_num=i + 1, symbol="AAPL", entry_date="2023-02-01") for i in range(3)]
+    result = gate.check(
+        spec=spec,
+        trades=trades,
+        market_data=_market_data_rsi_oversold(),
+        initial_capital=100_000.0,
+    )
+    # No row from the gate may claim the cycle-level ``trade_alignment``
+    # name — the orchestrator owns that label.
+    gate_names = {g.gate_name for g in result.gate_results}
+    assert "trade_alignment" not in gate_names
+    assert gate_names == {"alignment_finding"}
 
 
 def test_check_aligned_true_when_every_critical_passes() -> None:

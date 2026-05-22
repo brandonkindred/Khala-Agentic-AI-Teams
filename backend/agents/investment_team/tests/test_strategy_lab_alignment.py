@@ -445,6 +445,83 @@ def test_audit_misaligned_calls_propose_code_fix() -> None:
     assert report.alignment_findings[0].check_name == "entry_signal"
 
 
+def test_audit_per_finding_rows_dont_inflate_cycle_failure_count() -> None:
+    """Regression for PR #613 review: the gate's per-finding rows must
+    NOT use ``gate_name="trade_alignment"``. ``ConvergenceTracker.record``
+    increments ``_failure_modes[gate_name]`` per failed row; sharing the
+    cycle-level name on the per-trade × per-check fan-out would
+    prematurely trip ``get_failure_directives(min_occurrences=3)`` after
+    one bad cycle. The orchestrator emits exactly one cycle-level
+    ``trade_alignment`` aggregate, plus N per-finding rows tagged
+    ``alignment_finding`` (separate convergence bucket).
+    """
+    from investment_team.strategy_lab.alignment_findings import AlignmentFinding
+    from investment_team.strategy_lab.quality_gates.alignment_checks import (
+        AlignmentCheckResult,
+    )
+
+    # Synthesize a misaligned check_result with 10 critical findings
+    # (e.g. universe miss on each of 10 trades). Build matching per-
+    # finding QualityGateResult rows tagged ``alignment_finding``,
+    # not ``trade_alignment``.
+    findings = [
+        AlignmentFinding(
+            trade_num=i + 1,
+            rule_id="universe",
+            check_name="universe",
+            passed=False,
+            severity="critical",
+            details=f"trade #{i + 1} symbol off-spec",
+        )
+        for i in range(10)
+    ]
+    gate_results_per_finding = [
+        QualityGateResult(
+            gate_name="alignment_finding",
+            phase="verification",
+            passed=False,
+            severity="critical",
+            details=f.details,
+            rule_id=f.rule_id,
+        )
+        for f in findings
+    ]
+    canned = AlignmentCheckResult(
+        aligned=False,
+        findings=findings,
+        gate_results=gate_results_per_finding,
+        rationale="all 10 trades universe-mismatched",
+    )
+
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[canned],
+        propose_results=[_proposed_fix("ignored")],
+    )
+
+    all_gate_results: List[QualityGateResult] = []
+    events, emit = _collect_emit()
+    orch._run_alignment_round(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        align_round=0,
+        all_gate_results=all_gate_results,
+        alignment_attempts=[],
+        alignment_reports=[],
+        emit=emit,
+    )
+
+    # Cycle-level ``trade_alignment`` aggregate appears exactly once;
+    # per-finding rows live under ``alignment_finding``.
+    trade_alignment_rows = [g for g in all_gate_results if g.gate_name == "trade_alignment"]
+    finding_rows = [g for g in all_gate_results if g.gate_name == "alignment_finding"]
+    assert len(trade_alignment_rows) == 1
+    assert len(finding_rows) == 10
+
+
 def test_audit_overwrites_issues_with_deterministic_findings() -> None:
     """The LLM may omit or under-specify ``report.issues``. The audit
     must always re-derive issues from the deterministic findings so
