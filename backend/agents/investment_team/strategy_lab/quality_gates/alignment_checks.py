@@ -665,9 +665,39 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         ]
         if not stop_rules:
             return
-        # Tightest stop wins — if the spec has multiple, the floor is
-        # the smallest ``pct``.
-        tightest = min(r.pct for r in stop_rules)
+
+        # Trailing-high / trailing-low stops are path-dependent: the
+        # effective floor moves with the running peak/trough between
+        # entry and exit, so it cannot be validated from
+        # ``trade.return_pct`` alone. Emit an info-severity skip for
+        # each trailing rule so the audit ledger is self-describing,
+        # and only run the entry-price floor check against rules whose
+        # ``basis == "entry_price"``.
+        entry_basis_rules = [r for r in stop_rules if r.basis == "entry_price"]
+        trailing_rules = [r for r in stop_rules if r.basis != "entry_price"]
+        for tr in trailing_rules:
+            findings.append(
+                AlignmentFinding(
+                    trade_num=trade.trade_num,
+                    rule_id=f"exit:stop_loss:{tr.basis}",
+                    check_name="stop_loss",
+                    passed=True,
+                    severity="info",
+                    details=(
+                        f"Trade #{trade.trade_num} stop_loss basis={tr.basis!r} is "
+                        "path-dependent (depends on running peak/trough); deferring "
+                        "to engine-side enforcement."
+                    ),
+                )
+            )
+            gate_results.append(self._emit_for_finding(findings[-1]))
+
+        if not entry_basis_rules:
+            return
+
+        # Tightest entry-price stop wins — if the spec has multiple
+        # entry-basis stops, the floor is the smallest ``pct``.
+        tightest = min(r.pct for r in entry_basis_rules)
         # Engine-attributed stop-loss exit is the strongest signal that
         # the engine honoured the rule, regardless of what
         # ``return_pct`` rounded to.
@@ -689,9 +719,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         # Account for transaction costs + slippage when validating the
         # observed return against the spec's stop-loss floor. A 5% stop
         # on a strategy with 5 bps cost + 2 bps slippage realistically
-        # bottoms at -5.07%, not -5.00%. Read costs from the config
-        # snapshot the engine attached to the metrics when available;
-        # fall back to the strategy spec's fee defaults otherwise.
+        # bottoms at -5.07%, not -5.00%.
         return_pct = float(trade.return_pct)
         floor_pct = -tightest * 100.0
         # Allow a small absolute slack (0.5 percentage point) on top of
@@ -1093,7 +1121,16 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             "predicate_repr": predicate_repr,
             "lhs": lhs_value,
             "rhs": rhs_value,
-            "rel_miss": _relative_miss(lhs_value, rhs_value),
+            # Cross-predicate misses are about a missing prior-bar
+            # transition, not a numerical gap on the current bar. A
+            # sustained-above strategy can present a tiny
+            # ``|curr_lhs - curr_rhs|`` and the LLM near-miss
+            # adjudicator would happily legitimize it even though no
+            # cross happened — bypass the near-miss path entirely for
+            # cross ops by emitting ``rel_miss=None``. The aggregation
+            # step filters near-miss candidates on ``rel_miss is not
+            # None``.
+            "rel_miss": None if is_cross else _relative_miss(lhs_value, rhs_value),
         }
 
     def _consult_near_miss(

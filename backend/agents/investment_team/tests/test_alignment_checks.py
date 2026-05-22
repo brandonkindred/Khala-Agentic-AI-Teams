@@ -437,6 +437,68 @@ def test_stop_loss_passes_when_return_within_floor_with_slack() -> None:
     assert sl.passed is True
 
 
+def test_stop_loss_trailing_basis_emits_info_skip_only() -> None:
+    """Trailing-high / trailing-low stops are path-dependent and cannot
+    be validated from terminal ``return_pct`` alone. The check must
+    emit an info-severity skip per trailing rule rather than running
+    the entry-price floor logic, otherwise a strategy that legitimately
+    closed at a deep drawdown under a generous trailing stop could be
+    falsely marked critical (or vice versa). Regression for PR #613
+    review.
+    """
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")])
+    # Trade closed at a return well past the naive ``-5%`` floor — if
+    # basis were ignored, this would be marked critical. With
+    # trailing-high basis, the check is informational only.
+    trade = _trade(return_pct=-12.0, exit_reason=None)
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=_market_data_rsi_oversold(),
+        initial_capital=100_000.0,
+    )
+    sl_findings = [f for f in result.findings if f.check_name == "stop_loss"]
+    assert len(sl_findings) == 1
+    assert sl_findings[0].passed is True
+    assert sl_findings[0].severity == "info"
+    assert sl_findings[0].rule_id == "exit:stop_loss:trailing_high"
+    assert "path-dependent" in sl_findings[0].details
+
+
+def test_stop_loss_mixed_basis_runs_only_entry_basis_floor_check() -> None:
+    """When the spec mixes entry-price and trailing stops, only the
+    entry-price rules drive the critical floor check; the trailing
+    rule(s) emit info skips alongside."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(
+        exit_rules=[
+            StopLossRule(pct=0.05, basis="entry_price"),
+            StopLossRule(pct=0.10, basis="trailing_high"),
+        ]
+    )
+    # Return well past the -5% entry floor; the entry-basis arm of
+    # the check must still flag critical.
+    trade = _trade(return_pct=-12.0, exit_reason=None)
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=_market_data_rsi_oversold(),
+        initial_capital=100_000.0,
+    )
+    sl_findings = sorted(
+        (f for f in result.findings if f.check_name == "stop_loss"),
+        key=lambda f: f.rule_id or "",
+    )
+    # One trailing-info skip + one entry-price critical.
+    assert len(sl_findings) == 2
+    severities = {f.severity for f in sl_findings}
+    rule_ids = {f.rule_id for f in sl_findings}
+    assert severities == {"info", "critical"}
+    assert "exit:stop_loss" in rule_ids
+    assert "exit:stop_loss:trailing_high" in rule_ids
+
+
 def test_stop_loss_critical_when_return_breaches_floor_without_attribution() -> None:
     gate = DeterministicAlignmentChecker()
     spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
@@ -686,6 +748,63 @@ def test_entry_signal_cross_falls_closed_when_entry_is_first_bar() -> None:
     )
     entry = next(f for f in result.findings if f.check_name == "entry_signal")
     assert entry.passed is False
+
+
+def test_cross_predicate_miss_never_routes_to_near_miss_adjudicator(monkeypatch) -> None:
+    """A sustained-above strategy can present a tiny
+    ``|curr_lhs - curr_rhs|`` and superficially look like a tight
+    near-miss — but no cross actually happened. The near-miss path
+    must NOT consult the LLM for cross-op misses, regardless of the
+    numerical gap. Regression for PR #613 review.
+    """
+    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT", "0.05")
+
+    record, adjudicator = _counting_adjudicator()
+    record["scripted"] = [
+        NearMissVerdict(legitimate=True, rationale="should not be consulted"),
+    ]
+    gate = DeterministicAlignmentChecker()
+    rule = EntryRule(
+        side="long",
+        when=Predicate(lhs="bar.close", op="cross_above", rhs=100.0),
+    )
+    spec = _spec(entry_rules=[rule])
+    # Sustained-above: both bars sit just above 100, so the cross
+    # never happened, but the per-bar gap is tiny enough that a
+    # numeric near-miss check would route to the LLM.
+    md = {
+        "AAPL": [
+            OHLCVBar(
+                date="2023-01-01",
+                open=100.5,
+                high=100.7,
+                low=100.2,
+                close=100.4,
+                volume=1_000_000,
+            ),
+            OHLCVBar(
+                date="2023-01-02",
+                open=100.4,
+                high=100.6,
+                low=100.1,
+                close=100.5,
+                volume=1_000_000,
+            ),
+        ]
+    }
+    trade = _trade(entry_date="2023-01-02")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+        near_miss_adjudicator=adjudicator,
+    )
+    entry = next(f for f in result.findings if f.check_name == "entry_signal")
+    # The cross miss is critical and the LLM was never consulted.
+    assert entry.passed is False
+    assert entry.severity == "critical"
+    assert record["calls"] == []
 
 
 def test_entry_signal_critical_when_predicate_far_off() -> None:
