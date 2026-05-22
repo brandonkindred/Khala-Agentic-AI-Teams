@@ -584,7 +584,6 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
     winning on annualized return alone."""
 
     from investment_team.models import StrategyLabRecord
-    from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
 
     orch = _orchestrator(_StubMarketDataService())
 
@@ -626,8 +625,18 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
     # way the other gates are neutralised — synthesis-phase code
     # conformance is not the subject under test on the fallback path.
     monkeypatch.setattr(orch.code_conformance_gate, "check", lambda *a, **kw: [])
+    # The deterministic alignment gate decides ``aligned`` post-#545.
+    # Stub the gate's ``check`` to script the same verdict the old LLM
+    # path used to produce. ``propose_code_fix`` is never consulted for
+    # an aligned gate verdict.
+    from investment_team.strategy_lab.quality_gates.alignment_checks import (
+        AlignmentCheckResult,
+    )
+
     monkeypatch.setattr(
-        orch.alignment_agent, "run", lambda **kw: TradeAlignmentReport(aligned=True, rationale="ok")
+        orch.deterministic_alignment_checker,
+        "check",
+        lambda **kw: AlignmentCheckResult(aligned=True, rationale="ok"),
     )
     monkeypatch.setattr(orch.analysis_agent, "run", lambda *a, **k: "narrative")
     # Issue #525 — _fetch_market_data returns a _MarketDataFetch envelope.
@@ -759,11 +768,39 @@ def _wire_run_cycle_stubs(
     # way other gates are neutralised — the walk-forward path is the
     # subject under test, not synthesis-phase code conformance.
     monkeypatch.setattr(orch.code_conformance_gate, "check", lambda *a, **kw: [])
+    # Drive the deterministic gate's verdict directly; the LLM
+    # ``propose_code_fix`` is only consulted for the misaligned arm
+    # and returns a report with no proposed_code so the loop's
+    # ``no_proposed_fix`` exit fires cleanly.
+    from investment_team.strategy_lab.alignment_findings import AlignmentFinding
+    from investment_team.strategy_lab.quality_gates.alignment_checks import (
+        AlignmentCheckResult,
+    )
+
+    monkeypatch.setattr(
+        orch.deterministic_alignment_checker,
+        "check",
+        lambda **kw: AlignmentCheckResult(
+            aligned=alignment_aligned,
+            rationale=alignment_rationale,
+            findings=[]
+            if alignment_aligned
+            else [
+                AlignmentFinding(
+                    trade_num=1,
+                    check_name="entry_signal",
+                    passed=False,
+                    severity="critical",
+                    details=alignment_rationale,
+                )
+            ],
+        ),
+    )
     monkeypatch.setattr(
         orch.alignment_agent,
-        "run",
+        "propose_code_fix",
         lambda **kw: TradeAlignmentReport(
-            aligned=alignment_aligned, rationale=alignment_rationale, proposed_code=None
+            aligned=False, rationale=alignment_rationale, proposed_code=None
         ),
     )
     monkeypatch.setattr(orch.analysis_agent, "run", lambda *a, **k: "narrative")

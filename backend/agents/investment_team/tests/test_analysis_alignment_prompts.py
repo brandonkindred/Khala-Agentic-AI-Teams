@@ -159,10 +159,6 @@ def _render_lose_misaligned() -> str:
     return template.format(**inputs)
 
 
-def _render_alignment_system() -> str:
-    return (_PROMPT_DIR / "alignment_system.md").read_text(encoding="utf-8")
-
-
 _PromptRenderer = Callable[[], str]
 
 _RENDERERS: dict[str, tuple[str, _PromptRenderer]] = {
@@ -172,7 +168,6 @@ _RENDERERS: dict[str, tuple[str, _PromptRenderer]] = {
         "analysis_lose_misaligned",
         _render_lose_misaligned,
     ),
-    "prompt_alignment_system.txt": ("alignment_system", _render_alignment_system),
 }
 
 
@@ -228,89 +223,28 @@ def test_analysis_prompts_label_entry_intent_and_exit_enforcement(
     )
 
 
-def test_alignment_prompt_splits_enforced_and_aspirational() -> None:
-    """Issue #528 introduced the enforced vs aspirational split. Issue #527
-    promotes structured ``exit_rules`` from the aspirational side into the
-    enforced section; both section headers must remain so the LLM still
-    sees the two-bucket framing for the rules that *are* aspirational
-    (entry intent, SignalExitRule).
-    """
-    rendered = _render_alignment_system()
-    assert "Enforced rules" in rendered, (
-        "alignment_system.md must introduce 'Enforced rules' section (issue #528)."
-    )
-    assert "Aspirational rules" in rendered, (
-        "alignment_system.md must introduce 'Aspirational rules' section (issue #528)."
-    )
-    # Severity guidance above the JSON output must reserve `critical` for enforced rules.
-    assert "Reserve `severity: critical`" in rendered, (
-        "alignment_system.md must reserve `severity: critical` for enforced rules (issue #528)."
-    )
-
-
-def test_alignment_prompt_marks_exit_rules_engine_enforced() -> None:
-    """Issue #527: alignment prompt must describe ``exit_rules`` as engine-
-    enforced rather than aspirational prose. Guards the prompt's role-in-
-    pipeline framing so the LLM doesn't down-weight critical exit-rule
-    violations the deterministic conformance gate flags.
-    """
-    rendered = _render_alignment_system()
-    assert (
-        "engine evaluates after every bar" in rendered or "evaluates after every bar" in rendered
-    ), (
-        "alignment_system.md must state the engine evaluates structured exit "
-        "rules every bar (issue #527)."
-    )
-    assert "exit_rule_conformance" in rendered, (
-        "alignment_system.md must reference the deterministic "
-        "``exit_rule_conformance`` gate (issue #527)."
-    )
-
-
 @pytest.mark.parametrize(
     "label,renderer",
     [
         pytest.param("analysis_win", _render_win, id="analysis_win"),
         pytest.param("analysis_lose", _render_lose, id="analysis_lose"),
-        pytest.param("alignment_system", _render_alignment_system, id="alignment_system"),
     ],
 )
 def test_prompts_do_not_use_mandatory_or_hard_rule_phrasing(
     label: str, renderer: _PromptRenderer
 ) -> None:
-    """Issue #528: drop 'mandatory' / 'hard rule' phrasing across all three prompts."""
+    """Drop 'mandatory' / 'hard rule' phrasing across the analysis prompts.
+
+    The alignment fix-proposer prompt (``alignment_propose_fix.md``) is
+    grounded in structured findings and has no surface where this
+    phrasing could re-enter, so it's not covered here.
+    """
     rendered = renderer().lower()
     forbidden = ["mandatory", "hard rule", "hard-enforced"]
     offenders = [phrase for phrase in forbidden if phrase in rendered]
     assert not offenders, (
         f"{label} prompt still contains forbidden phrasing {offenders} "
-        "(issue #528 — prose rules are not engine-enforced)."
-    )
-
-
-def test_alignment_prompt_keeps_severity_and_rule_type_enums_intact() -> None:
-    """Issue #528 stops short of touching the alignment JSON schema. The
-    severity/rule_type enums must stay exactly as the orchestrator's parsers
-    expect, otherwise alignment-loop tests start failing. Guard the literal
-    enum strings inside the JSON example block.
-    """
-    rendered = _render_alignment_system()
-    assert '"severity": "info" | "warning" | "critical"' in rendered, (
-        "alignment_system.md must keep the severity enum as info|warning|critical."
-    )
-    assert (
-        '"rule_type": "entry_rules" | "exit_rules" | "sizing_rules" | '
-        '"risk_limits" | "universe" | "direction"' in rendered
-    ), "alignment_system.md must keep the rule_type enum unchanged."
-
-
-def test_alignment_prompt_drops_all_count_as_misalignment() -> None:
-    """The old wording asserted exit-rule deviation 'all count as misalignment';
-    issue #528 explicitly downgrades that."""
-    rendered = _render_alignment_system()
-    assert "all count as misalignment" not in rendered, (
-        "alignment_system.md must not assert that prose-rule deviations "
-        "'all count as misalignment' (issue #528)."
+        "(prose rules are not engine-enforced)."
     )
 
 

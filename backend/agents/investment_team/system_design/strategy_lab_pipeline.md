@@ -28,13 +28,33 @@ flowchart LR
 ```
 
 The `aligning` phase audits whether the executed trade ledger actually
-implements the strategy specification. When a misalignment is detected the
-orchestrator runs a problem-solving loop (capped at
-`MAX_ALIGNMENT_ROUNDS = 10`): the `TradeAlignmentAgent` identifies the bug,
-rewrites the Python code, and the script is sent back to the sandbox for a
-fresh backtest before the next audit. The loop exits as soon as the agent
-reports the trades are aligned, the agent cannot propose a further fix, or
-the cap is hit. See `strategy_lab/agents/alignment.py` and
+implements the strategy specification. Each iteration of the alignment
+loop now runs a two-step inner check:
+
+1. `DeterministicAlignmentChecker` (in
+   `strategy_lab/quality_gates/alignment_checks.py`) evaluates the
+   trade ledger against the structured `StrategySpec` across seven
+   per-rule checks (universe, side, sizing ±1%, stop-loss compliance,
+   take-profit compliance, time-stop, and entry-signal correlation
+   with optional near-miss adjudication). Output is a list of
+   `AlignmentFinding` rows that ride on `BacktestRecord.alignment_findings`
+   plus matching `QualityGateResult` rows on the existing
+   `quality_gate_results` stream.
+2. When the deterministic verdict is misaligned, `TradeAlignmentAgent.
+   propose_code_fix` is invoked with the structured findings (no
+   trade-ledger prose) and returns a rewritten Python file. The
+   sandbox re-executes the proposal, and the loop iterates.
+
+The re-execution loop and its cap remain intentional and unchanged:
+the cap (`MAX_ALIGNMENT_ROUNDS = 10`) prevents runaway iterations while
+still giving the system room to correct genuine code defects across
+multiple rounds. The loop exits as soon as the gate reports aligned,
+no further fix is proposed, or the cap is hit. Entry-signal predicate
+misses within `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT` (default 1%
+relative) route through `TradeAlignmentAgent.adjudicate_near_miss`, a
+single-shot yes/no LLM call; tolerance `0` disables that adjudicator
+entirely. See `strategy_lab/quality_gates/alignment_checks.py`,
+`strategy_lab/agents/alignment.py`, and
 `strategy_lab/orchestrator.py::run_cycle` (Phase 2.5).
 
 The pipeline lives in
@@ -63,7 +83,7 @@ canonical list is:
 |---|---|---|
 | `ideating` | Start of cycle; also on re-ideation retry | `{ retry?, excluded? }` |
 | `fetching_data` | After ideation, before backtest | `{ strategy: {asset_class, hypothesis}, retry? }` |
-| `aligning` | Trade-alignment audit and problem-solving loop | `{ sub_phase, alignment_round, trades_count?, issues_count?, issues_preview?, changes_made?, predicted_aligned_after_fix? }` |
+| `aligning` | Trade-alignment audit and problem-solving loop | `{ sub_phase, alignment_round, trades_count?, issues_count?, issues_preview?, findings_count?, findings_preview?, changes_made?, predicted_aligned_after_fix? }` |
 | `analyzing` | After backtest, before narrative | `{ strategy, metrics }` |
 | `paper_trading` | Entering the paper-trading step (winners only) | `{ strategy }` |
 | `paper_trading_complete` | Paper trading finished successfully | `{ session_id, verdict, trade_count }` |

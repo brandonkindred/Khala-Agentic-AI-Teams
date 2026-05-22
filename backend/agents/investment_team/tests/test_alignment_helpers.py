@@ -6,60 +6,10 @@ from __future__ import annotations
 
 import pytest
 
-from investment_team.models import TradeRecord
 from investment_team.strategy_lab.agents.alignment import (
     _coerce_report,
     _extract_json,
-    _format_trades_section,
 )
-
-
-def _trade(n: int = 1, outcome: str = "win") -> TradeRecord:
-    return TradeRecord(
-        trade_num=n,
-        symbol="AAA",
-        side="long",
-        entry_date="2024-01-01",
-        exit_date="2024-01-05",
-        entry_price=100.0,
-        exit_price=101.0,
-        shares=1.0,
-        position_value=100.0,
-        gross_pnl=1.0,
-        net_pnl=1.0,
-        return_pct=1.0,
-        hold_days=4,
-        cumulative_pnl=1.0,
-        outcome=outcome,
-    )
-
-
-# ---------------------------------------------------------------------------
-# _format_trades_section
-# ---------------------------------------------------------------------------
-
-
-def test_format_trades_section_no_trades() -> None:
-    assert _format_trades_section([]) == "No trades produced by this backtest."
-
-
-def test_format_trades_section_short_lists_all_trades() -> None:
-    trades = [_trade(i + 1) for i in range(5)]
-    out = _format_trades_section(trades, max_sample_rows=10)
-    assert "Aggregate: 5 trades" in out
-    # Every trade num appears.
-    for i in range(5):
-        assert f"#{i + 1}" in out
-
-
-def test_format_trades_section_long_uses_head_tail_split() -> None:
-    trades = [_trade(i + 1) for i in range(30)]
-    out = _format_trades_section(trades, max_sample_rows=8)
-    # Head + tail appear, middle is elided.
-    assert "#1 " in out
-    assert "#30" in out
-    assert "additional trades not shown" in out
-
 
 # ---------------------------------------------------------------------------
 # _coerce_report
@@ -159,7 +109,7 @@ def test_extract_json_plain_object() -> None:
 
 
 def test_extract_json_handles_markdown_fence() -> None:
-    text = "```json\n{\"aligned\": true}\n```"
+    text = '```json\n{"aligned": true}\n```'
     data = _extract_json(text)
     assert data == {"aligned": True}
 
