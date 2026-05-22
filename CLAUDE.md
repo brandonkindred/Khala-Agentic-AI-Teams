@@ -229,7 +229,8 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 
 ### Project Rules
 
-- **Never reference GitHub issues.** Do not mention issue numbers (e.g. `#243`, `#369`, `Issue #531`), issue URLs, or "see issue X" anywhere in source code, comments, docstrings, commit messages, PR titles/bodies, changelogs, or documentation. Describe the change on its own terms — what it does and why — without pointing at an external tracker. This rule applies to *new* writing; existing references in this file and historical docs are grandfathered until the surrounding section is rewritten.
+- **Never reference GitHub issues in code, comments, or docs.** Do not mention issue numbers (e.g. `#243`, `#369`, `Issue #531`), issue URLs, or "see issue X" anywhere in source code, comments, docstrings, commit messages, changelogs, or documentation. Describe the change on its own terms — what it does and why — without pointing at an external tracker. This rule applies to *new* writing; existing references in this file and historical docs are grandfathered until the surrounding section is rewritten.
+- **Always use `Closes #N` notation in pull requests.** Every PR must reference the associated GitHub issue in its body using GitHub's auto-close keywords (`Closes #N`, `Fixes #N`, or `Resolves #N`) so merging the PR automatically closes the linked issue. This is the *only* place issue numbers belong — PR bodies — and it is required, not optional. If a change has no associated issue, open one first.
 - **Design by Contract (DbC) is mandatory for all code and comments.** Every function, method, and module must make its contract explicit:
   - **Preconditions** — what callers must guarantee about inputs (types, ranges, invariants, required state). Enforce with `assert` or explicit validation that raises on violation at boundaries.
   - **Postconditions** — what the function guarantees about its return value and observable side effects when preconditions hold.
