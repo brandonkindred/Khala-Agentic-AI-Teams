@@ -65,8 +65,13 @@ class ConvergenceTracker:
         self._signatures.append(sig)
         self._asset_class_history.append(spec.asset_class.lower())
 
+        # Iterate sorted so insertion order into ``_failure_modes`` is
+        # deterministic across interpreter runs. ``Counter.most_common``
+        # breaks ties by first-seen order; without sorting, equal-count
+        # gates could appear in different order across runs and produce
+        # nondeterministic ideation prompts / snapshot-test flakes.
         failed_gate_names = {g.gate_name for g in gate_results if not g.passed}
-        for gate_name in failed_gate_names:
+        for gate_name in sorted(failed_gate_names):
             self._failure_modes[gate_name] += 1
 
         # Trim to max history
