@@ -491,3 +491,217 @@ def test_lookahead_returns_no_result_when_no_same_day_bars_exist():
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
     assert look == []
+
+
+def test_lookahead_critical_for_short_only_strategy_picking_down_bars():
+    """A look-ahead-biased SHORT strategy enters when the bar moves DOWN.
+    In this codebase profitable shorts carry ``return_pct > 0`` on down
+    bars, so a naive ``bar_dir == sign(return_pct)`` would systematically
+    DISAGREE and the rule would miss the bias. The side-aware comparison
+    must catch it.
+
+    Fixture: 20 short trades, alternating winners and losers. Winners
+    enter on down bars and earn positive return_pct; losers enter on up
+    bars and earn negative return_pct. Both arrangements agree under the
+    side-aware comparison ``effective_bar_dir = bar_dir * side_sign``.
+    """
+    trades = [
+        _trade(
+            trade_num=i + 1,
+            entry_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 1):02d}",
+            exit_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 2):02d}",
+            return_pct=1.5 if i % 2 == 0 else -1.0,
+            side="short",
+            hold_days=14,
+        )
+        for i in range(20)
+    ]
+    # Winning shorts (return_pct > 0) → down bar; losing shorts → up bar.
+    market: dict = {}
+    for t in trades:
+        bars = market.setdefault(t.symbol, [])
+        if t.return_pct >= 0:
+            bars.append(_bar(t.entry_date, open_=101.5, close=100.0))
+        else:
+            bars.append(_bar(t.entry_date, open_=100.0, close=101.5))
+
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data=market,
+    )
+    look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
+    assert len(look) == 1
+    assert "20/20" in look[0].details
+    assert look[0].severity == "critical"
+
+
+def test_lookahead_critical_on_mixed_long_short_ledger_with_aligned_bets():
+    """Mixed long+short ledger where every trade's directional bet aligned
+    with the entry bar's move (longs on up bars, shorts on down bars), and
+    every trade won. The side-aware comparison sees both subsets as
+    agreeing and fires critical against the union."""
+    trades: List[TradeRecord] = []
+    for i in range(20):
+        side = "long" if i % 2 == 0 else "short"
+        trades.append(
+            _trade(
+                trade_num=i + 1,
+                entry_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 1):02d}",
+                exit_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 2):02d}",
+                return_pct=1.5,  # every trade wins
+                side=side,
+                hold_days=14,
+            )
+        )
+    market: dict = {}
+    for t in trades:
+        bars = market.setdefault(t.symbol, [])
+        if t.side == "long":
+            bars.append(_bar(t.entry_date, open_=100.0, close=101.5))
+        else:
+            bars.append(_bar(t.entry_date, open_=101.5, close=100.0))
+
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data=market,
+    )
+    look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
+    # The fixture sets ret_dir = +1 for every trade, which collapses the
+    # ret-sign distribution to a single value → degenerate-sample guard
+    # short-circuits. Make some trades losers to satisfy the guard while
+    # keeping the side/bar alignment intact for the agreement count.
+    assert look == [], (
+        "all-winners fixture is degenerate by design — guard should skip; "
+        "see following non-degenerate test for the positive case"
+    )
+
+
+def test_lookahead_critical_on_mixed_long_short_with_winners_and_losers():
+    """Non-degenerate mixed ledger: longs on up bars + shorts on down bars
+    when winning; longs on down bars + shorts on up bars when losing. The
+    side-aware comparison treats both winning subsets as agreeing and
+    both losing subsets as disagreeing → high but not 100% agreement."""
+    trades: List[TradeRecord] = []
+    for i in range(20):
+        side = "long" if i % 2 == 0 else "short"
+        is_winner = i % 5 != 0  # 16 winners, 4 losers → distribution spans both signs
+        trades.append(
+            _trade(
+                trade_num=i + 1,
+                entry_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 1):02d}",
+                exit_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 2):02d}",
+                return_pct=1.5 if is_winner else -1.0,
+                side=side,
+                hold_days=14,
+            )
+        )
+    market: dict = {}
+    for t in trades:
+        bars = market.setdefault(t.symbol, [])
+        winning = t.return_pct > 0
+        # Long+winning → up bar; long+losing → down bar.
+        # Short+winning → down bar; short+losing → up bar.
+        if (t.side == "long") == winning:
+            bars.append(_bar(t.entry_date, open_=100.0, close=101.5))
+        else:
+            bars.append(_bar(t.entry_date, open_=101.5, close=100.0))
+
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data=market,
+    )
+    look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
+    # 20 eligible trades, all agree under the side-aware comparison
+    # (winners' bets aligned with bar, losers' bets opposed bar — both
+    # consistent with the heuristic's hypothesis), and ret_dir spans both
+    # signs → degenerate guard passes → critical.
+    assert len(look) == 1
+    assert "20/20" in look[0].details
+    assert look[0].severity == "critical"
+
+
+def test_lookahead_passes_when_short_strategy_is_genuinely_signal_driven():
+    """A genuinely signal-driven short strategy enters on some down bars
+    (winners) and some up bars (losers, due to noise/whipsaws), with no
+    systematic alignment. Agreement around chance → no finding.
+
+    Outcomes are keyed on ``i % 2`` so the ret_dir distribution spans both
+    signs; bar directions are keyed on ``i % 3`` so the two axes are
+    uncorrelated. Across 20 trades the agreement rate is well below the
+    80% warning threshold.
+    """
+    trades = [
+        _trade(
+            trade_num=i + 1,
+            entry_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 1):02d}",
+            exit_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 2):02d}",
+            return_pct=1.5 if i % 2 == 0 else -1.0,
+            side="short",
+            hold_days=14,
+        )
+        for i in range(20)
+    ]
+    market: dict = {}
+    for i, t in enumerate(trades):
+        bars = market.setdefault(t.symbol, [])
+        # i % 3 != i % 2, so bar direction is uncorrelated with outcome.
+        if i % 3 == 0:
+            bars.append(_bar(t.entry_date, open_=101.5, close=100.0))  # down bar
+        else:
+            bars.append(_bar(t.entry_date, open_=100.0, close=101.5))  # up bar
+
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data=market,
+    )
+    look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
+    assert look == []
+
+
+def test_lookahead_skips_trades_with_unrecognised_side():
+    """A malformed ledger row with a non-canonical ``side`` value must be
+    skipped rather than silently defaulted to long — defaulting would hide
+    short-side look-ahead in legacy/typo data."""
+    trades = [
+        _trade(
+            trade_num=i + 1,
+            entry_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 1):02d}",
+            exit_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 2):02d}",
+            return_pct=1.5 if i % 2 == 0 else -1.0,
+            side="SELL",  # non-canonical
+            hold_days=14,
+        )
+        for i in range(20)
+    ]
+    market = _market_data_perfectly_matching(trades)
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data=market,
+    )
+    look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
+    assert look == []

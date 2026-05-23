@@ -344,9 +344,9 @@ class BacktestAnomalyDetector(GateResultsMixin):
     def _check_lookahead_bar_predictability(
         self, ctx: BacktestAnomalyCtx
     ) -> Iterable[QualityGateResult]:
-        """Flag trades whose sign agrees suspiciously well with the entry bar's
-        intrabar direction — a heuristic for look-ahead bias that AST checks
-        miss.
+        """Flag trades whose outcome agrees suspiciously well with the entry
+        bar's intrabar direction — a heuristic for look-ahead bias that AST
+        checks miss.
 
         Preconditions:
           - ``ctx.trades`` is non-empty.
@@ -359,6 +359,15 @@ class BacktestAnomalyDetector(GateResultsMixin):
             least 5 trades (smaller-sample backstop).
           - Warning when ``n_eligible >= 20`` and ``80% <= agreement < 95%``.
         Invariants:
+          - Trade side is folded into the comparison: profitable shorts in
+            this codebase carry ``return_pct > 0`` on DOWN bars, so a naive
+            ``bar_dir == sign(return_pct)`` would systematically miss short-
+            side look-ahead. The comparison uses ``effective_bar_dir =
+            bar_dir * side_sign`` (``side_sign = +1`` for long, ``-1`` for
+            short), which models "did the strategy's directional bet on
+            the bar pay off". Look-ahead-biased trades — long on up bars
+            or short on down bars, both winners — produce agreement; the
+            heuristic catches both directions.
           - Entry-bar lookup prefers an exact ``bar.date == trade.entry_date``
             match — calendar-prefix matching would pick the wrong bar on
             intraday timeframes and make the agreement statistic arbitrary.
@@ -370,17 +379,18 @@ class BacktestAnomalyDetector(GateResultsMixin):
             close). Silent skipping in that asymmetry would let look-ahead
             slip through the realism veto, which is the failure mode this
             gate exists to catch.
-          - Trades whose entry bar has ``close == open`` or whose return
-            is exactly zero contribute no sign signal and are skipped.
-          - Degenerate samples (all eligible bars move one direction, or
-            all eligible trades return one sign) are skipped — the rate
+          - Trades whose entry bar has ``close == open``, whose return is
+            exactly zero, or whose ``side`` isn't ``long``/``short`` are
+            skipped — they contribute no sign signal.
+          - Degenerate samples (all effective bar directions move one way,
+            or all eligible trades return one sign) are skipped — the rate
             would be uninformative.
         """
         if ctx.market_data is None or ctx.mode == "paper":
             return ()
         agreements = 0
         eligible = 0
-        bar_dirs: set[int] = set()
+        effective_bar_dirs: set[int] = set()
         ret_dirs: set[int] = set()
         for trade in ctx.trades:
             bars = ctx.market_data.get(trade.symbol)
@@ -389,23 +399,27 @@ class BacktestAnomalyDetector(GateResultsMixin):
             bar_dir = _resolve_entry_bar_direction(bars, trade.entry_date)
             if bar_dir is None:
                 continue
+            side_sign = _side_sign(trade.side)
+            if side_sign is None:
+                continue
             ret_dir = _sign(trade.return_pct)
             if ret_dir == 0:
                 continue
+            effective_bar_dir = bar_dir * side_sign
             eligible += 1
-            bar_dirs.add(bar_dir)
+            effective_bar_dirs.add(effective_bar_dir)
             ret_dirs.add(ret_dir)
-            if bar_dir == ret_dir:
+            if effective_bar_dir == ret_dir:
                 agreements += 1
         if eligible == 0:
             return ()
-        # Degenerate samples (every eligible bar moves the same direction, or
+        # Degenerate samples (every effective bar direction is one way, or
         # every eligible trade returns the same sign) make the agreement
-        # statistic uninformative — a fixture where every bar is positive
-        # and every trade is a winner trivially scores 100% without any
-        # look-ahead. Require both sides of the sign distribution before
-        # promoting agreement to a finding.
-        if len(bar_dirs) < 2 or len(ret_dirs) < 2:
+        # statistic uninformative — a fixture where every long trade wins on
+        # an up bar trivially scores 100% without any look-ahead. Require
+        # both sides of the sign distribution before promoting agreement to
+        # a finding.
+        if len(effective_bar_dirs) < 2 or len(ret_dirs) < 2:
             return ()
         rate = agreements / eligible
         if eligible >= 20 and rate >= 0.95:
@@ -552,6 +566,24 @@ def _sign(value: float) -> int:
     if value < 0:
         return -1
     return 0
+
+
+def _side_sign(side: str) -> Optional[int]:
+    """Map ``"long"``/``"short"`` to ``+1``/``-1`` for look-ahead direction math.
+
+    Postconditions:
+      - Case-insensitive match on the canonical labels.
+      - Returns ``None`` for any other value (skip the trade) — silently
+        defaulting to long would hide short-side look-ahead bias.
+    """
+    if not isinstance(side, str):
+        return None
+    lowered = side.strip().lower()
+    if lowered == "long":
+        return 1
+    if lowered == "short":
+        return -1
+    return None
 
 
 def _resolve_entry_bar_direction(bars: List[OHLCVBar], target: str) -> Optional[int]:
