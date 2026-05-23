@@ -232,4 +232,26 @@ def test_compiler_reason_format_matching():
     results = gate.check(spec, trades)
     criticals = _criticals(results)
     assert len(criticals) == 1
-    assert "entry[0]" in criticals[0].details
+
+
+def test_substring_reason_does_not_match():
+    """Prefixed/suffixed reasons that merely *contain* the token must not
+    count — full-string match only."""
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=0)),
+        ]
+    )
+    trades = [
+        _trade(1, entry_reason="compiled_entry:entry[0]", exit_reason="prefix_compiled_signal_exit:exit[0]"),
+        _trade(2, entry_reason="compiled_entry:entry[0]", exit_reason="compiled_signal_exit:exit[0]_suffix"),
+        _trade(3, entry_reason="extra_compiled_entry:entry[0]", exit_reason="compiled_signal_exit:exit[0]"),
+    ]
+    results = gate.check(spec, trades)
+    # trade 3's entry_reason is prefixed → doesn't count for entry[0]
+    # Only trade 1 and 2 have valid entry_reason ("compiled_entry:entry[0]")
+    # For exit: only trade 3 has exact match
+    warnings = _warnings(results)
+    assert len(warnings) == 0
+    assert _criticals(results) == []

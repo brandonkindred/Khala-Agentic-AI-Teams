@@ -35,8 +35,8 @@ from ..models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
 GATE = "rule_firing_rate_realism"
 
-_ENTRY_REASON_RE = re.compile(r"compiled_entry:entry\[(\d+)]")
-_EXIT_REASON_RE = re.compile(r"compiled_signal_exit:exit\[(\d+)]")
+_ENTRY_REASON_RE = re.compile(r"^compiled_entry:entry\[(\d+)]$")
+_EXIT_REASON_RE = re.compile(r"^compiled_signal_exit:exit\[(\d+)]$")
 
 
 class RuleFiringRateGate(GateResultsMixin):
@@ -130,7 +130,7 @@ def _count_entry_hits(trades: List[TradeRecord]) -> dict:
     for t in trades:
         if not t.entry_reason:
             continue
-        m = _ENTRY_REASON_RE.search(t.entry_reason)
+        m = _ENTRY_REASON_RE.match(t.entry_reason)
         if m:
             idx = int(m.group(1))
             hits[idx] = hits.get(idx, 0) + 1
@@ -149,7 +149,7 @@ def _count_exit_hits(trades: List[TradeRecord]) -> dict:
     for t in trades:
         if not t.exit_reason:
             continue
-        m = _EXIT_REASON_RE.search(t.exit_reason)
+        m = _EXIT_REASON_RE.match(t.exit_reason)
         if m:
             idx = int(m.group(1))
             hits[idx] = hits.get(idx, 0) + 1
