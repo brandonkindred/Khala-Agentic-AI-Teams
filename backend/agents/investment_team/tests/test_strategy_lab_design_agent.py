@@ -337,3 +337,143 @@ def test_revise_strips_stray_strategy_code(monkeypatch: pytest.MonkeyPatch) -> N
     critique = SpecCritique(ready=False, rationale="r", issues=[])
     parsed, _ = DesignAgent().revise(_prior_spec(), critique)
     assert "strategy_code" not in parsed
+
+
+# ---------------------------------------------------------------------------
+# Parse / DSL-validation retries — bounded recovery from transient LLM drift
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedAgent:
+    """Returns the next scripted payload on each call; records every prompt."""
+
+    def __init__(self, payloads: List[str]) -> None:
+        self._payloads = list(payloads)
+        self.calls: List[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.calls.append(prompt)
+        if not self._payloads:
+            raise AssertionError("ScriptedAgent exhausted — more calls than scripted payloads")
+        return self._payloads.pop(0)
+
+
+def _patch_design_scripted(
+    monkeypatch: pytest.MonkeyPatch, payloads: List[str]
+) -> _ScriptedAgent:
+    scripted = _ScriptedAgent(payloads)
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.Agent",
+        lambda **_kwargs: scripted,
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.get_strands_model",
+        lambda role: object(),
+    )
+    return scripted
+
+
+def test_invoke_and_parse_retries_then_recovers_on_prose_rules(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A first response with prose rules retries, second response with
+    structured DSL succeeds — the cycle is not lost to a transient LLM drift."""
+    bad_payload = _payload(
+        entry_rules=["close > sma(20)"],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    good_payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    scripted = _patch_design_scripted(monkeypatch, [bad_payload, good_payload])
+
+    with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
+        parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert "strategy_code" not in parsed
+    assert len(scripted.calls) == 2, "expected one retry after the prose-rules failure"
+    # The retry prompt must surface what went wrong so the LLM can correct.
+    retry_prompt = scripted.calls[1]
+    assert "Retry" in retry_prompt
+    assert "entry_rules" in retry_prompt
+    assert any("invalid rule shape" in rec.message for rec in caplog.records)
+
+
+def test_invoke_and_parse_retries_then_recovers_on_malformed_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first response with no JSON retries, second response succeeds."""
+    good_payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    scripted = _patch_design_scripted(
+        monkeypatch, ["no JSON object at all here", good_payload]
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert parsed["asset_class"] == "stocks"
+    assert len(scripted.calls) == 2
+    assert "not valid JSON" in scripted.calls[1]
+
+
+def test_invoke_and_parse_exhausts_retries_and_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every attempt fails, the final exception is re-raised so the
+    existing error contract (StrategySpecParseError) is preserved."""
+    bad_payload = _payload(
+        entry_rules=["close > sma(20)"],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "1")
+    scripted = _patch_design_scripted(monkeypatch, [bad_payload, bad_payload])
+
+    with pytest.raises(StrategySpecParseError):
+        DesignAgent().run(prior_records=[])
+
+    assert len(scripted.calls) == 2, "budget=1 → 2 total attempts before re-raise"
+
+
+def test_invoke_and_parse_retry_budget_zero_disables_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setting the budget to 0 means a single attempt — preserves legacy behaviour."""
+    bad_payload = _payload(
+        entry_rules=["close > sma(20)"],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "0")
+    scripted = _patch_design_scripted(monkeypatch, [bad_payload])
+
+    with pytest.raises(StrategySpecParseError):
+        DesignAgent().run(prior_records=[])
+
+    assert len(scripted.calls) == 1, "budget=0 → exactly one attempt, no retries"
+
+
+def test_invoke_and_parse_retry_budget_garbage_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Garbage env values fall back to the default budget (2 → 3 attempts)."""
+    bad_payload = _payload(
+        entry_rules=["close > sma(20)"],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "not-a-number")
+    scripted = _patch_design_scripted(
+        monkeypatch, [bad_payload, bad_payload, bad_payload]
+    )
+
+    with pytest.raises(StrategySpecParseError):
+        DesignAgent().run(prior_records=[])
+
+    assert len(scripted.calls) == 3

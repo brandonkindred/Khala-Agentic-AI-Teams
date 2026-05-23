@@ -19,6 +19,7 @@ Invariants:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -44,6 +45,30 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _SYSTEM_PROMPT = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
+
+_DEFAULT_PARSE_RETRIES = 2
+
+
+def _parse_retry_budget() -> int:
+    """Resolve the retry budget for malformed LLM output in ``_invoke_and_parse``.
+
+    LLMs occasionally emit prose, truncated JSON, or off-shape rule objects
+    even with a strict system prompt. A bounded retry — replaying the prompt
+    with a corrective addendum — recovers cleanly the majority of the time
+    and prevents a single bad response from burning a Strategy Lab cycle.
+
+    Pre: env value, when set, parses to ``int`` and is ``>= 0`` after the
+    ``max(.., 0)`` clamp.
+    Post: returns a non-negative integer. Total attempts = budget + 1.
+    Default 2 → 3 attempts. Garbage values fall back to the default.
+    """
+    raw = os.environ.get("STRATEGY_LAB_DESIGN_PARSE_RETRIES")
+    if raw is None:
+        return _DEFAULT_PARSE_RETRIES
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        return _DEFAULT_PARSE_RETRIES
 
 _DESIGN_USER_TEMPLATE = """\
 Design ONE novel swing-style strategy (typical holds ~2-14 days unless the asset class implies shorter).
@@ -202,39 +227,105 @@ class DesignAgent:
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
         """Call the LLM, parse JSON, strip any stray ``strategy_code``, validate rules.
 
+        On JSON-extract failure or structured-DSL validation failure, the
+        call is retried up to :func:`_parse_retry_budget` times with a
+        corrective addendum appended to the user prompt so the model sees
+        what went wrong. On final exhaustion the last exception is
+        re-raised so the existing contract (``ValueError`` for malformed
+        JSON, :class:`StrategySpecParseError` for prose/off-shape rules)
+        is preserved.
+
         Pre: ``system_prompt`` and ``user_prompt`` are non-empty strings.
         Post: returns ``(parsed, rationale)`` with no ``strategy_code`` key
         and rule fields that pass :func:`validate_structured_rules`. Raises
-        ``ValueError`` on malformed JSON or
-        :class:`StrategySpecParseError` on prose/off-shape rules.
+        ``ValueError`` on persistently malformed JSON or
+        :class:`StrategySpecParseError` on persistently prose/off-shape
+        rules.
         """
+        max_retries = _parse_retry_budget()
+        attempts = max_retries + 1
+
         agent = Agent(
             model=get_strands_model("strategy_design"),
             system_prompt=system_prompt,
             tools=[],
         )
 
-        result = agent(user_prompt)
-        parsed = extract_json_object(str(result))
+        attempt_prompt = user_prompt
+        last_exc: Optional[Exception] = None
 
-        # Logged-and-dropped (not raised): a stray ``strategy_code`` is
-        # prompt drift, not a usable-spec failure.
-        if "strategy_code" in parsed:
-            parsed.pop("strategy_code", None)
-            logger.warning(
-                "DesignAgent stripped stray strategy_code field from LLM response "
-                "(code synthesis is a separate phase)."
-            )
+        for attempt in range(attempts):
+            result = agent(attempt_prompt)
 
-        rationale = parsed.pop("rationale", "")
+            try:
+                parsed = extract_json_object(str(result))
+            except ValueError as exc:
+                last_exc = exc
+                logger.warning(
+                    "DesignAgent failed to extract JSON (attempt %d/%d): %s",
+                    attempt + 1,
+                    attempts,
+                    exc,
+                )
+                attempt_prompt = _retry_prompt(
+                    user_prompt,
+                    reason=f"The previous response was not valid JSON: {exc}",
+                )
+                continue
 
-        try:
-            validate_structured_rules(parsed)
-        except StrategySpecParseError as exc:
-            logger.warning("DesignAgent emitted invalid rule shape: %s", exc)
-            raise
+            if "strategy_code" in parsed:
+                parsed.pop("strategy_code", None)
+                logger.warning(
+                    "DesignAgent stripped stray strategy_code field from LLM response "
+                    "(code synthesis is a separate phase)."
+                )
 
-        return parsed, rationale
+            rationale = parsed.pop("rationale", "")
+
+            try:
+                validate_structured_rules(parsed)
+            except StrategySpecParseError as exc:
+                last_exc = exc
+                logger.warning(
+                    "DesignAgent emitted invalid rule shape (attempt %d/%d): %s",
+                    attempt + 1,
+                    attempts,
+                    exc,
+                )
+                attempt_prompt = _retry_prompt(
+                    user_prompt,
+                    reason=(
+                        f"The previous response had invalid rule structure at "
+                        f"`{exc.field}`. Re-read the system prompt's structured "
+                        f"DSL section and retry. Validator error: {exc}"
+                    ),
+                )
+                continue
+
+            return parsed, rationale
+
+        assert last_exc is not None, (
+            "_invoke_and_parse retry loop exited without success or exception; "
+            "this is a bug in the loop condition."
+        )
+        raise last_exc
+
+
+def _retry_prompt(original_user_prompt: str, *, reason: str) -> str:
+    """Append a short corrective addendum so the LLM sees what went wrong.
+
+    The original prompt is preserved verbatim; the addendum is appended
+    rather than substituted so the design directives, prior-results
+    context, and JSON shape spec all stay in view on the retry attempt.
+    """
+    return (
+        f"{original_user_prompt}\n\n"
+        "## Retry — the previous attempt failed validation\n"
+        f"{reason}\n"
+        "Return ONLY a single JSON object matching the shape described above. "
+        "Every `entry_rules` / `exit_rules` item MUST be a structured DSL object "
+        "(NOT a prose string)."
+    )
 
 
 def _format_issues(critique: "SpecCritique") -> str:
