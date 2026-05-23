@@ -474,6 +474,46 @@ def test_subscript_on_non_self_collection_is_not_flagged() -> None:
     assert not any("Subscript" in w for w in warnings), warnings
 
 
+def test_getattr_on_renamed_bar_parameter_is_still_flagged() -> None:
+    """The AST rule must resolve the actual ``on_bar`` parameter names
+    rather than hardcoding ``bar``/``ctx``. A strategy that renames its
+    parameters — ``def on_bar(self, c, b):`` — must still trip the
+    getattr warning when the *renamed* receiver is the target.
+    """
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, c, b):
+                _ = getattr(b, 'next_close', 0.0)
+                c.submit_order(symbol='X', qty=1, side='LONG')
+                c.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("getattr" in w for w in warnings), warnings
+
+
+def test_try_except_on_renamed_ctx_parameter_is_still_flagged() -> None:
+    """Same concern for the try/except rule: ``try: c.future_data``
+    where ``c`` is the renamed ctx must still trip the warning."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, c, b):
+                try:
+                    forecast = b.future_close
+                except AttributeError:
+                    forecast = b.close
+                c.submit_order(symbol='X', qty=1, side='LONG')
+                c.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("try/except" in w for w in warnings), warnings
+
+
 # ---------------------------------------------------------------------------
 # Order-flow shape (#547 item 4): entry path + exit path required
 # ---------------------------------------------------------------------------

@@ -66,12 +66,35 @@ _LOOKAHEAD_WARNING_PATTERNS = [
     ),
 ]
 
-# Receiver names the AST forward-access check is interested in. These mirror
-# the two objects whose attribute access is the engine's strict no-look-ahead
-# contract — ``bar`` (the per-tick current-bar fields) and ``ctx`` (state +
-# history). Both arrive positionally to ``on_bar(self, ctx, bar)``; we use
-# the canonical names because every analysed scope is normalised to them.
+# Canonical receiver names for look-ahead checks. The AST forward-access
+# check resolves the *actual* ``on_bar`` parameter names from the class's
+# signature via :func:`_on_bar_receiver_names`, but the regex patterns
+# (which run against raw code text without AST context) still match the
+# canonical names. This constant is now only used as a fallback when the
+# class has no ``on_bar`` override — the primary path uses the resolved set.
 _FORWARD_ACCESS_RECEIVERS = frozenset({"bar", "ctx"})
+
+
+def _on_bar_receiver_names(cls: ast.ClassDef) -> frozenset[str]:
+    """Return the set of parameter names that receive ``ctx`` and ``bar``
+    in ``cls``'s ``on_bar`` method.
+
+    Preconditions:
+      - ``cls`` is a parsed ``Strategy`` subclass.
+    Postconditions:
+      - When ``on_bar`` exists and has >= 3 parameters (``self`` + 2),
+        returns ``{args[1].arg, args[2].arg}`` — the second positional
+        is the StrategyContext receiver, the third is the bar receiver.
+      - Falls back to the canonical ``{"bar", "ctx"}`` when ``on_bar``
+        is missing, has the wrong arity, or is async (the validator
+        would have flagged those already, but the AST check should
+        still function).
+    """
+    for node in ast.iter_child_nodes(cls):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "on_bar":
+            if len(node.args.args) >= 3:
+                return frozenset({node.args.args[1].arg, node.args.args[2].arg})
+    return _FORWARD_ACCESS_RECEIVERS
 
 
 def _find_forward_access_warnings(cls: ast.ClassDef) -> List[str]:
@@ -109,16 +132,17 @@ def _find_forward_access_warnings(cls: ast.ClassDef) -> List[str]:
             seen.add(msg)
             out.append(msg)
 
+    receivers = _on_bar_receiver_names(cls)
     self_collections = _self_collection_names(cls)
     for node in ast.walk(cls):
-        if isinstance(node, ast.Call) and _is_getattr_on_receiver(node):
+        if isinstance(node, ast.Call) and _is_getattr_on_receiver(node, receivers):
             _add(
                 "getattr(bar, ...) / getattr(ctx, ...) dodges the runtime "
                 "AttributeError trap — read the attribute directly so a "
                 "missing field surfaces as lookahead_violation instead of "
                 "silently returning a default"
             )
-        if isinstance(node, ast.Try) and _try_block_swallows_attribute_error(node):
+        if isinstance(node, ast.Try) and _try_block_swallows_attribute_error(node, receivers):
             _add(
                 "try/except AttributeError around bar.* or ctx.* swallows the "
                 "runtime lookahead_violation trap — let the exception "
@@ -137,9 +161,12 @@ def _find_forward_access_warnings(cls: ast.ClassDef) -> List[str]:
     return out
 
 
-def _is_getattr_on_receiver(call: ast.Call) -> bool:
-    """True iff ``call`` is ``getattr(bar | ctx, ...)`` with at least two args.
+def _is_getattr_on_receiver(call: ast.Call, receivers: frozenset[str]) -> bool:
+    """True iff ``call`` is ``getattr(<receiver>, ...)`` with at least two args.
 
+    Preconditions:
+      - ``receivers`` is the set of parameter names resolved from the
+        class's ``on_bar`` signature via :func:`_on_bar_receiver_names`.
     Postconditions:
       - Matches both the bare ``getattr(...)`` name form and the
         ``builtins.getattr(...)`` attribute form so the check survives
@@ -157,13 +184,16 @@ def _is_getattr_on_receiver(call: ast.Call) -> bool:
     if len(call.args) < 2:
         return False
     target = call.args[0]
-    return isinstance(target, ast.Name) and target.id in _FORWARD_ACCESS_RECEIVERS
+    return isinstance(target, ast.Name) and target.id in receivers
 
 
-def _try_block_swallows_attribute_error(node: ast.Try) -> bool:
+def _try_block_swallows_attribute_error(node: ast.Try, receivers: frozenset[str]) -> bool:
     """True iff any handler catches ``AttributeError`` AND the try body
-    touches ``bar.*`` or ``ctx.*``.
+    touches an attribute on a receiver name.
 
+    Preconditions:
+      - ``receivers`` is the set of parameter names resolved from the
+        class's ``on_bar`` signature via :func:`_on_bar_receiver_names`.
     Postconditions:
       - Matches both the bare ``except AttributeError:`` form and the
         tuple form (``except (AttributeError, KeyError):``) — the latter
@@ -176,7 +206,6 @@ def _try_block_swallows_attribute_error(node: ast.Try) -> bool:
     for handler in node.handlers:
         exc_type = handler.type
         if exc_type is None:
-            # bare ``except:`` — also masks AttributeError; treat as catching it.
             catches_attribute_error = True
             break
         if isinstance(exc_type, ast.Name) and exc_type.id == "AttributeError":
@@ -194,7 +223,7 @@ def _try_block_swallows_attribute_error(node: ast.Try) -> bool:
             if (
                 isinstance(inner, ast.Attribute)
                 and isinstance(inner.value, ast.Name)
-                and inner.value.id in _FORWARD_ACCESS_RECEIVERS
+                and inner.value.id in receivers
             ):
                 return True
     return False
