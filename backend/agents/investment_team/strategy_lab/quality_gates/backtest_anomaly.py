@@ -363,11 +363,15 @@ class BacktestAnomalyDetector(GateResultsMixin):
             zero-return signal). The previous behaviour returned nothing,
             so reviewers couldn't tell whether the detector ran or was
             skipped.
-          - Critical when ``n_eligible >= 20`` and combined agreement
-            ``>= 95%``, OR when ``n_eligible < 20`` and combined
-            agreement is perfect across at least 5 observations
-            (smaller-sample backstop).
-          - Warning when ``n_eligible >= 20`` and
+          - Critical when ``trades_with_signal >= 20`` and combined
+            agreement ``>= 95%``, OR when ``trades_with_signal < 20`` and
+            combined agreement is perfect across at least 5 trades
+            (smaller-sample backstop). Sample-size thresholds key off
+            distinct *trades* with a usable signal, NOT off the doubled
+            observation count — two bar observations per trade are
+            correlated through the trade's own outcome and don't compose
+            into independent samples for the threshold purpose.
+          - Warning when ``trades_with_signal >= 20`` and
             ``80% <= combined_agreement < 95%``.
           - Additionally emits an additive warning when
             ``len(ctx.trades) >= 10`` and the entry-bar resolvability
@@ -411,6 +415,14 @@ class BacktestAnomalyDetector(GateResultsMixin):
         entry_eligible = 0
         exit_agreements = 0
         exit_eligible = 0
+        # Count of distinct trades that contributed at least one
+        # observation (entry- OR exit-bar direction resolved). Used for
+        # sample-size thresholds because two observations from the same
+        # trade are NOT independent — both correlate with the trade's
+        # own outcome, so an agreement-rate threshold sized for 20
+        # independent samples should not be tripped by 10 trades' worth
+        # of paired observations.
+        trades_with_signal = 0
         effective_bar_dirs: set[int] = set()
         ret_dirs: set[int] = set()
         for trade in ctx.trades:
@@ -423,6 +435,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
             ret_dir = _sign(trade.return_pct)
             if ret_dir == 0:
                 continue
+            contributed = False
             # Entry-bar contribution.
             entry_dir = _resolve_entry_bar_direction(bars, trade.entry_date)
             if entry_dir is not None:
@@ -432,6 +445,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
                 ret_dirs.add(ret_dir)
                 if effective_entry == ret_dir:
                     entry_agreements += 1
+                contributed = True
             # Exit-bar contribution. ``_resolve_entry_bar_direction`` is
             # a generic timestamp→direction resolver; the same exact /
             # day-aggregate semantics apply to the exit bar.
@@ -443,6 +457,9 @@ class BacktestAnomalyDetector(GateResultsMixin):
                 ret_dirs.add(ret_dir)
                 if effective_exit == ret_dir:
                     exit_agreements += 1
+                contributed = True
+            if contributed:
+                trades_with_signal += 1
         eligible = entry_eligible + exit_eligible
         if eligible == 0:
             return (
@@ -482,33 +499,35 @@ class BacktestAnomalyDetector(GateResultsMixin):
             return tuple(results)
         agreements = entry_agreements + exit_agreements
         rate = agreements / eligible
-        if eligible >= 20 and rate >= 0.95:
+        if trades_with_signal >= 20 and rate >= 0.95:
             results.append(
                 self._critical(
                     f"Entry+exit bar direction agrees with trade return on "
-                    f"{agreements}/{eligible} bar observations ({rate:.0%}) — "
-                    "perfectly predictable from the close-minus-open of the "
+                    f"{agreements}/{eligible} bar observations ({rate:.0%}) "
+                    f"across {trades_with_signal} trades — perfectly "
+                    "predictable from the close-minus-open of the "
                     "entry/exit bars indicates intrabar look-ahead bias."
                 )
             )
             return tuple(results)
-        if eligible < 20 and eligible >= 5 and rate >= 0.999:
+        if trades_with_signal < 20 and trades_with_signal >= 5 and rate >= 0.999:
             results.append(
                 self._critical(
                     f"Entry+exit bar direction matches trade return on every "
-                    f"eligible observation ({agreements}/{eligible}) — perfect "
-                    "agreement at small sample is consistent with intrabar "
-                    "look-ahead bias; collect more trades to disambiguate."
+                    f"eligible observation ({agreements}/{eligible}) across "
+                    f"{trades_with_signal} trades — perfect agreement at "
+                    "small sample is consistent with intrabar look-ahead "
+                    "bias; collect more trades to disambiguate."
                 )
             )
             return tuple(results)
-        if eligible >= 20 and rate >= 0.80:
+        if trades_with_signal >= 20 and rate >= 0.80:
             results.append(
                 self._warning(
                     f"Entry+exit bar direction agrees with trade return on "
-                    f"{agreements}/{eligible} bar observations ({rate:.0%}) — "
-                    "review the entry- and exit-signal computation for subtle "
-                    "look-ahead."
+                    f"{agreements}/{eligible} bar observations ({rate:.0%}) "
+                    f"across {trades_with_signal} trades — review the entry- "
+                    "and exit-signal computation for subtle look-ahead."
                 )
             )
             return tuple(results)

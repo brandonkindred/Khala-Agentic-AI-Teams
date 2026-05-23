@@ -831,6 +831,48 @@ def test_lookahead_does_not_emit_degraded_warning_when_sample_is_small() -> None
     assert degraded == []
 
 
+def test_lookahead_thresholds_key_off_trade_count_not_bar_observation_count() -> None:
+    """A 10-trade ledger with perfect entry+exit agreement produces 20 bar
+    observations. The 95% critical band was calibrated for ``>= 20`` distinct
+    *trades*, not 20 bar observations — two bars per trade share the trade's
+    own outcome and are not independent samples. The detector must gate the
+    high-confidence critical on the trade count and route a 10-trade perfect
+    fixture through the small-sample backstop instead (5 <= trades < 20,
+    rate >= 0.999).
+    """
+    # 10 trades, alternating sign so the degenerate-sample guard passes.
+    # Entries spaced 3 days apart so the per-trade entry+exit bars don't
+    # collide with neighbouring trades' dates.
+    trades = [
+        _trade(
+            trade_num=i + 1,
+            entry_date=f"2024-{((i % 12) + 1):02d}-{((i * 3) % 27 + 1):02d}",
+            exit_date=f"2024-{((i % 12) + 1):02d}-{((i * 3) % 27 + 2):02d}",
+            return_pct=1.5 if i % 2 == 0 else -1.0,
+            hold_days=1,
+        )
+        for i in range(10)
+    ]
+    market = _market_data_perfectly_matching(trades)
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data=market,
+    )
+    look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
+    # Perfect agreement on 10 trades (20 observations) MUST still trip
+    # critical — but via the small-sample backstop, whose message
+    # references "across {n} trades" with n < 20 so reviewers can
+    # disambiguate the branch.
+    assert len(look) == 1
+    assert look[0].severity == "critical"
+    assert "across 10 trades" in look[0].details
+
+
 def test_lookahead_combined_rate_uses_entry_and_exit_observations() -> None:
     """A leak that shows up on exit bars but NOT on entry bars (e.g., the
     code peeks at the close of the exit bar before deciding to exit)
