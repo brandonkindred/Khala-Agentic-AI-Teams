@@ -125,6 +125,7 @@ def _trade(symbol: str, trade_num: int) -> TradeRecord:
         hold_days=14,
         outcome="win",
         cumulative_pnl=10.0 * trade_num,
+        entry_reason="compiled_entry:entry[0]",
     )
 
 
@@ -183,11 +184,14 @@ def test_run_realism_gates_emits_breadth_warning_for_multi_target_single_symbol_
         execution_succeeded=True,
     )
 
-    warnings = [r for r in results if not r.passed and r.severity == "warning"]
-    assert len(warnings) == 1
-    assert warnings[0].gate_name == "target_symbol_coverage"
-    assert warnings[0].phase == "verification"
-    assert "QQQ" in warnings[0].details
+    breadth_warnings = [
+        r
+        for r in results
+        if not r.passed and r.severity == "warning" and r.gate_name == "target_symbol_coverage"
+    ]
+    assert len(breadth_warnings) == 1
+    assert breadth_warnings[0].phase == "verification"
+    assert "QQQ" in breadth_warnings[0].details
 
 
 def test_run_realism_gates_passes_when_ledger_uses_full_universe():
@@ -204,7 +208,12 @@ def test_run_realism_gates_passes_when_ledger_uses_full_universe():
         execution_succeeded=True,
     )
 
-    assert all(r.passed for r in results)
+    # No criticals from any gate; breadth specifically passes (the
+    # universe test is the focus here — other gates may emit warnings
+    # from stub fixture gaps like unfired signal-exit rules).
+    breadth = [r for r in results if r.gate_name == "target_symbol_coverage"]
+    assert all(r.passed for r in breadth)
+    assert not any(not r.passed and r.severity == "critical" for r in results)
 
 
 def test_run_realism_gates_cost_stress_self_skips_when_not_requested_by_config():

@@ -760,6 +760,7 @@ class TradeRecord(BaseModel):
     # engine-closed from strategy-closed trades so a gap-down
     # strategy exit below a structured stop-loss floor is not
     # mis-attributed as an engine leak.
+    entry_reason: Optional[str] = None
     exit_reason: Optional[str] = None
 
 

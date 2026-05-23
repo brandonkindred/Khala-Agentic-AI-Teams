@@ -563,6 +563,11 @@ class TradingServiceResult:
     #: Shape: ``{"events": [{rule_id, hit_count, first_true_bar,
     #: last_true_bar}, ...], "truncated": bool}``.
     probe_events: Optional[Dict[str, Any]] = None
+    #: Entry reasons from positions still open at end-of-stream. The
+    #: rule-firing gate unions these with closed-trade entry_reasons so
+    #: a rule whose only firing left an unclosed position is not
+    #: misreported as dead code.
+    open_position_entry_reasons: List[str] = field(default_factory=list)
 
 
 def _record_event(
@@ -1240,6 +1245,11 @@ class TradingService:
 
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
+        result.open_position_entry_reasons = [
+            pos.entry_reason
+            for pos in fill_sim.portfolio.positions.values()
+            if pos.entry_reason
+        ]
         return _finalize_diagnostics(result)
 
     # ------------------------------------------------------------------
@@ -1524,6 +1534,11 @@ class TradingService:
 
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
+        result.open_position_entry_reasons = [
+            pos.entry_reason
+            for pos in fill_sim.portfolio.positions.values()
+            if pos.entry_reason
+        ]
         return _finalize_diagnostics(result)
 
     # ------------------------------------------------------------------

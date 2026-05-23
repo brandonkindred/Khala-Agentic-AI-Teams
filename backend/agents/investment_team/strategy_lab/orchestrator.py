@@ -85,6 +85,7 @@ from .quality_gates.models import QualityGateResult, StrategyLabPhase
 from .quality_gates.realism import (
     LiquidityRealismGate,
     RegimeCoverageGate,
+    RuleFiringRateGate,
     TradeClusteringGate,
 )
 from .quality_gates.rule_probes import RuleProbesGate
@@ -402,6 +403,7 @@ class StrategyLabOrchestrator:
         self.liquidity_realism_gate = LiquidityRealismGate()
         self.regime_coverage_gate = RegimeCoverageGate()
         self.trade_clustering_gate = TradeClusteringGate()
+        self.rule_firing_rate_gate = RuleFiringRateGate()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
         # SpecReadinessGate is wired to the live MarketDataService so Rule 5
@@ -958,6 +960,7 @@ class StrategyLabOrchestrator:
         assert isinstance(zero_trade_attempts, list), "zero_trade_attempts must be a list"
 
         trades: List[TradeRecord] = []
+        open_position_entry_reasons: List[str] = []
         metrics = compute_metrics([], config.initial_capital, config.start_date, config.end_date)
         execution_succeeded = False
         market_data: Optional[Dict[str, List[OHLCVBar]]] = None
@@ -1116,6 +1119,7 @@ class StrategyLabOrchestrator:
 
             # ── 2d: COLLECT TRADES + target-symbol coverage on trades ─
             trades = exec_result.trades
+            open_position_entry_reasons = getattr(exec_result, "open_position_entry_reasons", [])
 
             trade_coverage_gates = self.target_symbol_coverage_gate.check_trades(spec, trades)
             self.record_gates(trade_coverage_gates, all_gate_results, refinement_round=round_num)
@@ -1210,6 +1214,7 @@ class StrategyLabOrchestrator:
             execution_succeeded=execution_succeeded,
             max_rounds_exhausted=max_rounds_exhausted,
             provider_used=provider_used,
+            open_position_entry_reasons=open_position_entry_reasons,
             runtime_lookahead_violation=runtime_lookahead_violation,
         )
 
@@ -1718,6 +1723,7 @@ class StrategyLabOrchestrator:
         alignment_reports: List[TradeAlignmentReport],
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
+        open_position_entry_reasons: Optional[List[str]] = None,
         runtime_lookahead_violation: bool = False,
     ) -> _VerificationOutcome:
         """Run walk-forward + acceptance, conformance, is_winning resolution.
@@ -1820,6 +1826,7 @@ class StrategyLabOrchestrator:
             config=config,
             market_data=market_data,
             execution_succeeded=execution_succeeded,
+            open_position_entry_reasons=open_position_entry_reasons,
         )
         all_gate_results.extend(realism_results)
         realism_critical = [r for r in realism_results if not r.passed and r.severity == "critical"]
@@ -2010,6 +2017,7 @@ class StrategyLabOrchestrator:
         config: BacktestConfig,
         market_data: Optional[Dict[str, List[OHLCVBar]]],
         execution_succeeded: bool,
+        open_position_entry_reasons: Optional[List[str]] = None,
     ) -> List[QualityGateResult]:
         """Run verification-phase realism gates and return their results.
 
@@ -2048,6 +2056,14 @@ class StrategyLabOrchestrator:
         results.extend(self.liquidity_realism_gate.check(trades, market_data, phase="verification"))
         results.extend(self.regime_coverage_gate.check(metrics, phase="verification"))
         results.extend(self.trade_clustering_gate.check(trades, phase="verification"))
+        results.extend(
+            self.rule_firing_rate_gate.check(
+                spec,
+                trades,
+                open_position_entry_reasons=open_position_entry_reasons or [],
+                phase="verification",
+            )
+        )
         return results
 
     def _run_analysis_phase(
@@ -2466,6 +2482,7 @@ class StrategyLabOrchestrator:
         provider_used = synthesis.provider_used
         execution_succeeded = synthesis.execution_succeeded
         max_rounds_exhausted = synthesis.max_rounds_exhausted
+        open_position_entry_reasons = synthesis.open_position_entry_reasons
 
         # ═══ Phase 3 → 4 transition: CODE_SYNTHESIS → ═════════════════
         # ═══                         BACKTEST_AND_VERIFICATION ════════
@@ -2529,6 +2546,7 @@ class StrategyLabOrchestrator:
             all_gate_results=all_gate_results,
             runtime_lookahead_violation=synthesis.runtime_lookahead_violation,
             emit=emit,
+            open_position_entry_reasons=open_position_entry_reasons,
         )
         metrics = verification.metrics
         is_winning = verification.is_winning

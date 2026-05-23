@@ -871,13 +871,16 @@ def _emit_class(
         )
         on_bar_lines.append("        _ = _entry_ref  # engine enforces stop/take-profit thresholds")
 
-    signal_exits_in_order = [r for r in exit_rules if isinstance(r, SignalExitRule)]
+    signal_exits_in_order = [
+        (idx, r) for idx, r in enumerate(exit_rules) if isinstance(r, SignalExitRule)
+    ]
     if signal_exits_in_order:
         # Per-bar guard: multiple signal-exit predicates firing on the
         # same candle emit one close order, not several.
         on_bar_lines.append("        exit_submitted = False")
-    for rule in signal_exits_in_order:
+    for exit_idx, rule in signal_exits_in_order:
         pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
+        exit_reason = f"compiled_signal_exit:exit[{exit_idx}]"
         on_bar_lines.append(
             f"        if not exit_submitted and position is not None and {pred_src}:"
         )
@@ -891,7 +894,7 @@ def _emit_class(
         on_bar_lines.append("                qty=position.qty,")
         on_bar_lines.append("                order_type=OrderType.MARKET,")
         on_bar_lines.append("                tif=TimeInForce.DAY,")
-        on_bar_lines.append('                reason="compiled_signal_exit",')
+        on_bar_lines.append(f'                reason="{exit_reason}",')
         on_bar_lines.append("            )")
         on_bar_lines.append("            exit_submitted = True")
 
@@ -905,10 +908,11 @@ def _emit_class(
     # downgrades trailing-basis stop-losses. The engine's
     # ``_EngineExitDispatcher`` enforces every stop/take rule with the
     # correct basis against the post-fill ``position.entry_price``.
-    for rule in entry_rules:
+    for idx, rule in enumerate(entry_rules):
         pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
         side_literal = "OrderSide.LONG" if rule.side == "long" else "OrderSide.SHORT"
         sizing_stmt = _render_sizing(sizing, indicator_bindings)
+        rule_reason = f"compiled_entry:entry[{idx}]"
         on_bar_lines.append(f"        if not entry_submitted and position is None and {pred_src}:")
         on_bar_lines.append(f"            {sizing_stmt}")
         on_bar_lines.append("            ctx.submit_order(")
@@ -917,7 +921,7 @@ def _emit_class(
         on_bar_lines.append("                qty=qty,")
         on_bar_lines.append("                order_type=OrderType.MARKET,")
         on_bar_lines.append("                tif=TimeInForce.DAY,")
-        on_bar_lines.append('                reason="compiled_entry",')
+        on_bar_lines.append(f'                reason="{rule_reason}",')
         on_bar_lines.append("            )")
         on_bar_lines.append("            entry_submitted = True")
 

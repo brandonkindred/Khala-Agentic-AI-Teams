@@ -19,10 +19,12 @@ from __future__ import annotations
 
 from .liquidity_realism import LiquidityRealismGate
 from .regime_coverage import RegimeCoverageGate
+from .rule_firing import RuleFiringRateGate
 from .trade_clustering import TradeClusteringGate
 
 __all__ = [
     "LiquidityRealismGate",
     "RegimeCoverageGate",
+    "RuleFiringRateGate",
     "TradeClusteringGate",
 ]

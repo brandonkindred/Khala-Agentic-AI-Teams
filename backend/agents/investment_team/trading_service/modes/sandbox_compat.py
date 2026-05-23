@@ -49,6 +49,7 @@ class StrategyRunResult:
     #: ``TradingServiceResult.probe_events``: ``{"events": [...],
     #: "truncated": bool}``.
     probe_events: Optional[Dict[str, Any]] = None
+    open_position_entry_reasons: List[str] = field(default_factory=list)
 
 
 # Keys here match the legacy sandbox ``error_type`` taxonomy so the
@@ -156,6 +157,7 @@ def run_strategy_code(
         execution_time_seconds=elapsed,
         execution_diagnostics=service_result.execution_diagnostics,
         probe_events=service_result.probe_events,
+        open_position_entry_reasons=service_result.open_position_entry_reasons,
     )
 
 

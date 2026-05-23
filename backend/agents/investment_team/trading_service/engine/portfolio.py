@@ -29,6 +29,7 @@ class Position:
     entry_order_id: str
     entry_client_order_id: str
     entry_order_type: str = "market"
+    entry_reason: str = ""
 
     # Partial-fill accounting (#386). ``original_qty`` is the qty the strategy
     # asked for; ``qty`` is the *currently open* qty (decreases on partial
