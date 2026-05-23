@@ -871,13 +871,16 @@ def _emit_class(
         )
         on_bar_lines.append("        _ = _entry_ref  # engine enforces stop/take-profit thresholds")
 
-    signal_exits_in_order = [r for r in exit_rules if isinstance(r, SignalExitRule)]
+    signal_exits_in_order = [
+        (idx, r) for idx, r in enumerate(exit_rules) if isinstance(r, SignalExitRule)
+    ]
     if signal_exits_in_order:
         # Per-bar guard: multiple signal-exit predicates firing on the
         # same candle emit one close order, not several.
         on_bar_lines.append("        exit_submitted = False")
-    for rule in signal_exits_in_order:
+    for exit_idx, rule in signal_exits_in_order:
         pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
+        exit_reason = f"compiled_signal_exit:exit[{exit_idx}]"
         on_bar_lines.append(
             f"        if not exit_submitted and position is not None and {pred_src}:"
         )
@@ -891,7 +894,7 @@ def _emit_class(
         on_bar_lines.append("                qty=position.qty,")
         on_bar_lines.append("                order_type=OrderType.MARKET,")
         on_bar_lines.append("                tif=TimeInForce.DAY,")
-        on_bar_lines.append('                reason="compiled_signal_exit",')
+        on_bar_lines.append(f'                reason="{exit_reason}",')
         on_bar_lines.append("            )")
         on_bar_lines.append("            exit_submitted = True")
 
