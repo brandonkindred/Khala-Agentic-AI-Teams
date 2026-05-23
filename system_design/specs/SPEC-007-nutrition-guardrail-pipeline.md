@@ -470,7 +470,7 @@ previously flagged.
 | W10 | UI: filter notice + flag chips + medication banner | FE | P1 |
 | W11 | Observability counters + rejection audit log | P1 |
 | W12 | Replay job on `GUARDRAIL_VERSION` / `KB_VERSION` bump | P2 |
-| W13 | CODEOWNERS entry for `interactions.yaml` — team lead + clinical reviewer | P1 |
+| W13 | (Withdrawn — CODEOWNERS gate removed) | — |
 | W14 | Benchmarks: `check_recommendation` p99 ≤ 10 ms | P2 |
 
 ---
@@ -516,7 +516,7 @@ on → SPEC-007 pipeline).
 
 ### Phase 4 — Replay and cleanup (P1/P2)
 - [ ] W12 replay job live.
-- [ ] W13 CODEOWNERS committed.
+- [ ] ~~W13 CODEOWNERS committed.~~ Withdrawn — CODEOWNERS gate removed.
 - [ ] W14 benchmarks baselined.
 - [ ] Flag default on; flag removal scheduled.
 
@@ -669,79 +669,3 @@ fixture passes.
   ingredients × ~200 bytes of parse metadata = ~2 KB. Acceptable;
   ADR-003 nutrient data will dominate eventually. Compress column
   or archive >90 days if it becomes an issue.
-
----
-
-## 8. Approval ladder
-
-Sensitive policy artefacts ship under a two-sign-off rule, enforced by
-`.github/CODEOWNERS` plus branch protection ("Require review from Code
-Owners"). The policy is referenced inline at §4.4 (promotion of
-`flag` → `hard`), §5 Phase 4 W13, and §6.8 cutover; this section is the
-single source of truth.
-
-### 8.1 `interactions.yaml`
-
-Any PR that modifies
-`backend/agents/nutrition_meal_planning_team/guardrail/data/interactions.yaml`
-— including the promotion of an entry from `flag` to `hard` per §4.4 —
-requires approval from **both**:
-
-1. **Engineering team lead** — verifies schema correctness, version bump,
-   loader test coverage, and replay-job implications (W12).
-2. **Clinical reviewer** — verifies medical accuracy of the interaction
-   class, severity assignment, and the supporting citation.
-
-Either reviewer can block on either axis; promotions are not
-"engineering-only" or "clinical-only".
-
-### 8.2 CODEOWNERS handles and enforcement gap
-
-The current CODEOWNERS entry references the repo owner (`@brandonkindred`)
-as a placeholder for both roles while the engineering-lead and
-clinical-reviewer GitHub teams are stood up. The placeholder is annotated
-with `TODO(SPEC-007 W13)` so the handover is visible.
-
-Once the teams exist, replace the placeholder with two distinct owners on
-the same CODEOWNERS line:
-
-```
-backend/agents/nutrition_meal_planning_team/guardrail/data/interactions.yaml @<org>/engineering-leads @<org>/clinical-reviewers
-```
-
-**CODEOWNERS alone does not enforce two-category sign-off.** With
-"Require review from Code Owners" enabled, GitHub treats a multi-owner
-line as "approval from *any one* of the listed owners is sufficient" —
-so either team alone could clear the gate. Closing that gap is part of
-the W13 handover and needs one of:
-
-1. **Per-team repository rulesets (preferred)** — two separate ruleset
-   rules, each requiring at least one approval from a specific team
-   (`@<org>/engineering-leads` and `@<org>/clinical-reviewers`), scoped
-   to PRs that touch `interactions.yaml`. Both rules must be satisfied
-   for the merge button to enable.
-2. **Required status check** — a workflow that fails unless the PR's
-   approvers list intersects both teams; mark the check required in
-   branch protection.
-
-Until either mechanism lands, the placeholder owner provides single-
-reviewer gating but does not meet §8.1's two-category requirement; the
-policy is held by reviewer discipline.
-
-**Self-ownership of CODEOWNERS.** The CODEOWNERS file is also assigned
-to the engineering owner (`/.github/CODEOWNERS @brandonkindred` today;
-`@<org>/engineering-leads` once provisioned). Without this rule, a PR
-could strip the `interactions.yaml` line first and a follow-up PR could
-then edit the data with no gate, since CODEOWNERS only protects paths
-it explicitly lists. The supplemental ruleset / status check above must
-also scope to CODEOWNERS edits that touch the `interactions.yaml` rule,
-otherwise a unilateral engineering-side strip could disable the
-clinical-reviewer requirement on the next PR.
-
-### 8.3 Verification (W13 acceptance)
-
-Open a dummy PR that creates `interactions.yaml` with a single header
-comment (W3 will replace this with the real content). The PR's
-"Reviewers" sidebar must surface the CODEOWNERS-required reviewer before
-merge, and a non-owner approval alone must not be sufficient to merge
-once branch protection is configured.

@@ -502,8 +502,6 @@ changes behavior on.
   allergen-bearing seed rows.
 - Second-engineer review on `taxonomy.py` (enum stability is
   load-bearing).
-- Owner for `ingredient_kb/` named in CODEOWNERS; future PRs route
-  there automatically.
 
 ### 6.8 Cutover criteria (freeze v1.0.0)
 
