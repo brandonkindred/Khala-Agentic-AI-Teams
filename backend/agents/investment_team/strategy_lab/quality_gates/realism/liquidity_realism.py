@@ -183,15 +183,15 @@ class LiquidityRealismGate(GateResultsMixin):
                 f"realism-adjusted profit factor {adjusted_pf:.2f} still "
                 ">= 1.0 but the strategy relies on borderline-illiquid fills."
             )
-        if unresolvable_count > 0:
+        if unresolvable_count > 0 and oversized_count == 0:
             return self._info(
-                f"Liquidity check: 0 oversized trades; ADV unresolvable for "
-                f"{unresolvable_count} of {total_trades} (insufficient bars "
-                "or zero-volume window)."
+                f"Liquidity check: {oversized_count} oversized trades; ADV "
+                f"unresolvable for {unresolvable_count} of {total_trades} "
+                "(insufficient bars or zero-volume window)."
             )
         return self._info(
-            f"Liquidity check clean: 0 of {total_trades} trades exceeded "
-            f"{self._envelope:.0%}-of-ADV."
+            f"Liquidity check clean: {oversized_count} of {total_trades} "
+            f"trades exceeded {self._envelope:.0%}-of-ADV."
         )
 
 
