@@ -1133,6 +1133,10 @@ class StrategyLabOrchestrator:
                 dsr_aware=config.walk_forward_enabled,
                 diagnostics=exec_result.execution_diagnostics,
                 coverage_report=metrics.coverage_report,
+                start_date=config.start_date,
+                end_date=config.end_date,
+                timeframe=spec.timeframe,
+                market_data=market_data,
             )
             self.record_gates(anomaly_gates, all_gate_results, refinement_round=round_num)
 
@@ -1627,6 +1631,10 @@ class StrategyLabOrchestrator:
             diagnostics=align_exec.execution_diagnostics,
             coverage_report=new_metrics.coverage_report,
             phase="verification",
+            start_date=config.start_date,
+            end_date=config.end_date,
+            timeframe=proposed_spec.timeframe,
+            market_data=market_data,
         )
         self.record_gates(
             anomaly_gates,
@@ -1775,6 +1783,19 @@ class StrategyLabOrchestrator:
                 (not r.passed) and r.severity == "critical" for r in conformance_results
             )
 
+        # Realism cycle — verification-phase checks that the trade ledger
+        # resembles a real-world trading outcome (symbol breadth today;
+        # liquidity / cost-stress / regime / clustering / rule-firing are
+        # additive). Critical failures veto ``is_winning`` below.
+        realism_results = self._run_realism_gates(
+            spec=spec,
+            trades=trades,
+            execution_succeeded=execution_succeeded,
+        )
+        all_gate_results.extend(realism_results)
+        realism_critical = [r for r in realism_results if not r.passed and r.severity == "critical"]
+        realism_passed = not realism_critical
+
         # Resolve is_winning across the three publication-decision paths.
         # ``upstream_admitted`` records whether the upstream gate (walk-
         # forward or fallback) said admit. It feeds the veto-augmentation
@@ -1789,6 +1810,7 @@ class StrategyLabOrchestrator:
                 and acceptance_passed
                 and trades_aligned
                 and exit_rule_conformance_passed
+                and realism_passed
             )
             upstream_admitted = acceptance_passed
         elif walk_forward_failed and execution_succeeded:
@@ -1805,6 +1827,10 @@ class StrategyLabOrchestrator:
                 dsr_aware=False,
                 coverage_report=metrics.coverage_report,
                 phase="verification",
+                start_date=config.start_date,
+                end_date=config.end_date,
+                timeframe=spec.timeframe,
+                market_data=market_data,
             )
             fallback_criticals = [
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
@@ -1815,6 +1841,7 @@ class StrategyLabOrchestrator:
                 and not fallback_criticals
                 and trades_aligned
                 and exit_rule_conformance_passed
+                and realism_passed
             )
             upstream_admitted = return_ok and not fallback_criticals
             if fallback_criticals:
@@ -1887,6 +1914,17 @@ class StrategyLabOrchestrator:
                 metrics, suffix, upstream_admitted=upstream_admitted
             )
 
+        if execution_succeeded and trades and not realism_passed:
+            detail = "; ".join(r.details for r in realism_critical)
+            suffix = (
+                f"realism_failed: {detail}"
+                if detail
+                else "realism_failed: realism gates produced a critical finding"
+            )
+            metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
+                metrics, suffix, upstream_admitted=upstream_admitted
+            )
+
         if execution_succeeded and trades and alignment_reports and not trades_aligned:
             last_report = alignment_reports[-1]
             # NOTE: do NOT name this ``rationale`` — the strategy-rationale
@@ -1910,6 +1948,38 @@ class StrategyLabOrchestrator:
             walk_forward_failed=walk_forward_failed,
             exit_rule_conformance_passed=exit_rule_conformance_passed,
         )
+
+    def _run_realism_gates(
+        self,
+        *,
+        spec: StrategySpec,
+        trades: List[TradeRecord],
+        execution_succeeded: bool,
+    ) -> List[QualityGateResult]:
+        """Run verification-phase realism gates and return their results.
+
+        Preconditions:
+          - Called from :meth:`_run_verification_phase` between walk-forward
+            evaluation and the publication-veto block.
+        Postconditions:
+          - Returns ``[]`` when execution didn't succeed or the ledger is
+            empty — the gates' contracts are only meaningful for a strategy
+            that actually traded.
+          - Otherwise returns one or more :class:`QualityGateResult`s; the
+            caller treats any ``critical`` entry as a publication veto and
+            appends every entry to the persisted gate timeline.
+        Invariants:
+          - Pure orchestration: never mutates ``spec`` or ``trades``.
+          - Gates are run in a fixed order so the persisted timeline is
+            deterministic across re-runs of the same record.
+        """
+        if not execution_succeeded or not trades:
+            return []
+        results: List[QualityGateResult] = []
+        results.extend(
+            self.target_symbol_coverage_gate.check_breadth(spec, trades, phase="verification")
+        )
+        return results
 
     def _run_analysis_phase(
         self,

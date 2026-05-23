@@ -82,26 +82,34 @@ class TargetSymbolCoverageGate(GateResultsMixin):
                 missing = sorted(target_upper - fetched_upper)
                 if missing:
                     results.append(
-                        self._critical("target_symbols missing from fetched market data: "
-                                f"{missing}. Requested={sorted({s.upper() for s in requested_symbols})}, "
-                                f"fetched={sorted(fetched_upper)}.")
+                        self._critical(
+                            "target_symbols missing from fetched market data: "
+                            f"{missing}. Requested={sorted({s.upper() for s in requested_symbols})}, "
+                            f"fetched={sorted(fetched_upper)}."
+                        )
                     )
                 else:
                     results.append(
-                        self._info(f"All {len(target_upper)} target_symbols present in fetched data.")
+                        self._info(
+                            f"All {len(target_upper)} target_symbols present in fetched data."
+                        )
                     )
             else:
                 mentioned = sorted(self._tickers_in_hypothesis(spec.hypothesis or ""))
                 if mentioned:
                     results.append(
-                        self._warning(f"Hypothesis mentions known ticker(s) {mentioned} but "
-                                "spec.target_symbols is empty; the backtest is using the "
-                                "asset-class default universe. Set spec.target_symbols "
-                                "explicitly to guarantee the run trades the intended tickers.")
+                        self._warning(
+                            f"Hypothesis mentions known ticker(s) {mentioned} but "
+                            "spec.target_symbols is empty; the backtest is using the "
+                            "asset-class default universe. Set spec.target_symbols "
+                            "explicitly to guarantee the run trades the intended tickers."
+                        )
                     )
                 else:
                     results.append(
-                        self._info("spec.target_symbols empty; no specific tickers referenced in hypothesis.")
+                        self._info(
+                            "spec.target_symbols empty; no specific tickers referenced in hypothesis."
+                        )
                     )
 
             return results
@@ -120,15 +128,71 @@ class TargetSymbolCoverageGate(GateResultsMixin):
                 ]
 
             target_upper = {s.strip().upper() for s in spec.target_symbols if s and s.strip()}
-            offending = sorted({t.symbol.strip().upper() for t in trades if t.symbol} - target_upper)
+            offending = sorted(
+                {t.symbol.strip().upper() for t in trades if t.symbol} - target_upper
+            )
             if offending:
                 return [
-                    self._critical("Trade ledger contains symbols outside spec.target_symbols: "
-                            f"{offending}. target_symbols={sorted(target_upper)}.")
+                    self._critical(
+                        "Trade ledger contains symbols outside spec.target_symbols: "
+                        f"{offending}. target_symbols={sorted(target_upper)}."
+                    )
                 ]
 
+            return [self._info(f"All {len(trades)} trades within target_symbols.")]
+
+    def check_breadth(
+        self,
+        spec: StrategySpec,
+        trades: List[TradeRecord],
+        *,
+        phase: StrategyLabPhase = "verification",
+    ) -> List[QualityGateResult]:
+        """Flag strategies that touch only one of their intended symbols.
+
+        Preconditions:
+          - ``spec`` is a :class:`StrategySpec`.
+          - ``trades`` is a list (possibly empty) of :class:`TradeRecord`.
+        Postconditions:
+          - Returns exactly one :class:`QualityGateResult`.
+          - Severity is ``warning`` when ``len(spec.target_symbols) > 1`` AND
+            the realised ledger uses a single symbol; ``info`` otherwise
+            (single-target spec, empty target list, no trades, or breadth
+            already achieved).
+          - Never emits ``critical`` — true universe leakage is the job of
+            :meth:`check_trades`; breadth is a softer signal.
+        Invariants:
+          - Comparison is case-insensitive: symbols are upper-cased before
+            set construction so ``"qqq"`` and ``"QQQ"`` are treated as one.
+        """
+        with self._using_phase(phase):
+            target_upper = {s.strip().upper() for s in spec.target_symbols if s and s.strip()}
+            if len(target_upper) <= 1:
+                return [
+                    self._info(
+                        "Symbol-breadth check skipped: spec.target_symbols has "
+                        f"{len(target_upper)} entries."
+                    )
+                ]
+            if not trades:
+                return [self._info("Symbol-breadth check skipped: trade ledger is empty.")]
+            traded_upper = {
+                t.symbol.strip().upper() for t in trades if t.symbol and t.symbol.strip()
+            }
+            if len(traded_upper) == 1:
+                only = next(iter(traded_upper))
+                return [
+                    self._warning(
+                        f"spec.target_symbols={sorted(target_upper)} but the "
+                        f"realised ledger traded only {only!r} across "
+                        f"{len(trades)} trades — strategy is not exploiting the "
+                        "intended universe."
+                    )
+                ]
             return [
-                self._info(f"All {len(trades)} trades within target_symbols.")
+                self._info(
+                    f"Trade ledger uses {len(traded_upper)} of {len(target_upper)} target symbols."
+                )
             ]
 
     @staticmethod

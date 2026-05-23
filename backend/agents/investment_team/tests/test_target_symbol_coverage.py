@@ -207,3 +207,85 @@ def test_check_trades_empty_ledger_passes() -> None:
 
     assert _criticals(results) == []
     assert any(r.passed for r in results)
+
+
+# ── check_breadth ───────────────────────────────────────────────────────
+
+
+def test_check_breadth_warns_when_multi_target_but_single_traded_symbol() -> None:
+    """Spec asks for QQQ + SPY + IWM but the ledger only touches QQQ — the
+    strategy isn't exploiting its intended universe, so emit a warning."""
+    gate = TargetSymbolCoverageGate()
+    spec = _spec(target_symbols=["QQQ", "SPY", "IWM"])
+
+    results = gate.check_breadth(
+        spec, trades=[_trade("QQQ"), _trade("QQQ", trade_num=2), _trade("QQQ", trade_num=3)]
+    )
+
+    warnings = _warnings(results)
+    assert len(warnings) == 1
+    assert "QQQ" in warnings[0].details
+    assert "SPY" in warnings[0].details
+    assert warnings[0].gate_name == GATE
+    assert warnings[0].phase == "verification"
+
+
+def test_check_breadth_passes_when_multi_target_and_multi_traded_symbols() -> None:
+    gate = TargetSymbolCoverageGate()
+    spec = _spec(target_symbols=["QQQ", "SPY"])
+
+    results = gate.check_breadth(
+        spec, trades=[_trade("QQQ"), _trade("SPY", trade_num=2)]
+    )
+
+    assert _criticals(results) == []
+    assert _warnings(results) == []
+    assert any(r.passed for r in results)
+
+
+def test_check_breadth_skipped_when_single_target_symbol() -> None:
+    """One target ticker → breadth is irrelevant; emit a benign info."""
+    gate = TargetSymbolCoverageGate()
+    spec = _spec(target_symbols=["QQQ"])
+
+    results = gate.check_breadth(spec, trades=[_trade("QQQ")])
+
+    assert _criticals(results) == []
+    assert _warnings(results) == []
+    assert all(r.passed and r.severity == "info" for r in results)
+
+
+def test_check_breadth_skipped_when_target_symbols_empty() -> None:
+    gate = TargetSymbolCoverageGate()
+    spec = _spec(target_symbols=[])
+
+    results = gate.check_breadth(spec, trades=[_trade("AAPL")])
+
+    assert _criticals(results) == []
+    assert _warnings(results) == []
+    assert all(r.passed and r.severity == "info" for r in results)
+
+
+def test_check_breadth_skipped_when_ledger_empty() -> None:
+    gate = TargetSymbolCoverageGate()
+    spec = _spec(target_symbols=["QQQ", "SPY"])
+
+    results = gate.check_breadth(spec, trades=[])
+
+    assert _criticals(results) == []
+    assert _warnings(results) == []
+    assert all(r.passed and r.severity == "info" for r in results)
+
+
+def test_check_breadth_case_insensitive() -> None:
+    """Mixed-case symbols on either side must collapse to one entry."""
+    gate = TargetSymbolCoverageGate()
+    spec = _spec(target_symbols=["QQQ", "SPY"])
+
+    results = gate.check_breadth(
+        spec, trades=[_trade("qqq"), _trade("QQQ", trade_num=2)]
+    )
+
+    warnings = _warnings(results)
+    assert len(warnings) == 1
+    assert "QQQ" in warnings[0].details
