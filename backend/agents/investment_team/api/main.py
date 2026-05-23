@@ -873,7 +873,7 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
     if not strategy:
         raise HTTPException(status_code=404, detail=f"Strategy {request.strategy_id} not found")
 
-    strategy = StrategySpec(**strategy) if isinstance(strategy, dict) else strategy
+    strategy = StrategySpec.parse_persisted(strategy)
 
     config = BacktestConfig(
         start_date=request.start_date,
@@ -958,7 +958,7 @@ def list_backtests(strategy_id: Optional[str] = None) -> ListBacktestsResponse:
     with _lock:
         raw = list(_backtests.values())
 
-    items = [BacktestRecord(**r) if isinstance(r, dict) else r for r in raw]
+    items = [BacktestRecord.parse_persisted(r) for r in raw]
 
     if strategy_id:
         items = [item for item in items if item.strategy_id == strategy_id]
@@ -1331,7 +1331,7 @@ def _run_one_strategy_lab_cycle(
     with _lock:
         raw_prior = list(_strategy_lab_records.values())
 
-    prior_records = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
+    prior_records = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
     prior_records.sort(key=lambda r: r.created_at)
 
     record = orchestrator.run_cycle(
@@ -1536,9 +1536,7 @@ def _strategy_lab_worker(
                     )
                 with _lock:
                     raw_prior = list(_strategy_lab_records.values())
-                prior_for_brief = [
-                    StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior
-                ]
+                prior_for_brief = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
                 prior_for_brief.sort(key=lambda r: r.created_at)
 
                 expert = SignalIntelligenceExpert()
@@ -2007,7 +2005,7 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
     with _lock:
         raw = list(_strategy_lab_records.values())
 
-    items = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw]
+    items = [StrategyLabRecord.parse_persisted(r) for r in raw]
     items.sort(key=lambda r: r.created_at, reverse=True)
 
     winning_count = sum(1 for r in items if r.is_winning)
@@ -2551,7 +2549,7 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
                 status_code=404,
                 detail=f"Strategy lab record '{lab_record_id}' not found.",
             )
-        record = StrategyLabRecord(**raw) if isinstance(raw, dict) else raw
+        record = StrategyLabRecord.parse_persisted(raw)
         strategy_id = record.strategy.strategy_id
         backtest_id = record.backtest.backtest_id
 
@@ -2722,7 +2720,7 @@ def _run_paper_trading_background(
             with _lock:
                 raw = _paper_trading_sessions.get(session_id)
                 if raw is not None:
-                    session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+                    session = PaperTradingSession.parse_persisted(raw)
                     session.status = PaperTradingStatus.FAILED
                     session.divergence_analysis = (
                         "Failed to fetch market data from external sources."
@@ -2759,7 +2757,7 @@ def _run_paper_trading_background(
         with _lock:
             raw = _paper_trading_sessions.get(session_id)
             if raw is not None:
-                session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+                session = PaperTradingSession.parse_persisted(raw)
                 session.status = PaperTradingStatus.FAILED
                 session.divergence_analysis = f"Paper trading crashed: {exc}"
                 session.completed_at = datetime.now(tz=timezone.utc).isoformat()
@@ -2787,7 +2785,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             status_code=404, detail=f"Strategy lab record '{request.lab_record_id}' not found."
         )
 
-    lab_record = StrategyLabRecord(**raw_record) if isinstance(raw_record, dict) else raw_record
+    lab_record = StrategyLabRecord.parse_persisted(raw_record)
 
     if not lab_record.is_winning:
         raise HTTPException(
@@ -2826,7 +2824,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         with _lock:
             for existing in _paper_trading_sessions.values():
                 existing_session = (
-                    PaperTradingSession(**existing) if isinstance(existing, dict) else existing
+                    PaperTradingSession.parse_persisted(existing)
                 )
                 if (
                     existing_session.strategy.strategy_id == strategy.strategy_id
@@ -3008,7 +3006,7 @@ def _run_live_paper_trading_background(
             raw = _paper_trading_sessions.get(session_id)
             if raw is None:
                 return
-            session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+            session = PaperTradingSession.parse_persisted(raw)
             session.trades = run_result.trades
             session.fill_count = run_result.fill_count
             session.cutover_ts = run_result.cutover_ts
@@ -3046,7 +3044,7 @@ def _run_live_paper_trading_background(
         with _lock:
             raw = _paper_trading_sessions.get(session_id)
             if raw is not None:
-                session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+                session = PaperTradingSession.parse_persisted(raw)
                 session.status = PaperTradingStatus.FAILED
                 session.error = str(exc)[:500]
                 session.completed_at = datetime.now(tz=timezone.utc).isoformat()
@@ -3076,7 +3074,7 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
             raise HTTPException(
                 status_code=404, detail=f"Paper trading session '{session_id}' not found."
             )
-        session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+        session = PaperTradingSession.parse_persisted(raw)
         controller = _live_paper_stop_controllers.get(session_id)
         if controller is not None:
             controller.request_stop()
@@ -3130,7 +3128,7 @@ def get_paper_trading_results(
     with _lock:
         raw = list(_paper_trading_sessions.values())
 
-    items = [PaperTradingSession(**r) if isinstance(r, dict) else r for r in raw]
+    items = [PaperTradingSession.parse_persisted(r) for r in raw]
     items.sort(key=lambda s: s.completed_at or s.started_at, reverse=True)
 
     ready_count = sum(1 for s in items if s.verdict == PaperTradingVerdict.READY_FOR_LIVE)
@@ -3158,7 +3156,7 @@ def get_paper_trading_session(session_id: str) -> PaperTradingResponse:
             status_code=404, detail=f"Paper trading session '{session_id}' not found."
         )
 
-    session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+    session = PaperTradingSession.parse_persisted(raw)
     return PaperTradingResponse(session=session)
 
 
@@ -3193,7 +3191,7 @@ def _recover_orphaned_paper_trading_sessions() -> None:
     recovered = 0
     for raw in raw_sessions:
         try:
-            session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+            session = PaperTradingSession.parse_persisted(raw)
         except Exception:
             continue
         if session.status not in _active_statuses:
