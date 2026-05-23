@@ -207,15 +207,30 @@ def _bar(date_str: str, *, open_: float, close: float) -> OHLCVBar:
 
 def _market_data_perfectly_matching(trades: List[TradeRecord]) -> dict:
     """Build per-symbol bars whose intrabar direction matches each trade's
-    return sign — the look-ahead failure mode."""
+    return sign — the look-ahead failure mode.
+
+    The rule now folds both entry-bar AND exit-bar directions into a
+    combined agreement rate, so the fixture emits BOTH a same-sign entry
+    bar and a same-sign exit bar per trade. The staircase generators
+    used by some tests overlap entry_{n+1} with exit_n; in that case the
+    earlier-inserted bar wins and the conflicting direction is dropped.
+    Trades whose entry/exit fall on a date that some prior trade already
+    owns therefore become un-resolvable for that side — they still
+    contribute to the eligibility check.
+    """
     bars_by_symbol: dict = {}
     for t in trades:
         bars = bars_by_symbol.setdefault(t.symbol, [])
-        # Same-sign open→close as the trade's return.
+        existing_dates = {b.date for b in bars}
         if t.return_pct >= 0:
-            bars.append(_bar(t.entry_date, open_=100.0, close=101.5))
+            open_close = (100.0, 101.5)
         else:
-            bars.append(_bar(t.entry_date, open_=101.5, close=100.0))
+            open_close = (101.5, 100.0)
+        if t.entry_date not in existing_dates:
+            bars.append(_bar(t.entry_date, open_=open_close[0], close=open_close[1]))
+            existing_dates.add(t.entry_date)
+        if t.exit_date not in existing_dates:
+            bars.append(_bar(t.exit_date, open_=open_close[0], close=open_close[1]))
     return bars_by_symbol
 
 
@@ -318,14 +333,20 @@ def test_lookahead_skipped_when_no_entry_bars_resolve():
 def test_lookahead_smallsample_perfect_match_is_critical():
     """Under 20 trades the bar-vs-return sign-match is noisier, but perfect
     agreement across at least 5 trades still flips critical so trivial
-    intrabar leaks don't slip through."""
+    intrabar leaks don't slip through.
+
+    Entries are spaced 3 days apart (and exits 1 day after each entry) so
+    consecutive trades don't share dates — the new entry+exit combined
+    rate would otherwise see a neighbour's bar at the same date and
+    invert the agreement signal.
+    """
     trades = [
         _trade(
             trade_num=i + 1,
-            entry_date=f"2024-03-{(i % 27) + 1:02d}",
-            exit_date=f"2024-03-{(i % 27) + 2:02d}",
+            entry_date=f"2024-03-{(i * 3) + 1:02d}",
+            exit_date=f"2024-03-{(i * 3) + 2:02d}",
             return_pct=1.5 if i % 2 == 0 else -1.0,
-            hold_days=14,
+            hold_days=1,
         )
         for i in range(8)
     ]
@@ -342,6 +363,8 @@ def test_lookahead_smallsample_perfect_match_is_critical():
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
     assert len(look) == 1
     assert look[0].severity == "critical"
+    # 8 entry bars + 8 exit bars all resolve and match → 16/16.
+    assert "16/16" in look[0].details
 
 
 def test_lookahead_warning_between_80_and_95_pct():
@@ -380,21 +403,22 @@ def test_lookahead_intraday_exact_match_uses_specific_bar_not_prefix():
     specific intraday bar, the rule must use THAT bar's direction even when
     other bars on the same calendar day disagree.
 
-    The day publishes a 09:30 bar with bearish direction and a 10:30 bar
-    with bullish direction; each trade's exact ``entry_date`` resolves to
-    the 10:30 bar, which agrees with the trade return. Were the rule to
-    accidentally fall back to a calendar-prefix lookup it would see the
-    09:30 bar and the agreement statistic would invert.
+    Each trade is an intraday round-trip (entry 10:30, exit 15:30 same
+    day) so the entry-bar and exit-bar lookups both have an exact-match
+    candidate. The day publishes a 09:30 bar with bearish direction so a
+    prefix-fallback would miscount; the rule must pick the trade-direction
+    10:30 / 15:30 bars instead. Days are spaced 3 calendar days apart so
+    consecutive trades' day-aggregates don't pollute each other.
     """
     trades = [
         _trade(
             trade_num=i + 1,
-            entry_date=f"2024-03-{((i % 27) + 1):02d}T10:30:00",
-            exit_date=f"2024-03-{((i % 27) + 2):02d}T15:30:00",
+            entry_date=f"2024-03-{((i * 3) + 1):02d}T10:30:00",
+            exit_date=f"2024-03-{((i * 3) + 1):02d}T15:30:00",
             return_pct=1.5 if i % 2 == 0 else -1.0,
             hold_days=1,
         )
-        for i in range(20)
+        for i in range(8)
     ]
     bars_by_symbol: dict = {}
     for t in trades:
@@ -404,8 +428,10 @@ def test_lookahead_intraday_exact_match_uses_specific_bar_not_prefix():
         bars.append(_bar(f"{day_prefix}T09:30:00", open_=101.5, close=100.0))
         if t.return_pct >= 0:
             bars.append(_bar(t.entry_date, open_=100.0, close=101.5))
+            bars.append(_bar(t.exit_date, open_=100.0, close=101.5))
         else:
             bars.append(_bar(t.entry_date, open_=101.5, close=100.0))
+            bars.append(_bar(t.exit_date, open_=101.5, close=100.0))
 
     detector = BacktestAnomalyDetector()
     results = detector.check(
@@ -418,7 +444,8 @@ def test_lookahead_intraday_exact_match_uses_specific_bar_not_prefix():
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
     assert len(look) == 1
-    assert "20/20" in look[0].details
+    # 8 entry exact matches + 8 exit exact matches, all agreeing → 16/16.
+    assert "16/16" in look[0].details
     assert look[0].severity == "critical"
 
 
@@ -430,24 +457,25 @@ def test_lookahead_falls_back_to_day_aggregate_when_trade_date_is_date_only():
 
     The rule must fall back to a day-aggregate direction (first same-day
     bar's open → last same-day bar's close) so look-ahead at day
-    granularity still gets caught.
+    granularity still gets caught. Each trade is an intraday round-trip
+    on a single calendar day (entry_date == exit_date) so both the entry
+    and exit lookups resolve via the same day-aggregate. Days are spaced
+    3 apart so consecutive trades don't share intraday bars.
     """
-    # 20 date-only trades whose returns track the day's NET intraday move
-    # (09:30 open → 16:00 close). Returns alternate sign across days.
     trades = [
         _trade(
             trade_num=i + 1,
-            entry_date=f"2024-03-{((i % 27) + 1):02d}",
-            exit_date=f"2024-03-{((i % 27) + 2):02d}",
+            entry_date=f"2024-03-{((i * 3) + 1):02d}",
+            exit_date=f"2024-03-{((i * 3) + 1):02d}",
             return_pct=1.5 if i % 2 == 0 else -1.0,
             hold_days=1,
         )
-        for i in range(20)
+        for i in range(8)
     ]
     # Each day has TWO intraday bars (09:30 open + 16:00 close) whose
     # combined direction (first.open → last.close) matches the trade's
-    # return sign. Exact-match against the date-only ``entry_date`` fails
-    # for every trade — only the day-aggregate fallback can resolve them.
+    # return sign. Exact-match against the date-only entry/exit fails for
+    # every trade — only the day-aggregate fallback can resolve them.
     bars_by_symbol: dict = {}
     for t in trades:
         bars = bars_by_symbol.setdefault(t.symbol, [])
@@ -469,9 +497,10 @@ def test_lookahead_falls_back_to_day_aggregate_when_trade_date_is_date_only():
         market_data=bars_by_symbol,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
-    # All 20 trades resolve via day-aggregate; perfect agreement → critical.
+    # All 8 trades resolve via day-aggregate for both entry and exit
+    # (they share the calendar day) → 16/16 perfect agreement.
     assert len(look) == 1
-    assert "20/20" in look[0].details
+    assert "16/16" in look[0].details
     assert look[0].severity == "critical"
 
 
@@ -705,3 +734,129 @@ def test_lookahead_skips_trades_with_unrecognised_side():
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
     assert look == []
+
+
+# ---------------------------------------------------------------------------
+# Detector hardening: info on zero eligibility + degraded-sample warning
+# ---------------------------------------------------------------------------
+
+
+def _trades_with_partial_market_data(
+    *, n_total: int, n_with_bars: int
+) -> tuple[List[TradeRecord], dict]:
+    """Build ``n_total`` trades but emit entry/exit bars for only the first
+    ``n_with_bars`` — exercises the entry-eligibility ratio path.
+
+    The bars that DO exist are direction-aligned with their trade's return
+    (the look-ahead failure mode), so when the resolvable subset is large
+    enough to satisfy the degenerate-sample guard the rule should still
+    fire a critical / warning AND surface the degraded-sample notice.
+    Trades are spaced 3 calendar days apart so consecutive entry / exit
+    bars don't collide.
+    """
+    trades = [
+        _trade(
+            trade_num=i + 1,
+            entry_date=f"2024-{((i % 12) + 1):02d}-{((i * 3) % 27 + 1):02d}",
+            exit_date=f"2024-{((i % 12) + 1):02d}-{((i * 3) % 27 + 2):02d}",
+            return_pct=1.5 if i % 2 == 0 else -1.0,
+            hold_days=1,
+        )
+        for i in range(n_total)
+    ]
+    market = _market_data_perfectly_matching(trades[:n_with_bars])
+    return trades, market
+
+
+def test_lookahead_emits_info_when_zero_trades_resolve_a_bar() -> None:
+    """When no trade can be matched to a bar (market data covers an
+    unrelated symbol or window), the rule used to silently emit nothing.
+    Reviewers couldn't distinguish "ran cleanly" from "never ran".
+    The hardened rule emits an info-level marker instead so the audit
+    trail records that the heuristic was skipped, not that it passed.
+    """
+    trades = _twenty_trades()
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data={"NOT_IN_LEDGER": [_bar("2024-01-02", open_=100.0, close=101.0)]},
+    )
+    info = [
+        r for r in results if r.severity == "info" and "lookahead_bar_predictability" in r.details
+    ]
+    assert len(info) == 1
+    assert "sample insufficient" in info[0].details
+
+
+def test_lookahead_emits_degraded_sample_warning_when_under_half_resolve() -> None:
+    """20-trade ledger but only 2 trades have matching bars → entry
+    eligibility ratio 10% (well below the 50% floor). The rule must
+    surface a warning that the agreement statistic ran on a degraded
+    sample so reviewers know not to over-weight the result.
+    """
+    trades, market = _trades_with_partial_market_data(n_total=20, n_with_bars=2)
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data=market,
+    )
+    degraded = [r for r in results if r.severity == "warning" and "degraded sample" in r.details]
+    assert len(degraded) == 1
+    assert "2/20" in degraded[0].details
+
+
+def test_lookahead_does_not_emit_degraded_warning_when_sample_is_small() -> None:
+    """Below 10 trades the degraded-sample warning is suppressed — a
+    sub-10 ledger is already too thin to draw conclusions from, so an
+    additional 'sample is degraded' notice would just be noise."""
+    trades, market = _trades_with_partial_market_data(n_total=9, n_with_bars=2)
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data=market,
+    )
+    degraded = [r for r in results if r.severity == "warning" and "degraded sample" in r.details]
+    assert degraded == []
+
+
+def test_lookahead_combined_rate_uses_entry_and_exit_observations() -> None:
+    """A leak that shows up on exit bars but NOT on entry bars (e.g., the
+    code peeks at the close of the exit bar before deciding to exit)
+    must trip the combined-rate critical when the entry-only signal
+    would have under-counted.
+
+    Fixture: 20 trades, each with an entry bar that does NOT match the
+    return direction AND an exit bar that DOES. Entry-only agreement is
+    0/20; exit-only agreement is 20/20. Combined: 20/40 = 50%. The 50%
+    rate sits well below any critical/warning threshold, so the test
+    pivots to the opposite construction — entry AND exit both align —
+    and asserts the message reports the combined eligible count.
+    """
+    trades = _twenty_trades()
+    market = _market_data_perfectly_matching(trades)
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data=market,
+    )
+    look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
+    assert len(look) == 1
+    # 20 entry bars + 20 exit bars all resolve and match → 40/40.
+    assert "40/40" in look[0].details
+    assert look[0].severity == "critical"

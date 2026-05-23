@@ -252,6 +252,15 @@ class _SynthesisLoopOutcome:
     # Issue #533 — per-symbol provider id, snapshotted at fetch time so it
     # survives later fetches in the same orchestrator run.
     provider_used: Dict[str, str] = field(default_factory=dict)
+    # True iff the last code-execution attempt surfaced a runtime
+    # ``lookahead_violation`` (the harness's ``AttributeError`` trap on a
+    # forward-field access). Threaded into the verification phase so a
+    # max-rounds-exhausted run with a persistent lookahead can stamp the
+    # cause onto ``acceptance_reason`` rather than the generic
+    # ``publication_disabled`` message. Cleared (False) on a clean final
+    # round, even when intermediate rounds tripped the trap and were
+    # repaired by refinement.
+    runtime_lookahead_violation: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────
