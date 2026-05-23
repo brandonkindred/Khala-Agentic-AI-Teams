@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from .execution.risk_filter import RiskLimits
 from .strategy_lab.alignment_findings import AlignmentFinding
@@ -15,6 +15,45 @@ from .strategy_lab.spec_dsl import (
     FixedFractionSizing,
     SizingRule,
 )
+
+
+def _coerce_legacy_strategy_spec_dict(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Migrate a legacy persisted StrategySpec dict to the current strict schema.
+
+    Older persisted rows (pre Issue #537) stored ``entry_rules`` / ``exit_rules``
+    as prose strings and sometimes omitted ``timeframe`` entirely. The current
+    schema requires structured DSL nodes and a ``timeframe`` literal. This helper
+    rewrites the raw dict so that:
+
+      * prose entries in ``entry_rules`` / ``exit_rules`` are moved into
+        ``unparsed_rules`` and ``requires_redesign`` is set to True;
+      * missing ``timeframe`` defaults to ``"1d"`` so the strict Literal validator
+        passes.
+
+    Preconditions: ``raw`` is a dict (caller checks); behaviour is undefined for
+    other types. Postcondition: returns a new dict safe to pass to
+    ``StrategySpec.model_validate``.
+    """
+    coerced = dict(raw)
+    coerced.setdefault("timeframe", "1d")
+
+    unparsed = list(coerced.get("unparsed_rules") or [])
+    requires_redesign = bool(coerced.get("requires_redesign", False))
+
+    for key in ("entry_rules", "exit_rules"):
+        items = coerced.get(key) or []
+        kept: list = []
+        for item in items:
+            if isinstance(item, str):
+                unparsed.append(item)
+                requires_redesign = True
+            else:
+                kept.append(item)
+        coerced[key] = kept
+
+    coerced["unparsed_rules"] = unparsed
+    coerced["requires_redesign"] = requires_redesign
+    return coerced
 
 
 class RiskTolerance(str, Enum):
@@ -228,6 +267,34 @@ class StrategySpec(BaseModel):
     requires_custom_code: bool = False
     unparsed_rules: List[str] = Field(default_factory=list)
     audit: AuditContext = Field(default_factory=AuditContext)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_when_loading(cls, data: Any, info: ValidationInfo) -> Any:
+        """When validated with ``context={'legacy_spec': True}``, rewrite prose
+        rules into ``unparsed_rules`` and default a missing ``timeframe``.
+
+        This lets persisted rows authored before the strict DSL schema deserialize
+        cleanly. Live construction (no context) is unaffected so the strict
+        construction tests for prose rejection still hold.
+        """
+        if not isinstance(data, dict):
+            return data
+        if not (info.context and info.context.get("legacy_spec")):
+            return data
+        return _coerce_legacy_strategy_spec_dict(data)
+
+    @classmethod
+    def parse_persisted(cls, raw: Any) -> "StrategySpec":
+        """Deserialize a (possibly legacy) persisted row into a StrategySpec.
+
+        Accepts a ``StrategySpec`` (returned as-is) or a dict. Raw dicts are
+        validated with the legacy-coercion context so prose rules and missing
+        ``timeframe`` migrate to the current schema instead of raising.
+        """
+        if isinstance(raw, cls):
+            return raw
+        return cls.model_validate(raw, context={"legacy_spec": True})
 
     @field_validator("risk_limits", mode="before")
     @classmethod
@@ -718,6 +785,13 @@ class DataProvenance(BaseModel):
 
 
 class BacktestRecord(BaseModel):
+    @classmethod
+    def parse_persisted(cls, raw: Any) -> "BacktestRecord":
+        """Deserialize a persisted backtest row, migrating legacy nested specs."""
+        if isinstance(raw, cls):
+            return raw
+        return cls.model_validate(raw, context={"legacy_spec": True})
+
     backtest_id: str
     strategy_id: str
     strategy: StrategySpec
@@ -850,6 +924,13 @@ class StrategyLabRecord(BaseModel):
     ``paper_trading_status = "skipped"`` and ``paper_trading_skipped_reason = "not_winning"``.
     """
 
+    @classmethod
+    def parse_persisted(cls, raw: Any) -> "StrategyLabRecord":
+        """Deserialize a persisted lab record, migrating legacy nested specs."""
+        if isinstance(raw, cls):
+            return raw
+        return cls.model_validate(raw, context={"legacy_spec": True})
+
     lab_record_id: str
     strategy: StrategySpec
     backtest: BacktestRecord
@@ -944,6 +1025,13 @@ class PaperTradingComparison(BaseModel):
 
 class PaperTradingSession(BaseModel):
     """Full state of a paper trading session."""
+
+    @classmethod
+    def parse_persisted(cls, raw: Any) -> "PaperTradingSession":
+        """Deserialize a persisted paper-trading session, migrating legacy specs."""
+        if isinstance(raw, cls):
+            return raw
+        return cls.model_validate(raw, context={"legacy_spec": True})
 
     session_id: str
     lab_record_id: str
