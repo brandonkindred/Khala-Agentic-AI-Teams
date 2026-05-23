@@ -752,6 +752,11 @@ def _wire_run_cycle_stubs(
         "exit_rules": [StopLossRule(pct=0.20).model_dump()],
         "risk_limits": {},
         "speculative": False,
+        # The stub bypasses the compiler entirely, so the compiled
+        # ``reason="compiled_entry:entry[N]"`` annotation is absent from
+        # trades. Mark the spec as custom-code so the rule-firing gate
+        # self-skips rather than firing critical on the missing annotations.
+        "requires_custom_code": True,
     }
     code = (
         "from contract import Strategy\n\nclass S(Strategy):\n"

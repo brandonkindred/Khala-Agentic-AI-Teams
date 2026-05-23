@@ -905,10 +905,11 @@ def _emit_class(
     # downgrades trailing-basis stop-losses. The engine's
     # ``_EngineExitDispatcher`` enforces every stop/take rule with the
     # correct basis against the post-fill ``position.entry_price``.
-    for rule in entry_rules:
+    for idx, rule in enumerate(entry_rules):
         pred_src = _render_predicate(rule.when, binding_by_sigid, cross_sides)
         side_literal = "OrderSide.LONG" if rule.side == "long" else "OrderSide.SHORT"
         sizing_stmt = _render_sizing(sizing, indicator_bindings)
+        rule_reason = f"compiled_entry:entry[{idx}]"
         on_bar_lines.append(f"        if not entry_submitted and position is None and {pred_src}:")
         on_bar_lines.append(f"            {sizing_stmt}")
         on_bar_lines.append("            ctx.submit_order(")
@@ -917,7 +918,7 @@ def _emit_class(
         on_bar_lines.append("                qty=qty,")
         on_bar_lines.append("                order_type=OrderType.MARKET,")
         on_bar_lines.append("                tif=TimeInForce.DAY,")
-        on_bar_lines.append('                reason="compiled_entry",')
+        on_bar_lines.append(f'                reason="{rule_reason}",')
         on_bar_lines.append("            )")
         on_bar_lines.append("            entry_submitted = True")
 

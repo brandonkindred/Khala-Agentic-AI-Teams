@@ -85,6 +85,7 @@ from .quality_gates.models import QualityGateResult, StrategyLabPhase
 from .quality_gates.realism import (
     LiquidityRealismGate,
     RegimeCoverageGate,
+    RuleFiringRateGate,
     TradeClusteringGate,
 )
 from .quality_gates.rule_probes import RuleProbesGate
@@ -402,6 +403,7 @@ class StrategyLabOrchestrator:
         self.liquidity_realism_gate = LiquidityRealismGate()
         self.regime_coverage_gate = RegimeCoverageGate()
         self.trade_clustering_gate = TradeClusteringGate()
+        self.rule_firing_rate_gate = RuleFiringRateGate()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
         # SpecReadinessGate is wired to the live MarketDataService so Rule 5
@@ -2014,6 +2016,9 @@ class StrategyLabOrchestrator:
         results.extend(self.liquidity_realism_gate.check(trades, market_data, phase="verification"))
         results.extend(self.regime_coverage_gate.check(metrics, phase="verification"))
         results.extend(self.trade_clustering_gate.check(trades, phase="verification"))
+        results.extend(
+            self.rule_firing_rate_gate.check(spec, trades, phase="verification")
+        )
         return results
 
     def _run_analysis_phase(
