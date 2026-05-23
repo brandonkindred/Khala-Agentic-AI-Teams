@@ -1,7 +1,13 @@
-import time
+"""Tests for social_media_marketing_team API endpoints (HTTP layer).
+
+The autouse fixtures in ``conftest.py`` swap ``_job_manager`` for an
+in-memory ``FakeJobServiceClient`` and replace ``threading.Thread`` with
+a synchronous inline variant, so these tests run without a live job
+service or Postgres.
+"""
+
 from unittest.mock import patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from social_media_marketing_team.adapters.branding import (
@@ -10,10 +16,6 @@ from social_media_marketing_team.adapters.branding import (
 )
 from social_media_marketing_team.api.main import app
 from social_media_marketing_team.models import Platform
-
-# Hits the team API which calls the real job service.  See
-# ``test_api_internal.py`` for the converted unit-style equivalent.
-pytestmark = [pytest.mark.integration]
 
 _MOCK_BRAND_CTX = BrandContext(
     brand_name="Acme",
@@ -27,19 +29,6 @@ _MOCK_BRAND_CTX = BrandContext(
 )
 
 _BRAND_ADAPTER = "social_media_marketing_team.api.main"
-
-
-def _wait_for_done(client: TestClient, job_id: str):
-    deadline = time.time() + 5
-    status_payload = None
-    while time.time() < deadline:
-        status_resp = client.get(f"/social-marketing/status/{job_id}")
-        assert status_resp.status_code == 200
-        status_payload = status_resp.json()
-        if status_payload["status"] in {"completed", "failed"}:
-            break
-        time.sleep(0.05)
-    return status_payload
 
 
 @patch(f"{_BRAND_ADAPTER}._fetch_and_validate_brand", return_value=_MOCK_BRAND_CTX)
@@ -60,8 +49,9 @@ def test_run_endpoint_and_status_success(_mock_brand) -> None:
     assert body["brand_summary"] is not None
     assert "Acme" in body["brand_summary"]
 
-    status_payload = _wait_for_done(client, job_id)
-    assert status_payload is not None
+    status_resp = client.get(f"/social-marketing/status/{job_id}")
+    assert status_resp.status_code == 200
+    status_payload = status_resp.json()
     assert status_payload["status"] == "completed"
     assert status_payload["progress"] == 100
     assert status_payload["llm_model_name"] == "llama3.1"
@@ -108,9 +98,9 @@ def test_performance_ingest_and_revision_endpoints(_mock_brand) -> None:
     assert revise.status_code == 200
     assert revise.json()["status"] == "running"
 
-    status = _wait_for_done(client, job_id)
-    assert status is not None
-    assert status["status"] == "completed"
+    status_resp = client.get(f"/social-marketing/status/{job_id}")
+    assert status_resp.status_code == 200
+    assert status_resp.json()["status"] == "completed"
 
 
 @patch(
