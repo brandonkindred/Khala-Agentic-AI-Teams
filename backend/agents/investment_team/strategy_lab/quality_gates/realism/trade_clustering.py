@@ -95,7 +95,12 @@ class TradeClusteringGate(GateResultsMixin):
             quarter_clusters = max_quarter_share >= _QUARTER_DOMINANCE_THRESHOLD
 
             lag1_rho = _lag1_autocorrelation(entry_dates)
-            lb_q = _ljung_box_q_lag1(lag1_rho, len(entry_dates))
+            # Ljung-Box ``n`` is the count of inter-arrival OBSERVATIONS,
+            # not dates — there are ``len(dates) - 1`` intervals between
+            # ``len(dates)`` events. Passing ``len(entry_dates)`` would
+            # inflate Q and bias the clustering verdict upward.
+            n_intervals = max(0, len(entry_dates) - 1)
+            lb_q = _ljung_box_q_lag1(lag1_rho, n_intervals)
             autocorr_clusters = lb_q is not None and lb_q > _LB_CRITICAL_LAG1
 
             return [

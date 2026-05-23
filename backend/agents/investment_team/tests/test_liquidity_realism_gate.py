@@ -195,6 +195,38 @@ def test_critical_message_cites_envelope_and_haircut():
     assert "2%" in criticals[0].details
 
 
+def test_does_not_emit_critical_when_pf_below_1_with_zero_oversized_trades():
+    """A losing strategy whose trades all fit inside the liquidity envelope
+    is not a liquidity failure — vetoing here would mislabel the cause.
+    The acceptance gate and anomaly detector own the "strategy lost
+    money" verdict; this gate only fires when the loss is attributable
+    to oversized fills."""
+    gate = LiquidityRealismGate()
+    market = _market_data_with_adv("QQQ", daily_dollar_volume=10_000_000.0)
+    # All trades $50k against $100k envelope (well under). Net losers.
+    trades = [_trade(trade_num=i + 1, position_value=50_000.0, net_pnl=-200.0) for i in range(20)]
+    results = gate.check(trades, market)
+    # PF would be 0 (no winners, all losers) but no oversized trades →
+    # the gate must NOT veto. Verdict is clean info.
+    assert _criticals(results) == []
+    assert _warnings(results) == []
+    assert all(r.passed and r.severity == "info" for r in results)
+
+
+def test_does_not_emit_critical_when_pf_below_1_with_only_unresolvable_adv():
+    """When every symbol's ADV is unresolvable (insufficient bars),
+    oversized_count stays zero so no liquidity attribution exists for
+    the PF collapse. The gate must skip critical and surface the
+    unresolvable count instead."""
+    gate = LiquidityRealismGate()
+    # Only 5 bars (default lookback 20) → ADV is None.
+    market = {"QQQ": [_bar(f"2024-02-{i + 1:02d}", close=100.0, volume=10_000.0) for i in range(5)]}
+    trades = [_trade(trade_num=i + 1, position_value=10_000.0, net_pnl=-500.0) for i in range(20)]
+    results = gate.check(trades, market)
+    assert _criticals(results) == []
+    assert "unresolvable" in results[0].details.lower()
+
+
 # ---------------------------------------------------------------------------
 # Constructor validation
 # ---------------------------------------------------------------------------

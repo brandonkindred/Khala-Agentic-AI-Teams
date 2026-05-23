@@ -173,7 +173,13 @@ class LiquidityRealismGate(GateResultsMixin):
         unresolvable_count: int,
         total_trades: int,
     ) -> QualityGateResult:
-        if adjusted_pf < 1.0:
+        # Critical attribution requires both signals: PF must collapse AND
+        # the collapse must be caused by oversized trades. Without an
+        # oversize signal, a sub-1.0 PF reflects an ordinary losing
+        # strategy, not a liquidity failure — vetoing here would mislabel
+        # the cause and pre-empt other gates (acceptance, anomaly) that
+        # are responsible for "the strategy lost money".
+        if oversized_count > 0 and adjusted_pf < 1.0:
             return self._critical(
                 f"Realism-adjusted profit factor {adjusted_pf:.2f} < 1.0 after "
                 f"slippage haircut on {oversized_count} oversized trade(s) "
