@@ -359,9 +359,16 @@ class BacktestAnomalyDetector(GateResultsMixin):
             least 5 trades (smaller-sample backstop).
           - Warning when ``n_eligible >= 20`` and ``80% <= agreement < 95%``.
         Invariants:
-          - Trades whose entry bar can't be located in ``market_data`` (or
-            whose entry-bar ``close == open``) are skipped — they contribute
-            no agreement signal.
+          - Entry-bar lookup is an EXACT timestamp match against
+            ``OHLCVBar.date`` — calendar-prefix matching would pick the
+            first bar of the day on intraday timeframes and make the
+            agreement statistic arbitrary. Trades whose entry timestamp
+            doesn't exact-match any bar are skipped (ineligible).
+          - Trades whose entry bar has ``close == open`` or whose return
+            is exactly zero contribute no sign signal and are skipped.
+          - Degenerate samples (all eligible bars move one direction, or
+            all eligible trades return one sign) are skipped — the rate
+            would be uninformative.
         """
         if ctx.market_data is None or ctx.mode == "paper":
             return ()
@@ -373,7 +380,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
             bars = ctx.market_data.get(trade.symbol)
             if not bars:
                 continue
-            entry_bar = _find_bar_by_date(bars, trade.entry_date)
+            entry_bar = _find_bar_by_timestamp(bars, trade.entry_date)
             if entry_bar is None:
                 continue
             bar_dir = _sign(entry_bar.close - entry_bar.open)
@@ -542,16 +549,26 @@ def _sign(value: float) -> int:
     return 0
 
 
-def _find_bar_by_date(bars: List[OHLCVBar], target: str) -> Optional[OHLCVBar]:
-    """Return the bar whose ``date`` matches ``target`` (date-prefix match).
+def _find_bar_by_timestamp(bars: List[OHLCVBar], target: str) -> Optional[OHLCVBar]:
+    """Return the bar whose ``date`` equals ``target`` exactly.
 
+    Preconditions:
+      - ``bars`` is iterable; ``target`` is a string.
     Postconditions:
-      - Returns ``None`` when ``target`` is empty or no bar matches.
+      - Returns ``None`` when ``target`` is empty or no bar's ``date``
+        field equals ``target`` exactly.
+      - Never falls back to date-prefix matching: on intraday timeframes
+        (1m/5m/15m/1h) many bars share a calendar day, so a prefix match
+        would pick the first bar of the day rather than the actual entry
+        bar and make the look-ahead agreement statistic arbitrary.
+        Trades whose entry timestamp can't be resolved this way are
+        skipped by the caller (counted as ineligible).
+    Invariants:
+      - Pure function; no side effects.
     """
     if not target:
         return None
-    head = target[:10]
     for bar in bars:
-        if bar.date.startswith(head):
+        if bar.date == target:
             return bar
     return None
