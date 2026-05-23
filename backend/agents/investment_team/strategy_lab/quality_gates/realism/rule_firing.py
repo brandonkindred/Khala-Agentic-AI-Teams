@@ -28,7 +28,7 @@ Wired from
 from __future__ import annotations
 
 import re
-from typing import ClassVar, List
+from typing import ClassVar, List, Optional, Sequence
 
 from ....models import StrategySpec, TradeRecord
 from ..models import GateResultsMixin, QualityGateResult, StrategyLabPhase
@@ -59,6 +59,7 @@ class RuleFiringRateGate(GateResultsMixin):
         spec: StrategySpec,
         trades: List[TradeRecord],
         *,
+        open_position_entry_reasons: Optional[Sequence[str]] = None,
         phase: StrategyLabPhase = "verification",
     ) -> List[QualityGateResult]:
         with self._using_phase(phase):
@@ -74,7 +75,7 @@ class RuleFiringRateGate(GateResultsMixin):
 
             results: List[QualityGateResult] = []
 
-            entry_hits = _count_entry_hits(trades)
+            entry_hits = _count_entry_hits(trades, open_position_entry_reasons or ())
             for idx, rule in enumerate(spec.entry_rules):
                 rule_key = f"entry[{idx}]"
                 count = entry_hits.get(idx, 0)
@@ -119,18 +120,26 @@ class RuleFiringRateGate(GateResultsMixin):
             return results
 
 
-def _count_entry_hits(trades: List[TradeRecord]) -> dict:
+def _count_entry_hits(
+    trades: List[TradeRecord],
+    open_position_entry_reasons: Sequence[str] = (),
+) -> dict:
     """Return ``{rule_index: count}`` from ``entry_reason`` annotations.
+
+    Unions closed-trade ``entry_reason`` fields with
+    ``open_position_entry_reasons`` (positions still held at
+    end-of-stream) so a rule whose only firing left an unclosed
+    position is not misreported as dead code.
 
     Postconditions:
       - Trades with ``entry_reason=None`` or non-matching strings are
         silently skipped (they don't contribute to any rule's count).
     """
     hits: dict = {}
-    for t in trades:
-        if not t.entry_reason:
-            continue
-        m = _ENTRY_REASON_RE.match(t.entry_reason)
+    reasons = [t.entry_reason for t in trades if t.entry_reason]
+    reasons.extend(open_position_entry_reasons)
+    for reason in reasons:
+        m = _ENTRY_REASON_RE.match(reason)
         if m:
             idx = int(m.group(1))
             hits[idx] = hits.get(idx, 0) + 1

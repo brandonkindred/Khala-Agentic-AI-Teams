@@ -244,9 +244,21 @@ def test_substring_reason_does_not_match():
         ]
     )
     trades = [
-        _trade(1, entry_reason="compiled_entry:entry[0]", exit_reason="prefix_compiled_signal_exit:exit[0]"),
-        _trade(2, entry_reason="compiled_entry:entry[0]", exit_reason="compiled_signal_exit:exit[0]_suffix"),
-        _trade(3, entry_reason="extra_compiled_entry:entry[0]", exit_reason="compiled_signal_exit:exit[0]"),
+        _trade(
+            1,
+            entry_reason="compiled_entry:entry[0]",
+            exit_reason="prefix_compiled_signal_exit:exit[0]",
+        ),
+        _trade(
+            2,
+            entry_reason="compiled_entry:entry[0]",
+            exit_reason="compiled_signal_exit:exit[0]_suffix",
+        ),
+        _trade(
+            3,
+            entry_reason="extra_compiled_entry:entry[0]",
+            exit_reason="compiled_signal_exit:exit[0]",
+        ),
     ]
     results = gate.check(spec, trades)
     # trade 3's entry_reason is prefixed → doesn't count for entry[0]
@@ -254,4 +266,43 @@ def test_substring_reason_does_not_match():
     # For exit: only trade 3 has exact match
     warnings = _warnings(results)
     assert len(warnings) == 0
+    assert _criticals(results) == []
+
+
+# ---------------------------------------------------------------------------
+# Open-position entry reasons (positions still held at end-of-stream)
+# ---------------------------------------------------------------------------
+
+
+def test_open_position_entry_reason_prevents_false_critical():
+    """An entry rule whose only firing left a still-open position at
+    end-of-stream should NOT trigger a critical — the open-position
+    entry reasons supplement the closed-trade ledger."""
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+            EntryRule(side="short", when=Predicate(lhs="bar.close", op="<", rhs=0)),
+        ]
+    )
+    trades = [_trade(1, entry_reason="compiled_entry:entry[0]")]
+    results = gate.check(
+        spec,
+        trades,
+        open_position_entry_reasons=["compiled_entry:entry[1]"],
+    )
+    assert _criticals(results) == []
+    assert all(r.passed for r in results)
+
+
+def test_open_position_without_annotation_still_fires_critical():
+    """Open positions with empty/missing entry_reason don't count."""
+    gate = RuleFiringRateGate()
+    spec = _spec()
+    trades = [_trade(1, entry_reason="compiled_entry:entry[0]")]
+    results = gate.check(
+        spec,
+        trades,
+        open_position_entry_reasons=[""],
+    )
     assert _criticals(results) == []

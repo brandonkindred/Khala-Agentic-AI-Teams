@@ -252,6 +252,7 @@ class _SynthesisLoopOutcome:
     # Issue #533 — per-symbol provider id, snapshotted at fetch time so it
     # survives later fetches in the same orchestrator run.
     provider_used: Dict[str, str] = field(default_factory=dict)
+    open_position_entry_reasons: List[str] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────────────────
