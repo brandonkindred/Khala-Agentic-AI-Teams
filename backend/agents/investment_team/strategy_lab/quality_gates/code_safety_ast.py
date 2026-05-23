@@ -120,6 +120,12 @@ def _find_forward_access_warnings(cls: ast.ClassDef) -> List[str]:
       - Returns an empty list when ``cls`` has no relevant idioms.
     Invariants:
       - Pure function over the AST; never mutates ``cls``.
+      - The getattr and try/except checks are scoped to the ``on_bar``
+        method body (not the whole class) so that resolved parameter
+        names like ``c``/``b`` don't false-positive against coincidental
+        same-named locals in unrelated helper methods. The subscript
+        check (``self.<collection>[i + 1]``) still walks the whole class
+        because it matches on ``self.`` targets, not parameter names.
       - Messages do not include the class name — the caller wraps each
         finding in the gate's ``_warning`` envelope which already records
         the gate/phase/rule context.
@@ -133,22 +139,33 @@ def _find_forward_access_warnings(cls: ast.ClassDef) -> List[str]:
             out.append(msg)
 
     receivers = _on_bar_receiver_names(cls)
+
+    # Scope the receiver-sensitive checks (getattr, try/except) to the
+    # ``on_bar`` method body so that resolved parameter names don't
+    # collide with coincidental same-named locals in unrelated methods.
+    on_bar_method = _find_on_bar_method(cls)
+    if on_bar_method is not None:
+        for node in ast.walk(on_bar_method):
+            if isinstance(node, ast.Call) and _is_getattr_on_receiver(node, receivers):
+                _add(
+                    "getattr(bar, ...) / getattr(ctx, ...) dodges the runtime "
+                    "AttributeError trap — read the attribute directly so a "
+                    "missing field surfaces as lookahead_violation instead of "
+                    "silently returning a default"
+                )
+            if isinstance(node, ast.Try) and _try_block_swallows_attribute_error(node, receivers):
+                _add(
+                    "try/except AttributeError around bar.* or ctx.* swallows the "
+                    "runtime lookahead_violation trap — let the exception "
+                    "propagate so the harness can surface the forward-access "
+                    "violation"
+                )
+
+    # The subscript check uses ``self.<collection>`` targets (not
+    # parameter names), so it is safe to walk the whole class without
+    # risking false positives from name collisions in helpers.
     self_collections = _self_collection_names(cls)
     for node in ast.walk(cls):
-        if isinstance(node, ast.Call) and _is_getattr_on_receiver(node, receivers):
-            _add(
-                "getattr(bar, ...) / getattr(ctx, ...) dodges the runtime "
-                "AttributeError trap — read the attribute directly so a "
-                "missing field surfaces as lookahead_violation instead of "
-                "silently returning a default"
-            )
-        if isinstance(node, ast.Try) and _try_block_swallows_attribute_error(node, receivers):
-            _add(
-                "try/except AttributeError around bar.* or ctx.* swallows the "
-                "runtime lookahead_violation trap — let the exception "
-                "propagate so the harness can surface the forward-access "
-                "violation"
-            )
         if isinstance(node, ast.Subscript) and _subscript_is_forward_offset_on_self_collection(
             node, self_collections
         ):
@@ -159,6 +176,14 @@ def _find_forward_access_warnings(cls: ast.ClassDef) -> List[str]:
                 "under the event-driven contract"
             )
     return out
+
+
+def _find_on_bar_method(cls: ast.ClassDef) -> Optional[ast.FunctionDef]:
+    """Return the ``on_bar`` method node from ``cls``, or ``None``."""
+    for node in ast.iter_child_nodes(cls):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "on_bar":
+            return node
+    return None
 
 
 def _is_getattr_on_receiver(call: ast.Call, receivers: frozenset[str]) -> bool:

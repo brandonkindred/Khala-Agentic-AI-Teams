@@ -514,6 +514,27 @@ def test_try_except_on_renamed_ctx_parameter_is_still_flagged() -> None:
     assert any("try/except" in w for w in warnings), warnings
 
 
+def test_helper_method_with_same_named_local_does_not_false_positive() -> None:
+    """When ``on_bar`` uses renamed parameters like ``c``/``b``, an
+    unrelated helper method that coincidentally has a local ``b`` must
+    NOT trip the forward-access warning. The scan is scoped to
+    ``on_bar``'s body, not the whole class, to prevent this."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def _helper(self, b):
+                return getattr(b, 'something', None)
+
+            def on_bar(self, c, b):
+                c.submit_order(symbol='X', qty=1, side='LONG')
+                c.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert not any("getattr" in w for w in warnings), warnings
+
+
 # ---------------------------------------------------------------------------
 # Order-flow shape (#547 item 4): entry path + exit path required
 # ---------------------------------------------------------------------------
