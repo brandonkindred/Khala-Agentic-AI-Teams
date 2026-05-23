@@ -82,6 +82,11 @@ from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.cost_stress_realism import CostStressRealismGate
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult, StrategyLabPhase
+from .quality_gates.realism import (
+    LiquidityRealismGate,
+    RegimeCoverageGate,
+    TradeClusteringGate,
+)
 from .quality_gates.rule_probes import RuleProbesGate
 from .quality_gates.spec_readiness import SpecReadinessGate
 from .quality_gates.strategy_validator import StrategySpecValidator
@@ -394,6 +399,9 @@ class StrategyLabOrchestrator:
         self.acceptance_gate = AcceptanceGate()
         self.target_symbol_coverage_gate = TargetSymbolCoverageGate()
         self.cost_stress_realism_gate = CostStressRealismGate()
+        self.liquidity_realism_gate = LiquidityRealismGate()
+        self.regime_coverage_gate = RegimeCoverageGate()
+        self.trade_clustering_gate = TradeClusteringGate()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
         # SpecReadinessGate is wired to the live MarketDataService so Rule 5
@@ -1799,6 +1807,7 @@ class StrategyLabOrchestrator:
             trades=trades,
             metrics=metrics,
             config=config,
+            market_data=market_data,
             execution_succeeded=execution_succeeded,
         )
         all_gate_results.extend(realism_results)
@@ -1965,6 +1974,7 @@ class StrategyLabOrchestrator:
         trades: List[TradeRecord],
         metrics: BacktestResult,
         config: BacktestConfig,
+        market_data: Optional[Dict[str, List[OHLCVBar]]],
         execution_succeeded: bool,
     ) -> List[QualityGateResult]:
         """Run verification-phase realism gates and return their results.
@@ -1974,6 +1984,8 @@ class StrategyLabOrchestrator:
             evaluation and the publication-veto block.
           - ``metrics`` carries the post-walk-forward backtest result.
           - ``config`` is the run's :class:`BacktestConfig`.
+          - ``market_data`` is the per-symbol bar table used for the run;
+            the liquidity gate self-skips when this is ``None``.
         Postconditions:
           - Returns ``[]`` when execution didn't succeed or the ledger is
             empty — the gates' contracts are only meaningful for a strategy
@@ -1999,6 +2011,9 @@ class StrategyLabOrchestrator:
             self.target_symbol_coverage_gate.check_breadth(spec, trades, phase="verification")
         )
         results.extend(self.cost_stress_realism_gate.check(metrics, config, phase="verification"))
+        results.extend(self.liquidity_realism_gate.check(trades, market_data, phase="verification"))
+        results.extend(self.regime_coverage_gate.check(metrics, phase="verification"))
+        results.extend(self.trade_clustering_gate.check(trades, phase="verification"))
         return results
 
     def _run_analysis_phase(

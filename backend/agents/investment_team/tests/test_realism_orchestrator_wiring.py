@@ -150,6 +150,7 @@ def test_run_realism_gates_returns_empty_when_no_trades():
         trades=[],
         metrics=_metrics(),
         config=_config(),
+        market_data=None,
         execution_succeeded=True,
     )
     assert results == []
@@ -162,6 +163,7 @@ def test_run_realism_gates_returns_empty_when_execution_failed():
         trades=[_trade("QQQ", 1)],
         metrics=_metrics(),
         config=_config(),
+        market_data=None,
         execution_succeeded=False,
     )
     assert results == []
@@ -177,6 +179,7 @@ def test_run_realism_gates_emits_breadth_warning_for_multi_target_single_symbol_
         trades=trades,
         metrics=_metrics(),
         config=_config(),
+        market_data=None,
         execution_succeeded=True,
     )
 
@@ -197,6 +200,7 @@ def test_run_realism_gates_passes_when_ledger_uses_full_universe():
         trades=trades,
         metrics=_metrics(),
         config=_config(),
+        market_data=None,
         execution_succeeded=True,
     )
 
@@ -240,6 +244,7 @@ def test_run_realism_gates_cost_stress_self_skips_when_not_requested_by_config()
         trades=trades,
         metrics=metrics,
         config=_config(),
+        market_data=None,
         execution_succeeded=True,
     )
 
@@ -292,6 +297,7 @@ def test_run_realism_gates_cost_stress_critical_when_2x_sharpe_negative():
         trades=trades,
         metrics=metrics,
         config=_config(),
+        market_data=None,
         execution_succeeded=True,
     )
 
