@@ -94,36 +94,45 @@ def _warnings(results):
 # ---------------------------------------------------------------------------
 
 
-def test_critical_when_results_missing_on_winning_candidate_path():
-    """``walk_forward_enabled=True`` is the winning-candidate path; the
-    realism cycle requires cost-stress to have been run."""
-    gate = CostStressRealismGate()
-    results = gate.check(_metrics(cost_stress_results=None), _config())
-
-    criticals = _criticals(results)
-    assert len(criticals) == 1
-    assert "Cost-stress sweep not executed" in criticals[0].details
-    assert criticals[0].gate_name == GATE
-    assert criticals[0].phase == "verification"
-
-
 def test_critical_when_results_missing_but_cost_stress_was_requested():
-    """Even on legacy single-window runs, if the operator opted into
-    cost-stress (``cost_stress=True``) but the engine returned no payload,
-    that's a bug we surface as critical rather than swallow."""
+    """When the operator opted into cost-stress (``cost_stress=True``)
+    but the engine returned no payload, the sweep was silently dropped —
+    surface that as critical rather than swallow it."""
     gate = CostStressRealismGate()
-    config = _config(walk_forward_enabled=False, cost_stress=True)
+    config = _config(walk_forward_enabled=True, cost_stress=True)
     results = gate.check(_metrics(cost_stress_results=None), config)
 
     criticals = _criticals(results)
     assert len(criticals) == 1
-    assert "Cost-stress sweep not executed" in criticals[0].details
+    assert "engine appears to have dropped the sweep" in criticals[0].details
+    assert criticals[0].gate_name == GATE
+    assert criticals[0].phase == "verification"
 
 
-def test_info_when_results_missing_and_legacy_single_window_path():
-    """Operator explicitly opted out of both walk-forward AND cost-stress.
-    There's no winning-candidate verdict at stake here, so the realism
-    cycle has nothing to enforce."""
+def test_info_when_results_missing_and_cost_stress_not_requested():
+    """Hand-built configs that didn't enable cost-stress don't get vetoed
+    by the gate. Enforcement of "mandatory cost-stress on winning-candidate
+    runs" lives at the production entrypoint
+    (``_strategy_lab_worker`` force-enables the flag) — the gate just
+    verifies what the config requested.
+
+    This is the regression guard: under the prior logic, any
+    ``walk_forward_enabled=True`` config without cost-stress would have
+    fired critical and broken every Strategy Lab run by default.
+    """
+    gate = CostStressRealismGate()
+    config = _config(walk_forward_enabled=True, cost_stress=False)
+    results = gate.check(_metrics(cost_stress_results=None), config)
+
+    assert _criticals(results) == []
+    assert _warnings(results) == []
+    assert all(r.passed and r.severity == "info" for r in results)
+
+
+def test_info_when_results_missing_on_legacy_single_window_path():
+    """``walk_forward_enabled=False`` AND ``cost_stress=False`` — the
+    realism cycle has nothing to enforce; the acceptance gate's own
+    legacy criteria speak for this path."""
     gate = CostStressRealismGate()
     config = _config(walk_forward_enabled=False, cost_stress=False)
     results = gate.check(_metrics(cost_stress_results=None), config)
@@ -133,11 +142,12 @@ def test_info_when_results_missing_and_legacy_single_window_path():
     assert all(r.passed and r.severity == "info" for r in results)
 
 
-def test_critical_when_results_is_empty_list():
-    """A persisted empty list is just as bad as None — the sweep was
-    requested but produced no rows."""
+def test_critical_when_results_is_empty_list_and_cost_stress_requested():
+    """A persisted empty list with ``cost_stress=True`` is just as bad as
+    None — the sweep was requested but produced no rows."""
     gate = CostStressRealismGate()
-    results = gate.check(_metrics(cost_stress_results=[]), _config())
+    config = _config(walk_forward_enabled=True, cost_stress=True)
+    results = gate.check(_metrics(cost_stress_results=[]), config)
 
     criticals = _criticals(results)
     assert len(criticals) == 1

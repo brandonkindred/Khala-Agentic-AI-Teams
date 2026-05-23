@@ -117,29 +117,34 @@ class CostStressRealismGate(GateResultsMixin):
           - ``self._using_phase(...)`` is active.
         Postconditions:
           - Returns exactly one :class:`QualityGateResult`.
-          - ``critical`` when the run was on a winning-candidate path
-            (``walk_forward_enabled=True``) — mandatory cost-stress was not
-            run, which is the explicit failure mode this gate enforces.
-            Also ``critical`` when the operator asked for cost-stress
+          - ``critical`` when the operator asked for cost-stress
             (``config.cost_stress=True``) but no results came back — that
             means the engine silently dropped the sweep, which is a bug we
             want surfaced rather than swallowed.
-          - ``info`` (passing) on legacy single-window runs that explicitly
-            opt out of walk-forward; the realism cycle isn't responsible
-            for those, the acceptance gate is.
+          - ``info`` (passing) when ``config.cost_stress=False``. The
+            production Strategy Lab entrypoint
+            (:func:`investment_team.api.main._strategy_lab_worker`)
+            force-enables cost-stress on winning-candidate runs, so this
+            branch only fires on legacy single-window runs or
+            hand-constructed configs that explicitly opted out. The
+            realism cycle isn't responsible for those — the acceptance
+            gate's own criteria are.
         Invariants:
           - Never returns ``warning`` for the missing case — either the
             absence matters enough to veto, or it doesn't matter at all.
+          - Never vetoes a config that didn't request cost-stress; the
+            enforcement of "mandatory cost-stress on winning-candidate
+            runs" lives at the orchestrator/entrypoint, not here.
         """
-        if config.walk_forward_enabled or config.cost_stress:
+        if config.cost_stress:
             return self._critical(
-                "Cost-stress sweep not executed for a winning-candidate run. "
-                "Set BacktestConfig.cost_stress=True so the realism cycle can "
-                "verify the strategy's edge survives 2× friction."
+                "Cost-stress sweep was requested (BacktestConfig.cost_stress=True) "
+                "but produced no rows in BacktestResult.cost_stress_results — "
+                "the engine appears to have dropped the sweep."
             )
         return self._info(
-            "Cost-stress sweep not executed; walk_forward_enabled=False so "
-            "no winning-candidate verdict is at stake."
+            "Cost-stress sweep not requested on this config; the realism "
+            "gate has no Sharpe-at-2x floor to verify."
         )
 
 

@@ -1789,17 +1789,17 @@ class StrategyLabOrchestrator:
         # resembles a real-world trading outcome (symbol breadth +
         # cost-stress today; liquidity / regime / clustering / rule-firing
         # are additive). Critical failures veto ``is_winning`` below. The
-        # walk-forward-failed fallback skips cost-stress enforcement: that
-        # path falls back to the legacy single-window acceptance criteria
-        # which predate the realism cycle, and the fallback's own anomaly
-        # recheck already issues a verdict.
+        # cost-stress gate self-skips on legacy single-window or
+        # walk-forward-fallback paths where ``config.cost_stress`` is
+        # False; enforcement of mandatory cost-stress on winning-candidate
+        # runs lives at the production entrypoint, which force-enables
+        # the flag.
         realism_results = self._run_realism_gates(
             spec=spec,
             trades=trades,
             metrics=metrics,
             config=config,
             execution_succeeded=execution_succeeded,
-            walk_forward_succeeded=not walk_forward_failed,
         )
         all_gate_results.extend(realism_results)
         realism_critical = [r for r in realism_results if not r.passed and r.severity == "critical"]
@@ -1966,7 +1966,6 @@ class StrategyLabOrchestrator:
         metrics: BacktestResult,
         config: BacktestConfig,
         execution_succeeded: bool,
-        walk_forward_succeeded: bool = True,
     ) -> List[QualityGateResult]:
         """Run verification-phase realism gates and return their results.
 
@@ -1975,11 +1974,6 @@ class StrategyLabOrchestrator:
             evaluation and the publication-veto block.
           - ``metrics`` carries the post-walk-forward backtest result.
           - ``config`` is the run's :class:`BacktestConfig`.
-          - ``walk_forward_succeeded`` is ``True`` when the run is on the
-            walk-forward + acceptance-gate path (the realism cycle's
-            primary domain); ``False`` when the orchestrator fell back to
-            the legacy single-window path because walk-forward raised at
-            runtime.
         Postconditions:
           - Returns ``[]`` when execution didn't succeed or the ledger is
             empty — the gates' contracts are only meaningful for a strategy
@@ -1987,14 +1981,16 @@ class StrategyLabOrchestrator:
           - Otherwise returns one or more :class:`QualityGateResult`s; the
             caller treats any ``critical`` entry as a publication veto and
             appends every entry to the persisted gate timeline.
-          - Cost-stress enforcement is suppressed on the fallback path —
-            the legacy single-window acceptance criteria predate the
-            realism cycle and the fallback's own anomaly recheck already
-            issues a verdict.
         Invariants:
           - Pure orchestration: never mutates ``spec`` or ``trades``.
           - Gates are run in a fixed order so the persisted timeline is
             deterministic across re-runs of the same record.
+          - The cost-stress gate is invoked unconditionally; it
+            self-skips (info) when ``config.cost_stress=False``, so legacy
+            single-window and walk-forward-fallback paths never trip a
+            spurious veto here. Enforcement of "mandatory cost-stress on
+            winning-candidate runs" lives at the production entrypoint
+            (``api.main._strategy_lab_worker`` force-enables the flag).
         """
         if not execution_succeeded or not trades:
             return []
@@ -2002,10 +1998,7 @@ class StrategyLabOrchestrator:
         results.extend(
             self.target_symbol_coverage_gate.check_breadth(spec, trades, phase="verification")
         )
-        if walk_forward_succeeded:
-            results.extend(
-                self.cost_stress_realism_gate.check(metrics, config, phase="verification")
-            )
+        results.extend(self.cost_stress_realism_gate.check(metrics, config, phase="verification"))
         return results
 
     def _run_analysis_phase(

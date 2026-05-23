@@ -203,10 +203,20 @@ def test_run_realism_gates_passes_when_ledger_uses_full_universe():
     assert all(r.passed for r in results)
 
 
-def test_run_realism_gates_skips_cost_stress_on_walk_forward_fallback():
-    """When walk-forward failed at runtime, the legacy single-window
-    fallback runs without cost-stress. The realism cycle must not punish
-    that path — only breadth should run."""
+def test_run_realism_gates_cost_stress_self_skips_when_not_requested_by_config():
+    """When ``config.cost_stress=False`` (legacy single-window OR
+    walk-forward-fallback path where the operator hand-built the config
+    without enabling the sweep), the cost-stress realism gate must
+    self-skip with an info result — never produce a critical that would
+    veto a path the realism cycle isn't responsible for.
+
+    Enforcement of "mandatory cost-stress on winning-candidate runs"
+    lives at the production entrypoint (``_strategy_lab_worker``
+    force-enables the flag), not inside the gate. This test is the
+    regression guard against an earlier draft where any
+    ``walk_forward_enabled=True`` config without cost-stress would have
+    fired critical and broken every hand-built Strategy Lab run.
+    """
     orch = _orch()
     spec = _spec(target_symbols=["QQQ"])
     trades = [_trade("QQQ", i + 1) for i in range(5)]
@@ -221,22 +231,23 @@ def test_run_realism_gates_skips_cost_stress_on_walk_forward_fallback():
         calmar_ratio=0.0,
         deflated_sharpe=0.0,
         sortino_ratio=0.0,
-        cost_stress_results=None,  # legacy fallback path doesn't run cost-stress
+        cost_stress_results=None,
     )
-
+    # ``_config()`` here defaults to cost_stress=False (the BacktestConfig
+    # default); only ``walk_forward_enabled=True`` is set explicitly.
     results = orch._run_realism_gates(
         spec=spec,
         trades=trades,
         metrics=metrics,
         config=_config(),
         execution_succeeded=True,
-        walk_forward_succeeded=False,
     )
 
-    # No cost_stress_realism gate result at all (its enforcement is
-    # suppressed on the fallback path); breadth gate still ran.
-    assert all(g.gate_name != "cost_stress_realism" for g in results)
-    assert any(g.gate_name == "target_symbol_coverage" for g in results)
+    cost_stress_results = [r for r in results if r.gate_name == "cost_stress_realism"]
+    assert len(cost_stress_results) == 1
+    assert cost_stress_results[0].passed is True
+    assert cost_stress_results[0].severity == "info"
+    assert "not requested" in cost_stress_results[0].details
 
 
 def test_run_realism_gates_cost_stress_critical_when_2x_sharpe_negative():
