@@ -203,7 +203,7 @@ def test_bar_next_close_is_critical() -> None:
     """)
     results = CodeSafetyChecker().check(code)
     criticals = _critical_details(results)
-    assert any("bar.next_" in c or "next_" in c for c in criticals)
+    assert any("bar.next" in c for c in criticals)
 
 
 def test_ctx_future_accessor_is_critical() -> None:
@@ -247,7 +247,292 @@ def test_comment_mentioning_future_close_is_not_flagged() -> None:
     # Only the missing-on_bar check could fire — let's be precise and
     # assert no *lookahead* critical fired.
     criticals = _critical_details(results)
-    assert not any("bar.next_" in c or "ctx.future_" in c or "ctx.peek" in c for c in criticals)
+    assert not any("bar.next" in c or "ctx.future_" in c or "ctx.peek" in c for c in criticals)
+
+
+def test_bar_tomorrow_close_is_critical() -> None:
+    """``bar.tomorrowClose`` — camel-case forward-attribute variant the
+    underscore-only legacy regex used to miss."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.tomorrowClose > bar.close:
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("tomorrow" in c for c in criticals)
+
+
+def test_bar_forthcoming_open_is_critical() -> None:
+    """``bar.forthcomingOpen`` — second new forward-prefix the widened
+    pattern adds. Both camel-case and snake-case variants must trip."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.forthcoming_open > bar.open:
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("forthcoming" in c for c in criticals)
+
+
+def test_bar_next_attribute_without_underscore_is_critical() -> None:
+    """The widened pattern catches ``bar.next`` even when no underscore /
+    suffix follows — the legacy ``next_\\w+`` form required an explicit
+    separator and silently allowed bare ``bar.next``."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                forecast = bar.next
+                if forecast > 0:
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    criticals = _critical_details(results)
+    assert any("bar.next" in c for c in criticals)
+
+
+def test_getattr_on_bar_is_warning_not_critical() -> None:
+    """``getattr(bar, ...)`` dodges the harness's AttributeError trap. It's
+    occasionally used in defensive idioms (test fixtures, optional fields),
+    so the gate flags it as a warning — not a critical that vetoes the run.
+    """
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                _ = getattr(bar, 'next_close', 0.0)
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    criticals = _critical_details(results)
+    assert any("getattr" in w for w in warnings), warnings
+    # Must NOT also fire as critical — defensive idioms shouldn't veto.
+    assert not any("getattr" in c for c in criticals)
+
+
+def test_getattr_on_ctx_is_warning() -> None:
+    """The same warning fires for ``ctx`` because the runtime trap covers
+    every attribute access on either receiver."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                _ = getattr(ctx, 'future_history', None)
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("getattr" in w for w in warnings)
+
+
+def test_try_except_attribute_error_around_bar_is_warning() -> None:
+    """Swallowing ``AttributeError`` on a ``bar.*`` access silently dismisses
+    the runtime lookahead_violation trap. The AST rule flags this as a
+    warning so reviewers can decide whether to keep the defensive shape."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                try:
+                    forecast = bar.future_close
+                except AttributeError:
+                    forecast = bar.close
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    # The forward-access body ALSO trips the regex critical for
+    # ``bar.future_close``; the AST rule's contribution is the warning
+    # about the surrounding try/except.
+    assert any("try/except" in w for w in warnings), warnings
+
+
+def test_try_except_attribute_error_tuple_is_also_flagged() -> None:
+    """``except (AttributeError, KeyError):`` swallows the trap just as
+    cleanly as the bare form — the rule walks the handler's tuple."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                try:
+                    extra = bar.something
+                except (AttributeError, KeyError):
+                    extra = None
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("try/except" in w for w in warnings)
+
+
+def test_try_except_attribute_error_without_bar_or_ctx_is_not_flagged() -> None:
+    """An ``except AttributeError`` block that doesn't touch ``bar``/``ctx``
+    in its body has nothing to do with look-ahead — the rule must stay
+    silent so it doesn't fire on unrelated defensive code."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                try:
+                    self._counter += 1
+                except AttributeError:
+                    self._counter = 1
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert not any("try/except" in w for w in warnings), warnings
+
+
+def test_subscript_with_positive_offset_on_self_collection_is_warning() -> None:
+    """Reading ``self._closes[i + 1]`` is a structural look-ahead inside a
+    preloaded series — the engine's per-bar dispatch alone can't see this,
+    but the AST rule should."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def __init__(self):
+                self._closes = []
+
+            def on_bar(self, ctx, bar):
+                self._closes.append(bar.close)
+                i = len(self._closes) - 1
+                if i + 1 < len(self._closes) and self._closes[i + 1] > bar.close:
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("Subscript" in w and "positive offset" in w for w in warnings), warnings
+
+
+def test_subscript_with_negative_offset_is_not_flagged() -> None:
+    """``self._closes[i - 1]`` reads the prior bar — perfectly valid under
+    the contract. The rule must not fire on backward offsets."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def __init__(self):
+                self._closes = []
+
+            def on_bar(self, ctx, bar):
+                self._closes.append(bar.close)
+                i = len(self._closes) - 1
+                if i - 1 >= 0 and self._closes[i - 1] < bar.close:
+                    ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert not any("Subscript" in w for w in warnings), warnings
+
+
+def test_subscript_on_non_self_collection_is_not_flagged() -> None:
+    """The rule scopes to ``self.<known-collection>``; local variables and
+    parameters are out of scope (we can't tell whether they're preloaded
+    series or just live iterables)."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                local_list = [bar.close]
+                i = 0
+                # Subscript on a local — the rule must not infer look-ahead.
+                if i + 1 < len(local_list):
+                    pass
+                ctx.submit_order(symbol='X', qty=1, side='LONG')
+                ctx.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert not any("Subscript" in w for w in warnings), warnings
+
+
+def test_getattr_on_renamed_bar_parameter_is_still_flagged() -> None:
+    """The AST rule must resolve the actual ``on_bar`` parameter names
+    rather than hardcoding ``bar``/``ctx``. A strategy that renames its
+    parameters — ``def on_bar(self, c, b):`` — must still trip the
+    getattr warning when the *renamed* receiver is the target.
+    """
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, c, b):
+                _ = getattr(b, 'next_close', 0.0)
+                c.submit_order(symbol='X', qty=1, side='LONG')
+                c.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("getattr" in w for w in warnings), warnings
+
+
+def test_try_except_on_renamed_ctx_parameter_is_still_flagged() -> None:
+    """Same concern for the try/except rule: ``try: c.future_data``
+    where ``c`` is the renamed ctx must still trip the warning."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, c, b):
+                try:
+                    forecast = b.future_close
+                except AttributeError:
+                    forecast = b.close
+                c.submit_order(symbol='X', qty=1, side='LONG')
+                c.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("try/except" in w for w in warnings), warnings
+
+
+def test_helper_method_with_same_named_local_does_not_false_positive() -> None:
+    """When ``on_bar`` uses renamed parameters like ``c``/``b``, an
+    unrelated helper method that coincidentally has a local ``b`` must
+    NOT trip the forward-access warning. The scan is scoped to
+    ``on_bar``'s body, not the whole class, to prevent this."""
+    code = textwrap.dedent("""
+        from contract import Strategy
+
+        class S(Strategy):
+            def _helper(self, b):
+                return getattr(b, 'something', None)
+
+            def on_bar(self, c, b):
+                c.submit_order(symbol='X', qty=1, side='LONG')
+                c.submit_order(symbol='X', qty=1, side='SHORT')
+    """)
+    results = CodeSafetyChecker().check(code)
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert not any("getattr" in w for w in warnings), warnings
 
 
 # ---------------------------------------------------------------------------

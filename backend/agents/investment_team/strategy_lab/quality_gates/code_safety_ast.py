@@ -27,21 +27,337 @@ _BANNED_CALL_PATTERNS = [
 # event-driven contract (``ctx`` has no accessor for future data, and
 # ``AttributeError`` on a forward field is trapped as ``lookahead_violation``
 # at runtime), but these regexes catch obvious tripwires before the code
-# even runs.
+# even runs. The ``next|future|tomorrow|forthcoming`` alternation matches
+# both ``bar.nextClose`` (camel-case) and ``bar.next_close`` (snake-case)
+# variants, plus the same prefixes with no separator (``bar.next``).
 _LOOKAHEAD_PATTERNS = [
     (
         re.compile(r"\bctx\s*\.\s*future_\w+"),
         "ctx.future_* does not exist — use only ctx.history(symbol, n)",
     ),
     (
-        re.compile(r"\bbar\s*\.\s*(?:next|future)_\w+"),
-        "bar.next_* / bar.future_* does not exist — only current-bar fields are delivered",
+        re.compile(r"\bbar\s*\.\s*(?:next|future|tomorrow|forthcoming)\w*"),
+        (
+            "bar.next* / bar.future* / bar.tomorrow* / bar.forthcoming* does not "
+            "exist — only current-bar fields are delivered"
+        ),
     ),
     (
         re.compile(r"\bctx\s*\.\s*peek\b"),
         "ctx.peek(...) does not exist — the engine does not expose forward bars",
     ),
 ]
+
+# Softer look-ahead signals that should warn rather than veto. ``getattr``
+# on ``bar``/``ctx`` is suspicious because the only motivation for dynamic
+# attribute access on those objects is to dodge the regex/AST tripwires
+# above — but the same idiom occasionally shows up in legitimate
+# defensive-coding patterns, so the gate flags it as a warning instead of
+# a critical.
+_LOOKAHEAD_WARNING_PATTERNS = [
+    (
+        re.compile(r"\bgetattr\s*\(\s*(?:bar|ctx)\s*,"),
+        (
+            "getattr(bar, ...) / getattr(ctx, ...) bypasses the AttributeError "
+            "trap that surfaces look-ahead violations at runtime — read the "
+            "attribute directly so a missing field becomes a "
+            "lookahead_violation rather than a silent default"
+        ),
+    ),
+]
+
+# Canonical receiver names for look-ahead checks. The AST forward-access
+# check resolves the *actual* ``on_bar`` parameter names from the class's
+# signature via :func:`_on_bar_receiver_names`, but the regex patterns
+# (which run against raw code text without AST context) still match the
+# canonical names. This constant is now only used as a fallback when the
+# class has no ``on_bar`` override — the primary path uses the resolved set.
+_FORWARD_ACCESS_RECEIVERS = frozenset({"bar", "ctx"})
+
+
+def _on_bar_receiver_names(cls: ast.ClassDef) -> frozenset[str]:
+    """Return the set of parameter names that receive ``ctx`` and ``bar``
+    in ``cls``'s ``on_bar`` method.
+
+    Preconditions:
+      - ``cls`` is a parsed ``Strategy`` subclass.
+    Postconditions:
+      - When ``on_bar`` exists and has >= 3 parameters (``self`` + 2),
+        returns ``{args[1].arg, args[2].arg}`` — the second positional
+        is the StrategyContext receiver, the third is the bar receiver.
+      - Falls back to the canonical ``{"bar", "ctx"}`` when ``on_bar``
+        is missing, has the wrong arity, or is async (the validator
+        would have flagged those already, but the AST check should
+        still function).
+    """
+    for node in ast.iter_child_nodes(cls):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "on_bar":
+            if len(node.args.args) >= 3:
+                return frozenset({node.args.args[1].arg, node.args.args[2].arg})
+    return _FORWARD_ACCESS_RECEIVERS
+
+
+def _find_forward_access_warnings(cls: ast.ClassDef) -> List[str]:
+    """Return AST-detected forward-access warning messages for ``cls``.
+
+    Preconditions:
+      - ``cls`` is the parsed ``Strategy`` subclass.
+    Postconditions:
+      - One message per distinct finding (de-duplicated across the class
+        body) covering three idioms that bypass the existing regex /
+        runtime checks:
+        * ``getattr(bar, <name>)`` / ``getattr(ctx, <name>)`` — dynamic
+          attribute access dodges the harness's ``AttributeError``
+          interceptor that surfaces ``lookahead_violation`` at runtime.
+        * ``try: <bar.* / ctx.*> except AttributeError`` — silently
+          swallows the same trap, even when the body legitimately
+          touches forward fields.
+        * ``Subscript`` on a class-bound preloaded series (e.g.
+          ``self._closes[i + 1]``) whose index is a positive offset
+          from an iteration variable — reading the next entry in a
+          preloaded array is a structural look-ahead even though the
+          engine's per-bar dispatch alone can't see it.
+      - Returns an empty list when ``cls`` has no relevant idioms.
+    Invariants:
+      - Pure function over the AST; never mutates ``cls``.
+      - The getattr and try/except checks are scoped to the ``on_bar``
+        method body (not the whole class) so that resolved parameter
+        names like ``c``/``b`` don't false-positive against coincidental
+        same-named locals in unrelated helper methods. The subscript
+        check (``self.<collection>[i + 1]``) still walks the whole class
+        because it matches on ``self.`` targets, not parameter names.
+      - Messages do not include the class name — the caller wraps each
+        finding in the gate's ``_warning`` envelope which already records
+        the gate/phase/rule context.
+    """
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def _add(msg: str) -> None:
+        if msg not in seen:
+            seen.add(msg)
+            out.append(msg)
+
+    receivers = _on_bar_receiver_names(cls)
+
+    # Scope the receiver-sensitive checks (getattr, try/except) to the
+    # ``on_bar`` method body so that resolved parameter names don't
+    # collide with coincidental same-named locals in unrelated methods.
+    on_bar_method = _find_on_bar_method(cls)
+    if on_bar_method is not None:
+        for node in ast.walk(on_bar_method):
+            if isinstance(node, ast.Call) and _is_getattr_on_receiver(node, receivers):
+                _add(
+                    "getattr(bar, ...) / getattr(ctx, ...) dodges the runtime "
+                    "AttributeError trap — read the attribute directly so a "
+                    "missing field surfaces as lookahead_violation instead of "
+                    "silently returning a default"
+                )
+            if isinstance(node, ast.Try) and _try_block_swallows_attribute_error(node, receivers):
+                _add(
+                    "try/except AttributeError around bar.* or ctx.* swallows the "
+                    "runtime lookahead_violation trap — let the exception "
+                    "propagate so the harness can surface the forward-access "
+                    "violation"
+                )
+
+    # The subscript check uses ``self.<collection>`` targets (not
+    # parameter names), so it is safe to walk the whole class without
+    # risking false positives from name collisions in helpers.
+    self_collections = _self_collection_names(cls)
+    for node in ast.walk(cls):
+        if isinstance(node, ast.Subscript) and _subscript_is_forward_offset_on_self_collection(
+            node, self_collections
+        ):
+            _add(
+                "Subscript on self.<preloaded series> with a positive offset "
+                "from an iteration variable (e.g. self._closes[i + 1]) "
+                "reads beyond the current bar — only past entries are valid "
+                "under the event-driven contract"
+            )
+    return out
+
+
+def _find_on_bar_method(cls: ast.ClassDef) -> Optional[ast.FunctionDef]:
+    """Return the ``on_bar`` method node from ``cls``, or ``None``."""
+    for node in ast.iter_child_nodes(cls):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "on_bar":
+            return node
+    return None
+
+
+def _is_getattr_on_receiver(call: ast.Call, receivers: frozenset[str]) -> bool:
+    """True iff ``call`` is ``getattr(<receiver>, ...)`` with at least two args.
+
+    Preconditions:
+      - ``receivers`` is the set of parameter names resolved from the
+        class's ``on_bar`` signature via :func:`_on_bar_receiver_names`.
+    Postconditions:
+      - Matches both the bare ``getattr(...)`` name form and the
+        ``builtins.getattr(...)`` attribute form so the check survives
+        defensive ``import builtins`` aliasing.
+      - Requires ``len(call.args) >= 2`` — the single-arg ``getattr``
+        signature does not exist at runtime, so a one-arg call is some
+        unrelated function masquerading as ``getattr``.
+    """
+    if not isinstance(call.func, (ast.Name, ast.Attribute)):
+        return False
+    if isinstance(call.func, ast.Name) and call.func.id != "getattr":
+        return False
+    if isinstance(call.func, ast.Attribute) and call.func.attr != "getattr":
+        return False
+    if len(call.args) < 2:
+        return False
+    target = call.args[0]
+    return isinstance(target, ast.Name) and target.id in receivers
+
+
+def _try_block_swallows_attribute_error(node: ast.Try, receivers: frozenset[str]) -> bool:
+    """True iff any handler catches ``AttributeError`` AND the try body
+    touches an attribute on a receiver name.
+
+    Preconditions:
+      - ``receivers`` is the set of parameter names resolved from the
+        class's ``on_bar`` signature via :func:`_on_bar_receiver_names`.
+    Postconditions:
+      - Matches both the bare ``except AttributeError:`` form and the
+        tuple form (``except (AttributeError, KeyError):``) — the latter
+        also swallows the runtime trap and is just as unsafe.
+      - Empty try-blocks (no relevant Attribute accesses) do not trigger
+        — the rule only fires when the swallowed exception could
+        plausibly originate from a forward-field access.
+    """
+    catches_attribute_error = False
+    for handler in node.handlers:
+        exc_type = handler.type
+        if exc_type is None:
+            catches_attribute_error = True
+            break
+        if isinstance(exc_type, ast.Name) and exc_type.id == "AttributeError":
+            catches_attribute_error = True
+            break
+        if isinstance(exc_type, ast.Tuple) and any(
+            isinstance(e, ast.Name) and e.id == "AttributeError" for e in exc_type.elts
+        ):
+            catches_attribute_error = True
+            break
+    if not catches_attribute_error:
+        return False
+    for sub in node.body:
+        for inner in ast.walk(sub):
+            if (
+                isinstance(inner, ast.Attribute)
+                and isinstance(inner.value, ast.Name)
+                and inner.value.id in receivers
+            ):
+                return True
+    return False
+
+
+def _self_collection_names(cls: ast.ClassDef) -> frozenset[str]:
+    """Return identifiers bound on ``self`` to list/series-like literals.
+
+    Preconditions:
+      - ``cls`` is a parsed strategy class.
+    Postconditions:
+      - Returns the set of names ``n`` such that ``cls`` contains at
+        least one ``self.<n> = <collection-literal>`` assignment. A
+        collection literal is one of: ``ast.List``, ``ast.ListComp``,
+        ``ast.Tuple``, ``ast.Set``, or a call to ``list``/``tuple``/
+        ``np.array``/``np.asarray``/``pd.Series``/``pd.DataFrame``.
+      - The set is conservatively permissive — false positives at the
+        subscript check are downgraded to warnings, never criticals.
+    """
+    builders = frozenset({"list", "tuple", "set"})
+    pandas_builders = frozenset({"Series", "DataFrame", "array", "asarray"})
+    names: set[str] = set()
+    for node in ast.walk(cls):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not _is_self_target_only(node.targets):
+            continue
+        if not _is_collection_rhs(node.value, builders, pandas_builders):
+            continue
+        for target in node.targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            ):
+                names.add(target.attr)
+    return frozenset(names)
+
+
+def _is_self_target_only(targets: List[ast.expr]) -> bool:
+    """True iff every assignment target is ``self.<name>``."""
+    for target in targets:
+        if not (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        ):
+            return False
+    return True
+
+
+def _is_collection_rhs(
+    value: ast.AST,
+    builders: frozenset[str],
+    pandas_builders: frozenset[str],
+) -> bool:
+    """True iff ``value`` is a list/tuple/set literal or a recognised builder call."""
+    if isinstance(value, (ast.List, ast.ListComp, ast.Tuple, ast.Set)):
+        return True
+    if isinstance(value, ast.Call):
+        if isinstance(value.func, ast.Name) and value.func.id in builders:
+            return True
+        if isinstance(value.func, ast.Attribute) and value.func.attr in pandas_builders:
+            return True
+    return False
+
+
+def _subscript_is_forward_offset_on_self_collection(
+    node: ast.Subscript, self_collections: frozenset[str]
+) -> bool:
+    """True iff ``node`` is ``self.<known-collection>[<iter> + <positive-int>]``.
+
+    Preconditions:
+      - ``self_collections`` is the set of collection names returned by
+        :func:`_self_collection_names`.
+    Postconditions:
+      - The receiver must be ``self.<name>`` with ``<name>`` in
+        ``self_collections``.
+      - The index expression must be ``<Name> + <positive int constant>``
+        OR ``<positive int constant> + <Name>``. The ``<Name>`` operand
+        is treated as an iteration variable — we can't statically prove
+        it's an iter, but reading ahead by a constant offset from any
+        named variable indexing a preloaded series is the look-ahead
+        pattern we want to surface.
+      - ``[i - 1]`` / ``[i]`` / ``[i + 0]`` never trigger; only strictly
+        positive forward offsets do.
+    """
+    if not (
+        isinstance(node.value, ast.Attribute)
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "self"
+        and node.value.attr in self_collections
+    ):
+        return False
+    index_expr = node.slice
+    if not isinstance(index_expr, ast.BinOp) or not isinstance(index_expr.op, ast.Add):
+        return False
+    left, right = index_expr.left, index_expr.right
+    if isinstance(left, ast.Name) and _is_positive_int_constant(right):
+        return True
+    if isinstance(right, ast.Name) and _is_positive_int_constant(left):
+        return True
+    return False
+
+
+def _is_positive_int_constant(node: ast.AST) -> bool:
+    """True iff ``node`` is an integer ``ast.Constant`` with value ``>= 1``."""
+    return isinstance(node, ast.Constant) and isinstance(node.value, int) and node.value >= 1
+
 
 def _get_call_name(node: ast.Call) -> str:
     """Extract the function name from a Call node (handles simple names and attribute access)."""

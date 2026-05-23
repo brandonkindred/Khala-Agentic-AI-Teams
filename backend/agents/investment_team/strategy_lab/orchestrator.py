@@ -968,6 +968,13 @@ class StrategyLabOrchestrator:
         fetched_symbols: List[str] = []
         provider_used: Dict[str, str] = {}
         max_rounds_exhausted = False
+        # Tracks whether the LAST executed round (including any
+        # ``_handle_critical_anomalies`` recovery) surfaced the harness's
+        # runtime ``lookahead_violation`` (``error_type == LOOKAHEAD``).
+        # Threaded onto the synthesis outcome so the verification phase
+        # can stamp the cause onto ``acceptance_reason`` instead of the
+        # generic ``publication_disabled`` message.
+        runtime_lookahead_violation = False
 
         for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
@@ -1080,6 +1087,7 @@ class StrategyLabOrchestrator:
             # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
             emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
             exec_result = run_strategy_code(code, market_data, config, strategy=spec)
+            runtime_lookahead_violation = exec_result.error_type == "lookahead_violation"
 
             if not exec_result.success:
                 all_gate_results.append(
@@ -1176,6 +1184,7 @@ class StrategyLabOrchestrator:
                 spec, code = recovery.spec, recovery.code
                 trades, metrics = recovery.trades, recovery.metrics
                 exec_result = recovery.exec_result
+                runtime_lookahead_violation = exec_result.error_type == "lookahead_violation"
                 if recovery.exhausted:
                     # Even if the code is technically correct, the cycle
                     # exhausted its rounds on an unresolved anomaly. Leaving
@@ -1206,6 +1215,7 @@ class StrategyLabOrchestrator:
             max_rounds_exhausted=max_rounds_exhausted,
             provider_used=provider_used,
             open_position_entry_reasons=open_position_entry_reasons,
+            runtime_lookahead_violation=runtime_lookahead_violation,
         )
 
     def _handle_critical_anomalies(
@@ -1714,6 +1724,7 @@ class StrategyLabOrchestrator:
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
         open_position_entry_reasons: Optional[List[str]] = None,
+        runtime_lookahead_violation: bool = False,
     ) -> _VerificationOutcome:
         """Run walk-forward + acceptance, conformance, is_winning resolution.
 
@@ -1963,6 +1974,29 @@ class StrategyLabOrchestrator:
             )
             metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
                 metrics, suffix, upstream_admitted=upstream_admitted
+            )
+
+        # Runtime look-ahead veto. The harness traps ``AttributeError`` on
+        # forward-field access and surfaces it as
+        # ``TradingServiceResult.lookahead_violation=True`` → propagated
+        # through ``StrategyRunResult.error_type="lookahead_violation"`` →
+        # ``_SynthesisLoopOutcome.runtime_lookahead_violation``. By the
+        # time the synthesis loop hands control to verification, an
+        # unresolved lookahead means refinement exhausted its budget
+        # without producing a clean run; ``execution_succeeded`` is
+        # already False and the else-branch above set ``is_winning=False``.
+        # The veto here makes that decision explicit in the audit trail
+        # so reviewers see the cause instead of the generic
+        # ``publication_disabled`` reason. The sentinel field
+        # ``subprocess_attribute_error`` records that the trip point was
+        # the harness's AttributeError interceptor (the violating
+        # attribute name is not preserved on TradingServiceResult).
+        if runtime_lookahead_violation:
+            is_winning = False
+            metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
+                metrics,
+                "lookahead_violation_at_runtime: subprocess_attribute_error",
+                upstream_admitted=upstream_admitted,
             )
 
         return _VerificationOutcome(
@@ -2510,6 +2544,7 @@ class StrategyLabOrchestrator:
             trades_aligned=trades_aligned,
             alignment_reports=alignment_reports,
             all_gate_results=all_gate_results,
+            runtime_lookahead_violation=synthesis.runtime_lookahead_violation,
             emit=emit,
             open_position_entry_reasons=open_position_entry_reasons,
         )

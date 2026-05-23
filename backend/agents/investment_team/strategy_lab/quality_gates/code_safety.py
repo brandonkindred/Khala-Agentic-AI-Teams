@@ -10,8 +10,10 @@ from ..spec_dsl import StopLossRule, TakeProfitRule
 from .code_safety_ast import (
     _BANNED_CALL_PATTERNS,
     _LOOKAHEAD_PATTERNS,
+    _LOOKAHEAD_WARNING_PATTERNS,
     _calls_form_entry_exit_pair,
     _collect_hook_submit_calls,
+    _find_forward_access_warnings,
     _find_strategy_subclasses,
     _get_call_name,
     _has_universe_constant,
@@ -626,12 +628,55 @@ class CodeSafetyChecker(GateResultsMixin):
         return out
 
     def _check_lookahead_bias(self, ctx: CodeSafetyCtx) -> Iterable[QualityGateResult]:
-        # Run against executable code only — comments and string literals are
-        # stripped to avoid false positives.
+        """Scan executable code for syntactic look-ahead tripwires.
+
+        Preconditions:
+          - ``ctx.executable`` is ``ctx.code`` with comments and string
+            literals blanked, so docstring examples can't false-flag.
+        Postconditions:
+          - Returns one critical result per matched pattern in
+            :data:`_LOOKAHEAD_PATTERNS` (forward-attribute access whose
+            only correct response is to refuse the run).
+          - Returns one warning per matched pattern in
+            :data:`_LOOKAHEAD_WARNING_PATTERNS` (dynamic-attribute idioms
+            that dodge the runtime AttributeError trap).
+          - Returns the empty list when nothing matches.
+        """
         out: List[QualityGateResult] = []
         for pattern, reason in _LOOKAHEAD_PATTERNS:
             if pattern.search(ctx.executable):
                 out.append(self._critical(f"Look-ahead bias: {reason}"))
+        for pattern, reason in _LOOKAHEAD_WARNING_PATTERNS:
+            if pattern.search(ctx.executable):
+                out.append(self._warning(f"Look-ahead bias: {reason}"))
+        return out
+
+    def _check_forward_access_patterns(self, ctx: CodeSafetyCtx) -> Iterable[QualityGateResult]:
+        """Flag AST-level forward-access idioms the regex pass cannot see.
+
+        Preconditions:
+          - ``ctx.tree`` is a parsed module; ``ctx.strategy_classes`` is the
+            list of ``Strategy`` subclasses returned by
+            :func:`_find_strategy_subclasses`.
+        Postconditions:
+          - Returns one warning result per distinct findings produced by
+            :func:`_find_forward_access_warnings`:
+              * ``getattr(bar, ...)`` / ``getattr(ctx, ...)`` calls (AST
+                companion to the regex check, catches multi-line forms).
+              * ``try: <bar.* / ctx.*> except AttributeError:`` blocks
+                that swallow the lookahead_violation trap.
+              * ``Subscript`` on a class-bound preloaded series whose index
+                is a positive offset from an iteration variable, e.g.
+                ``self._closes[i + 1]``.
+          - Returns the empty list when no strategy class is present or
+            no pattern matches — paired with :func:`_check_lookahead_bias`
+            (critical-path) so a single piece of source surfaces all
+            forward-access concerns in one pass.
+        """
+        out: List[QualityGateResult] = []
+        for cls in ctx.strategy_classes:
+            for reason in _find_forward_access_warnings(cls):
+                out.append(self._warning(f"Look-ahead bias: {reason}"))
         return out
 
     def _check_code_length(self, ctx: CodeSafetyCtx) -> Iterable[QualityGateResult]:
@@ -751,6 +796,7 @@ class CodeSafetyChecker(GateResultsMixin):
         _check_banned_calls,
         _check_banned_call_regex,
         _check_lookahead_bias,
+        _check_forward_access_patterns,
         _check_code_length,
         _check_order_flow_shape,
         _check_universe_guard,

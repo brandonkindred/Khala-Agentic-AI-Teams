@@ -344,20 +344,40 @@ class BacktestAnomalyDetector(GateResultsMixin):
     def _check_lookahead_bar_predictability(
         self, ctx: BacktestAnomalyCtx
     ) -> Iterable[QualityGateResult]:
-        """Flag trades whose outcome agrees suspiciously well with the entry
-        bar's intrabar direction — a heuristic for look-ahead bias that AST
-        checks miss.
+        """Flag trades whose outcome agrees suspiciously well with the
+        intrabar direction of their entry and exit bars — a heuristic for
+        look-ahead bias that AST checks miss.
 
         Preconditions:
           - ``ctx.trades`` is non-empty.
           - ``ctx.market_data`` is provided; otherwise the rule emits nothing
             (the synthesis-loop call site doesn't always have it in scope).
         Postconditions:
-          - Returns at most one result.
-          - Critical when ``n_eligible >= 20`` and agreement rate ``>= 95%``,
-            OR when ``n_eligible < 20`` and agreement is perfect across at
-            least 5 trades (smaller-sample backstop).
-          - Warning when ``n_eligible >= 20`` and ``80% <= agreement < 95%``.
+          - Returns up to two results: at most one combined-rate finding
+            (critical / warning), plus an additive degraded-sample warning
+            when eligibility is sparse.
+          - Emits a single info-level result tagged
+            ``sample insufficient`` when no trade resolves a usable bar
+            direction (every candidate was filtered by missing market
+            data, unresolved entry/exit bars, an unrecognised side, or a
+            zero-return signal). The previous behaviour returned nothing,
+            so reviewers couldn't tell whether the detector ran or was
+            skipped.
+          - Critical when ``trades_with_signal >= 20`` and combined
+            agreement ``>= 95%``, OR when ``trades_with_signal < 20`` and
+            combined agreement is perfect across at least 5 trades
+            (smaller-sample backstop). Sample-size thresholds key off
+            distinct *trades* with a usable signal, NOT off the doubled
+            observation count — two bar observations per trade are
+            correlated through the trade's own outcome and don't compose
+            into independent samples for the threshold purpose.
+          - Warning when ``trades_with_signal >= 20`` and
+            ``80% <= combined_agreement < 95%``.
+          - Additionally emits an additive warning when
+            ``len(ctx.trades) >= 10`` and the entry-bar resolvability
+            ratio (``entry_eligible / len(trades)``) drops below 0.5 —
+            so reviewers know the agreement statistic was computed from
+            a degraded sample.
         Invariants:
           - Trade side is folded into the comparison: profitable shorts in
             this codebase carry ``return_pct > 0`` on DOWN bars, so a naive
@@ -368,18 +388,21 @@ class BacktestAnomalyDetector(GateResultsMixin):
             the bar pay off". Look-ahead-biased trades — long on up bars
             or short on down bars, both winners — produce agreement; the
             heuristic catches both directions.
-          - Entry-bar lookup prefers an exact ``bar.date == trade.entry_date``
-            match — calendar-prefix matching would pick the wrong bar on
-            intraday timeframes and make the agreement statistic arbitrary.
-            When exact match fails but at least one bar shares the trade's
-            calendar date (the production case where the simulator
-            truncates entry timestamps to ``YYYY-MM-DD`` while intraday
-            bars carry full ISO timestamps), the rule falls back to the
-            day's net intrabar direction (first bar's open → last bar's
-            close). Silent skipping in that asymmetry would let look-ahead
-            slip through the realism veto, which is the failure mode this
-            gate exists to catch.
-          - Trades whose entry bar has ``close == open``, whose return is
+          - Entry-bar AND exit-bar directions are folded into a single
+            combined rate (``(entry_agreements + exit_agreements) /
+            (entry_eligible + exit_eligible)``). A single-rate combination
+            has lower variance than a max-of-two-rates and avoids
+            double-counting the same leak signal across the two bars.
+          - Entry / exit bar lookup prefers an exact
+            ``bar.date == trade.entry_date`` match — calendar-prefix
+            matching would pick the wrong bar on intraday timeframes and
+            make the agreement statistic arbitrary. When exact match fails
+            but at least one bar shares the trade's calendar date (the
+            production case where the simulator truncates timestamps to
+            ``YYYY-MM-DD`` while intraday bars carry full ISO timestamps),
+            the rule falls back to the day's net intrabar direction
+            (first bar's open → last bar's close).
+          - Trades whose target bar has ``close == open``, whose return is
             exactly zero, or whose ``side`` isn't ``long``/``short`` are
             skipped — they contribute no sign signal.
           - Degenerate samples (all effective bar directions move one way,
@@ -388,16 +411,23 @@ class BacktestAnomalyDetector(GateResultsMixin):
         """
         if ctx.market_data is None or ctx.mode == "paper":
             return ()
-        agreements = 0
-        eligible = 0
+        entry_agreements = 0
+        entry_eligible = 0
+        exit_agreements = 0
+        exit_eligible = 0
+        # Count of distinct trades that contributed at least one
+        # observation (entry- OR exit-bar direction resolved). Used for
+        # sample-size thresholds because two observations from the same
+        # trade are NOT independent — both correlate with the trade's
+        # own outcome, so an agreement-rate threshold sized for 20
+        # independent samples should not be tripped by 10 trades' worth
+        # of paired observations.
+        trades_with_signal = 0
         effective_bar_dirs: set[int] = set()
         ret_dirs: set[int] = set()
         for trade in ctx.trades:
             bars = ctx.market_data.get(trade.symbol)
             if not bars:
-                continue
-            bar_dir = _resolve_entry_bar_direction(bars, trade.entry_date)
-            if bar_dir is None:
                 continue
             side_sign = _side_sign(trade.side)
             if side_sign is None:
@@ -405,14 +435,60 @@ class BacktestAnomalyDetector(GateResultsMixin):
             ret_dir = _sign(trade.return_pct)
             if ret_dir == 0:
                 continue
-            effective_bar_dir = bar_dir * side_sign
-            eligible += 1
-            effective_bar_dirs.add(effective_bar_dir)
-            ret_dirs.add(ret_dir)
-            if effective_bar_dir == ret_dir:
-                agreements += 1
+            contributed = False
+            # Entry-bar contribution.
+            entry_dir = _resolve_entry_bar_direction(bars, trade.entry_date)
+            if entry_dir is not None:
+                effective_entry = entry_dir * side_sign
+                entry_eligible += 1
+                effective_bar_dirs.add(effective_entry)
+                ret_dirs.add(ret_dir)
+                if effective_entry == ret_dir:
+                    entry_agreements += 1
+                contributed = True
+            # Exit-bar contribution. ``_resolve_entry_bar_direction`` is
+            # a generic timestamp→direction resolver; the same exact /
+            # day-aggregate semantics apply to the exit bar.
+            exit_dir = _resolve_entry_bar_direction(bars, trade.exit_date)
+            if exit_dir is not None:
+                effective_exit = exit_dir * side_sign
+                exit_eligible += 1
+                effective_bar_dirs.add(effective_exit)
+                ret_dirs.add(ret_dir)
+                if effective_exit == ret_dir:
+                    exit_agreements += 1
+                contributed = True
+            if contributed:
+                trades_with_signal += 1
+        eligible = entry_eligible + exit_eligible
         if eligible == 0:
-            return ()
+            return (
+                self._info(
+                    "lookahead_bar_predictability: 0 eligible observations — "
+                    "sample insufficient for the predictability heuristic "
+                    "(no trade resolved an entry- or exit-bar direction)."
+                ),
+            )
+
+        results: List[QualityGateResult] = []
+        # Degraded-sample warning fires on the *entry* ratio rather than
+        # the combined one because exit-bar resolvability tracks entry
+        # resolvability tightly; the entry ratio is the more interpretable
+        # signal for "the agreement statistic was computed against a
+        # smaller-than-expected fraction of the ledger".
+        if len(ctx.trades) >= 10:
+            entry_ratio = entry_eligible / len(ctx.trades)
+            if entry_ratio < 0.5:
+                results.append(
+                    self._warning(
+                        f"lookahead_bar_predictability ran on a degraded "
+                        f"sample: only {entry_eligible}/{len(ctx.trades)} "
+                        f"trades had a resolvable entry bar "
+                        f"({entry_ratio:.0%} eligibility) — agreement "
+                        "statistic below should be interpreted with caution."
+                    )
+                )
+
         # Degenerate samples (every effective bar direction is one way, or
         # every eligible trade returns the same sign) make the agreement
         # statistic uninformative — a fixture where every long trade wins on
@@ -420,35 +496,42 @@ class BacktestAnomalyDetector(GateResultsMixin):
         # both sides of the sign distribution before promoting agreement to
         # a finding.
         if len(effective_bar_dirs) < 2 or len(ret_dirs) < 2:
-            return ()
+            return tuple(results)
+        agreements = entry_agreements + exit_agreements
         rate = agreements / eligible
-        if eligible >= 20 and rate >= 0.95:
-            return (
+        if trades_with_signal >= 20 and rate >= 0.95:
+            results.append(
                 self._critical(
-                    f"Entry-bar direction agrees with trade return on "
-                    f"{agreements}/{eligible} trades ({rate:.0%}) — perfectly "
-                    "predictable from the entry bar's close-minus-open indicates "
-                    "intrabar look-ahead bias."
-                ),
+                    f"Entry+exit bar direction agrees with trade return on "
+                    f"{agreements}/{eligible} bar observations ({rate:.0%}) "
+                    f"across {trades_with_signal} trades — perfectly "
+                    "predictable from the close-minus-open of the "
+                    "entry/exit bars indicates intrabar look-ahead bias."
+                )
             )
-        if eligible < 20 and eligible >= 5 and rate >= 0.999:
-            return (
+            return tuple(results)
+        if trades_with_signal < 20 and trades_with_signal >= 5 and rate >= 0.999:
+            results.append(
                 self._critical(
-                    f"Entry-bar direction matches trade return on every "
-                    f"eligible trade ({agreements}/{eligible}) — perfect "
-                    "agreement at small sample is consistent with intrabar "
-                    "look-ahead bias; collect more trades to disambiguate."
-                ),
+                    f"Entry+exit bar direction matches trade return on every "
+                    f"eligible observation ({agreements}/{eligible}) across "
+                    f"{trades_with_signal} trades — perfect agreement at "
+                    "small sample is consistent with intrabar look-ahead "
+                    "bias; collect more trades to disambiguate."
+                )
             )
-        if eligible >= 20 and rate >= 0.80:
-            return (
+            return tuple(results)
+        if trades_with_signal >= 20 and rate >= 0.80:
+            results.append(
                 self._warning(
-                    f"Entry-bar direction agrees with trade return on "
-                    f"{agreements}/{eligible} trades ({rate:.0%}) — review the "
-                    "entry-signal computation for subtle look-ahead."
-                ),
+                    f"Entry+exit bar direction agrees with trade return on "
+                    f"{agreements}/{eligible} bar observations ({rate:.0%}) "
+                    f"across {trades_with_signal} trades — review the entry- "
+                    "and exit-signal computation for subtle look-ahead."
+                )
             )
-        return ()
+            return tuple(results)
+        return tuple(results)
 
     def _check_cost_sensitivity(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
         gross_wins = sum(t.gross_pnl for t in ctx.trades if t.gross_pnl > 0)
