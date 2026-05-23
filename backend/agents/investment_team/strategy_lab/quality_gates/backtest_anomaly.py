@@ -359,11 +359,17 @@ class BacktestAnomalyDetector(GateResultsMixin):
             least 5 trades (smaller-sample backstop).
           - Warning when ``n_eligible >= 20`` and ``80% <= agreement < 95%``.
         Invariants:
-          - Entry-bar lookup is an EXACT timestamp match against
-            ``OHLCVBar.date`` — calendar-prefix matching would pick the
-            first bar of the day on intraday timeframes and make the
-            agreement statistic arbitrary. Trades whose entry timestamp
-            doesn't exact-match any bar are skipped (ineligible).
+          - Entry-bar lookup prefers an exact ``bar.date == trade.entry_date``
+            match — calendar-prefix matching would pick the wrong bar on
+            intraday timeframes and make the agreement statistic arbitrary.
+            When exact match fails but at least one bar shares the trade's
+            calendar date (the production case where the simulator
+            truncates entry timestamps to ``YYYY-MM-DD`` while intraday
+            bars carry full ISO timestamps), the rule falls back to the
+            day's net intrabar direction (first bar's open → last bar's
+            close). Silent skipping in that asymmetry would let look-ahead
+            slip through the realism veto, which is the failure mode this
+            gate exists to catch.
           - Trades whose entry bar has ``close == open`` or whose return
             is exactly zero contribute no sign signal and are skipped.
           - Degenerate samples (all eligible bars move one direction, or
@@ -380,12 +386,11 @@ class BacktestAnomalyDetector(GateResultsMixin):
             bars = ctx.market_data.get(trade.symbol)
             if not bars:
                 continue
-            entry_bar = _find_bar_by_timestamp(bars, trade.entry_date)
-            if entry_bar is None:
+            bar_dir = _resolve_entry_bar_direction(bars, trade.entry_date)
+            if bar_dir is None:
                 continue
-            bar_dir = _sign(entry_bar.close - entry_bar.open)
             ret_dir = _sign(trade.return_pct)
-            if bar_dir == 0 or ret_dir == 0:
+            if ret_dir == 0:
                 continue
             eligible += 1
             bar_dirs.add(bar_dir)
@@ -549,26 +554,49 @@ def _sign(value: float) -> int:
     return 0
 
 
-def _find_bar_by_timestamp(bars: List[OHLCVBar], target: str) -> Optional[OHLCVBar]:
-    """Return the bar whose ``date`` equals ``target`` exactly.
+def _resolve_entry_bar_direction(bars: List[OHLCVBar], target: str) -> Optional[int]:
+    """Return the sign of the entry-bar's ``close - open`` for look-ahead
+    detection, accommodating the date-only / timestamped asymmetry.
 
     Preconditions:
-      - ``bars`` is iterable; ``target`` is a string.
+      - ``bars`` is iterable over :class:`OHLCVBar`.
+      - ``target`` is a non-empty string. Production callers pass
+        ``trade.entry_date``, which the trade simulator truncates to
+        ``YYYY-MM-DD``; bars may carry either ``YYYY-MM-DD`` (daily
+        fetchers today) or ``YYYY-MM-DDTHH:MM:SS`` (any future intraday
+        fetcher).
     Postconditions:
-      - Returns ``None`` when ``target`` is empty or no bar's ``date``
-        field equals ``target`` exactly.
-      - Never falls back to date-prefix matching: on intraday timeframes
-        (1m/5m/15m/1h) many bars share a calendar day, so a prefix match
-        would pick the first bar of the day rather than the actual entry
-        bar and make the look-ahead agreement statistic arbitrary.
-        Trades whose entry timestamp can't be resolved this way are
-        skipped by the caller (counted as ineligible).
+      - Returns ``None`` when ``target`` is empty, no bar matches the
+        target's calendar date, or the resolved direction is exactly
+        zero (uninformative for sign-agreement).
+      - Otherwise returns ``+1`` or ``-1`` representing the direction
+        of the entry "bar":
+          * **Exact match path** — when at least one bar's ``date`` equals
+            ``target`` exactly, the direction is ``sign(bar.close - bar.open)``
+            of that bar. Daily backtests resolve here.
+          * **Day-aggregate fallback** — when no bar exact-matches but at
+            least one bar's calendar-date prefix matches ``target[:10]``,
+            the direction is ``sign(last_bar.close - first_bar.open)``
+            across all same-day bars in chronological order. This is the
+            day's net intrabar direction and is a legitimate look-ahead
+            probe even when the trade ledger has truncated an intraday
+            entry timestamp to a date — silent skipping would otherwise
+            let look-ahead slip through the realism veto.
     Invariants:
-      - Pure function; no side effects.
+      - Pure function; never mutates ``bars``.
+      - Day-aggregate path only fires when exact match fails — the
+        precise-bar signal is preferred whenever it's available.
     """
     if not target:
         return None
+    target_date = target[:10]
+    same_day: List[OHLCVBar] = []
     for bar in bars:
         if bar.date == target:
-            return bar
-    return None
+            return _sign(bar.close - bar.open) or None
+        if bar.date[:10] == target_date:
+            same_day.append(bar)
+    if not same_day:
+        return None
+    direction = _sign(same_day[-1].close - same_day[0].open)
+    return direction or None

@@ -375,56 +375,37 @@ def test_lookahead_warning_between_80_and_95_pct():
     assert look[0].severity == "warning"
 
 
-def test_lookahead_skips_trades_whose_intraday_timestamp_does_not_exact_match():
-    """On intraday timeframes many bars share a calendar day; the rule must
-    require an exact ``bar.date == trade.entry_date`` match and skip trades
-    whose entry timestamp can't be resolved, so the agreement statistic
-    isn't computed against the wrong bar."""
-    # Twenty trades, 1h timeframe. Half carry the bar's exact intraday
-    # timestamp; the other half carry the calendar date only. The latter
-    # must be skipped, leaving only the former in the eligible set.
-    trades: List[TradeRecord] = []
-    for i in range(20):
-        entry_ts = (
-            f"2024-03-{((i % 27) + 1):02d}T10:30:00"
-            if i % 2 == 0
-            else f"2024-03-{((i % 27) + 1):02d}"
-        )
-        exit_ts = (
-            f"2024-03-{((i % 27) + 2):02d}T15:30:00"
-            if i % 2 == 0
-            else f"2024-03-{((i % 27) + 2):02d}"
-        )
-        trades.append(
-            _trade(
-                trade_num=i + 1,
-                entry_date=entry_ts,
-                exit_date=exit_ts,
-                return_pct=1.5 if i % 4 < 2 else -1.0,
-                hold_days=1,
-            )
-        )
+def test_lookahead_intraday_exact_match_uses_specific_bar_not_prefix():
+    """When a trade carries a full ISO timestamp that exact-matches one
+    specific intraday bar, the rule must use THAT bar's direction even when
+    other bars on the same calendar day disagree.
 
-    # Build bars whose intrabar direction PERFECTLY matches the exact-match
-    # trades' return signs. For the calendar-date trades we deliberately
-    # publish only an intraday timestamp ("...T09:30:00") so the exact-match
-    # lookup misses them. If the rule fell back to date-prefix matching, it
-    # would pick the 09:30 bar and the agreement stat would be wrong; the
-    # correct behaviour is to skip those trades entirely.
+    The day publishes a 09:30 bar with bearish direction and a 10:30 bar
+    with bullish direction; each trade's exact ``entry_date`` resolves to
+    the 10:30 bar, which agrees with the trade return. Were the rule to
+    accidentally fall back to a calendar-prefix lookup it would see the
+    09:30 bar and the agreement statistic would invert.
+    """
+    trades = [
+        _trade(
+            trade_num=i + 1,
+            entry_date=f"2024-03-{((i % 27) + 1):02d}T10:30:00",
+            exit_date=f"2024-03-{((i % 27) + 2):02d}T15:30:00",
+            return_pct=1.5 if i % 2 == 0 else -1.0,
+            hold_days=1,
+        )
+        for i in range(20)
+    ]
     bars_by_symbol: dict = {}
     for t in trades:
         bars = bars_by_symbol.setdefault(t.symbol, [])
-        # Always publish the day's open bar at 09:30 with one direction so
-        # date-prefix fallback would see homogeneous bars.
         day_prefix = t.entry_date[:10]
-        bars.append(_bar(f"{day_prefix}T09:30:00", open_=100.0, close=101.0))
-        if "T" in t.entry_date:
-            # Add the bar that exact-matches the intraday trade's entry,
-            # with direction aligned to the trade's return sign.
-            if t.return_pct >= 0:
-                bars.append(_bar(t.entry_date, open_=100.0, close=101.5))
-            else:
-                bars.append(_bar(t.entry_date, open_=101.5, close=100.0))
+        # Counter-direction 09:30 bar so prefix-fallback would miscount.
+        bars.append(_bar(f"{day_prefix}T09:30:00", open_=101.5, close=100.0))
+        if t.return_pct >= 0:
+            bars.append(_bar(t.entry_date, open_=100.0, close=101.5))
+        else:
+            bars.append(_bar(t.entry_date, open_=101.5, close=100.0))
 
     detector = BacktestAnomalyDetector()
     results = detector.check(
@@ -435,12 +416,78 @@ def test_lookahead_skips_trades_whose_intraday_timestamp_does_not_exact_match():
         timeframe="1h",
         market_data=bars_by_symbol,
     )
-
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
-    # 10 eligible trades (the intraday-timestamped half), all in perfect
-    # agreement with their exact-match bar → small-sample critical fires.
-    # The other 10 trades were correctly skipped because their calendar-date
-    # entry_date didn't exact-match any bar.
     assert len(look) == 1
-    assert "10/10" in look[0].details
+    assert "20/20" in look[0].details
     assert look[0].severity == "critical"
+
+
+def test_lookahead_falls_back_to_day_aggregate_when_trade_date_is_date_only():
+    """Production trade ledgers truncate ``entry_date`` to ``YYYY-MM-DD``
+    (``trade_builder.py:55`` and ``fill_simulator.py:1049``). When the
+    market data is intraday, exact-match would silently fail on every
+    trade and the rule would never fire — defeating the realism veto.
+
+    The rule must fall back to a day-aggregate direction (first same-day
+    bar's open → last same-day bar's close) so look-ahead at day
+    granularity still gets caught.
+    """
+    # 20 date-only trades whose returns track the day's NET intraday move
+    # (09:30 open → 16:00 close). Returns alternate sign across days.
+    trades = [
+        _trade(
+            trade_num=i + 1,
+            entry_date=f"2024-03-{((i % 27) + 1):02d}",
+            exit_date=f"2024-03-{((i % 27) + 2):02d}",
+            return_pct=1.5 if i % 2 == 0 else -1.0,
+            hold_days=1,
+        )
+        for i in range(20)
+    ]
+    # Each day has TWO intraday bars (09:30 open + 16:00 close) whose
+    # combined direction (first.open → last.close) matches the trade's
+    # return sign. Exact-match against the date-only ``entry_date`` fails
+    # for every trade — only the day-aggregate fallback can resolve them.
+    bars_by_symbol: dict = {}
+    for t in trades:
+        bars = bars_by_symbol.setdefault(t.symbol, [])
+        day = t.entry_date  # already date-only
+        if t.return_pct >= 0:
+            bars.append(_bar(f"{day}T09:30:00", open_=100.0, close=100.2))
+            bars.append(_bar(f"{day}T16:00:00", open_=100.2, close=102.0))
+        else:
+            bars.append(_bar(f"{day}T09:30:00", open_=101.5, close=101.3))
+            bars.append(_bar(f"{day}T16:00:00", open_=101.3, close=100.0))
+
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1h",
+        market_data=bars_by_symbol,
+    )
+    look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
+    # All 20 trades resolve via day-aggregate; perfect agreement → critical.
+    assert len(look) == 1
+    assert "20/20" in look[0].details
+    assert look[0].severity == "critical"
+
+
+def test_lookahead_returns_no_result_when_no_same_day_bars_exist():
+    """When neither the exact-match path nor the day-aggregate path can
+    resolve any trade (no bars share the calendar date), the rule emits
+    nothing — there's genuinely no signal to evaluate."""
+    trades = _twenty_trades()
+    detector = BacktestAnomalyDetector()
+    results = detector.check(
+        _baseline_metrics(),
+        trades,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        timeframe="1d",
+        market_data={"QQQ": [_bar("2099-12-31", open_=100.0, close=101.0)]},
+    )
+    look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
+    assert look == []
