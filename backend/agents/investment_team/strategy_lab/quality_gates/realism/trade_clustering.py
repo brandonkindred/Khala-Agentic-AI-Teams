@@ -101,7 +101,17 @@ class TradeClusteringGate(GateResultsMixin):
             # inflate Q and bias the clustering verdict upward.
             n_intervals = max(0, len(entry_dates) - 1)
             lb_q = _ljung_box_q_lag1(lag1_rho, n_intervals)
-            autocorr_clusters = lb_q is not None and lb_q > _LB_CRITICAL_LAG1
+            # Burst attribution requires POSITIVE lag-1 autocorrelation —
+            # ``Q ∝ rho²`` so the Ljung-Box statistic also fires on
+            # significant NEGATIVE autocorrelation (alternating "burst-
+            # gap-burst-gap" anti-bursty arrangements). Labelling those
+            # as bursts would be backwards; they're the opposite signal.
+            autocorr_clusters = (
+                lb_q is not None
+                and lb_q > _LB_CRITICAL_LAG1
+                and lag1_rho is not None
+                and lag1_rho > 0
+            )
 
             return [
                 self._verdict(

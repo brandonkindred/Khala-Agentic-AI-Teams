@@ -213,6 +213,54 @@ def test_does_not_emit_critical_when_pf_below_1_with_zero_oversized_trades():
     assert all(r.passed and r.severity == "info" for r in results)
 
 
+def test_adv_resolves_to_window_preceding_each_trade_not_endofsample():
+    """The gate must evaluate each trade against the liquidity that
+    existed at the time the trade was entered, not a single snapshot
+    from the tail of the bar series. Fixture: a symbol whose ADV is
+    low in early 2024 (1k shares/day at $100 = $100k ADV → $1k
+    envelope at 1%) and high in late 2024 (1M shares/day at $100 =
+    $100M ADV → $1M envelope). A $5k trade entered in February is
+    oversized against the contemporaneous February ADV; the same
+    trade entered in November would not be. Without the per-timestamp
+    fix it would be evaluated against the December tail and incorrectly
+    pass."""
+    bars: List[OHLCVBar] = []
+    # 50 bars Jan-Feb 2024 at LOW volume ($100k dollar ADV).
+    for i in range(50):
+        month = 1 if i < 31 else 2
+        day = i + 1 if i < 31 else i - 30
+        bars.append(_bar(f"2024-{month:02d}-{day:02d}", close=100.0, volume=1_000.0))
+    # 50 bars Nov-Dec 2024 at HIGH volume ($100M dollar ADV).
+    for i in range(50):
+        month = 11 if i < 30 else 12
+        day = i + 1 if i < 30 else i - 29
+        bars.append(_bar(f"2024-{month:02d}-{day:02d}", close=100.0, volume=1_000_000.0))
+    market = {"QQQ": bars}
+
+    # A $5k trade in February — well above the $1k contemporaneous envelope.
+    early_trade = _trade(
+        trade_num=1, position_value=5_000.0, net_pnl=-200.0, entry_date="2024-02-15"
+    )
+    # Same-sized trade in November — well inside the $1M contemporaneous envelope.
+    late_trade = _trade(
+        trade_num=2, position_value=5_000.0, net_pnl=-200.0, entry_date="2024-11-15"
+    )
+
+    gate = LiquidityRealismGate()
+    # Single early trade: oversized → adjusted PF would collapse since
+    # haircut > net P&L magnitude → critical attributable to liquidity.
+    results_early = gate.check([early_trade], market)
+    criticals_early = _criticals(results_early)
+    assert len(criticals_early) == 1, (
+        "early-window trade should be flagged against early-window ADV"
+    )
+
+    # Single late trade: not oversized → no liquidity finding (info clean).
+    results_late = gate.check([late_trade], market)
+    assert _criticals(results_late) == []
+    assert _warnings(results_late) == []
+
+
 def test_does_not_emit_critical_when_pf_below_1_with_only_unresolvable_adv():
     """When every symbol's ADV is unresolvable (insufficient bars),
     oversized_count stays zero so no liquidity attribution exists for

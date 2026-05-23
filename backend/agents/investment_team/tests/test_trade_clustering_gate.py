@@ -117,12 +117,64 @@ def test_warning_when_quarter_dominates_but_no_autocorrelation():
     assert _criticals(results) == []
 
 
-def test_warning_when_bursts_present_but_no_dominant_quarter():
-    """40 trades arriving in clear bursts (lag-1 autocorrelation positive)
-    but spread across multiple quarters so no single quarter dominates."""
+def test_warning_when_arrival_rate_drifts_without_dominant_quarter():
+    """20 trades whose inter-arrival times decrease monotonically — the
+    arrival rate accelerates over the ~2.5-year window. Consecutive
+    intervals are similar in magnitude → positive lag-1 autocorrelation
+    → autocorr signal fires. No single calendar quarter holds more than
+    ~30% of the trades, so the quarter signal does not → verdict is
+    warning, not critical."""
+    from datetime import date, timedelta
+
+    intervals_days = [
+        120,
+        110,
+        100,
+        90,
+        80,
+        70,
+        60,
+        50,
+        40,
+        30,
+        25,
+        20,
+        15,
+        12,
+        10,
+        8,
+        6,
+        4,
+        3,
+    ]
     trades: List[TradeRecord] = []
-    # Bursts at the start of each month, but spread across many months.
-    # Trade dates: 4 trades on consecutive days each month for 10 months.
+    cursor = date(2023, 1, 1)
+    trades.append(_trade(1, cursor.isoformat()))
+    for i, iv in enumerate(intervals_days):
+        cursor = cursor + timedelta(days=iv)
+        trades.append(_trade(i + 2, cursor.isoformat()))
+
+    gate = TradeClusteringGate()
+    results = gate.check(trades)
+    warnings = _warnings(results)
+    assert len(warnings) == 1
+    assert "burst" in warnings[0].details.lower()
+    assert _criticals(results) == []
+
+
+def test_does_not_flag_negative_lag1_autocorrelation_as_burst():
+    """Alternating burst-gap-burst-gap arrangements produce NEGATIVE
+    lag-1 autocorrelation. The Ljung-Box ``Q ∝ rho²`` would still cross
+    the 3.84 critical value, but labelling anti-bursty patterns as
+    bursts is backwards — burst attribution must require positive
+    lag-1 autocorrelation.
+
+    Fixture: 4 dates on consecutive days each month, 10 alternating
+    months. Intervals = [1, 1, 1, ~58, 1, 1, 1, ~58, ...] — strongly
+    negative lag-1 autocorrelation (small deviations alternate with
+    large deviations) and no quarter dominance. Must be info-level.
+    """
+    trades: List[TradeRecord] = []
     n = 1
     months = [
         "2023-01",
@@ -143,13 +195,9 @@ def test_warning_when_bursts_present_but_no_dominant_quarter():
 
     gate = TradeClusteringGate()
     results = gate.check(trades)
-    # No quarter dominates (each month has 4 trades, quarters split across
-    # 2-3 months). Inter-arrival times alternate small/large → strong lag-1
-    # autocorrelation → warning.
-    warnings = _warnings(results)
-    assert len(warnings) == 1
-    assert "burst" in warnings[0].details.lower()
+    assert _warnings(results) == []
     assert _criticals(results) == []
+    assert all(r.passed for r in results)
 
 
 # ---------------------------------------------------------------------------

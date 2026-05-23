@@ -107,18 +107,22 @@ class LiquidityRealismGate(GateResultsMixin):
                     )
                 ]
 
-            adv_by_symbol = self._adv_per_symbol(market_data)
             oversized_count = 0
             adjusted_gross_profit = 0.0
             adjusted_gross_loss = 0.0
             unresolvable_count = 0
             for trade in trades:
-                adv = adv_by_symbol.get(trade.symbol)
+                adv = _adv_as_of_trade(
+                    market_data.get(trade.symbol),
+                    trade.entry_date,
+                    lookback=self._adv_lookback,
+                )
                 envelope_capacity = self._envelope * adv if adv is not None and adv > 0 else None
                 if envelope_capacity is None:
-                    # No usable ADV — keep the trade's reported P&L (no
-                    # haircut, no signal either way) and bump the
-                    # unresolvable counter so the verdict surfaces it.
+                    # No usable ADV at this trade's timestamp — keep its
+                    # reported P&L (no haircut, no signal either way) and
+                    # bump the unresolvable counter so the verdict surfaces
+                    # it.
                     unresolvable_count += 1
                     adjusted_pnl = trade.net_pnl
                 else:
@@ -147,22 +151,6 @@ class LiquidityRealismGate(GateResultsMixin):
                     total_trades=len(trades),
                 )
             ]
-
-    def _adv_per_symbol(self, market_data: Dict[str, List[OHLCVBar]]) -> Dict[str, Optional[float]]:
-        """Compute the trailing-N-bar dollar ADV per symbol.
-
-        Preconditions:
-          - ``market_data`` keys are symbol strings; values are lists of
-            :class:`OHLCVBar`.
-        Postconditions:
-          - Returns one entry per symbol present in ``market_data``.
-          - Value is ``None`` when the symbol has fewer than
-            ``adv_lookback`` bars or every recent bar has zero volume.
-        """
-        out: Dict[str, Optional[float]] = {}
-        for symbol, bars in market_data.items():
-            out[symbol] = compute_adv_from_bars(bars, lookback=self._adv_lookback)
-        return out
 
     def _verdict(
         self,
@@ -205,6 +193,43 @@ class LiquidityRealismGate(GateResultsMixin):
             f"Liquidity check clean: 0 of {total_trades} trades exceeded "
             f"{self._envelope:.0%}-of-ADV."
         )
+
+
+def _adv_as_of_trade(
+    bars: Optional[List[OHLCVBar]], entry_date: str, *, lookback: int
+) -> Optional[float]:
+    """Trailing-N-bar dollar ADV computed from bars BEFORE the trade's
+    entry date.
+
+    Preconditions:
+      - ``bars`` is either ``None`` (unknown symbol) or a list of
+        :class:`OHLCVBar`.
+      - ``entry_date`` is the trade's ``YYYY-MM-DD`` (or full ISO
+        timestamp) string. Bars are filtered on calendar-date prefix so
+        intraday bar timestamps are tolerated.
+      - ``lookback`` is the desired window size in bars; > 0.
+    Postconditions:
+      - Returns the trailing dollar ADV over the last ``lookback`` bars
+        whose ``date[:10] < entry_date[:10]``. Volume from the entry
+        day itself is excluded — at order-submission time on day D, the
+        D-day volume isn't known yet, so including it would be a
+        look-ahead leak.
+      - Returns ``None`` when ``bars`` is ``None``/empty, fewer than
+        ``lookback`` prior bars are available, or every prior bar has
+        zero volume.
+    Invariants:
+      - Linear scan over ``bars`` (no sort assumption is required, but
+        the typical caller passes chronologically-ordered bars from the
+        market-data fetcher). The lookback is the most recent
+        ``lookback`` bars in input order whose date precedes the trade.
+    """
+    if not bars or lookback <= 0 or not entry_date:
+        return None
+    cutoff = entry_date[:10]
+    prior_bars = [b for b in bars if b.date[:10] < cutoff]
+    if len(prior_bars) < lookback:
+        return None
+    return compute_adv_from_bars(prior_bars, lookback=lookback)
 
 
 def _profit_factor(gross_profit: float, gross_loss: float) -> float:
