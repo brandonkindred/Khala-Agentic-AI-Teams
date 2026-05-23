@@ -1495,6 +1495,13 @@ def _strategy_lab_worker(
             benchmark_symbol=request.benchmark_symbol,
             transaction_cost_bps=request.transaction_cost_bps,
             slippage_bps=request.slippage_bps,
+            # Realism cycle requires the cost-stress sweep on
+            # winning-candidate runs so a strategy whose edge collapses
+            # at 2× friction is rejected. The Strategy Lab worker always
+            # runs the walk-forward acceptance path, so we enable the
+            # sweep unconditionally here. Operators who want to disable
+            # it must edit BacktestConfig construction explicitly.
+            cost_stress=True,
         )
 
         batch_size = request.batch_size

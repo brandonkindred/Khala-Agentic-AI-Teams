@@ -79,6 +79,7 @@ from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_conformance import CodeConformanceGate
 from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
+from .quality_gates.cost_stress_realism import CostStressRealismGate
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult, StrategyLabPhase
 from .quality_gates.rule_probes import RuleProbesGate
@@ -392,6 +393,7 @@ class StrategyLabOrchestrator:
         self.anomaly_detector = BacktestAnomalyDetector()
         self.acceptance_gate = AcceptanceGate()
         self.target_symbol_coverage_gate = TargetSymbolCoverageGate()
+        self.cost_stress_realism_gate = CostStressRealismGate()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
         # SpecReadinessGate is wired to the live MarketDataService so Rule 5
@@ -1784,12 +1786,19 @@ class StrategyLabOrchestrator:
             )
 
         # Realism cycle — verification-phase checks that the trade ledger
-        # resembles a real-world trading outcome (symbol breadth today;
-        # liquidity / cost-stress / regime / clustering / rule-firing are
-        # additive). Critical failures veto ``is_winning`` below.
+        # resembles a real-world trading outcome (symbol breadth +
+        # cost-stress today; liquidity / regime / clustering / rule-firing
+        # are additive). Critical failures veto ``is_winning`` below. The
+        # cost-stress gate self-skips on legacy single-window or
+        # walk-forward-fallback paths where ``config.cost_stress`` is
+        # False; enforcement of mandatory cost-stress on winning-candidate
+        # runs lives at the production entrypoint, which force-enables
+        # the flag.
         realism_results = self._run_realism_gates(
             spec=spec,
             trades=trades,
+            metrics=metrics,
+            config=config,
             execution_succeeded=execution_succeeded,
         )
         all_gate_results.extend(realism_results)
@@ -1954,6 +1963,8 @@ class StrategyLabOrchestrator:
         *,
         spec: StrategySpec,
         trades: List[TradeRecord],
+        metrics: BacktestResult,
+        config: BacktestConfig,
         execution_succeeded: bool,
     ) -> List[QualityGateResult]:
         """Run verification-phase realism gates and return their results.
@@ -1961,6 +1972,8 @@ class StrategyLabOrchestrator:
         Preconditions:
           - Called from :meth:`_run_verification_phase` between walk-forward
             evaluation and the publication-veto block.
+          - ``metrics`` carries the post-walk-forward backtest result.
+          - ``config`` is the run's :class:`BacktestConfig`.
         Postconditions:
           - Returns ``[]`` when execution didn't succeed or the ledger is
             empty — the gates' contracts are only meaningful for a strategy
@@ -1972,6 +1985,12 @@ class StrategyLabOrchestrator:
           - Pure orchestration: never mutates ``spec`` or ``trades``.
           - Gates are run in a fixed order so the persisted timeline is
             deterministic across re-runs of the same record.
+          - The cost-stress gate is invoked unconditionally; it
+            self-skips (info) when ``config.cost_stress=False``, so legacy
+            single-window and walk-forward-fallback paths never trip a
+            spurious veto here. Enforcement of "mandatory cost-stress on
+            winning-candidate runs" lives at the production entrypoint
+            (``api.main._strategy_lab_worker`` force-enables the flag).
         """
         if not execution_succeeded or not trades:
             return []
@@ -1979,6 +1998,7 @@ class StrategyLabOrchestrator:
         results.extend(
             self.target_symbol_coverage_gate.check_breadth(spec, trades, phase="verification")
         )
+        results.extend(self.cost_stress_realism_gate.check(metrics, config, phase="verification"))
         return results
 
     def _run_analysis_phase(
