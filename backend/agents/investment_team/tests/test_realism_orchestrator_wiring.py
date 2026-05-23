@@ -63,6 +63,34 @@ def _config() -> BacktestConfig:
     )
 
 
+def _cost_stress_payload_passing() -> List[dict]:
+    """Cost-stress sweep with a passing 2.0× row so the realism cost-stress
+    gate doesn't veto in tests focused on other behaviour."""
+    return [
+        {
+            "multiplier": 1.0,
+            "sharpe_ratio": 1.2,
+            "annualized_return_pct": 12.0,
+            "max_drawdown_pct": 6.0,
+            "trade_count": 100,
+        },
+        {
+            "multiplier": 2.0,
+            "sharpe_ratio": 0.5,
+            "annualized_return_pct": 7.0,
+            "max_drawdown_pct": 8.0,
+            "trade_count": 100,
+        },
+        {
+            "multiplier": 3.0,
+            "sharpe_ratio": 0.1,
+            "annualized_return_pct": 2.0,
+            "max_drawdown_pct": 10.0,
+            "trade_count": 100,
+        },
+    ]
+
+
 def _metrics() -> BacktestResult:
     return BacktestResult(
         total_return_pct=20.0,
@@ -75,6 +103,7 @@ def _metrics() -> BacktestResult:
         calmar_ratio=0.0,
         deflated_sharpe=0.0,
         sortino_ratio=0.0,
+        cost_stress_results=_cost_stress_payload_passing(),
         acceptance_reason="walk_forward_passed: all four criteria met",
     )
 
@@ -119,6 +148,8 @@ def test_run_realism_gates_returns_empty_when_no_trades():
     results = orch._run_realism_gates(
         spec=_spec(target_symbols=["QQQ", "SPY"]),
         trades=[],
+        metrics=_metrics(),
+        config=_config(),
         execution_succeeded=True,
     )
     assert results == []
@@ -129,6 +160,8 @@ def test_run_realism_gates_returns_empty_when_execution_failed():
     results = orch._run_realism_gates(
         spec=_spec(target_symbols=["QQQ", "SPY"]),
         trades=[_trade("QQQ", 1)],
+        metrics=_metrics(),
+        config=_config(),
         execution_succeeded=False,
     )
     assert results == []
@@ -139,7 +172,13 @@ def test_run_realism_gates_emits_breadth_warning_for_multi_target_single_symbol_
     spec = _spec(target_symbols=["QQQ", "SPY", "IWM"])
     trades = [_trade("QQQ", i + 1) for i in range(5)]
 
-    results = orch._run_realism_gates(spec=spec, trades=trades, execution_succeeded=True)
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=_metrics(),
+        config=_config(),
+        execution_succeeded=True,
+    )
 
     warnings = [r for r in results if not r.passed and r.severity == "warning"]
     assert len(warnings) == 1
@@ -153,9 +192,101 @@ def test_run_realism_gates_passes_when_ledger_uses_full_universe():
     spec = _spec(target_symbols=["QQQ", "SPY"])
     trades = [_trade("QQQ", 1), _trade("SPY", 2)]
 
-    results = orch._run_realism_gates(spec=spec, trades=trades, execution_succeeded=True)
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=_metrics(),
+        config=_config(),
+        execution_succeeded=True,
+    )
 
     assert all(r.passed for r in results)
+
+
+def test_run_realism_gates_skips_cost_stress_on_walk_forward_fallback():
+    """When walk-forward failed at runtime, the legacy single-window
+    fallback runs without cost-stress. The realism cycle must not punish
+    that path — only breadth should run."""
+    orch = _orch()
+    spec = _spec(target_symbols=["QQQ"])
+    trades = [_trade("QQQ", i + 1) for i in range(5)]
+    metrics = BacktestResult(
+        total_return_pct=18.0,
+        annualized_return_pct=10.0,
+        volatility_pct=12.0,
+        sharpe_ratio=0.8,
+        max_drawdown_pct=8.0,
+        win_rate_pct=58.0,
+        profit_factor=1.6,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+        cost_stress_results=None,  # legacy fallback path doesn't run cost-stress
+    )
+
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=metrics,
+        config=_config(),
+        execution_succeeded=True,
+        walk_forward_succeeded=False,
+    )
+
+    # No cost_stress_realism gate result at all (its enforcement is
+    # suppressed on the fallback path); breadth gate still ran.
+    assert all(g.gate_name != "cost_stress_realism" for g in results)
+    assert any(g.gate_name == "target_symbol_coverage" for g in results)
+
+
+def test_run_realism_gates_cost_stress_critical_when_2x_sharpe_negative():
+    """End-to-end: a cost-stress payload with negative 2.0× Sharpe makes
+    the realism cycle emit a critical that the caller will treat as a
+    publication veto."""
+    orch = _orch()
+    spec = _spec(target_symbols=["QQQ"])
+    trades = [_trade("QQQ", i + 1) for i in range(5)]
+    bad_payload = [
+        {
+            "multiplier": 1.0,
+            "sharpe_ratio": 1.0,
+            "annualized_return_pct": 10.0,
+            "max_drawdown_pct": 5.0,
+            "trade_count": 50,
+        },
+        {
+            "multiplier": 2.0,
+            "sharpe_ratio": -0.4,
+            "annualized_return_pct": -2.0,
+            "max_drawdown_pct": 15.0,
+            "trade_count": 50,
+        },
+    ]
+    metrics = BacktestResult(
+        total_return_pct=18.0,
+        annualized_return_pct=10.0,
+        volatility_pct=12.0,
+        sharpe_ratio=0.8,
+        max_drawdown_pct=8.0,
+        win_rate_pct=58.0,
+        profit_factor=1.6,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+        cost_stress_results=bad_payload,
+    )
+
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=metrics,
+        config=_config(),
+        execution_succeeded=True,
+    )
+
+    criticals = [r for r in results if not r.passed and r.severity == "critical"]
+    assert len(criticals) == 1
+    assert criticals[0].gate_name == "cost_stress_realism"
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +327,7 @@ def test_verification_phase_vetoes_is_winning_on_realism_critical(monkeypatch):
     monkeypatch.setattr(
         orch,
         "_run_realism_gates",
-        lambda *, spec, trades, execution_succeeded: [
+        lambda **_kwargs: [
             QualityGateResult(
                 gate_name="liquidity_realism",
                 passed=False,
@@ -261,7 +392,7 @@ def test_verification_phase_does_not_veto_on_realism_warning(monkeypatch):
     monkeypatch.setattr(
         orch,
         "_run_realism_gates",
-        lambda *, spec, trades, execution_succeeded: [
+        lambda **_kwargs: [
             QualityGateResult(
                 gate_name="target_symbol_coverage",
                 passed=False,

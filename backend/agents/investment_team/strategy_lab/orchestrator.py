@@ -79,6 +79,7 @@ from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_conformance import CodeConformanceGate
 from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
+from .quality_gates.cost_stress_realism import CostStressRealismGate
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult, StrategyLabPhase
 from .quality_gates.rule_probes import RuleProbesGate
@@ -392,6 +393,7 @@ class StrategyLabOrchestrator:
         self.anomaly_detector = BacktestAnomalyDetector()
         self.acceptance_gate = AcceptanceGate()
         self.target_symbol_coverage_gate = TargetSymbolCoverageGate()
+        self.cost_stress_realism_gate = CostStressRealismGate()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
         # SpecReadinessGate is wired to the live MarketDataService so Rule 5
@@ -1784,13 +1786,20 @@ class StrategyLabOrchestrator:
             )
 
         # Realism cycle — verification-phase checks that the trade ledger
-        # resembles a real-world trading outcome (symbol breadth today;
-        # liquidity / cost-stress / regime / clustering / rule-firing are
-        # additive). Critical failures veto ``is_winning`` below.
+        # resembles a real-world trading outcome (symbol breadth +
+        # cost-stress today; liquidity / regime / clustering / rule-firing
+        # are additive). Critical failures veto ``is_winning`` below. The
+        # walk-forward-failed fallback skips cost-stress enforcement: that
+        # path falls back to the legacy single-window acceptance criteria
+        # which predate the realism cycle, and the fallback's own anomaly
+        # recheck already issues a verdict.
         realism_results = self._run_realism_gates(
             spec=spec,
             trades=trades,
+            metrics=metrics,
+            config=config,
             execution_succeeded=execution_succeeded,
+            walk_forward_succeeded=not walk_forward_failed,
         )
         all_gate_results.extend(realism_results)
         realism_critical = [r for r in realism_results if not r.passed and r.severity == "critical"]
@@ -1954,13 +1963,23 @@ class StrategyLabOrchestrator:
         *,
         spec: StrategySpec,
         trades: List[TradeRecord],
+        metrics: BacktestResult,
+        config: BacktestConfig,
         execution_succeeded: bool,
+        walk_forward_succeeded: bool = True,
     ) -> List[QualityGateResult]:
         """Run verification-phase realism gates and return their results.
 
         Preconditions:
           - Called from :meth:`_run_verification_phase` between walk-forward
             evaluation and the publication-veto block.
+          - ``metrics`` carries the post-walk-forward backtest result.
+          - ``config`` is the run's :class:`BacktestConfig`.
+          - ``walk_forward_succeeded`` is ``True`` when the run is on the
+            walk-forward + acceptance-gate path (the realism cycle's
+            primary domain); ``False`` when the orchestrator fell back to
+            the legacy single-window path because walk-forward raised at
+            runtime.
         Postconditions:
           - Returns ``[]`` when execution didn't succeed or the ledger is
             empty — the gates' contracts are only meaningful for a strategy
@@ -1968,6 +1987,10 @@ class StrategyLabOrchestrator:
           - Otherwise returns one or more :class:`QualityGateResult`s; the
             caller treats any ``critical`` entry as a publication veto and
             appends every entry to the persisted gate timeline.
+          - Cost-stress enforcement is suppressed on the fallback path —
+            the legacy single-window acceptance criteria predate the
+            realism cycle and the fallback's own anomaly recheck already
+            issues a verdict.
         Invariants:
           - Pure orchestration: never mutates ``spec`` or ``trades``.
           - Gates are run in a fixed order so the persisted timeline is
@@ -1979,6 +2002,10 @@ class StrategyLabOrchestrator:
         results.extend(
             self.target_symbol_coverage_gate.check_breadth(spec, trades, phase="verification")
         )
+        if walk_forward_succeeded:
+            results.extend(
+                self.cost_stress_realism_gate.check(metrics, config, phase="verification")
+            )
         return results
 
     def _run_analysis_phase(
