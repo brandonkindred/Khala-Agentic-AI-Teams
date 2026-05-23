@@ -1534,6 +1534,11 @@ class TradingService:
 
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
+        result.open_position_entry_reasons = [
+            pos.entry_reason
+            for pos in fill_sim.portfolio.positions.values()
+            if pos.entry_reason
+        ]
         return _finalize_diagnostics(result)
 
     # ------------------------------------------------------------------
