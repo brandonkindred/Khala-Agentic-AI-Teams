@@ -594,6 +594,7 @@ class StrategyLabOrchestrator:
         # work on the same evaluation window and so contributes to the
         # multiple-testing burden that DSR deflation corrects for.
         phase_back_count: int = 0
+        last_drift_collector: Optional[_DriftCollector] = None
         for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
             try:
                 return self._run_design_attempt(
@@ -611,6 +612,7 @@ class StrategyLabOrchestrator:
                 last_spec = exc.last_spec
                 last_code = exc.last_code
                 last_failure_phase = exc.failure_phase
+                last_drift_collector = exc.drift_collector
                 phase_back_count += 1
                 self.convergence_tracker.increment_trials(1)
                 if design_attempt >= MAX_DESIGN_REENTRIES:
@@ -656,6 +658,7 @@ class StrategyLabOrchestrator:
             ),
             emit=emit,
             phase_back_count=phase_back_count,
+            drift_collector=last_drift_collector,
         )
 
     def _run_design_loop(
@@ -1612,7 +1615,11 @@ class StrategyLabOrchestrator:
             },
         )
         proposed_code = report.proposed_code
-        proposed_spec = self._apply_updates(spec, {}, proposed_code)
+        try:
+            proposed_spec = self._apply_updates(spec, {}, proposed_code)
+        except SpecImplementabilityError as exc:
+            exc.drift_collector = drift_collector
+            raise
         change_summary = report.changes_made or "alignment fix"
 
         # Re-validate code safety on the proposed code — alignment runs
@@ -2803,7 +2810,11 @@ class StrategyLabOrchestrator:
             metrics,
             refinement_attempts,
         )
-        new_spec = self._apply_updates(spec, updates, new_code, failure_phase=failure_phase)
+        try:
+            new_spec = self._apply_updates(spec, updates, new_code, failure_phase=failure_phase)
+        except SpecImplementabilityError as exc:
+            exc.drift_collector = drift_collector
+            raise
         changes = updates.get("changes_made", default_change_label)
         refinement_attempts.append(changes)
         if drift_collector is not None:

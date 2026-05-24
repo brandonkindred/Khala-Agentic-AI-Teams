@@ -372,16 +372,14 @@ def _build_rule_implementation_map(
     # ("exit:stop_loss") or suffixed ("exit:stop_loss:trailing") IDs.
     # Normalise to the canonical form before counting.
     canonical_set = set(rule_ids)
-    # Map unindexed kind to [0] instance when only one exists.
-    _kind_to_sole: Dict[str, str] = {}
+    # Map unindexed kind → first ([0]) canonical instance.
+    _kind_to_first: Dict[str, str] = {}
     for rid in rule_ids:
         m = re.match(r"^(exit:\w+)\[(\d+)\]$", rid)
         if m:
             base_kind = m.group(1)
-            if base_kind not in _kind_to_sole:
-                _kind_to_sole[base_kind] = rid
-            else:
-                _kind_to_sole[base_kind] = ""  # multiple — no sole target
+            if base_kind not in _kind_to_first:
+                _kind_to_first[base_kind] = rid
 
     def _normalise(rid: str) -> str:
         if rid in canonical_set:
@@ -396,10 +394,10 @@ def _build_rule_implementation_map(
         indexed = re.sub(r"\[\d+\]$", "", rid)
         if indexed != rid and indexed in canonical_set:
             return indexed
-        # Unindexed form with a single spec instance → sole canonical key
-        sole = _kind_to_sole.get(rid)
-        if sole:
-            return sole
+        # Unindexed form → first ([0]) canonical instance as best-effort
+        first = _kind_to_first.get(rid)
+        if first:
+            return first
         return rid
 
     passed_trades: Dict[str, set] = defaultdict(set)
