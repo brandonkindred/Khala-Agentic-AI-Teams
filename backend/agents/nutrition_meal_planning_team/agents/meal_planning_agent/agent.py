@@ -161,8 +161,8 @@ class MealPlanningAgent:
         from llm_service import LLMError, LLMPermanentError
         from llm_service.structured import complete_validated
 
-        prompt = build_regeneration_prompt(profile, original, violations)
         try:
+            prompt = build_regeneration_prompt(profile, original, violations)
             client = self._get_client()
             return complete_validated(
                 client,
