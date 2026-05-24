@@ -13,19 +13,11 @@ parsed a final JSON) with a stream-driven protocol:
         {"kind": "order", "payload": {...}}
         {"kind": "cancel", "payload": {...}}
         {"kind": "log", "level": "info", "message": "..."}
-        {"kind": "ready", "capabilities": {"chunked_bars": True,
-            "protocol_version": 1, "engine_protocol_version": 1}}
+        {"kind": "ready", "capabilities": {"chunked_bars": True}}
         {"kind": "error", "etype": "lookahead_violation", "message": "..."}
 
-The ``capabilities`` payload reports both the strategy-declared
-``protocol_version`` (defaults to ``1`` for any strategy that doesn't
-override ``Strategy.protocol_version``) and the engine's own
-``engine_protocol_version`` so the parent can detect a strategy that
-asks for features the engine doesn't ship. A strategy declaring a
-version *higher* than ``engine_protocol_version`` is rejected at
-handshake with ``etype="contract_error"``; older strategies (no
-``protocol_version`` attribute, or version ≤ engine version) work in
-legacy mode unchanged. Issue #379, Trading 5/5 Step 9 / criterion 9.
+The ``capabilities`` payload reports ``chunked_bars`` so the parent
+can decide whether to send bars one at a time or in chunks.
 
 Every parent message is answered with zero-or-more ``order``/``cancel``/``log``
 records followed by exactly one ``ready`` (or one ``error``). This gives the
@@ -247,35 +239,6 @@ class StreamingHarness:
         ``ready``. False until ``send_start`` has returned.
         """
         return bool(self._capabilities.get("chunked_bars"))
-
-    @property
-    def protocol_version(self) -> int:
-        """Negotiated strategy↔harness protocol version.
-
-        Reflects ``Strategy.protocol_version`` from the loaded subclass
-        (default ``1`` for any pre-#379 strategy that doesn't override
-        it). Returns ``1`` until the first ``ready`` arrives so callers
-        querying before ``send_start`` see the safe legacy default.
-        """
-        version = self._capabilities.get("protocol_version", 1)
-        try:
-            return int(version)
-        except (TypeError, ValueError):
-            return 1
-
-    @property
-    def engine_protocol_version(self) -> int:
-        """Engine-side strategy↔harness protocol version.
-
-        Sourced from the child's capabilities payload (which in turn
-        reflects ``contract.CURRENT_PROTOCOL_VERSION`` inside the
-        subprocess). Returns ``1`` until the first ``ready`` arrives.
-        """
-        version = self._capabilities.get("engine_protocol_version", 1)
-        try:
-            return int(version)
-        except (TypeError, ValueError):
-            return 1
 
     @property
     def probe_events(self) -> Optional[Dict[str, Any]]:
@@ -577,17 +540,8 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
     # parent uses this to decide whether it may invoke ``send_bars``
     # with chunked payloads. Older parents that don't read
     # ``capabilities`` simply ignore the field.
-    #
-    # ``engine_protocol_version`` is the engine-side strategy↔harness
-    # protocol level (sourced from ``contract.CURRENT_PROTOCOL_VERSION``);
-    # ``protocol_version`` is filled in by ``main`` from the resolved
-    # strategy class's class attribute (defaults to ``1`` via
-    # ``Strategy.protocol_version``) so the parent sees the negotiated
-    # value. Issue #379 Step 9 / criterion 9.
     _CAPABILITIES = {
         "chunked_bars": True,
-        "engine_protocol_version": contract.CURRENT_PROTOCOL_VERSION,
-        "protocol_version": contract.CURRENT_PROTOCOL_VERSION,
     }
 
 
@@ -597,44 +551,6 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
         except Exception as exc:
             _emit({"kind": "error", "etype": "contract_error", "message": str(exc)})
             sys.exit(1)
-
-        # Resolve the strategy's declared protocol version. Pre-#379
-        # strategies (no ``protocol_version`` attribute) inherit
-        # ``Strategy.protocol_version = 1`` and work in legacy mode.
-        # A strategy explicitly declaring a version greater than the
-        # engine's ``CURRENT_PROTOCOL_VERSION`` is rejected at handshake
-        # so a strategy written against a future engine fails fast with
-        # a structured ``contract_error`` rather than silently behaving
-        # like v1 (which would drop whatever feature the strategy
-        # expected at the newer version).
-        strategy_protocol_version = getattr(cls, "protocol_version", 1)
-        if (
-            not isinstance(strategy_protocol_version, int)
-            or isinstance(strategy_protocol_version, bool)
-            or strategy_protocol_version < 1
-        ):
-            _emit({
-                "kind": "error",
-                "etype": "contract_error",
-                "message": (
-                    f"Strategy.protocol_version must be a positive int, got "
-                    f"{strategy_protocol_version!r}"
-                ),
-            })
-            sys.exit(1)
-        if strategy_protocol_version > contract.CURRENT_PROTOCOL_VERSION:
-            _emit({
-                "kind": "error",
-                "etype": "contract_error",
-                "message": (
-                    f"strategy declares protocol_version="
-                    f"{strategy_protocol_version} but engine only supports "
-                    f"up to {contract.CURRENT_PROTOCOL_VERSION}; upgrade the "
-                    f"engine or pin the strategy to a supported version"
-                ),
-            })
-            sys.exit(1)
-        _CAPABILITIES["protocol_version"] = strategy_protocol_version
 
         instance = cls()
         # Use the bar_index-tagging emit so strategies can never forge

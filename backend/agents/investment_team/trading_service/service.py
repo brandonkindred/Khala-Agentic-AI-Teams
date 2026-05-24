@@ -1134,7 +1134,7 @@ class TradingService:
                         _apply_fill_outcome_events(result.execution_diagnostics, outcome)
                         for fill in outcome.entry_fills + outcome.exit_fills:
                             harness.send_fill(
-                                fill=fill.model_dump(mode="json", exclude_defaults=True),
+                                fill=fill.model_dump(mode="json"),
                                 state=self._state(portfolio),
                             )
                         result.trades.extend(outcome.closed_trades)
@@ -1246,9 +1246,7 @@ class TradingService:
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
         result.open_position_entry_reasons = [
-            pos.entry_reason
-            for pos in fill_sim.portfolio.positions.values()
-            if pos.entry_reason
+            pos.entry_reason for pos in fill_sim.portfolio.positions.values() if pos.entry_reason
         ]
         return _finalize_diagnostics(result)
 
@@ -1401,7 +1399,7 @@ class TradingService:
                         # The strategy sees fills from the *previous* chunk
                         # before its next chunk arrives.
                         harness.send_fill(
-                            fill=fill.model_dump(mode="json", exclude_defaults=True),
+                            fill=fill.model_dump(mode="json"),
                             state=self._state(portfolio),
                         )
                     result.trades.extend(outcome.closed_trades)
@@ -1535,9 +1533,7 @@ class TradingService:
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
         result.open_position_entry_reasons = [
-            pos.entry_reason
-            for pos in fill_sim.portfolio.positions.values()
-            if pos.entry_reason
+            pos.entry_reason for pos in fill_sim.portfolio.positions.values() if pos.entry_reason
         ]
         return _finalize_diagnostics(result)
 
