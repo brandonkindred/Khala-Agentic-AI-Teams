@@ -358,11 +358,18 @@ def _build_rule_implementation_map(
     for i, _ in enumerate(getattr(spec, "entry_rules", None) or []):
         rule_ids.append(f"entry[{i}]")
     kind_counts: Dict[str, int] = defaultdict(int)
+    # Map suffixed finding IDs to the specific rule instance based on
+    # distinguishing attributes (e.g. StopLossRule.basis).
+    _suffix_to_instance: Dict[str, str] = {}
     for er in getattr(spec, "exit_rules", None) or []:
         if hasattr(er, "kind"):
             idx = kind_counts[er.kind]
             kind_counts[er.kind] += 1
-            rule_ids.append(f"exit:{er.kind}[{idx}]")
+            canonical = f"exit:{er.kind}[{idx}]"
+            rule_ids.append(canonical)
+            basis = getattr(er, "basis", None)
+            if basis:
+                _suffix_to_instance[f"exit:{er.kind}:{basis}"] = canonical
         else:
             rule_ids.append(f"exit[{len([r for r in rule_ids if r.startswith('exit')])}]")
     rule_ids.append("sizing")
@@ -384,18 +391,23 @@ def _build_rule_implementation_map(
     def _normalise(rid: str) -> str:
         if rid in canonical_set:
             return rid
-        # Strip ":suffix" first → "exit:stop_loss:trailing" → "exit:stop_loss"
+        # Suffixed form with a known instance mapping
+        # e.g. "exit:stop_loss:trailing_high" → "exit:stop_loss[1]"
+        if rid in _suffix_to_instance:
+            return _suffix_to_instance[rid]
+        # Strip ":suffix" → "exit:stop_loss:trailing" → "exit:stop_loss"
         parts = rid.split(":")
+        base = rid
         if len(parts) >= 3:
-            rid = ":".join(parts[:2])
-            if rid in canonical_set:
-                return rid
-        # Try appending "[N]" index → "exit:stop_loss" → "exit:stop_loss[0]"
-        indexed = re.sub(r"\[\d+\]$", "", rid)
-        if indexed != rid and indexed in canonical_set:
-            return indexed
+            base = ":".join(parts[:2])
+            if base in canonical_set:
+                return base
+        # Try stripping "[N]" index → already-indexed non-canonical
+        stripped = re.sub(r"\[\d+\]$", "", rid)
+        if stripped != rid and stripped in canonical_set:
+            return stripped
         # Unindexed form → first ([0]) canonical instance as best-effort
-        first = _kind_to_first.get(rid)
+        first = _kind_to_first.get(base)
         if first:
             return first
         return rid

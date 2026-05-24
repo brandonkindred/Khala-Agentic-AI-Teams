@@ -433,6 +433,30 @@ def check_exit_stop_loss(data):
         assert m0.traded_count == 1
         assert m1.traded_count == 0
 
+    def test_suffixed_ids_map_to_matching_instance(self):
+        """Suffixed IDs map to the instance with the matching basis attribute."""
+        spec = _minimal_spec(
+            exit_rules=[
+                StopLossRule(pct=0.02, basis="entry_price"),
+                StopLossRule(pct=0.05, basis="trailing_high"),
+            ],
+        )
+        findings = [
+            AlignmentFinding(
+                trade_num=1, rule_id="exit:stop_loss:trailing_high", check_name="stop_loss",
+                passed=True, computed_value=-3.0, expected_value=-5.0,
+            ),
+            AlignmentFinding(
+                trade_num=2, rule_id="exit:stop_loss:entry_price", check_name="stop_loss",
+                passed=True, computed_value=-1.5, expected_value=-2.0,
+            ),
+        ]
+        result = _build_rule_implementation_map(spec, findings, "def run(): pass")
+        m0 = next(r for r in result if r.rule_id == "exit:stop_loss[0]")
+        m1 = next(r for r in result if r.rule_id == "exit:stop_loss[1]")
+        assert m0.traded_count == 1  # entry_price finding → [0]
+        assert m1.traded_count == 1  # trailing_high finding → [1]
+
 
 # ---------------------------------------------------------------------------
 # StrategyLabRecord with drift fields
