@@ -75,6 +75,24 @@ def test_freetext_plus_recognized_medication() -> None:
     assert len(advisory) == 1
 
 
+def test_duplicate_medication_across_lists_produces_single_flag() -> None:
+    profile = profile_with(medications=["unknown_x"], medications_freetext=["unknown_x"])
+    result: GuardrailResult = check_recommendation(profile, recipe("chicken breast"))
+
+    assert result.passed is True
+    advisory = [f for f in result.flags if "unknown_x" in f.detail]
+    assert len(advisory) == 1
+
+
+def test_duplicate_within_medications_produces_single_flag() -> None:
+    profile = profile_with(medications=["unknown_y", "unknown_y"])
+    result: GuardrailResult = check_recommendation(profile, recipe("chicken breast"))
+
+    assert result.passed is True
+    advisory = [f for f in result.flags if "unknown_y" in f.detail]
+    assert len(advisory) == 1
+
+
 def test_no_medications_no_advisory() -> None:
     result: GuardrailResult = check_recommendation(profile_with(), recipe("chicken breast"))
 

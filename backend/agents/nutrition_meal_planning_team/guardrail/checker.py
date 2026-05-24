@@ -41,7 +41,9 @@ def check_recommendation(
     resolution = profile.restriction_resolution
     active_allergens = frozenset(resolution.active_allergen_tags())
     catalog = get_catalog()
-    all_meds = profile.clinical.medications + profile.clinical.medications_freetext
+    all_meds = list(
+        dict.fromkeys(profile.clinical.medications + profile.clinical.medications_freetext)
+    )
     med_policies, unknown_meds = get_interaction_policies(all_meds)
 
     parsed = tuple(parse_ingredient(raw) for raw in rec.ingredients)
