@@ -1,7 +1,7 @@
 """API tests for Medium stats endpoints (agent mocked — no browser).
 
-MIXED file: one test polls a real async job loop; the other two could run
-on the in-memory fake.  Marked integration until we split it.
+Backed by an in-memory FakeJobServiceClient — no Postgres or live job service
+required.  The async tests still poll a real background thread for completion.
 """
 
 import importlib.util
@@ -11,8 +11,6 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
-pytestmark = [pytest.mark.integration]
 
 _blogging_root = Path(__file__).resolve().parent.parent
 if str(_blogging_root) not in sys.path:
@@ -27,54 +25,28 @@ _spec.loader.exec_module(_api_main)
 app = _api_main.app
 
 
-@pytest.fixture
-def client() -> TestClient:
-    return TestClient(app)
+@pytest.fixture(autouse=True)
+def _patched_blog_client(monkeypatch, fake_job_client):
+    from shared import blog_job_store as bjs
+
+    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
 
 
-@pytest.fixture
-def cache_dir(tmp_path: Path) -> Path:
-    return tmp_path
-
-
-def _patch_job_store(cache_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture(autouse=True)
+def _medium_stats_tmp_dir(monkeypatch, tmp_path):
     from shared import blog_job_store as bjs
 
     monkeypatch.setattr(
         _api_main,
-        "create_blog_job",
-        lambda jid, brief, **kw: bjs.create_blog_job(jid, brief, cache_dir=cache_dir, **kw),
-    )
-    monkeypatch.setattr(
-        _api_main,
-        "get_blog_job",
-        lambda jid: bjs.get_blog_job(jid, cache_dir=cache_dir),
-    )
-    monkeypatch.setattr(
-        _api_main,
-        "update_blog_job",
-        lambda jid, **kw: bjs.update_blog_job(jid, cache_dir=cache_dir, **kw),
-    )
-    monkeypatch.setattr(
-        _api_main,
-        "start_blog_job",
-        lambda jid: bjs.start_blog_job(jid, cache_dir=cache_dir),
-    )
-    monkeypatch.setattr(
-        _api_main,
-        "fail_blog_job",
-        lambda jid, **kw: bjs.fail_blog_job(jid, cache_dir=cache_dir, **kw),
-    )
-    monkeypatch.setattr(
-        _api_main,
-        "list_blog_jobs",
-        lambda **kw: bjs.list_blog_jobs(cache_dir=cache_dir, **kw),
-    )
-    monkeypatch.setattr(
-        _api_main,
         "medium_stats_run_dir",
-        lambda jid: bjs.medium_stats_run_dir(jid, cache_dir=cache_dir),
+        lambda jid, **kw: bjs.medium_stats_run_dir(jid, cache_dir=tmp_path),
     )
+
+
+@pytest.fixture
+def client() -> TestClient:
+    return TestClient(app)
 
 
 def test_medium_stats_sync_returns_503_without_integration(client: TestClient) -> None:
@@ -87,7 +59,6 @@ def test_medium_stats_sync_returns_503_without_integration(client: TestClient) -
 
 def test_medium_stats_async_writes_artifact(
     client: TestClient,
-    cache_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Async job completes and persists medium_stats_report.json when collect is mocked."""
@@ -108,7 +79,6 @@ def test_medium_stats_async_writes_artifact(
 
     monkeypatch.setattr(_api_main, "BlogMediumStatsAgent", FakeBlogMediumStatsAgent)
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
-    _patch_job_store(cache_dir, monkeypatch)
 
     r = client.post("/medium-stats-async", json={"headless": True})
     assert r.status_code == 200
@@ -141,7 +111,6 @@ def test_medium_stats_async_writes_artifact(
 
 def test_jobs_list_includes_job_type_for_medium_stats(
     client: TestClient,
-    cache_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from blog_medium_stats_agent.models import MediumStatsReport
@@ -152,7 +121,6 @@ def test_jobs_list_includes_job_type_for_medium_stats(
 
     monkeypatch.setattr(_api_main, "BlogMediumStatsAgent", FakeBlogMediumStatsAgent)
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
-    _patch_job_store(cache_dir, monkeypatch)
 
     r = client.post("/medium-stats-async", json={})
     job_id = r.json()["job_id"]
