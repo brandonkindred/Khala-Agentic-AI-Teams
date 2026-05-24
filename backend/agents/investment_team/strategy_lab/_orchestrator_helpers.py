@@ -385,17 +385,12 @@ def _build_rule_implementation_map(
                 return candidate
         return rid
 
-    passed_counts: Dict[str, int] = defaultdict(int)
+    passed_trades: Dict[str, set] = defaultdict(set)
     for f in findings:
         if f.rule_id and f.passed:
-            passed_counts[_normalise(f.rule_id)] += 1
+            passed_trades[_normalise(f.rule_id)].add(f.trade_num)
 
     all_rule_ids = list(dict.fromkeys(rule_ids))
-    for f in findings:
-        if f.rule_id:
-            norm = _normalise(f.rule_id)
-            if norm not in all_rule_ids and f.rule_id not in all_rule_ids:
-                all_rule_ids.append(f.rule_id)
 
     code_refs = _extract_code_line_refs(code, all_rule_ids)
 
@@ -403,7 +398,7 @@ def _build_rule_implementation_map(
         RuleImplementationMap(
             rule_id=rid,
             code_line_refs=code_refs.get(rid, []),
-            traded_count=passed_counts.get(rid, 0),
+            traded_count=len(passed_trades.get(rid, set())),
         )
         for rid in all_rule_ids
     ]

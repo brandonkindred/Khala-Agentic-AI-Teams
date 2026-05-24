@@ -333,6 +333,30 @@ def check_exit_stop_loss(data):
         sl_map = next(r for r in result if r.rule_id == "exit:stop_loss")
         assert sl_map.traded_count == 1
 
+    def test_traded_count_is_distinct_trades(self):
+        """Same trade with multiple suffixed findings counts once."""
+        spec = _minimal_spec()
+        findings = [
+            AlignmentFinding(trade_num=1, rule_id="exit:stop_loss:trailing_high", check_name="stop_loss", passed=True),
+            AlignmentFinding(trade_num=1, rule_id="exit:stop_loss:trailing_low", check_name="stop_loss", passed=True),
+            AlignmentFinding(trade_num=2, rule_id="exit:stop_loss:entry_price", check_name="stop_loss", passed=True),
+        ]
+        result = _build_rule_implementation_map(spec, findings, "def run(): pass")
+        sl_map = next(r for r in result if r.rule_id == "exit:stop_loss")
+        assert sl_map.traded_count == 2
+
+    def test_non_spec_finding_ids_excluded(self):
+        """Diagnostic finding IDs not in the spec are excluded from the map."""
+        spec = _minimal_spec()
+        findings = [
+            AlignmentFinding(trade_num=1, rule_id="universe", check_name="universe_check", passed=True),
+            AlignmentFinding(trade_num=1, rule_id="exit:time_stop", check_name="time_stop", passed=True),
+        ]
+        result = _build_rule_implementation_map(spec, findings, "def run(): pass")
+        rule_ids = {r.rule_id for r in result}
+        assert "universe" not in rule_ids
+        assert "exit:time_stop" not in rule_ids
+
 
 # ---------------------------------------------------------------------------
 # StrategyLabRecord with drift fields
