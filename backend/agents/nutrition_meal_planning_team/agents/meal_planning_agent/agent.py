@@ -15,6 +15,7 @@ from ...models import (
     MealRecommendation,
     NutritionPlan,
 )
+from .prompt_constraints import render_constraints_block
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ Output a JSON object with key "suggestions": array of objects, each with:
 - meal_type: string (e.g. lunch, dinner, breakfast)
 - suggested_date: string or null (e.g. for calendar)
 
-Respect max_cooking_time_minutes and lunch_context (office = portable/minimal prep). Prefer meals similar to past "hits" (high rating / would make again) and avoid ones like past "misses". Output only valid JSON."""
+Respect max_cooking_time_minutes and lunch_context (office = portable/minimal prep). Prefer meals similar to past "hits" (high rating / would make again) and avoid ones like past "misses". If a DIETARY CONSTRAINTS block is provided below, you MUST obey every FORBIDDEN entry exactly. Never include a forbidden allergen or dietary category. Output only valid JSON."""
 
 
 def _summarize_history(entries: List[MealHistoryEntry]) -> str:
@@ -55,6 +56,37 @@ def _summarize_history(entries: List[MealHistoryEntry]) -> str:
     return "\n".join(lines) if lines else "No past feedback yet."
 
 
+def _build_user_prompt(
+    profile: ClientProfile,
+    nutrition_plan: NutritionPlan,
+    history_summary: str,
+    period_days: int,
+    meal_types: List[str],
+) -> str:
+    """Assemble the user prompt with optional constraints block."""
+    parts = ["Client profile:\n" + profile.model_dump_json(indent=2)]
+
+    constraints = render_constraints_block(profile.restriction_resolution, profile.clinical)
+    if constraints:
+        parts.append(constraints)
+
+    parts.append(
+        "Nutrition plan (targets and guidelines):\n" + nutrition_plan.model_dump_json(indent=2)
+    )
+    parts.append("Past meal feedback summary:\n" + history_summary)
+    parts.append(
+        "Request: suggest meals for the next "
+        + str(period_days)
+        + " days, meal types: "
+        + ", ".join(meal_types)
+        + '. Output JSON: {"suggestions": [ ... ]} with each item having name, ingredients, portions_servings,'
+        " prep_time_minutes, cook_time_minutes, rationale, meal_type, suggested_date."
+        "\n\nRespond with valid JSON only, no markdown fences."
+    )
+
+    return "\n\n".join(parts)
+
+
 class MealPlanningAgent:
     """Suggests meals from profile, nutrition plan, and meal history. Caller records recommendations and passes history."""
 
@@ -73,19 +105,8 @@ class MealPlanningAgent:
         meal_types = meal_types or ["lunch", "dinner"]
         history_summary = _summarize_history(meal_history)
 
-        prompt = (
-            "Client profile:\n"
-            + profile.model_dump_json(indent=2)
-            + "\n\nNutrition plan (targets and guidelines):\n"
-            + nutrition_plan.model_dump_json(indent=2)
-            + "\n\nPast meal feedback summary:\n"
-            + history_summary
-            + "\n\nRequest: suggest meals for the next "
-            + str(period_days)
-            + " days, meal types: "
-            + ", ".join(meal_types)
-            + '. Output JSON: {"suggestions": [ ... ]} with each item having name, ingredients, portions_servings, prep_time_minutes, cook_time_minutes, rationale, meal_type, suggested_date.'
-            + "\n\nRespond with valid JSON only, no markdown fences."
+        prompt = _build_user_prompt(
+            profile, nutrition_plan, history_summary, period_days, meal_types
         )
 
         try:
