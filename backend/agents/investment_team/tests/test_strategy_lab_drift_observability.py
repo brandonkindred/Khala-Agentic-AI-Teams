@@ -269,16 +269,25 @@ class TestRuleImplementationMap:
     def test_builds_from_findings(self):
         spec = _minimal_spec()
         findings = [
-            AlignmentFinding(trade_num=1, rule_id="entry[0]", check_name="entry_signal", passed=True),
-            AlignmentFinding(trade_num=2, rule_id="entry[0]", check_name="entry_signal", passed=True),
-            AlignmentFinding(trade_num=1, rule_id="exit:stop_loss", check_name="stop_loss", passed=False),
-            AlignmentFinding(trade_num=1, rule_id="sizing", check_name="sizing", passed=True),
+            AlignmentFinding(
+                trade_num=1, rule_id="entry[0]", check_name="entry_signal",
+                passed=True, computed_value=25.0, expected_value=30.0,
+            ),
+            AlignmentFinding(
+                trade_num=2, rule_id="entry[0]", check_name="entry_signal",
+                passed=True, computed_value=22.0, expected_value=30.0,
+            ),
+            AlignmentFinding(trade_num=1, rule_id="exit:stop_loss[0]", check_name="stop_loss", passed=False),
+            AlignmentFinding(
+                trade_num=1, rule_id="sizing", check_name="sizing",
+                passed=True, computed_value=100.0, expected_value=100.0,
+            ),
         ]
         result = _build_rule_implementation_map(spec, findings, "def run(): pass")
         assert isinstance(result, list)
         rule_ids = {r.rule_id for r in result}
         assert "entry[0]" in rule_ids
-        assert "exit:stop_loss" in rule_ids
+        assert "exit:stop_loss[0]" in rule_ids
         assert "sizing" in rule_ids
 
         entry_map = next(r for r in result if r.rule_id == "entry[0]")
@@ -312,37 +321,55 @@ def check_exit_stop_loss(data):
         assert isinstance(result, list)
         assert all(r.code_line_refs == [] for r in result)
 
-    def test_indexed_signal_exit_ids_normalised(self):
-        """Indexed IDs like exit:signal_exit[0] count toward exit:signal_exit."""
+    def test_indexed_signal_exit_ids_match_directly(self):
+        """Indexed IDs like exit:signal_exit[0] match the per-instance canonical key."""
         spec = _minimal_spec()
         findings = [
-            AlignmentFinding(trade_num=1, rule_id="exit:signal_exit[0]", check_name="signal_exit", passed=True),
-            AlignmentFinding(trade_num=2, rule_id="exit:signal_exit[1]", check_name="signal_exit", passed=True),
+            AlignmentFinding(
+                trade_num=1, rule_id="exit:signal_exit[0]", check_name="signal_exit",
+                passed=True, severity="info", computed_value=75.0, expected_value=70.0,
+            ),
+            AlignmentFinding(
+                trade_num=2, rule_id="exit:signal_exit[0]", check_name="signal_exit",
+                passed=True, severity="info", computed_value=80.0, expected_value=70.0,
+            ),
         ]
         result = _build_rule_implementation_map(spec, findings, "def run(): pass")
-        sig_map = next(r for r in result if r.rule_id == "exit:signal_exit")
+        sig_map = next(r for r in result if r.rule_id == "exit:signal_exit[0]")
         assert sig_map.traded_count == 2
 
     def test_suffixed_stop_loss_ids_normalised(self):
-        """Suffixed IDs like exit:stop_loss:trailing count toward exit:stop_loss."""
+        """Suffixed IDs like exit:stop_loss:trailing normalise to exit:stop_loss[0]."""
         spec = _minimal_spec()
         findings = [
-            AlignmentFinding(trade_num=1, rule_id="exit:stop_loss:trailing", check_name="stop_loss", passed=True),
+            AlignmentFinding(
+                trade_num=1, rule_id="exit:stop_loss:trailing", check_name="stop_loss",
+                passed=True, computed_value=-1.5, expected_value=-2.0,
+            ),
         ]
         result = _build_rule_implementation_map(spec, findings, "def run(): pass")
-        sl_map = next(r for r in result if r.rule_id == "exit:stop_loss")
+        sl_map = next(r for r in result if r.rule_id == "exit:stop_loss[0]")
         assert sl_map.traded_count == 1
 
     def test_traded_count_is_distinct_trades(self):
         """Same trade with multiple suffixed findings counts once."""
         spec = _minimal_spec()
         findings = [
-            AlignmentFinding(trade_num=1, rule_id="exit:stop_loss:trailing_high", check_name="stop_loss", passed=True),
-            AlignmentFinding(trade_num=1, rule_id="exit:stop_loss:trailing_low", check_name="stop_loss", passed=True),
-            AlignmentFinding(trade_num=2, rule_id="exit:stop_loss:entry_price", check_name="stop_loss", passed=True),
+            AlignmentFinding(
+                trade_num=1, rule_id="exit:stop_loss:trailing_high", check_name="stop_loss",
+                passed=True, computed_value=-1.0, expected_value=-2.0,
+            ),
+            AlignmentFinding(
+                trade_num=1, rule_id="exit:stop_loss:trailing_low", check_name="stop_loss",
+                passed=True, computed_value=-0.5, expected_value=-2.0,
+            ),
+            AlignmentFinding(
+                trade_num=2, rule_id="exit:stop_loss:entry_price", check_name="stop_loss",
+                passed=True, computed_value=-1.8, expected_value=-2.0,
+            ),
         ]
         result = _build_rule_implementation_map(spec, findings, "def run(): pass")
-        sl_map = next(r for r in result if r.rule_id == "exit:stop_loss")
+        sl_map = next(r for r in result if r.rule_id == "exit:stop_loss[0]")
         assert sl_map.traded_count == 2
 
     def test_non_spec_finding_ids_excluded(self):
@@ -356,6 +383,55 @@ def check_exit_stop_loss(data):
         rule_ids = {r.rule_id for r in result}
         assert "universe" not in rule_ids
         assert "exit:time_stop" not in rule_ids
+
+    def test_info_skip_findings_not_counted(self):
+        """N/A skip findings (passed=True but no computed_value) don't inflate traded_count."""
+        spec = _minimal_spec()
+        findings = [
+            AlignmentFinding(
+                trade_num=1, rule_id="exit:signal_exit", check_name="signal_exit",
+                passed=True, severity="info",
+                details="Trade #1 closed via engine attribution; signal-exit check N/A.",
+            ),
+        ]
+        result = _build_rule_implementation_map(spec, findings, "def run(): pass")
+        sig_map = next(r for r in result if r.rule_id == "exit:signal_exit[0]")
+        assert sig_map.traded_count == 0
+
+    def test_per_instance_exit_rule_ids(self):
+        """Multiple exit rules of the same kind get separate map entries."""
+        spec = _minimal_spec(
+            exit_rules=[
+                SignalExitRule(
+                    when=Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}),
+                        op=">",
+                        rhs=70,
+                    ),
+                ),
+                SignalExitRule(
+                    when=Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}),
+                        op="<",
+                        rhs=20,
+                    ),
+                ),
+            ],
+        )
+        findings = [
+            AlignmentFinding(
+                trade_num=1, rule_id="exit:signal_exit[0]", check_name="signal_exit",
+                passed=True, severity="info", computed_value=75.0, expected_value=70.0,
+            ),
+        ]
+        result = _build_rule_implementation_map(spec, findings, "def run(): pass")
+        rule_ids = [r.rule_id for r in result]
+        assert "exit:signal_exit[0]" in rule_ids
+        assert "exit:signal_exit[1]" in rule_ids
+        m0 = next(r for r in result if r.rule_id == "exit:signal_exit[0]")
+        m1 = next(r for r in result if r.rule_id == "exit:signal_exit[1]")
+        assert m0.traded_count == 1
+        assert m1.traded_count == 0
 
 
 # ---------------------------------------------------------------------------

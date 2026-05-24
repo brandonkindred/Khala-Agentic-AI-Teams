@@ -357,37 +357,54 @@ def _build_rule_implementation_map(
     rule_ids: List[str] = []
     for i, _ in enumerate(getattr(spec, "entry_rules", None) or []):
         rule_ids.append(f"entry[{i}]")
+    kind_counts: Dict[str, int] = defaultdict(int)
     for er in getattr(spec, "exit_rules", None) or []:
         if hasattr(er, "kind"):
-            rule_ids.append(f"exit:{er.kind}")
+            idx = kind_counts[er.kind]
+            kind_counts[er.kind] += 1
+            rule_ids.append(f"exit:{er.kind}[{idx}]")
         else:
             rule_ids.append(f"exit[{len([r for r in rule_ids if r.startswith('exit')])}]")
     rule_ids.append("sizing")
 
-    # Alignment findings use indexed/suffixed rule IDs (e.g.
-    # "exit:signal_exit[0]", "exit:stop_loss:trailing") while the spec
-    # seeds canonical keys ("exit:signal_exit", "exit:stop_loss").
-    # Normalise finding IDs to their canonical form before counting.
+    # Canonical keys are now per-instance (e.g. "exit:stop_loss[0]",
+    # "exit:signal_exit[1]"). Alignment findings may use unindexed
+    # ("exit:stop_loss") or suffixed ("exit:stop_loss:trailing") IDs.
+    # Normalise to the canonical form before counting.
     canonical_set = set(rule_ids)
+    # Map unindexed kind to [0] instance when only one exists.
+    _kind_to_sole: Dict[str, str] = {}
+    for rid in rule_ids:
+        m = re.match(r"^(exit:\w+)\[(\d+)\]$", rid)
+        if m:
+            base_kind = m.group(1)
+            if base_kind not in _kind_to_sole:
+                _kind_to_sole[base_kind] = rid
+            else:
+                _kind_to_sole[base_kind] = ""  # multiple — no sole target
 
     def _normalise(rid: str) -> str:
         if rid in canonical_set:
             return rid
-        # Strip trailing "[N]" index → "exit:signal_exit[0]" → "exit:signal_exit"
-        base = re.sub(r"\[\d+\]$", "", rid)
-        if base in canonical_set:
-            return base
-        # Strip ":suffix" after the rule type → "exit:stop_loss:trailing" → "exit:stop_loss"
-        parts = base.split(":")
+        # Strip ":suffix" first → "exit:stop_loss:trailing" → "exit:stop_loss"
+        parts = rid.split(":")
         if len(parts) >= 3:
-            candidate = ":".join(parts[:2])
-            if candidate in canonical_set:
-                return candidate
+            rid = ":".join(parts[:2])
+            if rid in canonical_set:
+                return rid
+        # Try appending "[N]" index → "exit:stop_loss" → "exit:stop_loss[0]"
+        indexed = re.sub(r"\[\d+\]$", "", rid)
+        if indexed != rid and indexed in canonical_set:
+            return indexed
+        # Unindexed form with a single spec instance → sole canonical key
+        sole = _kind_to_sole.get(rid)
+        if sole:
+            return sole
         return rid
 
     passed_trades: Dict[str, set] = defaultdict(set)
     for f in findings:
-        if f.rule_id and f.passed:
+        if f.rule_id and f.passed and f.computed_value is not None:
             passed_trades[_normalise(f.rule_id)].add(f.trade_num)
 
     all_rule_ids = list(dict.fromkeys(rule_ids))
