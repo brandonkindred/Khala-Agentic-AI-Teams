@@ -109,6 +109,11 @@ class MealPlanningAgent:
             prompt = _build_user_prompt(
                 profile, nutrition_plan, history_summary, period_days, meal_types
             )
+        except Exception as e:
+            logger.error("Prompt constraint build failed: %s", e)
+            return []
+
+        try:
             result = self._agent(prompt)
             raw = str(result).strip()
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
