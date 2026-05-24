@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import ClassVar, Iterator, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 StrategyLabPhase = Literal["design", "design_review", "synthesis", "verification"]
 
@@ -28,6 +29,7 @@ class QualityGateResult(BaseModel):
     phase: StrategyLabPhase
     refinement_round: int = 0
     rule_id: Optional[str] = None
+    evaluated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class GateResultsMixin:

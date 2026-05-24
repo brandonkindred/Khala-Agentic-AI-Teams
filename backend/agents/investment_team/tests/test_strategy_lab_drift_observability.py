@@ -197,6 +197,7 @@ class TestGateTimeline:
                 details="ok",
                 severity="info",
                 phase="design",
+                evaluated_at="2024-01-01T00:00:01+00:00",
             ),
             QualityGateResult(
                 gate_name="code_conformance",
@@ -204,9 +205,9 @@ class TestGateTimeline:
                 details="missing import",
                 severity="critical",
                 phase="synthesis",
+                evaluated_at="2024-01-01T00:00:05+00:00",
             ),
         ]
-        now_iso = "2024-01-01T00:00:00+00:00"
         timeline = [
             GateEvent(
                 phase=g.phase,
@@ -214,7 +215,7 @@ class TestGateTimeline:
                 passed=g.passed,
                 severity=g.severity,
                 details=g.details,
-                timestamp=now_iso,
+                timestamp=g.evaluated_at,
             )
             for g in gates
         ]
@@ -222,6 +223,41 @@ class TestGateTimeline:
         assert timeline[0].passed is True
         assert timeline[1].passed is False
         assert timeline[1].gate_name == "code_conformance"
+
+    def test_per_gate_timestamps_preserved(self):
+        """Each gate event carries its own evaluation timestamp."""
+        gates = [
+            QualityGateResult(
+                gate_name="spec_readiness",
+                passed=True,
+                details="ok",
+                severity="info",
+                phase="design",
+                evaluated_at="2024-01-01T00:00:01+00:00",
+            ),
+            QualityGateResult(
+                gate_name="alignment",
+                passed=False,
+                details="misaligned",
+                severity="critical",
+                phase="verification",
+                evaluated_at="2024-01-01T00:05:00+00:00",
+            ),
+        ]
+        timeline = [
+            GateEvent(
+                phase=g.phase,
+                gate_name=g.gate_name,
+                passed=g.passed,
+                severity=g.severity,
+                details=g.details,
+                timestamp=g.evaluated_at,
+            )
+            for g in gates
+        ]
+        assert timeline[0].timestamp == "2024-01-01T00:00:01+00:00"
+        assert timeline[1].timestamp == "2024-01-01T00:05:00+00:00"
+        assert timeline[0].timestamp != timeline[1].timestamp
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +311,27 @@ def check_exit_stop_loss(data):
         result = _build_rule_implementation_map(_minimal_spec(), [], "def broken(")
         assert isinstance(result, list)
         assert all(r.code_line_refs == [] for r in result)
+
+    def test_indexed_signal_exit_ids_normalised(self):
+        """Indexed IDs like exit:signal_exit[0] count toward exit:signal_exit."""
+        spec = _minimal_spec()
+        findings = [
+            AlignmentFinding(trade_num=1, rule_id="exit:signal_exit[0]", check_name="signal_exit", passed=True),
+            AlignmentFinding(trade_num=2, rule_id="exit:signal_exit[1]", check_name="signal_exit", passed=True),
+        ]
+        result = _build_rule_implementation_map(spec, findings, "def run(): pass")
+        sig_map = next(r for r in result if r.rule_id == "exit:signal_exit")
+        assert sig_map.traded_count == 2
+
+    def test_suffixed_stop_loss_ids_normalised(self):
+        """Suffixed IDs like exit:stop_loss:trailing count toward exit:stop_loss."""
+        spec = _minimal_spec()
+        findings = [
+            AlignmentFinding(trade_num=1, rule_id="exit:stop_loss:trailing", check_name="stop_loss", passed=True),
+        ]
+        result = _build_rule_implementation_map(spec, findings, "def run(): pass")
+        sl_map = next(r for r in result if r.rule_id == "exit:stop_loss")
+        assert sl_map.traded_count == 1
 
 
 # ---------------------------------------------------------------------------

@@ -2282,7 +2282,7 @@ class StrategyLabOrchestrator:
                 passed=g.passed,
                 severity=g.severity,
                 details=g.details,
-                timestamp=now_iso,
+                timestamp=g.evaluated_at,
             )
             for g in all_gate_results
         ]
@@ -3084,7 +3084,7 @@ class StrategyLabOrchestrator:
                 passed=g.passed,
                 severity=g.severity,
                 details=g.details,
-                timestamp=now_iso,
+                timestamp=g.evaluated_at,
             )
             for g in all_gate_results
         ]

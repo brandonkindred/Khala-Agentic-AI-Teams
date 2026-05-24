@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -357,21 +358,44 @@ def _build_rule_implementation_map(
     for i, _ in enumerate(getattr(spec, "entry_rules", None) or []):
         rule_ids.append(f"entry[{i}]")
     for er in getattr(spec, "exit_rules", None) or []:
-        if hasattr(er, "rule_type"):
-            rule_ids.append(f"exit:{er.rule_type}")
+        if hasattr(er, "kind"):
+            rule_ids.append(f"exit:{er.kind}")
         else:
             rule_ids.append(f"exit[{len([r for r in rule_ids if r.startswith('exit')])}]")
     rule_ids.append("sizing")
 
+    # Alignment findings use indexed/suffixed rule IDs (e.g.
+    # "exit:signal_exit[0]", "exit:stop_loss:trailing") while the spec
+    # seeds canonical keys ("exit:signal_exit", "exit:stop_loss").
+    # Normalise finding IDs to their canonical form before counting.
+    canonical_set = set(rule_ids)
+
+    def _normalise(rid: str) -> str:
+        if rid in canonical_set:
+            return rid
+        # Strip trailing "[N]" index → "exit:signal_exit[0]" → "exit:signal_exit"
+        base = re.sub(r"\[\d+\]$", "", rid)
+        if base in canonical_set:
+            return base
+        # Strip ":suffix" after the rule type → "exit:stop_loss:trailing" → "exit:stop_loss"
+        parts = base.split(":")
+        if len(parts) >= 3:
+            candidate = ":".join(parts[:2])
+            if candidate in canonical_set:
+                return candidate
+        return rid
+
     passed_counts: Dict[str, int] = defaultdict(int)
     for f in findings:
         if f.rule_id and f.passed:
-            passed_counts[f.rule_id] += 1
+            passed_counts[_normalise(f.rule_id)] += 1
 
     all_rule_ids = list(dict.fromkeys(rule_ids))
     for f in findings:
-        if f.rule_id and f.rule_id not in all_rule_ids:
-            all_rule_ids.append(f.rule_id)
+        if f.rule_id:
+            norm = _normalise(f.rule_id)
+            if norm not in all_rule_ids and f.rule_id not in all_rule_ids:
+                all_rule_ids.append(f.rule_id)
 
     code_refs = _extract_code_line_refs(code, all_rule_ids)
 
