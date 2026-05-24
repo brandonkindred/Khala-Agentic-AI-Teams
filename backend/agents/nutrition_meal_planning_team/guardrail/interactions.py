@@ -13,7 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Tuple
+from types import MappingProxyType
+from typing import Dict, List, Mapping, Tuple
 
 import yaml
 
@@ -68,6 +69,10 @@ def _coerce_tags(raw: list, field_name: str, medication: str) -> frozenset[Inter
         )
     tags: list[InteractionTag] = []
     for item in raw:
+        if not isinstance(item, str):
+            raise InteractionDataError(
+                f"interactions.yaml: {medication}.{field_name} contains non-string entry: {item!r}"
+            )
         if item not in _INTERACTION_TAG_VALUES:
             raise InteractionDataError(
                 f"interactions.yaml: unknown InteractionTag '{item}' in {medication}.{field_name}"
@@ -77,14 +82,14 @@ def _coerce_tags(raw: list, field_name: str, medication: str) -> frozenset[Inter
 
 
 @lru_cache(maxsize=1)
-def load_interactions() -> Dict[str, InteractionPolicy]:
+def load_interactions() -> Mapping[str, InteractionPolicy]:
     """Load and validate ``interactions.yaml``.
 
     Preconditions:
         ``data/interactions.yaml`` exists and is valid YAML.
 
     Postconditions:
-        Returns a dict keyed by every ``Medication`` enum value.
+        Returns an immutable mapping keyed by every ``Medication`` enum value.
         Each value is a frozen ``InteractionPolicy``.
         Raises ``InteractionDataError`` on any schema violation.
 
@@ -140,7 +145,7 @@ def load_interactions() -> Dict[str, InteractionPolicy]:
             f"interactions.yaml: missing entries for Medication members: {sorted(missing)}"
         )
 
-    return result
+    return MappingProxyType(result)
 
 
 def get_interaction_policies(

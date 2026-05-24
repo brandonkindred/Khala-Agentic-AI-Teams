@@ -9,6 +9,7 @@ correctly.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 
 import pytest
 from agents.nutrition_meal_planning_team.clinical_taxonomy import Medication
@@ -22,10 +23,12 @@ from agents.nutrition_meal_planning_team.ingredient_kb.taxonomy import Interacti
 
 
 class TestLoadInteractions:
-    def test_returns_dict(self) -> None:
+    def test_returns_immutable_mapping(self) -> None:
         result = load_interactions()
-        assert isinstance(result, dict)
+        assert isinstance(result, Mapping)
         assert len(result) > 0
+        with pytest.raises(TypeError):
+            result["warfarin"] = None  # type: ignore[index]
 
     def test_every_medication_has_policy(self) -> None:
         result = load_interactions()
