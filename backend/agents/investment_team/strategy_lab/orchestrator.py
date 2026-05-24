@@ -594,7 +594,7 @@ class StrategyLabOrchestrator:
         # work on the same evaluation window and so contributes to the
         # multiple-testing burden that DSR deflation corrects for.
         phase_back_count: int = 0
-        last_drift_collector: Optional[_DriftCollector] = None
+        drift_collector = _DriftCollector()
         for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
             try:
                 return self._run_design_attempt(
@@ -606,13 +606,13 @@ class StrategyLabOrchestrator:
                     directives=directives,
                     design_attempt=design_attempt,
                     phase_back_count=phase_back_count,
+                    drift_collector=drift_collector,
                 )
             except SpecImplementabilityError as exc:
                 last_evidence = exc.evidence
                 last_spec = exc.last_spec
                 last_code = exc.last_code
                 last_failure_phase = exc.failure_phase
-                last_drift_collector = exc.drift_collector
                 phase_back_count += 1
                 self.convergence_tracker.increment_trials(1)
                 if design_attempt >= MAX_DESIGN_REENTRIES:
@@ -658,7 +658,7 @@ class StrategyLabOrchestrator:
             ),
             emit=emit,
             phase_back_count=phase_back_count,
-            drift_collector=last_drift_collector,
+            drift_collector=drift_collector,
         )
 
     def _run_design_loop(
@@ -2347,6 +2347,7 @@ class StrategyLabOrchestrator:
         directives: List[str],
         design_attempt: int = 0,
         phase_back_count: int = 0,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -2368,7 +2369,8 @@ class StrategyLabOrchestrator:
         all_gate_results: List[QualityGateResult] = []
         refinement_attempts: List[str] = []
         zero_trade_attempts: List[str] = []
-        drift_collector = _DriftCollector()
+        if drift_collector is None:
+            drift_collector = _DriftCollector()
 
         # ── Phase 1: DESIGN + REVIEW LOOP ──────────────────────────────
         design_outcome = self._run_design_loop(
