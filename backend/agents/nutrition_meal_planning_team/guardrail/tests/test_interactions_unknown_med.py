@@ -52,6 +52,29 @@ def test_known_plus_unknown_medication() -> None:
     assert advisory[0].severity is Severity.flag
 
 
+def test_freetext_medication_produces_advisory_flag() -> None:
+    profile = profile_with(medications_freetext=["my_custom_supplement"])
+    result: GuardrailResult = check_recommendation(profile, recipe("chicken breast"))
+
+    assert result.passed is True
+    advisory = [f for f in result.flags if f.reason is ViolationReason.interaction_flag]
+    assert len(advisory) == 1
+    assert "my_custom_supplement" in advisory[0].detail
+    assert advisory[0].severity is Severity.flag
+
+
+def test_freetext_plus_recognized_medication() -> None:
+    profile = profile_with(medications=["maoi"], medications_freetext=["aspirin_custom"])
+    result: GuardrailResult = check_recommendation(profile, recipe("miso paste"))
+
+    assert result.passed is False
+    hard = [v for v in result.violations if v.reason is ViolationReason.interaction_hard]
+    assert any(v.tag == "tyramine_high" for v in hard)
+
+    advisory = [f for f in result.flags if "aspirin_custom" in f.detail]
+    assert len(advisory) == 1
+
+
 def test_no_medications_no_advisory() -> None:
     result: GuardrailResult = check_recommendation(profile_with(), recipe("chicken breast"))
 

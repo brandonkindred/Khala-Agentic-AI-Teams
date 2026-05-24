@@ -27,18 +27,20 @@ def profile_with(
     allergens: Iterable[AllergenTag] = (),
     dietary_forbid: Iterable[DietaryTag] = (),
     medications: Iterable[str] = (),
+    medications_freetext: Iterable[str] = (),
     client_id: str = "test_client",
 ) -> ClientProfile:
     """Build a ClientProfile with the given active tags via SPEC-006
     ``RestrictionResolution.resolved`` entries.
 
     Preconditions:
-        ``medications`` contains recognised ``Medication`` enum values
-        or free-text strings (unknown meds produce advisory flags).
+        ``medications`` contains recognised ``Medication`` enum values.
+        ``medications_freetext`` contains unrecognised medication strings
+        (mirrors the real write path in ``patch_clinical``).
 
     Postconditions:
         Returned profile has the specified allergens, dietary forbid tags,
-        and medications set on ``clinical.medications``.
+        and medications set on ``clinical.medications`` / ``medications_freetext``.
     """
     resolved: list[ResolvedRestriction] = []
     for tag in allergens:
@@ -56,10 +58,12 @@ def profile_with(
             )
         )
     med_list = list(medications)
+    med_freetext_list = list(medications_freetext)
+    clinical = ClinicalInfo(medications=med_list, medications_freetext=med_freetext_list)
     return ClientProfile(
         client_id=client_id,
         restriction_resolution=RestrictionResolution(resolved=resolved),
-        clinical=ClinicalInfo(medications=med_list) if med_list else ClinicalInfo(),
+        clinical=clinical,
     )
 
 
