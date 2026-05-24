@@ -37,6 +37,7 @@ from ..models import (
     BacktestRecord,
     BacktestResult,
     DataProvenance,
+    GateEvent,
     StrategyLabRecord,
     StrategySpec,
     TradeRecord,
@@ -668,6 +669,7 @@ class StrategyLabOrchestrator:
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
         design_attempt: int = 0,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> _DesignLoopOutcome:
         """Drive the bounded design ↔ design-review loop.
 
@@ -794,10 +796,19 @@ class StrategyLabOrchestrator:
                 # will short-circuit using the existing critique history.
                 break
 
+            prev_spec = spec.model_copy(deep=True)
             strategy_dict, rationale = self.design_agent.revise(
                 spec, critique, prior_critiques=critique_history
             )
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+            if drift_collector is not None:
+                drift_collector.record_spec_change(
+                    phase="design_review",
+                    agent="DesignAgent",
+                    before_spec=prev_spec,
+                    after_spec=spec,
+                    reason=critique.rationale if hasattr(critique, "rationale") else str(critique),
+                )
 
         return _DesignLoopOutcome(
             spec=spec,
@@ -853,6 +864,7 @@ class StrategyLabOrchestrator:
         refinement_attempts: List[Dict[str, Any]],
         emit: PhaseCallback,
         phase_back_count: int = 0,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> Optional[StrategyLabRecord]:
         """Run spec validation before the refinement loop.
 
@@ -915,6 +927,7 @@ class StrategyLabOrchestrator:
             ),
             emit=emit,
             phase_back_count=phase_back_count,
+            drift_collector=drift_collector,
         )
 
     def _run_synthesis_loop(
@@ -927,6 +940,7 @@ class StrategyLabOrchestrator:
         refinement_attempts: List[str],
         zero_trade_attempts: List[str],
         emit: PhaseCallback,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> _SynthesisLoopOutcome:
         """Run up to ``MAX_CODE_REFINEMENT_ROUNDS`` of (validate → fetch →
         execute → trade-collect → evaluate), refining ``spec``/``code``
@@ -1031,6 +1045,7 @@ class StrategyLabOrchestrator:
                     round_num=round_num,
                     default_change_label="validation fix",
                     emit=emit,
+                    drift_collector=drift_collector,
                 )
                 if exhausted:
                     max_rounds_exhausted = True
@@ -1111,6 +1126,7 @@ class StrategyLabOrchestrator:
                     round_num=round_num,
                     default_change_label="execution fix",
                     emit=emit,
+                    drift_collector=drift_collector,
                 )
                 if exhausted:
                     max_rounds_exhausted = True
@@ -1180,6 +1196,7 @@ class StrategyLabOrchestrator:
                     zero_trade_attempts=zero_trade_attempts,
                     round_num=round_num,
                     emit=emit,
+                    drift_collector=drift_collector,
                 )
                 spec, code = recovery.spec, recovery.code
                 trades, metrics = recovery.trades, recovery.metrics
@@ -1234,6 +1251,7 @@ class StrategyLabOrchestrator:
         zero_trade_attempts: List[str],
         round_num: int,
         emit: PhaseCallback,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> _AnomalyRecoveryOutcome:
         """Recover from critical backtest anomalies in the evaluation phase.
 
@@ -1295,6 +1313,22 @@ class StrategyLabOrchestrator:
                     if zt_outcome.changes_made
                     else "zero-trade repair"
                 )
+                if drift_collector is not None:
+                    zt_reason = zt_outcome.changes_made or "zero-trade repair"
+                    drift_collector.record_spec_change(
+                        phase="verification",
+                        agent="ZeroTradeRepairer",
+                        before_spec=spec,
+                        after_spec=zt_outcome.new_spec,
+                        reason=zt_reason,
+                    )
+                    drift_collector.record_code_change(
+                        phase="verification",
+                        agent="ZeroTradeRepairer",
+                        before_code=code,
+                        after_code=zt_outcome.new_code,
+                        reason=zt_reason,
+                    )
                 emit(
                     "coding",
                     {
@@ -1325,6 +1359,7 @@ class StrategyLabOrchestrator:
             round_num=round_num,
             default_change_label="anomaly fix",
             emit=emit,
+            drift_collector=drift_collector,
         )
         return _AnomalyRecoveryOutcome(
             spec=new_spec,
@@ -1347,6 +1382,7 @@ class StrategyLabOrchestrator:
         execution_succeeded: bool,
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> _AlignmentLoopOutcome:
         """Run the trade-alignment audit loop after the synthesis loop settles.
 
@@ -1401,6 +1437,7 @@ class StrategyLabOrchestrator:
                 alignment_attempts=alignment_attempts,
                 alignment_reports=alignment_reports,
                 emit=emit,
+                drift_collector=drift_collector,
             )
             spec, code = round_outcome.spec, round_outcome.code
             trades, metrics = round_outcome.trades, round_outcome.metrics
@@ -1431,6 +1468,7 @@ class StrategyLabOrchestrator:
         alignment_attempts: List[str],
         alignment_reports: List[TradeAlignmentReport],
         emit: PhaseCallback,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> _AlignmentRoundOutcome:
         """One iteration of ``_run_trade_alignment_loop``.
 
@@ -1693,6 +1731,21 @@ class StrategyLabOrchestrator:
 
         # All gates passed — commit the proposal as the new known-good state.
         alignment_attempts.append(change_summary)
+        if drift_collector is not None:
+            drift_collector.record_code_change(
+                phase="verification",
+                agent="TradeAlignmentAgent",
+                before_code=code,
+                after_code=proposed_code,
+                reason=change_summary,
+            )
+            drift_collector.record_spec_change(
+                phase="verification",
+                agent="TradeAlignmentAgent",
+                before_spec=spec,
+                after_spec=proposed_spec,
+                reason=change_summary,
+            )
         emit(
             "aligning",
             {
@@ -2156,6 +2209,7 @@ class StrategyLabOrchestrator:
         design_context: Optional[_DesignPersistContext] = None,
         alignment_findings: Optional[List[AlignmentFinding]] = None,
         phase_back_count: int = 0,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> StrategyLabRecord:
         """Build the final ``StrategyLabRecord`` from a settled cycle.
 
@@ -2220,6 +2274,21 @@ class StrategyLabOrchestrator:
         )
 
         design_context = design_context or _DesignPersistContext()
+        dc = drift_collector or _DriftCollector()
+        gate_timeline = dc.gate_timeline + [
+            GateEvent(
+                phase=g.phase,
+                gate_name=g.gate_name,
+                passed=g.passed,
+                severity=g.severity,
+                details=g.details,
+                timestamp=now_iso,
+            )
+            for g in all_gate_results
+        ]
+        rule_impl_map = _build_rule_implementation_map(
+            spec, list(alignment_findings or []), code
+        )
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
         record = StrategyLabRecord(
             lab_record_id=lab_record_id,
@@ -2237,6 +2306,10 @@ class StrategyLabOrchestrator:
             original_spec=original_spec,
             original_code=original_code,
             spec_implementability_phase_backs=phase_back_count,
+            spec_history=list(dc.spec_history),
+            code_history=list(dc.code_history),
+            gate_timeline=gate_timeline,
+            rule_implementation_map=rule_impl_map,
         )
 
         self.convergence_tracker.record(spec, all_gate_results)
@@ -2288,6 +2361,7 @@ class StrategyLabOrchestrator:
         all_gate_results: List[QualityGateResult] = []
         refinement_attempts: List[str] = []
         zero_trade_attempts: List[str] = []
+        drift_collector = _DriftCollector()
 
         # ── Phase 1: DESIGN + REVIEW LOOP ──────────────────────────────
         design_outcome = self._run_design_loop(
@@ -2299,6 +2373,7 @@ class StrategyLabOrchestrator:
             all_gate_results=all_gate_results,
             emit=emit,
             design_attempt=design_attempt,
+            drift_collector=drift_collector,
         )
         spec = design_outcome.spec
         rationale = design_outcome.rationale
@@ -2332,6 +2407,7 @@ class StrategyLabOrchestrator:
                 emit=emit,
                 design_context=design_context,
                 phase_back_count=phase_back_count,
+                drift_collector=drift_collector,
             )
 
         # ═══ Phase 2 → 3 transition: DESIGN_REVIEW → CODE_SYNTHESIS ═══
@@ -2394,7 +2470,16 @@ class StrategyLabOrchestrator:
                     emit=emit,
                     design_context=design_context,
                     phase_back_count=phase_back_count,
+                    drift_collector=drift_collector,
                 )
+
+        drift_collector.record_code_change(
+            phase="synthesis",
+            agent="compiler" if not spec.requires_custom_code else "CodeSynthesisAgent",
+            before_code="",
+            after_code=code,
+            reason="initial code synthesis",
+        )
 
         spec.strategy_code = code
         # ``original_spec`` / ``original_code`` are snapshotted after the
@@ -2451,6 +2536,7 @@ class StrategyLabOrchestrator:
             refinement_attempts=refinement_attempts,
             emit=emit,
             phase_back_count=phase_back_count,
+            drift_collector=drift_collector,
         )
         if pre_synthesis is not None:
             return pre_synthesis
@@ -2471,6 +2557,7 @@ class StrategyLabOrchestrator:
             refinement_attempts=refinement_attempts,
             zero_trade_attempts=zero_trade_attempts,
             emit=emit,
+            drift_collector=drift_collector,
         )
         spec = synthesis.spec
         code = synthesis.code
@@ -2514,6 +2601,7 @@ class StrategyLabOrchestrator:
             execution_succeeded=execution_succeeded,
             all_gate_results=all_gate_results,
             emit=emit,
+            drift_collector=drift_collector,
         )
         spec = alignment_outcome.spec
         code = alignment_outcome.code
@@ -2626,6 +2714,7 @@ class StrategyLabOrchestrator:
             design_context=design_context,
             alignment_findings=alignment_findings,
             phase_back_count=phase_back_count,
+            drift_collector=drift_collector,
         )
 
     # ------------------------------------------------------------------
@@ -2668,6 +2757,7 @@ class StrategyLabOrchestrator:
         default_change_label: str,
         emit: PhaseCallback,
         refine_label: Optional[str] = None,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> tuple[StrategySpec, str, bool]:
         """Apply one refinement attempt or exhaust the round budget.
 
@@ -2716,6 +2806,21 @@ class StrategyLabOrchestrator:
         new_spec = self._apply_updates(spec, updates, new_code, failure_phase=failure_phase)
         changes = updates.get("changes_made", default_change_label)
         refinement_attempts.append(changes)
+        if drift_collector is not None:
+            drift_collector.record_code_change(
+                phase="synthesis",
+                agent="RefinementAgent",
+                before_code=code,
+                after_code=new_code,
+                reason=changes,
+            )
+            drift_collector.record_spec_change(
+                phase="synthesis",
+                agent="RefinementAgent",
+                before_spec=spec,
+                after_spec=new_spec,
+                reason=changes,
+            )
         emit(
             "coding",
             {
@@ -2937,23 +3042,18 @@ class StrategyLabOrchestrator:
         emit: PhaseCallback,
         design_context: Optional[_DesignPersistContext] = None,
         phase_back_count: int = 0,
+        drift_collector: Optional[_DriftCollector] = None,
     ) -> StrategyLabRecord:
         """Persist a failed cycle that exited before code execution.
 
-        Used by the pre-synthesis spec gate (#547 item 1) so that
-        critical spec failures short-circuit without ever running
-        ``run_strategy_code`` or fetching market data. The record still
-        flows through ``convergence_tracker`` so failed specs influence
-        diversity directives on the next cycle.
+        Used by the pre-synthesis spec gate so that critical spec failures
+        short-circuit without ever running ``run_strategy_code`` or
+        fetching market data. The record still flows through
+        ``convergence_tracker`` so failed specs influence diversity
+        directives on the next cycle.
         """
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Mirror the short-circuit cause onto ``acceptance_reason`` so the
-        # persisted record self-documents — consistent with the Gap 4/8/7/9
-        # audit-trail messages set on the main publication path (#529).
-        # ``short_circuit_status`` carries a ``"failed: <cause>"`` prefix at
-        # every current call site; strip it so the resulting field reads
-        # ``"publication_disabled: <cause>"``.
         short_circuit_metrics = compute_metrics(
             [], config.initial_capital, config.start_date, config.end_date
         )
@@ -2976,6 +3076,18 @@ class StrategyLabOrchestrator:
         )
 
         design_context = design_context or _DesignPersistContext()
+        dc = drift_collector or _DriftCollector()
+        gate_timeline = dc.gate_timeline + [
+            GateEvent(
+                phase=g.phase,
+                gate_name=g.gate_name,
+                passed=g.passed,
+                severity=g.severity,
+                details=g.details,
+                timestamp=now_iso,
+            )
+            for g in all_gate_results
+        ]
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
         record = StrategyLabRecord(
             lab_record_id=lab_record_id,
@@ -2993,6 +3105,9 @@ class StrategyLabOrchestrator:
             original_spec=original_spec,
             original_code=original_code,
             spec_implementability_phase_backs=phase_back_count,
+            spec_history=list(dc.spec_history),
+            code_history=list(dc.code_history),
+            gate_timeline=gate_timeline,
         )
 
         self.convergence_tracker.record(spec, all_gate_results)
@@ -3323,10 +3438,12 @@ from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
     _AlignmentRoundOutcome,
     _AnomalyRecoveryOutcome,
     _apply_veto_to_acceptance_reason,
+    _build_rule_implementation_map,
     _closes_to_equity,
     _daily_returns_from_trades,
     _DesignLoopOutcome,
     _DesignPersistContext,
+    _DriftCollector,
     _equity_to_returns,
     _format_execution_diagnostics,
     _MarketDataFetch,

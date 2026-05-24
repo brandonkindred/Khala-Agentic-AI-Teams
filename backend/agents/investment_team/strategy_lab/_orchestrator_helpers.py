@@ -183,6 +183,236 @@ class _DesignPersistContext:
 
 
 @dataclass
+class _DriftCollector:
+    """Mutable accumulator for spec/code revision history and gate events.
+
+    Threaded through the orchestrator pipeline alongside
+    ``_DesignPersistContext``. Each mutation site calls one of the
+    ``record_*`` helpers; the orchestrator drains the lists into the
+    final ``StrategyLabRecord`` at record-build time.
+
+    Invariants:
+      - ``record_spec_change`` is a no-op when before/after hashes match
+        (no-op mutation). Same for ``record_code_change``.
+    """
+
+    spec_history: list = field(default_factory=list)
+    code_history: list = field(default_factory=list)
+    gate_timeline: list = field(default_factory=list)
+
+    def record_spec_change(
+        self,
+        *,
+        phase: str,
+        agent: str,
+        before_spec: "StrategySpec",
+        after_spec: "StrategySpec",
+        reason: str,
+        gate_failures: Optional[List[str]] = None,
+    ) -> None:
+        """Append a ``SpecRevision`` if the spec actually changed.
+
+        Preconditions:
+          - Both specs are constructed ``StrategySpec`` instances.
+        Postconditions:
+          - If ``hash_spec(before) == hash_spec(after)``, no entry is appended.
+          - Otherwise exactly one ``SpecRevision`` is appended.
+        """
+        from ..models import SpecRevision
+        from .phases import hash_spec
+
+        before_hash = hash_spec(before_spec)
+        after_hash = hash_spec(after_spec)
+        if before_hash == after_hash:
+            return
+
+        diff = _unified_diff_json(before_spec, after_spec)
+        self.spec_history.append(
+            SpecRevision(
+                phase=phase,
+                agent=agent,
+                timestamp=_now_iso(),
+                before_hash=before_hash,
+                after_hash=after_hash,
+                diff=diff,
+                reason=reason,
+                gate_failures=list(gate_failures or []),
+            )
+        )
+
+    def record_code_change(
+        self,
+        *,
+        phase: str,
+        agent: str,
+        before_code: str,
+        after_code: str,
+        reason: str,
+        gate_failures: Optional[List[str]] = None,
+    ) -> None:
+        """Append a ``CodeRevision`` if the code actually changed.
+
+        Preconditions:
+          - ``before_code`` and ``after_code`` are strings (possibly empty).
+        Postconditions:
+          - If ``hash_code(before) == hash_code(after)``, no entry is appended.
+          - Otherwise exactly one ``CodeRevision`` is appended.
+        """
+        from ..models import CodeRevision
+        from .phases import hash_code
+
+        before_hash = hash_code(before_code)
+        after_hash = hash_code(after_code)
+        if before_hash == after_hash:
+            return
+
+        diff = _unified_diff_code(before_code, after_code)
+        self.code_history.append(
+            CodeRevision(
+                phase=phase,
+                agent=agent,
+                timestamp=_now_iso(),
+                before_hash=before_hash,
+                after_hash=after_hash,
+                diff=diff,
+                reason=reason,
+                gate_failures=list(gate_failures or []),
+            )
+        )
+
+    def record_gate(
+        self,
+        *,
+        phase: str,
+        gate_name: str,
+        passed: bool,
+        severity: str,
+        details: str,
+    ) -> None:
+        from ..models import GateEvent
+
+        self.gate_timeline.append(
+            GateEvent(
+                phase=phase,
+                gate_name=gate_name,
+                passed=passed,
+                severity=severity,
+                details=details,
+                timestamp=_now_iso(),
+            )
+        )
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _unified_diff_json(before_spec: "StrategySpec", after_spec: "StrategySpec") -> str:
+    """Unified diff of sorted-key pretty-printed JSON of two specs."""
+    import difflib
+
+    def _canon(spec: "StrategySpec") -> str:
+        d = spec.model_dump(mode="json")
+        d.pop("strategy_code", None)
+        return json.dumps(d, sort_keys=True, indent=2, default=str)
+
+    a = _canon(before_spec).splitlines(keepends=True)
+    b = _canon(after_spec).splitlines(keepends=True)
+    return "".join(difflib.unified_diff(a, b, fromfile="before", tofile="after"))
+
+
+def _unified_diff_code(before: str, after: str) -> str:
+    """Unified diff of raw code strings."""
+    import difflib
+
+    a = (before or "").splitlines(keepends=True)
+    b = (after or "").splitlines(keepends=True)
+    return "".join(difflib.unified_diff(a, b, fromfile="before", tofile="after"))
+
+
+def _build_rule_implementation_map(
+    spec: "StrategySpec",
+    findings: List[Any],
+    code: str,
+) -> list:
+    """Build per-rule trade coverage from alignment findings.
+
+    Preconditions:
+      - ``findings`` is a list of ``AlignmentFinding`` instances (or empty).
+      - ``spec`` has ``entry_rules``, ``exit_rules`` attributes.
+    Postconditions:
+      - Returns a list of ``RuleImplementationMap`` instances, one per
+        known rule ID derived from the spec plus ``"sizing"``.
+      - ``traded_count`` counts distinct trades where ``passed=True``
+        for that ``rule_id``.
+      - ``code_line_refs`` is best-effort AST; empty on parse failure.
+    """
+    from collections import defaultdict
+
+    from ..models import RuleImplementationMap
+
+    rule_ids: List[str] = []
+    for i, _ in enumerate(getattr(spec, "entry_rules", None) or []):
+        rule_ids.append(f"entry[{i}]")
+    for er in getattr(spec, "exit_rules", None) or []:
+        if hasattr(er, "rule_type"):
+            rule_ids.append(f"exit:{er.rule_type}")
+        else:
+            rule_ids.append(f"exit[{len([r for r in rule_ids if r.startswith('exit')])}]")
+    rule_ids.append("sizing")
+
+    passed_counts: Dict[str, int] = defaultdict(int)
+    for f in findings:
+        if f.rule_id and f.passed:
+            passed_counts[f.rule_id] += 1
+
+    all_rule_ids = list(dict.fromkeys(rule_ids))
+    for f in findings:
+        if f.rule_id and f.rule_id not in all_rule_ids:
+            all_rule_ids.append(f.rule_id)
+
+    code_refs = _extract_code_line_refs(code, all_rule_ids)
+
+    return [
+        RuleImplementationMap(
+            rule_id=rid,
+            code_line_refs=code_refs.get(rid, []),
+            traded_count=passed_counts.get(rid, 0),
+        )
+        for rid in all_rule_ids
+    ]
+
+
+def _extract_code_line_refs(code: str, rule_ids: List[str]) -> Dict[str, List[List[int]]]:
+    """Best-effort AST analysis to find code regions matching rule IDs."""
+    import ast
+    import re
+
+    if not code or not code.strip():
+        return {}
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+
+    refs: Dict[str, List[List[int]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        name_lower = node.name.lower()
+        start = node.lineno
+        end = node.end_lineno or start
+        for rid in rule_ids:
+            tag = rid.replace("[", "").replace("]", "").replace(":", "_").lower()
+            if tag in name_lower or re.search(re.escape(tag), name_lower):
+                refs.setdefault(rid, []).append([start, end])
+    return refs
+
+
+@dataclass
 class _DesignLoopOutcome:
     """Bundle returned by ``_run_design_loop``.
 

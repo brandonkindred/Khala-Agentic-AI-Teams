@@ -915,6 +915,81 @@ class PaperTradingVerdict(str, Enum):
     NOT_PERFORMANT = "not_performant"
 
 
+# ---------------------------------------------------------------------------
+# Drift-observability models (spec/code revision ledger, gate timeline,
+# rule-implementation coverage)
+# ---------------------------------------------------------------------------
+
+StrategyLabPhase = Literal["design", "design_review", "synthesis", "verification"]
+
+
+class SpecRevision(BaseModel):
+    """One mutation of the strategy spec during a lab cycle.
+
+    Preconditions:
+      - ``before_hash`` / ``after_hash`` are 64-char hex SHA-256 digests
+        produced by ``phases.hash_spec``.
+      - ``before_hash != after_hash`` (no-op mutations are not recorded).
+    Postconditions:
+      - ``diff`` is a unified-diff string of the spec's sorted-key
+        pretty-printed JSON, suitable for human review.
+    """
+
+    phase: StrategyLabPhase
+    agent: str
+    timestamp: str
+    before_hash: str = Field(..., min_length=64, max_length=64)
+    after_hash: str = Field(..., min_length=64, max_length=64)
+    diff: str
+    reason: str
+    gate_failures: List[str] = Field(default_factory=list)
+
+
+class CodeRevision(BaseModel):
+    """One mutation of the strategy code during a lab cycle.
+
+    Preconditions:
+      - ``before_hash`` / ``after_hash`` are 64-char hex SHA-256 digests
+        produced by ``phases.hash_code``.
+      - ``before_hash != after_hash`` (no-op mutations are not recorded).
+    Postconditions:
+      - ``diff`` is a unified-diff string of the raw code text.
+    """
+
+    phase: StrategyLabPhase
+    agent: str
+    timestamp: str
+    before_hash: str = Field(..., min_length=64, max_length=64)
+    after_hash: str = Field(..., min_length=64, max_length=64)
+    diff: str
+    reason: str
+    gate_failures: List[str] = Field(default_factory=list)
+
+
+class GateEvent(BaseModel):
+    """Chronological record of a quality-gate evaluation."""
+
+    phase: str
+    gate_name: str
+    passed: bool
+    severity: Literal["info", "warning", "critical"]
+    details: str
+    timestamp: str
+
+
+class RuleImplementationMap(BaseModel):
+    """Per-rule trade coverage: how many trades exercised each spec rule.
+
+    ``code_line_refs`` is best-effort AST analysis — empty when the
+    generated code cannot be parsed or the rule cannot be located.
+    Each inner list is ``[start_line, end_line]``.
+    """
+
+    rule_id: str
+    code_line_refs: List[List[int]] = Field(default_factory=list)
+    traded_count: int = 0
+
+
 class StrategyLabRecord(BaseModel):
     """Result of one strategy ideation + backtest + analysis (+ optional paper trading) cycle.
 
@@ -996,6 +1071,11 @@ class StrategyLabRecord(BaseModel):
     )
     paper_trading_error: Optional[str] = None
     paper_trading_verdict: Optional[PaperTradingVerdict] = None
+    # Drift-observability ledgers
+    spec_history: List[SpecRevision] = Field(default_factory=list)
+    code_history: List[CodeRevision] = Field(default_factory=list)
+    gate_timeline: List[GateEvent] = Field(default_factory=list)
+    rule_implementation_map: List[RuleImplementationMap] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

@@ -938,6 +938,7 @@ def test_compiled_code_flows_into_orchestrator_local_variable() -> None:
         refinement_attempts,
         emit,
         phase_back_count=0,
+        drift_collector=None,
     ):
         captured["code"] = code
         captured["original_code"] = original_code
