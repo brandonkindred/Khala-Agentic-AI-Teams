@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -180,6 +181,281 @@ class _DesignPersistContext:
     # ``Any`` to avoid a cycle with ``agents/design_review``; the orchestrator
     # passes a ``List[SpecCritique]`` through.
     critiques: List[Any] = field(default_factory=list)
+
+
+@dataclass
+class _DriftCollector:
+    """Mutable accumulator for spec/code revision history and gate events.
+
+    Threaded through the orchestrator pipeline alongside
+    ``_DesignPersistContext``. Each mutation site calls one of the
+    ``record_*`` helpers; the orchestrator drains the lists into the
+    final ``StrategyLabRecord`` at record-build time.
+
+    Invariants:
+      - ``record_spec_change`` is a no-op when before/after hashes match
+        (no-op mutation). Same for ``record_code_change``.
+    """
+
+    spec_history: list = field(default_factory=list)
+    code_history: list = field(default_factory=list)
+    gate_timeline: list = field(default_factory=list)
+
+    def record_spec_change(
+        self,
+        *,
+        phase: str,
+        agent: str,
+        before_spec: "StrategySpec",
+        after_spec: "StrategySpec",
+        reason: str,
+        gate_failures: Optional[List[str]] = None,
+    ) -> None:
+        """Append a ``SpecRevision`` if the spec actually changed.
+
+        Preconditions:
+          - Both specs are constructed ``StrategySpec`` instances.
+        Postconditions:
+          - If ``hash_spec(before) == hash_spec(after)``, no entry is appended.
+          - Otherwise exactly one ``SpecRevision`` is appended.
+        """
+        from ..models import SpecRevision
+        from .phases import hash_spec
+
+        before_hash = hash_spec(before_spec)
+        after_hash = hash_spec(after_spec)
+        if before_hash == after_hash:
+            return
+
+        diff = _unified_diff_json(before_spec, after_spec)
+        self.spec_history.append(
+            SpecRevision(
+                phase=phase,
+                agent=agent,
+                timestamp=_now_iso(),
+                before_hash=before_hash,
+                after_hash=after_hash,
+                diff=diff,
+                reason=reason,
+                gate_failures=list(gate_failures or []),
+            )
+        )
+
+    def record_code_change(
+        self,
+        *,
+        phase: str,
+        agent: str,
+        before_code: str,
+        after_code: str,
+        reason: str,
+        gate_failures: Optional[List[str]] = None,
+    ) -> None:
+        """Append a ``CodeRevision`` if the code actually changed.
+
+        Preconditions:
+          - ``before_code`` and ``after_code`` are strings (possibly empty).
+        Postconditions:
+          - If ``hash_code(before) == hash_code(after)``, no entry is appended.
+          - Otherwise exactly one ``CodeRevision`` is appended.
+        """
+        from ..models import CodeRevision
+        from .phases import hash_code
+
+        before_hash = hash_code(before_code)
+        after_hash = hash_code(after_code)
+        if before_hash == after_hash:
+            return
+
+        diff = _unified_diff_code(before_code, after_code)
+        self.code_history.append(
+            CodeRevision(
+                phase=phase,
+                agent=agent,
+                timestamp=_now_iso(),
+                before_hash=before_hash,
+                after_hash=after_hash,
+                diff=diff,
+                reason=reason,
+                gate_failures=list(gate_failures or []),
+            )
+        )
+
+    def record_gate(
+        self,
+        *,
+        phase: str,
+        gate_name: str,
+        passed: bool,
+        severity: str,
+        details: str,
+    ) -> None:
+        from ..models import GateEvent
+
+        self.gate_timeline.append(
+            GateEvent(
+                phase=phase,
+                gate_name=gate_name,
+                passed=passed,
+                severity=severity,
+                details=details,
+                timestamp=_now_iso(),
+            )
+        )
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _unified_diff_json(before_spec: "StrategySpec", after_spec: "StrategySpec") -> str:
+    """Unified diff of sorted-key pretty-printed JSON of two specs."""
+    import difflib
+
+    def _canon(spec: "StrategySpec") -> str:
+        d = spec.model_dump(mode="json")
+        d.pop("strategy_code", None)
+        return json.dumps(d, sort_keys=True, indent=2, default=str)
+
+    a = _canon(before_spec).splitlines(keepends=True)
+    b = _canon(after_spec).splitlines(keepends=True)
+    return "".join(difflib.unified_diff(a, b, fromfile="before", tofile="after"))
+
+
+def _unified_diff_code(before: str, after: str) -> str:
+    """Unified diff of raw code strings."""
+    import difflib
+
+    a = (before or "").splitlines(keepends=True)
+    b = (after or "").splitlines(keepends=True)
+    return "".join(difflib.unified_diff(a, b, fromfile="before", tofile="after"))
+
+
+def _build_rule_implementation_map(
+    spec: "StrategySpec",
+    findings: List[Any],
+    code: str,
+) -> list:
+    """Build per-rule trade coverage from alignment findings.
+
+    Preconditions:
+      - ``findings`` is a list of ``AlignmentFinding`` instances (or empty).
+      - ``spec`` has ``entry_rules``, ``exit_rules`` attributes.
+    Postconditions:
+      - Returns a list of ``RuleImplementationMap`` instances, one per
+        known rule ID derived from the spec plus ``"sizing"``.
+      - ``traded_count`` counts distinct trades where ``passed=True``
+        for that ``rule_id``.
+      - ``code_line_refs`` is best-effort AST; empty on parse failure.
+    """
+    from collections import defaultdict
+
+    from ..models import RuleImplementationMap
+
+    rule_ids: List[str] = []
+    for i, _ in enumerate(getattr(spec, "entry_rules", None) or []):
+        rule_ids.append(f"entry[{i}]")
+    kind_counts: Dict[str, int] = defaultdict(int)
+    # Map suffixed finding IDs to the specific rule instance based on
+    # distinguishing attributes (e.g. StopLossRule.basis).
+    _suffix_to_instance: Dict[str, str] = {}
+    for er in getattr(spec, "exit_rules", None) or []:
+        if hasattr(er, "kind"):
+            idx = kind_counts[er.kind]
+            kind_counts[er.kind] += 1
+            canonical = f"exit:{er.kind}[{idx}]"
+            rule_ids.append(canonical)
+            basis = getattr(er, "basis", None)
+            if basis:
+                _suffix_to_instance[f"exit:{er.kind}:{basis}"] = canonical
+        else:
+            rule_ids.append(f"exit[{len([r for r in rule_ids if r.startswith('exit')])}]")
+    rule_ids.append("sizing")
+
+    # Canonical keys are now per-instance (e.g. "exit:stop_loss[0]",
+    # "exit:signal_exit[1]"). Alignment findings may use unindexed
+    # ("exit:stop_loss") or suffixed ("exit:stop_loss:trailing") IDs.
+    # Normalise to the canonical form before counting.
+    canonical_set = set(rule_ids)
+    # Map unindexed kind → first ([0]) canonical instance.
+    _kind_to_first: Dict[str, str] = {}
+    for rid in rule_ids:
+        m = re.match(r"^(exit:\w+)\[(\d+)\]$", rid)
+        if m:
+            base_kind = m.group(1)
+            if base_kind not in _kind_to_first:
+                _kind_to_first[base_kind] = rid
+
+    def _normalise(rid: str) -> str:
+        if rid in canonical_set:
+            return rid
+        # Suffixed form with a known instance mapping
+        # e.g. "exit:stop_loss:trailing_high" → "exit:stop_loss[1]"
+        if rid in _suffix_to_instance:
+            return _suffix_to_instance[rid]
+        # Strip ":suffix" → "exit:stop_loss:trailing" → "exit:stop_loss"
+        parts = rid.split(":")
+        base = rid
+        if len(parts) >= 3:
+            base = ":".join(parts[:2])
+            if base in canonical_set:
+                return base
+        # Try stripping "[N]" index → already-indexed non-canonical
+        stripped = re.sub(r"\[\d+\]$", "", rid)
+        if stripped != rid and stripped in canonical_set:
+            return stripped
+        # Unindexed form → first ([0]) canonical instance as best-effort
+        first = _kind_to_first.get(base)
+        if first:
+            return first
+        return rid
+
+    passed_trades: Dict[str, set] = defaultdict(set)
+    for f in findings:
+        if f.rule_id and f.passed and f.computed_value is not None:
+            passed_trades[_normalise(f.rule_id)].add(f.trade_num)
+
+    all_rule_ids = list(dict.fromkeys(rule_ids))
+
+    code_refs = _extract_code_line_refs(code, all_rule_ids)
+
+    return [
+        RuleImplementationMap(
+            rule_id=rid,
+            code_line_refs=code_refs.get(rid, []),
+            traded_count=len(passed_trades.get(rid, set())),
+        )
+        for rid in all_rule_ids
+    ]
+
+
+def _extract_code_line_refs(code: str, rule_ids: List[str]) -> Dict[str, List[List[int]]]:
+    """Best-effort AST analysis to find code regions matching rule IDs."""
+    import ast
+    import re
+
+    if not code or not code.strip():
+        return {}
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+
+    refs: Dict[str, List[List[int]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        name_lower = node.name.lower()
+        start = node.lineno
+        end = node.end_lineno or start
+        for rid in rule_ids:
+            tag = rid.replace("[", "").replace("]", "").replace(":", "_").lower()
+            if tag in name_lower or re.search(re.escape(tag), name_lower):
+                refs.setdefault(rid, []).append([start, end])
+    return refs
 
 
 @dataclass
