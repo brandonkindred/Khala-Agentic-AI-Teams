@@ -595,6 +595,7 @@ class StrategyLabOrchestrator:
         # multiple-testing burden that DSR deflation corrects for.
         phase_back_count: int = 0
         drift_collector = _DriftCollector()
+        cumulative_gate_results: List[QualityGateResult] = []
         for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
             try:
                 return self._run_design_attempt(
@@ -607,6 +608,7 @@ class StrategyLabOrchestrator:
                     design_attempt=design_attempt,
                     phase_back_count=phase_back_count,
                     drift_collector=drift_collector,
+                    cumulative_gate_results=cumulative_gate_results,
                 )
             except SpecImplementabilityError as exc:
                 last_evidence = exc.evidence
@@ -649,7 +651,7 @@ class StrategyLabOrchestrator:
             original_spec=last_spec,
             original_code=last_code,
             rationale="",
-            all_gate_results=[],
+            all_gate_results=cumulative_gate_results,
             refinement_attempts=[],
             short_circuit_status="failed: spec_unimplementable",
             short_circuit_reason=(
@@ -2348,6 +2350,7 @@ class StrategyLabOrchestrator:
         design_attempt: int = 0,
         phase_back_count: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
+        cumulative_gate_results: Optional[List[QualityGateResult]] = None,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -2366,7 +2369,7 @@ class StrategyLabOrchestrator:
         # Reset per-attempt counters so a re-entry starts fresh.
         self._consecutive_spec_mutation_rounds = {}
 
-        all_gate_results: List[QualityGateResult] = []
+        all_gate_results: List[QualityGateResult] = cumulative_gate_results if cumulative_gate_results is not None else []
         refinement_attempts: List[str] = []
         zero_trade_attempts: List[str] = []
         if drift_collector is None:
