@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 
 from strands import Agent
 
+from ...guardrail.violations import Violation
 from ...models import (
     ClientProfile,
     MealHistoryEntry,
@@ -16,6 +17,7 @@ from ...models import (
     NutritionPlan,
 )
 from .prompt_constraints import render_constraints_block
+from .regeneration_prompt import REGENERATION_SYSTEM_PROMPT, build_regeneration_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +95,10 @@ def _build_user_prompt(
 class MealPlanningAgent:
     """Suggests meals from profile, nutrition plan, and meal history. Caller records recommendations and passes history."""
 
-    def __init__(self, model: Any) -> None:
+    def __init__(self, model: Any, *, agent_key: str = "nutrition_meal_planning") -> None:
         self._agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
+        self._agent_key = agent_key
+        self._client: Any = None
 
     def run(
         self,
@@ -128,3 +132,50 @@ class MealPlanningAgent:
             if isinstance(s, dict):
                 result_list.append(MealRecommendation.model_validate(s))
         return result_list
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            from llm_service import get_client
+
+            self._client = get_client(self._agent_key)
+        return self._client
+
+    def regenerate_single(
+        self,
+        profile: ClientProfile,
+        original: MealRecommendation,
+        violations: Sequence[Violation],
+    ) -> Optional[MealRecommendation]:
+        """Generate a single replacement meal after a guardrail rejection.
+
+        Preconditions:
+            ``violations`` is non-empty — at least one hard-reject violation
+            triggered the regeneration request.
+            ``profile`` carries a valid ``restriction_resolution`` and ``clinical``.
+
+        Postconditions:
+            Returns a validated ``MealRecommendation`` on success, or ``None``
+            when the LLM fails to produce a valid response after built-in
+            self-correction retry.
+        """
+        from llm_service import LLMError, LLMPermanentError
+        from llm_service.structured import complete_validated
+
+        prompt = build_regeneration_prompt(profile, original, violations)
+        try:
+            client = self._get_client()
+            return complete_validated(
+                client,
+                prompt,
+                schema=MealRecommendation,
+                system_prompt=REGENERATION_SYSTEM_PROMPT,
+            )
+        except LLMPermanentError as e:
+            logger.warning("regenerate_single failed (permanent): %s", e)
+            return None
+        except LLMError as e:
+            logger.warning("regenerate_single failed (transient): %s", e)
+            return None
+        except Exception as e:
+            logger.exception("regenerate_single unexpected error: %s", e)
+            return None
