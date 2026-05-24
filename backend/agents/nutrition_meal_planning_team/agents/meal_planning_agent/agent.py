@@ -66,9 +66,12 @@ def _build_user_prompt(
     """Assemble the user prompt with optional constraints block."""
     parts = ["Client profile:\n" + profile.model_dump_json(indent=2)]
 
-    constraints = render_constraints_block(profile.restriction_resolution, profile.clinical)
-    if constraints:
-        parts.append(constraints)
+    try:
+        constraints = render_constraints_block(profile.restriction_resolution, profile.clinical)
+        if constraints:
+            parts.append(constraints)
+    except Exception as e:
+        logger.error("Prompt constraint rendering failed, continuing without constraints: %s", e)
 
     parts.append(
         "Nutrition plan (targets and guidelines):\n" + nutrition_plan.model_dump_json(indent=2)
@@ -105,13 +108,9 @@ class MealPlanningAgent:
         meal_types = meal_types or ["lunch", "dinner"]
         history_summary = _summarize_history(meal_history)
 
-        try:
-            prompt = _build_user_prompt(
-                profile, nutrition_plan, history_summary, period_days, meal_types
-            )
-        except Exception as e:
-            logger.error("Prompt constraint build failed: %s", e)
-            return []
+        prompt = _build_user_prompt(
+            profile, nutrition_plan, history_summary, period_days, meal_types
+        )
 
         try:
             result = self._agent(prompt)
