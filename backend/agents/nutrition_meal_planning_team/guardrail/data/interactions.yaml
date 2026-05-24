@@ -1,0 +1,66 @@
+# SPEC-007 §4.4 step 4 — medication-class → food-interaction tag map v1.
+#
+# Closed table. Every key must be a clinical_taxonomy.Medication member;
+# every tag in hard/flag must be an ingredient_kb.taxonomy.InteractionTag
+# member. The loader fails fast on unknowns.
+#
+# Policy: default to flag (advisory) unless the interaction is both
+# acute and well-documented.  Only maoi × tyramine_high is hard in v1.
+# Promoting a flag to hard requires team-lead + clinical reviewer
+# sign-off per entry.
+#
+# Clinical review: [pending — to be recorded on PR approval]
+
+warfarin:
+  hard: []
+  flag: [vitamin_k_high]
+  note: "Coordinate vitamin K intake with INR monitoring."
+
+maoi:
+  hard: [tyramine_high]
+  flag: []
+  note: "Aged cheeses, cured meats, fermented foods excluded."
+
+ssri:
+  hard: []
+  flag: [st_johns_wort]
+
+acei_arb:
+  hard: []
+  flag: [potassium_high]
+
+k_sparing_diuretic:
+  hard: []
+  flag: [potassium_high]
+
+statin:
+  hard: []
+  flag: [grapefruit]
+
+amiodarone:
+  hard: []
+  flag: [grapefruit]
+
+glp1:
+  hard: []
+  flag: [very_high_fat]
+
+metformin:
+  hard: []
+  flag: []
+  note: "No specific food interactions in v1 scope."
+
+levothyroxine:
+  hard: []
+  flag: [caffeine_high]
+  note: "Take on empty stomach; caffeine may reduce absorption."
+
+lithium:
+  hard: []
+  flag: [sodium_very_high, caffeine_high]
+  note: "Consistent sodium and caffeine intake recommended."
+
+st_johns_wort:
+  hard: []
+  flag: [st_johns_wort]
+  note: "St. John's wort interacts with many medication classes."
