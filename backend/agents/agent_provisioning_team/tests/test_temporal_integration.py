@@ -1,4 +1,4 @@
-"""Temporal integration tests for the Agent Provisioning team.
+"""Temporal tests for the Agent Provisioning team.
 
 Covers routing, skip_phases/prior_results plumbing on /resume, the
 PROVISION_THREAD_FALLBACK escape hatch, progress writes from v2
@@ -11,15 +11,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from agent_provisioning_team.api import main as api_main
 from agent_provisioning_team.api.main import app
-
-# Exercises real activity contracts that touch the job store.  Run via the
-# `test-integration` CI job.
-pytestmark = [pytest.mark.integration]
 
 client = TestClient(app)
 
