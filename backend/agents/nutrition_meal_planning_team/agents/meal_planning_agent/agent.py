@@ -105,11 +105,10 @@ class MealPlanningAgent:
         meal_types = meal_types or ["lunch", "dinner"]
         history_summary = _summarize_history(meal_history)
 
-        prompt = _build_user_prompt(
-            profile, nutrition_plan, history_summary, period_days, meal_types
-        )
-
         try:
+            prompt = _build_user_prompt(
+                profile, nutrition_plan, history_summary, period_days, meal_types
+            )
             result = self._agent(prompt)
             raw = str(result).strip()
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
