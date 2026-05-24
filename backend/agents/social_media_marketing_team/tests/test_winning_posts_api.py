@@ -2,8 +2,9 @@
 
 Swaps the bank module's ``get_conn`` for an in-process fake so the
 routes exercise their full happy-path without Postgres.  The autouse
-fixtures in ``conftest.py`` route ``_job_manager`` through an in-memory
-fake and run dispatched jobs synchronously.
+``_patched_job_manager`` fixture in ``conftest.py`` routes
+``_job_manager`` through an in-memory fake; the ``_inline_threading``
+fixture (opted in below) runs dispatched jobs synchronously.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from fastapi.testclient import TestClient
 from social_media_marketing_team.adapters.branding import BrandContext
 from social_media_marketing_team.api.main import app
 from social_media_marketing_team.tests.test_winning_posts_bank import _FakeConn
+
+pytestmark = [pytest.mark.usefixtures("_inline_threading")]
 
 _BRAND_ADAPTER = "social_media_marketing_team.api.main"
 

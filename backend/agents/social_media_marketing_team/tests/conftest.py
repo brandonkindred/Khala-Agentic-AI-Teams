@@ -29,9 +29,14 @@ def _patched_job_manager(monkeypatch, fake_job_client):
     return fake_job_client
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture()
 def _inline_threading(monkeypatch):
     """Run dispatched jobs synchronously so tests don't need polling.
+
+    Not autouse — only test modules that exercise the ``/run`` endpoint
+    should opt in via ``pytest.mark.usefixtures("_inline_threading")``.
+    Patching ``api_main.threading.Thread`` globally would break OTel's
+    ``ThreadingInstrumentor`` in tests that create Strands agents.
 
     Postconditions: ``threading.Thread`` in ``api_main`` is replaced with
         an inline variant that calls ``target(*args)`` on ``start()``.
@@ -41,8 +46,11 @@ def _inline_threading(monkeypatch):
         def __init__(self, target, args=(), daemon=False, **kw):
             self._target, self._args = target, args
 
-        def start(self):
+        def run(self):
             self._target(*self._args)
+
+        def start(self):
+            self.run()
 
     monkeypatch.setattr(api_main.threading, "Thread", _InlineThread)
 

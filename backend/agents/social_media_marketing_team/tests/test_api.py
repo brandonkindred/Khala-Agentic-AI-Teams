@@ -1,13 +1,15 @@
 """Tests for social_media_marketing_team API endpoints (HTTP layer).
 
-The autouse fixtures in ``conftest.py`` swap ``_job_manager`` for an
-in-memory ``FakeJobServiceClient`` and replace ``threading.Thread`` with
-a synchronous inline variant, so these tests run without a live job
-service or Postgres.
+The autouse ``_patched_job_manager`` fixture in ``conftest.py`` swaps
+``_job_manager`` for an in-memory ``FakeJobServiceClient``.  The
+``_inline_threading`` fixture (opted in below) replaces
+``threading.Thread`` with a synchronous variant so jobs complete during
+the POST handler and no polling is needed.
 """
 
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from social_media_marketing_team.adapters.branding import (
@@ -16,6 +18,8 @@ from social_media_marketing_team.adapters.branding import (
 )
 from social_media_marketing_team.api.main import app
 from social_media_marketing_team.models import Platform
+
+pytestmark = [pytest.mark.usefixtures("_inline_threading")]
 
 _MOCK_BRAND_CTX = BrandContext(
     brand_name="Acme",
