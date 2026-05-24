@@ -50,12 +50,9 @@ def build_regeneration_prompt(
 
     parts.append(_forbidden_section(violations))
 
-    try:
-        constraints = render_constraints_block(profile.restriction_resolution, profile.clinical)
-        if constraints:
-            parts.append(constraints)
-    except Exception:
-        pass
+    constraints = render_constraints_block(profile.restriction_resolution, profile.clinical)
+    if constraints:
+        parts.append(constraints)
 
     parts.append(_original_context(original))
     parts.append(_instruction(original))
