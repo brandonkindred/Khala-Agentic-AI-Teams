@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_REGEN_RETRIES = 2
+_MAX_GUARDRAIL_WORKERS = 8
 
 
 @dataclass
@@ -180,7 +181,9 @@ def run_guardrail_pipeline(
     dropped: list[DroppedSuggestion] = []
     flags_by_rec: dict[str, list[str]] = {}
 
-    with ThreadPoolExecutor(max_workers=len(suggestions) or 1) as executor:
+    with ThreadPoolExecutor(
+        max_workers=min(len(suggestions), _MAX_GUARDRAIL_WORKERS) or 1
+    ) as executor:
         future_to_idx = {
             executor.submit(
                 _process_one,
