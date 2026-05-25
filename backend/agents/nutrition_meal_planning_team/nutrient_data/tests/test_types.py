@@ -47,7 +47,7 @@ class TestNutrientRow:
         assert row in s
 
     def test_rejects_negative_value(self):
-        with pytest.raises(ValueError, match="value_per_100g must be >= 0"):
+        with pytest.raises(ValueError, match="value_per_100g must be finite and >= 0"):
             NutrientRow(
                 canonical_id="x",
                 nutrient=Nutrient.kcal,
@@ -63,6 +63,16 @@ class TestNutrientRow:
             data_version="1.0.0",
         )
         assert row.value_per_100g == 0.0
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+    def test_rejects_non_finite_value(self, bad_value: float):
+        with pytest.raises(ValueError, match="finite"):
+            NutrientRow(
+                canonical_id="x",
+                nutrient=Nutrient.kcal,
+                value_per_100g=bad_value,
+                data_version="1.0.0",
+            )
 
 
 class TestNutrients:
@@ -125,6 +135,21 @@ class TestDensityRecord:
         )
         with pytest.raises(AttributeError):
             d.grams_per_unit = 99.0  # type: ignore[misc]
+
+    def test_rejects_zero(self):
+        with pytest.raises(ValueError, match="grams_per_unit"):
+            DensityRecord(canonical_id="x", unit="cup", grams_per_unit=0.0, data_version="1.0.0")
+
+    def test_rejects_negative(self):
+        with pytest.raises(ValueError, match="grams_per_unit"):
+            DensityRecord(canonical_id="x", unit="cup", grams_per_unit=-5.0, data_version="1.0.0")
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+    def test_rejects_non_finite(self, bad_value: float):
+        with pytest.raises(ValueError, match="finite"):
+            DensityRecord(
+                canonical_id="x", unit="cup", grams_per_unit=bad_value, data_version="1.0.0"
+            )
 
 
 class TestRetentionFactors:
@@ -195,3 +220,25 @@ class TestRetentionFactors:
             data_version="1.0.0",
         )
         assert r.mass_retention == 2.0
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+    def test_rejects_non_finite_nutrient_retention(self, bad_value: float):
+        with pytest.raises(ValueError, match="finite"):
+            RetentionFactors(
+                canonical_id="x",
+                method="boiled",
+                nutrient_retention=bad_value,
+                mass_retention=0.8,
+                data_version="1.0.0",
+            )
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+    def test_rejects_non_finite_mass_retention(self, bad_value: float):
+        with pytest.raises(ValueError, match="finite"):
+            RetentionFactors(
+                canonical_id="x",
+                method="boiled",
+                nutrient_retention=0.9,
+                mass_retention=bad_value,
+                data_version="1.0.0",
+            )
