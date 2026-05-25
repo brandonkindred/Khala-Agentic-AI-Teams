@@ -20,7 +20,7 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as _field
-from typing import Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterator, List, Optional, Protocol, Tuple, Union
 
 import pandas as pd
 
@@ -2513,180 +2513,186 @@ def _resolve_string_in_method(value: ast.expr, name_strings: "_NameStrings") -> 
     return None
 
 
-def _collect_name_strings(
-    tree: ast.AST,
-    strategy_class: Optional[ast.ClassDef] = None,
-) -> _NameStrings:
-    """Bind ``NAME = "<string>"`` for string-constant resolution.
+class _BindingRecorder(Protocol):
+    """Protocol for type-specific constant recorders.
 
-    Mirrors :func:`_collect_name_periods` but for string-valued
-    assignments. Used by :func:`_symbol_gate` so a target-symbol
-    constant like ``TARGET_SYMBOL = "BBB"`` resolves
-    ``bar.symbol == TARGET_SYMBOL`` (bare name) and
-    ``bar.symbol == self.TARGET`` (attribute) without one overwriting
-    the other.
-
-    Returns a :class:`_NameStrings` with two dicts:
-
-    - ``globals_`` (bare-name lookups) — module-level ``Name``
-      targets only. Class-body ``Name`` targets do NOT contribute
-      because Python's class body is not in lexical scope for
-      methods, so a bare ``TARGET`` reference inside ``on_bar``
-      resolves through the module/global scope, not the class.
-    - ``attrs`` (``self.X`` / ``cls.X`` lookups) — class-body
-      ``Name`` targets (which become class attributes accessible
-      via ``self.X`` / ``Class.X``) and class ``__init__`` /
-      ``__post_init__`` ``self.X = ...`` instance assignments.
-      Module-level bare names do NOT contribute because
-      ``self.X`` resolution stops at the class chain — it does not
-      fall through to module scope.
+    Preconditions: ``target`` is an ``ast.expr`` from an ``Assign`` or
+    ``AnnAssign`` node; ``value`` is the corresponding RHS expression.
+    Postconditions: the recorder's internal accumulator reflects the
+    binding, or the call is a no-op when the RHS cannot be resolved.
     """
-    bindings = _NameStrings()
-    _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
 
-    def _resolve_string_value(value: ast.expr, *, in_method: bool) -> Optional[str]:
-        """Resolve an assignment RHS to a string at write time.
+    def record_module(self, target: ast.expr, value: ast.expr) -> None: ...
+    def record_class_body(self, target: ast.expr, value: ast.expr) -> None: ...
+    def record_constructor(self, target: ast.expr, value: ast.expr) -> None: ...
 
-        Strategies routinely alias module constants into class
-        attributes — ``self.TARGET = TARGET`` inside ``__init__`` or
-        a class-body ``TARGET = TARGET`` line. Without resolving the
-        RHS, the alias was silently dropped (RHS isn't a Constant)
-        and ``bar.symbol == self.TARGET`` lost its gate, so a sibling
-        indicator condition silently evaluated against every fetched
-        DataFrame and the report could falsely flip to
-        ``COVERAGE_OK``.
 
-        ``in_method=True`` for assignments inside ``__init__`` (and
-        any method body): bare ``Name`` references resolve through
-        the module scope only, matching Python's runtime — class-body
-        names are not in scope inside methods.
-        ``in_method=False`` for assignments lexically in the class
-        body: bare ``Name`` references resolve class-local first
-        (earlier class-body bindings already recorded into ``attrs``),
-        then module/global scope, matching Python's class-namespace
-        lookup at class-body execution time.
+class _StringRecorder:
+    """Collects ``NAME = "<string>"`` bindings into a :class:`_NameStrings`.
 
-        ``self.X`` / ``cls.X`` always resolve through ``attrs``.
-        """
+    Invariants:
+    - ``result.globals_`` holds bare-``Name`` module-scope bindings.
+    - ``result.attrs`` holds class-body and constructor ``self.X`` bindings.
+    - The two namespaces never cross-pollute.
+    """
+
+    __slots__ = ("result",)
+
+    def __init__(self) -> None:
+        self.result = _NameStrings()
+
+    def _resolve(self, value: ast.expr, *, in_method: bool) -> Optional[str]:
         if isinstance(value, ast.Constant) and isinstance(value.value, str):
             return value.value
         if isinstance(value, ast.Name):
             if (
                 in_method
             ):  # pragma: no cover — method-body bare-name string alias rare in generated strategies
-                return bindings.globals_.get(value.id)
-            cls_local = bindings.attrs.get(value.id)
+                return self.result.globals_.get(value.id)
+            cls_local = self.result.attrs.get(value.id)
             if (
                 cls_local is not None
             ):  # pragma: no cover — class-local bare-name alias resolution rare
                 return cls_local
-            return bindings.globals_.get(value.id)
+            return self.result.globals_.get(value.id)
         if (  # pragma: no cover — self/cls string alias rare in generated strategies
             isinstance(value, ast.Attribute)
             and isinstance(value.value, ast.Name)
             and value.value.id in {"self", "cls"}
         ):
-            return bindings.attrs.get(value.attr)
+            return self.result.attrs.get(value.attr)
         return None
 
-    def _record_global(target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
-        # Module scope: bare ``Name`` RHS resolution can only consult
-        # the module's own dict (``globals_``); ``attrs`` is empty
-        # before we enter the class. ``in_method`` is irrelevant here
-        # — pass ``True`` so we never fall through to ``attrs`` (which
-        # would also be empty, but the explicit choice documents the
-        # intent).
-        resolved = _resolve_string_value(value, in_method=True)
+    def record_module(self, target: ast.expr, value: ast.expr) -> None:
+        resolved = self._resolve(value, in_method=True)
         if resolved is None:
             return
+        if isinstance(target, ast.Name):
+            self.result.globals_.setdefault(target.id, resolved)
+
+    def record_class_body(self, target: ast.expr, value: ast.expr) -> None:
+        resolved = self._resolve(value, in_method=False)
+        if resolved is None:
+            return
+        if isinstance(target, ast.Name):
+            self.result.attrs[target.id] = resolved
+        elif isinstance(target, ast.Attribute):
+            self.result.attrs[target.attr] = resolved
+
+    def record_constructor(self, target: ast.expr, value: ast.expr) -> None:
+        resolved = self._resolve(value, in_method=True)
+        if resolved is None:
+            return
+        if isinstance(target, ast.Attribute):
+            self.result.attrs[target.attr] = resolved
+
+
+class _PeriodRecorder:
+    """Collects ``NAME = <numeric>`` bindings into a flat dict.
+
+    Invariants:
+    - Keys are bare names or attribute names (never dotted paths).
+    - Values are ``int`` when the literal is integer-valued, else ``float``.
+    """
+
+    __slots__ = ("result",)
+
+    def __init__(self) -> None:
+        self.result: Dict[str, Union[int, float]] = {}
+
+    def _record(self, target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
+        v = _numeric_literal(value, self.result)
+        if v is None:
+            return
+        ivalue: Union[int, float] = int(v) if float(v).is_integer() else float(v)
         if isinstance(target, ast.Name):
             if overwrite:
-                bindings.globals_[target.id] = resolved
+                self.result[target.id] = ivalue
             else:
-                bindings.globals_.setdefault(target.id, resolved)
-
-    def _record_attr(target: ast.expr, value: ast.expr, *, in_method: bool) -> None:
-        resolved = _resolve_string_value(value, in_method=in_method)
-        if resolved is None:
-            return
-        if isinstance(target, ast.Name):
-            # In a class body, a bare ``Name`` target creates a class
-            # attribute (``class S: TARGET = "MSFT"`` → ``S.TARGET``).
-            # Inside a method body (``__init__``), a bare ``Name``
-            # target is a function local — it does NOT create an
-            # instance attribute, so ``self.TARGET`` would still
-            # resolve through the class chain at runtime. Skip the
-            # local entirely so it doesn't pollute ``attrs``.
-            if in_method:
-                return
-            bindings.attrs[target.id] = resolved
+                self.result.setdefault(target.id, ivalue)
         elif isinstance(target, ast.Attribute):
-            bindings.attrs[target.attr] = resolved
+            if overwrite:
+                self.result[target.attr] = ivalue
+            else:  # pragma: no cover — non-overwrite Attribute target rare in current corpus
+                self.result.setdefault(target.attr, ivalue)
 
-    def _walk(node: ast.AST):
+    def record_module(self, target: ast.expr, value: ast.expr) -> None:
+        self._record(target, value, overwrite=False)
+
+    def record_class_body(self, target: ast.expr, value: ast.expr) -> None:
+        self._record(target, value, overwrite=True)
+
+    def record_constructor(self, target: ast.expr, value: ast.expr) -> None:
+        self._record(target, value, overwrite=True)
+
+
+def _collect_name_bindings(
+    tree: ast.AST,
+    recorder: _BindingRecorder,
+    *,
+    strategy_class: Optional[ast.ClassDef] = None,
+) -> None:
+    """Walk module → class → constructor collecting name bindings via *recorder*.
+
+    Preconditions:
+    - ``tree`` is a parsed ``ast.Module`` (or rooted subtree).
+    - ``recorder`` implements the :class:`_BindingRecorder` protocol.
+    Postconditions:
+    - ``recorder``'s internal accumulator contains all statically-resolvable
+      constant bindings from the guaranteed-execution paths of ``tree``.
+    """
+    _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
+
+    def _dispatch(node: Union[ast.Assign, ast.AnnAssign], hook: str) -> None:
+        record_fn = getattr(recorder, hook)
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                record_fn(t, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            record_fn(node.target, node.value)
+
+    def _walk(node: ast.AST) -> None:
         if strategy_class is not None and isinstance(node, ast.ClassDef):
             if node is not strategy_class:
                 return
-            # Class body: walk all top-level statements through the
-            # unconditional-walker so a class-scope ``if True: TARGET =
-            # "AAPL"`` (or ``with ...``) lands in ``attrs`` like its
-            # plain-top-level counterpart. Without this, the recursive
-            # ``_walk(child)`` fallthrough hit the module-scope path and
-            # stored the class attribute in ``globals_`` — invisible to
-            # ``self.TARGET`` lookups.
             class_param_defaults: Dict[str, ast.Constant] = {}
             for child in node.body:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
-                        # Descend into branches that are statically
-                        # guaranteed to execute (``if True: ...``,
-                        # ``if <param>:`` where ``<param>`` has a
-                        # constant default, ``with ...``) while skipping
-                        # unknown-predicate branches (whose dead-branch
-                        # values would otherwise overwrite the class
-                        # attribute) and loops / try (whose execution
-                        # isn't statically guaranteed). See
-                        # :func:`_iter_unconditional_constructor_assigns`.
                         param_defaults = _constructor_param_defaults(child)
                         for sub in _iter_unconditional_constructor_assigns(
                             child.body, param_defaults
                         ):
-                            if isinstance(sub, ast.Assign):
-                                for t in sub.targets:
-                                    _record_attr(t, sub.value, in_method=True)
-                            elif (
-                                isinstance(sub, ast.AnnAssign) and sub.value is not None
-                            ):  # pragma: no cover — annotated assign in constructor rare in generated strategies
-                                _record_attr(sub.target, sub.value, in_method=True)
+                            _dispatch(sub, "record_constructor")
                     continue
-                # Class body assignment (top-level or nested under a
-                # statically-guaranteed ``if True:`` / ``with`` /
-                # default-true param guard). Class bodies don't have
-                # their own parameters, so we pass an empty defaults
-                # table — only literal-Constant predicates resolve.
                 for sub in _iter_unconditional_constructor_assigns([child], class_param_defaults):
-                    if isinstance(sub, ast.Assign):
-                        for t in sub.targets:
-                            _record_attr(t, sub.value, in_method=False)
-                    elif (
-                        isinstance(sub, ast.AnnAssign) and sub.value is not None
-                    ):  # pragma: no cover — annotated assign in class body rare in generated strategies
-                        _record_attr(sub.target, sub.value, in_method=False)
+                    _dispatch(sub, "record_class_body")
             return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             return
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                _record_global(t, node.value, overwrite=False)
-        elif (
-            isinstance(node, ast.AnnAssign) and node.value is not None
-        ):  # pragma: no cover — annotated module-level assign rare in generated strategies
-            _record_global(node.target, node.value, overwrite=False)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            _dispatch(node, "record_module")
         for child in ast.iter_child_nodes(node):
             _walk(child)
 
     _walk(tree)
-    return bindings
+
+
+def _collect_name_strings(
+    tree: ast.AST,
+    strategy_class: Optional[ast.ClassDef] = None,
+) -> _NameStrings:
+    """Bind ``NAME = "<string>"`` for string-constant resolution.
+
+    Delegates to :func:`_collect_name_bindings` with a :class:`_StringRecorder`.
+
+    Preconditions: ``tree`` is a parsed ``ast.Module``.
+    Postconditions: returns a :class:`_NameStrings` with ``globals_``
+    (bare-name lookups) and ``attrs`` (``self.X`` / ``cls.X`` lookups).
+    """
+    recorder = _StringRecorder()
+    _collect_name_bindings(tree, recorder, strategy_class=strategy_class)
+    return recorder.result
 
 
 def _collect_name_periods(
@@ -2696,182 +2702,15 @@ def _collect_name_periods(
 ) -> Dict[str, Union[int, float]]:
     """Bind ``NAME = <int>`` for later ``Name`` / ``self.NAME`` resolution.
 
-    Walks every ``Assign`` / ``AnnAssign`` whose target is either:
+    Delegates to :func:`_collect_name_bindings` with a :class:`_PeriodRecorder`.
 
-    - a bare ``Name`` (module-level ``WINDOW = 80`` or class attribute
-      ``WINDOW = 80``), or
-    - an ``Attribute`` of the form ``self.WINDOW = 80`` (typically inside
-      ``__init__``) — only the attr name is recorded.
-
-    Strategies generated from the standard ideation prompt encourage
-    class tuning knobs and ``self.WINDOW`` access; without this both the
-    AST walk and downstream lookup would miss the binding entirely.
-
-    When ``strategy_class`` is provided, the walker skips the bodies
-    of any sibling ``ClassDef`` so a helper class's same-named
-    attribute can't pre-empt the strategy's own constant via the bare-
-    attribute keying. ``Helper.PERIOD = 2`` declared before
-    ``class Strategy: PERIOD = 20`` would otherwise leave the probe
-    resolving ``self.PERIOD`` to 2 instead of 20.
-
-    When ``function_node`` is provided, a second pass walks just that
-    function's body and **overwrites** any outer-scope binding that
-    shares a name. Python's lexical scope means a local
-    ``WINDOW = 5`` inside ``on_bar`` shadows a module/class-level
-    ``WINDOW = 200``; without the override the probe would evaluate
-    ``sma(close, WINDOW)`` against the outer 200, producing false
-    ``INDICATOR_FILTER_TOO_RESTRICTIVE`` / ``COVERAGE_OK`` calls for
-    common tuning-variable refactors.
+    Preconditions: ``tree`` is a parsed ``ast.Module``.
+    Postconditions: returns a flat dict mapping bare names and attribute
+    names to their resolved numeric values.
     """
-    bindings: Dict[str, Union[int, float]] = {}
-
-    def _record(target: ast.expr, value: ast.expr, *, overwrite: bool) -> None:
-        # Reuse the same numeric-literal extractor used downstream so
-        # negative ints and unary-minus constants resolve consistently.
-        # Allow any numeric value — zero, negatives, and non-integer
-        # floats are stored alongside positive ints to support
-        # threshold locals like ``ZERO_LINE = 0`` or ``limit = 100.5``
-        # that appear as ``Name`` operands in comparisons. Period-use
-        # sites validate ``> 0`` and ``is_integer()`` at lookup time
-        # so non-positive or float values are never misapplied as
-        # indicator windows.
-        v = _numeric_literal(value, bindings)
-        if v is None:
-            return
-        ivalue: Union[int, float] = int(v) if float(v).is_integer() else float(v)
-        if isinstance(target, ast.Name):
-            if overwrite:
-                bindings[target.id] = ivalue
-            else:
-                bindings.setdefault(target.id, ivalue)
-        elif isinstance(target, ast.Attribute):
-            # ``self.WINDOW`` (or any other instance attribute) — record
-            # by attribute name so a later ``self.WINDOW`` reference
-            # resolves through _numeric_literal's Attribute branch.
-            if overwrite:
-                bindings[target.attr] = ivalue
-            else:  # pragma: no cover — non-overwrite ``self.X`` recording (module-scope Attribute target) rare in current corpus
-                bindings.setdefault(target.attr, ivalue)
-
-    def _iter_outer_assigns(node: ast.AST):
-        """Yield ``(node, scope)`` tuples for assignments lexically in
-        scope for the strategy.
-
-        ``scope`` is ``"module"`` for module-level (or nested
-        non-strategy compound) assignments and ``"class"`` for
-        assignments inside the strategy ``ClassDef`` (class body and
-        constructor body). The caller uses the scope to decide
-        ``setdefault`` vs ``overwrite`` semantics: module scope is
-        outer-most and only seeds defaults, class scope **overrides**
-        module-level bindings because Python's runtime ``self.WINDOW``
-        resolves through the class attribute regardless of any
-        same-named module constant.
-
-        When ``strategy_class`` is set, descend into module / function
-        bodies as usual but only into the strategy's own ``ClassDef``.
-        Sibling helper classes are skipped so their same-named
-        attributes can't pre-empt the strategy's bare-attr bindings.
-
-        Inside the strategy class, only the constructor's body
-        (``__init__`` / ``__post_init__``) is walked for
-        ``self.<NAME>`` assignments. Other methods like ``on_bar`` or
-        a private ``_helper`` are runtime entry points whose
-        ``self.<NAME> = ...`` lines are state mutations, not constants.
-        Without this restriction, a helper method ordered before
-        ``__init__`` in the class body would seed the binding via
-        ``setdefault`` and ``__init__``'s actual value would never bind
-        — ``self.THRESHOLD`` would resolve to whatever the helper set
-        rather than what the live strategy state holds.
-
-        Module-level helper ``FunctionDef`` / ``AsyncFunctionDef``
-        bodies are also skipped (a helper's local ``WINDOW = 999``
-        is not a module constant; without this skip a sibling helper
-        ordered before the strategy class could pre-empt
-        ``class Strategy: WINDOW = 2`` and ``self.WINDOW`` would
-        resolve to the helper's value).
-
-        When ``strategy_class`` is None, behaves like ``ast.walk`` over
-        Assigns/AnnAssigns but still skips function bodies (the
-        previous behaviour incorrectly recorded function locals). All
-        yielded entries use ``"module"`` scope since there is no
-        identified class boundary.
-        """
-        _CONSTRUCTOR_NAMES = {"__init__", "__post_init__"}
-        if strategy_class is not None and isinstance(node, ast.ClassDef):
-            if node is not strategy_class:
-                return
-            # Walk class-body Assign / AnnAssign directly. For
-            # FunctionDef children, only descend into the constructor
-            # along the always-taken default-construction path — a
-            # blanket ``ast.walk`` records assignments from dead /
-            # default-false branches such as
-            # ``def __init__(self, enabled=False):
-            #       if enabled: self.WINDOW = 200``,
-            # whose ``self.WINDOW = 200`` would overwrite the class
-            # default ``WINDOW = 2`` and the probe would evaluate
-            # indicators with a window the live default-constructed
-            # strategy never sees. Mirror the helper used by
-            # :func:`_collect_name_strings` to stay consistent.
-            # Nested ClassDefs follow the strategy_class skip rule via
-            # the recursive call.
-            for child in node.body:
-                if isinstance(child, (ast.Assign, ast.AnnAssign)):
-                    yield child, "class"
-                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if child.name in _CONSTRUCTOR_NAMES:
-                        param_defaults = _constructor_param_defaults(child)
-                        for sub in _iter_unconditional_constructor_assigns(
-                            child.body, param_defaults
-                        ):
-                            yield sub, "class"
-                else:
-                    yield from _iter_outer_assigns(child)
-            return
-        # Module / nested compound: skip function / async-function
-        # bodies entirely — their locals belong to that function's
-        # scope, not to the strategy. Descending into them would let a
-        # sibling ``def helper(): WINDOW = 999`` pre-empt the
-        # strategy's class-level constant via ``setdefault``.
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            return
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            yield node, "module"
-        for child in ast.iter_child_nodes(node):
-            yield from _iter_outer_assigns(child)
-
-    # Pass 1: outer-scope assignments. Module scope uses ``setdefault``
-    # so cross-scope constants stay isolated; the strategy class's own
-    # body and ``__init__`` use overwrite, because a class-level
-    # ``WINDOW = 3`` shadows a module-level ``WINDOW = 1`` for any
-    # ``self.WINDOW`` reference at runtime. Walking module-first then
-    # class-second keeps source order; the per-scope flag controls the
-    # write semantics.
-    for node, scope in _iter_outer_assigns(tree):
-        is_class = scope == "class"
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                _record(target, node.value, overwrite=is_class)
-        elif (
-            isinstance(node, ast.AnnAssign) and node.value is not None
-        ):  # pragma: no cover — outer-scope annotated assign rare in generated strategies
-            _record(node.target, node.value, overwrite=is_class)
-
-    # Pass 2: inner-scope assignments on the entry control-flow path
-    # overwrite the outer binding. We skip exit branches of position
-    # checks so an exit-only reassignment can't shadow the entry-path
-    # binding (matches the entry-only routing used by _visit and the
-    # name-evaluator collector).
-    if (
-        function_node is not None
-    ):  # pragma: no cover — current call sites always pass function_node=None; inner-scope override pass is unreachable
-        for node in _iter_entry_path_assigns(function_node):
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    _record(target, node.value, overwrite=True)
-            elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                _record(node.target, node.value, overwrite=True)
-
-    return bindings
+    recorder = _PeriodRecorder()
+    _collect_name_bindings(tree, recorder, strategy_class=strategy_class)
+    return recorder.result
 
 
 def _build_subcond(
