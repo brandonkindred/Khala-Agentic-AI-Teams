@@ -30,17 +30,17 @@ logger = logging.getLogger("audit_recent_runs")
 # decoupled (no runtime import of gate classes or the spec DSL).
 # ---------------------------------------------------------------------------
 
-_RISK_LIMIT_KEYS = frozenset(
-    {
-        "max_gross_leverage",
-        "max_position_pct",
-        "max_symbol_concentration_pct",
-        "max_drawdown_pct",
-        "max_open_positions",
-        "target_annual_vol",
-        "vol_lookback_days",
-    }
-)
+_RISK_LIMIT_TIGHTEN_DIR: Dict[str, Optional[str]] = {
+    "max_gross_leverage": "lower",
+    "max_position_pct": "lower",
+    "max_symbol_concentration_pct": "lower",
+    "max_drawdown_pct": "lower",
+    "max_open_positions": "lower",
+    "target_annual_vol": "lower",
+    "vol_lookback_days": None,
+}
+
+_RISK_LIMIT_KEYS = frozenset(_RISK_LIMIT_TIGHTEN_DIR.keys())
 
 _INDICATOR_NAMES = frozenset(
     {
@@ -177,6 +177,21 @@ def _trades(record: Dict[str, Any]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _parse_diff_kv(line: str) -> tuple[Optional[str], Optional[float]]:
+    """Extract (key, numeric_value) from a unified-diff +/- line, or (None, None)."""
+    content = line[1:].strip().strip(",").strip('"')
+    if not content or content in ("{", "}", "[", "]"):
+        return None, None
+    if ":" not in content:
+        return content.strip('"'), None
+    key = content.split(":")[0].strip().strip('"')
+    val_str = content.split(":", 1)[1].strip().rstrip(",").strip('"')
+    try:
+        return key, float(val_str)
+    except (ValueError, TypeError):
+        return key, None
+
+
 def check_spec_stability(record: Dict[str, Any]) -> CheckResult:
     """Spec must not mutate after the design phase, except to tighten risk limits."""
     name = "spec_stability"
@@ -190,25 +205,59 @@ def check_spec_stability(record: Dict[str, Any]) -> CheckResult:
 
     for rev in post_design:
         diff_text = rev.get("diff", "")
+        removed: Dict[str, float] = {}
+        added: Dict[str, float] = {}
         for line in diff_text.splitlines():
-            if not line.startswith("+") and not line.startswith("-"):
-                continue
             if line.startswith("+++") or line.startswith("---"):
                 continue
-            content = line[1:].strip().strip(",").strip('"')
-            if not content or content in ("{", "}", "[", "]"):
+            if line.startswith("-"):
+                key, val = _parse_diff_kv(line)
+                if key is None:
+                    continue
+                if key != "risk_limits" and key not in _RISK_LIMIT_KEYS:
+                    return CheckResult(
+                        name,
+                        "FAIL",
+                        f"Post-design spec revision in phase '{rev.get('phase')}' "
+                        f"touched non-risk-limits field: {key}",
+                    )
+                if val is not None:
+                    removed[key] = val
+            elif line.startswith("+"):
+                key, val = _parse_diff_kv(line)
+                if key is None:
+                    continue
+                if key != "risk_limits" and key not in _RISK_LIMIT_KEYS:
+                    return CheckResult(
+                        name,
+                        "FAIL",
+                        f"Post-design spec revision in phase '{rev.get('phase')}' "
+                        f"touched non-risk-limits field: {key}",
+                    )
+                if val is not None:
+                    added[key] = val
+
+        for key in added:
+            if key not in removed:
                 continue
-            key = content.split(":")[0].strip().strip('"') if ":" in content else content.strip('"')
-            if key == "risk_limits":
-                continue
-            if key in _RISK_LIMIT_KEYS:
-                continue
-            return CheckResult(
-                name,
-                "FAIL",
-                f"Post-design spec revision in phase '{rev.get('phase')}' "
-                f"touched non-risk-limits field: {key}",
-            )
+            direction = _RISK_LIMIT_TIGHTEN_DIR.get(key)
+            if direction is None:
+                return CheckResult(
+                    name,
+                    "FAIL",
+                    f"Post-design spec revision in phase '{rev.get('phase')}' "
+                    f"changed immutable risk-limit field: {key}",
+                )
+            old_val = removed[key]
+            new_val = added[key]
+            if direction == "lower" and new_val > old_val:
+                return CheckResult(
+                    name,
+                    "FAIL",
+                    f"Post-design spec revision in phase '{rev.get('phase')}' "
+                    f"loosened {key}: {old_val} -> {new_val}",
+                )
+
     return CheckResult(name, "PASS")
 
 

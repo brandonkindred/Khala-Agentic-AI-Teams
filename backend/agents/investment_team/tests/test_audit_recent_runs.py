@@ -272,6 +272,39 @@ class TestCheckSpecStability:
         )
         assert check_spec_stability(rec).status == "PASS"
 
+    def test_fail_loosened_risk_limit(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_spec_stability
+
+        rec = _synthetic_record(
+            spec_history=[
+                {
+                    "phase": "synthesis",
+                    "diff": '- "max_drawdown_pct": 0.15\n+ "max_drawdown_pct": 0.25',
+                    "reason": "relax risk",
+                },
+            ]
+        )
+        result = check_spec_stability(rec)
+        assert result.status == "FAIL"
+        assert "loosened" in result.details
+        assert "max_drawdown_pct" in result.details
+
+    def test_fail_immutable_risk_limit(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_spec_stability
+
+        rec = _synthetic_record(
+            spec_history=[
+                {
+                    "phase": "verification",
+                    "diff": '- "vol_lookback_days": 20\n+ "vol_lookback_days": 30',
+                    "reason": "adjust",
+                },
+            ]
+        )
+        result = check_spec_stability(rec)
+        assert result.status == "FAIL"
+        assert "immutable" in result.details
+
     def test_skip_missing(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_spec_stability
 
