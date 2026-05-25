@@ -1385,4 +1385,65 @@ describe('JobsDashboardComponent', () => {
       expect(component.isPollingActive).toBe(false);
     });
   });
+
+  describe('table refresh progress bar', () => {
+    const row = (jobId: string) =>
+      ({
+        unified: {
+          source: 'software_engineering',
+          jobId,
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          label: 'Run',
+          progress: 50,
+        },
+        seDetail: undefined,
+      }) as any;
+
+    it('renders an indeterminate progress bar at the top of the table when loading is true', () => {
+      component.jobs = [row('j1')];
+      component.loading = true;
+      fixture.detectChanges();
+
+      const host = fixture.nativeElement as HTMLElement;
+      const bar = host.querySelector('.jobs-table-container .table-refresh-bar');
+      expect(bar).toBeTruthy();
+      expect(bar?.getAttribute('mode')).toBe('indeterminate');
+      expect(bar?.getAttribute('role')).toBe('progressbar');
+    });
+
+    it('does not render the refresh bar when loading is false', () => {
+      component.jobs = [row('j1')];
+      component.loading = false;
+      fixture.detectChanges();
+
+      const bar = fixture.nativeElement.querySelector('.jobs-table-container .table-refresh-bar');
+      expect(bar).toBeNull();
+    });
+
+    it('bar disappears after loading flips from true to false', () => {
+      component.jobs = [row('j1')];
+      component.loading = true;
+      fixture.detectChanges();
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('.table-refresh-bar')).toBeTruthy();
+
+      component.loading = false;
+      fixture.detectChanges();
+
+      expect(host.querySelector('.table-refresh-bar')).toBeNull();
+    });
+
+    it('does not render the refresh bar when no jobs exist', () => {
+      component.jobs = [];
+      component.loading = true;
+      fixture.detectChanges();
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('.jobs-table-container')).toBeNull();
+      expect(host.querySelector('.table-refresh-bar')).toBeNull();
+      expect(host.querySelector('.loading-state')).toBeTruthy();
+    });
+  });
 });

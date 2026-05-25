@@ -97,6 +97,9 @@
     </div>
   } @else {
     <div class="jobs-table-container">
+      @if (loading) {
+        <mat-progress-bar class="table-refresh-bar" mode="indeterminate"></mat-progress-bar>
+      }
       <table class="jobs-table">
         <thead>
           <tr>

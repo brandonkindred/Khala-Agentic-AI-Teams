@@ -268,11 +268,21 @@
 // ── Table ───────────────────────────────────────────────────────────────────
 
 .jobs-table-container {
+  position: relative;
   background: var(--kh-surface-2);
   border-radius: var(--kh-radius-lg);
   border: 1px solid var(--kh-border);
   box-shadow: var(--kh-shadow-md);
   overflow: hidden;
+}
+
+.table-refresh-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 1;
 }
 
 .jobs-table {
@@ -357,8 +367,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .stuck-indicator { animation: none; opacity: 1; }
-  .live-dot        { animation: none; opacity: 1; }
+  .stuck-indicator   { animation: none; opacity: 1; }
+  .live-dot          { animation: none; opacity: 1; }
+  .table-refresh-bar { display: none; }
 }
 
 // ── Column Widths ───────────────────────────────────────────────────────────
