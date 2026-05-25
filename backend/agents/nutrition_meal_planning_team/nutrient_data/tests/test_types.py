@@ -61,10 +61,24 @@ class TestNutrients:
         n = Nutrients(canonical_id="salmon", data_version="1.0.0", values={})
         assert n.get(Nutrient.iron_mg) is None
 
-    def test_frozen(self):
+    def test_frozen_field_reassignment(self):
         n = Nutrients(canonical_id="x", data_version="1.0.0")
         with pytest.raises(AttributeError):
             n.canonical_id = "y"  # type: ignore[misc]
+
+    def test_values_immutable(self):
+        n = Nutrients(
+            canonical_id="x",
+            data_version="1.0.0",
+            values={Nutrient.kcal: 100.0},
+        )
+        with pytest.raises(TypeError):
+            n.values[Nutrient.protein_g] = 50.0  # type: ignore[index]
+
+    def test_default_empty_values(self):
+        n = Nutrients(canonical_id="x", data_version="1.0.0")
+        assert len(n.values) == 0
+        assert n.get(Nutrient.kcal) is None
 
 
 class TestDensityRecord:

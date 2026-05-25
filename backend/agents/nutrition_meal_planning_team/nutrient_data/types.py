@@ -1,13 +1,14 @@
 """Public types for the nutrient data module.
 
-Frozen dataclasses for immutable, hashable runtime values. All fields
-use SI-consistent units indicated by the nutrient enum member's suffix
+Frozen dataclasses for immutable runtime values. All fields use
+SI-consistent units indicated by the nutrient enum member's suffix
 (e.g. ``protein_g`` → grams per 100 g edible portion).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Optional
 
 from .data.nutrient_enum import Nutrient
@@ -36,15 +37,35 @@ class NutrientRow:
 
 @dataclass(frozen=True)
 class Nutrients:
-    """Full nutrient profile for one food — convenience wrapper.
+    """Full nutrient profile for one food — read-only lookup container.
 
     Maps each Nutrient enum member to its per-100g value. Missing
     nutrients default to None (not measured / not in FDC for this food).
+
+    Invariants:
+        - ``values`` is wrapped in MappingProxyType at construction;
+          mutation attempts raise TypeError.
+        - Not hashable (use canonical_id + data_version as cache keys).
     """
 
     canonical_id: str
     data_version: str
-    values: dict[Nutrient, float] = field(default_factory=dict)
+    values: MappingProxyType[Nutrient, float] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __init__(
+        self,
+        canonical_id: str,
+        data_version: str,
+        values: dict[Nutrient, float] | MappingProxyType[Nutrient, float] | None = None,
+    ):
+        object.__setattr__(self, "canonical_id", canonical_id)
+        object.__setattr__(self, "data_version", data_version)
+        proxy = (
+            MappingProxyType(values)
+            if isinstance(values, dict)
+            else (values if values is not None else MappingProxyType({}))
+        )
+        object.__setattr__(self, "values", proxy)
 
     def get(self, nutrient: Nutrient) -> Optional[float]:
         """Return value for a nutrient, or None if not available."""
