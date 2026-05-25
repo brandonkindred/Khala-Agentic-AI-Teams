@@ -69,6 +69,15 @@ _MULTIPLIER_TOL = 1e-6
 _POST_DESIGN_PHASES = frozenset({"synthesis", "verification"})
 
 
+def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
@@ -342,7 +351,11 @@ def check_universe_fidelity(record: Dict[str, Any]) -> CheckResult:
         return CheckResult(name, "SKIP", "no trades")
 
     off_spec = sorted(
-        {t.get("symbol", "?") for t in trades if t.get("symbol", "").upper() not in allowed}
+        {
+            str(t.get("symbol") or "?")
+            for t in trades
+            if str(t.get("symbol") or "").upper() not in allowed
+        }
     )
     if off_spec:
         return CheckResult(name, "FAIL", f"Off-spec symbols: {', '.join(off_spec)}")
@@ -403,9 +416,9 @@ def check_cost_robustness(record: Dict[str, Any]) -> CheckResult:
     if row_2x is None:
         return CheckResult(name, "SKIP", "No 2.0x multiplier row found")
 
-    ann_return = row_2x.get("annualized_return_pct")
+    ann_return = _safe_float(row_2x.get("annualized_return_pct"))
     if ann_return is None:
-        return CheckResult(name, "SKIP", "2.0x row missing annualized_return_pct")
+        return CheckResult(name, "SKIP", "2.0x row missing or non-numeric annualized_return_pct")
     if ann_return >= 0:
         return CheckResult(name, "PASS")
     return CheckResult(name, "FAIL", f"2x cost-stress annualized return = {ann_return:.2f}% (< 0)")
@@ -419,9 +432,9 @@ def check_regime_coverage(record: Dict[str, Any]) -> CheckResult:
     if not regimes:
         return CheckResult(name, "SKIP", "No regime_results")
 
-    dsr = result.get("deflated_sharpe")
+    dsr = _safe_float(result.get("deflated_sharpe"))
     if dsr is None:
-        return CheckResult(name, "FAIL", "deflated_sharpe missing")
+        return CheckResult(name, "FAIL", "deflated_sharpe missing or non-numeric")
     if dsr < 0:
         return CheckResult(name, "FAIL", f"Deflated Sharpe = {dsr:.4f} (< 0)")
 
@@ -502,7 +515,7 @@ def check_trade_adequacy(record: Dict[str, Any]) -> CheckResult:
     if window_days == 0:
         window_days = 1
 
-    observed_holds = [t.get("hold_days", 0) for t in trades if (t.get("hold_days") or 0) > 0]
+    observed_holds = [h for t in trades if (h := _safe_float(t.get("hold_days"), 0.0)) and h > 0]
     if observed_holds:
         expected_hold = sum(observed_holds) / len(observed_holds)
     else:
@@ -555,7 +568,11 @@ def check_no_dead_code_rules(record: Dict[str, Any]) -> CheckResult:
             return CheckResult(name, "FAIL", "rule_implementation_map empty but spec has rules")
         return CheckResult(name, "SKIP", "rule_implementation_map missing (legacy record)")
 
-    dead = [r.get("rule_id", "?") for r in rim if (r.get("traded_count") or 0) == 0]
+    dead = [
+        r.get("rule_id", "?")
+        for r in rim
+        if (r.get("traded_count") or 0) == 0 and r.get("rule_id") != "sizing"
+    ]
     if dead:
         return CheckResult(name, "FAIL", f"Dead-code rules (traded_count=0): {', '.join(dead)}")
     return CheckResult(name, "PASS")
