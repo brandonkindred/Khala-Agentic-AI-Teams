@@ -484,6 +484,16 @@ class TestCheckCostRobustness:
         assert result.status == "FAIL"
         assert "-3.50%" in result.details
 
+    def test_skips_malformed_multiplier(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_cost_robustness
+
+        rec = _synthetic_record()
+        rec["backtest"]["result"]["cost_stress_results"] = [
+            {"multiplier": "bad", "sharpe_ratio": 1.0, "annualized_return_pct": 5.0},
+            {"multiplier": 2.0, "sharpe_ratio": 0.8, "annualized_return_pct": 3.0},
+        ]
+        assert check_cost_robustness(rec).status == "PASS"
+
     def test_skip_no_results(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_cost_robustness
 
@@ -628,6 +638,17 @@ class TestCheckTradeAdequacy:
         rec = _synthetic_record()
         rec["backtest"]["trades"] = []
         assert check_trade_adequacy(rec).status == "SKIP"
+
+    def test_accepts_iso_datetime_strings(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_trade_adequacy
+
+        rec = _synthetic_record()
+        rec["backtest"]["config"] = {
+            "start_date": "2024-01-01T00:00:00+00:00",
+            "end_date": "2024-01-16T00:00:00+00:00",
+        }
+        result = check_trade_adequacy(rec)
+        assert result.status == "PASS"
 
     def test_fallback_to_default_hold(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_trade_adequacy

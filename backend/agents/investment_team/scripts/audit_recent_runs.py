@@ -374,9 +374,14 @@ def check_cost_robustness(record: Dict[str, Any]) -> CheckResult:
     row_2x = None
     for row in rows:
         mult = row.get("multiplier")
-        if mult is not None and abs(float(mult) - 2.0) < _MULTIPLIER_TOL:
-            row_2x = row
-            break
+        if mult is None:
+            continue
+        try:
+            if abs(float(mult) - 2.0) < _MULTIPLIER_TOL:
+                row_2x = row
+                break
+        except (ValueError, TypeError):
+            continue
 
     if row_2x is None:
         return CheckResult(name, "SKIP", "No 2.0x multiplier row found")
@@ -466,7 +471,9 @@ def check_trade_adequacy(record: Dict[str, Any]) -> CheckResult:
         return CheckResult(name, "SKIP", "No trades")
 
     try:
-        window_days = (date.fromisoformat(str(end_date)) - date.fromisoformat(str(start_date))).days
+        start_str = str(start_date).split("T")[0]
+        end_str = str(end_date).split("T")[0]
+        window_days = (date.fromisoformat(end_str) - date.fromisoformat(start_str)).days
     except (ValueError, TypeError):
         return CheckResult(name, "SKIP", "Unparseable backtest dates")
     if window_days <= 0:
