@@ -150,8 +150,13 @@ def _load_records(
         if not jid:
             continue
         payload = job.get("data") or {}
-        created_dt = _parse_created_at(payload.get("created_at", ""))
-        if created_dt is not None and created_dt >= since:
+        raw_ts = payload.get("created_at", "")
+        created_dt = _parse_created_at(raw_ts)
+        if created_dt is None:
+            if raw_ts:
+                logger.warning("Skipping record %s: unparseable created_at %r", jid, raw_ts)
+            continue
+        if created_dt >= since:
             payload["_job_id"] = jid
             payload["_created_dt"] = created_dt
             records.append(payload)
@@ -365,7 +370,7 @@ def check_exit_rule_alignment(record: Dict[str, Any]) -> CheckResult:
     alignment_checks = [
         f
         for f in findings
-        if f.get("check_name") in ("stop_loss", "take_profit")
+        if f.get("check_name") in ("stop_loss", "take_profit", "signal_exit", "time_stop")
         and f.get("severity") == "critical"
         and not f.get("passed")
     ]
@@ -494,8 +499,10 @@ def check_trade_adequacy(record: Dict[str, Any]) -> CheckResult:
         window_days = (date.fromisoformat(end_str) - date.fromisoformat(start_str)).days
     except (ValueError, TypeError):
         return CheckResult(name, "SKIP", "Unparseable backtest dates")
-    if window_days <= 0:
-        return CheckResult(name, "SKIP", "Non-positive backtest window")
+    if window_days < 0:
+        return CheckResult(name, "SKIP", "Negative backtest window")
+    if window_days == 0:
+        window_days = 1
 
     observed_holds = [t.get("hold_days", 0) for t in trades if (t.get("hold_days") or 0) > 0]
     if observed_holds:

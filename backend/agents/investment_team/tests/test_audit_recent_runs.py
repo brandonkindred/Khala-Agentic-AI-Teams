@@ -694,6 +694,18 @@ class TestCheckTradeAdequacy:
         result = check_trade_adequacy(rec)
         assert result.status == "PASS"
 
+    def test_same_day_intraday_window(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_trade_adequacy
+
+        rec = _synthetic_record()
+        rec["backtest"]["config"] = {
+            "start_date": "2024-01-15",
+            "end_date": "2024-01-15",
+        }
+        result = check_trade_adequacy(rec)
+        assert result.status in ("PASS", "FAIL")
+        assert result.status != "SKIP"
+
     def test_fallback_to_default_hold(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_trade_adequacy
 
