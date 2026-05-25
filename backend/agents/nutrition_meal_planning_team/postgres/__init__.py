@@ -220,8 +220,10 @@ SCHEMA = TeamSchema(
             id                  BIGSERIAL PRIMARY KEY,
             canonical_id        TEXT NOT NULL,
             method              TEXT NOT NULL,
-            nutrient_retention  DOUBLE PRECISION NOT NULL,
-            mass_retention      DOUBLE PRECISION NOT NULL,
+            nutrient_retention  DOUBLE PRECISION NOT NULL
+                                CHECK (nutrient_retention > 0 AND nutrient_retention <= 1.0),
+            mass_retention      DOUBLE PRECISION NOT NULL
+                                CHECK (mass_retention > 0),
             data_version        TEXT NOT NULL,
             source              TEXT NOT NULL DEFAULT 'manual',
             created_at          TIMESTAMPTZ NOT NULL DEFAULT now()

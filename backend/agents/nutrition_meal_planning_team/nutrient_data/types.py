@@ -60,12 +60,8 @@ class Nutrients:
     ):
         object.__setattr__(self, "canonical_id", canonical_id)
         object.__setattr__(self, "data_version", data_version)
-        proxy = (
-            MappingProxyType(values)
-            if isinstance(values, dict)
-            else (values if values is not None else MappingProxyType({}))
-        )
-        object.__setattr__(self, "values", proxy)
+        snapshot = dict(values) if values is not None else {}
+        object.__setattr__(self, "values", MappingProxyType(snapshot))
 
     def get(self, nutrient: Nutrient) -> Optional[float]:
         """Return value for a nutrient, or None if not available."""

@@ -80,6 +80,13 @@ class TestNutrients:
         assert len(n.values) == 0
         assert n.get(Nutrient.kcal) is None
 
+    def test_defensive_copy_of_input_dict(self):
+        source = {Nutrient.kcal: 100.0}
+        n = Nutrients(canonical_id="x", data_version="1.0.0", values=source)
+        source[Nutrient.protein_g] = 25.0
+        assert n.get(Nutrient.protein_g) is None
+        assert len(n.values) == 1
+
 
 class TestDensityRecord:
     def test_construction(self):
