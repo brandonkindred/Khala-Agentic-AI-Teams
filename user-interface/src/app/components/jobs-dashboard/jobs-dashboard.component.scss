@@ -585,7 +585,11 @@ tbody .col-actions {
 .agents-cell {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 6px;
+}
+
+.agent-chip + .agent-chip {
+  box-shadow: -3px 0 0 0 var(--kh-bg-primary);
 }
 
 .agent-chip {
