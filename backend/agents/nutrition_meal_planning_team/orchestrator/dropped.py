@@ -92,11 +92,12 @@ def _process_one(
         or a ``DroppedSuggestion`` on exhaustion.
     """
     current_rec = suggestion
-    last_result = None
+    first_result = None
 
     for attempt in range(MAX_REGEN_RETRIES + 1):
         result = check_recommendation(profile, current_rec)
-        last_result = result
+        if first_result is None:
+            first_result = result
 
         if result.passed:
             parsed_dicts = [_asdict(p) for p in result.parsed_ingredients]
@@ -149,11 +150,12 @@ def _process_one(
                 break
             current_rec = replacement
 
-    violations: Sequence = last_result.violations if last_result else ()
+    # Use the original check's violations so name and reasons stay aligned.
+    drop_violations: Sequence = first_result.violations if first_result else ()
     return DroppedSuggestion(
         name=suggestion.name,
-        reasons=[f"{v.reason.value}:{v.tag}" if v.tag else v.reason.value for v in violations],
-        detail=[v.detail for v in violations],
+        reasons=[f"{v.reason.value}:{v.tag}" if v.tag else v.reason.value for v in drop_violations],
+        detail=[v.detail for v in drop_violations],
     )
 
 
