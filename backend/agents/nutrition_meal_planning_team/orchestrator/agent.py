@@ -424,6 +424,7 @@ class NutritionMealPlanningOrchestrator:
         profile = self.profile_store.get_profile(request.client_id)
         if profile is None:
             raise ValueError("Profile not found")
+        guardrail_on = is_guardrail_enabled()
         nutrition_plan = self._get_or_generate_nutrition_plan(profile)
         meal_history = self.meal_feedback_store.get_meal_history(request.client_id, limit=50)
         suggestions = self.meal_planning_agent.run(
@@ -433,13 +434,15 @@ class NutritionMealPlanningOrchestrator:
             period_days=request.period_days,
             meal_types=request.meal_types,
         )
-        result = self._record_suggestions(request.client_id, profile, suggestions)
+        result = self._record_suggestions(
+            request.client_id, profile, suggestions, guardrail_on=guardrail_on
+        )
         return MealPlanResponse(
             client_id=request.client_id,
             suggestions=result.recorded,
             dropped=result.dropped,
             flags_by_recommendation=result.flags_by_recommendation,
-            guardrail_version=GUARDRAIL_VERSION if is_guardrail_enabled() else "",
+            guardrail_version=GUARDRAIL_VERSION if guardrail_on else "",
             restrictions_best_effort=result.restrictions_best_effort,
         )
 
@@ -761,7 +764,12 @@ class NutritionMealPlanningOrchestrator:
     # --- Private helpers ---
 
     def _record_suggestions(
-        self, client_id: str, profile: ClientProfile, suggestions: list
+        self,
+        client_id: str,
+        profile: ClientProfile,
+        suggestions: list,
+        *,
+        guardrail_on: Optional[bool] = None,
     ) -> RecordedSuggestions:
         """Check, regenerate, and record suggestions through the guardrail pipeline.
 
@@ -773,7 +781,8 @@ class NutritionMealPlanningOrchestrator:
             When on, every returned ``recorded`` entry passed
             ``check_recommendation``.
         """
-        if not is_guardrail_enabled():
+        enabled = guardrail_on if guardrail_on is not None else is_guardrail_enabled()
+        if not enabled:
             with_ids: list[MealRecommendationWithId] = []
             for s in suggestions:
                 rec_id = self.meal_feedback_store.record_recommendation(client_id, s.model_dump())

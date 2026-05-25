@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -57,25 +59,32 @@ def _slow_regen(profile, original, violations):
     )
 
 
+def _per_thread_check_factory():
+    """Return a side_effect function that fails the first call per thread
+    and passes subsequent calls, regardless of thread scheduling order."""
+    counts: dict[int, int] = {}
+    lock = threading.Lock()
+
+    def _check(profile, rec):
+        tid = threading.get_ident()
+        with lock:
+            n = counts.get(tid, 0)
+            counts[tid] = n + 1
+        return _failing() if n == 0 else _passing()
+
+    return _check
+
+
 class TestConcurrentRegeneration:
     @patch("nutrition_meal_planning_team.orchestrator.dropped.check_recommendation")
     def test_three_concurrent_regens_wall_time(self, mock_check):
         """Three rejected suggestions regenerated concurrently should take
         roughly the same wall time as a single regeneration, not 3x."""
-        mock_check.side_effect = [
-            _failing(),
-            _passing(),  # meal 1: fail → regen → pass
-            _failing(),
-            _passing(),  # meal 2: fail → regen → pass
-            _failing(),
-            _passing(),  # meal 3: fail → regen → pass
-        ]
+        mock_check.side_effect = _per_thread_check_factory()
 
         agent = MagicMock()
         agent.regenerate_single.side_effect = _slow_regen
         feedback = MagicMock()
-        from uuid import uuid4
-
         feedback.record_recommendation.return_value = str(uuid4())
         audit = MagicMock()
         audit.record_rejection.return_value = 1
