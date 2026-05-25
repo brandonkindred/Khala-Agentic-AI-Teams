@@ -440,9 +440,13 @@ def check_regime_coverage(record: Dict[str, Any]) -> CheckResult:
 
     losers = []
     for r in regimes:
-        n_obs = r.get("n_obs", 0)
-        cumret = r.get("strategy_cumret", 0.0)
-        if n_obs > 0 and cumret < 0:
+        n_obs = _safe_float(r.get("n_obs"), 0.0)
+        if not n_obs or n_obs <= 0:
+            continue
+        cumret = _safe_float(r.get("strategy_cumret"))
+        if cumret is None:
+            losers.append(f"{r.get('regime', '?')} (cumret=missing)")
+        elif cumret < 0:
             losers.append(f"{r.get('regime', '?')} (cumret={cumret:.4f})")
     if losers:
         return CheckResult(name, "FAIL", f"Negative-cumret regimes: {'; '.join(losers)}")
