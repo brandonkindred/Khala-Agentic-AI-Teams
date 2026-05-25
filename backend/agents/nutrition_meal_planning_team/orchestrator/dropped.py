@@ -65,7 +65,8 @@ def _restriction_snapshot_hash(profile: ClientProfile) -> str:
 def _is_best_effort(profile: ClientProfile) -> bool:
     rr = profile.restriction_resolution
     has_raw = bool(profile.allergies_and_intolerances or profile.dietary_needs)
-    return not rr.resolved and has_raw
+    resolver_ran = bool(rr.resolved or rr.ambiguous)
+    return not resolver_ran and has_raw
 
 
 _Passed = tuple  # (rec_with_id, flags_list)
