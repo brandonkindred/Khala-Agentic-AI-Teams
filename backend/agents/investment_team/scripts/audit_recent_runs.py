@@ -303,10 +303,12 @@ def check_rule_implementation(record: Dict[str, Any]) -> CheckResult:
     exit_rules = spec.get("exit_rules") or []
 
     rim = record.get("rule_implementation_map")
+    if rim is None:
+        return CheckResult(name, "SKIP", "rule_implementation_map missing (legacy record)")
     if not rim:
         if entry_rules or exit_rules:
             return CheckResult(name, "FAIL", "rule_implementation_map empty but spec has rules")
-        return CheckResult(name, "SKIP", "rule_implementation_map missing (legacy record)")
+        return CheckResult(name, "SKIP", "No rules in spec")
 
     expected_ids: List[str] = []
     for i, _ in enumerate(entry_rules):
@@ -545,6 +547,8 @@ def check_no_dead_code_rules(record: Dict[str, Any]) -> CheckResult:
         return CheckResult(name, "SKIP", "requires_custom_code=True")
 
     rim = record.get("rule_implementation_map")
+    if rim is None:
+        return CheckResult(name, "SKIP", "rule_implementation_map missing (legacy record)")
     if not rim:
         has_rules = (spec.get("entry_rules") or []) or (spec.get("exit_rules") or [])
         if has_rules:
