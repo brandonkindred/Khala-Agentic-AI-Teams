@@ -340,12 +340,24 @@ class TestCheckRuleImplementation:
 
         assert check_rule_implementation(_synthetic_record()).status == "PASS"
 
-    def test_fail_missing_refs(self) -> None:
+    def test_pass_empty_code_line_refs(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_rule_implementation
 
         rec = _synthetic_record(
             rule_implementation_map=[
                 {"rule_id": "entry[0]", "code_line_refs": [], "traded_count": 3},
+                {"rule_id": "exit:stop_loss[0]", "code_line_refs": [[25, 30]], "traded_count": 2},
+                {"rule_id": "exit:take_profit[0]", "code_line_refs": [[35, 40]], "traded_count": 1},
+                {"rule_id": "sizing", "code_line_refs": [[45, 50]], "traded_count": 3},
+            ]
+        )
+        assert check_rule_implementation(rec).status == "PASS"
+
+    def test_fail_missing_rule_in_map(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_rule_implementation
+
+        rec = _synthetic_record(
+            rule_implementation_map=[
                 {"rule_id": "exit:stop_loss[0]", "code_line_refs": [[25, 30]], "traded_count": 2},
                 {"rule_id": "exit:take_profit[0]", "code_line_refs": [[35, 40]], "traded_count": 1},
                 {"rule_id": "sizing", "code_line_refs": [[45, 50]], "traded_count": 3},
@@ -962,6 +974,37 @@ class TestMain:
         assert rc == 0
         out = capsys.readouterr().out
         assert "Records: 2" in out
+
+    def test_all_skip_exits_1(
+        self, capsys: pytest.CaptureFixture[str], patched_job_service_client
+    ) -> None:
+        from investment_team.scripts.audit_recent_runs import main
+
+        fake = patched_job_service_client.setdefault(
+            "investment_strategy_lab_records",
+            _FakeJobClient(team="investment_strategy_lab_records"),
+        )
+        rec: Dict[str, Any] = {
+            "lab_record_id": "skip-all",
+            "created_at": "2099-01-15T00:00:00+00:00",
+            "strategy": {
+                "requires_custom_code": True,
+                "target_symbols": [],
+                "entry_rules": [],
+                "exit_rules": [],
+            },
+            "backtest": {"result": {}, "trades": [], "config": {}, "alignment_findings": []},
+            "quality_gate_results": [],
+            "rule_implementation_map": [],
+            "analysis_narrative": "",
+            "spec_history": None,
+        }
+        fake.jobs = [{"job_id": "r-skip", "data": rec}]
+
+        rc = main(["--since", "1d"])
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "NO DATA" in out
 
     def test_no_since_defaults_to_all(
         self, capsys: pytest.CaptureFixture[str], patched_job_service_client

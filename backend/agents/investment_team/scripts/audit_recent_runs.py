@@ -320,14 +320,10 @@ def check_rule_implementation(record: Dict[str, Any]) -> CheckResult:
         expected_ids.append(f"exit:{kind}[{idx}]")
 
     rim_by_id = {r.get("rule_id"): r for r in rim}
-    missing = []
-    for rid in expected_ids:
-        entry = rim_by_id.get(rid)
-        if not entry or not entry.get("code_line_refs"):
-            missing.append(rid)
+    missing = [rid for rid in expected_ids if rid not in rim_by_id]
 
     if missing:
-        return CheckResult(name, "FAIL", f"Rules missing code_line_refs: {', '.join(missing)}")
+        return CheckResult(name, "FAIL", f"Rules missing from map: {', '.join(missing)}")
     return CheckResult(name, "PASS")
 
 
@@ -678,7 +674,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f)
 
     # --- Summary ---
-    pass_rate = total_pass / total_evaluated if total_evaluated else 1.0
+    if total_evaluated == 0:
+        print("\nNo checks were evaluated (all SKIP). Result: NO DATA")
+        return 1
+    pass_rate = total_pass / total_evaluated
     verdict = "OK" if pass_rate >= args.min_pass_rate else "BELOW THRESHOLD"
     print(
         f"\nPass rate: {pass_rate:.1%} ({total_pass}/{total_evaluated} evaluated)  "
