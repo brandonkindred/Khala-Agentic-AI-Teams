@@ -113,6 +113,23 @@ class TestBestEffortFlag:
         assert result.restrictions_best_effort is False
 
     @patch("nutrition_meal_planning_team.orchestrator.dropped.check_recommendation")
+    def test_unresolved_only_not_best_effort(self, mock_check):
+        mock_check.return_value = _passing()
+        feedback, audit, agent = _stores()
+
+        profile = ClientProfile(
+            client_id="c1",
+            dietary_needs=["some_unknown_diet"],
+            restriction_resolution=RestrictionResolution(
+                unresolved=["some_unknown_diet"],
+            ),
+        )
+
+        result = run_guardrail_pipeline("c1", profile, [_meal()], agent, feedback, audit)
+
+        assert result.restrictions_best_effort is False
+
+    @patch("nutrition_meal_planning_team.orchestrator.dropped.check_recommendation")
     def test_ambiguous_only_not_best_effort(self, mock_check):
         from nutrition_meal_planning_team.models import AmbiguousRestriction, ResolvedRestriction
 
