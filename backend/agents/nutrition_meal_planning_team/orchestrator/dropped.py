@@ -58,7 +58,9 @@ class RecordedSuggestions:
 
 
 def _restriction_snapshot_hash(profile: ClientProfile) -> str:
-    payload = profile.restriction_resolution.model_dump_json(exclude_none=True)
+    payload = profile.restriction_resolution.model_dump_json(
+        exclude={"resolved_at"}, exclude_none=True
+    )
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
