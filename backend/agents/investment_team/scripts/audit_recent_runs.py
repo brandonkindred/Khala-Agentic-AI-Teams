@@ -221,6 +221,8 @@ def check_spec_stability(record: Dict[str, Any]) -> CheckResult:
         diff_text = rev.get("diff", "")
         removed: Dict[str, float] = {}
         added: Dict[str, float] = {}
+        removed_keys: set[str] = set()
+        added_keys: set[str] = set()
         for line in diff_text.splitlines():
             if line.startswith("+++") or line.startswith("---"):
                 continue
@@ -235,6 +237,8 @@ def check_spec_stability(record: Dict[str, Any]) -> CheckResult:
                         f"Post-design spec revision in phase '{rev.get('phase')}' "
                         f"touched non-risk-limits field: {key}",
                     )
+                if key in _RISK_LIMIT_KEYS:
+                    removed_keys.add(key)
                 if val is not None:
                     removed[key] = val
             elif line.startswith("+"):
@@ -248,28 +252,36 @@ def check_spec_stability(record: Dict[str, Any]) -> CheckResult:
                         f"Post-design spec revision in phase '{rev.get('phase')}' "
                         f"touched non-risk-limits field: {key}",
                     )
+                if key in _RISK_LIMIT_KEYS:
+                    added_keys.add(key)
                 if val is not None:
                     added[key] = val
 
-        for key in added:
-            if key not in removed:
-                continue
-            direction = _RISK_LIMIT_TIGHTEN_DIR.get(key)
-            if direction is None:
+        for key in added_keys | removed_keys:
+            has_old = key in removed
+            has_new = key in added
+            if has_old and has_new:
+                direction = _RISK_LIMIT_TIGHTEN_DIR.get(key)
+                if direction is None:
+                    return CheckResult(
+                        name,
+                        "FAIL",
+                        f"Post-design spec revision in phase '{rev.get('phase')}' "
+                        f"changed immutable risk-limit field: {key}",
+                    )
+                if direction == "lower" and added[key] > removed[key]:
+                    return CheckResult(
+                        name,
+                        "FAIL",
+                        f"Post-design spec revision in phase '{rev.get('phase')}' "
+                        f"loosened {key}: {removed[key]} -> {added[key]}",
+                    )
+            elif has_old != has_new:
                 return CheckResult(
                     name,
                     "FAIL",
                     f"Post-design spec revision in phase '{rev.get('phase')}' "
-                    f"changed immutable risk-limit field: {key}",
-                )
-            old_val = removed[key]
-            new_val = added[key]
-            if direction == "lower" and new_val > old_val:
-                return CheckResult(
-                    name,
-                    "FAIL",
-                    f"Post-design spec revision in phase '{rev.get('phase')}' "
-                    f"loosened {key}: {old_val} -> {new_val}",
+                    f"structurally changed {key} (null/value mismatch)",
                 )
 
     return CheckResult(name, "PASS")
@@ -282,12 +294,14 @@ def check_rule_implementation(record: Dict[str, Any]) -> CheckResult:
     if spec.get("requires_custom_code"):
         return CheckResult(name, "SKIP", "requires_custom_code=True")
 
-    rim = record.get("rule_implementation_map")
-    if not rim:
-        return CheckResult(name, "SKIP", "rule_implementation_map missing (legacy record)")
-
     entry_rules = spec.get("entry_rules") or []
     exit_rules = spec.get("exit_rules") or []
+
+    rim = record.get("rule_implementation_map")
+    if not rim:
+        if entry_rules or exit_rules:
+            return CheckResult(name, "FAIL", "rule_implementation_map empty but spec has rules")
+        return CheckResult(name, "SKIP", "rule_implementation_map missing (legacy record)")
 
     expected_ids: List[str] = []
     for i, _ in enumerate(entry_rules):
@@ -386,7 +400,9 @@ def check_cost_robustness(record: Dict[str, Any]) -> CheckResult:
     if row_2x is None:
         return CheckResult(name, "SKIP", "No 2.0x multiplier row found")
 
-    ann_return = row_2x.get("annualized_return_pct", 0.0)
+    ann_return = row_2x.get("annualized_return_pct")
+    if ann_return is None:
+        return CheckResult(name, "SKIP", "2.0x row missing annualized_return_pct")
     if ann_return >= 0:
         return CheckResult(name, "PASS")
     return CheckResult(name, "FAIL", f"2x cost-stress annualized return = {ann_return:.2f}% (< 0)")
@@ -401,7 +417,9 @@ def check_regime_coverage(record: Dict[str, Any]) -> CheckResult:
         return CheckResult(name, "SKIP", "No regime_results")
 
     dsr = result.get("deflated_sharpe")
-    if dsr is not None and dsr < 0:
+    if dsr is None:
+        return CheckResult(name, "FAIL", "deflated_sharpe missing")
+    if dsr < 0:
         return CheckResult(name, "FAIL", f"Deflated Sharpe = {dsr:.4f} (< 0)")
 
     losers = []
@@ -519,11 +537,15 @@ def check_liquidity_realism(record: Dict[str, Any]) -> CheckResult:
 def check_no_dead_code_rules(record: Dict[str, Any]) -> CheckResult:
     """Every rule in rule_implementation_map must have traded_count > 0."""
     name = "no_dead_code_rules"
-    if _spec(record).get("requires_custom_code"):
+    spec = _spec(record)
+    if spec.get("requires_custom_code"):
         return CheckResult(name, "SKIP", "requires_custom_code=True")
 
     rim = record.get("rule_implementation_map")
     if not rim:
+        has_rules = (spec.get("entry_rules") or []) or (spec.get("exit_rules") or [])
+        if has_rules:
+            return CheckResult(name, "FAIL", "rule_implementation_map empty but spec has rules")
         return CheckResult(name, "SKIP", "rule_implementation_map missing (legacy record)")
 
     dead = [r.get("rule_id", "?") for r in rim if (r.get("traded_count") or 0) == 0]

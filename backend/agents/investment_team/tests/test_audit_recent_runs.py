@@ -305,6 +305,22 @@ class TestCheckSpecStability:
         assert result.status == "FAIL"
         assert "immutable" in result.details
 
+    def test_fail_null_to_value_mutation(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_spec_stability
+
+        rec = _synthetic_record(
+            spec_history=[
+                {
+                    "phase": "synthesis",
+                    "diff": '- "target_annual_vol": null\n+ "target_annual_vol": 0.15',
+                    "reason": "set vol target",
+                },
+            ]
+        )
+        result = check_spec_stability(rec)
+        assert result.status == "FAIL"
+        assert "structurally changed" in result.details
+
     def test_skip_missing(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_spec_stability
 
@@ -346,10 +362,20 @@ class TestCheckRuleImplementation:
         rec["strategy"]["requires_custom_code"] = True
         assert check_rule_implementation(rec).status == "SKIP"
 
-    def test_skip_missing_rim(self) -> None:
+    def test_fail_empty_rim_with_rules(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_rule_implementation
 
         rec = _synthetic_record(rule_implementation_map=[])
+        result = check_rule_implementation(rec)
+        assert result.status == "FAIL"
+        assert "empty but spec has rules" in result.details
+
+    def test_skip_empty_rim_no_rules(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_rule_implementation
+
+        rec = _synthetic_record(rule_implementation_map=[])
+        rec["strategy"]["entry_rules"] = []
+        rec["strategy"]["exit_rules"] = []
         assert check_rule_implementation(rec).status == "SKIP"
 
 
@@ -484,6 +510,15 @@ class TestCheckCostRobustness:
         assert result.status == "FAIL"
         assert "-3.50%" in result.details
 
+    def test_skip_missing_annualized_return(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_cost_robustness
+
+        rec = _synthetic_record()
+        rec["backtest"]["result"]["cost_stress_results"] = [
+            {"multiplier": 2.0, "sharpe_ratio": 0.8},
+        ]
+        assert check_cost_robustness(rec).status == "SKIP"
+
     def test_skips_malformed_multiplier(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_cost_robustness
 
@@ -542,6 +577,15 @@ class TestCheckRegimeCoverage:
         result = check_regime_coverage(rec)
         assert result.status == "FAIL"
         assert "Deflated Sharpe" in result.details
+
+    def test_fail_missing_dsr(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_regime_coverage
+
+        rec = _synthetic_record()
+        del rec["backtest"]["result"]["deflated_sharpe"]
+        result = check_regime_coverage(rec)
+        assert result.status == "FAIL"
+        assert "missing" in result.details
 
     def test_skip_no_regimes(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_regime_coverage
@@ -727,10 +771,20 @@ class TestCheckNoDeadCodeRules:
         rec["strategy"]["requires_custom_code"] = True
         assert check_no_dead_code_rules(rec).status == "SKIP"
 
-    def test_skip_missing_rim(self) -> None:
+    def test_fail_empty_rim_with_rules(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_no_dead_code_rules
 
         rec = _synthetic_record(rule_implementation_map=[])
+        result = check_no_dead_code_rules(rec)
+        assert result.status == "FAIL"
+        assert "empty but spec has rules" in result.details
+
+    def test_skip_empty_rim_no_rules(self) -> None:
+        from investment_team.scripts.audit_recent_runs import check_no_dead_code_rules
+
+        rec = _synthetic_record(rule_implementation_map=[])
+        rec["strategy"]["entry_rules"] = []
+        rec["strategy"]["exit_rules"] = []
         assert check_no_dead_code_rules(rec).status == "SKIP"
 
 
