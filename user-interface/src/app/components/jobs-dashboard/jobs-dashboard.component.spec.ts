@@ -1,6 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
+import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
 import { Router } from '@angular/router';
 import { of } from 'rxjs';
@@ -102,7 +103,7 @@ describe('JobsDashboardComponent', () => {
     };
 
     await TestBed.configureTestingModule({
-      imports: [JobsDashboardComponent],
+      imports: [JobsDashboardComponent, NoopAnimationsModule],
       providers: [
         provideHttpClient(),
         provideHttpClientTesting(),
@@ -428,11 +429,9 @@ describe('JobsDashboardComponent', () => {
       fixture.detectChanges();
 
       const host = fixture.nativeElement as HTMLElement;
-      // status 'completed' → restart + delete are visible, stop + resume are not.
-      const restart = host.querySelector('button.restart-button');
-      const del = host.querySelector('button.delete-button');
-      expect(restart?.getAttribute('aria-label')).toBe('Restart Blogging Blog pipeline job for Sample Post');
-      expect(del?.getAttribute('aria-label')).toBe('Delete Blogging Blog pipeline job for Sample Post');
+      // status 'completed' → overflow trigger visible, stop + resume are not.
+      const overflow = host.querySelector('button.overflow-button');
+      expect(overflow?.getAttribute('aria-label')).toBe('More actions Blogging Blog pipeline job for Sample Post');
     });
   });
 
@@ -1209,6 +1208,149 @@ describe('JobsDashboardComponent', () => {
     }
     expect(host.querySelectorAll('.progress-na').length).toBe(0);
     expect(host.querySelectorAll('.agents-na').length).toBe(0);
+  });
+
+  describe('hasOverflowActions', () => {
+    const makeJob = (status: string): any => ({
+      unified: { source: 'blogging', jobId: 'j1', status },
+      seDetail: undefined,
+    });
+
+    it('returns true for terminal statuses (restart or delete available)', () => {
+      expect(component.hasOverflowActions(makeJob('completed'))).toBe(true);
+      expect(component.hasOverflowActions(makeJob('failed'))).toBe(true);
+      expect(component.hasOverflowActions(makeJob('cancelled'))).toBe(true);
+      expect(component.hasOverflowActions(makeJob('interrupted'))).toBe(true);
+      expect(component.hasOverflowActions(makeJob('agent_crash'))).toBe(true);
+    });
+
+    it('returns false for running/pending (no restart or delete)', () => {
+      expect(component.hasOverflowActions(makeJob('running'))).toBe(false);
+      expect(component.hasOverflowActions(makeJob('pending'))).toBe(false);
+    });
+  });
+
+  describe('overflow menu', () => {
+    const makeRow = (status: string, source = 'blogging'): any => ({
+      unified: {
+        source,
+        jobId: 'j1',
+        status,
+        label: 'Test Job',
+        createdAt: new Date().toISOString(),
+      },
+      seDetail: undefined,
+    });
+
+    it('renders overflow trigger for completed status', () => {
+      component.jobs = [makeRow('completed')];
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('.overflow-button')).toBeTruthy();
+    });
+
+    it('renders overflow trigger for failed status', () => {
+      component.jobs = [makeRow('failed')];
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('.overflow-button')).toBeTruthy();
+    });
+
+    it('does not render overflow trigger for running jobs', () => {
+      component.jobs = [makeRow('running')];
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('.overflow-button')).toBeNull();
+    });
+
+    it('does not render overflow trigger for pending jobs', () => {
+      component.jobs = [makeRow('pending')];
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('.overflow-button')).toBeNull();
+    });
+
+    it('running jobs show only Stop inline, no overflow', () => {
+      component.jobs = [makeRow('running')];
+      fixture.detectChanges();
+      const actions = fixture.nativeElement.querySelector('td.col-actions');
+      expect(actions?.querySelectorAll('button.stop-button').length).toBe(1);
+      expect(actions?.querySelectorAll('button.resume-button').length).toBe(0);
+      expect(actions?.querySelectorAll('button.overflow-button').length).toBe(0);
+    });
+
+    it('failed jobs show Resume inline plus overflow', () => {
+      component.jobs = [makeRow('failed')];
+      fixture.detectChanges();
+      const actions = fixture.nativeElement.querySelector('td.col-actions');
+      expect(actions?.querySelectorAll('button.stop-button').length).toBe(0);
+      expect(actions?.querySelectorAll('button.resume-button').length).toBe(1);
+      expect(actions?.querySelectorAll('button.overflow-button').length).toBe(1);
+    });
+
+    it('completed jobs show only overflow trigger, no inline primary action', () => {
+      component.jobs = [makeRow('completed')];
+      fixture.detectChanges();
+      const actions = fixture.nativeElement.querySelector('td.col-actions');
+      expect(actions?.querySelectorAll('button.stop-button').length).toBe(0);
+      expect(actions?.querySelectorAll('button.resume-button').length).toBe(0);
+      expect(actions?.querySelectorAll('button.overflow-button').length).toBe(1);
+    });
+
+    it('overflow trigger click stops event propagation', () => {
+      component.jobs = [makeRow('completed')];
+      fixture.detectChanges();
+      const overflowBtn = fixture.nativeElement.querySelector('.overflow-button') as HTMLElement;
+      const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+      const stopSpy = vi.spyOn(clickEvent, 'stopPropagation');
+      overflowBtn.dispatchEvent(clickEvent);
+      expect(stopSpy).toHaveBeenCalled();
+    });
+
+    it('overflow menu contains Restart and Delete items for completed status', () => {
+      component.jobs = [makeRow('completed')];
+      fixture.detectChanges();
+      const overflowBtn = fixture.nativeElement.querySelector('.overflow-button') as HTMLElement;
+      overflowBtn.click();
+      fixture.detectChanges();
+      const overlay = document.querySelector('.cdk-overlay-container');
+      const items = Array.from(overlay?.querySelectorAll('[mat-menu-item]') ?? []);
+      const spans = items.map((el) => el.querySelector('span')?.textContent?.trim());
+      expect(spans).toContain('Restart');
+      expect(spans).toContain('Delete');
+    });
+
+    it('clicking Restart menu item triggers restartJob with confirmation dialog', () => {
+      dialogSpy.open.mockReturnValue({ afterClosed: () => of(true) });
+      component.jobs = [makeRow('failed', 'software_engineering')];
+      fixture.detectChanges();
+      const overflowBtn = fixture.nativeElement.querySelector('.overflow-button') as HTMLElement;
+      overflowBtn.click();
+      fixture.detectChanges();
+      const overlay = document.querySelector('.cdk-overlay-container');
+      const items = Array.from(overlay?.querySelectorAll('[mat-menu-item]') ?? []);
+      const restartItem = items.find((el) => el.querySelector('span')?.textContent?.trim() === 'Restart') as HTMLElement;
+      restartItem?.click();
+      fixture.detectChanges();
+      expect(dialogSpy.open).toHaveBeenCalled();
+      expect(jobActionsSpy.restart).toHaveBeenCalledWith('software_engineering', 'j1');
+    });
+
+    it('clicking Delete menu item triggers deleteJob with confirmation dialog', () => {
+      dialogSpy.open.mockReturnValue({ afterClosed: () => of(true) });
+      component.jobs = [makeRow('completed')];
+      fixture.detectChanges();
+      const overflowBtn = fixture.nativeElement.querySelector('.overflow-button') as HTMLElement;
+      overflowBtn.click();
+      fixture.detectChanges();
+      const overlay = document.querySelector('.cdk-overlay-container');
+      const items = Array.from(overlay?.querySelectorAll('[mat-menu-item]') ?? []);
+      const deleteItem = items.find((el) => el.querySelector('span')?.textContent?.trim() === 'Delete') as HTMLElement;
+      deleteItem?.click();
+      fixture.detectChanges();
+      expect(dialogSpy.open).toHaveBeenCalled();
+      expect(jobActionsSpy.delete).toHaveBeenCalledWith('blogging', 'j1');
+    });
   });
 
   describe('live-refresh indicator', () => {

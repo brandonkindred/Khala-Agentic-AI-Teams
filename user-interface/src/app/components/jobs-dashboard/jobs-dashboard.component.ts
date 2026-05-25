@@ -6,6 +6,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatMenuModule } from '@angular/material/menu';
 import { MatDialog } from '@angular/material/dialog';
 import { Subscription, forkJoin, of, timer } from 'rxjs';
 import { switchMap, catchError, map } from 'rxjs/operators';
@@ -147,6 +148,7 @@ interface PersistedFilters {
     MatIconModule,
     MatButtonModule,
     MatTooltipModule,
+    MatMenuModule,
   ],
   templateUrl: './jobs-dashboard.component.html',
   styleUrl: './jobs-dashboard.component.scss',
@@ -731,7 +733,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     return parts.join(', ');
   }
 
-  getActionAriaLabel(job: DashboardRow, action: 'Stop' | 'Resume' | 'Restart' | 'Delete'): string {
+  getActionAriaLabel(job: DashboardRow, action: 'Stop' | 'Resume' | 'Restart' | 'Delete' | 'More actions'): string {
     const team = SOURCE_DISPLAY[job.unified.source]?.label ?? job.unified.source;
     const type = this.getJobTypeInfo(job).label;
     const subject =
@@ -820,6 +822,10 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   canDeleteJob(job: DashboardRow): boolean {
     return job.unified.status !== 'running' && job.unified.status !== 'pending';
+  }
+
+  hasOverflowActions(job: DashboardRow): boolean {
+    return this.canRestartJob(job) || this.canDeleteJob(job);
   }
 
   trackByJobId(_index: number, job: DashboardRow): string {

@@ -631,14 +631,9 @@ tbody .col-actions {
   &:hover { background: var(--kh-accent-subtle) !important; }
 }
 
-.restart-button {
-  color: #c084fc !important;
-  &:hover { background: rgba(168, 85, 247, 0.12) !important; }
-}
-
-.delete-button {
+.overflow-button {
   color: var(--kh-text-muted) !important;
-  &:hover { background: var(--kh-error-subtle) !important; color: var(--kh-error) !important; }
+  &:hover { background: var(--kh-glass) !important; }
 }
 
 // ── Animation ───────────────────────────────────────────────────────────────
