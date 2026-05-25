@@ -126,6 +126,19 @@ def _parse_rate(value: str) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _parse_created_at(value: str) -> Optional[datetime]:
+    """Parse a created_at timestamp into a timezone-aware datetime."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
 def _load_records(
     client: Any,
     since: datetime,
@@ -137,11 +150,12 @@ def _load_records(
         if not jid:
             continue
         payload = job.get("data") or {}
-        created = payload.get("created_at", "")
-        if created and created >= since.isoformat():
+        created_dt = _parse_created_at(payload.get("created_at", ""))
+        if created_dt is not None and created_dt >= since:
             payload["_job_id"] = jid
+            payload["_created_dt"] = created_dt
             records.append(payload)
-    records.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    records.sort(key=lambda r: r.get("_created_dt", since), reverse=True)
     if sample is not None:
         records = records[:sample]
     return records

@@ -718,6 +718,40 @@ class TestCheckNoDeadCodeRules:
 # ---------------------------------------------------------------------------
 
 
+class TestParseCreatedAt:
+    def test_iso_with_offset(self) -> None:
+        from investment_team.scripts.audit_recent_runs import _parse_created_at
+
+        dt = _parse_created_at("2026-01-15T00:00:00+00:00")
+        assert dt is not None
+        assert dt.tzinfo is not None
+        assert dt.year == 2026
+
+    def test_iso_with_z(self) -> None:
+        from investment_team.scripts.audit_recent_runs import _parse_created_at
+
+        dt = _parse_created_at("2026-01-15T00:00:00Z")
+        assert dt is not None
+        assert dt.tzinfo is not None
+
+    def test_naive_gets_utc(self) -> None:
+        from investment_team.scripts.audit_recent_runs import _parse_created_at
+
+        dt = _parse_created_at("2026-01-15T00:00:00")
+        assert dt is not None
+        assert dt.tzinfo is not None
+
+    def test_empty(self) -> None:
+        from investment_team.scripts.audit_recent_runs import _parse_created_at
+
+        assert _parse_created_at("") is None
+
+    def test_invalid(self) -> None:
+        from investment_team.scripts.audit_recent_runs import _parse_created_at
+
+        assert _parse_created_at("not-a-date") is None
+
+
 class TestLoadRecords:
     def test_filters_by_since(self) -> None:
         from investment_team.scripts.audit_recent_runs import _load_records
@@ -731,6 +765,21 @@ class TestLoadRecords:
         records = _load_records(client, since, None)
         assert len(records) == 1
         assert records[0]["_job_id"] == "new"
+
+    def test_mixed_timestamp_formats(self) -> None:
+        from investment_team.scripts.audit_recent_runs import _load_records
+
+        client = _FakeJobClient()
+        client.jobs = [
+            {"job_id": "z-fmt", "data": {"created_at": "2026-06-01T00:00:00Z"}},
+            {"job_id": "offset-fmt", "data": {"created_at": "2026-06-02T00:00:00+00:00"}},
+            {"job_id": "old-z", "data": {"created_at": "2023-01-01T00:00:00Z"}},
+        ]
+        since = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        records = _load_records(client, since, None)
+        assert len(records) == 2
+        assert records[0]["_job_id"] == "offset-fmt"
+        assert records[1]["_job_id"] == "z-fmt"
 
     def test_sample_limits(self) -> None:
         from investment_team.scripts.audit_recent_runs import _load_records
