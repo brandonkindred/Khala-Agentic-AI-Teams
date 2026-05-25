@@ -601,12 +601,13 @@ def test_temporal_constants_loaded() -> None:
     assert constants.ACTIVITY_FULL_PIPELINE
 
 
-@pytest.mark.asyncio
-async def test_connect_temporal_client_no_address(monkeypatch) -> None:
+def test_connect_temporal_client_no_address(monkeypatch) -> None:
+    import asyncio
+
     from blogging.temporal import client as tc
 
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
-    out = await tc.connect_temporal_client()
+    out = asyncio.run(tc.connect_temporal_client())
     assert out is None
 
 
