@@ -1186,6 +1186,31 @@ describe('JobsDashboardComponent', () => {
     });
   });
 
+  it('renders muted middle-dot in both progress and agents cells when data is absent', () => {
+    component.jobs = [
+      {
+        unified: {
+          source: 'blogging',
+          jobId: 'empty-1',
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+          label: 'Draft post',
+        },
+        seDetail: undefined,
+      } as any,
+    ];
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    const empties = host.querySelectorAll('.cell-empty');
+    expect(empties.length).toBe(2);
+    for (const el of Array.from(empties)) {
+      expect(el.textContent?.trim()).toBe('·');
+    }
+    expect(host.querySelectorAll('.progress-na').length).toBe(0);
+    expect(host.querySelectorAll('.agents-na').length).toBe(0);
+  });
+
   describe('live-refresh indicator', () => {
     it('renders a pulsing live-dot next to the timestamp once lastUpdated is set', () => {
       component.lastUpdated = new Date();

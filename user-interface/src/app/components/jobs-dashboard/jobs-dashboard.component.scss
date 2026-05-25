@@ -530,9 +530,10 @@ tbody .col-actions {
   }
 }
 
-.progress-na,
-.agents-na {
-  color: var(--kh-text-secondary);
+.cell-empty {
+  color: var(--kh-text-muted);
+  opacity: 0.5;
+  user-select: none;
 }
 
 .time-ago {
