@@ -152,7 +152,7 @@ def _process_one(
     violations: Sequence = last_result.violations if last_result else ()
     return DroppedSuggestion(
         name=suggestion.name,
-        reasons=[f"{v.reason.value}:{v.tag or ''}" for v in violations],
+        reasons=[f"{v.reason.value}:{v.tag}" if v.tag else v.reason.value for v in violations],
         detail=[v.detail for v in violations],
     )
 
