@@ -73,7 +73,10 @@ def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     if value is None:
         return default
     try:
-        return float(value)
+        result = float(value)
+        if result != result:
+            return default
+        return result
     except (ValueError, TypeError):
         return default
 
@@ -325,6 +328,8 @@ def check_rule_implementation(record: Dict[str, Any]) -> CheckResult:
 
     kind_counts: Dict[str, int] = {}
     for er in exit_rules:
+        if not isinstance(er, dict):
+            continue
         kind = er.get("kind", "exit")
         idx = kind_counts.get(kind, 0)
         kind_counts[kind] = idx + 1
@@ -469,9 +474,11 @@ def _collect_spec_indicators(record: Dict[str, Any]) -> set[str]:
             indicators.add(rhs["name"].lower())
 
     for rule in spec.get("entry_rules") or []:
-        _extract_from_predicate(rule.get("when"))
+        if isinstance(rule, dict):
+            _extract_from_predicate(rule.get("when"))
     for rule in spec.get("exit_rules") or []:
-        _extract_from_predicate(rule.get("when"))
+        if isinstance(rule, dict):
+            _extract_from_predicate(rule.get("when"))
 
     return indicators
 
@@ -575,7 +582,9 @@ def check_no_dead_code_rules(record: Dict[str, Any]) -> CheckResult:
     dead = [
         r.get("rule_id", "?")
         for r in rim
-        if (r.get("traded_count") or 0) == 0 and r.get("rule_id") != "sizing"
+        if isinstance(r, dict)
+        and (_safe_float(r.get("traded_count"), 0.0) or 0) == 0
+        and r.get("rule_id") != "sizing"
     ]
     if dead:
         return CheckResult(name, "FAIL", f"Dead-code rules (traded_count=0): {', '.join(dead)}")
