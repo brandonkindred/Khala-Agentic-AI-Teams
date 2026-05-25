@@ -34,6 +34,10 @@ class NutrientRow:
     source: str = "fdc"
     is_override: bool = False
 
+    def __post_init__(self) -> None:
+        if self.value_per_100g < 0:
+            raise ValueError(f"value_per_100g must be >= 0, got {self.value_per_100g}")
+
 
 @dataclass(frozen=True)
 class Nutrients:
@@ -97,6 +101,14 @@ class RetentionFactors:
     mass_retention: float
     data_version: str
     is_default: bool = False
+
+    def __post_init__(self) -> None:
+        if not (0 < self.nutrient_retention <= 1.0):
+            raise ValueError(
+                f"nutrient_retention must be in (0, 1.0], got {self.nutrient_retention}"
+            )
+        if self.mass_retention <= 0:
+            raise ValueError(f"mass_retention must be > 0, got {self.mass_retention}")
 
 
 # Sentinel instance: identity factors (no cooking adjustment)

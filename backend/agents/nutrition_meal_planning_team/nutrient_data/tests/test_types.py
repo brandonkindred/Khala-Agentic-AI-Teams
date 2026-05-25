@@ -46,6 +46,24 @@ class TestNutrientRow:
         s = {row}
         assert row in s
 
+    def test_rejects_negative_value(self):
+        with pytest.raises(ValueError, match="value_per_100g must be >= 0"):
+            NutrientRow(
+                canonical_id="x",
+                nutrient=Nutrient.kcal,
+                value_per_100g=-1.0,
+                data_version="1.0.0",
+            )
+
+    def test_accepts_zero_value(self):
+        row = NutrientRow(
+            canonical_id="x",
+            nutrient=Nutrient.alcohol_g,
+            value_per_100g=0.0,
+            data_version="1.0.0",
+        )
+        assert row.value_per_100g == 0.0
+
 
 class TestNutrients:
     def test_get_existing(self):
@@ -137,3 +155,43 @@ class TestRetentionFactors:
         )
         with pytest.raises(AttributeError):
             r.method = "boiled"  # type: ignore[misc]
+
+    def test_rejects_zero_nutrient_retention(self):
+        with pytest.raises(ValueError, match="nutrient_retention"):
+            RetentionFactors(
+                canonical_id="x",
+                method="boiled",
+                nutrient_retention=0.0,
+                mass_retention=0.8,
+                data_version="1.0.0",
+            )
+
+    def test_rejects_nutrient_retention_above_one(self):
+        with pytest.raises(ValueError, match="nutrient_retention"):
+            RetentionFactors(
+                canonical_id="x",
+                method="boiled",
+                nutrient_retention=1.1,
+                mass_retention=0.8,
+                data_version="1.0.0",
+            )
+
+    def test_rejects_zero_mass_retention(self):
+        with pytest.raises(ValueError, match="mass_retention"):
+            RetentionFactors(
+                canonical_id="x",
+                method="boiled",
+                nutrient_retention=0.9,
+                mass_retention=0.0,
+                data_version="1.0.0",
+            )
+
+    def test_allows_mass_retention_above_one(self):
+        r = RetentionFactors(
+            canonical_id="pasta",
+            method="boiled",
+            nutrient_retention=0.95,
+            mass_retention=2.0,
+            data_version="1.0.0",
+        )
+        assert r.mass_retention == 2.0

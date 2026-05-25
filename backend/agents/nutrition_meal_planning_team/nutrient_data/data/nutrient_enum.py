@@ -19,6 +19,8 @@ from enum import Enum
 class Nutrient(str, Enum):
     """Canonical nutrient identifier."""
 
+    __str__ = str.__str__
+
     # --- Macros ---
     kcal = "kcal"
     protein_g = "protein_g"

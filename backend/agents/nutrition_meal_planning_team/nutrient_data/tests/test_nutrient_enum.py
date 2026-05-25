@@ -42,3 +42,8 @@ class TestNutrientEnum:
     def test_member_is_usable_as_dict_key(self):
         d = {Nutrient.kcal: 200.0, Nutrient.protein_g: 25.0}
         assert d[Nutrient.kcal] == 200.0
+
+    def test_str_returns_value_not_class_prefix(self):
+        assert str(Nutrient.kcal) == "kcal"
+        assert str(Nutrient.protein_g) == "protein_g"
+        assert f"{Nutrient.vitamin_c_mg}" == "vitamin_c_mg"
