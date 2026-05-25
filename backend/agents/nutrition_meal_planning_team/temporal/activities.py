@@ -58,11 +58,19 @@ def run_meal_plan_activity(job_id: str, request_dict: Dict[str, Any]) -> None:
         )
         activity.heartbeat("recording_suggestions")
 
-        with_ids = orchestrator._record_suggestions(body.client_id, suggestions)
+        pipeline_result = orchestrator._record_suggestions(body.client_id, profile, suggestions)
 
+        from nutrition_meal_planning_team.guardrail import GUARDRAIL_VERSION, is_guardrail_enabled
         from nutrition_meal_planning_team.models import MealPlanResponse
 
-        result = MealPlanResponse(client_id=body.client_id, suggestions=with_ids)
+        result = MealPlanResponse(
+            client_id=body.client_id,
+            suggestions=pipeline_result.recorded,
+            dropped=pipeline_result.dropped,
+            flags_by_recommendation=pipeline_result.flags_by_recommendation,
+            guardrail_version=GUARDRAIL_VERSION if is_guardrail_enabled() else "",
+            restrictions_best_effort=pipeline_result.restrictions_best_effort,
+        )
         update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
         activity.heartbeat("completed")
     except Exception:
