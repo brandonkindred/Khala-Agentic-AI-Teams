@@ -338,6 +338,33 @@
         padding: var(--kh-space-2) var(--kh-space-3);
         vertical-align: middle;
       }
+
+      td.col-actions {
+        position: relative;
+        padding-right: calc(var(--kh-space-3) + 22px);
+
+        &::after {
+          content: 'chevron_right';
+          font-family: 'Material Icons';
+          font-feature-settings: 'liga';
+          -webkit-font-smoothing: antialiased;
+          position: absolute;
+          right: var(--kh-space-2);
+          top: 50%;
+          transform: translateY(-50%);
+          font-size: 18px;
+          line-height: 1;
+          color: var(--kh-text-muted);
+          opacity: 0;
+          transition: opacity var(--kh-transition);
+          pointer-events: none;
+        }
+      }
+
+      &:hover td.col-actions::after,
+      &:focus-visible td.col-actions::after {
+        opacity: 1;
+      }
     }
   }
 }
@@ -370,6 +397,7 @@
   .stuck-indicator   { animation: none; opacity: 1; }
   .live-dot          { animation: none; opacity: 1; }
   .table-refresh-bar { display: none; }
+  .jobs-table tbody tr.job-row td.col-actions::after { transition: none; }
 }
 
 // ── Column Widths ───────────────────────────────────────────────────────────
