@@ -1,0 +1,15 @@
+schema_version: 1
+id: sales.dossier_builder
+team: sales_team
+name: Sales — Dossier Builder
+summary: Builds a full ProspectDossier with executive summary, triggers, and conversation hooks.
+tags: [sales, research, requires-live-integration]
+inputs:
+  schema_ref: sales_team.models:DossierRequest
+outputs:
+  schema_ref: sales_team.models:ProspectDossier
+sandbox:
+  manifest_path: default.yaml
+  access_tier: elevated
+source:
+  entrypoint: sales_team.invoke_runners:invoke_dossier_builder

@@ -1,0 +1,22 @@
+schema_version: 1
+id: sales.nurture
+team: sales_team
+name: Sales — Nurture Specialist
+summary: Builds long-cycle nurture sequences for leads not ready to buy.
+tags: [sales, nurture]
+inputs:
+  schema_ref: sales_team.models:NurtureRequest
+outputs:
+  description: >-
+    Per-prospect grouped results: {"duration_days": N, "results": [{prospect_id, prospect_company,
+    touchpoints, re_engagement_triggers, content_recommendations}, ...]}.
+    Each entry contains the NurtureSequenceBody output for one prospect.
+invoke:
+  kind: http
+  method: POST
+  path: /api/sales/nurture
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: sales_team.invoke_runners:invoke_nurture

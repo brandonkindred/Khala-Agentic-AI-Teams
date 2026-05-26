@@ -48,6 +48,7 @@ from sales_team.outcome_store import (
     record_deal_outcome,
     record_stage_outcome,
 )
+from shared_agent_invoke import mount_invoke_shim
 from shared_observability import init_otel, instrument_fastapi_app
 
 init_otel(service_name="sales-team", team_key="sales_team")
@@ -88,6 +89,7 @@ app = FastAPI(
     lifespan=_sales_lifespan,
 )
 instrument_fastapi_app(app, team_key="sales_team")
+mount_invoke_shim(app)
 
 logger = logging.getLogger(__name__)
 _job_manager = JobServiceClient(team="sales_team")

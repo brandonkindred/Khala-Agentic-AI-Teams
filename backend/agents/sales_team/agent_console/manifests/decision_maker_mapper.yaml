@@ -1,0 +1,15 @@
+schema_version: 1
+id: sales.decision_maker_mapper
+team: sales_team
+name: Sales — Decision-Maker Mapper
+summary: Maps named decision-makers at a target company given ICP criteria.
+tags: [sales, research]
+inputs:
+  schema_ref: sales_team.models:DecisionMakerMapperRequest
+outputs:
+  schema_ref: sales_team.models:DecisionMakerList
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: sales_team.invoke_runners:invoke_decision_maker_mapper

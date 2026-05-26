@@ -1,0 +1,19 @@
+schema_version: 1
+id: sales.qualifier
+team: sales_team
+name: Sales — Lead Qualifier
+summary: Scores leads using BANT, MEDDIC, and Iannarino's value-creation tiers.
+tags: [sales, qualification]
+inputs:
+  schema_ref: sales_team.models:QualificationRequest
+outputs:
+  schema_ref: sales_team.models:QualificationScoreBody
+invoke:
+  kind: http
+  method: POST
+  path: /api/sales/qualify
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: sales_team.invoke_runners:invoke_qualifier

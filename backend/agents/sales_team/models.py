@@ -924,6 +924,47 @@ class CoachingRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Standalone invoke request models (Agent Console sandbox dispatch)
+# ---------------------------------------------------------------------------
+
+
+class DossierRequest(BaseModel):
+    """Invoke request for the DossierBuilder agent."""
+
+    prospect: Prospect
+    product_name: str
+    value_proposition: str
+
+
+class DecisionMakerMapperRequest(BaseModel):
+    """Invoke request for the DecisionMakerMapper agent."""
+
+    company: Prospect
+    icp: IdealCustomerProfile
+    product_name: str
+    value_proposition: str
+    max_contacts: int = Field(default=2, ge=1, le=10)
+
+
+class DiscoveryRequest(BaseModel):
+    """Invoke request for the Discovery agent."""
+
+    prospect: Prospect
+    qualification: QualificationScoreBody
+    product_name: str
+    value_proposition: str
+
+
+class CloserRequest(BaseModel):
+    """Invoke request for the Closer agent."""
+
+    prospect: Prospect
+    proposal: SalesProposalBody
+    product_name: str
+    value_proposition: str
+
+
+# ---------------------------------------------------------------------------
 # Outcome tracking models
 # ---------------------------------------------------------------------------
 
