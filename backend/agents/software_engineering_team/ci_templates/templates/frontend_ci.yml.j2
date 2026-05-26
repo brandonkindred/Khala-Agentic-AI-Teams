@@ -18,8 +18,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "{{ node_version }}"
-      - run: "{{ install_command }}"
-      - run: "{{ lint_command }}"
+      - run: "{{ install_command | yaml_escape }}"
+      - run: "{{ lint_command | yaml_escape }}"
 
   build:
     name: Build & Typecheck
@@ -30,8 +30,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "{{ node_version }}"
-      - run: "{{ install_command }}"
-      - run: "{{ build_command }}"
+      - run: "{{ install_command | yaml_escape }}"
+      - run: "{{ build_command | yaml_escape }}"
 
   test:
     name: Test
@@ -42,8 +42,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "{{ node_version }}"
-      - run: "{{ install_command }}"
-      - run: "{{ test_command }}"
+      - run: "{{ install_command | yaml_escape }}"
+      - run: "{{ test_command | yaml_escape }}"
 
   {% if enable_sca %}
   sca:
@@ -55,8 +55,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "{{ node_version }}"
-      - run: "{{ install_command }}"
-      - run: "{{ package_manager }} audit --json > npm-audit-report.json || true"
+      - run: "{{ install_command | yaml_escape }}"
+      - run: "{{ package_manager | yaml_escape }} audit --json > npm-audit-report.json || true"
       - uses: actions/upload-artifact@v4
         with:
           name: npm-audit-report
@@ -71,7 +71,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
         env:
-          GITLEAKS_LICENSE: ${{ "{{" }} secrets.GITLEAKS_LICENSE {{ "}}" }}
+          GITHUB_TOKEN: ${{ "{{" }} secrets.GITHUB_TOKEN {{ "}}" }}
   {% endif %}

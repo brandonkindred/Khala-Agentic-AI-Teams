@@ -73,6 +73,18 @@ class TestRenderBackendCI:
         assert "lint" in parsed["jobs"]
         assert "test" in parsed["jobs"]
 
+    def test_commands_with_quotes_produce_valid_yaml(self) -> None:
+        params = BackendCIParams(test_command='pytest -k "smoke"')
+        result = render_backend_ci(params)
+        parsed = yaml.safe_load(result)
+        assert "jobs" in parsed
+
+    def test_commands_with_colon_space_produce_valid_yaml(self) -> None:
+        params = BackendCIParams(test_command='echo "key: value"')
+        result = render_backend_ci(params)
+        parsed = yaml.safe_load(result)
+        assert "jobs" in parsed
+
     def test_deterministic(self) -> None:
         a = render_backend_ci(BackendCIParams())
         b = render_backend_ci(BackendCIParams())

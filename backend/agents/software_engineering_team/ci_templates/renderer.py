@@ -23,14 +23,21 @@ logger = logging.getLogger(__name__)
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
+def _yaml_escape(value: str) -> str:
+    """Escape a string for use inside a YAML double-quoted scalar."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _env() -> Environment:
-    return Environment(
+    env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         undefined=StrictUndefined,
         keep_trailing_newline=True,
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    env.filters["yaml_escape"] = _yaml_escape
+    return env
 
 
 def render_backend_ci(params: BackendCIParams | None = None) -> str:
