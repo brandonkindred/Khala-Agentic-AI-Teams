@@ -151,7 +151,6 @@ class Lifecycle:
         ``agent_id``.
         """
         team = _resolve_team(agent_id)
-        _check_docker_available()
         lock = self._locks.setdefault(agent_id, asyncio.Lock())
         async with lock:
             existing = self._state.get(agent_id)
@@ -174,6 +173,8 @@ class Lifecycle:
                     agent_id,
                     existing.container_id,
                 )
+
+            _check_docker_available()
 
             container_name = provisioner_mod.container_name_for(agent_id)
             try:

@@ -130,6 +130,28 @@ async def test_acquire_is_idempotent_when_already_warm(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_acquire_reuses_warm_handle_when_docker_check_would_fail(tmp_path: Path) -> None:
+    """A WARM sandbox should be reused even if the Docker daemon is temporarily
+    unavailable (e.g. live-restore). The preflight must not gate the fast path."""
+    from agent_provisioning_team.sandbox.lifecycle import DockerUnavailableError
+
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker(running=True):
+        await lc.acquire("blogging.planner")
+
+    with (
+        _patched_registry(),
+        patch(
+            "agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+            side_effect=DockerUnavailableError("daemon gone"),
+        ),
+        patch.object(provisioner_mod, "is_running", new=AsyncMock(return_value=True)),
+    ):
+        handle = await lc.acquire("blogging.planner")
+    assert handle.status == SandboxStatus.WARM
+
+
+@pytest.mark.asyncio
 async def test_acquire_reports_error_on_health_timeout(tmp_path: Path) -> None:
     lc = _lifecycle(tmp_path)
     with _patched_registry(), _patched_docker() as d:
