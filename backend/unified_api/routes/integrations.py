@@ -1036,11 +1036,16 @@ def _resolve_repo_path(cfg: dict[str, Any]) -> str:
 
 
 def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str | None:
-    """Clone or fetch the repository. Returns error string on failure, None on success."""
+    """Clone or fetch the repository. Returns error string on failure, None on success.
+
+    Auth is passed via ``-c http.extraHeader`` so the token never persists
+    in ``.git/config`` (unlike ``https://token@host`` remote URLs).
+    """
+    auth_header = f"Authorization: Bearer {token}"
     path = Path(repo_path)
     if path.is_dir() and (path / ".git").is_dir():
         result = subprocess.run(
-            ["git", "-C", repo_path, "fetch", "--all"],
+            ["git", "-C", repo_path, "-c", f"http.extraHeader={auth_header}", "fetch", "--all"],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0:
@@ -1048,9 +1053,9 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
         return None
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    clone_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+    clone_url = f"https://github.com/{owner}/{repo}.git"
     result = subprocess.run(
-        ["git", "clone", clone_url, repo_path],
+        ["git", "clone", "-c", f"http.extraHeader={auth_header}", clone_url, repo_path],
         capture_output=True, text=True, timeout=300,
     )
     if result.returncode != 0:

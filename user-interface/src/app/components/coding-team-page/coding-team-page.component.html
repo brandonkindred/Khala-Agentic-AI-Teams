@@ -64,7 +64,7 @@
         <div class="github-job-panel__header">
           <mat-icon>engineering</mat-icon>
           <h3>Working on issue #{{ activeJob.issue_number }}</h3>
-          @if (jobStatus?.status === 'completed' || jobStatus?.status === 'failed') {
+          @if (jobStatus?.status === 'completed' || jobStatus?.status === 'failed' || jobStatus?.status === 'cancelled') {
             <button mat-button (click)="dismissJob()">
               <mat-icon>close</mat-icon>
               Dismiss

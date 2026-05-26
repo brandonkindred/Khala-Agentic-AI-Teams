@@ -133,7 +133,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.pollSub = interval(5000)
       .pipe(
         switchMap(() => this.api.getJobStatus(jobId)),
-        takeWhile((status) => status.status !== 'completed' && status.status !== 'failed', true),
+        takeWhile((status) => !['completed', 'failed', 'cancelled'].includes(status.status), true),
       )
       .subscribe({
         next: (status: CodingTeamJobStatus) => {
