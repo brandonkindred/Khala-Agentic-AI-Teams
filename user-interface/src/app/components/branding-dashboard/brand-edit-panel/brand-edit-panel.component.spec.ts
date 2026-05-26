@@ -72,6 +72,26 @@ describe('BrandEditPanelComponent', () => {
     );
   });
 
+  it('onApply emits empty arrays (not undefined) when values/differentiators are cleared', () => {
+    const spy = vi.fn();
+    component.missionUpdate.subscribe(spy);
+    component.form.setValue({
+      company_name: 'ClearCo',
+      company_description: 'Clearing values test',
+      target_audience: 'testers',
+      desired_voice: '',
+      values_csv: '',
+      differentiators_csv: '',
+    });
+    component.onApply();
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        values: [],
+        differentiators: [],
+      }),
+    );
+  });
+
   it('onApply does not emit when form is invalid', () => {
     const spy = vi.fn();
     component.missionUpdate.subscribe(spy);
