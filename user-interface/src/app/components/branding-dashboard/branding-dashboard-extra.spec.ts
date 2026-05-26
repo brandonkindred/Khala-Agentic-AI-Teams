@@ -576,6 +576,7 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     component.selectedClient = workspaceClient;
     component.selectedBrand = makeBrand('b1');
     component.brands = [component.selectedBrand];
+    component.activeConversationId = 'conv-b1';
     component.conversationMission = { company_name: 'Old', company_description: 'd', target_audience: 'a' } as BrandingMissionSnapshot;
     component.editPanelOpen = true;
     const updatedMission = { ...component.selectedBrand.mission, company_name: 'New' };
@@ -586,6 +587,7 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     expect(component.conversationMission?.company_name).toBe('New');
     expect(component.selectedBrand?.mission.company_name).toBe('New');
     expect(api.updateBrand).toHaveBeenCalled();
+    expect(api.sendConversationMessage).toHaveBeenCalledWith('conv-b1', expect.stringContaining('New'), false);
     expect(component.editPanelOpen).toBe(false);
   });
 
@@ -610,6 +612,29 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
 
     expect(api.sendConversationMessage).toHaveBeenCalledWith('conv-orphan', expect.stringContaining('New'), false);
     expect(component.conversationMission?.company_name).toBe('New');
+  });
+
+  it('onMissionUpdateFromPanel reconciles auto-created brand from conversation response', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.selectedBrand = null;
+    component.selectedClient = workspaceClient;
+    component.activeConversationId = 'conv-orphan';
+    component.conversationMission = { company_name: 'Old', company_description: 'd', target_audience: 'a' } as BrandingMissionSnapshot;
+    api.sendConversationMessage.mockReturnValue(of({
+      conversation_id: 'conv-orphan',
+      brand_id: 'auto-b1',
+      messages: [],
+      mission: { company_name: 'New', company_description: 'd', target_audience: 'a' },
+      latest_output: null,
+      suggested_questions: [],
+    }));
+    api.listBrands.mockReturnValue(of([makeBrand('auto-b1', { name: 'Auto' })]));
+
+    component.onMissionUpdateFromPanel({ company_name: 'New' });
+
+    expect(api.listBrands).toHaveBeenCalledWith('w1');
+    expect(component.selectedBrand?.id).toBe('auto-b1');
   });
 
   it('onMissionUpdateFromPanel handles updateBrand error without crashing', async () => {

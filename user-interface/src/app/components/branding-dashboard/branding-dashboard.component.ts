@@ -489,12 +489,19 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
           );
         },
       });
+      if (this.activeConversationId) {
+        const summary = this.buildMissionSummaryMessage(patch);
+        this.api.sendConversationMessage(this.activeConversationId, summary, this.skipSave).subscribe();
+      }
     } else if (this.activeConversationId) {
       const summary = this.buildMissionSummaryMessage(patch);
       this.api.sendConversationMessage(this.activeConversationId, summary, this.skipSave).subscribe({
         next: (res) => {
           this.conversationMission = res.mission ?? this.conversationMission;
           this.conversationLatestOutput = res.latest_output ?? this.conversationLatestOutput;
+          if (res.brand_id && !this.selectedBrand) {
+            this.onBrandAutoCreated(res.brand_id);
+          }
         },
         error: () => {
           // Optimistic local update already applied; backend will reconcile on next chat turn.
