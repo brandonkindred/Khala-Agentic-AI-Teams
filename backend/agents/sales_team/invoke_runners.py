@@ -76,22 +76,27 @@ def invoke_dossier_builder(body: dict[str, Any]) -> dict[str, Any]:
 
 def invoke_outreach(body: dict[str, Any]) -> dict[str, Any]:
     req = OutreachRequest(**body)
+    if not req.prospects:
+        raise ValueError("OutreachRequest.prospects must not be empty")
     agent = OutreachAgent()
-    dossier = ProspectDossier(**body["dossier"]) if "dossier" in body else ProspectDossier(
-        prospect_name=req.prospects[0].name if req.prospects else "Unknown",
-        company_name=req.prospects[0].company if req.prospects else "Unknown",
-        executive_summary="No dossier provided.",
-    )
-    prospect_json = req.prospects[0].model_dump_json() if req.prospects else "{}"
-    result = agent.generate_sequence(
-        prospect_json=prospect_json,
-        dossier=dossier,
-        product_name=req.product_name,
-        value_proposition=req.value_proposition,
-        case_studies="\n".join(req.case_study_snippets),
-        company_context=req.company_context,
-    )
-    return result.model_dump(mode="json")
+    case_studies = "\n".join(req.case_study_snippets)
+    all_variants: list = []
+    for prospect in req.prospects:
+        dossier = ProspectDossier(
+            prospect_name=prospect.name,
+            company_name=prospect.company,
+            executive_summary="No dossier provided.",
+        )
+        result = agent.generate_sequence(
+            prospect_json=prospect.model_dump_json(),
+            dossier=dossier,
+            product_name=req.product_name,
+            value_proposition=req.value_proposition,
+            case_studies=case_studies,
+            company_context=req.company_context,
+        )
+        all_variants.extend(result.model_dump(mode="json")["variants"])
+    return {"variants": all_variants}
 
 
 def invoke_qualifier(body: dict[str, Any]) -> dict[str, Any]:
@@ -108,15 +113,29 @@ def invoke_qualifier(body: dict[str, Any]) -> dict[str, Any]:
 
 def invoke_nurture(body: dict[str, Any]) -> dict[str, Any]:
     req = NurtureRequest(**body)
+    if not req.prospects:
+        raise ValueError("NurtureRequest.prospects must not be empty")
     agent = NurtureAgent()
-    prospect_json = req.prospects[0].model_dump_json() if req.prospects else "{}"
-    result = agent.build_sequence(
-        prospect_json=prospect_json,
-        product_name=req.product_name,
-        value_proposition=req.value_proposition,
-        duration_days=req.duration_days,
-    )
-    return result.model_dump(mode="json")
+    all_touchpoints: list = []
+    all_triggers: list = []
+    all_recommendations: list = []
+    for prospect in req.prospects:
+        result = agent.build_sequence(
+            prospect_json=prospect.model_dump_json(),
+            product_name=req.product_name,
+            value_proposition=req.value_proposition,
+            duration_days=req.duration_days,
+        )
+        dumped = result.model_dump(mode="json")
+        all_touchpoints.extend(dumped.get("touchpoints", []))
+        all_triggers.extend(dumped.get("re_engagement_triggers", []))
+        all_recommendations.extend(dumped.get("content_recommendations", []))
+    return {
+        "duration_days": req.duration_days,
+        "touchpoints": all_touchpoints,
+        "re_engagement_triggers": all_triggers,
+        "content_recommendations": all_recommendations,
+    }
 
 
 def invoke_discovery(body: dict[str, Any]) -> dict[str, Any]:
