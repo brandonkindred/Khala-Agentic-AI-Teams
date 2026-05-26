@@ -12,7 +12,13 @@ import pytest
 from investment_team.models import CoverageCategory
 from investment_team.strategy_lab.coverage_probe import run_indicator_probe
 
-from ._indicator_probe_fixtures import flat_close_df, flat_ohlcv, make_strategy, small_swing_df, swing_close_df
+from ._indicator_probe_fixtures import (
+    flat_close_df,
+    flat_ohlcv,
+    make_strategy,
+    small_swing_df,
+    swing_close_df,
+)
 
 CC = CoverageCategory
 
@@ -36,8 +42,18 @@ _FLAT_CASES: list[tuple[str, CoverageCategory, str, str]] = [
     ("close > sma(close, period=-5)", CC.UNKNOWN_LOW_COVERAGE, "", ""),
     ("macd(close, PERIOD + 1)[0] > 0", CC.UNKNOWN_LOW_COVERAGE, "", ""),
     ("macd(close, fast=dynamic_fast)[0] > 0", CC.UNKNOWN_LOW_COVERAGE, "", ""),
-    ("close > bollinger_bands(close, 20, num_std=self.band_width)[0]", CC.UNKNOWN_LOW_COVERAGE, "", ""),
-    ("close > bollinger_bands(close, 20, num_std=0.1)[0]", CC.INDICATOR_FILTER_TOO_RESTRICTIVE, "", ""),
+    (
+        "close > bollinger_bands(close, 20, num_std=self.band_width)[0]",
+        CC.UNKNOWN_LOW_COVERAGE,
+        "",
+        "",
+    ),
+    (
+        "close > bollinger_bands(close, 20, num_std=0.1)[0]",
+        CC.INDICATOR_FILTER_TOO_RESTRICTIVE,
+        "",
+        "",
+    ),
     ("macd(close, 5, 10, 4)[0] > 0", CC.INDICATOR_FILTER_TOO_RESTRICTIVE, "", ""),
     ("atr(high, low, close, 14) > 0.5", CC.COVERAGE_OK, "", ""),
     ("atr() > 0.5", CC.COVERAGE_OK, "", ""),
@@ -59,7 +75,12 @@ _FLAT_CASES: list[tuple[str, CoverageCategory, str, str]] = [
     ("close > 0 and (volume < 0 or close < -1)", CC.INDICATOR_FILTER_TOO_RESTRICTIVE, "", ""),
     ("close > 0 and (volume > 0 or close < -1)", CC.COVERAGE_OK, "", ""),
     ("close > 0 and (self.custom_ok(bar) or close < -50)", CC.UNKNOWN_LOW_COVERAGE, "", ""),
-    ("close < sma(close, SMA_LOOKBACK) - 100", CC.INDICATOR_FILTER_TOO_RESTRICTIVE, "SMA_LOOKBACK = 5", ""),
+    (
+        "close < sma(close, SMA_LOOKBACK) - 100",
+        CC.INDICATOR_FILTER_TOO_RESTRICTIVE,
+        "SMA_LOOKBACK = 5",
+        "",
+    ),
     ("close > 50 or close > 1000", CC.COVERAGE_OK, "", ""),
     ("close < -10 or close > 1000", CC.INDICATOR_FILTER_TOO_RESTRICTIVE, "", ""),
     ("close > 50 or close > 1000 or close < -10", CC.COVERAGE_OK, "", ""),
@@ -76,7 +97,12 @@ _FLAT_CASES: list[tuple[str, CoverageCategory, str, str]] = [
         "",
         "",
     ),  # negative named threshold — inline local
-    ("close > bollinger_bands(close, 20, num_std=self.band_width)[0]", CC.UNKNOWN_LOW_COVERAGE, "", ""),
+    (
+        "close > bollinger_bands(close, 20, num_std=self.band_width)[0]",
+        CC.UNKNOWN_LOW_COVERAGE,
+        "",
+        "",
+    ),
     ("macd(close)[0] > ZERO_LINE", CC.INDICATOR_FILTER_TOO_RESTRICTIVE, "ZERO_LINE = 0", ""),
     (
         "LIMIT = 1\n\nclass S:\n    def on_bar(self, ctx, bar):\n        if close > 0 and LIMIT == 1:\n            pass",
@@ -95,7 +121,9 @@ _FLAT_CASES: list[tuple[str, CoverageCategory, str, str]] = [
         if "\n" not in pred  # only simple single-line predicates
     ],
 )
-def test_flat_ohlcv_predicate(predicate: str, expected: CoverageCategory, preamble: str, init: str) -> None:
+def test_flat_ohlcv_predicate(
+    predicate: str, expected: CoverageCategory, preamble: str, init: str
+) -> None:
     code = make_strategy(predicate, preamble=preamble, init=init)
     report = run_indicator_probe(strategy_code=code, market_data={"AAPL": flat_ohlcv()})
     assert report.coverage_category is expected
@@ -289,7 +317,12 @@ def test_empty_market_data_does_not_raise() -> None:
 
 def test_evaluator_failure_per_subcondition_does_not_raise() -> None:
     df = pd.DataFrame(
-        {"open": np.full(30, 100.0), "high": np.full(30, 101.0), "low": np.full(30, 99.0), "close": np.full(30, 100.0)},
+        {
+            "open": np.full(30, 100.0),
+            "high": np.full(30, 101.0),
+            "low": np.full(30, 99.0),
+            "close": np.full(30, 100.0),
+        },
         index=pd.date_range("2024-01-01", periods=30, freq="D"),
     )
     code = make_strategy("volume > 0")
@@ -316,7 +349,9 @@ def test_no_llm_calls_made() -> None:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _assert_pos_check(code: str, expected: CoverageCategory, present: set[str], absent: set[str]) -> None:
+def _assert_pos_check(
+    code: str, expected: CoverageCategory, present: set[str], absent: set[str]
+) -> None:
     report = run_indicator_probe(strategy_code=code, market_data={"AAPL": flat_ohlcv()})
     assert report.coverage_category is expected
     labels = {sc.label for sc in report.subconditions}
@@ -456,7 +491,9 @@ _BOOL_CASES = [
 
 
 @pytest.mark.parametrize(("body", "expected", "label", "has_hits"), _BOOL_CASES)
-def test_bool_and_name_residuals(body: str, expected: CoverageCategory, label: str | None, has_hits: bool) -> None:
+def test_bool_and_name_residuals(
+    body: str, expected: CoverageCategory, label: str | None, has_hits: bool
+) -> None:
     code = textwrap.dedent(f"""
         class S:
             def on_bar(self, ctx, bar):
@@ -642,7 +679,13 @@ def test_class_attribute_window_resolves(self=None) -> None:
     moves = np.array([+0.005, -0.005] * (n // 2))
     close = 100.0 * np.cumprod(1.0 + moves)
     df = pd.DataFrame(
-        {"open": close, "high": close * 1.005, "low": close * 0.995, "close": close, "volume": np.full(n, 1e6)},
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1e6),
+        },
         index=pd.date_range("2024-01-01", periods=n, freq="D"),
     )
     code_short = textwrap.dedent("""
@@ -763,7 +806,13 @@ def test_float_threshold_local_is_preserved() -> None:
     idx = pd.date_range("2024-01-01", periods=n, freq="D")
     close = np.array([90.0] * 15 + [110.0] * 15)
     df = pd.DataFrame(
-        {"open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": np.full(n, 1e6)},
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(n, 1e6),
+        },
         index=idx,
     )
     code = textwrap.dedent("""
@@ -784,7 +833,13 @@ def test_zero_valued_named_threshold_is_preserved() -> None:
     close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
     idx = pd.date_range("2024-01-01", periods=n, freq="D")
     df = pd.DataFrame(
-        {"open": close, "high": close * 1.005, "low": close * 0.995, "close": close, "volume": np.full(n, 1e6)},
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1e6),
+        },
         index=idx,
     )
     code = textwrap.dedent("""
@@ -834,7 +889,13 @@ def test_tuple_unpacked_stochastic_binds_hlc() -> None:
     closes = 100.0 * np.cumprod(1.0 + moves)
     idx = pd.date_range("2024-01-01", periods=n, freq="D")
     df = pd.DataFrame(
-        {"open": closes, "high": closes * 1.005, "low": closes * 0.995, "close": closes, "volume": np.full(n, 1e6)},
+        {
+            "open": closes,
+            "high": closes * 1.005,
+            "low": closes * 0.995,
+            "close": closes,
+            "volume": np.full(n, 1e6),
+        },
         index=idx,
     )
     code = textwrap.dedent("""
@@ -940,7 +1001,13 @@ def test_module_helper_function_local_does_not_shadow() -> None:
     close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
     idx = pd.date_range("2024-01-01", periods=n, freq="D")
     df = pd.DataFrame(
-        {"open": close, "high": close * 1.005, "low": close * 0.995, "close": close, "volume": np.full(n, 1e6)},
+        {
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": np.full(n, 1e6),
+        },
         index=idx,
     )
     code = textwrap.dedent("""
@@ -964,7 +1031,13 @@ def test_strategy_class_constant_overrides_module() -> None:
     close = np.array([100.0] * 15 + [110.0] * 15)
     idx = pd.date_range("2024-01-01", periods=n, freq="D")
     df = pd.DataFrame(
-        {"open": close, "high": close + 0.5, "low": close - 0.5, "close": close, "volume": np.full(n, 1e6)},
+        {
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.full(n, 1e6),
+        },
         index=idx,
     )
     code = textwrap.dedent("""
@@ -1199,7 +1272,9 @@ def test_warmup_check_restricted_to_gated_symbols() -> None:
     code = make_strategy('bar.symbol == "AAPL" and close > sma(close, 50)')
     aapl = flat_close_df(100.0, n=10)
     msft = flat_close_df(200.0, n=100)
-    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft}, warmup_bars_required=50)
+    report = run_indicator_probe(
+        strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft}, warmup_bars_required=50
+    )
     assert report.coverage_category is CC.INSUFFICIENT_BARS
     assert "AAPL" in (report.likely_blockers[0].evidence or "")
 
@@ -1208,7 +1283,9 @@ def test_warmup_check_unaffected_when_any_group_universal() -> None:
     code = make_strategy("close > sma(close, 50)")
     short = flat_close_df(100.0, n=10)
     long = flat_close_df(100.0, n=100)
-    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": short, "MSFT": long}, warmup_bars_required=50)
+    report = run_indicator_probe(
+        strategy_code=code, market_data={"AAPL": short, "MSFT": long}, warmup_bars_required=50
+    )
     assert report.coverage_category is not CC.INSUFFICIENT_BARS
 
 
@@ -1216,7 +1293,9 @@ def test_or_with_unrestricted_leg_treats_warmup_as_universal() -> None:
     code = make_strategy('bar.symbol == "AAPL" or close > 100')
     aapl = flat_close_df(100.0, n=10)
     msft = flat_close_df(200.0, n=100)
-    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft}, warmup_bars_required=50)
+    report = run_indicator_probe(
+        strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft}, warmup_bars_required=50
+    )
     assert report.coverage_category is not CC.INSUFFICIENT_BARS
 
 
@@ -1231,7 +1310,9 @@ def test_denylist_excludes_symbol_from_warmup_scoping() -> None:
                 if close > sma(close, 150):
                     pass
     """)
-    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft}, warmup_bars_required=150)
+    report = run_indicator_probe(
+        strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft}, warmup_bars_required=150
+    )
     assert report.coverage_category is CC.INSUFFICIENT_BARS
 
 
@@ -1289,7 +1370,8 @@ def test_symbol_gated_hit_rate_uses_matching_bars() -> None:
 def test_contradictory_symbol_gates_drop_group() -> None:
     code = make_strategy('bar.symbol == "AAPL" and bar.symbol == "MSFT" and close > 0')
     report = run_indicator_probe(
-        strategy_code=code, market_data={"AAPL": flat_ohlcv(n=20), "MSFT": flat_close_df(50.0, n=20)}
+        strategy_code=code,
+        market_data={"AAPL": flat_ohlcv(n=20), "MSFT": flat_close_df(50.0, n=20)},
     )
     assert report.coverage_category is CC.UNKNOWN_LOW_COVERAGE
     assert report.subconditions == []
@@ -1533,7 +1615,9 @@ _EARLY_RETURN_CASES = [
 
 
 @pytest.mark.parametrize(("code_text", "market", "expected"), _EARLY_RETURN_CASES)
-def test_early_return_symbol_guard(code_text: str, market: dict, expected: CoverageCategory) -> None:
+def test_early_return_symbol_guard(
+    code_text: str, market: dict, expected: CoverageCategory
+) -> None:
     code = textwrap.dedent(code_text)
     md = {sym: flat_close_df(val) for sym, val in market.items()}
     report = run_indicator_probe(strategy_code=code, market_data=md)
@@ -1574,7 +1658,9 @@ def test_positive_symbol_in_return_guard_is_denylist() -> None:
                 if close > 100:
                     pass
     """)
-    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": aapl, "GOOG": goog, "MSFT": msft})
+    report = run_indicator_probe(
+        strategy_code=code, market_data={"AAPL": aapl, "GOOG": goog, "MSFT": msft}
+    )
     assert report.coverage_category is CC.INDICATOR_FILTER_TOO_RESTRICTIVE
 
 
@@ -1606,7 +1692,9 @@ def test_or_group_with_unknown_leg_suppresses_conjunction_never_true() -> None:
                     if close < 50 or self.custom_ok(bar):
                         pass
     """)
-    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": flat_close_df(200.0, n=20)})
+    report = run_indicator_probe(
+        strategy_code=code, market_data={"AAPL": flat_close_df(200.0, n=20)}
+    )
     assert report.coverage_category is not CC.CONJUNCTION_NEVER_TRUE
 
 
@@ -1693,7 +1781,10 @@ def test_or_symbol_allowlist_inside_and_predicate() -> None:
     code = make_strategy('(bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100')
     md = {"AAPL": flat_close_df(50.0), "MSFT": flat_close_df(50.0), "TSLA": flat_close_df(200.0)}
     report = run_indicator_probe(strategy_code=code, market_data=md)
-    assert report.coverage_category in {CC.CONJUNCTION_NEVER_TRUE, CC.INDICATOR_FILTER_TOO_RESTRICTIVE}
+    assert report.coverage_category in {
+        CC.CONJUNCTION_NEVER_TRUE,
+        CC.INDICATOR_FILTER_TOO_RESTRICTIVE,
+    }
     assert report.coverage_category is not CC.COVERAGE_OK
 
 
