@@ -1,0 +1,78 @@
+name: Frontend CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "{{ node_version }}"
+      - run: "{{ install_command | yaml_escape }}"
+      - run: "{{ lint_command | yaml_escape }}"
+
+  build:
+    name: Build & Typecheck
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "{{ node_version }}"
+      - run: "{{ install_command | yaml_escape }}"
+      - run: "{{ build_command | yaml_escape }}"
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "{{ node_version }}"
+      - run: "{{ install_command | yaml_escape }}"
+      - run: "{{ test_command | yaml_escape }}"
+
+  {% if enable_sca %}
+  sca:
+    name: SCA (npm audit)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "{{ node_version }}"
+      - run: "{{ install_command | yaml_escape }}"
+      - run: "{{ package_manager | yaml_escape }} audit --json > npm-audit-report.json || true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: npm-audit-report.json
+  {% endif %}
+
+  {% if enable_secrets_scan %}
+  secrets:
+    name: Secrets scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ "{{" }} secrets.GITHUB_TOKEN {{ "}}" }}
+  {% endif %}
