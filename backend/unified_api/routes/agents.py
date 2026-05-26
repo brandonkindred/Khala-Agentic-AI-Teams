@@ -37,6 +37,7 @@ from agent_console import (
 )
 from agent_console.models import RunCreate
 from agent_provisioning_team.sandbox import (
+    DockerUnavailableError,
     SandboxStatus,
     acquire,
     note_activity,
@@ -156,7 +157,10 @@ async def invoke_agent(
 
     try:
         handle = await acquire(agent_id)
-    except Exception as exc:  # Docker/daemon/infra problems
+    except DockerUnavailableError as exc:
+        logger.error("Docker not available for sandbox %s: %s", agent_id, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
         logger.exception("sandbox acquire failed for %s", agent_id)
         raise HTTPException(
             status_code=503,

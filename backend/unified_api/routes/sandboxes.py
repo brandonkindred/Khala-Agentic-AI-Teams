@@ -19,6 +19,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from agent_provisioning_team.sandbox import (
+    DockerUnavailableError,
     SandboxHandle,
     SandboxMetrics,
     UnknownAgentError,
@@ -52,6 +53,8 @@ async def warm_sandbox(agent_id: str) -> SandboxHandle:
         return await acquire(agent_id)
     except UnknownAgentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DockerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/{agent_id}", response_model=SandboxHandle)

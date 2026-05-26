@@ -40,6 +40,7 @@ def client(tmp_path, monkeypatch) -> TestClient:
     lifecycle_mod.get_lifecycle.cache_clear()
     monkeypatch.setattr(lifecycle_mod, "get_lifecycle", lambda: lc)
     monkeypatch.setattr(lifecycle_mod, "_resolve_team", _fake_resolve_team)
+    monkeypatch.setattr(lifecycle_mod, "_check_docker_available", lambda: None)
 
     monkeypatch.setattr(provisioner_mod, "run_container", AsyncMock(return_value="abc123"))
     monkeypatch.setattr(provisioner_mod, "inspect_host_port", AsyncMock(return_value=55123))

@@ -7,6 +7,7 @@ a real Docker daemon.
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -44,6 +45,12 @@ def _patched_docker(*, container_id: str = "abc123", host_port: int = 55123, run
     assert on call counts without unpacking a tuple in every `with` block.
     """
     with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+                return_value=None,
+            )
+        )
         yield SimpleNamespace(
             run=stack.enter_context(
                 patch.object(
@@ -120,6 +127,28 @@ async def test_acquire_is_idempotent_when_already_warm(tmp_path: Path) -> None:
     assert first.status == SandboxStatus.WARM
     assert second.status == SandboxStatus.WARM
     assert second.container_id == first.container_id
+
+
+@pytest.mark.asyncio
+async def test_acquire_reuses_warm_handle_when_docker_check_would_fail(tmp_path: Path) -> None:
+    """A WARM sandbox should be reused even if the Docker daemon is temporarily
+    unavailable (e.g. live-restore). The preflight must not gate the fast path."""
+    from agent_provisioning_team.sandbox.lifecycle import DockerUnavailableError
+
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker(running=True):
+        await lc.acquire("blogging.planner")
+
+    with (
+        _patched_registry(),
+        patch(
+            "agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+            side_effect=DockerUnavailableError("daemon gone"),
+        ),
+        patch.object(provisioner_mod, "is_running", new=AsyncMock(return_value=True)),
+    ):
+        handle = await lc.acquire("blogging.planner")
+    assert handle.status == SandboxStatus.WARM
 
 
 @pytest.mark.asyncio
@@ -241,11 +270,164 @@ async def test_unknown_agent_raises_without_docker_call(tmp_path: Path) -> None:
             "agent_provisioning_team.sandbox.lifecycle._resolve_team",
             side_effect=UnknownAgentError("No agent manifest for 'ghost.agent'"),
         ),
+        patch(
+            "agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+            return_value=None,
+        ),
         patch.object(provisioner_mod, "run_container", new=AsyncMock()) as run_mock,
     ):
         with pytest.raises(UnknownAgentError):
             await lc.acquire("ghost.agent")
     run_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_acquire_raises_docker_unavailable_when_no_docker(tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox.lifecycle import DockerUnavailableError
+
+    lc = _lifecycle(tmp_path)
+    with (
+        _patched_registry(),
+        patch(
+            "agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+            side_effect=DockerUnavailableError("Docker daemon not found"),
+        ),
+        patch.object(provisioner_mod, "run_container", new=AsyncMock()) as run_mock,
+    ):
+        with pytest.raises(DockerUnavailableError, match="Docker daemon not found"):
+            await lc.acquire("blogging.planner")
+    run_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_acquire_propagates_docker_error_from_zombie_cleanup(tmp_path: Path) -> None:
+    """DockerError from stop_container should propagate — if the daemon is
+    unreachable for cleanup, provisioning would also fail."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker() as d:
+        d.stop.side_effect = provisioner_mod.DockerError("daemon unreachable")
+        with pytest.raises(provisioner_mod.DockerError, match="daemon unreachable"):
+            await lc.acquire("blogging.planner")
+
+
+@pytest.mark.asyncio
+async def test_acquire_continues_when_non_docker_cleanup_fails(tmp_path: Path) -> None:
+    """Non-DockerError from stop_container (e.g. unexpected OSError) should
+    log a warning and continue to provisioning."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker() as d:
+        d.stop.side_effect = OSError("unexpected")
+        handle = await lc.acquire("blogging.planner")
+    assert handle.status == SandboxStatus.WARM
+    d.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_acquire_returns_warm_handle_when_is_running_check_fails(tmp_path: Path) -> None:
+    """If is_running raises (transient daemon issue), return the cached warm
+    handle optimistically rather than tearing down a potentially healthy sandbox."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker():
+        first = await lc.acquire("blogging.planner")
+
+    with _patched_registry(), _patched_docker(container_id="new123", host_port=55999) as d2:
+        d2.running.side_effect = OSError("docker socket gone")
+        handle = await lc.acquire("blogging.planner")
+    assert handle.status == SandboxStatus.WARM
+    assert handle.container_id == first.container_id
+    d2.run.assert_not_awaited()
+
+
+def test_check_docker_available_honors_persisted_context(tmp_path: Path) -> None:
+    """_check_docker_available should pass when ~/.docker/config.json has a
+    non-default currentContext, even without DOCKER_HOST or the default socket."""
+    from agent_provisioning_team.sandbox.lifecycle import _check_docker_available
+
+    docker_dir = tmp_path / ".docker"
+    docker_dir.mkdir()
+    (docker_dir / "config.json").write_text(json.dumps({"currentContext": "remote-server"}))
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": ""}, clear=False),
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("pathlib.Path.exists", return_value=False),
+    ):
+        _check_docker_available()
+
+
+def test_check_docker_available_ignores_default_context(tmp_path: Path) -> None:
+    """A persisted context of 'default' should NOT skip the socket check."""
+    from agent_provisioning_team.sandbox.lifecycle import (
+        DockerUnavailableError,
+        _check_docker_available,
+    )
+
+    docker_dir = tmp_path / ".docker"
+    docker_dir.mkdir()
+    (docker_dir / "config.json").write_text(json.dumps({"currentContext": "default"}))
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": ""}, clear=False),
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("pathlib.Path.exists", return_value=False),
+    ):
+        with pytest.raises(DockerUnavailableError):
+            _check_docker_available()
+
+
+def test_check_docker_available_honors_docker_config_env(tmp_path: Path) -> None:
+    """DOCKER_CONFIG pointing to a custom dir with a non-default context
+    should skip the socket check."""
+    from agent_provisioning_team.sandbox.lifecycle import _check_docker_available
+
+    custom_dir = tmp_path / "custom-docker"
+    custom_dir.mkdir()
+    (custom_dir / "config.json").write_text(json.dumps({"currentContext": "remote-server"}))
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict(
+            "os.environ",
+            {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": str(custom_dir)},
+            clear=False,
+        ),
+        patch("pathlib.Path.exists", return_value=False),
+    ):
+        _check_docker_available()
+
+
+def test_check_docker_available_ignores_docker_context_default_env(tmp_path: Path) -> None:
+    """DOCKER_CONTEXT=default points to the local socket, so the socket check
+    must still fire — setting it should not bypass the fast-fail."""
+    from agent_provisioning_team.sandbox.lifecycle import (
+        DockerUnavailableError,
+        _check_docker_available,
+    )
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": "default"}, clear=False),
+        patch(
+            "agent_provisioning_team.sandbox.lifecycle._has_non_default_docker_context",
+            return_value=False,
+        ),
+        patch("pathlib.Path.exists", return_value=False),
+    ):
+        with pytest.raises(DockerUnavailableError):
+            _check_docker_available()
+
+
+def test_check_docker_available_passes_with_non_default_docker_context_env() -> None:
+    """DOCKER_CONTEXT set to a non-default value should skip the socket check."""
+    from agent_provisioning_team.sandbox.lifecycle import _check_docker_available
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": "remote-server"}, clear=False),
+    ):
+        _check_docker_available()
 
 
 def test_state_persists_across_lifecycle_instances(tmp_path: Path) -> None:

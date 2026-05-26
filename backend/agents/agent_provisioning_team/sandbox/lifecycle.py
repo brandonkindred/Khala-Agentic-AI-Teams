@@ -20,8 +20,11 @@ container per specialist agent.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
+import os
+import shutil
 import time
 from collections import Counter, deque
 from datetime import datetime
@@ -72,6 +75,53 @@ def _resolve_team(agent_id: str) -> str:
     return manifest.team
 
 
+class DockerUnavailableError(RuntimeError):
+    """Raised when the ``docker`` CLI is not installed or the daemon is unreachable."""
+
+
+def _has_non_default_docker_context() -> bool:
+    """Return True when the Docker config selects a non-default context.
+
+    Respects ``DOCKER_CONFIG`` (falls back to ``~/.docker``).
+    """
+    config_dir = Path(os.environ.get("DOCKER_CONFIG") or (Path.home() / ".docker"))
+    config_path = config_dir / "config.json"
+    try:
+        data = json.loads(config_path.read_text())
+        ctx = data.get("currentContext", "")
+        return bool(ctx and ctx != "default")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _check_docker_available() -> None:
+    """Fail fast with a clear message when docker is not usable.
+
+    Preconditions: none.
+    Postconditions: returns normally only when the ``docker`` binary is on
+    PATH and a Docker endpoint is reachable (DOCKER_HOST, DOCKER_CONTEXT,
+    a persisted active context in ~/.docker/config.json, or the default
+    /var/run/docker.sock).
+    """
+    if shutil.which("docker") is None:
+        raise DockerUnavailableError(
+            "Sandbox provisioning requires the 'docker' CLI, but it is not installed or not on PATH. "
+            "Install Docker or run the unified API on a host with Docker access."
+        )
+    docker_context = os.environ.get("DOCKER_CONTEXT", "")
+    if os.environ.get("DOCKER_HOST") or (docker_context and docker_context != "default"):
+        return
+    if _has_non_default_docker_context():
+        return
+    docker_sock = Path("/var/run/docker.sock")
+    if not docker_sock.exists():
+        raise DockerUnavailableError(
+            "Sandbox provisioning requires the Docker daemon, but /var/run/docker.sock is missing "
+            "and neither DOCKER_HOST nor DOCKER_CONTEXT is set. "
+            "Start the Docker daemon, set DOCKER_HOST, or bind-mount the socket into this container."
+        )
+
+
 class Lifecycle:
     """Per-process owner of agent-keyed sandboxes.
 
@@ -105,7 +155,18 @@ class Lifecycle:
         async with lock:
             existing = self._state.get(agent_id)
             if existing and existing.status == SandboxStatus.WARM and existing.container_id:
-                if await provisioner_mod.is_running(existing.container_id):
+                try:
+                    still_running = await provisioner_mod.is_running(existing.container_id)
+                except Exception:
+                    logger.warning(
+                        "Could not check container status for %s; returning cached warm handle",
+                        agent_id,
+                        exc_info=True,
+                    )
+                    existing.last_used_at = now()
+                    self._persist()
+                    return SandboxHandle.from_state(existing)
+                if still_running:
                     existing.last_used_at = now()
                     self._persist()
                     return SandboxHandle.from_state(existing)
@@ -115,13 +176,19 @@ class Lifecycle:
                     existing.container_id,
                 )
 
+            _check_docker_available()
+
             container_name = provisioner_mod.container_name_for(agent_id)
-            # Sweep any zombie container from a prior run. `docker rm -f` is
-            # idempotent against missing containers; timeouts are surfaced.
-            await provisioner_mod.stop_container(container_name)
-            # And any stale secrets file the previous sandbox may have left
-            # behind before the host process died — run_container will write
-            # a fresh one.
+            try:
+                await provisioner_mod.stop_container(container_name)
+            except provisioner_mod.DockerError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Zombie cleanup failed for %s; continuing to provision",
+                    container_name,
+                    exc_info=True,
+                )
             provisioner_mod.cleanup_secrets_file(container_name)
 
             logger.info("Provisioning sandbox for %s (container %s)", agent_id, container_name)
