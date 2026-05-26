@@ -159,11 +159,13 @@ class Lifecycle:
                     still_running = await provisioner_mod.is_running(existing.container_id)
                 except Exception:
                     logger.warning(
-                        "Could not check container status for %s; re-provisioning",
+                        "Could not check container status for %s; returning cached warm handle",
                         agent_id,
                         exc_info=True,
                     )
-                    still_running = False
+                    existing.last_used_at = now()
+                    self._persist()
+                    return SandboxHandle.from_state(existing)
                 if still_running:
                     existing.last_used_at = now()
                     self._persist()
@@ -179,6 +181,8 @@ class Lifecycle:
             container_name = provisioner_mod.container_name_for(agent_id)
             try:
                 await provisioner_mod.stop_container(container_name)
+            except provisioner_mod.DockerError:
+                raise
             except Exception:
                 logger.warning(
                     "Zombie cleanup failed for %s; continuing to provision",

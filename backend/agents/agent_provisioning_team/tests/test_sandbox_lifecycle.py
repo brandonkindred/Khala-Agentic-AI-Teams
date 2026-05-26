@@ -300,29 +300,42 @@ async def test_acquire_raises_docker_unavailable_when_no_docker(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_acquire_continues_when_zombie_cleanup_fails(tmp_path: Path) -> None:
-    """Pre-provision stop_container failure should not prevent provisioning."""
+async def test_acquire_propagates_docker_error_from_zombie_cleanup(tmp_path: Path) -> None:
+    """DockerError from stop_container should propagate — if the daemon is
+    unreachable for cleanup, provisioning would also fail."""
     lc = _lifecycle(tmp_path)
     with _patched_registry(), _patched_docker() as d:
-        d.stop.side_effect = provisioner_mod.DockerError("daemon blip")
+        d.stop.side_effect = provisioner_mod.DockerError("daemon unreachable")
+        with pytest.raises(provisioner_mod.DockerError, match="daemon unreachable"):
+            await lc.acquire("blogging.planner")
+
+
+@pytest.mark.asyncio
+async def test_acquire_continues_when_non_docker_cleanup_fails(tmp_path: Path) -> None:
+    """Non-DockerError from stop_container (e.g. unexpected OSError) should
+    log a warning and continue to provisioning."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker() as d:
+        d.stop.side_effect = OSError("unexpected")
         handle = await lc.acquire("blogging.planner")
     assert handle.status == SandboxStatus.WARM
     d.run.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_acquire_continues_when_is_running_check_fails(tmp_path: Path) -> None:
-    """If is_running raises (e.g. docker socket gone), treat as not running
-    and re-provision rather than aborting with 503."""
+async def test_acquire_returns_warm_handle_when_is_running_check_fails(tmp_path: Path) -> None:
+    """If is_running raises (transient daemon issue), return the cached warm
+    handle optimistically rather than tearing down a potentially healthy sandbox."""
     lc = _lifecycle(tmp_path)
     with _patched_registry(), _patched_docker():
-        await lc.acquire("blogging.planner")
+        first = await lc.acquire("blogging.planner")
 
     with _patched_registry(), _patched_docker(container_id="new123", host_port=55999) as d2:
         d2.running.side_effect = OSError("docker socket gone")
         handle = await lc.acquire("blogging.planner")
     assert handle.status == SandboxStatus.WARM
-    assert handle.container_id == "new123"
+    assert handle.container_id == first.container_id
+    d2.run.assert_not_awaited()
 
 
 def test_check_docker_available_honors_persisted_context(tmp_path: Path) -> None:
