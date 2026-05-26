@@ -181,6 +181,34 @@ def test_strip_accidental_json_suppresses_mission_wrapped_one_level_deep() -> No
     assert _strip_accidental_json(raw) == ""
 
 
+def test_strip_accidental_json_suppresses_mission_after_stray_open_brace() -> None:
+    """A stray ``{`` in prose before the real mission JSON must NOT
+    short-circuit the scanner. Regression for the reviewer's case: the
+    earlier implementation aborted the entire scan on the first unmatched
+    brace and let the later mission JSON leak through to the user."""
+    raw = (
+        'See { example pseudo-code, then the real payload: '
+        '{"company_name": "Acme", "target_audience": "devs"} done.'
+    )
+    assert _strip_accidental_json(raw) == ""
+
+
+def test_strip_accidental_json_handles_multiple_stray_open_braces() -> None:
+    """Several stray ``{`` characters before mission JSON must not stop the scan."""
+    raw = (
+        'Plenty { of { unbalanced { junk before '
+        '{"company_name": "Acme"} the payload'
+    )
+    assert _strip_accidental_json(raw) == ""
+
+
+def test_strip_accidental_json_preserves_prose_with_only_stray_open_braces() -> None:
+    """Stray ``{`` characters with NO subsequent mission JSON must pass
+    through unchanged — the scanner must terminate without false positives."""
+    prose = "Here are some braces: { { { but no real JSON object follows."
+    assert _strip_accidental_json(prose) == prose
+
+
 def test_strip_accidental_json_preserves_prose_with_unrelated_nested_json() -> None:
     """A JSON object embedded in prose that does NOT carry any mission keys
     (even nested) must pass through unchanged — the guard is mission-

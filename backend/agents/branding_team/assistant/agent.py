@@ -134,6 +134,13 @@ def _iter_balanced_json_objects(text: str):
     (which carries no mission keys). Brace counting handles arbitrary
     nesting and skips past each outer object so its interior is not
     re-scanned in isolation.
+
+    When an opening ``{`` cannot be balanced (no matching ``}`` exists in
+    the remaining text), the scanner advances by one character and keeps
+    looking — a stray ``{`` in prose ahead of a real mission JSON object
+    must not silently disqualify the rest of the reply from the leak
+    guard. The scanner still terminates (each step strictly advances
+    ``i``).
     """
     i = 0
     n = len(text)
@@ -153,7 +160,11 @@ def _iter_balanced_json_objects(text: str):
                     end = j + 1
                     break
         if end == -1:
-            return  # unbalanced from here on; no further objects possible
+            # Stray unmatched ``{`` — skip just this character and resume
+            # scanning. Returning here would let a stray brace upstream of
+            # a real mission JSON object suppress the entire guard.
+            i += 1
+            continue
         yield i, end
         i = end
 
