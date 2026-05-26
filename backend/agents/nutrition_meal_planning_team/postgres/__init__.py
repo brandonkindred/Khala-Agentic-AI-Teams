@@ -176,7 +176,10 @@ SCHEMA = TeamSchema(
             id              BIGSERIAL PRIMARY KEY,
             canonical_id    TEXT NOT NULL,
             nutrient        TEXT NOT NULL,
-            value_per_100g  DOUBLE PRECISION NOT NULL CHECK (value_per_100g >= 0),
+            value_per_100g  DOUBLE PRECISION NOT NULL
+                            CHECK (value_per_100g >= 0
+                                   AND value_per_100g != 'NaN'::float8
+                                   AND value_per_100g != 'Infinity'::float8),
             data_version    TEXT NOT NULL,
             source          TEXT NOT NULL DEFAULT 'fdc',
             is_override     BOOLEAN NOT NULL DEFAULT FALSE,
@@ -208,7 +211,10 @@ SCHEMA = TeamSchema(
             id              BIGSERIAL PRIMARY KEY,
             canonical_id    TEXT NOT NULL,
             unit            TEXT NOT NULL,
-            grams_per_unit  DOUBLE PRECISION NOT NULL CHECK (grams_per_unit > 0),
+            grams_per_unit  DOUBLE PRECISION NOT NULL
+                            CHECK (grams_per_unit > 0
+                                   AND grams_per_unit != 'NaN'::float8
+                                   AND grams_per_unit != 'Infinity'::float8),
             data_version    TEXT NOT NULL,
             source          TEXT NOT NULL DEFAULT 'fdc',
             created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -222,9 +228,12 @@ SCHEMA = TeamSchema(
             canonical_id        TEXT NOT NULL,
             method              TEXT NOT NULL,
             nutrient_retention  DOUBLE PRECISION NOT NULL
-                                CHECK (nutrient_retention > 0 AND nutrient_retention <= 1.0),
+                                CHECK (nutrient_retention > 0 AND nutrient_retention <= 1.0
+                                       AND nutrient_retention != 'NaN'::float8),
             mass_retention      DOUBLE PRECISION NOT NULL
-                                CHECK (mass_retention > 0),
+                                CHECK (mass_retention > 0
+                                       AND mass_retention != 'NaN'::float8
+                                       AND mass_retention != 'Infinity'::float8),
             data_version        TEXT NOT NULL,
             source              TEXT NOT NULL DEFAULT 'manual',
             created_at          TIMESTAMPTZ NOT NULL DEFAULT now()

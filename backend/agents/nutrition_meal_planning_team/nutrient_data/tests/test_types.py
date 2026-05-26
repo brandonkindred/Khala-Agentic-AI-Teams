@@ -74,6 +74,15 @@ class TestNutrientRow:
                 data_version="1.0.0",
             )
 
+    def test_rejects_non_enum_nutrient(self):
+        with pytest.raises(TypeError, match="Nutrient enum member"):
+            NutrientRow(
+                canonical_id="x",
+                nutrient="kcal",  # type: ignore[arg-type]
+                value_per_100g=100.0,
+                data_version="1.0.0",
+            )
+
 
 class TestNutrients:
     def test_get_existing(self):

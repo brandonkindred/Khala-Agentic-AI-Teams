@@ -36,6 +36,10 @@ class NutrientRow:
     is_override: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.nutrient, Nutrient):
+            raise TypeError(
+                f"nutrient must be a Nutrient enum member, got {type(self.nutrient).__name__}"
+            )
         if not math.isfinite(self.value_per_100g) or self.value_per_100g < 0:
             raise ValueError(f"value_per_100g must be finite and >= 0, got {self.value_per_100g}")
 
