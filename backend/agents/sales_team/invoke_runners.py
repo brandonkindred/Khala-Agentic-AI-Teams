@@ -80,7 +80,7 @@ def invoke_outreach(body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("OutreachRequest.prospects must not be empty")
     agent = OutreachAgent()
     case_studies = "\n".join(req.case_study_snippets)
-    all_variants: list = []
+    per_prospect_results: list[dict[str, Any]] = []
     for prospect in req.prospects:
         dossier = ProspectDossier(
             prospect_id=prospect.id or "unknown",
@@ -97,8 +97,12 @@ def invoke_outreach(body: dict[str, Any]) -> dict[str, Any]:
             case_studies=case_studies,
             company_context=req.company_context,
         )
-        all_variants.extend(result.model_dump(mode="json")["variants"])
-    return {"variants": all_variants}
+        per_prospect_results.append({
+            "prospect_id": prospect.id,
+            "prospect_company": prospect.company_name,
+            "variants": result.model_dump(mode="json")["variants"],
+        })
+    return {"results": per_prospect_results}
 
 
 def invoke_qualifier(body: dict[str, Any]) -> dict[str, Any]:
@@ -118,9 +122,7 @@ def invoke_nurture(body: dict[str, Any]) -> dict[str, Any]:
     if not req.prospects:
         raise ValueError("NurtureRequest.prospects must not be empty")
     agent = NurtureAgent()
-    all_touchpoints: list = []
-    all_triggers: list = []
-    all_recommendations: list = []
+    per_prospect_results: list[dict[str, Any]] = []
     for prospect in req.prospects:
         result = agent.build_sequence(
             prospect_json=prospect.model_dump_json(),
@@ -129,15 +131,10 @@ def invoke_nurture(body: dict[str, Any]) -> dict[str, Any]:
             duration_days=req.duration_days,
         )
         dumped = result.model_dump(mode="json")
-        all_touchpoints.extend(dumped.get("touchpoints", []))
-        all_triggers.extend(dumped.get("re_engagement_triggers", []))
-        all_recommendations.extend(dumped.get("content_recommendations", []))
-    return {
-        "duration_days": req.duration_days,
-        "touchpoints": all_touchpoints,
-        "re_engagement_triggers": all_triggers,
-        "content_recommendations": all_recommendations,
-    }
+        dumped["prospect_id"] = prospect.id
+        dumped["prospect_company"] = prospect.company_name
+        per_prospect_results.append(dumped)
+    return {"duration_days": req.duration_days, "results": per_prospect_results}
 
 
 def invoke_discovery(body: dict[str, Any]) -> dict[str, Any]:
