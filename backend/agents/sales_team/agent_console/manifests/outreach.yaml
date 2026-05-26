@@ -1,0 +1,19 @@
+schema_version: 1
+id: sales.outreach
+team: sales_team
+name: Sales — Outreach Specialist
+summary: Crafts hyper-personalized cold outreach sequences with citation-backed personalization.
+tags: [sales, outreach]
+inputs:
+  schema_ref: sales_team.models:OutreachRequest
+outputs:
+  schema_ref: sales_team.models:OutreachVariantList
+invoke:
+  kind: http
+  method: POST
+  path: /api/sales/outreach
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: sales_team.invoke_runners:invoke_outreach

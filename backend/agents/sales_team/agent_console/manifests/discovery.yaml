@@ -1,0 +1,15 @@
+schema_version: 1
+id: sales.discovery
+team: sales_team
+name: Sales — Discovery Specialist
+summary: Prepares SPIN-based discovery call guides and demo agendas.
+tags: [sales, discovery]
+inputs:
+  schema_ref: sales_team.models:DiscoveryRequest
+outputs:
+  schema_ref: sales_team.models:DiscoveryPlanBody
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: sales_team.invoke_runners:invoke_discovery

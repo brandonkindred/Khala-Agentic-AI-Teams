@@ -1,0 +1,19 @@
+schema_version: 1
+id: sales.coach
+team: sales_team
+name: Sales — Pipeline Coach
+summary: Reviews the pipeline and provides Gong-style coaching with deal risk signals.
+tags: [sales, coaching]
+inputs:
+  schema_ref: sales_team.models:CoachingRequest
+outputs:
+  schema_ref: sales_team.models:PipelineCoachingReport
+invoke:
+  kind: http
+  method: POST
+  path: /api/sales/coaching
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: sales_team.invoke_runners:invoke_coach

@@ -1,0 +1,19 @@
+schema_version: 1
+id: sales.proposal
+team: sales_team
+name: Sales — Proposal Writer
+summary: Generates ROI-driven sales proposals with Level-4 Value Creation methodology.
+tags: [sales, proposal]
+inputs:
+  schema_ref: sales_team.models:ProposalRequest
+outputs:
+  schema_ref: sales_team.models:SalesProposalBody
+invoke:
+  kind: http
+  method: POST
+  path: /api/sales/proposal
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: sales_team.invoke_runners:invoke_proposal

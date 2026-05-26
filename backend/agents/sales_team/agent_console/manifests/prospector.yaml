@@ -1,0 +1,19 @@
+schema_version: 1
+id: sales.prospector
+team: sales_team
+name: Sales — Prospector
+summary: Identifies and researches prospects matching the ICP using Fanatical Prospecting frameworks.
+tags: [sales, prospecting]
+inputs:
+  schema_ref: sales_team.models:ProspectingRequest
+outputs:
+  schema_ref: sales_team.models:ProspectList
+invoke:
+  kind: http
+  method: POST
+  path: /api/sales/prospect
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: sales_team.invoke_runners:invoke_prospector

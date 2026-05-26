@@ -1,0 +1,15 @@
+schema_version: 1
+id: sales.closer
+team: sales_team
+name: Sales — Closer
+summary: Develops closing strategies and objection handlers using Zig Ziglar techniques.
+tags: [sales, closing]
+inputs:
+  schema_ref: sales_team.models:CloserRequest
+outputs:
+  schema_ref: sales_team.models:ClosingStrategyBody
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: sales_team.invoke_runners:invoke_closer
