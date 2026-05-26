@@ -188,10 +188,12 @@ class AnswerBrandingQuestionRequest(BaseModel):
 class CreateConversationRequest(BaseModel):
     initial_message: Optional[str] = None
     brand_id: Optional[str] = None
+    skip_save: bool = False
 
 
 class SendMessageRequest(BaseModel):
     message: str = Field(..., min_length=1)
+    skip_save: bool = False
 
 
 class ConversationMessage(BaseModel):
@@ -960,7 +962,8 @@ def create_branding_conversation(
             conversation_store.update_output(conversation_id, output)
 
         # Auto-create a brand when the user provided enough info in the initial message.
-        if not brand_id and _mission_has_brand_name(updated_mission):
+        skip_save = req.skip_save
+        if not brand_id and not skip_save and _mission_has_brand_name(updated_mission):
             client_id = _ensure_default_client()
             brand = branding_store.create_brand(
                 client_id=client_id,
@@ -1037,7 +1040,7 @@ def send_branding_conversation_message(
         conversation_store.update_output(conversation_id, output)
 
     # Auto-create a brand when the user has provided at least a company name and conversation is unattached.
-    if not brand_id and _mission_has_brand_name(updated_mission):
+    if not brand_id and not payload.skip_save and _mission_has_brand_name(updated_mission):
         client_id = _ensure_default_client()
         brand = branding_store.create_brand(
             client_id=client_id,

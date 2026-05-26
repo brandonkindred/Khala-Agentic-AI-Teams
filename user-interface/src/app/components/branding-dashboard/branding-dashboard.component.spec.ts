@@ -77,11 +77,12 @@ describe('BrandingDashboardComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('should expose selectedTabIndex for two-way tab binding (not forced to 0)', () => {
-    expect(typeof component.selectedTabIndex).toBe('number');
-    component.selectedTabIndex = 1;
-    fixture.detectChanges();
-    expect(component.selectedTabIndex).toBe(1);
+  it('should expose editPanelOpen for toggling the edit details panel', () => {
+    expect(component.editPanelOpen).toBe(false);
+    component.toggleEditPanel();
+    expect(component.editPanelOpen).toBe(true);
+    component.toggleEditPanel();
+    expect(component.editPanelOpen).toBe(false);
   });
 
   it('loadClients should call api.listClients', () => {

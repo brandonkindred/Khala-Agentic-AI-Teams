@@ -1,6 +1,6 @@
 <h1>Branding Team</h1>
 <p class="page-intro">
-  <strong>Chat</strong> to explore ideas with the branding assistant. Use <strong>Form (Expert)</strong> to add brands, run the workflow, or request research and design assets.
+  <strong>Chat</strong> with the branding assistant to build your brand. Use <strong>Edit details</strong> to enter structured fields directly.
 </p>
 
 <div class="header-row">
@@ -14,7 +14,7 @@
   [selectedBrand]="selectedBrand"
   (clientChange)="onWorkspaceChange($event)"
   (brandChange)="onBrandChange($event)"
-  (newBrandRequest)="openFormTabForNewBrand()"
+  (newBrandRequest)="openEditPanelForNewBrand()"
   (reloadClients)="loadClients()"
   (addClient)="onAddClientFromSelector($event)"
 />
@@ -27,262 +27,114 @@
   <app-error-message [message]="error" />
 }
 
-<mat-tab-group
-  class="branding-tabs"
-  animationDuration="200ms"
-  [(selectedIndex)]="selectedTabIndex"
->
-  <mat-tab>
-    <ng-template mat-tab-label>
-      <mat-icon>chat</mat-icon>
-      <span class="tab-label">Chat</span>
-    </ng-template>
-    <div class="chat-view">
-      <div class="split-panel">
-        <div class="panel chat-panel">
-          <div class="chat-toolbar">
-            @if (!selectedBrand && conversationMission) {
-              <button mat-stroked-button color="primary" type="button" (click)="onOpenSaveAsBrand()" [disabled]="!canCreateBrandFromChat">
-                Save conversation as brand
-              </button>
-            }
-          </div>
-          <app-branding-chat
-            [conversationId]="activeConversationId"
-            [brandId]="selectedBrand?.id ?? null"
-            (stateChange)="onChatStateChange($event)"
-            (brandAutoCreated)="onBrandAutoCreated($event)"
-          />
-        </div>
-        <div class="panel preview-panel">
-          @if (isCompactLayout) {
-            <mat-expansion-panel [expanded]="true" class="preview-mobile-panel">
-              <mat-expansion-panel-header>
-                <mat-panel-title>Brand preview</mat-panel-title>
-                <mat-panel-description>On small screens, collapse to save space</mat-panel-description>
-              </mat-expansion-panel-header>
-              <app-brand-preview
-                [mission]="selectedBrand?.mission ?? conversationMission"
-                [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
-                (saveAsBrand)="onOpenSaveAsBrand()"
-                (selectPalette)="onSelectPalette($event)"
-              />
-            </mat-expansion-panel>
-          } @else {
-            <app-brand-preview
-              [mission]="selectedBrand?.mission ?? conversationMission"
-              [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
-              (saveAsBrand)="onOpenSaveAsBrand()"
-              (selectPalette)="onSelectPalette($event)"
-            />
-          }
-        </div>
+<div class="chat-toolbar-row">
+  @if (selectedBrand) {
+    <span class="split-button">
+      <button
+        mat-stroked-button
+        type="button"
+        class="split-button__primary"
+        (click)="runBrand(selectedBrand)"
+        [disabled]="isGenerating(selectedBrand.id)"
+      >
+        <mat-icon>bolt</mat-icon>
+        Generate
+      </button>
+      <button
+        mat-stroked-button
+        type="button"
+        class="split-button__menu"
+        [matMenuTriggerFor]="generateMenu"
+        [disabled]="isGenerating(selectedBrand.id)"
+        aria-label="Generate options"
+      >
+        <mat-icon>arrow_drop_down</mat-icon>
+      </button>
+    </span>
+    <mat-menu #generateMenu="matMenu" xPosition="before">
+      <button mat-menu-item type="button" (click)="runBrand(selectedBrand)">
+        <mat-icon>bolt</mat-icon>
+        <span class="menu-item__title">Run full pipeline</span>
+        <span class="menu-item__subtitle">Strategic core through governance (5-phase)</span>
+      </button>
+      <button mat-menu-item type="button" (click)="requestMarketResearchForBrand(selectedBrand)">
+        <mat-icon>travel_explore</mat-icon>
+        <span class="menu-item__title">Market research only</span>
+        <span class="menu-item__subtitle">Competitor and audience analysis</span>
+      </button>
+      <button mat-menu-item type="button" (click)="requestDesignAssetsForBrand(selectedBrand)">
+        <mat-icon>palette</mat-icon>
+        <span class="menu-item__title">Design assets only</span>
+        <span class="menu-item__subtitle">Palettes, typography, moodboards</span>
+      </button>
+    </mat-menu>
+    <app-brand-activity-strip
+      [brandId]="selectedBrand.id"
+      (open)="onActivityOpen($event)"
+      (retry)="onActivityRetry(selectedBrand, $event)"
+      (dismiss)="onActivityDismiss($event)"
+    />
+  }
+  <span class="toolbar-spacer"></span>
+  <button mat-stroked-button type="button" (click)="toggleEditPanel()" class="edit-details-btn">
+    <mat-icon>edit_note</mat-icon>
+    Edit details
+  </button>
+</div>
+
+<div class="chat-view">
+  <div class="split-panel">
+    <div class="panel chat-panel">
+      <div class="chat-toolbar">
+        @if (!selectedBrand && conversationMission) {
+          <button mat-stroked-button color="primary" type="button" (click)="onOpenSaveAsBrand()" [disabled]="!canCreateBrandFromChat">
+            Save conversation as brand
+          </button>
+        }
       </div>
+      <app-branding-chat
+        [conversationId]="activeConversationId"
+        [brandId]="selectedBrand?.id ?? null"
+        [skipSave]="skipSave"
+        (stateChange)="onChatStateChange($event)"
+        (brandAutoCreated)="onBrandAutoCreated($event)"
+      />
     </div>
-  </mat-tab>
-  <mat-tab>
-    <ng-template mat-tab-label>
-      <mat-icon>edit_note</mat-icon>
-      <span class="tab-label">Form (Expert)</span>
-    </ng-template>
-    <div class="form-view">
-      <mat-card>
-        <mat-card-header>
-          <mat-card-title>Your brands</mat-card-title>
-          <mat-card-subtitle>
-            One workspace, many brand identities. Create a brand here, then chat or run workflows on it.
-          </mat-card-subtitle>
-        </mat-card-header>
-        <mat-card-content>
-          @if (clientLoadError) {
-            <app-error-message [message]="clientLoadError" />
-          }
-          @if (selectedClient) {
-            <div class="brand-summary-row">
-              <span class="brand-count">{{ brands.length }} {{ brands.length === 1 ? 'brand' : 'brands' }}</span>
-              <button mat-stroked-button color="primary" type="button" (click)="showCreateBrand = !showCreateBrand">
-                {{ showCreateBrand ? 'Cancel' : 'New brand' }}
-              </button>
-            </div>
-            @if (showCreateBrand) {
-              <form [formGroup]="newBrandForm" (ngSubmit)="createBrand()" class="new-brand-form">
-                <mat-form-field appearance="outline">
-                  <mat-label>Company name</mat-label>
-                  <input matInput formControlName="company_name" />
-                </mat-form-field>
-                <mat-form-field appearance="outline">
-                  <mat-label>Company description</mat-label>
-                  <textarea matInput rows="2" formControlName="company_description"></textarea>
-                </mat-form-field>
-                <mat-form-field appearance="outline">
-                  <mat-label>Target audience</mat-label>
-                  <input matInput formControlName="target_audience" />
-                </mat-form-field>
-                <mat-form-field appearance="outline">
-                  <mat-label>Brand name (optional)</mat-label>
-                  <input matInput formControlName="name" />
-                </mat-form-field>
-                <button mat-raised-button color="primary" type="submit" [disabled]="brandFormBusy || newBrandForm.invalid">
-                  Create brand
-                </button>
-              </form>
-            }
-            @if (selectedBrand) {
-              <div
-                class="selected-brand-actions"
-                [class.brand-item--highlight]="highlightedBrandId === selectedBrand.id"
-                [attr.data-brand-id]="selectedBrand.id"
-              >
-                <div class="brand-item__header">
-                  <strong>{{ selectedBrand.name }}</strong>
-                  <span class="brand-meta">({{ selectedBrand.status }}, v{{ selectedBrand.version }})</span>
-                  <span class="brand-actions">
-                    <span class="split-button">
-                      <button
-                        mat-stroked-button
-                        type="button"
-                        class="split-button__primary"
-                        (click)="runBrand(selectedBrand)"
-                        [disabled]="isGenerating(selectedBrand.id)"
-                      >
-                        <mat-icon>bolt</mat-icon>
-                        Generate
-                      </button>
-                      <button
-                        mat-stroked-button
-                        type="button"
-                        class="split-button__menu"
-                        [matMenuTriggerFor]="generateMenu"
-                        [disabled]="isGenerating(selectedBrand.id)"
-                        aria-label="Generate options"
-                      >
-                        <mat-icon>arrow_drop_down</mat-icon>
-                      </button>
-                    </span>
-                    <mat-menu #generateMenu="matMenu" xPosition="before">
-                      <button mat-menu-item type="button" (click)="runBrand(selectedBrand)">
-                        <mat-icon>bolt</mat-icon>
-                        <span class="menu-item__title">Run full pipeline</span>
-                        <span class="menu-item__subtitle">Strategic core through governance (5-phase)</span>
-                      </button>
-                      <button mat-menu-item type="button" (click)="requestMarketResearchForBrand(selectedBrand)">
-                        <mat-icon>travel_explore</mat-icon>
-                        <span class="menu-item__title">Market research only</span>
-                        <span class="menu-item__subtitle">Competitor and audience analysis</span>
-                      </button>
-                      <button mat-menu-item type="button" (click)="requestDesignAssetsForBrand(selectedBrand)">
-                        <mat-icon>palette</mat-icon>
-                        <span class="menu-item__title">Design assets only</span>
-                        <span class="menu-item__subtitle">Palettes, typography, moodboards</span>
-                      </button>
-                    </mat-menu>
-                  </span>
-                </div>
-                <app-brand-activity-strip
-                  [brandId]="selectedBrand.id"
-                  (open)="onActivityOpen($event)"
-                  (retry)="onActivityRetry(selectedBrand, $event)"
-                  (dismiss)="onActivityDismiss($event)"
-                />
-              </div>
-            } @else if (brands.length > 0) {
-              <p class="hint">Select a brand from the context switcher above to run workflows.</p>
-            } @else if (!showCreateBrand) {
-              <p>No brands yet. Use <strong>New brand</strong> to add one.</p>
-            }
-            @if (brandActionMessage) {
-              <p class="action-message">{{ brandActionMessage }}</p>
-            }
-          } @else if (!loading && !clientLoadError) {
-            <p>Preparing workspace…</p>
-          }
-        </mat-card-content>
-      </mat-card>
-
-      <mat-card>
-        <mat-card-header>
-          <mat-card-title>Start Branding Session (one-off)</mat-card-title>
-          <mat-card-subtitle>No saved brand required. Answer open questions to refine output.</mat-card-subtitle>
-        </mat-card-header>
-        <mat-card-content>
-          <form [formGroup]="form" (ngSubmit)="startSession()" class="session-form">
-            <mat-form-field appearance="outline">
-              <mat-label>Company name</mat-label>
-              <input matInput formControlName="company_name" />
-            </mat-form-field>
-
-            <mat-form-field appearance="outline">
-              <mat-label>Company description</mat-label>
-              <textarea matInput rows="3" formControlName="company_description"></textarea>
-            </mat-form-field>
-
-            <mat-form-field appearance="outline">
-              <mat-label>Target audience</mat-label>
-              <input matInput formControlName="target_audience" />
-            </mat-form-field>
-
-            <mat-form-field appearance="outline">
-              <mat-label>Desired voice</mat-label>
-              <input matInput formControlName="desired_voice" />
-            </mat-form-field>
-
-            <mat-form-field appearance="outline">
-              <mat-label>Values (comma-separated)</mat-label>
-              <input matInput formControlName="values_csv" />
-            </mat-form-field>
-
-            <mat-form-field appearance="outline">
-              <mat-label>Differentiators (comma-separated)</mat-label>
-              <input matInput formControlName="differentiators_csv" />
-            </mat-form-field>
-
-            <button mat-raised-button color="primary" type="submit" [disabled]="loading">Start Session</button>
-          </form>
-        </mat-card-content>
-      </mat-card>
-
-      @if (session) {
-        <mat-card>
-          <mat-card-header>
-            <mat-card-title>Open Questions Feed</mat-card-title>
-            <mat-card-subtitle>Status: {{ session.status }}</mat-card-subtitle>
-          </mat-card-header>
-          <mat-card-content>
-            @if (session.open_questions.length === 0) {
-              <p>All open questions answered. Branding output is refreshed and ready.</p>
-            } @else {
-              @for (question of session.open_questions; track question.id) {
-                <div class="question-item">
-                  <h3>{{ question.question }}</h3>
-                  <p>{{ question.context }}</p>
-                  <mat-form-field appearance="outline" class="answer-field">
-                    <mat-label>Your answer</mat-label>
-                    <textarea matInput rows="2" [(ngModel)]="answers[question.id]" [ngModelOptions]="{standalone: true}"></textarea>
-                  </mat-form-field>
-                  <button mat-stroked-button color="primary" (click)="submitAnswer(question)">Submit Answer</button>
-                </div>
-              }
-            }
-          </mat-card-content>
-        </mat-card>
-
-        <mat-card>
-          <mat-card-header>
-            <mat-card-title>Updated Branding Guidelines</mat-card-title>
-          </mat-card-header>
-          <mat-card-content>
-            <p>{{ session.latest_output.mission_summary }}</p>
-            <ul>
-              @for (item of session.latest_output.brand_guidelines; track item) {
-                <li>{{ item }}</li>
-              }
-            </ul>
-          </mat-card-content>
-        </mat-card>
+    <div class="panel preview-panel">
+      @if (isCompactLayout) {
+        <mat-expansion-panel [expanded]="true" class="preview-mobile-panel">
+          <mat-expansion-panel-header>
+            <mat-panel-title>Brand preview</mat-panel-title>
+            <mat-panel-description>On small screens, collapse to save space</mat-panel-description>
+          </mat-expansion-panel-header>
+          <app-brand-preview
+            [mission]="selectedBrand?.mission ?? conversationMission"
+            [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
+            (saveAsBrand)="onOpenSaveAsBrand()"
+            (selectPalette)="onSelectPalette($event)"
+          />
+        </mat-expansion-panel>
+      } @else {
+        <app-brand-preview
+          [mission]="selectedBrand?.mission ?? conversationMission"
+          [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
+          (saveAsBrand)="onOpenSaveAsBrand()"
+          (selectPalette)="onSelectPalette($event)"
+        />
       }
     </div>
-  </mat-tab>
-</mat-tab-group>
+  </div>
+</div>
+
+<app-brand-edit-panel
+  [brand]="selectedBrand"
+  [mission]="conversationMission"
+  [open]="editPanelOpen"
+  [skipSave]="skipSave"
+  (closePanel)="editPanelOpen = false"
+  (missionUpdate)="onMissionUpdateFromPanel($event)"
+  (skipSaveChange)="onSkipSaveChange($event)"
+/>
 
 @if (showSaveAsBrandDialog) {
   <mat-card class="save-as-brand-overlay">

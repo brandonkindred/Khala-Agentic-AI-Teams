@@ -2,12 +2,11 @@ import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { BreakpointObserver } from '@angular/cdk/layout';
 import { FormBuilder, FormsModule, ReactiveFormsModule, Validators } from '@angular/forms';
-import { interval, Subscription, switchMap } from 'rxjs';
+import { Subscription } from 'rxjs';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatButtonModule } from '@angular/material/button';
-import { MatTabsModule } from '@angular/material/tabs';
 import { MatIconModule } from '@angular/material/icon';
 import { MatOption, MatSelectModule } from '@angular/material/select';
 import { MatMenuModule } from '@angular/material/menu';
@@ -22,16 +21,15 @@ import { BrandingChatComponent } from '../branding-chat/branding-chat.component'
 import { BrandPreviewComponent } from '../brand-preview/brand-preview.component';
 import { BrandActivityStripComponent } from '../brand-activity-strip/brand-activity-strip.component';
 import { BrandingContextSelectorComponent } from './branding-context-selector/branding-context-selector.component';
+import { BrandEditPanelComponent } from './brand-edit-panel/brand-edit-panel.component';
 import type {
   Brand,
   BrandActivity,
   BrandingMissionSnapshot,
-  BrandingQuestion,
-  BrandingSessionResponse,
   BrandingTeamOutput,
   Client,
   CreateBrandRequest,
-  RunBrandingTeamRequest,
+  UpdateBrandRequest,
 } from '../../models';
 import type { BrandingChatState } from '../branding-chat/branding-chat.component';
 
@@ -48,7 +46,6 @@ const WORKSPACE_CLIENT_NAME = 'My brands';
     MatFormFieldModule,
     MatInputModule,
     MatButtonModule,
-    MatTabsModule,
     MatIconModule,
     MatSelectModule,
     MatOption,
@@ -62,6 +59,7 @@ const WORKSPACE_CLIENT_NAME = 'My brands';
     BrandPreviewComponent,
     BrandActivityStripComponent,
     BrandingContextSelectorComponent,
+    BrandEditPanelComponent,
   ],
   templateUrl: './branding-dashboard.component.html',
   styleUrl: './branding-dashboard.component.scss',
@@ -85,14 +83,11 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   conversationLatestOutput: BrandingTeamOutput | null = null;
   activeConversationId: string | null = null;
 
-  /** True during initial workspace bootstrap or heavy session operations (full-page spinner). */
+  /** True during initial workspace bootstrap (full-page spinner). */
   loading = false;
-  /** True while creating a brand or running brand actions from the Form tab (button-level only). */
+  /** True while creating a brand (button-level only). */
   brandFormBusy = false;
   error: string | null = null;
-  session: BrandingSessionResponse | null = null;
-  answers: Record<string, string> = {};
-  private pollSub: Subscription | null = null;
 
   clients: Client[] = [];
   selectedClient: Client | null = null;
@@ -105,22 +100,16 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   /** Brief highlight on the row for a newly created brand (scroll target). */
   highlightedBrandId: string | null = null;
 
-  selectedTabIndex = 0;
+  /** Edit details side panel state. */
+  editPanelOpen = false;
+  /** When true, the chat does not auto-create brands on the backend. */
+  skipSave = false;
 
   newBrandForm = this.fb.nonNullable.group({
     company_name: ['', [Validators.required, Validators.minLength(2)]],
     company_description: ['', [Validators.required, Validators.minLength(10)]],
     target_audience: ['', [Validators.required, Validators.minLength(3)]],
     name: [''],
-  });
-
-  form = this.fb.nonNullable.group({
-    company_name: ['', [Validators.required, Validators.minLength(2)]],
-    company_description: ['', [Validators.required, Validators.minLength(10)]],
-    target_audience: ['', [Validators.required, Validators.minLength(3)]],
-    desired_voice: ['clear, confident, human', [Validators.required]],
-    values_csv: [''],
-    differentiators_csv: [''],
   });
 
   healthCheck = (): ReturnType<BrandingApiService['health']> => this.api.health();
@@ -133,13 +122,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.syncQueryParams();
   }
 
-  /**
-   * Handle a palette selection click from the brand preview. Optimistically
-   * updates the local mission so the UI reflects the choice immediately.
-   * TODO(#279): send the selection through the chat assistant so the backend
-   * persists it; the current palette-selection path runs via conversational
-   * intent rather than a dedicated REST endpoint.
-   */
   onSelectPalette(index: number): void {
     if (this.conversationMission) {
       this.conversationMission = { ...this.conversationMission, selected_palette_index: index };
@@ -150,8 +132,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         mission: { ...this.selectedBrand.mission, selected_palette_index: index },
       };
       this.selectedBrand = updated;
-      // Also patch `brands` so syncBrandPreviewFromSelection() doesn't
-      // rehydrate selectedBrand from a stale entry and revert the choice.
       this.brands = this.brands.map((b) => (b.id === updated.id ? updated : b));
     }
   }
@@ -270,7 +250,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.saveToAgencyError = null;
     this.api.createBrand(clientId, request).subscribe({
       next: (brand) => {
-        // Switch to the brand's conversation (existing chat is now attached).
         this.activeConversationId = brand.conversation_id ?? null;
         this.api.runBrand(clientId, brand.id).subscribe({
           next: () => {
@@ -317,10 +296,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
-  /**
-   * Ensure a single implicit workspace client exists, then select it and load brands.
-   * Users never manage "clients"; the API still nests brands under one client row.
-   */
   ensureWorkspaceClient(): void {
     this.clientLoadError = null;
     this.loading = true;
@@ -405,19 +380,12 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
-  /**
-   * When brands load and none selected, prefer the last item as "most recently created"
-   * (typical API ordering). Keeps chat scoped without asking the user to pick first.
-   *
-   * If query params specify a brand/conversation, restore those first.
-   */
   private applyDefaultBrandSelection(): void {
     if (this.brands.length === 0) {
       this.selectedBrand = null;
       return;
     }
 
-    // Restore from URL query params on first load.
     if (this.pendingBrandId) {
       const match = this.brands.find((b) => b.id === this.pendingBrandId);
       if (match) {
@@ -442,11 +410,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     }
   }
 
-  /**
-   * Select a brand and try to resume the most recent conversation for it.
-   * Falls back to creating a new conversation if none exist.
-   */
-  /** Select a brand and open its single permanent conversation. */
   private resumeOrStartBrand(brand: Brand): void {
     this.selectedBrand = brand;
     this.conversationMission = brand.mission;
@@ -459,14 +422,13 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.resumeOrStartBrand(brand);
   }
 
-  openFormTabForNewBrand(): void {
-    this.selectedTabIndex = 1;
-    this.showCreateBrand = true;
+  toggleEditPanel(): void {
+    this.editPanelOpen = !this.editPanelOpen;
   }
 
-  private scrollBrandRowIntoView(brandId: string): void {
-    const el = document.querySelector(`[data-brand-id="${brandId}"]`);
-    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  openEditPanelForNewBrand(): void {
+    this.editPanelOpen = true;
+    this.showCreateBrand = true;
   }
 
   get canCreateBrandFromChat(): boolean {
@@ -482,7 +444,62 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.syncQueryParams();
   }
 
+  /** Handle mission field changes from the edit details panel. */
+  onMissionUpdateFromPanel(patch: Partial<BrandingMissionSnapshot>): void {
+    if (this.conversationMission) {
+      this.conversationMission = { ...this.conversationMission, ...patch };
+    } else {
+      this.conversationMission = {
+        company_name: '',
+        company_description: '',
+        target_audience: '',
+        ...patch,
+      } as BrandingMissionSnapshot;
+    }
+    if (this.selectedBrand && this.selectedClient) {
+      const updated: Brand = {
+        ...this.selectedBrand,
+        mission: { ...this.selectedBrand.mission, ...patch },
+      };
+      this.selectedBrand = updated;
+      this.brands = this.brands.map((b) => (b.id === updated.id ? updated : b));
+      const req: UpdateBrandRequest = {};
+      if (patch.company_name !== undefined) req.company_name = patch.company_name;
+      if (patch.company_description !== undefined) req.company_description = patch.company_description;
+      if (patch.target_audience !== undefined) req.target_audience = patch.target_audience;
+      if (patch.desired_voice !== undefined) req.desired_voice = patch.desired_voice;
+      if (patch.values !== undefined) req.values = patch.values;
+      if (patch.differentiators !== undefined) req.differentiators = patch.differentiators;
+      this.api.updateBrand(this.selectedClient.id, this.selectedBrand.id, req).subscribe({
+        next: (refreshed) => {
+          this.brands = this.brands.map((b) => (b.id === refreshed.id ? refreshed : b));
+          if (this.selectedBrand?.id === refreshed.id) {
+            this.selectedBrand = refreshed;
+          }
+        },
+        error: (err) => {
+          this.snackBar.open(
+            err?.error?.detail ?? err?.message ?? 'Failed to update brand',
+            'Dismiss',
+            { duration: 5000 },
+          );
+        },
+      });
+    }
+    this.editPanelOpen = false;
+  }
 
+  /** Handle the "Don't save this brand" toggle from the edit panel. */
+  onSkipSaveChange(skip: boolean): void {
+    this.skipSave = skip;
+    if (skip) {
+      this.selectedBrand = null;
+      this.activeConversationId = null;
+      this.conversationMission = null;
+      this.conversationLatestOutput = null;
+      this.syncQueryParams();
+    }
+  }
 
   private syncBrandPreviewFromSelection(): void {
     if (!this.selectedBrand) return;
@@ -535,16 +552,12 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
           this.highlightedBrandId = null;
         }, 2500);
         this.resumeOrStartBrand(brand);
-        this.selectedTabIndex = 0;
-        const ref = this.snackBar.open(
-          `Brand “${brand.name}” created. Chat is scoped to this brand.`,
-          'View in Form',
+        this.editPanelOpen = false;
+        this.snackBar.open(
+          `Brand "${brand.name}" created. Chat is scoped to this brand.`,
+          'Dismiss',
           { duration: 8000 }
         );
-        ref.onAction().subscribe(() => {
-          this.selectedTabIndex = 1;
-          setTimeout(() => this.scrollBrandRowIntoView(brand.id), 150);
-        });
       },
       error: (err) => {
         this.error = err?.error?.detail ?? err?.message ?? 'Failed to create brand';
@@ -553,11 +566,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
-  /**
-   * True when this brand currently has a running or queued activity of any
-   * kind. Disables the split-button so users can't double-fire pipelines for
-   * the same brand.
-   */
   isGenerating(brandId: string): boolean {
     return this.activityStore
       .snapshot()
@@ -625,11 +633,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
-  /**
-   * Subscribe to `observeJob` and mirror each status poll onto the matching
-   * activity chip. On terminal success, refresh the brand so the preview panel
-   * reflects the new output.
-   */
   private trackRunActivity(clientId: string, brand: Brand, activityId: string, jobId: string): void {
     this.activityPolls.get(activityId)?.unsubscribe();
     const sub = this.api.observeJob(jobId).subscribe({
@@ -648,7 +651,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
                 `Brand "${brand.name}" run completed.`,
                 'View',
                 { duration: 5000 }
-              ).onAction().subscribe(() => this.openActivityArtifacts(brand.id));
+              );
             },
           });
         } else if (status.status === 'failed' || status.status === 'cancelled') {
@@ -680,7 +683,10 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   }
 
   onActivityOpen(activity: BrandActivity): void {
-    this.openActivityArtifacts(activity.brandId);
+    const brand = this.brands.find((b) => b.id === activity.brandId);
+    if (brand) {
+      this.resumeOrStartBrand(brand);
+    }
   }
 
   onActivityRetry(brand: Brand, activity: BrandActivity): void {
@@ -702,23 +708,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.activityStore.remove(activity.id);
   }
 
-  /**
-   * Jump to the brand preview. Today this selects the brand and switches to
-   * the Chat tab (which hosts the preview panel) — precise per-phase anchoring
-   * will arrive with the phase stepper in #277.
-   */
-  private openActivityArtifacts(brandId: string): void {
-    const brand = this.brands.find((b) => b.id === brandId);
-    if (brand) {
-      this.resumeOrStartBrand(brand);
-    }
-    this.selectedTabIndex = 0;
-  }
-
-  /**
-   * Fetch in-flight jobs for the current workspace and seed the activity
-   * strip so a page reload mid-run does not hide the chip.
-   */
   private hydrateRunningJobs(): void {
     if (!this.brands.length) return;
     const knownBrandIds = new Set(this.brands.map((b) => b.id));
@@ -751,84 +740,10 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.pollSub?.unsubscribe();
     this.layoutSub?.unsubscribe();
     for (const sub of this.activityPolls.values()) {
       sub.unsubscribe();
     }
     this.activityPolls.clear();
-  }
-
-  startSession(): void {
-    if (this.form.invalid) {
-      this.form.markAllAsTouched();
-      return;
-    }
-
-    const raw = this.form.getRawValue();
-    const request: RunBrandingTeamRequest = {
-      company_name: raw.company_name,
-      company_description: raw.company_description,
-      target_audience: raw.target_audience,
-      desired_voice: raw.desired_voice,
-      values: raw.values_csv.split(',').map((v) => v.trim()).filter((v) => !!v),
-      differentiators: raw.differentiators_csv.split(',').map((v) => v.trim()).filter((v) => !!v),
-    };
-
-    this.loading = true;
-    this.error = null;
-    this.api.createSession(request).subscribe({
-      next: (res) => {
-        this.session = res;
-        this.loading = false;
-        this.startPolling();
-      },
-      error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to start branding session';
-        this.loading = false;
-      },
-    });
-  }
-
-  submitAnswer(question: BrandingQuestion): void {
-    if (!this.session) return;
-    const answer = (this.answers[question.id] ?? '').trim();
-    if (!answer) return;
-
-    this.loading = true;
-    this.error = null;
-    this.api.answerQuestion(this.session.session_id, question.id, answer).subscribe({
-      next: (res) => {
-        this.session = res;
-        this.answers[question.id] = '';
-        this.loading = false;
-      },
-      error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to submit answer';
-        this.loading = false;
-      },
-    });
-  }
-
-  private startPolling(): void {
-    this.pollSub?.unsubscribe();
-    if (!this.session?.session_id) {
-      return;
-    }
-    this.pollSub = interval(120000)
-      .pipe(switchMap(() => this.api.getSession(this.session!.session_id)))
-      .subscribe({
-        next: (res) => {
-          this.session = res;
-          if (res.open_questions.length === 0) {
-            this.pollSub?.unsubscribe();
-            this.pollSub = null;
-          }
-        },
-        error: () => {
-          this.pollSub?.unsubscribe();
-          this.pollSub = null;
-        },
-      });
   }
 }
