@@ -331,12 +331,17 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
   // openFormTabForNewBrand / startFreshConversation / canCreateBrandFromChat
   // ---------------------------------------------------------------------
 
-  it('openEditPanelForNewBrand clears selectedBrand, opens panel, and sets create flag', async () => {
+  it('openEditPanelForNewBrand clears brand and conversation state, opens panel', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
     component.selectedBrand = makeBrand('b1');
+    component.activeConversationId = 'conv-b1';
+    component.conversationMission = { company_name: 'C' } as BrandingMissionSnapshot;
     component.openEditPanelForNewBrand();
     expect(component.selectedBrand).toBeNull();
+    expect(component.activeConversationId).toBeNull();
+    expect(component.conversationMission).toBeNull();
+    expect(component.conversationLatestOutput).toBeNull();
     expect(component.editPanelOpen).toBe(true);
     expect(component.showCreateBrand).toBe(true);
   });

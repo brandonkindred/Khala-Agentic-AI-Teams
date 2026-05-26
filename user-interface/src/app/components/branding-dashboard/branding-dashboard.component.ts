@@ -428,6 +428,9 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
 
   openEditPanelForNewBrand(): void {
     this.selectedBrand = null;
+    this.activeConversationId = null;
+    this.conversationMission = null;
+    this.conversationLatestOutput = null;
     this.editPanelOpen = true;
     this.showCreateBrand = true;
   }
@@ -650,7 +653,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
               }
               this.snackBar.open(
                 `Brand "${brand.name}" run completed.`,
-                'View',
+                'Dismiss',
                 { duration: 5000 }
               );
             },
