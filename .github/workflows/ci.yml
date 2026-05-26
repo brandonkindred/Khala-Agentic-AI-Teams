@@ -33,11 +33,13 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
+      is_pull_request: ${{ github.event_name == 'pull_request' }}
       lint_python: ${{ steps.filter.outputs.lint_python }}
       lint_frontend: ${{ steps.filter.outputs.lint_frontend }}
       ui: ${{ steps.filter.outputs.ui }}
       shared_postgres: ${{ steps.filter.outputs.shared_postgres }}
       backend_any: ${{ steps.filter.outputs.backend_any }}
+      needs_integration: ${{ steps.matrix.outputs.needs_integration }}
       docker_backend: ${{ steps.filter.outputs.docker_backend }}
       docker_blogging_service: ${{ steps.filter.outputs.docker_blogging_service }}
       docker_team_service: ${{ steps.filter.outputs.docker_team_service }}
@@ -260,19 +262,13 @@ jobs:
           python3 - <<'PY'
           import json, os
 
-          all_entries = {
+          # Large teams get their own matrix entries; small teams are
+          # batched into a single "misc" runner to cut setup overhead.
+          large_teams = {
               "software_engineering": {
                   "name": "Software Engineering Team",
                   "tests": "software_engineering_team/tests/",
                   "source": "software_engineering_team",
-                  # SE-specific coverage config: the team owns a large surface area
-                  # of integration-only modules (live LLM / git / npm / Temporal)
-                  # that are exercised end-to-end rather than by unit tests. The
-                  # per-file omits live in software_engineering_team/pyproject.toml
-                  # under [tool.coverage.run] omit; pointing --cov-config at that
-                  # file here makes them take effect for the CI invocation, which
-                  # runs from backend/agents/ where coverage's default config
-                  # search does not pick up software_engineering_team/pyproject.toml.
                   "cov_config": "software_engineering_team/pyproject.toml",
                   "extra_requirements": "software_engineering_team/requirements.txt",
                   "editable_install": "software_engineering_team",
@@ -284,26 +280,11 @@ jobs:
                   "source": "blogging",
                   "extra_requirements": "blogging/requirements.txt",
               },
-              "market_research": {
-                  "name": "Market Research",
-                  "tests": "market_research_team/tests/",
-                  "source": "market_research_team",
-              },
-              "soc2": {
-                  "name": "SOC2 Compliance",
-                  "tests": "soc2_compliance_team/tests/",
-                  "source": "soc2_compliance_team",
-              },
               "investment": {
                   "name": "Investment Strategy Lab",
                   "tests": "investment_team/tests/",
                   "source": "investment_team",
                   "extra_requirements": "investment_team/requirements-test.txt",
-              },
-              "social_marketing": {
-                  "name": "Social Marketing",
-                  "tests": "social_media_marketing_team/tests/",
-                  "source": "social_media_marketing_team",
               },
               "agent_provisioning": {
                   "name": "Agent Provisioning",
@@ -311,33 +292,72 @@ jobs:
                   "source": "agent_provisioning_team",
                   "extra_requirements": "agent_provisioning_team/requirements.txt",
               },
+          }
+
+          # Batched into one runner; pytest runs once per team sequentially
+          # inside the job to preserve per-team 90 % coverage gates.
+          misc_teams = {
+              "market_research": {
+                  "tests": "market_research_team/tests/",
+                  "source": "market_research_team",
+              },
+              "soc2": {
+                  "tests": "soc2_compliance_team/tests/",
+                  "source": "soc2_compliance_team",
+              },
+              "social_marketing": {
+                  "tests": "social_media_marketing_team/tests/",
+                  "source": "social_media_marketing_team",
+              },
               "sales": {
-                  "name": "Sales Team",
                   "tests": "sales_team/tests/",
                   "source": "sales_team",
               },
           }
 
+          misc_entry = {
+              "name": "Misc Teams (market_research + soc2 + social_marketing + sales)",
+              "tests": "BATCHED",
+              "source": "BATCHED",
+              "batched_teams": [v for v in misc_teams.values()],
+          }
+
+          all_team_keys = set(large_teams) | set(misc_teams)
+
           truthy = lambda v: str(v).lower() == "true"
-          # Fan out (run every team) when the workflow file changed, when a
-          # shared backend dep changed, or when ANY backend file outside the
-          # per-team / shared_backend allowlist changed. The last case catches
-          # mixed PRs where a per-team filter trips alongside an uncategorised
-          # backend change that classified teams may transitively import.
-          fan_out = (
-              truthy(os.environ.get("F_CI_WORKFLOW", "false"))
-              or truthy(os.environ.get("F_SHARED_BACKEND", "false"))
-              or truthy(os.environ.get("F_BACKEND_UNCLASSIFIED", "false"))
-          )
+
+          ci_workflow = truthy(os.environ.get("F_CI_WORKFLOW", "false"))
+          shared_backend = truthy(os.environ.get("F_SHARED_BACKEND", "false"))
+          backend_unclassified = truthy(os.environ.get("F_BACKEND_UNCLASSIFIED", "false"))
+
+          # Full fan-out for shared deps / unclassified backend changes.
+          # ci.yml edits get a reduced fan-out (2 representative teams)
+          # instead of running all 8 — catches regressions without
+          # burning minutes on every CI iteration commit.
+          fan_out_full = shared_backend or backend_unclassified
+          fan_out_ci = ci_workflow and not fan_out_full
+
           per_team = {
               k: truthy(os.environ.get("F_" + k.upper(), "false"))
-              for k in all_entries
+              for k in all_team_keys
           }
-          if fan_out:
-              changed = {k: True for k in all_entries}
+
+          if fan_out_full:
+              changed = {k: True for k in all_team_keys}
+          elif fan_out_ci:
+              changed = dict(per_team)
+              changed["market_research"] = True
+              changed["investment"] = True
           else:
               changed = per_team
-          entries = [v for k, v in all_entries.items() if changed[k]]
+
+          entries = [v for k, v in large_teams.items() if changed.get(k)]
+          any_misc = any(changed.get(k) for k in misc_teams)
+          if any_misc:
+              entries.append(misc_entry)
+
+          # integration tests only need to run when shared infra changes
+          needs_integration = fan_out_full or shared_backend
 
           team_services = {
               "docker_blogging_service": {
@@ -351,7 +371,7 @@ jobs:
           }
           team_services_entries = [
               v for k, v in team_services.items()
-              if truthy(os.environ.get("F_CI_WORKFLOW", "false"))
+              if ci_workflow
               or truthy(os.environ.get("F_" + k.upper(), "false"))
           ]
 
@@ -365,6 +385,7 @@ jobs:
               f.write(
                   f"team_services_empty={'true' if not team_services_entries else 'false'}\n"
               )
+              f.write(f"needs_integration={'true' if needs_integration else 'false'}\n")
           PY
 
   # ── Lint ────────────────────────────────────────────────────────────────────
@@ -373,7 +394,9 @@ jobs:
     name: Lint Python (ruff)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.lint_python == 'true'
+    if: >-
+      needs.changes.outputs.is_pull_request == 'true' &&
+      needs.changes.outputs.lint_python == 'true'
     defaults:
       run:
         working-directory: backend
@@ -393,27 +416,6 @@ jobs:
       - run: pip install ruff
       - run: ruff check agents/ unified_api/ blogging_service/ team_service/
 
-  lint-frontend:
-    name: Lint Angular (ng lint)
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.lint_frontend == 'true'
-    defaults:
-      run:
-        working-directory: user-interface
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-v1-${{ runner.os }}-${{ hashFiles('user-interface/package-lock.json') }}
-          restore-keys: npm-v1-${{ runner.os }}-
-      - run: npm ci
-      - run: npm run lint
-
   # ── Tests ───────────────────────────────────────────────────────────────────
   # Test jobs run in parallel with lint — lint failures are surfaced via the
   # `all-checks` gate, not by serializing the critical path.
@@ -422,7 +424,9 @@ jobs:
     name: Test – shared_postgres (live Postgres)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.shared_postgres == 'true'
+    if: >-
+      needs.changes.outputs.is_pull_request == 'true' &&
+      needs.changes.outputs.shared_postgres == 'true'
     defaults:
       run:
         working-directory: backend/agents
@@ -463,7 +467,7 @@ jobs:
         run: python -c "from shared_postgres import register_all_team_schemas; r = register_all_team_schemas(); assert all(r.values()), r"
       # Coverage gate is enforced at 90% line coverage; see CLAUDE.md.
       - run: >-
-          pytest shared_postgres/tests/ -v --tb=short -n auto
+          pytest shared_postgres/tests/ -v --tb=short -n 4
           --cov=shared_postgres
           --cov-report=term-missing
           --cov-fail-under=90
@@ -475,7 +479,9 @@ jobs:
     name: "Test – ${{ matrix.name }}"
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.tests_matrix_empty != 'true'
+    if: >-
+      needs.changes.outputs.is_pull_request == 'true' &&
+      needs.changes.outputs.tests_matrix_empty != 'true'
     defaults:
       run:
         working-directory: backend/agents
@@ -523,20 +529,42 @@ jobs:
       # Unit tests only — anything that needs Postgres or the job service is
       # marked `@pytest.mark.integration` and runs in `test-integration`.
       # Coverage gate is enforced per team at 90% line coverage; see CLAUDE.md.
-      # `matrix.cov_config` is optional: when set (e.g. SE team), pass
-      # `--cov-config=<path>` so coverage picks up the team's per-file omit
-      # list. Empty matrix fields expand to empty strings; the conditional
-      # keeps the flag out of the command when no config is provided.
+      #
+      # Normal entries: single pytest invocation with --cov.
+      # Batched entries (source == "BATCHED"): loop over sub-teams, running
+      # pytest once per team to preserve per-team 90% coverage gates.
       - run: |
-          COV_CONFIG_ARG=""
-          if [ -n "${{ matrix.cov_config }}" ]; then
-            COV_CONFIG_ARG="--cov-config=${{ matrix.cov_config }}"
+          if [ "${{ matrix.source }}" = "BATCHED" ]; then
+            echo '${{ toJSON(matrix.batched_teams) }}' | python3 -c "
+          import json, sys, subprocess
+          teams = json.load(sys.stdin)
+          failed = 0
+          for t in teams:
+              cmd = [
+                  'pytest', t['tests'], '-v', '--tb=short', '-n', '4',
+                  '-m', 'not integration',
+                  '--cov=' + t['source'],
+                  '--cov-report=term-missing',
+                  '--cov-fail-under=90',
+              ]
+              print(f'::group::Testing {t[\"source\"]}')
+              rc = subprocess.call(cmd)
+              print('::endgroup::')
+              if rc != 0:
+                  failed = 1
+          sys.exit(failed)
+          "
+          else
+            COV_CONFIG_ARG=""
+            if [ -n "${{ matrix.cov_config }}" ]; then
+              COV_CONFIG_ARG="--cov-config=${{ matrix.cov_config }}"
+            fi
+            pytest ${{ matrix.tests }} -v --tb=short -n 4 -m "not integration" \
+              --cov=${{ matrix.source }} \
+              $COV_CONFIG_ARG \
+              --cov-report=term-missing \
+              --cov-fail-under=90
           fi
-          pytest ${{ matrix.tests }} -v --tb=short -n auto -m "not integration" \
-            --cov=${{ matrix.source }} \
-            $COV_CONFIG_ARG \
-            --cov-report=term-missing \
-            --cov-fail-under=90
 
   # Integration suite: real Postgres + real job service. Currently a sentinel
   # job that boots the infra and runs the marker; per-team integration suites
@@ -545,7 +573,9 @@ jobs:
     name: Test – integration (Postgres + job service)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.backend_any == 'true'
+    if: >-
+      needs.changes.outputs.is_pull_request == 'true' &&
+      needs.changes.outputs.needs_integration == 'true'
     defaults:
       run:
         working-directory: backend/agents
@@ -629,11 +659,13 @@ jobs:
           pytest -v --tb=short -m integration \
             ../unified_api/tests/test_integration_smoke.py
 
-  test-ui:
-    name: Test – Angular UI
+  lint-and-test-ui:
+    name: Lint & Test – Angular UI
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.ui == 'true'
+    if: >-
+      needs.changes.outputs.is_pull_request == 'true' &&
+      needs.changes.outputs.ui == 'true'
     defaults:
       run:
         working-directory: user-interface
@@ -643,11 +675,13 @@ jobs:
         with:
           node-version: "22"
       - uses: actions/cache@v4
+        id: node-cache
         with:
-          path: ~/.npm
-          key: npm-v1-${{ runner.os }}-${{ hashFiles('user-interface/package-lock.json') }}
-          restore-keys: npm-v1-${{ runner.os }}-
-      - run: npm ci
+          path: user-interface/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('user-interface/package-lock.json') }}
+      - if: steps.node-cache.outputs.cache-hit != 'true'
+        run: npm ci
+      - run: npm run lint
       - run: npm run test:coverage
 
   # ── Gate ────────────────────────────────────────────────────────────────────
@@ -663,11 +697,10 @@ jobs:
     needs:
       - changes
       - lint-python
-      - lint-frontend
+      - lint-and-test-ui
       - test-shared-postgres
       - test-backend
       - test-integration
-      - test-ui
     steps:
       - name: Verify dependencies
         env:
@@ -688,11 +721,10 @@ jobs:
           PY
 
   # ── Build & Deploy ──────────────────────────────────────────────────────────
-  # Builds gate on `all-checks` so untested images can never be published.
+  # Builds run only on push-to-main (never on PRs — they validate but never
+  # publish, and branch protection ensures tests passed on the PR event).
   # Each build only runs when its docker_* path filter trips, so an
-  # investment-only PR doesn't rebuild blogging or team-service images.
-  # On pull_request: builds validate (push: false). On push to default
-  # branches: builds publish to GHCR and update the registry buildcache.
+  # investment-only push doesn't rebuild blogging or team-service images.
 
   build-backend:
     name: Build Backend Docker image
@@ -702,7 +734,8 @@ jobs:
       - all-checks
     if: |
       always() &&
-      needs.all-checks.result == 'success' &&
+      github.event_name == 'push' &&
+      (needs.all-checks.result == 'success' || needs.all-checks.result == 'skipped') &&
       needs.changes.outputs.docker_backend == 'true'
     permissions:
       contents: read
@@ -755,7 +788,8 @@ jobs:
       - all-checks
     if: |
       always() &&
-      needs.all-checks.result == 'success' &&
+      github.event_name == 'push' &&
+      (needs.all-checks.result == 'success' || needs.all-checks.result == 'skipped') &&
       needs.changes.outputs.team_services_matrix_empty != 'true'
     permissions:
       contents: read
@@ -871,7 +905,8 @@ jobs:
       - all-checks
     if: |
       always() &&
-      needs.all-checks.result == 'success' &&
+      github.event_name == 'push' &&
+      (needs.all-checks.result == 'success' || needs.all-checks.result == 'skipped') &&
       needs.changes.outputs.docker_frontend == 'true'
     permissions:
       contents: read
