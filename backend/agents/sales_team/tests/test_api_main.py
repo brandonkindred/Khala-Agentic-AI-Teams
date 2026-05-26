@@ -145,6 +145,9 @@ def test_run_pipeline_creates_pending_job_and_starts_thread(
     monkeypatch.setattr(api_main.threading, "Thread", _InlineThread)
 
     class _StubOrch:
+        def __init__(self, **_kw):
+            pass
+
         def run(self, request, job_id, update_cb=None):
             update_cb("prospecting", 50)
             return SalesPipelineResult(
@@ -184,6 +187,9 @@ def test_run_pipeline_job_failure_branch(monkeypatch: pytest.MonkeyPatch, fake_j
     fake_job_client.create_job("j-fail", status="pending")
 
     class _RaisingOrch:
+        def __init__(self, **_kw):
+            pass
+
         def run(self, request, job_id, update_cb=None):
             raise RuntimeError("boom")
 

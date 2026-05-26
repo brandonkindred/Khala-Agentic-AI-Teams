@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
 from uuid import uuid4
@@ -24,6 +25,7 @@ from .agents import (
 from .critics import OutreachCriticAgent, ProposalCriticAgent, format_critic_feedback
 from .learning_engine import LearningEngine, format_insights_for_prompt
 from .models import (
+    PERSONALIZATION_CONFIDENCE_THRESHOLD,
     ClosingStrategy,
     DecisionMakerList,
     DeepResearchRequest,
@@ -44,6 +46,7 @@ from .models import (
     ProspectDossier,
     ProspectListEntry,
     QualificationScore,
+    SalesPipelineConfig,
     SalesPipelineRequest,
     SalesPipelineResult,
     SalesProposal,
@@ -64,6 +67,32 @@ _STAGE_ORDER = [
     PipelineStage.PROPOSAL,
     PipelineStage.NEGOTIATION,
 ]
+
+
+def _noop_update(_stage: str, _pct: int) -> None:
+    """Default progress callback — does nothing."""
+
+
+@dataclass
+class _RunContext:
+    """Pre-computed shared state threaded through each pipeline stage method.
+
+    Built once inside ``run()`` from the inbound request and injected into
+    every ``_run_*`` helper so stage methods stay pure-ish (they read ctx,
+    call agents, and return results without referencing the request directly).
+    """
+
+    request: SalesPipelineRequest
+    job_id: str
+    icp_json: str
+    product: str
+    vp: str
+    company_context: str
+    cases: str
+    entry: PipelineStage
+    insights_ctx: str
+    config: SalesPipelineConfig
+    update: UpdateCallback
 
 
 # ---------------------------------------------------------------------------
@@ -197,20 +226,23 @@ def _wrap_outreach_sequence(
     variants: OutreachVariantList,
     prospect: Prospect,
     dossier: ProspectDossier,
+    confidence_threshold: float = PERSONALIZATION_CONFIDENCE_THRESHOLD,
 ) -> OutreachSequence:
     """Wrap a validated :class:`OutreachVariantList` into a full OutreachSequence.
 
-    The model's citation verification and grade downgrade rules already ran
-    inside the Pydantic validators on EmailTouch and OutreachVariant. The
-    OutreachSequence ``model_validator`` then dropped non-soft-opener variants
-    when ``dossier_confidence < PERSONALIZATION_CONFIDENCE_THRESHOLD``. What's
-    left for the orchestrator: if that leaves zero variants, emit a fallback.
+    ``confidence_threshold`` is forwarded to the model validator via context
+    so ``SalesPipelineConfig.dossier_confidence_threshold`` overrides take
+    effect.
     """
-    seq = OutreachSequence(
-        prospect=prospect,
-        dossier_id=dossier.dossier_id,
-        dossier_confidence=dossier.confidence,
-        variants=variants.variants,
+    context = {"dossier_confidence_threshold": confidence_threshold}
+    seq = OutreachSequence.model_validate(
+        {
+            "prospect": prospect,
+            "dossier_id": dossier.dossier_id,
+            "dossier_confidence": dossier.confidence,
+            "variants": [v.model_dump() for v in variants.variants],
+        },
+        context=context,
     )
     if not seq.variants:
         logger.warning("sales.outreach.no_variants prospect_id=%s — emitting fallback", prospect.id)
@@ -239,7 +271,8 @@ class SalesPodOrchestrator:
     based on historical win/loss data.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: Optional[SalesPipelineConfig] = None) -> None:
+        self.config = config or SalesPipelineConfig()
         self.prospector = ProspectorAgent()
         self.outreach = OutreachAgent()
         self.qualifier = LeadQualifierAgent()
@@ -261,7 +294,7 @@ class SalesPodOrchestrator:
             return False
 
     # ------------------------------------------------------------------
-    # Critic-gated emit helpers (one-shot refinement budget per prospect)
+    # Critic-gated emit helpers (configurable refinement budget)
     # ------------------------------------------------------------------
 
     def _generate_outreach_with_critic(
@@ -274,8 +307,11 @@ class SalesPodOrchestrator:
         company_context: str,
         insights_context: Optional[str],
         icp: Optional[IdealCustomerProfile],
+        max_refinements: int = 1,
+        confidence_threshold: Optional[float] = None,
     ) -> OutreachSequence:
-        """Emit -> wrap -> critic -> on revise, re-emit once with violations."""
+        """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements* times."""
+        threshold = confidence_threshold if confidence_threshold is not None else self.config.dossier_confidence_threshold
         variants = self.outreach.generate_sequence(
             prospect.model_dump_json(indent=2),
             dossier,
@@ -285,40 +321,46 @@ class SalesPodOrchestrator:
             company_context,
             insights_context,
         )
-        sequence = _wrap_outreach_sequence(variants, prospect, dossier)
+        sequence = _wrap_outreach_sequence(variants, prospect, dossier, confidence_threshold=threshold)
 
-        if icp is None:
-            # No ICP available (e.g. outreach_only without a request envelope) —
-            # the rubric needs ICP for rule 6, so skip the critic in that case.
+        if icp is None or max_refinements < 1:
             return sequence
 
-        report = self.outreach_critic.review(sequence, dossier, icp)
-        if report.approved:
-            return sequence
+        refined_ctx = company_context or ""
+        for attempt in range(max_refinements):
+            report = self.outreach_critic.review(sequence, dossier, icp)
+            if report.approved:
+                return sequence
 
-        feedback = format_critic_feedback(report.violations, report.notes)
-        logger.info(
-            "sales.outreach.critic_revise prospect_id=%s violations=%d",
-            prospect.id,
-            report.must_fix_count(),
-        )
-        refined_ctx = (company_context or "") + "\n\nReviewer feedback to address:\n" + feedback
-        try:
-            variants = self.outreach.generate_sequence(
-                prospect.model_dump_json(indent=2),
-                dossier,
-                product_name,
-                value_proposition,
-                case_studies,
-                refined_ctx,
-                insights_context,
+            feedback = format_critic_feedback(report.violations, report.notes)
+            logger.info(
+                "sales.outreach.critic_revise prospect_id=%s violations=%d attempt=%d/%d",
+                prospect.id,
+                report.must_fix_count(),
+                attempt + 1,
+                max_refinements,
             )
-        except Exception:
-            logger.exception(
-                "sales.outreach.refine_failed prospect_id=%s — keeping original", prospect.id
+            refined_ctx = refined_ctx + "\n\nReviewer feedback to address:\n" + feedback
+            try:
+                variants = self.outreach.generate_sequence(
+                    prospect.model_dump_json(indent=2),
+                    dossier,
+                    product_name,
+                    value_proposition,
+                    case_studies,
+                    refined_ctx,
+                    insights_context,
+                )
+            except Exception:
+                logger.exception(
+                    "sales.outreach.refine_failed prospect_id=%s — keeping previous", prospect.id
+                )
+                return sequence
+            sequence = _wrap_outreach_sequence(
+                variants, prospect, dossier, confidence_threshold=threshold,
             )
-            return sequence
-        return _wrap_outreach_sequence(variants, prospect, dossier)
+
+        return sequence
 
     def _generate_proposal_with_critic(
         self,
@@ -332,8 +374,9 @@ class SalesPodOrchestrator:
         insights_context: Optional[str],
         dossier: Optional[ProspectDossier],
         qualification: Optional[QualificationScore],
+        max_refinements: int = 1,
     ) -> SalesProposal:
-        """Emit -> wrap -> critic -> on revise, re-emit once with violations."""
+        """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements* times."""
         body = self.proposal.write(
             prospect.model_dump_json(indent=2),
             product_name,
@@ -346,34 +389,40 @@ class SalesPodOrchestrator:
         )
         proposal = SalesProposal(prospect=prospect, **body.model_dump())
 
-        report = self.proposal_critic.review(proposal, dossier, qualification)
-        if report.approved:
-            return proposal
+        refined_notes = discovery_notes or ""
+        for attempt in range(max_refinements):
+            report = self.proposal_critic.review(proposal, dossier, qualification)
+            if report.approved:
+                return proposal
 
-        feedback = format_critic_feedback(report.violations, report.notes)
-        logger.info(
-            "sales.proposal.critic_revise prospect_id=%s violations=%d",
-            prospect.id,
-            report.must_fix_count(),
-        )
-        refined_notes = (discovery_notes or "") + "\n\nReviewer feedback to address:\n" + feedback
-        try:
-            body = self.proposal.write(
-                prospect.model_dump_json(indent=2),
-                product_name,
-                value_proposition,
-                annual_cost,
-                refined_notes,
-                case_studies,
-                company_context,
-                insights_context,
+            feedback = format_critic_feedback(report.violations, report.notes)
+            logger.info(
+                "sales.proposal.critic_revise prospect_id=%s violations=%d attempt=%d/%d",
+                prospect.id,
+                report.must_fix_count(),
+                attempt + 1,
+                max_refinements,
             )
-        except Exception:
-            logger.exception(
-                "sales.proposal.refine_failed prospect_id=%s — keeping original", prospect.id
-            )
-            return proposal
-        return SalesProposal(prospect=prospect, **body.model_dump())
+            refined_notes = refined_notes + "\n\nReviewer feedback to address:\n" + feedback
+            try:
+                body = self.proposal.write(
+                    prospect.model_dump_json(indent=2),
+                    product_name,
+                    value_proposition,
+                    annual_cost,
+                    refined_notes,
+                    case_studies,
+                    company_context,
+                    insights_context,
+                )
+            except Exception:
+                logger.exception(
+                    "sales.proposal.refine_failed prospect_id=%s — keeping previous", prospect.id
+                )
+                return proposal
+            proposal = SalesProposal(prospect=prospect, **body.model_dump())
+
+        return proposal
 
     def load_dossiers_for_prospects(self, prospects: List[Prospect]) -> dict[str, ProspectDossier]:
         """Batch-load dossiers for the prospects we're about to run outreach on.
@@ -400,262 +449,288 @@ class SalesPodOrchestrator:
             )
             return {}
 
+    # ------------------------------------------------------------------
+    # Per-stage methods — each owns a single pipeline phase
+    # ------------------------------------------------------------------
+
+    def _run_prospecting(self, ctx: _RunContext) -> List[Prospect]:
+        ctx.update("prospecting", 5)
+        logger.info("Sales pod [%s]: prospecting stage", ctx.job_id)
+        if ctx.request.existing_prospects:
+            prospects = ctx.request.existing_prospects
+        else:
+            prospects_result = self.prospector.prospect(
+                ctx.icp_json, ctx.product, ctx.vp, ctx.request.max_prospects,
+                ctx.company_context, ctx.insights_ctx,
+            )
+            prospects = list(prospects_result.prospects)
+        ctx.update("prospecting", 15)
+        return prospects
+
+    def _run_outreach(
+        self, ctx: _RunContext, prospects: List[Prospect],
+    ) -> tuple[List[OutreachSequence], dict[str, ProspectDossier]]:
+        ctx.update("outreach", 20)
+        logger.info("Sales pod [%s]: outreach stage for %d prospects", ctx.job_id, len(prospects))
+        dossier_map = self.load_dossiers_for_prospects(prospects)
+        sequences: List[OutreachSequence] = []
+        for p in prospects:
+            dossier = dossier_map.get(p.id)
+            if dossier is None:
+                logger.warning(
+                    "sales.outreach.dossier_missing prospect_id=%s company=%s",
+                    p.id, p.company_name,
+                )
+                continue
+            try:
+                sequence = self._generate_outreach_with_critic(
+                    p, dossier, ctx.product, ctx.vp, ctx.cases, ctx.company_context,
+                    ctx.insights_ctx, ctx.request.icp,
+                    max_refinements=ctx.config.critic_max_refinements,
+                    confidence_threshold=ctx.config.dossier_confidence_threshold,
+                )
+            except Exception:
+                logger.exception(
+                    "sales.outreach.failed prospect_id=%s company=%s", p.id, p.company_name,
+                )
+                continue
+            sequences.append(sequence)
+        ctx.update("outreach", 35)
+        return sequences, dossier_map
+
+    def _run_qualification(
+        self, ctx: _RunContext, prospects: List[Prospect],
+    ) -> List[QualificationScore]:
+        ctx.update("qualification", 40)
+        logger.info("Sales pod [%s]: qualification stage", ctx.job_id)
+        qualified: List[QualificationScore] = []
+        for p in prospects:
+            try:
+                body = self.qualifier.qualify(
+                    p.model_dump_json(indent=2), ctx.product, ctx.vp, "", ctx.insights_ctx,
+                )
+            except Exception:
+                logger.exception("sales.qualify.failed prospect_id=%s", p.id)
+                continue
+            qualified.append(QualificationScore(prospect=p, **body.model_dump()))
+        ctx.update("qualification", 50)
+        return qualified
+
+    def _run_nurture(
+        self, ctx: _RunContext, nurture_prospects: List[Prospect],
+    ) -> List[NurtureSequence]:
+        ctx.update("nurturing", 55)
+        logger.info("Sales pod [%s]: nurturing %d prospects", ctx.job_id, len(nurture_prospects))
+        nurture_seqs: List[NurtureSequence] = []
+        for p in nurture_prospects:
+            try:
+                body = self.nurture.build_sequence(
+                    p.model_dump_json(indent=2), ctx.product, ctx.vp, 90, ctx.insights_ctx,
+                )
+            except Exception:
+                logger.exception("sales.nurture.failed prospect_id=%s", p.id)
+                continue
+            nurture_seqs.append(NurtureSequence(prospect=p, **body.model_dump()))
+        ctx.update("nurturing", 62)
+        return nurture_seqs
+
+    def _run_discovery(
+        self,
+        ctx: _RunContext,
+        qualified_prospects: List[Prospect],
+        qualified: List[QualificationScore],
+    ) -> List[DiscoveryPlan]:
+        ctx.update("discovery", 65)
+        logger.info(
+            "Sales pod [%s]: discovery stage for %d prospects", ctx.job_id, len(qualified_prospects),
+        )
+        plans: List[DiscoveryPlan] = []
+        for p in qualified_prospects:
+            qual_json = "{}"
+            for q in qualified:
+                if q.prospect.company_name == p.company_name:
+                    qual_json = q.model_dump_json(indent=2)
+                    break
+            try:
+                body = self.discovery.prepare(
+                    p.model_dump_json(indent=2), qual_json, ctx.product, ctx.vp, ctx.insights_ctx,
+                )
+            except Exception:
+                logger.exception("sales.discovery.failed prospect_id=%s", p.id)
+                continue
+            plans.append(DiscoveryPlan(prospect=p, **body.model_dump()))
+        ctx.update("discovery", 75)
+        return plans
+
+    def _run_proposal(
+        self,
+        ctx: _RunContext,
+        qualified_prospects: List[Prospect],
+        qualified: List[QualificationScore],
+        dossier_map: dict[str, ProspectDossier],
+    ) -> List[SalesProposal]:
+        ctx.update("proposal", 78)
+        logger.info(
+            "Sales pod [%s]: proposal stage for %d prospects", ctx.job_id, len(qualified_prospects),
+        )
+        proposals: List[SalesProposal] = []
+        annual_cost = 25000.0
+        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect.id}
+        if not dossier_map:
+            dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
+        for p in qualified_prospects:
+            try:
+                proposal_obj = self._generate_proposal_with_critic(
+                    p, ctx.product, ctx.vp, annual_cost, "", ctx.cases,
+                    ctx.company_context, ctx.insights_ctx,
+                    dossier_map.get(p.id), qual_by_prospect_id.get(p.id),
+                    max_refinements=ctx.config.critic_max_refinements,
+                )
+            except Exception:
+                logger.exception("sales.proposal.failed prospect_id=%s", p.id)
+                continue
+            proposals.append(proposal_obj)
+        ctx.update("proposal", 87)
+        return proposals
+
+    def _run_negotiation(
+        self,
+        ctx: _RunContext,
+        qualified_prospects: List[Prospect],
+        proposals: List[SalesProposal],
+    ) -> List[ClosingStrategy]:
+        ctx.update("negotiation", 90)
+        logger.info("Sales pod [%s]: closing strategy stage", ctx.job_id)
+        strategies: List[ClosingStrategy] = []
+        for p in qualified_prospects:
+            prop_json = "{}"
+            for prop in proposals:
+                if prop.prospect.company_name == p.company_name:
+                    prop_json = prop.model_dump_json(indent=2)
+                    break
+            try:
+                body = self.closer.develop_strategy(
+                    p.model_dump_json(indent=2), prop_json, ctx.product, ctx.vp, ctx.insights_ctx,
+                )
+            except Exception:
+                logger.exception("sales.close.failed prospect_id=%s", p.id)
+                continue
+            strategies.append(ClosingStrategy(prospect=p, **body.model_dump()))
+        ctx.update("negotiation", 95)
+        return strategies
+
+    def _run_coaching(
+        self, ctx: _RunContext, prospects: List[Prospect],
+    ) -> Optional[PipelineCoachingReport]:
+        ctx.update("coaching", 97)
+        logger.info("Sales pod [%s]: generating coaching report", ctx.job_id)
+        prospects_json = json.dumps([p.model_dump() for p in prospects], indent=2)
+        try:
+            return self.coach.review(prospects_json, ctx.product, "", ctx.insights_ctx)
+        except Exception:
+            logger.exception("sales.coaching.failed")
+            return None
+
+    # ------------------------------------------------------------------
+    # Pipeline driver — dispatches to stage methods and assembles result
+    # ------------------------------------------------------------------
+
     def run(
         self,
         request: SalesPipelineRequest,
         job_id: str,
         update_cb: Optional[UpdateCallback] = None,
     ) -> SalesPipelineResult:
-        def update(stage: str, pct: int) -> None:
-            if update_cb:
-                update_cb(stage, pct)
-
-        icp_json = request.icp.model_dump_json(indent=2)
-        product = request.product_name
-        vp = request.value_proposition
-        ctx = request.company_context
-        cases = "\n".join(request.case_study_snippets) if request.case_study_snippets else ""
-        entry = request.entry_stage
-
-        # Load current learning insights and format them for prompt injection
         current_insights: Optional[LearningInsights] = load_current_insights()
-        insights_ctx: Optional[str] = format_insights_for_prompt(current_insights)
+        insights_ctx: str = format_insights_for_prompt(current_insights)
         if current_insights and current_insights.total_outcomes_analyzed > 0:
             logger.info(
                 "Sales pod [%s]: injecting learning insights v%d (%d outcomes, win_rate=%.0f%%)",
-                job_id,
-                current_insights.insights_version,
-                current_insights.total_outcomes_analyzed,
-                current_insights.win_rate * 100,
+                job_id, current_insights.insights_version,
+                current_insights.total_outcomes_analyzed, current_insights.win_rate * 100,
             )
 
-        result = SalesPipelineResult(job_id=job_id, entry_stage=entry, product_name=product)
-        # Dossiers are loaded once per run and reused by both the outreach
-        # critic (rule outreach.citation.fabricated) and the proposal critic.
-        dossier_map: dict[str, ProspectDossier] = {}
+        ctx = _RunContext(
+            request=request,
+            job_id=job_id,
+            icp_json=request.icp.model_dump_json(indent=2),
+            product=request.product_name,
+            vp=request.value_proposition,
+            company_context=request.company_context,
+            cases="\n".join(request.case_study_snippets) if request.case_study_snippets else "",
+            entry=request.entry_stage,
+            insights_ctx=insights_ctx,
+            config=request.config,
+            update=update_cb or _noop_update,
+        )
+        result = SalesPipelineResult(
+            job_id=job_id, entry_stage=ctx.entry, product_name=ctx.product,
+        )
 
-        # ------------------------------------------------------------------
-        # Stage 1: Prospecting
-        # ------------------------------------------------------------------
-        if self._should_run(PipelineStage.PROSPECTING, entry):
-            update("prospecting", 5)
-            logger.info("Sales pod [%s]: prospecting stage", job_id)
-            if request.existing_prospects:
-                prospects = request.existing_prospects
-            else:
-                prospects_result = self.prospector.prospect(
-                    icp_json, product, vp, request.max_prospects, ctx, insights_ctx
-                )
-                prospects = list(prospects_result.prospects)
-            result.prospects = prospects
-            update("prospecting", 15)
+        # Stage 1 — Prospecting
+        if self._should_run(PipelineStage.PROSPECTING, ctx.entry):
+            prospects = self._run_prospecting(ctx)
         else:
             prospects = request.existing_prospects
-            result.prospects = prospects
+        result.prospects = prospects
 
         if not prospects:
             logger.warning("Sales pod [%s]: no prospects found — stopping pipeline", job_id)
             result.summary = "No prospects found or provided. Pipeline halted."
             return result
 
-        # ------------------------------------------------------------------
-        # Stage 2: Outreach
-        # ------------------------------------------------------------------
-        if self._should_run(PipelineStage.OUTREACH, entry):
-            update("outreach", 20)
-            logger.info("Sales pod [%s]: outreach stage for %d prospects", job_id, len(prospects))
-            dossier_map = self.load_dossiers_for_prospects(prospects)
-            sequences: List[OutreachSequence] = []
-            for p in prospects:
-                dossier = dossier_map.get(p.id)
-                if dossier is None:
-                    logger.warning(
-                        "sales.outreach.dossier_missing prospect_id=%s company=%s",
-                        p.id,
-                        p.company_name,
-                    )
-                    continue
-                try:
-                    sequence = self._generate_outreach_with_critic(
-                        p, dossier, product, vp, cases, ctx, insights_ctx, request.icp
-                    )
-                except Exception:
-                    logger.exception(
-                        "sales.outreach.failed prospect_id=%s company=%s", p.id, p.company_name
-                    )
-                    continue
-                sequences.append(sequence)
-            result.outreach_sequences = sequences
-            update("outreach", 35)
+        # Stage 2 — Outreach
+        dossier_map: dict[str, ProspectDossier] = {}
+        if self._should_run(PipelineStage.OUTREACH, ctx.entry):
+            result.outreach_sequences, dossier_map = self._run_outreach(ctx, prospects)
 
-        # ------------------------------------------------------------------
-        # Stage 3: Qualification
-        # ------------------------------------------------------------------
+        # Stage 3 — Qualification + advance/nurture routing
         qualified: List[QualificationScore] = []
-        if self._should_run(PipelineStage.QUALIFICATION, entry):
-            update("qualification", 40)
-            logger.info("Sales pod [%s]: qualification stage", job_id)
-            for p in prospects:
-                try:
-                    body = self.qualifier.qualify(
-                        p.model_dump_json(indent=2), product, vp, "", insights_ctx
-                    )
-                except Exception:
-                    logger.exception("sales.qualify.failed prospect_id=%s", p.id)
-                    continue
-                qualified.append(QualificationScore(prospect=p, **body.model_dump()))
+        if self._should_run(PipelineStage.QUALIFICATION, ctx.entry):
+            qualified = self._run_qualification(ctx, prospects)
             result.qualified_leads = qualified
-            update("qualification", 50)
 
-        # Determine which prospects advance vs. go to nurture
         if qualified:
-            # Qualification ran — only explicitly advanced leads proceed downstream.
-            # Disqualified and stalled leads are intentionally excluded.
             advance = [q for q in qualified if q.recommended_action.lower().startswith("advance")]
             nurture_prospects = [
-                q.prospect
-                for q in qualified
+                q.prospect for q in qualified
                 if not q.recommended_action.lower().startswith("advance")
                 and not q.recommended_action.lower().startswith("disqualify")
             ]
             qualified_prospects = [q.prospect for q in advance]
         else:
-            # No qualification ran — all prospects advance to downstream stages
-            advance = []
             nurture_prospects = []
             qualified_prospects = prospects
 
-        # ------------------------------------------------------------------
-        # Stage 4: Nurturing
-        # ------------------------------------------------------------------
-        if self._should_run(PipelineStage.NURTURING, entry) and nurture_prospects:
-            update("nurturing", 55)
-            logger.info("Sales pod [%s]: nurturing %d prospects", job_id, len(nurture_prospects))
-            nurture_seqs: List[NurtureSequence] = []
-            for p in nurture_prospects:
-                try:
-                    body = self.nurture.build_sequence(
-                        p.model_dump_json(indent=2), product, vp, 90, insights_ctx
-                    )
-                except Exception:
-                    logger.exception("sales.nurture.failed prospect_id=%s", p.id)
-                    continue
-                nurture_seqs.append(NurtureSequence(prospect=p, **body.model_dump()))
-            result.nurture_sequences = nurture_seqs
-            update("nurturing", 62)
+        # Stage 4 — Nurturing
+        if self._should_run(PipelineStage.NURTURING, ctx.entry) and nurture_prospects:
+            result.nurture_sequences = self._run_nurture(ctx, nurture_prospects)
 
-        # ------------------------------------------------------------------
-        # Stage 5: Discovery
-        # ------------------------------------------------------------------
-        if self._should_run(PipelineStage.DISCOVERY, entry) and qualified_prospects:
-            update("discovery", 65)
-            logger.info(
-                "Sales pod [%s]: discovery stage for %d prospects", job_id, len(qualified_prospects)
+        # Stage 5 — Discovery
+        if self._should_run(PipelineStage.DISCOVERY, ctx.entry) and qualified_prospects:
+            result.discovery_plans = self._run_discovery(ctx, qualified_prospects, qualified)
+
+        # Stage 6 — Proposal
+        if self._should_run(PipelineStage.PROPOSAL, ctx.entry) and qualified_prospects:
+            result.proposals = self._run_proposal(ctx, qualified_prospects, qualified, dossier_map)
+
+        # Stage 7 — Negotiation / Closing
+        if self._should_run(PipelineStage.NEGOTIATION, ctx.entry) and qualified_prospects:
+            result.closing_strategies = self._run_negotiation(
+                ctx, qualified_prospects, result.proposals,
             )
-            plans: List[DiscoveryPlan] = []
-            for p in qualified_prospects:
-                qual_json = "{}"
-                for q in qualified:
-                    if q.prospect.company_name == p.company_name:
-                        qual_json = q.model_dump_json(indent=2)
-                        break
-                try:
-                    body = self.discovery.prepare(
-                        p.model_dump_json(indent=2), qual_json, product, vp, insights_ctx
-                    )
-                except Exception:
-                    logger.exception("sales.discovery.failed prospect_id=%s", p.id)
-                    continue
-                plans.append(DiscoveryPlan(prospect=p, **body.model_dump()))
-            result.discovery_plans = plans
-            update("discovery", 75)
 
-        # ------------------------------------------------------------------
-        # Stage 6: Proposal
-        # ------------------------------------------------------------------
-        if self._should_run(PipelineStage.PROPOSAL, entry) and qualified_prospects:
-            update("proposal", 78)
-            logger.info(
-                "Sales pod [%s]: proposal stage for %d prospects", job_id, len(qualified_prospects)
-            )
-            proposals: List[SalesProposal] = []
-            annual_cost = 25000.0  # Default; real requests should supply per-prospect pricing
-            # Key by prospect.id, not company_name — multiple decision-makers
-            # at the same company (max_per_company > 1) would otherwise share
-            # one entry and trip false `proposal.discovery.referenced` flags.
-            qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect.id}
-            # If outreach stage didn't run, dossier_map is empty — load now so
-            # the proposal critic has dossier context for the founded-claims check.
-            if not dossier_map:
-                dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
-            for p in qualified_prospects:
-                try:
-                    proposal_obj = self._generate_proposal_with_critic(
-                        p,
-                        product,
-                        vp,
-                        annual_cost,
-                        "",
-                        cases,
-                        ctx,
-                        insights_ctx,
-                        dossier_map.get(p.id),
-                        qual_by_prospect_id.get(p.id),
-                    )
-                except Exception:
-                    logger.exception("sales.proposal.failed prospect_id=%s", p.id)
-                    continue
-                proposals.append(proposal_obj)
-            result.proposals = proposals
-            update("proposal", 87)
+        # Coaching + outcomes
+        result.coaching_report = self._run_coaching(ctx, prospects)
+        self._record_prospecting_outcomes(prospects, job_id)
 
-        # ------------------------------------------------------------------
-        # Stage 7: Negotiation / Closing
-        # ------------------------------------------------------------------
-        if self._should_run(PipelineStage.NEGOTIATION, entry) and qualified_prospects:
-            update("negotiation", 90)
-            logger.info("Sales pod [%s]: closing strategy stage", job_id)
-            strategies: List[ClosingStrategy] = []
-            for p in qualified_prospects:
-                prop_json = "{}"
-                for prop in result.proposals:
-                    if prop.prospect.company_name == p.company_name:
-                        prop_json = prop.model_dump_json(indent=2)
-                        break
-                try:
-                    body = self.closer.develop_strategy(
-                        p.model_dump_json(indent=2), prop_json, product, vp, insights_ctx
-                    )
-                except Exception:
-                    logger.exception("sales.close.failed prospect_id=%s", p.id)
-                    continue
-                strategies.append(ClosingStrategy(prospect=p, **body.model_dump()))
-            result.closing_strategies = strategies
-            update("negotiation", 95)
-
-        # ------------------------------------------------------------------
-        # Final: Pipeline Coaching Report
-        # ------------------------------------------------------------------
-        update("coaching", 97)
-        logger.info("Sales pod [%s]: generating coaching report", job_id)
-        prospects_json = json.dumps([p.model_dump() for p in prospects], indent=2)
-        try:
-            result.coaching_report = self.coach.review(prospects_json, product, "", insights_ctx)
-        except Exception:
-            logger.exception("sales.coaching.failed")
-            result.coaching_report = None
-
-        # Auto-record prospecting outcomes so the ICP accuracy learns over time
-        self._record_prospecting_outcomes(result.prospects, job_id)
-
-        # Summary
         insights_note = (
             f" (learning insights v{current_insights.insights_version} applied)"
             if current_insights and current_insights.total_outcomes_analyzed > 0
             else " (no learning history yet — record outcomes to improve future runs)"
         )
         result.summary = (
-            f"Sales pod completed pipeline from '{entry.value}' stage{insights_note}. "
+            f"Sales pod completed pipeline from '{ctx.entry.value}' stage{insights_note}. "
             f"Prospects identified: {len(result.prospects)}. "
             f"Outreach sequences generated: {len(result.outreach_sequences)}. "
             f"Leads qualified: {len(result.qualified_leads)}. "
@@ -665,7 +740,7 @@ class SalesPodOrchestrator:
             f"Closing strategies: {len(result.closing_strategies)}."
         )
 
-        update("completed", 100)
+        ctx.update("completed", 100)
         logger.info("Sales pod [%s]: pipeline complete — %s", job_id, result.summary)
         return result
 
@@ -752,7 +827,8 @@ class SalesPodOrchestrator:
                 # outreach_only callers don't supply ICP — pass None and the
                 # critic-gated helper falls back to the unreviewed wrap path.
                 sequence = self._generate_outreach_with_critic(
-                    p, dossier, product_name, value_proposition, cases, company_context, ctx, None
+                    p, dossier, product_name, value_proposition, cases, company_context, ctx, None,
+                    max_refinements=self.config.critic_max_refinements,
                 )
             except Exception:
                 logger.exception(
@@ -824,6 +900,7 @@ class SalesPodOrchestrator:
                 ctx,
                 dossier_map.get(req.prospect.id),
                 None,  # propose_only does not carry a qualification score
+                max_refinements=self.config.critic_max_refinements,
             )
         except Exception:
             logger.exception("sales.propose_only.failed prospect_id=%s", req.prospect.id)
@@ -925,7 +1002,7 @@ class SalesPodOrchestrator:
                 )
                 return []
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=self.config.decision_maker_workers) as pool:
             for result in pool.map(_map_one, companies):
                 mapped.extend(result)
 
@@ -984,7 +1061,7 @@ class SalesPodOrchestrator:
                 return p, None
 
         dossiers: dict[str, ProspectDossier] = {}
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=self.config.dossier_workers) as pool:
             futures = [pool.submit(_build_one, p) for p in final_prospects]
             for fut in as_completed(futures):
                 p, dossier = fut.result()

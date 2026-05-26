@@ -14,7 +14,8 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     from sales_team.orchestrator import SalesPodOrchestrator
 
     req = SalesPipelineRequest(**request)
-    result = SalesPodOrchestrator().run(req)
+    job_id = request.get("job_id") or f"temporal_{activity.info().activity_id}"
+    result = SalesPodOrchestrator(config=req.config).run(req, job_id=job_id)
     if hasattr(result, "model_dump"):
         return result.model_dump()
     return result if isinstance(result, dict) else {"result": result}

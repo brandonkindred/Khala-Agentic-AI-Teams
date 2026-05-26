@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -127,6 +128,9 @@ def _utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+_REFRESH_LOCK = threading.Lock()
+
+
 @dataclass
 class LearningEngine:
     """Analyzes accumulated outcomes and refreshes LearningInsights.
@@ -149,42 +153,50 @@ class LearningEngine:
 
         If stage_outcomes / deal_outcomes are not provided, they are loaded
         from the outcome store automatically.
+
+        The expensive LLM call (``_generate_insights``) runs outside the lock.
+        ``_REFRESH_LOCK`` serializes only the version read-increment-write so
+        concurrent callers don't overwrite each other, without blocking the
+        full network round-trip.
         """
         if stage_outcomes is None:
             stage_outcomes = load_stage_outcomes()
         if deal_outcomes is None:
             deal_outcomes = load_deal_outcomes()
 
-        current = load_current_insights()
-        current_version = current.insights_version if current else 0
         n_analyzed = len(stage_outcomes) + len(deal_outcomes)
 
         if n_analyzed == 0:
             logger.info("LearningEngine: no outcomes to analyze yet — returning empty insights")
-            empty = LearningInsights(
-                total_outcomes_analyzed=0,
-                actionable_recommendations=[
-                    "No outcomes recorded yet. Use POST /sales/outcomes/stage or "
-                    "POST /sales/outcomes/deal to log results as you work deals."
-                ],
-                generated_at=_utc_now_iso(),
-                insights_version=current_version + 1,
-            )
-            save_insights(empty)
+            with _REFRESH_LOCK:
+                current = load_current_insights()
+                current_version = current.insights_version if current else 0
+                empty = LearningInsights(
+                    total_outcomes_analyzed=0,
+                    actionable_recommendations=[
+                        "No outcomes recorded yet. Use POST /sales/outcomes/stage or "
+                        "POST /sales/outcomes/deal to log results as you work deals."
+                    ],
+                    generated_at=_utc_now_iso(),
+                    insights_version=current_version + 1,
+                )
+                save_insights(empty)
             return empty
 
         body = self._generate_insights(stage_outcomes, deal_outcomes)
-        insights = LearningInsights(
-            **body.model_dump(),
-            generated_at=_utc_now_iso(),
-            insights_version=current_version + 1,
-        )
-        # Defensive: if the LLM under-reported total_outcomes, fall back to our
-        # actual count so the UI shows the right number.
-        if insights.total_outcomes_analyzed == 0:
-            insights.total_outcomes_analyzed = n_analyzed
 
-        save_insights(insights)
+        with _REFRESH_LOCK:
+            current = load_current_insights()
+            current_version = current.insights_version if current else 0
+            insights = LearningInsights(
+                **body.model_dump(),
+                generated_at=_utc_now_iso(),
+                insights_version=current_version + 1,
+            )
+            if insights.total_outcomes_analyzed == 0:
+                insights.total_outcomes_analyzed = n_analyzed
+            save_insights(insights)
+
         logger.info(
             "LearningEngine: insights refreshed to v%d — win_rate=%.0f%%, %d outcomes",
             insights.insights_version,

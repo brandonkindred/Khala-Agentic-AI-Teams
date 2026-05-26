@@ -38,6 +38,7 @@ from sales_team.models import (
     ProspectList,
     QualificationScoreBody,
     ROIModel,
+    SalesPipelineConfig,
     SalesPipelineRequest,
     SalesProposalBody,
     SPINQuestions,
@@ -1167,3 +1168,238 @@ def test_deep_research_propagates_dossier_field_backfill(
     result = stub_orch.deep_research_only(_deep_request(target=10), persist=False)
     # The orchestrator must have populated those fields when building entries.
     assert result.total_prospects >= 1
+
+
+# ---------------------------------------------------------------------------
+# SalesPipelineConfig plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_config_defaults_match_legacy_constants() -> None:
+    """Default SalesPipelineConfig reproduces the prior hardcoded behaviour."""
+    cfg = SalesPipelineConfig()
+    assert cfg.dossier_confidence_threshold == 0.6
+    assert cfg.decision_maker_workers == 8
+    assert cfg.dossier_workers == 4
+    assert cfg.critic_max_refinements == 1
+
+
+def test_request_carries_default_config() -> None:
+    req = SalesPipelineRequest(
+        product_name="P",
+        value_proposition="A valid long value proposition",
+        icp=IdealCustomerProfile(),
+    )
+    assert isinstance(req.config, SalesPipelineConfig)
+    assert req.config.critic_max_refinements == 1
+
+
+def test_request_accepts_custom_config() -> None:
+    custom = SalesPipelineConfig(critic_max_refinements=3, dossier_workers=2)
+    req = SalesPipelineRequest(
+        product_name="P",
+        value_proposition="A valid long value proposition",
+        icp=IdealCustomerProfile(),
+        config=custom,
+    )
+    assert req.config.critic_max_refinements == 3
+    assert req.config.dossier_workers == 2
+
+
+def test_orchestrator_accepts_config() -> None:
+    cfg = SalesPipelineConfig(decision_maker_workers=2, dossier_workers=1)
+    o = orch_mod.SalesPodOrchestrator(config=cfg)
+    assert o.config.decision_maker_workers == 2
+
+
+def test_run_uses_request_config_critic_refinements(
+    monkeypatch: pytest.MonkeyPatch, stub_orch, sample_icp, sample_prospect, sample_dossier
+) -> None:
+    """Setting critic_max_refinements=0 skips the critic loop entirely."""
+    monkeypatch.setattr(orch_mod, "load_current_insights", lambda: None)
+    monkeypatch.setattr(orch_mod, "record_stage_outcome", lambda outcome: outcome)
+
+    stub_orch.load_dossiers_for_prospects = MagicMock(
+        return_value={sample_prospect.id: sample_dossier}
+    )
+    stub_orch.prospector.prospect.return_value = ProspectList(prospects=[sample_prospect])
+    stub_orch.outreach.generate_sequence.return_value = _good_variant_list()
+    stub_orch.qualifier.qualify.return_value = _qualifier_body("disqualify")
+    stub_orch.coach.review.return_value = _coaching_report()
+
+    request = SalesPipelineRequest(
+        product_name="P",
+        value_proposition="A valid long value proposition",
+        icp=sample_icp,
+        entry_stage=PipelineStage.PROSPECTING,
+        config=SalesPipelineConfig(critic_max_refinements=0),
+    )
+    result = stub_orch.run(request, job_id="j-no-critic")
+    assert len(result.outreach_sequences) == 1
+    # Critic was never called because max_refinements=0.
+    stub_orch.outreach_critic.review.assert_not_called()
+
+
+def test_stage_methods_are_individually_callable(
+    monkeypatch: pytest.MonkeyPatch, stub_orch, sample_icp, sample_prospect
+) -> None:
+    """Stage methods can be called directly without running the full pipeline."""
+    monkeypatch.setattr(orch_mod, "load_current_insights", lambda: None)
+    stub_orch.prospector.prospect.return_value = ProspectList(prospects=[sample_prospect])
+
+    ctx = orch_mod._RunContext(
+        request=SalesPipelineRequest(
+            product_name="P",
+            value_proposition="A valid long value proposition",
+            icp=sample_icp,
+        ),
+        job_id="j-stage",
+        icp_json=sample_icp.model_dump_json(indent=2),
+        product="P",
+        vp="A valid long value proposition",
+        company_context="",
+        cases="",
+        entry=PipelineStage.PROSPECTING,
+        insights_ctx="",
+        config=SalesPipelineConfig(),
+        update=orch_mod._noop_update,
+    )
+    prospects = stub_orch._run_prospecting(ctx)
+    assert prospects == [sample_prospect]
+
+
+# ---------------------------------------------------------------------------
+# Multi-iteration critic refinement tests
+# ---------------------------------------------------------------------------
+
+
+def test_outreach_critic_multi_iteration_refinement(
+    stub_orch,
+    sample_prospect: Prospect,
+    sample_dossier: ProspectDossier,
+    sample_icp: IdealCustomerProfile,
+) -> None:
+    """With max_refinements=2, the critic can reject twice and the agent retries."""
+    from sales_team.models import CriticViolation, OutreachCriticReport
+
+    call_count = {"n": 0}
+
+    def _outreach_side_effect(*a, **kw):
+        call_count["n"] += 1
+        return _good_variant_list()
+
+    stub_orch.outreach.generate_sequence.side_effect = _outreach_side_effect
+
+    # Critic rejects twice, then approves on the third review.
+    review_count = {"n": 0}
+
+    def _critic_side_effect(*a, **kw):
+        review_count["n"] += 1
+        if review_count["n"] <= 2:
+            return OutreachCriticReport(
+                status="FAIL",
+                approved=False,
+                violations=[
+                    CriticViolation(
+                        rule_id="outreach.day1.cta",
+                        severity="must_fix",
+                        description="no CTA",
+                        suggested_fix="add one",
+                    )
+                ],
+            )
+        return OutreachCriticReport(status="PASS", approved=True, violations=[])
+
+    stub_orch.outreach_critic.review.side_effect = _critic_side_effect
+
+    sequence = stub_orch._generate_outreach_with_critic(
+        sample_prospect, sample_dossier, "p", "v", "", "", None, sample_icp,
+        max_refinements=2,
+    )
+    # 1 initial + 2 refinement emits = 3 outreach calls
+    assert call_count["n"] == 3
+    # 2 reviews (both FAIL) — the third would be the approval but the loop
+    # exhausted its budget, so the last regenerated sequence is returned.
+    # Actually: loop runs range(2) → attempts 0 and 1. On attempt 0: FAIL →
+    # re-emit. On attempt 1: FAIL → re-emit. Loop ends, returns the last
+    # sequence. So 2 reviews, 3 outreach calls.
+    assert review_count["n"] == 2
+    assert sequence.variants  # still has variants
+
+
+def test_proposal_critic_fail_then_refine(
+    stub_orch,
+    sample_prospect: Prospect,
+    sample_dossier: ProspectDossier,
+) -> None:
+    """When the proposal critic rejects, the agent retries with feedback."""
+    from sales_team.models import CriticViolation, ProposalCriticReport
+
+    call_count = {"n": 0}
+
+    def _write_side_effect(*a, **kw):
+        call_count["n"] += 1
+        return _proposal_body()
+
+    stub_orch.proposal.write.side_effect = _write_side_effect
+
+    # Critic rejects on first review, approves on second.
+    review_count = {"n": 0}
+
+    def _critic_side_effect(*a, **kw):
+        review_count["n"] += 1
+        if review_count["n"] == 1:
+            return ProposalCriticReport(
+                status="FAIL",
+                approved=False,
+                violations=[
+                    CriticViolation(
+                        rule_id="proposal.roi.arithmetic",
+                        severity="must_fix",
+                        description="ROI math wrong",
+                        suggested_fix="fix the multiplication",
+                    )
+                ],
+            )
+        return ProposalCriticReport(status="PASS", approved=True, violations=[])
+
+    stub_orch.proposal_critic.review.side_effect = _critic_side_effect
+
+    proposal = stub_orch._generate_proposal_with_critic(
+        sample_prospect, "p", "v", 25000.0, "", "", "", None,
+        sample_dossier, None,
+        max_refinements=2,
+    )
+    # 1 initial emit + 1 refinement (after first FAIL) + 1 more refinement (after second FAIL) = 3
+    # Actually: initial emit is outside the loop. Loop runs 2 iterations.
+    # Iter 0: review FAIL → re-emit. Iter 1: review FAIL → re-emit. Loop ends.
+    # So: 1 initial + 2 refinements = 3 write calls, 2 review calls.
+    # But the second review returns PASS (review_count==2), so iter 1 returns early.
+    # Iter 0: review(FAIL) → re-emit. Iter 1: review(PASS) → return.
+    # Total: 1 initial + 1 refinement = 2 write calls, 2 review calls.
+    assert call_count["n"] == 2
+    assert review_count["n"] == 2
+    assert proposal is not None
+    assert proposal.roi_model.payback_months == 6.0
+
+
+def test_propose_only_forwards_config_critic_refinements(
+    monkeypatch: pytest.MonkeyPatch, stub_orch, sample_prospect
+) -> None:
+    """propose_only must forward self.config.critic_max_refinements."""
+    monkeypatch.setattr(orch_mod, "load_current_insights", lambda: None)
+    stub_orch.load_dossiers_for_prospects = MagicMock(return_value={})
+    stub_orch.proposal.write.return_value = _proposal_body()
+    stub_orch.proposal_critic.review.return_value = _pass_proposal_report()
+
+    # Override config to max_refinements=0 → critic should never be called.
+    stub_orch.config = SalesPipelineConfig(critic_max_refinements=0)
+    req = ProposalRequest(
+        prospect=sample_prospect,
+        product_name="P",
+        value_proposition="V",
+        annual_cost_usd=25000.0,
+    )
+    proposal = stub_orch.propose_only(req)
+    assert proposal is not None
+    stub_orch.proposal_critic.review.assert_not_called()
