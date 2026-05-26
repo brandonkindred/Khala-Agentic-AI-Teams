@@ -154,22 +154,23 @@ class LearningEngine:
         If stage_outcomes / deal_outcomes are not provided, they are loaded
         from the outcome store automatically.
 
-        Serialized by ``_REFRESH_LOCK`` so concurrent callers cannot both read
-        the same ``insights_version``, compute independently, and overwrite
-        each other with a stale version.
+        The expensive LLM call (``_generate_insights``) runs outside the lock.
+        ``_REFRESH_LOCK`` serializes only the version read-increment-write so
+        concurrent callers don't overwrite each other, without blocking the
+        full network round-trip.
         """
-        with _REFRESH_LOCK:
-            if stage_outcomes is None:
-                stage_outcomes = load_stage_outcomes()
-            if deal_outcomes is None:
-                deal_outcomes = load_deal_outcomes()
+        if stage_outcomes is None:
+            stage_outcomes = load_stage_outcomes()
+        if deal_outcomes is None:
+            deal_outcomes = load_deal_outcomes()
 
-            current = load_current_insights()
-            current_version = current.insights_version if current else 0
-            n_analyzed = len(stage_outcomes) + len(deal_outcomes)
+        n_analyzed = len(stage_outcomes) + len(deal_outcomes)
 
-            if n_analyzed == 0:
-                logger.info("LearningEngine: no outcomes to analyze yet — returning empty insights")
+        if n_analyzed == 0:
+            logger.info("LearningEngine: no outcomes to analyze yet — returning empty insights")
+            with _REFRESH_LOCK:
+                current = load_current_insights()
+                current_version = current.insights_version if current else 0
                 empty = LearningInsights(
                     total_outcomes_analyzed=0,
                     actionable_recommendations=[
@@ -180,9 +181,13 @@ class LearningEngine:
                     insights_version=current_version + 1,
                 )
                 save_insights(empty)
-                return empty
+            return empty
 
-            body = self._generate_insights(stage_outcomes, deal_outcomes)
+        body = self._generate_insights(stage_outcomes, deal_outcomes)
+
+        with _REFRESH_LOCK:
+            current = load_current_insights()
+            current_version = current.insights_version if current else 0
             insights = LearningInsights(
                 **body.model_dump(),
                 generated_at=_utc_now_iso(),
@@ -190,15 +195,15 @@ class LearningEngine:
             )
             if insights.total_outcomes_analyzed == 0:
                 insights.total_outcomes_analyzed = n_analyzed
-
             save_insights(insights)
-            logger.info(
-                "LearningEngine: insights refreshed to v%d — win_rate=%.0f%%, %d outcomes",
-                insights.insights_version,
-                insights.win_rate * 100,
-                insights.total_outcomes_analyzed,
-            )
-            return insights
+
+        logger.info(
+            "LearningEngine: insights refreshed to v%d — win_rate=%.0f%%, %d outcomes",
+            insights.insights_version,
+            insights.win_rate * 100,
+            insights.total_outcomes_analyzed,
+        )
+        return insights
 
     def _generate_insights(
         self,

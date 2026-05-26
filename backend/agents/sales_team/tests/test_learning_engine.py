@@ -252,6 +252,8 @@ def test_concurrent_refreshes_serialize_versions(monkeypatch: pytest.MonkeyPatch
     t2.start()
     t1.join(timeout=5)
     t2.join(timeout=5)
+    assert not t1.is_alive(), "Thread t1 still running after join timeout"
+    assert not t2.is_alive(), "Thread t2 still running after join timeout"
 
     assert not errors, f"Unexpected errors: {errors}"
     assert len(versions_saved) == 2

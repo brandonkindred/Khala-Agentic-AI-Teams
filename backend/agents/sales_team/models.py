@@ -105,11 +105,6 @@ class SalesPipelineConfig(BaseModel):
         le=5,
         description="Max refinement attempts per prospect when a critic returns FAIL.",
     )
-    learning_insights_ttl_s: int = Field(
-        default=3600,
-        ge=0,
-        description="Seconds before cached learning insights are considered stale.",
-    )
 
 
 class IdealCustomerProfile(BaseModel):
@@ -445,17 +440,17 @@ class OutreachSequence(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _enforce_confidence_gate(self) -> "OutreachSequence":
+    def _enforce_confidence_gate(self, info: ValidationInfo) -> "OutreachSequence":
         """Drop non-``company_soft_opener`` variants when dossier confidence is low.
 
-        Mirrors the Enforcement-3 rule that used to live in
-        ``orchestrator._outreach_from_json``. Policy: when the dossier isn't
-        trustworthy enough to back person-level personalization, the sequence
-        may only carry company-level soft-opener variants. Does **not**
-        synthesise a fallback variant — that remains the orchestrator's job
-        (a validator shouldn't fabricate data).
+        The threshold defaults to the module-level
+        ``PERSONALIZATION_CONFIDENCE_THRESHOLD`` but can be overridden per-call
+        via ``context={"dossier_confidence_threshold": <float>}``.
         """
-        if self.dossier_confidence < PERSONALIZATION_CONFIDENCE_THRESHOLD:
+        threshold = PERSONALIZATION_CONFIDENCE_THRESHOLD
+        if info.context and "dossier_confidence_threshold" in info.context:
+            threshold = info.context["dossier_confidence_threshold"]
+        if self.dossier_confidence < threshold:
             non_soft = [v for v in self.variants if v.angle != "company_soft_opener"]
             if non_soft:
                 logger.warning(

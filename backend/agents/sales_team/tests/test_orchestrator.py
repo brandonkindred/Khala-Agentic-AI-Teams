@@ -1182,7 +1182,6 @@ def test_config_defaults_match_legacy_constants() -> None:
     assert cfg.decision_maker_workers == 8
     assert cfg.dossier_workers == 4
     assert cfg.critic_max_refinements == 1
-    assert cfg.learning_insights_ttl_s == 3600
 
 
 def test_request_carries_default_config() -> None:
@@ -1261,9 +1260,146 @@ def test_stage_methods_are_individually_callable(
         company_context="",
         cases="",
         entry=PipelineStage.PROSPECTING,
-        insights_ctx=None,
+        insights_ctx="",
         config=SalesPipelineConfig(),
         update=orch_mod._noop_update,
     )
     prospects = stub_orch._run_prospecting(ctx)
     assert prospects == [sample_prospect]
+
+
+# ---------------------------------------------------------------------------
+# Multi-iteration critic refinement tests
+# ---------------------------------------------------------------------------
+
+
+def test_outreach_critic_multi_iteration_refinement(
+    stub_orch,
+    sample_prospect: Prospect,
+    sample_dossier: ProspectDossier,
+    sample_icp: IdealCustomerProfile,
+) -> None:
+    """With max_refinements=2, the critic can reject twice and the agent retries."""
+    from sales_team.models import CriticViolation, OutreachCriticReport
+
+    call_count = {"n": 0}
+
+    def _outreach_side_effect(*a, **kw):
+        call_count["n"] += 1
+        return _good_variant_list()
+
+    stub_orch.outreach.generate_sequence.side_effect = _outreach_side_effect
+
+    # Critic rejects twice, then approves on the third review.
+    review_count = {"n": 0}
+
+    def _critic_side_effect(*a, **kw):
+        review_count["n"] += 1
+        if review_count["n"] <= 2:
+            return OutreachCriticReport(
+                status="FAIL",
+                approved=False,
+                violations=[
+                    CriticViolation(
+                        rule_id="outreach.day1.cta",
+                        severity="must_fix",
+                        description="no CTA",
+                        suggested_fix="add one",
+                    )
+                ],
+            )
+        return OutreachCriticReport(status="PASS", approved=True, violations=[])
+
+    stub_orch.outreach_critic.review.side_effect = _critic_side_effect
+
+    sequence = stub_orch._generate_outreach_with_critic(
+        sample_prospect, sample_dossier, "p", "v", "", "", None, sample_icp,
+        max_refinements=2,
+    )
+    # 1 initial + 2 refinement emits = 3 outreach calls
+    assert call_count["n"] == 3
+    # 2 reviews (both FAIL) — the third would be the approval but the loop
+    # exhausted its budget, so the last regenerated sequence is returned.
+    # Actually: loop runs range(2) → attempts 0 and 1. On attempt 0: FAIL →
+    # re-emit. On attempt 1: FAIL → re-emit. Loop ends, returns the last
+    # sequence. So 2 reviews, 3 outreach calls.
+    assert review_count["n"] == 2
+    assert sequence.variants  # still has variants
+
+
+def test_proposal_critic_fail_then_refine(
+    stub_orch,
+    sample_prospect: Prospect,
+    sample_dossier: ProspectDossier,
+) -> None:
+    """When the proposal critic rejects, the agent retries with feedback."""
+    from sales_team.models import CriticViolation, ProposalCriticReport
+
+    call_count = {"n": 0}
+
+    def _write_side_effect(*a, **kw):
+        call_count["n"] += 1
+        return _proposal_body()
+
+    stub_orch.proposal.write.side_effect = _write_side_effect
+
+    # Critic rejects on first review, approves on second.
+    review_count = {"n": 0}
+
+    def _critic_side_effect(*a, **kw):
+        review_count["n"] += 1
+        if review_count["n"] == 1:
+            return ProposalCriticReport(
+                status="FAIL",
+                approved=False,
+                violations=[
+                    CriticViolation(
+                        rule_id="proposal.roi.arithmetic",
+                        severity="must_fix",
+                        description="ROI math wrong",
+                        suggested_fix="fix the multiplication",
+                    )
+                ],
+            )
+        return ProposalCriticReport(status="PASS", approved=True, violations=[])
+
+    stub_orch.proposal_critic.review.side_effect = _critic_side_effect
+
+    proposal = stub_orch._generate_proposal_with_critic(
+        sample_prospect, "p", "v", 25000.0, "", "", "", None,
+        sample_dossier, None,
+        max_refinements=2,
+    )
+    # 1 initial emit + 1 refinement (after first FAIL) + 1 more refinement (after second FAIL) = 3
+    # Actually: initial emit is outside the loop. Loop runs 2 iterations.
+    # Iter 0: review FAIL → re-emit. Iter 1: review FAIL → re-emit. Loop ends.
+    # So: 1 initial + 2 refinements = 3 write calls, 2 review calls.
+    # But the second review returns PASS (review_count==2), so iter 1 returns early.
+    # Iter 0: review(FAIL) → re-emit. Iter 1: review(PASS) → return.
+    # Total: 1 initial + 1 refinement = 2 write calls, 2 review calls.
+    assert call_count["n"] == 2
+    assert review_count["n"] == 2
+    assert proposal is not None
+    assert proposal.roi_model.payback_months == 6.0
+
+
+def test_propose_only_forwards_config_critic_refinements(
+    monkeypatch: pytest.MonkeyPatch, stub_orch, sample_prospect
+) -> None:
+    """propose_only must forward self.config.critic_max_refinements."""
+    monkeypatch.setattr(orch_mod, "load_current_insights", lambda: None)
+    stub_orch.load_dossiers_for_prospects = MagicMock(return_value={})
+    stub_orch.proposal.write.return_value = _proposal_body()
+    stub_orch.proposal_critic.review.return_value = _pass_proposal_report()
+
+    # Override config to max_refinements=0 → critic should never be called.
+    stub_orch.config = SalesPipelineConfig(critic_max_refinements=0)
+    req = ProposalRequest(
+        prospect=sample_prospect,
+        product_name="P",
+        value_proposition="V",
+        annual_cost_usd=25000.0,
+    )
+    proposal = stub_orch.propose_only(req)
+    assert proposal is not None
+    stub_orch.proposal_critic.review.assert_not_called()

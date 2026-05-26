@@ -176,7 +176,7 @@ def _run_pipeline_job(job_id: str, request: SalesPipelineRequest) -> None:
             eta_hint="Starting pipeline...",
         )
 
-        orchestrator = SalesPodOrchestrator()
+        orchestrator = SalesPodOrchestrator(config=request.config)
 
         def on_update(stage: str, pct: int) -> None:
             _update_job(job_id, current_stage=stage, progress=pct, last_updated_at=_now())

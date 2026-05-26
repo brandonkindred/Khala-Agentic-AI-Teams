@@ -25,6 +25,7 @@ from .agents import (
 from .critics import OutreachCriticAgent, ProposalCriticAgent, format_critic_feedback
 from .learning_engine import LearningEngine, format_insights_for_prompt
 from .models import (
+    PERSONALIZATION_CONFIDENCE_THRESHOLD,
     ClosingStrategy,
     DecisionMakerList,
     DeepResearchRequest,
@@ -89,7 +90,7 @@ class _RunContext:
     company_context: str
     cases: str
     entry: PipelineStage
-    insights_ctx: Optional[str]
+    insights_ctx: str
     config: SalesPipelineConfig
     update: UpdateCallback
 
@@ -225,20 +226,23 @@ def _wrap_outreach_sequence(
     variants: OutreachVariantList,
     prospect: Prospect,
     dossier: ProspectDossier,
+    confidence_threshold: float = PERSONALIZATION_CONFIDENCE_THRESHOLD,
 ) -> OutreachSequence:
     """Wrap a validated :class:`OutreachVariantList` into a full OutreachSequence.
 
-    The model's citation verification and grade downgrade rules already ran
-    inside the Pydantic validators on EmailTouch and OutreachVariant. The
-    OutreachSequence ``model_validator`` then dropped non-soft-opener variants
-    when ``dossier_confidence < PERSONALIZATION_CONFIDENCE_THRESHOLD``. What's
-    left for the orchestrator: if that leaves zero variants, emit a fallback.
+    ``confidence_threshold`` is forwarded to the model validator via context
+    so ``SalesPipelineConfig.dossier_confidence_threshold`` overrides take
+    effect.
     """
-    seq = OutreachSequence(
-        prospect=prospect,
-        dossier_id=dossier.dossier_id,
-        dossier_confidence=dossier.confidence,
-        variants=variants.variants,
+    context = {"dossier_confidence_threshold": confidence_threshold}
+    seq = OutreachSequence.model_validate(
+        {
+            "prospect": prospect,
+            "dossier_id": dossier.dossier_id,
+            "dossier_confidence": dossier.confidence,
+            "variants": [v.model_dump() for v in variants.variants],
+        },
+        context=context,
     )
     if not seq.variants:
         logger.warning("sales.outreach.no_variants prospect_id=%s — emitting fallback", prospect.id)
@@ -290,7 +294,7 @@ class SalesPodOrchestrator:
             return False
 
     # ------------------------------------------------------------------
-    # Critic-gated emit helpers (one-shot refinement budget per prospect)
+    # Critic-gated emit helpers (configurable refinement budget)
     # ------------------------------------------------------------------
 
     def _generate_outreach_with_critic(
@@ -306,6 +310,7 @@ class SalesPodOrchestrator:
         max_refinements: int = 1,
     ) -> OutreachSequence:
         """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements* times."""
+        threshold = self.config.dossier_confidence_threshold
         variants = self.outreach.generate_sequence(
             prospect.model_dump_json(indent=2),
             dossier,
@@ -315,7 +320,7 @@ class SalesPodOrchestrator:
             company_context,
             insights_context,
         )
-        sequence = _wrap_outreach_sequence(variants, prospect, dossier)
+        sequence = _wrap_outreach_sequence(variants, prospect, dossier, confidence_threshold=threshold)
 
         if icp is None or max_refinements < 1:
             return sequence
@@ -350,7 +355,9 @@ class SalesPodOrchestrator:
                     "sales.outreach.refine_failed prospect_id=%s — keeping previous", prospect.id
                 )
                 return sequence
-            sequence = _wrap_outreach_sequence(variants, prospect, dossier)
+            sequence = _wrap_outreach_sequence(
+                variants, prospect, dossier, confidence_threshold=threshold,
+            )
 
         return sequence
 
@@ -633,7 +640,7 @@ class SalesPodOrchestrator:
         update_cb: Optional[UpdateCallback] = None,
     ) -> SalesPipelineResult:
         current_insights: Optional[LearningInsights] = load_current_insights()
-        insights_ctx: Optional[str] = format_insights_for_prompt(current_insights)
+        insights_ctx: str = format_insights_for_prompt(current_insights)
         if current_insights and current_insights.total_outcomes_analyzed > 0:
             logger.info(
                 "Sales pod [%s]: injecting learning insights v%d (%d outcomes, win_rate=%.0f%%)",
@@ -818,7 +825,8 @@ class SalesPodOrchestrator:
                 # outreach_only callers don't supply ICP — pass None and the
                 # critic-gated helper falls back to the unreviewed wrap path.
                 sequence = self._generate_outreach_with_critic(
-                    p, dossier, product_name, value_proposition, cases, company_context, ctx, None
+                    p, dossier, product_name, value_proposition, cases, company_context, ctx, None,
+                    max_refinements=self.config.critic_max_refinements,
                 )
             except Exception:
                 logger.exception(
@@ -890,6 +898,7 @@ class SalesPodOrchestrator:
                 ctx,
                 dossier_map.get(req.prospect.id),
                 None,  # propose_only does not carry a qualification score
+                max_refinements=self.config.critic_max_refinements,
             )
         except Exception:
             logger.exception("sales.propose_only.failed prospect_id=%s", req.prospect.id)
