@@ -489,8 +489,30 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
           );
         },
       });
+    } else if (this.activeConversationId) {
+      const summary = this.buildMissionSummaryMessage(patch);
+      this.api.sendConversationMessage(this.activeConversationId, summary, this.skipSave).subscribe({
+        next: (res) => {
+          this.conversationMission = res.mission ?? this.conversationMission;
+          this.conversationLatestOutput = res.latest_output ?? this.conversationLatestOutput;
+        },
+        error: () => {
+          // Optimistic local update already applied; backend will reconcile on next chat turn.
+        },
+      });
     }
     this.editPanelOpen = false;
+  }
+
+  private buildMissionSummaryMessage(patch: Partial<BrandingMissionSnapshot>): string {
+    const parts: string[] = [];
+    if (patch.company_name) parts.push(`Our company name is ${patch.company_name}.`);
+    if (patch.company_description) parts.push(`We do: ${patch.company_description}.`);
+    if (patch.target_audience) parts.push(`Our target audience is ${patch.target_audience}.`);
+    if (patch.desired_voice) parts.push(`Our desired voice is ${patch.desired_voice}.`);
+    if (patch.values?.length) parts.push(`Our values are: ${patch.values.join(', ')}.`);
+    if (patch.differentiators?.length) parts.push(`Our differentiators are: ${patch.differentiators.join(', ')}.`);
+    return parts.length > 0 ? parts.join(' ') : 'I updated brand details via the edit panel.';
   }
 
   /** Handle the "Don't save this brand" toggle from the edit panel. */

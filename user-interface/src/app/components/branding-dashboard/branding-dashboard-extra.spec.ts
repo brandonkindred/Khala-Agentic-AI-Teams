@@ -46,6 +46,7 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     getConversation: ReturnType<typeof vi.fn>;
     createConversation: ReturnType<typeof vi.fn>;
     updateBrand: ReturnType<typeof vi.fn>;
+    sendConversationMessage: ReturnType<typeof vi.fn>;
   };
   let snackBar: { open: ReturnType<typeof vi.fn> };
   let router: { navigate: ReturnType<typeof vi.fn> };
@@ -87,6 +88,7 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
       getConversation: vi.fn().mockReturnValue(of({ conversation_id: 'c1', messages: [], mission: null, latest_output: null, suggested_questions: [] })),
       createConversation: vi.fn().mockReturnValue(of({ conversation_id: 'c1', messages: [], mission: null, latest_output: null, suggested_questions: [] })),
       updateBrand: vi.fn().mockReturnValue(of(makeBrand('b1'))),
+      sendConversationMessage: vi.fn().mockReturnValue(of({ conversation_id: 'c1', messages: [], mission: { company_name: 'New', company_description: 'd', target_audience: 'a' }, latest_output: null, suggested_questions: [] })),
     };
   });
 
@@ -594,6 +596,20 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     component.selectedBrand = null;
     component.onMissionUpdateFromPanel({ company_name: 'X' });
     expect(component.conversationMission?.company_name).toBe('X');
+  });
+
+  it('onMissionUpdateFromPanel syncs edits to conversation when no brand is selected', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.selectedBrand = null;
+    component.selectedClient = workspaceClient;
+    component.activeConversationId = 'conv-orphan';
+    component.conversationMission = { company_name: 'Old', company_description: 'd', target_audience: 'a' } as BrandingMissionSnapshot;
+
+    component.onMissionUpdateFromPanel({ company_name: 'New' });
+
+    expect(api.sendConversationMessage).toHaveBeenCalledWith('conv-orphan', expect.stringContaining('New'), false);
+    expect(component.conversationMission?.company_name).toBe('New');
   });
 
   it('onMissionUpdateFromPanel handles updateBrand error without crashing', async () => {

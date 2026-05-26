@@ -44,7 +44,11 @@ export class BrandEditPanelComponent implements OnChanges {
   });
 
   ngOnChanges(changes: SimpleChanges): void {
-    if ((changes['open'] && this.open) || changes['mission'] || changes['brand']) {
+    const justOpened = changes['open'] && this.open && !changes['open'].previousValue;
+    const brandSwitch = changes['brand']
+      && changes['brand'].currentValue?.id !== changes['brand'].previousValue?.id;
+    const missionCleared = changes['mission'] && !changes['mission'].currentValue;
+    if (justOpened || brandSwitch || missionCleared || (!this.open && (changes['mission'] || changes['brand']))) {
       this.patchFormFromMission();
     }
   }

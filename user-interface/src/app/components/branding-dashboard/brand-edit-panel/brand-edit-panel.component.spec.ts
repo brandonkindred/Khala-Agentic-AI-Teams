@@ -42,7 +42,7 @@ describe('BrandEditPanelComponent', () => {
   });
 
   it('patches form from brand.mission when brand is provided', () => {
-    component.brand = { mission } as Brand;
+    component.brand = { id: 'b1', mission } as Brand;
     component.mission = null;
     component.open = true;
     component.ngOnChanges({
@@ -105,6 +105,23 @@ describe('BrandEditPanelComponent', () => {
     });
     component.onApply();
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('does not clobber form when mission changes while panel is open', () => {
+    component.mission = mission;
+    component.open = true;
+    component.ngOnChanges({
+      open: { currentValue: true, previousValue: false, firstChange: false, isFirstChange: () => false },
+    });
+    expect(component.form.value.company_name).toBe('Acme');
+
+    component.form.patchValue({ company_name: 'UserEdit' });
+
+    component.mission = { ...mission, company_name: 'ServerUpdate' };
+    component.ngOnChanges({
+      mission: { currentValue: component.mission, previousValue: mission, firstChange: false, isFirstChange: () => false },
+    });
+    expect(component.form.value.company_name).toBe('UserEdit');
   });
 
   it('onSkipSaveToggle emits skipSaveChange', () => {
