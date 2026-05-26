@@ -427,6 +427,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   }
 
   openEditPanelForNewBrand(): void {
+    this.selectedBrand = null;
     this.editPanelOpen = true;
     this.showCreateBrand = true;
   }

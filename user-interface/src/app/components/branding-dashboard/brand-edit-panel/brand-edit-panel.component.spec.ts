@@ -101,13 +101,20 @@ describe('BrandEditPanelComponent', () => {
     expect(spy).toHaveBeenCalled();
   });
 
-  it('handles empty mission gracefully', () => {
-    component.mission = null;
-    component.brand = null;
+  it('clears form when no mission is available (prevents stale data)', () => {
+    component.mission = mission;
     component.open = true;
     component.ngOnChanges({
       open: { currentValue: true, previousValue: false, firstChange: false, isFirstChange: () => false },
     });
+    expect(component.form.value.company_name).toBe('Acme');
+
+    component.mission = null;
+    component.brand = null;
+    component.ngOnChanges({
+      mission: { currentValue: null, previousValue: mission, firstChange: false, isFirstChange: () => false },
+    });
     expect(component.form.value.company_name).toBe('');
+    expect(component.form.value.values_csv).toBe('');
   });
 });

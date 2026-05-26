@@ -78,7 +78,10 @@ export class BrandEditPanelComponent implements OnChanges {
 
   private patchFormFromMission(): void {
     const m = this.brand?.mission ?? this.mission;
-    if (!m) return;
+    if (!m) {
+      this.form.reset({ company_name: '', company_description: '', target_audience: '', desired_voice: '', values_csv: '', differentiators_csv: '' });
+      return;
+    }
     this.form.patchValue({
       company_name: m.company_name || '',
       company_description: m.company_description || '',
