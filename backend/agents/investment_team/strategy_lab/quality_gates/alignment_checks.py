@@ -2,7 +2,7 @@
 
 Runs inside the orchestrator's trade-alignment loop, replacing the LLM
 audit's "read the ledger and write prose" inner step. Each executed
-``TradeRecord`` is run through eight deterministic checks against the
+``TradeRecord`` is run through seven deterministic checks against the
 structured :class:`StrategySpec`:
 
   1. Universe — ``trade.symbol in spec.target_symbols``
@@ -10,12 +10,11 @@ structured :class:`StrategySpec`:
   3. Sizing — ``trade.position_value`` within ±1% of the sizing formula
   4. Stop-loss compliance — return floor respected (or engine-closed)
   5. Take-profit compliance — return ceiling respected (or engine-closed)
-  6. Time-stop compliance — guarded no-op until the DSL grows the rule
-  7. Entry-signal correlation — predicate(s) evaluate ``True`` on the
+  6. Entry-signal correlation — predicate(s) evaluate ``True`` on the
      entry bar; near-misses (within
      ``STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT``) optionally route to a
      narrow LLM adjudicator.
-  8. Signal-exit correlation — when the spec carries
+  7. Signal-exit correlation — when the spec carries
      :class:`SignalExitRule` and the engine did not attribute the
      close to a structured exit, at least one signal-exit predicate
      must evaluate ``True`` at the exit bar.
@@ -472,7 +471,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             near_miss_pct = _near_miss_pct()
 
             for trade in trades:
-                # The seven checks. Each yields zero-or-more findings
+                # The six checks. Each yields zero-or-more findings
                 # (and matching gate_result rows). Critical failures
                 # drive ``aligned=False``.
                 self._check_universe(spec, trade, findings, gate_results)
@@ -486,7 +485,6 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 )
                 self._check_stop_loss(spec, trade, findings, gate_results)
                 self._check_take_profit(spec, trade, findings, gate_results)
-                self._check_time_stop(trade, findings, gate_results)
                 self._check_entry_signal(
                     spec,
                     trade,
@@ -864,32 +862,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         gate_results.append(self._emit_for_finding(finding))
 
     # ------------------------------------------------------------------
-    # Check 6 — time-stop compliance (guarded no-op until the DSL grows it)
-    # ------------------------------------------------------------------
-    def _check_time_stop(
-        self,
-        trade: Any,
-        findings: List[AlignmentFinding],
-        gate_results: List[QualityGateResult],
-    ) -> None:
-        # ``TimeStopRule`` is intentionally not part of the current spec
-        # DSL (``spec_dsl.py`` excludes bar-counting time stops). The
-        # check is wired so it activates the moment the DSL adds the
-        # rule; today it emits a single ``info`` row per trade so the
-        # ledger is self-describing.
-        finding = AlignmentFinding(
-            trade_num=trade.trade_num,
-            rule_id="exit:time_stop",
-            check_name="time_stop",
-            passed=True,
-            severity="info",
-            details="Time-stop check is a no-op (TimeStopRule not in current DSL).",
-        )
-        findings.append(finding)
-        gate_results.append(self._emit_for_finding(finding))
-
-    # ------------------------------------------------------------------
-    # Check 7 — entry-signal correlation (with near-miss adjudication)
+    # Check 6 — entry-signal correlation (with near-miss adjudication)
     # ------------------------------------------------------------------
     def _check_entry_signal(
         self,
@@ -1115,7 +1088,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         is the per-trade cache the entry-signal check populates.
         Post: emits zero-or-more findings:
           - no SignalExitRule in spec → no-op (other exit checks cover
-            stop_loss / take_profit / time_stop)
+            stop_loss / take_profit)
           - engine-attributed close (``exit_reason`` starts with
             ``engine_exit:``) → info skip (signal-exit check N/A)
           - strategy-emitted close (or unknown attribution) without
@@ -1132,8 +1105,8 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         exit_reason = getattr(trade, "exit_reason", None) or ""
         if exit_reason.startswith("engine_exit:"):
             # Engine attribution already covered by the matching
-            # structured-exit check (stop_loss / take_profit /
-            # time_stop). Emit a single info row so the audit ledger
+            # structured-exit check (stop_loss / take_profit).
+            # Emit a single info row so the audit ledger
             # records that the signal-exit check was reached and
             # deliberately skipped.
             finding = AlignmentFinding(

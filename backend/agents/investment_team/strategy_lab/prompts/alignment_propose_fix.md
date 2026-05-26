@@ -60,5 +60,8 @@ A JSON object with these fields:
   return``) when the spec carries ``target_symbols``.
 - Sizing must derive from ``ctx.equity`` or ``ctx.capital``; do not
   hardcode integer share counts.
+- Do not implement bar-counting "time stop" exits (e.g. ``bars_held``,
+  ``hold_count``, ``if counter >= N: close``). Exits must use price,
+  P&L, or signal-based logic only.
 
 Return ONLY the JSON object with no markdown fencing.

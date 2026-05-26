@@ -584,28 +584,7 @@ def test_take_profit_critical_when_return_exceeds_ceiling_without_attribution() 
 
 
 # ---------------------------------------------------------------------------
-# Check 6 — time-stop (guarded no-op until the DSL grows the rule)
-# ---------------------------------------------------------------------------
-
-
-def test_time_stop_emits_single_info_finding_per_trade() -> None:
-    gate = DeterministicAlignmentChecker()
-    spec = _spec()
-    trades = [_trade(trade_num=1), _trade(trade_num=2)]
-    result = gate.check(
-        spec=spec,
-        trades=trades,
-        market_data=_market_data_rsi_oversold(),
-        initial_capital=100_000.0,
-    )
-    time_stops = [f for f in result.findings if f.check_name == "time_stop"]
-    assert len(time_stops) == 2
-    assert all(f.passed and f.severity == "info" for f in time_stops)
-    assert all("TimeStopRule not in current DSL" in f.details for f in time_stops)
-
-
-# ---------------------------------------------------------------------------
-# Check 7 — entry signal correlation
+# Check 6 — entry signal correlation
 # ---------------------------------------------------------------------------
 
 
@@ -1404,7 +1383,7 @@ def test_check_aligned_true_when_every_critical_passes() -> None:
         initial_capital=100_000.0,
     )
     assert result.aligned is True
-    # Only info findings (universe, side, sizing, time_stop) plus the
+    # Only info findings (universe, side, sizing) plus the
     # passing entry_signal info row remain.
     criticals = [f for f in result.findings if f.severity == "critical"]
     assert criticals == []

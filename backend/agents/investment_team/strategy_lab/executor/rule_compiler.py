@@ -17,9 +17,7 @@ Supported rule kinds (matching the discriminated ``ExitRule`` union in
   today); the evaluator treats it as a silent no-op so a spec mixing
   signal exits with stop/take-profit still gets the latter enforced.
 
-Bar-counting "time stops" are deliberately absent: real traders close
-on price action, P&L, or signal reversal — not on an arbitrary "Nth
-bar held" counter.
+Only price-, P&L-, and signal-based exit rules are supported.
 
 This module is intentionally side-effect free: it takes the current
 per-position state and the current bar, and returns a list of

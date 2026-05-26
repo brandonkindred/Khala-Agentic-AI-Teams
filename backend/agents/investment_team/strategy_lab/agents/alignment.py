@@ -58,7 +58,7 @@ class AlignmentIssue(BaseModel):
     ``check_name`` rolls up into:
 
       - ``"entry_rules"`` ← ``side`` / ``entry_signal``
-      - ``"exit_rules"``  ← ``stop_loss`` / ``take_profit`` / ``time_stop``
+      - ``"exit_rules"``  ← ``stop_loss`` / ``take_profit`` / ``signal_exit``
       - ``"sizing_rules"`` ← ``sizing``
       - ``"universe"``    ← ``universe``
       - ``"direction"``   ← (legacy alias for ``side``)
@@ -117,7 +117,6 @@ _CHECK_TO_RULE_TYPE: Dict[str, str] = {
     "sizing": "sizing_rules",
     "stop_loss": "exit_rules",
     "take_profit": "exit_rules",
-    "time_stop": "exit_rules",
     "signal_exit": "exit_rules",
     "entry_signal": "entry_rules",
 }

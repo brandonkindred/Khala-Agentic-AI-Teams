@@ -37,7 +37,7 @@ class AlignmentFinding(BaseModel):
         test trade-level invariants rather than a specific rule.
       - ``check_name`` is one of: ``"universe"``, ``"side"``,
         ``"sizing"``, ``"stop_loss"``, ``"take_profit"``,
-        ``"time_stop"``, ``"entry_signal"``.
+        ``"signal_exit"``, ``"entry_signal"``.
       - ``computed_value`` / ``expected_value`` are populated by
         numeric checks so the UI can render "got X, expected ±tol of Y".
     """

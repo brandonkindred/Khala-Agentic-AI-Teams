@@ -49,7 +49,7 @@ def _rsi_exit_dict() -> Dict[str, Any]:
     ).model_dump()
 
 
-def _time_stop_exit_dict() -> Dict[str, Any]:
+def _stop_loss_exit_dict() -> Dict[str, Any]:
     return StopLossRule(pct=0.03).model_dump()
 
 
@@ -87,7 +87,7 @@ def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.Monke
         "hypothesis": "test",
         "signal_definition": "sig",
         "entry_rules": [],  # critical: no entry rules
-        "exit_rules": [_time_stop_exit_dict()],
+        "exit_rules": [_stop_loss_exit_dict()],
         "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
         "speculative": False,
     }

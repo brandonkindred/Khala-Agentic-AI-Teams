@@ -386,7 +386,7 @@ def check_exit_rule_alignment(record: Dict[str, Any]) -> CheckResult:
     alignment_checks = [
         f
         for f in findings
-        if f.get("check_name") in ("stop_loss", "take_profit", "signal_exit", "time_stop")
+        if f.get("check_name") in ("stop_loss", "take_profit", "signal_exit")
         and f.get("severity") == "critical"
         and not f.get("passed")
     ]

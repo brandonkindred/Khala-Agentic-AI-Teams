@@ -377,12 +377,12 @@ def check_exit_stop_loss(data):
         spec = _minimal_spec()
         findings = [
             AlignmentFinding(trade_num=1, rule_id="universe", check_name="universe_check", passed=True),
-            AlignmentFinding(trade_num=1, rule_id="exit:time_stop", check_name="time_stop", passed=True),
+            AlignmentFinding(trade_num=1, rule_id="diagnostic:example", check_name="diagnostic_check", passed=True),
         ]
         result = _build_rule_implementation_map(spec, findings, "def run(): pass")
         rule_ids = {r.rule_id for r in result}
         assert "universe" not in rule_ids
-        assert "exit:time_stop" not in rule_ids
+        assert "diagnostic:example" not in rule_ids
 
     def test_info_skip_findings_not_counted(self):
         """N/A skip findings (passed=True but no computed_value) don't inflate traded_count."""
