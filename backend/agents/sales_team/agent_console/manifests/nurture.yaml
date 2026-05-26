@@ -7,7 +7,10 @@ tags: [sales, nurture]
 inputs:
   schema_ref: sales_team.models:NurtureRequest
 outputs:
-  schema_ref: sales_team.models:NurtureSequenceBody
+  description: >-
+    Per-prospect grouped results: {"duration_days": N, "results": [{prospect_id, prospect_company,
+    touchpoints, re_engagement_triggers, content_recommendations}, ...]}.
+    Each entry contains the NurtureSequenceBody output for one prospect.
 invoke:
   kind: http
   method: POST

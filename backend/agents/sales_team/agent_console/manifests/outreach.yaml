@@ -7,7 +7,9 @@ tags: [sales, outreach]
 inputs:
   schema_ref: sales_team.models:OutreachRequest
 outputs:
-  schema_ref: sales_team.models:OutreachVariantList
+  description: >-
+    Per-prospect grouped results: {"results": [{prospect_id, prospect_company, variants}, ...]}.
+    Each entry contains the OutreachVariantList output for one prospect.
 invoke:
   kind: http
   method: POST
