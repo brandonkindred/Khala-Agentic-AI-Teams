@@ -195,8 +195,14 @@ SCHEMA = TeamSchema(
             id              BIGSERIAL PRIMARY KEY,
             canonical_id    TEXT NOT NULL,
             nutrient        TEXT NOT NULL,
-            old_value       DOUBLE PRECISION CHECK (old_value >= 0),
-            new_value       DOUBLE PRECISION NOT NULL CHECK (new_value >= 0),
+            old_value       DOUBLE PRECISION
+                            CHECK (old_value >= 0
+                                   AND old_value != 'NaN'::float8
+                                   AND old_value != 'Infinity'::float8),
+            new_value       DOUBLE PRECISION NOT NULL
+                            CHECK (new_value >= 0
+                                   AND new_value != 'NaN'::float8
+                                   AND new_value != 'Infinity'::float8),
             reason          TEXT,
             citation        TEXT,
             author          TEXT NOT NULL,
