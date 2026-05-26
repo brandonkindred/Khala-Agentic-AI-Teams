@@ -515,6 +515,45 @@ def test_no_bar_counting_false_positive_on_clean_code() -> None:
     assert crits == []
 
 
+def test_no_bar_counting_false_positive_on_local_variable() -> None:
+    """Bare local variables (e.g. diagnostic ``bar_count``) must not
+    trigger the bar-counting exit guard — only ``self.<name>`` instance
+    attributes are flagged."""
+    code = (
+        "from contract import OrderSide, OrderType, Strategy, TimeInForce\n"
+        "from indicators import rsi\n\n"
+        "class S(Strategy):\n"
+        "    UNIVERSE = frozenset({'QQQ'})\n"
+        "    WINDOW = 20\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        if ctx.is_warmup:\n"
+        "            return\n"
+        "        if bar.symbol not in self.UNIVERSE:\n"
+        "            return\n"
+        "        history = ctx.history(bar.symbol, self.WINDOW)\n"
+        "        if len(history) < self.WINDOW:\n"
+        "            return\n"
+        "        bar_count = len(history)\n"
+        "        days_held = 0\n"
+        "        closes = [b.close for b in history]\n"
+        "        r = rsi(closes)\n"
+        "        pos = ctx.position(bar.symbol)\n"
+        "        if pos is None and r < 30:\n"
+        "            qty = int((ctx.equity * 0.02) / bar.close)\n"
+        "            if qty > 0:\n"
+        "                ctx.submit_order(symbol=bar.symbol, qty=qty,\n"
+        "                    side=OrderSide.LONG, order_type=OrderType.MARKET,\n"
+        "                    tif=TimeInForce.DAY, reason='rsi entry')\n"
+        "        elif pos is not None and r > 70:\n"
+        "            ctx.submit_order(symbol=bar.symbol, qty=pos.qty,\n"
+        "                side=OrderSide.SHORT, order_type=OrderType.MARKET,\n"
+        "                tif=TimeInForce.DAY, reason='rsi exit')\n"
+    )
+    results = CodeConformanceGate().check(code, _happy_spec())
+    crits = [r for r in results if r.severity == "critical" and "bar-counting" in r.details.lower()]
+    assert crits == []
+
+
 # ---------------------------------------------------------------------------
 # Check 8: sizing math
 # ---------------------------------------------------------------------------

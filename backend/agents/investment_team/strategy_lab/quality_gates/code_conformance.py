@@ -659,14 +659,17 @@ class CodeConformanceGate(GateResultsMixin):
         violations: list[str] = []
         for method in _iter_strategy_methods(cls):
             for node in ast.walk(method):
-                if isinstance(node, ast.Attribute) and node.attr in self._BAR_COUNTER_NAMES:
-                    violations.append(
-                        f"self.{node.attr}"
-                        if isinstance(node.value, ast.Name) and node.value.id == "self"
-                        else node.attr
-                    )
-                if isinstance(node, ast.Name) and node.id in self._BAR_COUNTER_NAMES:
-                    violations.append(node.id)
+                # Only flag self.<counter> instance attributes — these persist
+                # across bars and are the pattern LLMs use for holding-period
+                # exits.  Bare locals (e.g. a diagnostic `bar_count`) are left
+                # alone to avoid false positives on non-exit bookkeeping.
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr in self._BAR_COUNTER_NAMES
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"
+                ):
+                    violations.append(f"self.{node.attr}")
         unique = sorted(set(violations))
         if not unique:
             return ()
