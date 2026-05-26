@@ -2840,40 +2840,6 @@ def run_orchestrator(
                 get_job_fn=lambda jid: get_job(jid),
                 get_llm=get_client,
             )
-
-            # CI workflow seeding + gate are non-fatal: failures must never
-            # block job completion or crash background orchestrator threads.
-            try:
-                from software_engineering_team.quality_gate_tools import (
-                    run_ci_gate,
-                    seed_ci_workflows,
-                )
-
-                _repo_path = Path(path)
-                _seed_result = seed_ci_workflows(
-                    _repo_path,
-                    has_backend=(_repo_path / "backend").is_dir()
-                    or (_repo_path / "requirements.txt").exists(),
-                    has_frontend=(_repo_path / "frontend").is_dir()
-                    or (_repo_path / "package.json").exists(),
-                )
-                if _seed_result:
-                    logger.info("Seeded CI workflows: %s", _seed_result)
-
-                if os.environ.get("SE_CI_GATE_ENABLED", "true").lower() in ("1", "true", "yes"):
-                    _ci_result = run_ci_gate(_repo_path)
-                    if _ci_result.passed:
-                        logger.info("CI gate: passed")
-                    else:
-                        logger.warning("CI gate: %s", _ci_result.summary)
-                    update_job(
-                        job_id,
-                        ci_gate_passed=_ci_result.passed,
-                        ci_gate_summary=_ci_result.summary,
-                    )
-            except Exception as _ci_err:
-                logger.warning("CI workflow seeding/gate failed (non-blocking): %s", _ci_err)
-
             update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
             return
 
