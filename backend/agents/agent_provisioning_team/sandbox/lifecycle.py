@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import shutil
 import time
 from collections import Counter, deque
@@ -81,19 +82,23 @@ def _check_docker_available() -> None:
     """Fail fast with a clear message when docker is not usable.
 
     Preconditions: none.
-    Postconditions: returns normally only when both the ``docker`` binary is on
-    PATH and the daemon socket exists at the default location.
+    Postconditions: returns normally only when the ``docker`` binary is on
+    PATH and a Docker endpoint is reachable (DOCKER_HOST, DOCKER_CONTEXT,
+    or the default /var/run/docker.sock).
     """
     if shutil.which("docker") is None:
         raise DockerUnavailableError(
             "Sandbox provisioning requires the 'docker' CLI, but it is not installed or not on PATH. "
             "Install Docker or run the unified API on a host with Docker access."
         )
+    if os.environ.get("DOCKER_HOST") or os.environ.get("DOCKER_CONTEXT"):
+        return
     docker_sock = Path("/var/run/docker.sock")
     if not docker_sock.exists():
         raise DockerUnavailableError(
-            "Sandbox provisioning requires the Docker daemon, but /var/run/docker.sock is missing. "
-            "Start the Docker daemon or bind-mount the socket into this container."
+            "Sandbox provisioning requires the Docker daemon, but /var/run/docker.sock is missing "
+            "and neither DOCKER_HOST nor DOCKER_CONTEXT is set. "
+            "Start the Docker daemon, set DOCKER_HOST, or bind-mount the socket into this container."
         )
 
 
