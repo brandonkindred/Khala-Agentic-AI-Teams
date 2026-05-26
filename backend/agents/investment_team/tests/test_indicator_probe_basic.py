@@ -1,54 +1,14 @@
-"""Basic per-subcondition tests for the indicator-coverage probe (#448)."""
+"""Basic per-subcondition tests for the indicator-coverage probe."""
 
 from __future__ import annotations
 
 import textwrap
 
-import numpy as np
-import pandas as pd
-
 from investment_team.models import CoverageCategory
 from investment_team.strategy_lab.coverage_probe import run_indicator_probe
 
-
-def _flat_ohlcv(n: int = 60, base: float = 100.0) -> pd.DataFrame:
-    idx = pd.date_range("2024-01-01", periods=n, freq="D")
-    return pd.DataFrame(
-        {
-            "open": np.full(n, base),
-            "high": np.full(n, base + 1.0),
-            "low": np.full(n, base - 1.0),
-            "close": np.full(n, base),
-            "volume": np.full(n, 1_000_000.0),
-        },
-        index=idx,
-    )
-
-
-def _swing_ohlcv(n: int = 200, leg: int = 50, step: float = 0.005) -> pd.DataFrame:
-    """Sawtooth price series that drives RSI to its extremes.
-
-    50 bars at -0.5%/bar take RSI well below 30; 50 bars at +0.5%/bar
-    take it above 70. Two full cycles in 200 bars give every RSI
-    threshold in (0..100) at least one strict crossing per cycle.
-    """
-    idx = pd.date_range("2024-01-01", periods=n, freq="D")
-    moves: list[float] = []
-    while len(moves) < n:
-        moves.extend([-step] * leg)
-        moves.extend([+step] * leg)
-    moves = moves[:n]
-    close = 100.0 * np.cumprod(1.0 + np.array(moves))
-    return pd.DataFrame(
-        {
-            "open": close,
-            "high": close * 1.005,
-            "low": close * 0.995,
-            "close": close,
-            "volume": np.full(n, 1_000_000.0),
-        },
-        index=idx,
-    )
+from ._indicator_probe_fixtures import flat_ohlcv as _flat_ohlcv
+from ._indicator_probe_fixtures import swing_ohlcv as _swing_ohlcv
 
 
 def test_always_true_subcondition_returns_coverage_ok() -> None:
