@@ -262,7 +262,7 @@ def test_get_llm_for_agent_global_fallback() -> None:
 
 
 def test_get_llm_for_agent_uses_default_when_no_env() -> None:
-    """When no env overrides, agent default (e.g. qwen3.5:397b-cloud for backend) is used."""
+    """When no env overrides, agent default (e.g. deepseek-v4-pro:cloud for backend) is used."""
     _clear_client_cache_for_testing()
     with patch.dict(
         os.environ,
@@ -275,7 +275,7 @@ def test_get_llm_for_agent_uses_default_when_no_env() -> None:
     ):
         client = get_client("backend")
     assert isinstance(client, OllamaLLMClient)
-    assert client.model == "qwen3.5:397b-cloud"
+    assert client.model == "deepseek-v4-pro:cloud"
 
 
 def test_get_client_cache_returns_same_instance() -> None:

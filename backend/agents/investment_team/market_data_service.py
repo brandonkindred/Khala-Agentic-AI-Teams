@@ -9,6 +9,7 @@ Provider priority:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from datetime import date, timedelta
@@ -807,12 +808,23 @@ class MarketDataService:
         """
         bars: List[OHLCVBar] = []
         repairs = 0
+        dropped_nan = 0
         for idx, row in df.iterrows():  # type: ignore[union-attr]
             bar_date = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
             o = round(float(row["Open"]), 4)
             h = round(float(row["High"]), 4)
             ll = round(float(row["Low"]), 4)
             c = round(float(row["Close"]), 4)
+            # Drop rows where any OHLC value is non-finite. yfinance
+            # occasionally surfaces NaN rows during data gaps; without this
+            # filter a NaN close propagates straight into the gate's market
+            # sample provider and trips the sizing-realisability critical
+            # with ``got nan``, killing the cycle before any trade can run.
+            if not (
+                math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)
+            ):
+                dropped_nan += 1
+                continue
             h_fixed = max(o, h, ll, c)
             l_fixed = min(o, h, ll, c)
             if h_fixed != h or l_fixed != ll:
@@ -832,5 +844,10 @@ class MarketDataService:
                 "yfinance: repaired OHLC invariants on %d/%d bars",
                 repairs,
                 len(bars),
+            )
+        if dropped_nan > 0:
+            logger.warning(
+                "yfinance: dropped %d bar(s) with non-finite OHLC values",
+                dropped_nan,
             )
         return bars

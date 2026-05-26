@@ -43,6 +43,8 @@ KNOWN_MODEL_CONTEXT: dict[str, int] = {
     "qwen3.5:cloud": 262144,
     "qwen3-coder:480b-cloud": 262144,
     "qwen3-coder:480b": 262144,
+    # deepseek-v4-pro:cloud is intentionally omitted — context size is
+    # resolved at runtime via the Ollama /api/show call on first use.
 }
 
 # ---------------------------------------------------------------------------
@@ -50,45 +52,45 @@ KNOWN_MODEL_CONTEXT: dict[str, int] = {
 # ---------------------------------------------------------------------------
 
 AGENT_DEFAULT_MODELS: dict[str, str] = {
-    "backend": "qwen3.5:397b-cloud",
-    "frontend": "qwen3.5:397b-cloud",
-    "code_review": "qwen3.5:397b-cloud",
-    "repair": "qwen3.5:397b-cloud",
-    "devops": "qwen3.5:397b-cloud",
-    "dbc_comments": "qwen3.5:397b-cloud",
-    "tech_lead": "qwen3.5:397b-cloud",
-    "architecture": "qwen3.5:397b-cloud",
-    "spec_intake": "qwen3.5:397b-cloud",
-    "spec_clarification": "qwen3.5:397b-cloud",
-    "product_analysis": "qwen3.5:397b-cloud",
-    "project_planning": "qwen3.5:397b-cloud",
-    "integration": "qwen3.5:397b-cloud",
-    "api_contract": "qwen3.5:397b-cloud",
-    "data_architecture": "qwen3.5:397b-cloud",
-    "ui_ux": "qwen3.5:397b-cloud",
-    "frontend_architecture": "qwen3.5:397b-cloud",
-    "infrastructure": "qwen3.5:397b-cloud",
-    "devops_planning": "qwen3.5:397b-cloud",
-    "qa_test_strategy": "qwen3.5:397b-cloud",
-    "security_planning": "qwen3.5:397b-cloud",
-    "observability": "qwen3.5:397b-cloud",
-    "acceptance_verifier": "qwen3.5:397b-cloud",
-    "documentation": "qwen3.5:397b-cloud",
-    "qa": "qwen3.5:397b-cloud",
-    "security": "qwen3.5:397b-cloud",
-    "accessibility": "qwen3.5:397b-cloud",
+    "backend": "deepseek-v4-pro:cloud",
+    "frontend": "deepseek-v4-pro:cloud",
+    "code_review": "deepseek-v4-pro:cloud",
+    "repair": "deepseek-v4-pro:cloud",
+    "devops": "deepseek-v4-pro:cloud",
+    "dbc_comments": "deepseek-v4-pro:cloud",
+    "tech_lead": "deepseek-v4-pro:cloud",
+    "architecture": "deepseek-v4-pro:cloud",
+    "spec_intake": "deepseek-v4-pro:cloud",
+    "spec_clarification": "deepseek-v4-pro:cloud",
+    "product_analysis": "deepseek-v4-pro:cloud",
+    "project_planning": "deepseek-v4-pro:cloud",
+    "integration": "deepseek-v4-pro:cloud",
+    "api_contract": "deepseek-v4-pro:cloud",
+    "data_architecture": "deepseek-v4-pro:cloud",
+    "ui_ux": "deepseek-v4-pro:cloud",
+    "frontend_architecture": "deepseek-v4-pro:cloud",
+    "infrastructure": "deepseek-v4-pro:cloud",
+    "devops_planning": "deepseek-v4-pro:cloud",
+    "qa_test_strategy": "deepseek-v4-pro:cloud",
+    "security_planning": "deepseek-v4-pro:cloud",
+    "observability": "deepseek-v4-pro:cloud",
+    "acceptance_verifier": "deepseek-v4-pro:cloud",
+    "documentation": "deepseek-v4-pro:cloud",
+    "qa": "deepseek-v4-pro:cloud",
+    "security": "deepseek-v4-pro:cloud",
+    "accessibility": "deepseek-v4-pro:cloud",
     # Other teams
     "soc2": "llama3.1",
-    "blog": "qwen3.5:397b-cloud",
+    "blog": "deepseek-v4-pro:cloud",
     "personal_assistant": "llama3.2",
     "nutrition_meal_planning": "llama3.2",
     "accessibility_audit": "llama3.1",
-    "strategy_ideation": "qwen3.5:397b-cloud",
-    "signal_intelligence": "qwen3.5:397b-cloud",
-    "deepthought": "qwen3.5:397b-cloud",
+    "strategy_ideation": "deepseek-v4-pro:cloud",
+    "signal_intelligence": "deepseek-v4-pro:cloud",
+    "deepthought": "deepseek-v4-pro:cloud",
 }
 
-DEFAULT_FALLBACK_MODEL = "qwen3.5:397b-cloud"
+DEFAULT_FALLBACK_MODEL = "deepseek-v4-pro:cloud"
 
 # ---------------------------------------------------------------------------
 # Resolvers (env + agent defaults)

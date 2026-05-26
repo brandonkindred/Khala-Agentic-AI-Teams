@@ -70,7 +70,7 @@ for the design rationale and migration notes.
 | `LLM_BACKOFF_BASE` | Backoff base (seconds) |
 | `LLM_BACKOFF_MAX` | Max backoff (seconds) |
 | `LLM_MAX_CONCURRENCY` | Max concurrent Ollama calls |
-| `LLM_ENABLE_THINKING` | Enable thinking for qwen3.5 |
+| `LLM_ENABLE_THINKING` | Enable thinking mode (some Ollama Cloud models reject `think: true`; disable if you see 500s) |
 | `OLLAMA_API_KEY` | **Required for Ollama Cloud.** API key from https://ollama.com/settings/keys. All LLM requests use this when set. |
 
 ### Troubleshooting
@@ -83,9 +83,9 @@ for the design rationale and migration notes.
 
 **500 Internal Server Error from Ollama Cloud**
 
-- **Thinking mode:** With `qwen3.5:397b-cloud`, the client may send `think: true`, which some endpoints reject. Set `LLM_ENABLE_THINKING=false` and retry.
+- **Thinking mode:** Some Ollama Cloud models (e.g. `qwen3.5:397b-cloud`) reject `think: true` and return 500s. Set `LLM_ENABLE_THINKING=false` and retry.
 - **Quota / capacity:** Check your Ollama Cloud account and https://status.ollama.com (or Ollama’s status page) for outages or rate limits.
-- **Model / size:** Try a smaller model (e.g. `LLM_MODEL=qwen3.5:8b-cloud`) or reduce prompt size to rule out server-side overload.
+- **Model / size:** Try a smaller model or reduce prompt size to rule out server-side overload.
 
 ### Docker and name resolution
 
@@ -106,7 +106,7 @@ Context size is resolved in this order: `LLM_CONTEXT_SIZE` env, then known-model
 
 ## Per-agent default models
 
-When `LLM_MODEL_<agent_key>` and `LLM_MODEL` are unset, `config.AGENT_DEFAULT_MODELS` is used (e.g. `backend` → `qwen3.5:397b-cloud`). See `config.py`.
+When `LLM_MODEL_<agent_key>` and `LLM_MODEL` are unset, `config.AGENT_DEFAULT_MODELS` is used (e.g. `backend` → `deepseek-v4-pro:cloud`). See `config.py`.
 
 ## Strands Agents adapter
 

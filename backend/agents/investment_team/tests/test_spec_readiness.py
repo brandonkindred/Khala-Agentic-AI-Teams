@@ -453,18 +453,79 @@ def test_rule5_passes_with_realistic_sizing() -> None:
     assert not sizing_failures, sizing_failures
 
 
+def test_rule5_skips_price_fetch_when_fractional_forex() -> None:
+    """Forex (fractional sizing) must NOT critical-fail on a missing price.
+
+    The per-symbol price loop only validates whole-lot realisability —
+    qty >= 1 for stocks/futures/commodities. Forex and crypto accept
+    fractional quantities, so the price sample contributes nothing, and a
+    transient provider gap (weekend, holiday, yfinance miss) must not
+    block the cycle. Without this skip, a forex spec on a Saturday dies
+    on Rule 5 before ever producing a trade — the system loses its
+    learning signal.
+    """
+    spec = _spec(
+        asset_class="forex",
+        target_symbols=["USDJPY=X"],
+        sizing=FixedFractionSizing(fraction=0.02),
+        hypothesis="USDJPY=X mean reversion via RSI(14).",
+        timeframe="1h",
+    )
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: float("nan"))
+    results = gate.validate(spec, backtest_config=_config())
+    sizing_failures = [c for c in _critical(results) if "Sizing realisability" in c]
+    assert not sizing_failures, sizing_failures
+
+
+def test_rule5_skips_price_fetch_when_fractional_crypto() -> None:
+    """Crypto (fractional sizing) inherits the same NaN-tolerance contract."""
+    spec = _spec(
+        asset_class="crypto",
+        target_symbols=["BTC-USD"],
+        sizing=FixedFractionSizing(fraction=0.02),
+        hypothesis="BTC-USD momentum via RSI(14).",
+    )
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: float("nan"))
+    results = gate.validate(spec, backtest_config=_config())
+    sizing_failures = [c for c in _critical(results) if "Sizing realisability" in c]
+    assert not sizing_failures, sizing_failures
+
+
+def test_rule5_still_fails_closed_on_whole_lot_class_with_nan_price() -> None:
+    """Stocks (whole-lot) must still fail closed on NaN — the per-symbol
+    fetch genuinely matters there (qty < 1 is unfillable). Pin this so a
+    future refactor that skips too aggressively gets caught."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=1000.0),
+        target_symbols=["AAPL"],
+        asset_class="stocks",
+    )
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: float("nan"))
+    results = gate.validate(spec, backtest_config=_config())
+    assert any("no usable price sample" in c for c in _critical(results))
+
+
 # ---------------------------------------------------------------------------
 # Rule 6: Hypothesis–rule consistency
 # ---------------------------------------------------------------------------
 
 
-def test_rule6_hypothesis_mentions_indicator_not_in_rules_is_critical() -> None:
+def test_rule6_hypothesis_mentions_indicator_not_in_rules_is_warning() -> None:
+    """An indicator named in the hypothesis but absent from every predicate
+    is prose hygiene, not an implementability failure: surface it as a
+    warning so the design ↔ review loop can act on it, but do not block
+    the cycle. Blocking on this lost the system its learning signal for
+    every otherwise-runnable spec whose prose drifted from its rules.
+    """
     spec = _spec(
         hypothesis="MACD bullish crossovers on AAPL signal long entries.",
         # entry rule uses RSI, not MACD
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    assert any("macd" in c.lower() for c in _critical(results))
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("macd" in w.lower() for w in warnings), warnings
+    # And explicitly NOT critical — that's the behavioural contract change.
+    assert not any("macd" in c.lower() for c in _critical(results))
 
 
 def test_rule1_matches_lowercase_ticker_in_hypothesis() -> None:

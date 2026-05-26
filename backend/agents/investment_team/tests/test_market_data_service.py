@@ -233,6 +233,74 @@ def test_df_to_bars_normalises_ohlc_invariants() -> None:
     assert bars[0].volume == 1000
 
 
+def test_df_to_bars_filters_nan_rows() -> None:
+    """Rows containing NaN in any OHLC field must be dropped.
+
+    yfinance occasionally surfaces NaN rows during data gaps; left unfiltered,
+    a NaN close propagates straight into the SpecReadinessGate's market sample
+    provider (which then trips the sizing realisability critical with
+    ``got nan``). Filter at the data boundary so no downstream consumer ever
+    sees a non-finite OHLC value.
+    """
+    import math
+
+    class _Row:
+        def __init__(self, data: Dict[str, float]) -> None:
+            self._d = data
+
+        def __getitem__(self, key: str) -> float:
+            return self._d[key]
+
+        def get(self, key: str, default: float = 0.0) -> float:
+            return self._d.get(key, default)
+
+    class _Index:
+        def __init__(self, label: str) -> None:
+            self._label = label
+
+        def strftime(self, fmt: str) -> str:  # noqa: ARG002 — accept arbitrary fmt
+            return self._label
+
+    class _DF:
+        def __init__(self, rows: List[Tuple[_Index, _Row]]) -> None:
+            self._rows = rows
+
+        def iterrows(self):
+            return iter(self._rows)
+
+    rows = [
+        # Good bar — kept.
+        (
+            _Index("2024-01-01"),
+            _Row({"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000}),
+        ),
+        # NaN Close — dropped.
+        (
+            _Index("2024-01-02"),
+            _Row({"Open": 100, "High": 101, "Low": 99, "Close": float("nan"), "Volume": 1000}),
+        ),
+        # +inf Open — dropped.
+        (
+            _Index("2024-01-03"),
+            _Row({"Open": float("inf"), "High": 101, "Low": 99, "Close": 100, "Volume": 1000}),
+        ),
+        # Good bar — kept.
+        (
+            _Index("2024-01-04"),
+            _Row({"Open": 102, "High": 103, "Low": 101, "Close": 102, "Volume": 2000}),
+        ),
+    ]
+    bars = MarketDataService._df_to_bars(_DF(rows))
+    assert [b.date for b in bars] == ["2024-01-01", "2024-01-04"]
+    assert all(
+        math.isfinite(b.open)
+        and math.isfinite(b.high)
+        and math.isfinite(b.low)
+        and math.isfinite(b.close)
+        for b in bars
+    )
+
+
 def test_df_to_bars_falls_back_when_index_has_no_strftime() -> None:
     """Indexes without strftime are stringified and truncated to 10 chars."""
 

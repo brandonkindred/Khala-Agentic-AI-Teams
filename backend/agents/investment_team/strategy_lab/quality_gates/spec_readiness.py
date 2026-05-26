@@ -480,6 +480,17 @@ class SpecReadinessGate(GateResultsMixin):
             # defensive: nothing further to evaluate.
             return ()
 
+        # The per-symbol price loop only adds value when whole-lot
+        # realisability matters (qty >= 1 for stocks/futures/commodities).
+        # Forex and crypto accept fractional quantities, so any positive
+        # price would pass the qty check — and a transient provider gap
+        # (weekend, holiday, yfinance miss) producing NaN would otherwise
+        # critical-fail an otherwise-runnable spec. Skip the loop for
+        # fractional asset classes; the symbol-independent notional check
+        # above is the only realisability signal that applies to them.
+        if not enforce_whole_lot:
+            return ()
+
         for sym in symbols:
             try:
                 price = float(self._market_sample_provider(sym, ctx.spec.asset_class))
@@ -492,7 +503,7 @@ class SpecReadinessGate(GateResultsMixin):
                     ),
                 )
             qty = notional / price
-            if qty < threshold or (not enforce_whole_lot and qty <= threshold):
+            if qty < threshold:
                 return (
                     self._critical(
                         f"Sizing yields qty={qty:.4f} (threshold {threshold}) "
@@ -524,8 +535,14 @@ class SpecReadinessGate(GateResultsMixin):
         )
         if not orphan:
             return ()
+        # Demoted from critical to warning: a hypothesis that names an
+        # indicator the predicates don't use is prose hygiene, not an
+        # implementability failure. The design ↔ review loop sees the
+        # warning row and can push DesignAgent.revise() to either add the
+        # indicator reference or trim the prose; the cycle still produces
+        # a backtest record so the orchestrator has a learning signal.
         return (
-            self._critical(
+            self._warning(
                 f"Hypothesis names indicator concept(s) {orphan} "
                 "that no entry/exit rule references."
             ),

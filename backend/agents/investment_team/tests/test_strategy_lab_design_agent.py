@@ -104,11 +104,18 @@ def _structured_sizing() -> Dict[str, Any]:
     return {"kind": "fixed_fraction", "fraction": 0.02}
 
 
-def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str | List[str]) -> _CapturingAgent:
+def _patch_design(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: str | List[str],
+    *,
+    enable_self_review: bool = False,
+) -> _CapturingAgent:
     """Replace the in-module ``Agent``/``get_strands_model`` with stubs.
 
     Returns the capturing agent so the test can inspect the prompt
-    sent to the model.
+    sent to the model. Self-review is disabled by default so legacy
+    single-call tests don't have to script an extra critique payload;
+    self-review tests opt in with ``enable_self_review=True``.
     """
     capture = _CapturingAgent(payload)
     monkeypatch.setattr(
@@ -118,6 +125,10 @@ def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str | List[str]) -> 
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.design.get_strands_model",
         lambda role: object(),
+    )
+    monkeypatch.setenv(
+        "STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED",
+        "true" if enable_self_review else "false",
     )
     return capture
 
@@ -374,6 +385,31 @@ def _bar_close_as_indicator_ref_payload() -> str:
     )
 
 
+def _source_in_params_payload() -> str:
+    """Real-world failure shape #3: ``source`` nested inside ``params``.
+
+    ``source`` is a TOP-LEVEL field on IndicatorRef, not a member of
+    ``params``. The per-indicator param registry rejects unexpected keys,
+    so ``params: {"period": 20, "source": "volume"}`` trips with
+    "unexpected param 'source'; allowed: ['period']" for SMA/EMA.
+    """
+    return _payload(
+        entry_rules=[
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "lhs": "bar.volume",
+                    "op": ">",
+                    "rhs": {"name": "sma", "params": {"period": 20, "source": "volume"}},
+                },
+            }
+        ],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+
+
 def _sma_of_atr_payload() -> str:
     """Real-world failure shape #2: SMA-of-ATR.
 
@@ -424,6 +460,31 @@ def test_run_retries_parse_error_then_succeeds(monkeypatch: pytest.MonkeyPatch) 
     retry_prompt = capture.calls[1]
     assert "entry_rules[0]" in retry_prompt
     assert "bar.close" in retry_prompt
+
+
+def test_run_retries_source_in_params_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Third observed failure shape: ``source`` nested inside ``params``.
+
+    The correction prompt must explicitly call out that ``source`` is a
+    top-level field on IndicatorRef — without that nudge the model often
+    re-emits the same misplaced key on retry.
+    """
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", raising=False)
+    capture = _patch_design(
+        monkeypatch,
+        [_source_in_params_payload(), _good_payload()],
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 2
+    assert parsed["asset_class"] == "stocks"
+    retry_prompt = capture.calls[1]
+    assert "entry_rules[0]" in retry_prompt
+    # The corrective preamble must steer the LLM toward the top-level
+    # `source` shape so the retry is more than just a re-roll.
+    assert "TOP-LEVEL" in retry_prompt
+    assert "source" in retry_prompt
 
 
 def test_run_retries_sma_of_atr_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -484,3 +545,156 @@ def test_revise_also_retries_on_parse_error(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert len(capture.calls) == 2
     assert parsed["asset_class"] == "stocks"
+
+
+# ---------------------------------------------------------------------------
+# Self-review pass — catch prose↔predicate + risk-math contradictions
+# inside DesignAgent before they reach the external review loop.
+# ---------------------------------------------------------------------------
+
+
+def _ready_critique_payload() -> str:
+    """Self-review verdict declaring the candidate spec internally coherent."""
+    return json.dumps(
+        {
+            "ready": True,
+            "rationale": "Internally coherent; predicates implement every prose claim.",
+            "issues": [],
+        }
+    )
+
+
+def _failing_critique_payload() -> str:
+    """Self-review verdict flagging a prose↔predicate completeness gap."""
+    return json.dumps(
+        {
+            "ready": False,
+            "rationale": (
+                "Hypothesis names an ADX > 25 trend filter but no entry rule references ADX."
+            ),
+            "issues": [
+                {
+                    "field": "entry_rules",
+                    "severity": "critical",
+                    "description": "Hypothesis mentions ADX > 25 but no predicate uses adx.",
+                    "suggested_fix": "Add an entry predicate {lhs: adx(14), op: >, rhs: 25}.",
+                }
+            ],
+        }
+    )
+
+
+def test_run_self_review_passes_no_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When self-review marks the candidate ready, no self-revision fires.
+
+    Two LLM calls total: initial generation + self-review verdict. The
+    returned spec is the original draft, unmodified.
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _ready_critique_payload()],
+        enable_self_review=True,
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 2
+    assert parsed["asset_class"] == "stocks"
+
+
+def test_run_self_review_flags_then_self_revises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When self-review flags issues, the designer self-revises exactly once.
+
+    Three LLM calls total: initial generation + self-review verdict +
+    self-revision. The retry prompt for the third call must carry the
+    self-critique's field+description so the LLM has something concrete
+    to act on (otherwise the revision is a blind re-roll).
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _failing_critique_payload(), _good_payload()],
+        enable_self_review=True,
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 3
+    assert parsed["asset_class"] == "stocks"
+    # The third call (self-revision) must include the self-critique payload.
+    revision_prompt = capture.calls[2]
+    assert "entry_rules" in revision_prompt
+    assert "ADX" in revision_prompt or "adx" in revision_prompt
+
+
+def test_revise_self_review_passes_no_extra_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``revise()`` also runs through self-review. When the revision is
+    self-coherent, exactly two LLM calls fire: the revision + the
+    self-review verdict. No self-revision."""
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _ready_critique_payload()],
+        enable_self_review=True,
+    )
+
+    critique = SpecCritique(ready=False, rationale="external r", issues=[])
+    parsed, _ = DesignAgent().revise(_prior_spec(), critique)
+
+    assert len(capture.calls) == 2
+    assert parsed["asset_class"] == "stocks"
+
+
+def test_revise_self_review_flags_then_self_revises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A revision that fails self-review triggers exactly one self-revision.
+
+    The external-loop revision was the failure mode named in the user's
+    example feedback ("defects persist after 9 prior rounds") — this test
+    pins that revise() inherits the same self-review contract as run().
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _failing_critique_payload(), _good_payload()],
+        enable_self_review=True,
+    )
+
+    critique = SpecCritique(ready=False, rationale="external r", issues=[])
+    parsed, _ = DesignAgent().revise(_prior_spec(), critique)
+
+    assert len(capture.calls) == 3
+    assert parsed["asset_class"] == "stocks"
+
+
+def test_self_review_disabled_via_env_single_call_on_both_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED=false`` restores the
+    pre-change single-call behaviour for both run() and revise().
+
+    ``_patch_design`` defaults to disabled, so this test mirrors that
+    default explicitly — same expectation, no extra calls.
+    """
+    capture = _patch_design(monkeypatch, _good_payload())
+
+    DesignAgent().run(prior_records=[])
+    DesignAgent().revise(_prior_spec(), SpecCritique(ready=False, rationale="r", issues=[]))
+
+    assert len(capture.calls) == 2  # one per public method, no self-review
+
+
+def test_self_review_garbage_response_falls_back_to_original(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Self-review is best-effort: a malformed verdict must not block the
+    cycle. Return the original spec unchanged and log a warning so the
+    drift is observable."""
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), "not a json verdict at all"],
+        enable_self_review=True,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
+        parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 2  # generation + self-review; no revision attempted
+    assert parsed["asset_class"] == "stocks"
+    assert any("self-review" in rec.message.lower() for rec in caplog.records)

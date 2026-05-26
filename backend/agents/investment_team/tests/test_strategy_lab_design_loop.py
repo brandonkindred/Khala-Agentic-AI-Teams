@@ -376,7 +376,7 @@ def test_design_review_rounds_env_override_floors_to_one(
     assert _design_review_rounds() == 1
 
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "garbage")
-    assert _design_review_rounds() == 5  # falls back to default
+    assert _design_review_rounds() == 20  # falls back to default
 
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "7")
     assert _design_review_rounds() == 7

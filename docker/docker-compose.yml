@@ -133,7 +133,7 @@ services:
     environment:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
-      LLM_MODEL: ${LLM_MODEL:-qwen3.5:397b-cloud}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro:cloud}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres
@@ -179,7 +179,7 @@ services:
     environment: &team-env-base
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
-      LLM_MODEL: ${LLM_MODEL:-qwen3.5:397b-cloud}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro:cloud}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres
@@ -786,7 +786,7 @@ services:
     environment:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
-      LLM_MODEL: ${LLM_MODEL:-qwen3.5:397b-cloud}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro:cloud}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres
