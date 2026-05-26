@@ -56,6 +56,69 @@ def test_parse_extraction_returns_empty_on_garbage() -> None:
     assert suggestions == []
 
 
+def test_parse_extraction_accepts_top_level_mission_fields() -> None:
+    """Schema-drift fallback: the LLM occasionally omits the ``mission_update``
+    wrapper and emits mission fields at the top level. The parser must
+    promote those fields rather than silently lose the turn's updates."""
+    raw = json.dumps(
+        {
+            "company_name": "Acme",
+            "target_audience": "Developers",
+            "values": ["clarity", "trust"],
+        }
+    )
+    mission_update, suggestions = _parse_extraction(raw)
+    assert mission_update == {
+        "company_name": "Acme",
+        "target_audience": "Developers",
+        "values": ["clarity", "trust"],
+    }
+    assert suggestions == []
+
+
+def test_parse_extraction_top_level_fallback_ignores_non_mission_keys() -> None:
+    """The fallback must NOT promote arbitrary non-mission keys."""
+    raw = json.dumps({"company_name": "Acme", "unrelated_field": "ignored"})
+    mission_update, _ = _parse_extraction(raw)
+    assert mission_update == {"company_name": "Acme"}
+    assert "unrelated_field" not in mission_update
+
+
+def test_parse_extraction_prefers_mission_update_wrapper_when_present() -> None:
+    """When the model returns the canonical wrapper, the top-level
+    fallback must NOT kick in and overwrite it."""
+    raw = json.dumps(
+        {
+            "mission_update": {"company_name": "Acme"},
+            # Top-level mission keys present but should be ignored — the
+            # wrapper takes precedence.
+            "company_name": "Should-Be-Ignored",
+            "suggested_questions": ["q1"],
+        }
+    )
+    mission_update, suggestions = _parse_extraction(raw)
+    assert mission_update == {"company_name": "Acme"}
+    assert suggestions == ["q1"]
+
+
+def test_parse_extraction_top_level_fallback_collects_nested_palettes() -> None:
+    """The reviewer's concrete example: top-level mission with nested
+    ``color_palettes`` list of objects must be preserved verbatim."""
+    raw = json.dumps(
+        {
+            "company_name": "Acme",
+            "color_palettes": [
+                {"name": "warm", "colors": ["#aa3300", "#ffcc99"]},
+            ],
+        }
+    )
+    mission_update, _ = _parse_extraction(raw)
+    assert mission_update["company_name"] == "Acme"
+    assert mission_update["color_palettes"] == [
+        {"name": "warm", "colors": ["#aa3300", "#ffcc99"]}
+    ]
+
+
 def test_strip_accidental_json_suppresses_bare_json_object() -> None:
     """Regression for the screenshot bug — the conversation agent must never leak
     raw mission JSON to the user. _strip_accidental_json blanks it so the caller

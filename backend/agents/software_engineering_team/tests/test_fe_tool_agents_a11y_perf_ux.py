@@ -82,6 +82,7 @@ class TestAccessibility:
 
         a = mod.AccessibilityToolAgent.__new__(mod.AccessibilityToolAgent)
         a._model = None
+        a._model_json = None
         a.llm = None
         return a, mod
 
@@ -111,18 +112,21 @@ class TestAccessibility:
     def test_review_no_code(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, "{}")
         assert "no code" in a.review(_fe_phase_input(current_files={})).summary
 
     def test_review_llm_exception(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, raise_exc=RuntimeError("err"))
         assert "LLM error" in a.review(_fe_phase_input(current_files={"a.ts": "x"})).summary
 
     def test_review_finds_issues(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         payload = json.dumps(
             {
                 "issues": [
@@ -146,6 +150,7 @@ class TestAccessibility:
         """Extracts JSON object even with surrounding chatter."""
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         payload = (
             "Here is the result:\n"
             '{"issues": [{"description": "x", "severity": "low"}], "summary": "ok"}\n'
@@ -158,6 +163,7 @@ class TestAccessibility:
     def test_review_invalid_json_returns_no_issues(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, "not json at all")
         out = a.review(_fe_phase_input(current_files={"a.tsx": "x"}))
         assert out.issues == []
@@ -165,6 +171,7 @@ class TestAccessibility:
     def test_review_malformed_inner_json(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, "garbage {malformed: } more")
         out = a.review(_fe_phase_input(current_files={"a.tsx": "x"}))
         assert out.issues == []
@@ -176,6 +183,7 @@ class TestAccessibility:
     def test_problem_solve_no_a11y_issues(self):
         a, _ = self._agent()
         a._model = object()
+        a._model_json = object()
         out = a.problem_solve(
             _fe_phase_input(review_issues=[_fe_review_issue(source="security")])
         )
@@ -184,6 +192,7 @@ class TestAccessibility:
     def test_problem_solve_fixes(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(
             monkeypatch,
             mod,
@@ -203,6 +212,7 @@ class TestAccessibility:
     def test_problem_solve_llm_exception(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, raise_exc=RuntimeError("err"))
         out = a.problem_solve(
             _fe_phase_input(
@@ -226,6 +236,7 @@ class TestPerformance:
 
         a = mod.PerformanceToolAgent.__new__(mod.PerformanceToolAgent)
         a._model = None
+        a._model_json = None
         a.llm = None
         return a, mod
 
@@ -252,17 +263,20 @@ class TestPerformance:
     def test_review_no_code(self):
         a, _ = self._agent()
         a._model = object()
+        a._model_json = object()
         assert "no code" in a.review(_fe_phase_input(current_files={})).summary
 
     def test_review_llm_exception(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, raise_exc=RuntimeError("e"))
         assert "LLM error" in a.review(_fe_phase_input(current_files={"a.ts": "x"})).summary
 
     def test_review_finds_issues(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         payload = json.dumps(
             {
                 "issues": [
@@ -285,6 +299,7 @@ class TestPerformance:
     def test_review_invalid_json(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, "not json")
         assert a.review(_fe_phase_input(current_files={"a.ts": "x"})).issues == []
 
@@ -295,6 +310,7 @@ class TestPerformance:
     def test_problem_solve_no_perf_issues(self):
         a, _ = self._agent()
         a._model = object()
+        a._model_json = object()
         out = a.problem_solve(
             _fe_phase_input(review_issues=[_fe_review_issue(source="security")])
         )
@@ -303,6 +319,7 @@ class TestPerformance:
     def test_problem_solve_fixes(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(
             monkeypatch,
             mod,
@@ -330,6 +347,7 @@ class TestUxUsability:
 
         a = mod.UxUsabilityToolAgent.__new__(mod.UxUsabilityToolAgent)
         a._model = None
+        a._model_json = None
         a.llm = None
         return a, mod
 
@@ -357,12 +375,14 @@ class TestUxUsability:
     def test_review_no_code(self):
         a, _ = self._agent()
         a._model = object()
+        a._model_json = object()
         out = a.review(_fe_phase_input(current_files={}))
         assert "no code" in out.summary
 
     def test_review_llm_exception(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, raise_exc=RuntimeError("err"))
         out = a.review(_fe_phase_input(current_files={"a.tsx": "x"}))
         assert "LLM error" in out.summary
@@ -370,6 +390,7 @@ class TestUxUsability:
     def test_review_finds_issues(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         payload = json.dumps(
             {
                 "issues": [
@@ -395,7 +416,223 @@ class TestUxUsability:
     def test_problem_solve_no_ux_issues(self):
         a, _ = self._agent()
         a._model = object()
+        a._model_json = object()
         out = a.problem_solve(
             _fe_phase_input(review_issues=[_fe_review_issue(source="security")])
         )
         assert "No" in out.summary
+
+
+# ---------------------------------------------------------------------------
+# Dual-model routing: review/plan must use the JSON-mode model;
+# problem_solve must use the text-mode model. The reviewer flagged a silent
+# zero-issues failure mode when review ran in text mode and the LLM returned
+# prose — JSON mode + retained text mode for the marker-template path closes it.
+# ---------------------------------------------------------------------------
+
+
+class _ModelRecordingAgent:
+    """Captures the ``model`` kwarg of every ``Agent(...)`` construction."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def __call__(self, prompt):
+        return self._response
+
+
+def _patch_recording(monkeypatch, mod, response):
+    calls: list = []
+
+    def fake_agent(*args, **kwargs):
+        calls.append(kwargs.get("model"))
+        return _ModelRecordingAgent(response)
+
+    monkeypatch.setattr(mod, "Agent", fake_agent)
+    return calls
+
+
+def _problem_solve_marker_payload() -> str:
+    return "## FILE a.tsx ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n"
+
+
+def test_accessibility_review_uses_json_mode_model(monkeypatch) -> None:
+    """The review path must route through ``_model_json`` so a prose
+    response from the LLM is biased toward returning JSON; routing it
+    through ``_model`` (text mode) would silently drop WCAG findings."""
+    from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility import (
+        agent as mod,
+    )
+
+    a = mod.AccessibilityToolAgent.__new__(mod.AccessibilityToolAgent)
+    text_sentinel = object()
+    json_sentinel = object()
+    a._model = text_sentinel
+    a._model_json = json_sentinel
+    a.llm = None
+    calls = _patch_recording(monkeypatch, mod, json.dumps({"issues": [], "summary": ""}))
+
+    a.review(_fe_phase_input(current_files={"a.tsx": "<img/>"}))
+
+    assert calls and all(c is json_sentinel for c in calls), (
+        "review() must invoke Agent(model=_model_json); "
+        f"got {[id(c) for c in calls]} vs json={id(json_sentinel)} text={id(text_sentinel)}"
+    )
+
+
+def test_accessibility_problem_solve_uses_text_mode_model(monkeypatch) -> None:
+    """The problem_solve path consumes a ``---FILES---`` marker template,
+    so it must keep using the text-mode ``_model`` — JSON mode would
+    force a JSON object on the wire and clobber the marker output."""
+    from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility import (
+        agent as mod,
+    )
+
+    a = mod.AccessibilityToolAgent.__new__(mod.AccessibilityToolAgent)
+    text_sentinel = object()
+    json_sentinel = object()
+    a._model = text_sentinel
+    a._model_json = json_sentinel
+    a.llm = None
+    calls = _patch_recording(monkeypatch, mod, _problem_solve_marker_payload())
+
+    a.problem_solve(
+        _fe_phase_input(
+            current_files={"a.tsx": "x"},
+            review_issues=[_fe_review_issue(source="accessibility", file_path="a.tsx")],
+        )
+    )
+
+    assert calls and all(c is text_sentinel for c in calls)
+
+
+def test_performance_review_uses_json_mode_model(monkeypatch) -> None:
+    from software_engineering_team.frontend_code_v2_team.tool_agents.performance import (
+        agent as mod,
+    )
+
+    a = mod.PerformanceToolAgent.__new__(mod.PerformanceToolAgent)
+    text_sentinel = object()
+    json_sentinel = object()
+    a._model = text_sentinel
+    a._model_json = json_sentinel
+    a.llm = None
+    calls = _patch_recording(monkeypatch, mod, json.dumps({"issues": [], "summary": ""}))
+
+    a.review(_fe_phase_input(current_files={"a.ts": "x"}))
+
+    assert calls and all(c is json_sentinel for c in calls)
+
+
+def test_performance_problem_solve_uses_text_mode_model(monkeypatch) -> None:
+    from software_engineering_team.frontend_code_v2_team.tool_agents.performance import (
+        agent as mod,
+    )
+
+    a = mod.PerformanceToolAgent.__new__(mod.PerformanceToolAgent)
+    text_sentinel = object()
+    json_sentinel = object()
+    a._model = text_sentinel
+    a._model_json = json_sentinel
+    a.llm = None
+    calls = _patch_recording(monkeypatch, mod, _problem_solve_marker_payload())
+
+    a.problem_solve(
+        _fe_phase_input(
+            current_files={"a.ts": "x"},
+            review_issues=[_fe_review_issue(source="performance", file_path="a.ts")],
+        )
+    )
+
+    assert calls and all(c is text_sentinel for c in calls)
+
+
+def test_ux_usability_plan_and_review_use_json_mode_model(monkeypatch) -> None:
+    """Both plan() and review() on UX usability ask for strict JSON."""
+    from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability import (
+        agent as mod,
+    )
+
+    a = mod.UxUsabilityToolAgent.__new__(mod.UxUsabilityToolAgent)
+    text_sentinel = object()
+    json_sentinel = object()
+    a._model = text_sentinel
+    a._model_json = json_sentinel
+    a.llm = None
+
+    calls = _patch_recording(monkeypatch, mod, json.dumps({"summary": "ok"}))
+    a.plan(_fe_phase_input(task_description="some task"))
+    assert calls and all(c is json_sentinel for c in calls), "plan() must use _model_json"
+
+    calls = _patch_recording(monkeypatch, mod, json.dumps({"issues": [], "summary": "ok"}))
+    a.review(_fe_phase_input(current_files={"a.tsx": "x"}))
+    assert calls and all(c is json_sentinel for c in calls), "review() must use _model_json"
+
+
+def test_ux_usability_problem_solve_uses_text_mode_model(monkeypatch) -> None:
+    from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability import (
+        agent as mod,
+    )
+
+    a = mod.UxUsabilityToolAgent.__new__(mod.UxUsabilityToolAgent)
+    text_sentinel = object()
+    json_sentinel = object()
+    a._model = text_sentinel
+    a._model_json = json_sentinel
+    a.llm = None
+    calls = _patch_recording(monkeypatch, mod, _problem_solve_marker_payload())
+
+    a.problem_solve(
+        _fe_phase_input(
+            current_files={"a.tsx": "x"},
+            review_issues=[_fe_review_issue(source="ux", file_path="a.tsx")],
+        )
+    )
+
+    assert calls and all(c is text_sentinel for c in calls)
+
+
+def test_a11y_perf_ux_constructor_resolves_both_models_with_distinct_modes(monkeypatch) -> None:
+    """All three tool agents must call ``resolve_strands_model`` twice —
+    once for the text-mode ``_model`` and once for the json-mode
+    ``_model_json``. Verified by recording every ``response_format``
+    requested at the resolver boundary so we lock in the JSON path
+    cannot silently fall back to text mode for the review/plan calls."""
+    from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility import (
+        agent as a11y_mod,
+    )
+    from software_engineering_team.frontend_code_v2_team.tool_agents.performance import (
+        agent as perf_mod,
+    )
+    from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability import (
+        agent as ux_mod,
+    )
+
+    for cls in (
+        a11y_mod.AccessibilityToolAgent,
+        perf_mod.PerformanceToolAgent,
+        ux_mod.UxUsabilityToolAgent,
+    ):
+        formats_seen: list[str] = []
+
+        def _record(llm, *, response_format="json", _store=formats_seen):  # noqa: ANN001
+            _store.append(response_format)
+            return object()
+
+        monkeypatch.setattr(
+            "software_engineering_team.shared.strands_model.resolve_strands_model",
+            _record,
+        )
+
+        instance = cls(llm=None)
+
+        assert instance._model is not None, f"{cls.__name__}: text-mode _model missing"
+        assert instance._model_json is not None, f"{cls.__name__}: json-mode _model_json missing"
+        assert "text" in formats_seen, (
+            f"{cls.__name__}: constructor must resolve a text-mode model "
+            f"(formats seen: {formats_seen})"
+        )
+        assert "json" in formats_seen, (
+            f"{cls.__name__}: constructor must resolve a json-mode model "
+            f"(formats seen: {formats_seen})"
+        )

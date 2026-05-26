@@ -75,6 +75,14 @@ def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
         return {}, []
 
     mission_update = _coerce_mission(parsed.get("mission_update"))
+    # Schema-drift fallback: when the model omits the ``mission_update``
+    # wrapper and emits mission fields at the top level — a common LLM
+    # output deviation — promote the top-level mission-shaped keys so the
+    # turn's updates aren't silently lost.
+    if not mission_update:
+        top_level_mission = {k: v for k, v in parsed.items() if k in _MISSION_FIELD_NAMES}
+        if top_level_mission:
+            mission_update = top_level_mission
     suggested_questions = _coerce_suggestions(parsed.get("suggested_questions"))
     return mission_update, suggested_questions
 

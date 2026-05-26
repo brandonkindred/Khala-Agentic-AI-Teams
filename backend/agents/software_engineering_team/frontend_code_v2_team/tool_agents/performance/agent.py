@@ -101,11 +101,18 @@ class PerformanceToolAgent:
     def __init__(self, llm=None) -> None:
         from software_engineering_team.shared.strands_model import resolve_strands_model
 
-        # v2 tool agents consume template-parsed output (parse_review_template /
-        # parse_files_and_summary_template / parse_problem_solving_single_issue_template);
-        # the mixed-mode ones (accessibility / performance / ux_usability) have
-        # JSON paths with defensive fence-stripping fallbacks that work in text mode.
+        # Two models for two output shapes:
+        #   * ``_model`` (text mode) drives ``problem_solve`` whose output is
+        #     a ``---FILES---`` marker hybrid parsed by
+        #     ``parse_problem_solving_single_issue_template`` — JSON mode
+        #     would clobber the marker.
+        #   * ``_model_json`` (JSON mode) drives ``review``/``plan`` whose
+        #     prompts require strict JSON and whose parser falls back to
+        #     ``{}`` on failure — without JSON mode a prose response would
+        #     silently drop every finding (no issues surfaced, no
+        #     remediation triggered).
         self._model = resolve_strands_model(llm, response_format="text")
+        self._model_json = resolve_strands_model(llm, response_format="json")
         self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
@@ -140,7 +147,7 @@ class PerformanceToolAgent:
             code=code_text,
         )
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            raw = (lambda _r: str(_r))(Agent(model=self._model_json)(prompt)).strip()
         except Exception as e:
             logger.warning("Performance review LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="Performance review failed (LLM error).")
@@ -153,8 +160,18 @@ class PerformanceToolAgent:
                 try:
                     data = json.loads(raw[start:end])
                 except json.JSONDecodeError:
+                    logger.warning(
+                        "Performance review: model output did not parse as JSON "
+                        "(first 200 chars: %r); reporting 0 issues.",
+                        raw[:200],
+                    )
                     data = {}
             else:
+                logger.warning(
+                    "Performance review: model output contained no JSON object "
+                    "(first 200 chars: %r); reporting 0 issues.",
+                    raw[:200],
+                )
                 data = {}
         issues: List[ReviewIssue] = []
         for item in data.get("issues") or []:
