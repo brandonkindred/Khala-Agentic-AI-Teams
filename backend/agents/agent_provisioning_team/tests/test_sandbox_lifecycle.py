@@ -44,6 +44,12 @@ def _patched_docker(*, container_id: str = "abc123", host_port: int = 55123, run
     assert on call counts without unpacking a tuple in every `with` block.
     """
     with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+                return_value=None,
+            )
+        )
         yield SimpleNamespace(
             run=stack.enter_context(
                 patch.object(
@@ -241,11 +247,59 @@ async def test_unknown_agent_raises_without_docker_call(tmp_path: Path) -> None:
             "agent_provisioning_team.sandbox.lifecycle._resolve_team",
             side_effect=UnknownAgentError("No agent manifest for 'ghost.agent'"),
         ),
+        patch(
+            "agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+            return_value=None,
+        ),
         patch.object(provisioner_mod, "run_container", new=AsyncMock()) as run_mock,
     ):
         with pytest.raises(UnknownAgentError):
             await lc.acquire("ghost.agent")
     run_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_acquire_raises_docker_unavailable_when_no_docker(tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox.lifecycle import DockerUnavailableError
+
+    lc = _lifecycle(tmp_path)
+    with (
+        _patched_registry(),
+        patch(
+            "agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+            side_effect=DockerUnavailableError("Docker daemon not found"),
+        ),
+        patch.object(provisioner_mod, "run_container", new=AsyncMock()) as run_mock,
+    ):
+        with pytest.raises(DockerUnavailableError, match="Docker daemon not found"):
+            await lc.acquire("blogging.planner")
+    run_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_acquire_continues_when_zombie_cleanup_fails(tmp_path: Path) -> None:
+    """Pre-provision stop_container failure should not prevent provisioning."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker() as d:
+        d.stop.side_effect = provisioner_mod.DockerError("daemon blip")
+        handle = await lc.acquire("blogging.planner")
+    assert handle.status == SandboxStatus.WARM
+    d.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_acquire_continues_when_is_running_check_fails(tmp_path: Path) -> None:
+    """If is_running raises (e.g. docker socket gone), treat as not running
+    and re-provision rather than aborting with 503."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker():
+        await lc.acquire("blogging.planner")
+
+    with _patched_registry(), _patched_docker(container_id="new123", host_port=55999) as d2:
+        d2.running.side_effect = OSError("docker socket gone")
+        handle = await lc.acquire("blogging.planner")
+    assert handle.status == SandboxStatus.WARM
+    assert handle.container_id == "new123"
 
 
 def test_state_persists_across_lifecycle_instances(tmp_path: Path) -> None:

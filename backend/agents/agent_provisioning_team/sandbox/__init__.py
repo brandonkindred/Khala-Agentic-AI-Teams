@@ -6,6 +6,7 @@ API and Agent Console switch to this module in Phase 3 (#265).
 """
 
 from .lifecycle import (
+    DockerUnavailableError,
     Lifecycle,
     UnknownAgentError,
     acquire,
@@ -31,6 +32,7 @@ from .state import (
 __all__ = [
     "AgeStats",
     "BootMsStats",
+    "DockerUnavailableError",
     "Lifecycle",
     "ReaperStats",
     "SandboxHandle",
