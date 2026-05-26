@@ -29,13 +29,25 @@ from ..models import (
     OrderLifecycleEvent,
     TradeRecord,
 )
+from ..strategy_lab.executor.predicate_evaluator import (
+    BarRecord,
+    StreamingHistoryView,
+    evaluate_entry_rules as _evaluate_entry_rules_pred,
+)
 from ..strategy_lab.executor.rule_compiler import (
     BarSnapshot,
     ExitIntent,
     PositionState,
     evaluate_exit_rules,
 )
-from ..strategy_lab.spec_dsl import ExitRule
+from ..strategy_lab.spec_dsl import (
+    EntryRule,
+    ExitRule,
+    FixedFractionSizing,
+    FixedNotionalSizing,
+    SizingRule,
+    VolatilityTargetSizing,
+)
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
 from .engine.execution_model import build_execution_model
 from .engine.fill_simulator import FillOutcome, FillSimulator, FillSimulatorConfig
@@ -134,6 +146,7 @@ class _EngineExitDispatcher:
     exit_rules: Sequence[ExitRule]
     engine_exit_bindings: Dict[str, str] = field(default_factory=dict)
     _next_seq: int = 0
+    views: Optional[Dict[str, StreamingHistoryView]] = None
 
     # ------------------------------------------------------------------
 
@@ -273,7 +286,9 @@ class _EngineExitDispatcher:
         """
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
-        intents = evaluate_exit_rules(self.exit_rules, {sym: snapshot}, {sym: bar_snap})
+        intents = evaluate_exit_rules(
+            self.exit_rules, {sym: snapshot}, {sym: bar_snap}, views=self.views,
+        )
         return intents[0] if intents else None
 
     @staticmethod
@@ -484,6 +499,117 @@ class _EngineExitDispatcher:
             order_type=OrderType.MARKET.value,
             reason=req.reason,
         )
+
+
+ENGINE_ENTRY_REASON_PREFIX = "engine_entry:"
+
+
+@dataclass
+class _EngineEntryDispatcher:
+    """Per-run owner of engine-side entry-rule enforcement.
+
+    Parallel to :class:`_EngineExitDispatcher`.  Evaluates structured
+    entry predicates deterministically using a per-symbol
+    :class:`StreamingHistoryView` and auto-submits entry orders with
+    spec-derived sizing when a predicate fires.
+
+    Empty ``entry_rules`` (or ``None`` sizing) makes
+    :meth:`maybe_emit` a no-op — the strategy subprocess handles
+    entries via its ``on_bar`` code as before.
+    """
+
+    entry_rules: Sequence[EntryRule]
+    sizing: Any
+    _next_seq: int = 0
+
+    def maybe_emit(
+        self,
+        *,
+        cur_bar,
+        portfolio: Portfolio,
+        pending_for_prev: List[OrderRequest],
+        views: Dict[str, StreamingHistoryView],
+        result: "TradingServiceResult",
+    ) -> None:
+        if not self.entry_rules or self.sizing is None:
+            return
+        sym = cur_bar.symbol
+        if portfolio.positions.get(sym) is not None:
+            return
+        if any(req.symbol == sym and req.side in (OrderSide.LONG, OrderSide.SHORT) for req in pending_for_prev):
+            return
+        view = views.get(sym)
+        if view is None or view.length() == 0:
+            return
+        match = _evaluate_entry_rules_pred(self.entry_rules, view, view.length() - 1)
+        if match is None:
+            return
+        rule, rule_idx = match
+        qty = self._compute_qty(rule.side, cur_bar, portfolio, views)
+        if qty <= 0:
+            return
+        self._next_seq += 1
+        side = OrderSide.LONG if rule.side == "long" else OrderSide.SHORT
+        req = OrderRequest(
+            client_order_id=f"e_entry_{self._next_seq}",
+            symbol=sym,
+            side=side,
+            qty=qty,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            reason=f"{ENGINE_ENTRY_REASON_PREFIX}entry[{rule_idx}]",
+        )
+        try:
+            req.validate_prices()
+        except Exception as exc:
+            logger.error(
+                "engine-issued entry order failed validation (rule=%d symbol=%s): %s",
+                rule_idx,
+                sym,
+                exc,
+            )
+            return
+        pending_for_prev.append(req)
+        diag = result.execution_diagnostics
+        diag.orders_emitted += 1
+        _record_event(
+            diag,
+            "emitted",
+            timestamp=cur_bar.timestamp,
+            symbol=sym,
+            side=req.side.value,
+            order_type=OrderType.MARKET.value,
+            reason=req.reason,
+        )
+
+    def _compute_qty(
+        self,
+        side: str,
+        cur_bar,
+        portfolio: Portfolio,
+        views: Dict[str, StreamingHistoryView],
+    ) -> int:
+        equity = portfolio.mark_to_market()
+        close = cur_bar.close
+        if close <= 0:
+            return 0
+        sizing = self.sizing
+        if isinstance(sizing, FixedFractionSizing):
+            return max(1, int(equity * float(sizing.fraction) / close))
+        if isinstance(sizing, FixedNotionalSizing):
+            return max(1, int(float(sizing.notional_usd) / close))
+        if isinstance(sizing, VolatilityTargetSizing):
+            from ..strategy_lab.spec_dsl import IndicatorRef
+
+            atr_ref = IndicatorRef(name="atr")
+            view = views.get(cur_bar.symbol)
+            if view is None or view.length() == 0:
+                return 1
+            atr_val = view.indicator(atr_ref, view.length() - 1)
+            if atr_val is None or atr_val <= 0:
+                return 1
+            return max(1, int(equity * float(sizing.target_annual_vol) / (close * atr_val)))
+        return 1
 
 
 # Default chunk size for the batched-bar protocol (issue #377). 1 keeps
@@ -840,6 +966,8 @@ class TradingService:
         bar_chunk_size: Optional[int] = None,
         coverage_probe_mode: bool = False,
         exit_rules: Optional[List[ExitRule]] = None,
+        entry_rules: Optional[List[EntryRule]] = None,
+        sizing: Optional[Any] = None,
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
@@ -860,6 +988,8 @@ class TradingService:
         # each bar's strategy response. Empty list (or None) preserves the
         # legacy behaviour where strategy code is the only source of exits.
         self._exit_rules: List[ExitRule] = list(exit_rules or [])
+        self._entry_rules: List[EntryRule] = list(entry_rules or [])
+        self._sizing = sizing
         # Issue #377: when set, overrides ``BAR_CHUNK_SIZE`` env. Paper-trade
         # mode pins this to 1 so live-bar handling never buffers. Reject
         # zero/negative or non-int explicitly so a future caller passing
@@ -901,7 +1031,12 @@ class TradingService:
         # counter, and the per-bar dispatch logic split across
         # :meth:`_EngineExitDispatcher.maybe_emit` sub-steps. No-op
         # when ``self._exit_rules`` is empty.
-        engine_exits = _EngineExitDispatcher(exit_rules=self._exit_rules)
+        streaming_views: Dict[str, StreamingHistoryView] = {}
+        engine_exits = _EngineExitDispatcher(exit_rules=self._exit_rules, views=streaming_views)
+        engine_entries = _EngineEntryDispatcher(
+            entry_rules=self._entry_rules,
+            sizing=self._sizing,
+        )
         execution_model = build_execution_model(
             self.config.execution_model,
             participation_cap=self.config.fill_participation_cap,
@@ -1003,6 +1138,8 @@ class TradingService:
                     eod_buffer=eod_buffer,
                     position_tracker=position_tracker,
                     engine_exits=engine_exits,
+                    engine_entries=engine_entries,
+                    streaming_views=streaming_views,
                 )
 
             # We need one-bar lookahead in the fill simulator, so we buffer
@@ -1172,6 +1309,8 @@ class TradingService:
                                 portfolio=portfolio,
                             )
 
+                        self._append_streaming_bar(streaming_views, cur_bar)
+
                     # 4) Deliver the current bar to the strategy and collect
                     #    any orders it submits in response. Warm-up bars set
                     #    ``ctx.is_warmup = True`` in the subprocess so the
@@ -1200,6 +1339,8 @@ class TradingService:
                         pending_for_prev=pending_for_prev,
                         position_tracker=position_tracker,
                         engine_exits=engine_exits,
+                        engine_entries=engine_entries,
+                        streaming_views=streaming_views,
                         result=result,
                     )
 
@@ -1275,6 +1416,8 @@ class TradingService:
         eod_buffer: "_StreamingEquityBuffer",
         position_tracker: Dict[str, _TrackedPosition],
         engine_exits: _EngineExitDispatcher,
+        engine_entries: _EngineEntryDispatcher,
+        streaming_views: Dict[str, StreamingHistoryView],
     ) -> TradingServiceResult:
         prev_bar = None
         pending_for_prev: List[OrderRequest] = []
@@ -1436,6 +1579,8 @@ class TradingService:
                             portfolio=portfolio,
                         )
 
+                    self._append_streaming_bar(streaming_views, cur_bar)
+
                 # 4) Process the strategy's response for this bar.
                 try:
                     self._process_bar_strategy_response(
@@ -1448,6 +1593,8 @@ class TradingService:
                         pending_for_prev=pending_for_prev,
                         position_tracker=position_tracker,
                         engine_exits=engine_exits,
+                        engine_entries=engine_entries,
+                        streaming_views=streaming_views,
                         result=result,
                     )
                 except StrategyRuntimeError:
@@ -1553,11 +1700,13 @@ class TradingService:
         pending_for_prev: List[OrderRequest],
         position_tracker: Dict[str, _TrackedPosition],
         engine_exits: _EngineExitDispatcher,
+        engine_entries: _EngineEntryDispatcher,
+        streaming_views: Dict[str, StreamingHistoryView],
         result: TradingServiceResult,
     ) -> None:
         """Apply one bar's strategy response (cancels + orders) to the
         order book and pending-submit queue, then run the engine's
-        structured-exit-rule enforcement step.
+        structured entry- and exit-rule enforcement steps.
 
         Shared between the per-bar (``run``) and chunked
         (``_run_chunked``) paths — extracted because earlier the engine-
@@ -1688,6 +1837,32 @@ class TradingService:
         # lookahead). No-op when the spec has no exit rules.
         if self._exit_rules:
             self._extend_watermarks(tracker=position_tracker, cur_bar=cur_bar)
+
+        engine_entries.maybe_emit(
+            cur_bar=cur_bar,
+            portfolio=portfolio,
+            pending_for_prev=pending_for_prev,
+            views=streaming_views,
+            result=result,
+        )
+
+    @staticmethod
+    def _append_streaming_bar(
+        views: Dict[str, StreamingHistoryView],
+        cur_bar,
+    ) -> None:
+        """Append a bar to the per-symbol streaming view."""
+        sym = cur_bar.symbol
+        if sym not in views:
+            views[sym] = StreamingHistoryView()
+        views[sym].append(BarRecord(
+            timestamp=cur_bar.timestamp,
+            open=cur_bar.open,
+            high=cur_bar.high,
+            low=cur_bar.low,
+            close=cur_bar.close,
+            volume=getattr(cur_bar, "volume", 0.0),
+        ))
 
     @staticmethod
     def _update_position_tracker(

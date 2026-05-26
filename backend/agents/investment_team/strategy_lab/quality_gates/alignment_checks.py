@@ -46,6 +46,13 @@ from pydantic import BaseModel, Field
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict, Severity
 from ..executor import indicators as ind
+from ..executor.predicate_evaluator import (
+    PandasHistoryView,
+    compare as _compare_shared,
+    evaluate_predicate as _evaluate_predicate_shared,
+    relative_miss as _relative_miss_shared,
+    resolve_side_value as _resolve_side_value_shared,
+)
 from ..spec_dsl import (
     EntryRule,
     FixedFractionSizing,
@@ -143,15 +150,8 @@ def _near_miss_pct() -> float:
 
 
 def _relative_miss(computed: float, threshold: float) -> float:
-    """Relative magnitude of the gap between ``computed`` and ``threshold``.
-
-    Returns ``|computed - threshold| / max(|threshold|, |computed|, 1e-12)``.
-    The denominator floor of ``1e-12`` prevents division-by-zero when
-    both sides are zero (in which case the miss is also zero and the
-    ratio is well-defined).
-    """
-    denom = max(abs(threshold), abs(computed), 1e-12)
-    return abs(computed - threshold) / denom
+    """Delegate to the shared predicate evaluator."""
+    return _relative_miss_shared(computed, threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -260,36 +260,9 @@ def _resolve_side_value(
     entry_idx: int,
     indicator_cache: Dict[str, pd.Series],
 ) -> Optional[float]:
-    """Resolve one side of a predicate to a scalar at ``entry_idx``.
-
-    Returns ``None`` when the indicator value is ``NaN`` at the entry
-    bar (warmup not yet satisfied). ``float`` literals and ``bar.*``
-    references are always resolvable.
-    """
-    if isinstance(side, IndicatorRef):
-        key = side.model_dump_json()
-        if key not in indicator_cache:
-            indicator_cache[key] = _evaluate_indicator(side, df)
-        series = indicator_cache[key]
-        if entry_idx >= len(series):
-            return None
-        value = series.iloc[entry_idx]
-        if value is None or (isinstance(value, float) and math.isnan(value)):
-            return None
-        return float(value)
-    if isinstance(side, str):
-        if side == "bar.close":
-            return float(df["close"].iloc[entry_idx])
-        if side == "bar.high":
-            return float(df["high"].iloc[entry_idx])
-        if side == "bar.low":
-            return float(df["low"].iloc[entry_idx])
-        if side == "bar.volume":
-            return float(df["volume"].iloc[entry_idx])
-        raise ValueError(f"unexpected bar-ref string: {side!r}")
-    if isinstance(side, (int, float)) and not isinstance(side, bool):
-        return float(side)
-    raise TypeError(f"unsupported predicate side type: {type(side).__name__}")
+    """Delegate to the shared predicate evaluator via ``PandasHistoryView``."""
+    view = PandasHistoryView(df, indicator_cache)
+    return _resolve_side_value_shared(side, view, entry_idx)
 
 
 def _compare(
@@ -300,38 +273,8 @@ def _compare(
     prev_lhs: Optional[float] = None,
     prev_rhs: Optional[float] = None,
 ) -> bool:
-    """Evaluate a comparison op on two scalars.
-
-    ``cross_above`` / ``cross_below`` are state transitions: the
-    previous bar must have been on or below (resp. on or above) the
-    threshold AND the current bar must be strictly above (resp.
-    below) it. Collapsing them to ``>`` / ``<`` at the entry bar
-    alone would mark any sustained-above strategy as having "crossed
-    above" on every bar, letting non-cross strategies wave through
-    the gate. When the previous-bar values are not available (e.g.
-    entry is the first bar in market_data, or warmup left an
-    indicator NaN), the cross is treated as not satisfied —
-    deterministic-fail-closed.
-    """
-    if op == "<":
-        return lhs < rhs
-    if op == "<=":
-        return lhs <= rhs
-    if op == ">":
-        return lhs > rhs
-    if op == ">=":
-        return lhs >= rhs
-    if op == "==":
-        return math.isclose(lhs, rhs, rel_tol=1e-9, abs_tol=1e-12)
-    if op == "cross_above":
-        if prev_lhs is None or prev_rhs is None:
-            return False
-        return prev_lhs <= prev_rhs and lhs > rhs
-    if op == "cross_below":
-        if prev_lhs is None or prev_rhs is None:
-            return False
-        return prev_lhs >= prev_rhs and lhs < rhs
-    raise ValueError(f"unknown comparison op: {op!r}")
+    """Delegate to the shared predicate evaluator."""
+    return _compare_shared(op, lhs, rhs, prev_lhs=prev_lhs, prev_rhs=prev_rhs)
 
 
 def _format_predicate(p: Predicate) -> str:

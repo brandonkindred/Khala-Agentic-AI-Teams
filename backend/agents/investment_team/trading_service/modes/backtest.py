@@ -183,6 +183,8 @@ def run_backtest(
             # does. Empty list (no rules in spec) preserves the legacy
             # strategy-code-only path.
             exit_rules=list(strategy.exit_rules),
+            entry_rules=list(strategy.entry_rules) if not strategy.requires_custom_code else None,
+            sizing=strategy.sizing if not strategy.requires_custom_code else None,
         )
         outcome = service.run(stream)
         run_metrics = compute_metrics(
