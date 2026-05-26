@@ -735,6 +735,7 @@ jobs:
     if: |
       always() &&
       github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
       (needs.all-checks.result == 'success' || needs.all-checks.result == 'skipped') &&
       needs.changes.outputs.docker_backend == 'true'
     permissions:
@@ -789,6 +790,7 @@ jobs:
     if: |
       always() &&
       github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
       (needs.all-checks.result == 'success' || needs.all-checks.result == 'skipped') &&
       needs.changes.outputs.team_services_matrix_empty != 'true'
     permissions:
@@ -906,6 +908,7 @@ jobs:
     if: |
       always() &&
       github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
       (needs.all-checks.result == 'success' || needs.all-checks.result == 'skipped') &&
       needs.changes.outputs.docker_frontend == 'true'
     permissions:
