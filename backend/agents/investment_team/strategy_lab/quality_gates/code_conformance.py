@@ -22,10 +22,11 @@ Scope choices (issue #541, v1):
   recognised and will fail. Recognising inline patterns is a future
   enhancement; the deterministic compiler track (#538) makes it
   unnecessary on the compiled path.
-* Check #7 (time-stop enforcement) is a no-op today because the spec
-  DSL has no ``TimeStopRule`` (``spec_dsl.py`` explicitly excludes
-  bar-counting time stops). The check is wired up so it activates the
-  moment the DSL adds the rule.
+* Check #7 (bar-counting exit rejection) scans generated code for
+  bar-counting exit patterns (variables like ``bars_held``,
+  ``hold_count``, ``days_held`` and ``if counter >= N: close``
+  idioms). These implement the forbidden "time stop" concept and are
+  rejected with a critical finding.
 * Check #2 (symbol gate) reuses the same AST helpers as
   ``CodeSafetyChecker._check_universe_guard``. The duplication is
   intentional defense-in-depth so this gate remains self-sufficient.
@@ -434,7 +435,7 @@ class CodeConformanceGate(GateResultsMixin):
             results.extend(self._check_signal_exit_coverage(cls, spec))
             results.extend(self._check_stop_loss_enforcement(cls, spec))
             results.extend(self._check_take_profit_enforcement(cls, spec))
-            results.extend(self._check_time_stop_enforcement(spec))
+            results.extend(self._check_bar_counting_exit(cls))
             results.extend(self._check_sizing_math(cls))
             results.extend(self._check_no_extra_side_effects(tree, cls))
 
@@ -644,29 +645,42 @@ class CodeConformanceGate(GateResultsMixin):
         return False
 
     # ------------------------------------------------------------------
-    # Check 7 — time-stop enforcement (no-op until the DSL grows the rule)
+    # Check 7 — bar-counting exit rejection
     # ------------------------------------------------------------------
-    def _check_time_stop_enforcement(self, spec: Any) -> Iterable[QualityGateResult]:
-        # ``TimeStopRule`` is intentionally not a member of the
-        # ``ExitRule`` union (see ``spec_dsl.py``); the check stays wired
-        # up so it activates the moment the DSL adds it.
-        time_stop_cls = globals().get("TimeStopRule")
-        if time_stop_cls is None:
-            return (
-                self._info(
-                    "Time-stop check is a no-op: TimeStopRule is not part "
-                    "of the current spec DSL (see spec_dsl.py)."
-                ),
-            )
-        time_rules = [
-            r for r in (getattr(spec, "exit_rules", []) or []) if isinstance(r, time_stop_cls)
-        ]
-        if not time_rules:
+
+    _BAR_COUNTER_NAMES: ClassVar[frozenset] = frozenset({
+        "bars_held", "hold_count", "days_held", "bars_in_trade",
+        "held_bars", "bar_count", "hold_period", "bars_since_entry",
+        "hold_bars", "n_bars_held", "num_bars_held", "time_in_trade",
+        "holding_period", "exit_countdown", "bar_counter",
+    })
+
+    def _check_bar_counting_exit(self, cls: ast.ClassDef) -> Iterable[QualityGateResult]:
+        violations: list[str] = []
+        for method in _iter_strategy_methods(cls):
+            for node in ast.walk(method):
+                # Only flag self.<counter> instance attributes — these persist
+                # across bars and are the pattern LLMs use for holding-period
+                # exits.  Bare locals (e.g. a diagnostic `bar_count`) are left
+                # alone to avoid false positives on non-exit bookkeeping.
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr in self._BAR_COUNTER_NAMES
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"
+                ):
+                    violations.append(f"self.{node.attr}")
+        unique = sorted(set(violations))
+        if not unique:
             return ()
-        # Future activation path: look for ctx.bars_held or a class-level
-        # held-bars dict updated in on_bar / on_fill. Critical when neither
-        # is present.
-        return ()  # pragma: no cover — activates with DSL change
+        names = ", ".join(f"`{v}`" for v in unique)
+        return (
+            self._critical(
+                f"Bar-counting exit detected ({names}). "
+                f"Exits must close on price, P&L, or signal reversal — "
+                f"not on an arbitrary bar counter."
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Check 8 — sizing math present

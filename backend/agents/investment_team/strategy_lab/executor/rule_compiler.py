@@ -17,9 +17,7 @@ Supported rule kinds (matching the discriminated ``ExitRule`` union in
   :func:`evaluate_exit_rules`.  When no view is available, the rule is
   a silent no-op for backward compatibility.
 
-Bar-counting "time stops" are deliberately absent: real traders close
-on price action, P&L, or signal reversal — not on an arbitrary "Nth
-bar held" counter.
+Only price-, P&L-, and signal-based exit rules are supported.
 
 This module is intentionally side-effect free: it takes the current
 per-position state and the current bar, and returns a list of

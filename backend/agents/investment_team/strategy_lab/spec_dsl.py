@@ -297,9 +297,8 @@ class SignalExitRule(_SpecNode):
 
 
 # Exit rules: structured close conditions the engine enforces (stop-loss /
-# take-profit) plus aspirational signal-based exits. Bar-counting time stops
-# are deliberately *not* a member — real traders close on price, P&L, or
-# signal reversal, not on an arbitrary "Nth bar held" trigger.
+# take-profit) plus signal-based exits.  The union is intentionally limited
+# to price-, P&L-, and signal-based exits.
 ExitRule = Annotated[
     Union[StopLossRule, TakeProfitRule, SignalExitRule],
     Field(discriminator="kind"),

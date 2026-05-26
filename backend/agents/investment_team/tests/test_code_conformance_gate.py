@@ -431,14 +431,127 @@ def test_take_profit_fails_when_entry_price_never_referenced() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check 7: time-stop enforcement (no-op until DSL adds TimeStopRule)
+# Check 7: bar-counting exit rejection
 # ---------------------------------------------------------------------------
 
 
-def test_time_stop_check_is_currently_noop() -> None:
+def test_bar_counting_exit_rejected_bars_held() -> None:
+    code = (
+        "from contract import OrderSide, OrderType, Strategy, TimeInForce\n"
+        "from indicators import rsi\n\n"
+        "class S(Strategy):\n"
+        "    UNIVERSE = frozenset({'QQQ'})\n"
+        "    WINDOW = 20\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        if ctx.is_warmup:\n"
+        "            return\n"
+        "        if bar.symbol not in self.UNIVERSE:\n"
+        "            return\n"
+        "        history = ctx.history(bar.symbol, self.WINDOW)\n"
+        "        if len(history) < self.WINDOW:\n"
+        "            return\n"
+        "        pos = ctx.position(bar.symbol)\n"
+        "        if pos is not None:\n"
+        "            self.bars_held = getattr(self, 'bars_held', 0) + 1\n"
+        "            if self.bars_held >= 10:\n"
+        "                ctx.submit_order(symbol=bar.symbol, qty=pos.qty,\n"
+        "                    side=OrderSide.SHORT, order_type=OrderType.MARKET,\n"
+        "                    tif=TimeInForce.DAY, reason='time exit')\n"
+        "        else:\n"
+        "            closes = [b.close for b in history]\n"
+        "            r = rsi(closes)\n"
+        "            if r < 30:\n"
+        "                qty = int((ctx.equity * 0.02) / bar.close)\n"
+        "                if qty > 0:\n"
+        "                    ctx.submit_order(symbol=bar.symbol, qty=qty,\n"
+        "                        side=OrderSide.LONG, order_type=OrderType.MARKET,\n"
+        "                        tif=TimeInForce.DAY, reason='rsi entry')\n"
+    )
+    results = CodeConformanceGate().check(code, _happy_spec())
+    crits = [r for r in results if r.severity == "critical"]
+    assert any("bar-counting" in r.details.lower() or "bars_held" in r.details for r in crits)
+
+
+def test_bar_counting_exit_rejected_hold_count() -> None:
+    code = (
+        "from contract import OrderSide, OrderType, Strategy, TimeInForce\n"
+        "from indicators import rsi\n\n"
+        "class S(Strategy):\n"
+        "    UNIVERSE = frozenset({'QQQ'})\n"
+        "    WINDOW = 20\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        if ctx.is_warmup:\n"
+        "            return\n"
+        "        if bar.symbol not in self.UNIVERSE:\n"
+        "            return\n"
+        "        history = ctx.history(bar.symbol, self.WINDOW)\n"
+        "        if len(history) < self.WINDOW:\n"
+        "            return\n"
+        "        pos = ctx.position(bar.symbol)\n"
+        "        if pos is not None:\n"
+        "            self.hold_count = getattr(self, 'hold_count', 0) + 1\n"
+        "            if self.hold_count >= 5:\n"
+        "                ctx.submit_order(symbol=bar.symbol, qty=pos.qty,\n"
+        "                    side=OrderSide.SHORT, order_type=OrderType.MARKET,\n"
+        "                    tif=TimeInForce.DAY, reason='hold exit')\n"
+        "        else:\n"
+        "            closes = [b.close for b in history]\n"
+        "            r = rsi(closes)\n"
+        "            if r < 30:\n"
+        "                qty = int((ctx.equity * 0.02) / bar.close)\n"
+        "                if qty > 0:\n"
+        "                    ctx.submit_order(symbol=bar.symbol, qty=qty,\n"
+        "                        side=OrderSide.LONG, order_type=OrderType.MARKET,\n"
+        "                        tif=TimeInForce.DAY, reason='rsi entry')\n"
+    )
+    results = CodeConformanceGate().check(code, _happy_spec())
+    crits = [r for r in results if r.severity == "critical"]
+    assert any("bar-counting" in r.details.lower() or "hold_count" in r.details for r in crits)
+
+
+def test_no_bar_counting_false_positive_on_clean_code() -> None:
     results = CodeConformanceGate().check(_HAPPY_CODE, _happy_spec())
-    time_stop_infos = [r for r in results if "TimeStopRule" in r.details and r.severity == "info"]
-    assert len(time_stop_infos) == 1
+    crits = [r for r in results if r.severity == "critical" and "bar-counting" in r.details.lower()]
+    assert crits == []
+
+
+def test_no_bar_counting_false_positive_on_local_variable() -> None:
+    """Bare local variables (e.g. diagnostic ``bar_count``) must not
+    trigger the bar-counting exit guard — only ``self.<name>`` instance
+    attributes are flagged."""
+    code = (
+        "from contract import OrderSide, OrderType, Strategy, TimeInForce\n"
+        "from indicators import rsi\n\n"
+        "class S(Strategy):\n"
+        "    UNIVERSE = frozenset({'QQQ'})\n"
+        "    WINDOW = 20\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        if ctx.is_warmup:\n"
+        "            return\n"
+        "        if bar.symbol not in self.UNIVERSE:\n"
+        "            return\n"
+        "        history = ctx.history(bar.symbol, self.WINDOW)\n"
+        "        if len(history) < self.WINDOW:\n"
+        "            return\n"
+        "        bar_count = len(history)\n"
+        "        days_held = 0\n"
+        "        closes = [b.close for b in history]\n"
+        "        r = rsi(closes)\n"
+        "        pos = ctx.position(bar.symbol)\n"
+        "        if pos is None and r < 30:\n"
+        "            qty = int((ctx.equity * 0.02) / bar.close)\n"
+        "            if qty > 0:\n"
+        "                ctx.submit_order(symbol=bar.symbol, qty=qty,\n"
+        "                    side=OrderSide.LONG, order_type=OrderType.MARKET,\n"
+        "                    tif=TimeInForce.DAY, reason='rsi entry')\n"
+        "        elif pos is not None and r > 70:\n"
+        "            ctx.submit_order(symbol=bar.symbol, qty=pos.qty,\n"
+        "                side=OrderSide.SHORT, order_type=OrderType.MARKET,\n"
+        "                tif=TimeInForce.DAY, reason='rsi exit')\n"
+    )
+    results = CodeConformanceGate().check(code, _happy_spec())
+    crits = [r for r in results if r.severity == "critical" and "bar-counting" in r.details.lower()]
+    assert crits == []
 
 
 # ---------------------------------------------------------------------------

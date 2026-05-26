@@ -570,7 +570,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
 # Default expected holding period in CALENDAR DAYS per spec timeframe.
 # Daily-bar swing strategies hold roughly two weeks; intraday holds collapse
 # to fractions of a day. These defaults are the fallback when neither the
-# average observed hold nor a structured TimeStopRule supplies a value.
+# average observed hold period supplies a value.
 _DEFAULT_EXPECTED_HOLD_DAYS: Dict[str, float] = {
     "1d": 10.0,
     "1h": 0.5,

@@ -66,8 +66,13 @@ together tell you where in the lifecycle execution stopped.
   closed trades exist (`entries_filled > 0`, `closed_trades == 0`,
   `open_positions_at_end` non-empty). The exit rules are too strict,
   reference an unset attribute, or only fire on conditions that never
-  occur in the test window. Add a fallback exit (time stop or
-  end-of-data force-close) and tighten the rules so trades close.
+  occur in the test window. Loosen the exit predicate thresholds,
+  add a signal-based fallback exit (e.g. a reversal or momentum-
+  exhaustion condition), or widen the stop-loss / take-profit bands
+  so trades close within the test window. Do NOT add bar-counting
+  "time stop" exits (e.g. `if bars_held >= N: close`) — they are
+  not a supported exit kind and will be rejected by the code
+  conformance gate.
 
 - **UNKNOWN_ZERO_TRADE_PATH** — the trading service crashed before it
   could classify the failure, or the strategy raised before any bar was

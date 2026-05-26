@@ -14,10 +14,7 @@ Recipes are organised by rule shape rather than rule kind:
   then append a tail that satisfies the exit predicate (``StopLoss`` /
   ``TakeProfit`` / ``SignalExit``).
 
-TimeStopRule is out of scope here — ``spec_dsl.py`` deliberately omits
-it from the ``ExitRule`` union ("real traders close on price, P&L, or
-signal reversal, not on an arbitrary Nth bar"). If the DSL grows a
-time-based exit kind later, add a recipe here.
+Only price-, P&L-, and signal-based exit rules are in scope.
 
 Unprobeable rules (e.g. predicates whose synthetic series cannot be
 made to satisfy the predicate within bounded binary-search iterations,

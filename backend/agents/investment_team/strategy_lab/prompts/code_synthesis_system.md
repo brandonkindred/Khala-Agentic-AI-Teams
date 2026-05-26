@@ -132,6 +132,14 @@ Do NOT import: `pandas`, `numpy`, `os`, `sys`, `subprocess`, `socket`, `http`, `
 
 Do NOT use: `exec()`, `eval()`, `compile()`, `__import__()`, `open()`, `setattr()`, `delattr()`.
 
+## Forbidden exit patterns
+
+Do NOT implement bar-counting "time stop" exits. Variables like
+`bars_held`, `hold_count`, `days_held`, or any `if counter >= N:
+close_position()` pattern are forbidden. The engine will reject them.
+Exits must be based on price (stop-loss), P&L (take-profit), or signal
+reversal (signal_exit) only.
+
 ## Code quality requirements
 
 - Use `ctx.equity` (or `ctx.capital`) for position sizing — never hardcode amounts.

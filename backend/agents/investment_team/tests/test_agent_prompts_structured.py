@@ -258,7 +258,7 @@ def test_design_rejects_legacy_sizing_rules_list(monkeypatch: pytest.MonkeyPatch
     falls back to the DSL default), but prose rules still raise."""
     payload = _design_payload(
         entry_rules=[_structured_entry_rule_dict()],
-        exit_rules=["exit after 10 bars"],
+        exit_rules=["close when ready"],
         sizing=_structured_sizing_dict(),
     )
     _patch_design(monkeypatch, payload)
@@ -413,7 +413,7 @@ def test_zero_trade_repair_drops_off_list_rule_spec_updates(
     warning + quality gate on the production agent-to-orchestrator flow."""
     spec_updates = {
         "entry_rules": ["close > sma(20)"],
-        "exit_rules": ["exit after 10 bars"],
+        "exit_rules": ["close when ready"],
     }
     _patch_zero_trade_repair(monkeypatch, _zero_trade_payload(proposed_spec_updates=spec_updates))
 

@@ -178,7 +178,7 @@ def run_backtest(
             # capture_fingerprint code path.
             coverage_probe_mode=coverage_probe_mode,
             # Issue #527 — pass the spec's structured exit rules to the
-            # engine so the per-bar loop emits time-stop / stop-loss /
+            # engine so the per-bar loop emits stop-loss /
             # take-profit closes regardless of what ``strategy_code``
             # does. Empty list (no rules in spec) preserves the legacy
             # strategy-code-only path.

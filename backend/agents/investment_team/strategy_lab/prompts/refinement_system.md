@@ -55,6 +55,13 @@ The orchestrator drops any top-level key other than `strategy_code` and
 - Fix: only ever use `bar` (current bar) and `ctx.history(symbol, n)` (past bars already delivered).
 - For crossover detection, inspect the most recent bars from `ctx.history` and compare to the current `bar.close`.
 
+### Forbidden exit patterns
+- Do NOT implement bar-counting "time stop" exits. Variables like
+  `bars_held`, `hold_count`, `days_held`, or any `if counter >= N:
+  close_position()` pattern are forbidden. The engine will reject them.
+  Exits must be based on price (stop-loss), P&L (take-profit), or signal
+  reversal (signal_exit) only.
+
 ### Phantom capital / over-allocation
 - You do NOT track capital yourself — the engine does. Use `ctx.equity` / `ctx.capital` as read-only accessors for sizing.
 - If the engine rejects entries ("insufficient capital"), reduce your position percentage in `qty = int((ctx.equity * self.POSITION_PCT) / bar.close)` and check `qty > 0` before submitting.
