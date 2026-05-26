@@ -80,8 +80,12 @@ class DockerUnavailableError(RuntimeError):
 
 
 def _has_non_default_docker_context() -> bool:
-    """Return True when ``~/.docker/config.json`` selects a non-default context."""
-    config_path = Path.home() / ".docker" / "config.json"
+    """Return True when the Docker config selects a non-default context.
+
+    Respects ``DOCKER_CONFIG`` (falls back to ``~/.docker``).
+    """
+    config_dir = Path(os.environ.get("DOCKER_CONFIG") or (Path.home() / ".docker"))
+    config_path = config_dir / "config.json"
     try:
         data = json.loads(config_path.read_text())
         ctx = data.get("currentContext", "")

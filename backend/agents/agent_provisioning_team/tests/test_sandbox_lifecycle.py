@@ -342,6 +342,27 @@ def test_check_docker_available_ignores_default_context(tmp_path: Path) -> None:
             _check_docker_available()
 
 
+def test_check_docker_available_honors_docker_config_env(tmp_path: Path) -> None:
+    """DOCKER_CONFIG pointing to a custom dir with a non-default context
+    should skip the socket check."""
+    from agent_provisioning_team.sandbox.lifecycle import _check_docker_available
+
+    custom_dir = tmp_path / "custom-docker"
+    custom_dir.mkdir()
+    (custom_dir / "config.json").write_text(json.dumps({"currentContext": "remote-server"}))
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict(
+            "os.environ",
+            {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": str(custom_dir)},
+            clear=False,
+        ),
+        patch("pathlib.Path.exists", return_value=False),
+    ):
+        _check_docker_available()
+
+
 def test_check_docker_available_ignores_docker_context_default_env(tmp_path: Path) -> None:
     """DOCKER_CONTEXT=default points to the local socket, so the socket check
     must still fire — setting it should not bypass the fast-fail."""
