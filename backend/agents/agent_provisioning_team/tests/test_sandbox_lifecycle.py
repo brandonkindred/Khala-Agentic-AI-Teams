@@ -7,6 +7,7 @@ a real Docker daemon.
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -300,6 +301,45 @@ async def test_acquire_continues_when_is_running_check_fails(tmp_path: Path) -> 
         handle = await lc.acquire("blogging.planner")
     assert handle.status == SandboxStatus.WARM
     assert handle.container_id == "new123"
+
+
+def test_check_docker_available_honors_persisted_context(tmp_path: Path) -> None:
+    """_check_docker_available should pass when ~/.docker/config.json has a
+    non-default currentContext, even without DOCKER_HOST or the default socket."""
+    from agent_provisioning_team.sandbox.lifecycle import _check_docker_available
+
+    docker_dir = tmp_path / ".docker"
+    docker_dir.mkdir()
+    (docker_dir / "config.json").write_text(json.dumps({"currentContext": "remote-server"}))
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": ""}, clear=False),
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("pathlib.Path.exists", return_value=False),
+    ):
+        _check_docker_available()
+
+
+def test_check_docker_available_ignores_default_context(tmp_path: Path) -> None:
+    """A persisted context of 'default' should NOT skip the socket check."""
+    from agent_provisioning_team.sandbox.lifecycle import (
+        DockerUnavailableError,
+        _check_docker_available,
+    )
+
+    docker_dir = tmp_path / ".docker"
+    docker_dir.mkdir()
+    (docker_dir / "config.json").write_text(json.dumps({"currentContext": "default"}))
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": ""}, clear=False),
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("pathlib.Path.exists", return_value=False),
+    ):
+        with pytest.raises(DockerUnavailableError):
+            _check_docker_available()
 
 
 def test_state_persists_across_lifecycle_instances(tmp_path: Path) -> None:

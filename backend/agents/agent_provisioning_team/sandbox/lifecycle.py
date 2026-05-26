@@ -20,6 +20,7 @@ container per specialist agent.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -78,13 +79,25 @@ class DockerUnavailableError(RuntimeError):
     """Raised when the ``docker`` CLI is not installed or the daemon is unreachable."""
 
 
+def _has_non_default_docker_context() -> bool:
+    """Return True when ``~/.docker/config.json`` selects a non-default context."""
+    config_path = Path.home() / ".docker" / "config.json"
+    try:
+        data = json.loads(config_path.read_text())
+        ctx = data.get("currentContext", "")
+        return bool(ctx and ctx != "default")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _check_docker_available() -> None:
     """Fail fast with a clear message when docker is not usable.
 
     Preconditions: none.
     Postconditions: returns normally only when the ``docker`` binary is on
     PATH and a Docker endpoint is reachable (DOCKER_HOST, DOCKER_CONTEXT,
-    or the default /var/run/docker.sock).
+    a persisted active context in ~/.docker/config.json, or the default
+    /var/run/docker.sock).
     """
     if shutil.which("docker") is None:
         raise DockerUnavailableError(
@@ -92,6 +105,8 @@ def _check_docker_available() -> None:
             "Install Docker or run the unified API on a host with Docker access."
         )
     if os.environ.get("DOCKER_HOST") or os.environ.get("DOCKER_CONTEXT"):
+        return
+    if _has_non_default_docker_context():
         return
     docker_sock = Path("/var/run/docker.sock")
     if not docker_sock.exists():
