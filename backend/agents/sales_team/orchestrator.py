@@ -308,9 +308,10 @@ class SalesPodOrchestrator:
         insights_context: Optional[str],
         icp: Optional[IdealCustomerProfile],
         max_refinements: int = 1,
+        confidence_threshold: Optional[float] = None,
     ) -> OutreachSequence:
         """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements* times."""
-        threshold = self.config.dossier_confidence_threshold
+        threshold = confidence_threshold if confidence_threshold is not None else self.config.dossier_confidence_threshold
         variants = self.outreach.generate_sequence(
             prospect.model_dump_json(indent=2),
             dossier,
@@ -486,6 +487,7 @@ class SalesPodOrchestrator:
                     p, dossier, ctx.product, ctx.vp, ctx.cases, ctx.company_context,
                     ctx.insights_ctx, ctx.request.icp,
                     max_refinements=ctx.config.critic_max_refinements,
+                    confidence_threshold=ctx.config.dossier_confidence_threshold,
                 )
             except Exception:
                 logger.exception(
