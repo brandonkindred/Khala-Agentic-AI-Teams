@@ -9,6 +9,12 @@ from investment_team.models import (
     StrategySpec,
 )
 from investment_team.strategy_lab.coverage_probe import run_static_probe
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    IndicatorRef,
+    Predicate,
+    SignalExitRule,
+)
 
 
 def _spec(strategy_code: str | None, *, max_position_pct: float = 6.0) -> StrategySpec:
@@ -18,9 +24,18 @@ def _spec(strategy_code: str | None, *, max_position_pct: float = 6.0) -> Strate
         asset_class="stocks",
         hypothesis="hyp",
         signal_definition="sig",
-        entry_rules=["enter when RSI < 30"],
-        exit_rules=["exit when RSI > 70"],
-        sizing_rules=["risk 2% per trade"],
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
+            )
+        ],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70)
+            )
+        ],
         risk_limits={"max_position_pct": max_position_pct},
         speculative=False,
         strategy_code=strategy_code,

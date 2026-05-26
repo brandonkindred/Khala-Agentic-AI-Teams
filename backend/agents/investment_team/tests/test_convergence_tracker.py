@@ -11,6 +11,12 @@ from investment_team.strategy_lab.quality_gates.convergence_tracker import (
     ConvergenceTracker,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    IndicatorRef,
+    Predicate,
+    SignalExitRule,
+)
 
 
 def _mk_spec(asset_class: str = "stocks") -> StrategySpec:
@@ -20,8 +26,22 @@ def _mk_spec(asset_class: str = "stocks") -> StrategySpec:
         asset_class=asset_class,
         hypothesis="test hypothesis",
         signal_definition="close crosses above SMA(20)",
-        entry_rules=["close > sma(20)"],
-        exit_rules=["close < sma(5)"],
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+                ),
+            )
+        ],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                )
+            )
+        ],
     )
 
 
@@ -30,6 +50,7 @@ def _passing_gate() -> QualityGateResult:
         gate_name="dummy",
         passed=True,
         severity="info",
+        phase="design",
         details="",
     )
 
@@ -221,3 +242,192 @@ def test_merge_from_lowers_dsr_on_subsequent_cycle():
         "Expected post-merge DSR to deflate further once sibling trial "
         f"counts are visible; got pre={dsr_pre_merge:.6f} post={dsr_post_merge:.6f}"
     )
+
+
+# ----------------------------------------------------------------------
+# Issue #552 — _strategy_signature determinism under the structured DSL.
+# ----------------------------------------------------------------------
+
+
+def _spec_with_entries(entry_rules, asset_class: str = "stocks") -> StrategySpec:
+    return StrategySpec(
+        strategy_id="s1",
+        authored_by="test",
+        asset_class=asset_class,
+        hypothesis="test hypothesis",
+        signal_definition="sig",
+        timeframe="1d",
+        entry_rules=entry_rules,
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
+            ),
+        ],
+    )
+
+
+def test_strategy_signature_invariant_to_entry_list_order():
+    """``_strategy_signature`` is invariant to the position of rules within
+    ``entry_rules`` — guaranteed by the use of a ``Set`` for the returned
+    tokens (and reinforced by the ``sorted((_canon(r) for r in ...))`` pass
+    inside the helper)."""
+    rule_a = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+        ),
+    )
+    rule_b = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 50})
+        ),
+    )
+
+    sig_ab = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_a, rule_b]))
+    sig_ba = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_b, rule_a]))
+
+    assert sig_ab == sig_ba
+
+
+def test_strategy_signature_canonicalises_across_distinct_equivalent_rules():
+    """Two structurally identical rules built as separate Python objects
+    must produce the same token. This is the property ``sort_keys=True``
+    inside ``_canon`` exists to defend: a future change to dict-ordering
+    semantics in Pydantic or stdlib ``json`` must not silently
+    desynchronise the signature."""
+    rule_v1 = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+        ),
+    )
+    rule_v2 = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+        ),
+    )
+    assert rule_v1 is not rule_v2
+
+    sig_1 = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_v1]))
+    sig_2 = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_v2]))
+
+    assert sig_1 == sig_2
+
+
+def test_strategy_signature_differs_when_rule_payload_differs():
+    """A meaningful payload change — ``IndicatorRef(name="sma", params={"period": 20})`` vs
+    ``IndicatorRef(name="sma", params={"period": 50})`` — must produce a different entry token. Guards
+    against an over-aggressive canonicalisation that collapses distinct
+    rules."""
+    rule_20 = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+        ),
+    )
+    rule_50 = EntryRule(
+        side="long",
+        when=Predicate(
+            lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 50})
+        ),
+    )
+
+    sig_20 = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_20]))
+    sig_50 = ConvergenceTracker._strategy_signature(_spec_with_entries([rule_50]))
+
+    assert sig_20 != sig_50
+
+
+def test_strategy_signature_includes_asset_class_token():
+    """``_strategy_signature`` emits an ``ac:<lower>`` token. Two specs with
+    identical rules but different asset classes must differ exactly in that
+    token."""
+    sig_stocks = ConvergenceTracker._strategy_signature(_mk_spec("stocks"))
+    sig_crypto = ConvergenceTracker._strategy_signature(_mk_spec("crypto"))
+
+    assert sig_stocks ^ sig_crypto == {"ac:stocks", "ac:crypto"}
+
+
+def _failing_gate(name: str = "trade_alignment") -> QualityGateResult:
+    return QualityGateResult(
+        gate_name=name,
+        passed=False,
+        severity="critical",
+        phase="verification",
+        details="",
+    )
+
+
+def test_record_dedupes_failures_by_gate_name_per_cycle():
+    """Regression for PR #613 review: many failed rows under the same
+    ``gate_name`` in a single cycle count as ONE cycle-level failure.
+
+    ``DeterministicAlignmentChecker`` emits one row per trade × per
+    check, so a single misaligned cycle can produce dozens of failing
+    rows tagged ``alignment_finding``. ``_failure_modes`` is supposed
+    to track cross-cycle failure frequency for
+    ``get_failure_directives(min_occurrences=3)``; without deduping,
+    one bad cycle with three failed findings would prematurely trip
+    the directive.
+    """
+    t = ConvergenceTracker()
+    # One cycle with 10 failing rows under the same gate name.
+    rows = [_failing_gate("alignment_finding") for _ in range(10)]
+    t.record(_mk_spec(), rows)
+    assert t._failure_modes["alignment_finding"] == 1
+
+    # Second cycle, same shape — count goes to 2, not 12.
+    t.record(_mk_spec(), rows)
+    assert t._failure_modes["alignment_finding"] == 2
+
+
+def test_record_counts_distinct_gate_names_separately_in_one_cycle():
+    """Distinct gate names in the same cycle each count once."""
+    t = ConvergenceTracker()
+    t.record(
+        _mk_spec(),
+        [
+            _failing_gate("trade_alignment"),
+            _failing_gate("alignment_finding"),
+            _failing_gate("alignment_finding"),  # dedupes
+            _failing_gate("code_safety"),
+        ],
+    )
+    assert t._failure_modes["trade_alignment"] == 1
+    assert t._failure_modes["alignment_finding"] == 1
+    assert t._failure_modes["code_safety"] == 1
+
+
+def test_record_inserts_failed_gates_in_deterministic_order():
+    """Regression for PR #613 review: failed gates with the same count
+    must surface in deterministic order in ``get_failure_directives``.
+
+    ``Counter.most_common`` breaks ties by first-seen insertion order;
+    iterating an unordered set across runs would make equal-count
+    directives appear in different orders, polluting ideation prompts
+    and snapshot tests. The tracker now sorts the failed-gate names
+    before incrementing the counter.
+    """
+    # Build two trackers from independently-shuffled gate-result lists
+    # that share the same set of failing gate names. Insertion order
+    # into _failure_modes must match because the tracker sorts.
+    rows = [_failing_gate(name) for name in ["zeta_gate", "alpha_gate", "mu_gate", "beta_gate"]]
+    rows_reversed = list(reversed(rows))
+
+    t1 = ConvergenceTracker()
+    t1.record(_mk_spec(), rows)
+    t2 = ConvergenceTracker()
+    t2.record(_mk_spec(), rows_reversed)
+
+    # Same insertion order in both — sorted alphabetically.
+    assert list(t1._failure_modes.keys()) == list(t2._failure_modes.keys())
+    assert list(t1._failure_modes.keys()) == [
+        "alpha_gate",
+        "beta_gate",
+        "mu_gate",
+        "zeta_gate",
+    ]

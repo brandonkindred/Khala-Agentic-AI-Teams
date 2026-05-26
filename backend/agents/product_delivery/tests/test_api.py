@@ -443,6 +443,14 @@ class _FakeStore:
     def get_sprint(self, sprint_id: str) -> Sprint | None:
         return self.sprints.get(sprint_id)
 
+    def list_sprints_for_product(self, product_id: str) -> list[Sprint]:
+        # Mirror the real store: unknown product → 404, otherwise return
+        # sprints under the product ordered created_at desc.
+        if product_id not in self.products:
+            raise UnknownProductDeliveryEntity(f"unknown product: {product_id}")
+        rows = [s for s in self.sprints.values() if s.product_id == product_id]
+        return sorted(rows, key=lambda s: s.created_at, reverse=True)
+
     def add_story_to_sprint(self, *, sprint_id: str, story_id: str) -> bool:
         if sprint_id not in self.sprints or story_id not in self.stories:
             raise UnknownProductDeliveryEntity(
@@ -1822,6 +1830,48 @@ def test_get_sprint_returns_planned_stories_ordered_by_wsjf(
 def test_get_sprint_404_when_missing(client: TestClient) -> None:
     r = client.get("/api/product-delivery/sprints/missing")
     assert r.status_code == 404
+
+
+def test_list_sprints_for_product_round_trip(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    """`GET /sprints?product_id=…` returns the product's sprints, newest first.
+
+    Mirrors `list_releases_for_product` (newest by `created_at`). The two
+    sprints are created in order S1 then S2, so S2 must come back first.
+    """
+    client, _ = client_and_store
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    s1 = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S1", "capacity_points": 5},
+    ).json()["id"]
+    s2 = client.post(
+        "/api/product-delivery/sprints",
+        json={"product_id": pid, "name": "S2", "capacity_points": 5},
+    ).json()["id"]
+    resp = client.get(f"/api/product-delivery/sprints?product_id={pid}")
+    assert resp.status_code == 200, resp.text
+    ids = [s["id"] for s in resp.json()]
+    assert ids == [s2, s1]
+
+
+def test_list_sprints_for_product_empty_for_product_with_no_sprints(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, _ = client_and_store
+    pid = client.post("/api/product-delivery/products", json={"name": "P"}).json()["id"]
+    resp = client.get(f"/api/product-delivery/sprints?product_id={pid}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == []
+
+
+def test_list_sprints_unknown_product_returns_404(
+    client_and_store: tuple[TestClient, _FakeStore],
+) -> None:
+    client, _ = client_and_store
+    resp = client.get("/api/product-delivery/sprints?product_id=missing")
+    assert resp.status_code == 404
 
 
 def test_sprint_plan_404_when_sprint_missing(client: TestClient) -> None:

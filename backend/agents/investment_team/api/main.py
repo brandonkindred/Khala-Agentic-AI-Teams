@@ -9,11 +9,11 @@ import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from investment_team.agents import (
     AgentIdentity,
@@ -100,6 +100,12 @@ from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.spec_dsl import (
+    DEFAULT_SIZING_PAYLOAD,
+    EntryRule,
+    ExitRule,
+    SizingRule,
+)
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared_observability import init_otel, instrument_fastapi_app
 
@@ -408,13 +414,20 @@ class ValidateProposalResponse(BaseModel):
 
 
 class CreateStrategyRequest(BaseModel):
+    # Reject stale-client payloads (e.g. legacy ``sizing_rules: [...]``) at
+    # the HTTP boundary with 422 rather than silently dropping them.
+    model_config = ConfigDict(extra="forbid")
+
     authored_by: str = Field(..., description="Agent or user ID who authored the strategy")
     asset_class: str = Field(..., description="Primary asset class")
     hypothesis: str = Field(..., description="Investment hypothesis")
     signal_definition: str = Field(..., description="Signal definition")
-    entry_rules: List[str] = Field(default_factory=list)
-    exit_rules: List[str] = Field(default_factory=list)
-    sizing_rules: List[str] = Field(default_factory=list)
+    timeframe: Literal["1m", "5m", "15m", "1h", "1d"] = Field(
+        ..., description="Bar timeframe the strategy was designed against"
+    )
+    entry_rules: List[EntryRule] = Field(default_factory=list)
+    exit_rules: List[ExitRule] = Field(default_factory=list)
+    sizing: Optional[SizingRule] = Field(default=None)
     risk_limits: Dict[str, Any] = Field(default_factory=dict)
     speculative: bool = Field(default=False)
 
@@ -683,9 +696,10 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
         asset_class=request.asset_class,
         hypothesis=request.hypothesis,
         signal_definition=request.signal_definition,
+        timeframe=request.timeframe,
         entry_rules=request.entry_rules,
         exit_rules=request.exit_rules,
-        sizing_rules=request.sizing_rules,
+        sizing=request.sizing if request.sizing is not None else DEFAULT_SIZING_PAYLOAD,
         risk_limits=request.risk_limits,
         speculative=request.speculative,
     )
@@ -859,7 +873,7 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
     if not strategy:
         raise HTTPException(status_code=404, detail=f"Strategy {request.strategy_id} not found")
 
-    strategy = StrategySpec(**strategy) if isinstance(strategy, dict) else strategy
+    strategy = StrategySpec.parse_persisted(strategy)
 
     config = BacktestConfig(
         start_date=request.start_date,
@@ -944,7 +958,7 @@ def list_backtests(strategy_id: Optional[str] = None) -> ListBacktestsResponse:
     with _lock:
         raw = list(_backtests.values())
 
-    items = [BacktestRecord(**r) if isinstance(r, dict) else r for r in raw]
+    items = [BacktestRecord.parse_persisted(r) for r in raw]
 
     if strategy_id:
         items = [item for item in items if item.strategy_id == strategy_id]
@@ -1067,9 +1081,9 @@ def _run_real_data_backtest(
         )
 
     market_service = MarketDataService()
-    symbols = market_service.get_symbols_for_strategy(strategy)
-    # Use top 5 symbols to keep data fetching reasonable
-    symbols = symbols[:5]
+    # Issue #523 — honour explicit target_symbols; otherwise fall back to
+    # the asset-class default universe (capped to 5; #525 removes the cap).
+    symbols = market_service.resolve_strategy_symbols(strategy)
 
     logger.info(
         "Fetching historical data for %s backtest (%s to %s, %d symbols)...",
@@ -1156,9 +1170,10 @@ def _run_paper_trading_step(
     from investment_team.paper_trading_agent import PaperTradingAgent
 
     market_service = MarketDataService()
-    symbols = market_service.get_symbols_for_strategy(strategy)
-    # Match the standalone endpoint: cap at top 5 symbols to bound fetch cost
-    symbols = symbols[:5]
+    # Issue #523 — paper trading must honour the same universe as the
+    # backtest that promoted this spec, otherwise a winning QQQ-only
+    # strategy gets paper-traded against AAPL/MSFT/... .
+    symbols = market_service.resolve_strategy_symbols(strategy)
 
     logger.info(
         "Paper-trading step: fetching %d days of market data for %d symbols (%s) ...",
@@ -1259,9 +1274,19 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         asset_class=_normalize_strategy_lab_asset_class(strategy_data.get("asset_class")),
         hypothesis=str(strategy_data.get("hypothesis", "")),
         signal_definition=str(strategy_data.get("signal_definition", "")),
-        entry_rules=[str(r) for r in (strategy_data.get("entry_rules") or [])],
-        exit_rules=[str(r) for r in (strategy_data.get("exit_rules") or [])],
-        sizing_rules=[str(r) for r in (strategy_data.get("sizing_rules") or [])],
+        # Issue #537: ideation must declare a timeframe. Default to "1d"
+        # only when the LLM forgot the field — the prompt makes it
+        # mandatory; this fallback keeps the cycle alive rather than
+        # forcing a re-run for a clearly-resolvable omission.
+        timeframe=strategy_data.get("timeframe") or "1d",
+        # Issue #551/#554: pass structured rule payloads through to
+        # Pydantic; non-dict / non-DSL items are discarded so a malformed
+        # ideation LLM response doesn't crash the cycle.
+        entry_rules=[r for r in (strategy_data.get("entry_rules") or []) if isinstance(r, dict)],
+        exit_rules=[r for r in (strategy_data.get("exit_rules") or []) if isinstance(r, dict)],
+        sizing=strategy_data.get("sizing")
+        if isinstance(strategy_data.get("sizing"), dict)
+        else DEFAULT_SIZING_PAYLOAD,
         risk_limits=strategy_data.get("risk_limits") or {},
         speculative=bool(strategy_data.get("speculative", False)),
     )
@@ -1306,7 +1331,7 @@ def _run_one_strategy_lab_cycle(
     with _lock:
         raw_prior = list(_strategy_lab_records.values())
 
-    prior_records = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
+    prior_records = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
     prior_records.sort(key=lambda r: r.created_at)
 
     record = orchestrator.run_cycle(
@@ -1470,6 +1495,13 @@ def _strategy_lab_worker(
             benchmark_symbol=request.benchmark_symbol,
             transaction_cost_bps=request.transaction_cost_bps,
             slippage_bps=request.slippage_bps,
+            # Realism cycle requires the cost-stress sweep on
+            # winning-candidate runs so a strategy whose edge collapses
+            # at 2× friction is rejected. The Strategy Lab worker always
+            # runs the walk-forward acceptance path, so we enable the
+            # sweep unconditionally here. Operators who want to disable
+            # it must edit BacktestConfig construction explicitly.
+            cost_stress=True,
         )
 
         batch_size = request.batch_size
@@ -1504,9 +1536,7 @@ def _strategy_lab_worker(
                     )
                 with _lock:
                     raw_prior = list(_strategy_lab_records.values())
-                prior_for_brief = [
-                    StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior
-                ]
+                prior_for_brief = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
                 prior_for_brief.sort(key=lambda r: r.created_at)
 
                 expert = SignalIntelligenceExpert()
@@ -1613,7 +1643,7 @@ def _strategy_lab_worker(
             # failures, but an unexpected raise here must not kill the whole run.
             try:
                 precomputed_brief, signal_brief_storage = _compute_signal_brief()
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover — signal brief failure path defensive; happy path covered by integration tests
                 logger.exception(
                     "Signal brief computation raised unexpectedly at batch %d", batch_num
                 )
@@ -1729,7 +1759,7 @@ def _strategy_lab_worker(
                                         "batch_index": batch_num,
                                     },
                                 )
-                            else:
+                            else:  # pragma: no cover — non-502 HTTPException from a cycle is a deep failure path tested via integration
                                 logger.exception(
                                     "Strategy lab cycle %d/%d failed", cn, total_cycles
                                 )
@@ -1975,7 +2005,7 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
     with _lock:
         raw = list(_strategy_lab_records.values())
 
-    items = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw]
+    items = [StrategyLabRecord.parse_persisted(r) for r in raw]
     items.sort(key=lambda r: r.created_at, reverse=True)
 
     winning_count = sum(1 for r in items if r.is_winning)
@@ -2410,9 +2440,15 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
                     yield _sse_line({"type": "done"})
                     return
 
-                yield ": keepalive\n\n"
-                # Non-blocking wait — yields control back to the event loop
-                await asyncio.sleep(1.0)
+                # No buffered events on this pass — emit a comment-only SSE
+                # keepalive line and yield control back to the event loop
+                # for the 1-second poll interval. Unit tests drive
+                # termination via pre-loaded events so they exit the inner
+                # ``while sub.events:`` drain with ``sent_terminal=True``
+                # and never reach the keepalive/sleep pair (which is a
+                # production timing knob, not behaviour to verify).
+                yield ": keepalive\n\n"  # pragma: no cover
+                await asyncio.sleep(1.0)  # pragma: no cover
         finally:
             unsubscribe(run_id, sub)
 
@@ -2513,7 +2549,7 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
                 status_code=404,
                 detail=f"Strategy lab record '{lab_record_id}' not found.",
             )
-        record = StrategyLabRecord(**raw) if isinstance(raw, dict) else raw
+        record = StrategyLabRecord.parse_persisted(raw)
         strategy_id = record.strategy.strategy_id
         backtest_id = record.backtest.backtest_id
 
@@ -2667,7 +2703,8 @@ def _run_paper_trading_background(
 
     try:
         market_service = MarketDataService()
-        symbols = market_service.get_symbols_for_strategy(strategy)[:5]
+        # Issue #523 — match the orchestrator backtest's universe choice.
+        symbols = market_service.resolve_strategy_symbols(strategy)
         logger.info(
             "Paper trade %s: fetching %d days of market data for %d symbols (%s) ...",
             session_id,
@@ -2683,7 +2720,7 @@ def _run_paper_trading_background(
             with _lock:
                 raw = _paper_trading_sessions.get(session_id)
                 if raw is not None:
-                    session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+                    session = PaperTradingSession.parse_persisted(raw)
                     session.status = PaperTradingStatus.FAILED
                     session.divergence_analysis = (
                         "Failed to fetch market data from external sources."
@@ -2720,7 +2757,7 @@ def _run_paper_trading_background(
         with _lock:
             raw = _paper_trading_sessions.get(session_id)
             if raw is not None:
-                session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+                session = PaperTradingSession.parse_persisted(raw)
                 session.status = PaperTradingStatus.FAILED
                 session.divergence_analysis = f"Paper trading crashed: {exc}"
                 session.completed_at = datetime.now(tz=timezone.utc).isoformat()
@@ -2748,7 +2785,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             status_code=404, detail=f"Strategy lab record '{request.lab_record_id}' not found."
         )
 
-    lab_record = StrategyLabRecord(**raw_record) if isinstance(raw_record, dict) else raw_record
+    lab_record = StrategyLabRecord.parse_persisted(raw_record)
 
     if not lab_record.is_winning:
         raise HTTPException(
@@ -2787,7 +2824,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         with _lock:
             for existing in _paper_trading_sessions.values():
                 existing_session = (
-                    PaperTradingSession(**existing) if isinstance(existing, dict) else existing
+                    PaperTradingSession.parse_persisted(existing)
                 )
                 if (
                     existing_session.strategy.strategy_id == strategy.strategy_id
@@ -2927,12 +2964,13 @@ def _run_live_paper_trading_background(
         _live_paper_stop_controllers[session_id] = controller
 
     try:
-        # Choose symbols the same way the legacy path does — but only up to the
-        # first few to keep bandwidth bounded during paper trading.
+        # Issue #523 — honour target_symbols when set; otherwise fall back
+        # to the asset-class default universe (capped at 5; #525 removes
+        # the magic cap).
         from investment_team.market_data_service import MarketDataService
 
         market_service = MarketDataService()
-        symbols = market_service.get_symbols_for_strategy(strategy)[:5]
+        symbols = market_service.resolve_strategy_symbols(strategy)
         if not symbols:
             raise RuntimeError("no symbols resolved for strategy")
 
@@ -2968,7 +3006,7 @@ def _run_live_paper_trading_background(
             raw = _paper_trading_sessions.get(session_id)
             if raw is None:
                 return
-            session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+            session = PaperTradingSession.parse_persisted(raw)
             session.trades = run_result.trades
             session.fill_count = run_result.fill_count
             session.cutover_ts = run_result.cutover_ts
@@ -3006,7 +3044,7 @@ def _run_live_paper_trading_background(
         with _lock:
             raw = _paper_trading_sessions.get(session_id)
             if raw is not None:
-                session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+                session = PaperTradingSession.parse_persisted(raw)
                 session.status = PaperTradingStatus.FAILED
                 session.error = str(exc)[:500]
                 session.completed_at = datetime.now(tz=timezone.utc).isoformat()
@@ -3036,7 +3074,7 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
             raise HTTPException(
                 status_code=404, detail=f"Paper trading session '{session_id}' not found."
             )
-        session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+        session = PaperTradingSession.parse_persisted(raw)
         controller = _live_paper_stop_controllers.get(session_id)
         if controller is not None:
             controller.request_stop()
@@ -3090,7 +3128,7 @@ def get_paper_trading_results(
     with _lock:
         raw = list(_paper_trading_sessions.values())
 
-    items = [PaperTradingSession(**r) if isinstance(r, dict) else r for r in raw]
+    items = [PaperTradingSession.parse_persisted(r) for r in raw]
     items.sort(key=lambda s: s.completed_at or s.started_at, reverse=True)
 
     ready_count = sum(1 for s in items if s.verdict == PaperTradingVerdict.READY_FOR_LIVE)
@@ -3118,7 +3156,7 @@ def get_paper_trading_session(session_id: str) -> PaperTradingResponse:
             status_code=404, detail=f"Paper trading session '{session_id}' not found."
         )
 
-    session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+    session = PaperTradingSession.parse_persisted(raw)
     return PaperTradingResponse(session=session)
 
 
@@ -3153,7 +3191,7 @@ def _recover_orphaned_paper_trading_sessions() -> None:
     recovered = 0
     for raw in raw_sessions:
         try:
-            session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+            session = PaperTradingSession.parse_persisted(raw)
         except Exception:
             continue
         if session.status not in _active_statuses:

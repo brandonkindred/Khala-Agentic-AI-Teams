@@ -29,6 +29,11 @@ from investment_team.models import (
     StrategySpec,
     TradeRecord,
 )
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    Predicate,
+    SignalExitRule,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -42,8 +47,14 @@ def _sample_strategy(*, code: str | None) -> StrategySpec:
         asset_class="equity",
         hypothesis="h",
         signal_definition="s",
-        entry_rules=["a > b"],
-        exit_rules=["b > a"],
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs="bar.high", op=">", rhs="bar.low"),
+            )
+        ],
+        exit_rules=[SignalExitRule(when=Predicate(lhs="bar.low", op=">", rhs="bar.high"))],
         strategy_code=code,
     )
 
@@ -83,6 +94,13 @@ class _FakeMarketDataService:
 
     def get_symbols_for_strategy(self, strategy: StrategySpec) -> List[str]:
         return list(self._market_data.keys())
+
+    def resolve_strategy_symbols(self, strategy: StrategySpec) -> List[str]:
+        # Issue #523 — mirror the real ``MarketDataService.resolve_strategy_symbols``
+        # so endpoint tests honour ``spec.target_symbols`` when set.
+        if strategy.target_symbols:
+            return list(strategy.target_symbols)
+        return self.get_symbols_for_strategy(strategy)[:5]
 
     def fetch_multi_symbol_range(
         self, symbols: List[str], asset_class: str, start: str, end: str

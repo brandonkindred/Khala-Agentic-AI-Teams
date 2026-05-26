@@ -1,0 +1,48 @@
+Draft a rigorous analysis of this LOSING swing-trading strategy (annualized return below 8% threshold).
+
+## Strategy (definition under test)
+Asset class: equity
+Hypothesis: Trend-followers profit when SMA(20) crosses above SMA(50).
+Signal: SMA(20) > SMA(50)
+Intended entry rules (as authored — may not all be machine-enforced): long when sma(20) > sma(50)
+Engine-enforced exit rules (structured DSL applied by the parent engine every bar): take profit 5%, stop loss 2%
+Sizing / risk: risk 1% per trade
+Rationale for testing: Validate SMA-cross trend following on the equity sleeve.
+
+## Aggregated backtest metrics
+Annualized return: 3.1%
+Total return: 4.2%
+Sharpe ratio: 0.42
+Max drawdown: 18.7%
+Win rate: 38.0%
+Profit factor: 0.95
+Volatility: 22.4%
+
+## Simulated trade ledger (evidence)
+Trade 1: BUY AAA on 2024-01-15 @ 100.00, SELL on 2024-01-25 @ 102.50 (+2.5%)
+Trade 2: BUY BBB on 2024-02-01 @ 50.00, SELL on 2024-02-11 @ 49.00 (-2.0%)
+
+## Alignment status — TRADES DID NOT IMPLEMENT THE SPEC
+
+Disclaimer to surface in the narrative: "The executed trades did not faithfully implement the specification; interpretation is preliminary."
+
+Concrete alignment issues (facts; do not paraphrase away):
+- [critical] exit_rules: stop-loss did not fire on trade #1 despite -8% drawdown
+- [warning] universe: trade #2 used symbol BBB which is outside the spec universe
+
+Audit rationale: Two trades skipped the stop-loss; one trade entered a symbol outside the spec universe.
+
+Constraints for this analysis:
+- DO open the narrative with the disclaimer above.
+- DO NOT make causal claims about strategy design (e.g. "worked because of X", "failed because of Y") — the trades are not a valid test of the spec.
+- DO describe execution gaps factually and recommend re-running once aligned.
+
+## Instructions
+Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced for `StopLossRule` and `TakeProfitRule`: the parent engine emits closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. losing trades clustered near the stop-loss floor point to it firing). `SignalExitRule` entries in the list above are NOT yet engine-enforced — treat any predicate-based exit prose the same way as entry intent.
+Think step by step: what failure modes explain weak performance — signal timing, risk/reward asymmetry, cost drag, or rules misaligned with the market regime implied by the results?
+Use the trade-level evidence where it supports your reasoning.
+Write 5-8 sentences. Be specific about *why* this strategy underperformed.
+If an "Alignment status" section above marks the run as misaligned, you MUST open with the disclaimer verbatim and treat the strategy design as untested. Do not attribute the weak performance to any design choice; describe the execution gaps factually and recommend re-running once aligned.
+
+Return ONLY JSON with no markdown:
+{"draft_narrative": "your draft analysis"}

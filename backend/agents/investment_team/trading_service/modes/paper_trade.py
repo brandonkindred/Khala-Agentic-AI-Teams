@@ -234,6 +234,11 @@ def run_paper_trade(
         # would corrupt decision-time portfolio reads. Pin to per-bar
         # mode regardless of ``BAR_CHUNK_SIZE``.
         bar_chunk_size=1,
+        # Issue #527 — engine-enforce structured exit rules in paper mode
+        # too, so a spec with ``StopLossRule`` / ``TakeProfitRule`` doesn't
+        # leak open positions when ``strategy_code`` is purely entry-driven.
+        # Empty list is a no-op.
+        exit_rules=list(strategy.exit_rules),
     )
 
     # First attempt: primary provider.

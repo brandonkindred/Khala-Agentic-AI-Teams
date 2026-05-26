@@ -177,6 +177,12 @@ def run_backtest(
             # land only on the baseline ``service_result`` via the
             # capture_fingerprint code path.
             coverage_probe_mode=coverage_probe_mode,
+            # Issue #527 — pass the spec's structured exit rules to the
+            # engine so the per-bar loop emits time-stop / stop-loss /
+            # take-profit closes regardless of what ``strategy_code``
+            # does. Empty list (no rules in spec) preserves the legacy
+            # strategy-code-only path.
+            exit_rules=list(strategy.exit_rules),
         )
         outcome = service.run(stream)
         run_metrics = compute_metrics(

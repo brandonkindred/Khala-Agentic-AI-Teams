@@ -78,7 +78,7 @@ def run_phase2_parallel(
     def _run_deploy() -> DeploymentStrategyAgentOutput:
         return deployment_agent.run(DeploymentStrategyAgentInput(task_spec=task_spec))
 
-    if parallel:
+    if parallel:  # pragma: no cover  # integration-only: ThreadPoolExecutor parallel-agent fan-out
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="devops_phase2") as pool:
             futures = {
                 pool.submit(_run_iac): "iac",

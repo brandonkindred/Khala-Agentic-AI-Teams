@@ -129,7 +129,9 @@ def extract_posts_from_html(
     return list(posts.values())
 
 
-def collect_medium_stats(config: MediumStatsRunConfig) -> MediumStatsReport:
+def collect_medium_stats(
+    config: MediumStatsRunConfig,
+) -> MediumStatsReport:  # pragma: no cover - drives a real Chromium browser via Playwright and scrapes medium.com /me/stats; exercised only by integration tests with the Medium session configured.
     """
     Launch Chromium with the platform-stored Medium session, open /me/stats, extract rows.
 

@@ -5,9 +5,55 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from .execution.risk_filter import RiskLimits
+from .strategy_lab.alignment_findings import AlignmentFinding
+from .strategy_lab.spec_dsl import (
+    EntryRule,
+    ExitRule,
+    FixedFractionSizing,
+    SizingRule,
+)
+
+
+def _coerce_legacy_strategy_spec_dict(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Migrate a legacy persisted StrategySpec dict to the current strict schema.
+
+    Older persisted rows (pre Issue #537) stored ``entry_rules`` / ``exit_rules``
+    as prose strings and sometimes omitted ``timeframe`` entirely. The current
+    schema requires structured DSL nodes and a ``timeframe`` literal. This helper
+    rewrites the raw dict so that:
+
+      * prose entries in ``entry_rules`` / ``exit_rules`` are moved into
+        ``unparsed_rules`` and ``requires_redesign`` is set to True;
+      * missing ``timeframe`` defaults to ``"1d"`` so the strict Literal validator
+        passes.
+
+    Preconditions: ``raw`` is a dict (caller checks); behaviour is undefined for
+    other types. Postcondition: returns a new dict safe to pass to
+    ``StrategySpec.model_validate``.
+    """
+    coerced = dict(raw)
+    coerced.setdefault("timeframe", "1d")
+
+    unparsed = list(coerced.get("unparsed_rules") or [])
+    requires_redesign = bool(coerced.get("requires_redesign", False))
+
+    for key in ("entry_rules", "exit_rules"):
+        items = coerced.get(key) or []
+        kept: list = []
+        for item in items:
+            if isinstance(item, str):
+                unparsed.append(item)
+                requires_redesign = True
+            else:
+                kept.append(item)
+        coerced[key] = kept
+
+    coerced["unparsed_rules"] = unparsed
+    coerced["requires_redesign"] = requires_redesign
+    return coerced
 
 
 class RiskTolerance(str, Enum):
@@ -197,9 +243,15 @@ class StrategySpec(BaseModel):
     asset_class: str
     hypothesis: str
     signal_definition: str
-    entry_rules: List[str] = Field(default_factory=list)
-    exit_rules: List[str] = Field(default_factory=list)
-    sizing_rules: List[str] = Field(default_factory=list)
+    timeframe: Literal["1m", "5m", "15m", "1h", "1d"]
+    entry_rules: List[EntryRule] = Field(default_factory=list)
+    exit_rules: List[ExitRule] = Field(default_factory=list)
+    sizing: SizingRule = Field(default_factory=lambda: FixedFractionSizing(fraction=0.02))
+    # Issue #523 — explicit list of tickers the strategy is designed to
+    # trade. When non-empty, the fetch path uses this list verbatim
+    # instead of the asset-class default universe, so a hypothesis naming
+    # QQQ doesn't get silently backtested on AAPL.
+    target_symbols: List[str] = Field(default_factory=list)
     # Phase 3: risk_limits is validated at spec construction time.  Dicts
     # authored by the LLM (or persisted before this field was typed) are
     # accepted and routed through ``RiskLimits.from_legacy_dict``, which
@@ -207,7 +259,42 @@ class StrategySpec(BaseModel):
     risk_limits: RiskLimits = Field(default_factory=RiskLimits)
     speculative: bool = False
     strategy_code: Optional[str] = None
+    requires_redesign: bool = False
+    # False: orchestrator compiles ``strategy_code`` deterministically
+    # from the structured rules. True: keep LLM-authored code verbatim
+    # because the spec falls outside the deterministic compiler's
+    # expressible subset. Orthogonal to ``requires_redesign``.
+    requires_custom_code: bool = False
+    unparsed_rules: List[str] = Field(default_factory=list)
     audit: AuditContext = Field(default_factory=AuditContext)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_when_loading(cls, data: Any, info: ValidationInfo) -> Any:
+        """When validated with ``context={'legacy_spec': True}``, rewrite prose
+        rules into ``unparsed_rules`` and default a missing ``timeframe``.
+
+        This lets persisted rows authored before the strict DSL schema deserialize
+        cleanly. Live construction (no context) is unaffected so the strict
+        construction tests for prose rejection still hold.
+        """
+        if not isinstance(data, dict):
+            return data
+        if not (info.context and info.context.get("legacy_spec")):
+            return data
+        return _coerce_legacy_strategy_spec_dict(data)
+
+    @classmethod
+    def parse_persisted(cls, raw: Any) -> "StrategySpec":
+        """Deserialize a (possibly legacy) persisted row into a StrategySpec.
+
+        Accepts a ``StrategySpec`` (returned as-is) or a dict. Raw dicts are
+        validated with the legacy-coercion context so prose rules and missing
+        ``timeframe`` migrate to the current schema instead of raising.
+        """
+        if isinstance(raw, cls):
+            return raw
+        return cls.model_validate(raw, context={"legacy_spec": True})
 
     @field_validator("risk_limits", mode="before")
     @classmethod
@@ -219,6 +306,25 @@ class StrategySpec(BaseModel):
         if isinstance(v, dict):
             return RiskLimits.from_legacy_dict(v)
         return v
+
+    @field_validator("target_symbols", mode="before")
+    @classmethod
+    def _normalize_target_symbols(cls, v: Any) -> List[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("target_symbols must be a list of strings")
+        seen: set[str] = set()
+        out: List[str] = []
+        for item in v:
+            if not isinstance(item, str):
+                raise ValueError("target_symbols entries must be strings")
+            sym = item.strip().upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append(sym)
+        return out
 
 
 class ValidationCheck(BaseModel):
@@ -468,6 +574,16 @@ class BacktestExecutionDiagnostics(BaseModel):
     entries_filled: int = Field(default=0, ge=0)
     exits_emitted: int = Field(default=0, ge=0)
     closed_trades: int = Field(default=0, ge=0)
+    # Issue #527 — count of engine-emitted exit orders, keyed by rule kind
+    # (``stop_loss`` / ``take_profit``). Counts close-order submissions,
+    # not fills; fills land in the existing trade ledger.
+    exit_rule_firings: Dict[str, int] = Field(default_factory=dict)
+    # Per-symbol breakdown of ``exit_rule_firings`` — same counts, keyed by
+    # ``symbol → rule_kind → count``. The aggregate field above is the
+    # row-sum across symbols. Conformance checks consume the per-symbol
+    # view so a stop_loss firing on one symbol can't mask a missed
+    # firing on another (cross-symbol leak attribution).
+    exit_rule_firings_by_symbol: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     open_positions_at_end: List[OpenPositionDiagnostic] = Field(default_factory=list)
     last_order_events: List[OrderLifecycleEvent] = Field(default_factory=list)
 
@@ -635,9 +751,48 @@ class TradeRecord(BaseModel):
     participation_clipped: Optional[bool] = None
     partial_fill_count: Optional[int] = None
     total_unfilled_qty: Optional[float] = None
+    # Issue #527 — close-order attribution. Mirrors
+    # ``OrderRequest.reason`` for the order that closed the position.
+    # Engine-fired structured-exit closes carry a
+    # ``"engine_exit:<rule_kind>"`` prefix; strategy-emitted closes
+    # carry whatever ``reason`` the strategy set (typically empty
+    # / None). Used by ``ExitRuleConformanceGate`` to distinguish
+    # engine-closed from strategy-closed trades so a gap-down
+    # strategy exit below a structured stop-loss floor is not
+    # mis-attributed as an engine leak.
+    entry_reason: Optional[str] = None
+    exit_reason: Optional[str] = None
+
+
+class DataProvenance(BaseModel):
+    """Issue #533 — symbol & data-source audit trail for one backtest run.
+
+    Lets reviewers answer "spec asked for QQQ → fetcher returned
+    AAPL/MSFT/NVDA/TSLA/AMZN → ledger traded TSLA" from structured data
+    without grepping narrative prose or strategy code.
+
+    ``target_symbols`` is the explicit list the spec asked for
+    (``spec.target_symbols``); distinct from ``BacktestRecord.requested_symbols``
+    which is the *resolved* universe (may be the asset-class fallback when
+    ``target_symbols`` is empty).
+    """
+
+    target_symbols: List[str] = Field(default_factory=list)
+    fetched_symbols: List[str] = Field(default_factory=list)
+    traded_symbols: List[str] = Field(default_factory=list)
+    provider_used: Dict[str, str] = Field(default_factory=dict)
+    as_of: Optional[str] = None
+    legacy_fingerprint: Optional[str] = None
 
 
 class BacktestRecord(BaseModel):
+    @classmethod
+    def parse_persisted(cls, raw: Any) -> "BacktestRecord":
+        """Deserialize a persisted backtest row, migrating legacy nested specs."""
+        if isinstance(raw, cls):
+            return raw
+        return cls.model_validate(raw, context={"legacy_spec": True})
+
     backtest_id: str
     strategy_id: str
     strategy: StrategySpec
@@ -649,6 +804,24 @@ class BacktestRecord(BaseModel):
     result: BacktestResult
     notes: List[str] = Field(default_factory=list)
     trades: List[TradeRecord] = Field(default_factory=list)
+    # Issue #525 — symbol-fetch audit trail. ``requested_symbols`` is what
+    # the orchestrator asked ``MarketDataService.fetch_multi_symbol_range``
+    # to retrieve (post target_symbols / asset-class fallback resolution);
+    # ``fetched_symbols`` is the subset that returned usable bars. Both
+    # default to ``[]`` so older persisted rows deserialize cleanly.
+    requested_symbols: List[str] = Field(default_factory=list)
+    fetched_symbols: List[str] = Field(default_factory=list)
+    # Issue #533 — structured provenance (target/fetched/traded symbols,
+    # per-symbol provider, ``as_of`` snapshot id, dataset fingerprint).
+    # Default-empty so legacy persisted rows deserialize cleanly.
+    data_provenance: DataProvenance = Field(default_factory=DataProvenance)
+    # Per-trade, per-rule alignment findings emitted by the deterministic
+    # ``DeterministicAlignmentChecker``. Carries the final-iteration
+    # ledger of which alignment checks passed / failed on each trade so
+    # the Strategy Lab dashboard can render fine-grained pass/fail rows
+    # instead of a single LLM verdict. Default-empty so legacy persisted
+    # rows deserialize cleanly.
+    alignment_findings: List[AlignmentFinding] = Field(default_factory=list)
 
 
 class GateCheckResult(BaseModel):
@@ -742,6 +915,81 @@ class PaperTradingVerdict(str, Enum):
     NOT_PERFORMANT = "not_performant"
 
 
+# ---------------------------------------------------------------------------
+# Drift-observability models (spec/code revision ledger, gate timeline,
+# rule-implementation coverage)
+# ---------------------------------------------------------------------------
+
+StrategyLabPhase = Literal["design", "design_review", "synthesis", "verification"]
+
+
+class SpecRevision(BaseModel):
+    """One mutation of the strategy spec during a lab cycle.
+
+    Preconditions:
+      - ``before_hash`` / ``after_hash`` are 64-char hex SHA-256 digests
+        produced by ``phases.hash_spec``.
+      - ``before_hash != after_hash`` (no-op mutations are not recorded).
+    Postconditions:
+      - ``diff`` is a unified-diff string of the spec's sorted-key
+        pretty-printed JSON, suitable for human review.
+    """
+
+    phase: StrategyLabPhase
+    agent: str
+    timestamp: str
+    before_hash: str = Field(..., min_length=64, max_length=64)
+    after_hash: str = Field(..., min_length=64, max_length=64)
+    diff: str
+    reason: str
+    gate_failures: List[str] = Field(default_factory=list)
+
+
+class CodeRevision(BaseModel):
+    """One mutation of the strategy code during a lab cycle.
+
+    Preconditions:
+      - ``before_hash`` / ``after_hash`` are 64-char hex SHA-256 digests
+        produced by ``phases.hash_code``.
+      - ``before_hash != after_hash`` (no-op mutations are not recorded).
+    Postconditions:
+      - ``diff`` is a unified-diff string of the raw code text.
+    """
+
+    phase: StrategyLabPhase
+    agent: str
+    timestamp: str
+    before_hash: str = Field(..., min_length=64, max_length=64)
+    after_hash: str = Field(..., min_length=64, max_length=64)
+    diff: str
+    reason: str
+    gate_failures: List[str] = Field(default_factory=list)
+
+
+class GateEvent(BaseModel):
+    """Chronological record of a quality-gate evaluation."""
+
+    phase: str
+    gate_name: str
+    passed: bool
+    severity: Literal["info", "warning", "critical"]
+    details: str
+    timestamp: str
+
+
+class RuleImplementationMap(BaseModel):
+    """Per-rule trade coverage: how many trades exercised each spec rule.
+
+    ``code_line_refs`` is best-effort AST analysis — empty when the
+    generated code cannot be parsed or the rule cannot be located.
+    Each inner list is ``[start_line, end_line]``.
+    """
+
+    rule_id: str
+    code_line_refs: List[List[int]] = Field(default_factory=list)
+    traded_count: int = 0
+
+
 class StrategyLabRecord(BaseModel):
     """Result of one strategy ideation + backtest + analysis (+ optional paper trading) cycle.
 
@@ -752,16 +1000,59 @@ class StrategyLabRecord(BaseModel):
     ``paper_trading_status = "skipped"`` and ``paper_trading_skipped_reason = "not_winning"``.
     """
 
+    @classmethod
+    def parse_persisted(cls, raw: Any) -> "StrategyLabRecord":
+        """Deserialize a persisted lab record, migrating legacy nested specs."""
+        if isinstance(raw, cls):
+            return raw
+        return cls.model_validate(raw, context={"legacy_spec": True})
+
     lab_record_id: str
     strategy: StrategySpec
     backtest: BacktestRecord
-    is_winning: bool  # annualized_return_pct > 8.0
+    is_winning: bool  # walk-forward acceptance gate (or fallback) AND alignment veto (#247, #529)
     strategy_rationale: str  # why the agent chose this strategy
     analysis_narrative: str  # LLM post-backtest analysis
     created_at: str
     refinement_rounds: int = 0
+    design_rounds: int = Field(
+        default=0,
+        description=(
+            "Number of design ↔ design-review iterations the cycle ran "
+            "before code synthesis. 0 on legacy rows; >=1 on rows from the "
+            "split design pipeline (one design call + zero or more review "
+            "rounds)."
+        ),
+    )
+    spec_implementability_phase_backs: int = Field(
+        default=0,
+        description=(
+            "Number of times this cycle phased back to the design step "
+            "because a downstream phase raised SpecImplementabilityError. "
+            "Each phase-back also contributes one trial to the convergence "
+            "tracker so DSR deflation reflects the multiple-testing cost "
+            "of the failed attempts. 0 on the happy path and on legacy rows."
+        ),
+    )
+    critiques: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Serialized SpecCritique entries (model_dump) the reviewer "
+            "produced during the design ↔ design-review loop. Empty on "
+            "legacy rows; carries one entry per round on rows from the "
+            "split design pipeline."
+        ),
+    )
     quality_gate_results: List[Dict[str, Any]] = Field(default_factory=list)
     strategy_code: Optional[str] = None
+    original_spec: Optional[StrategySpec] = Field(
+        default=None,
+        description="Design-time spec before any refinement-driven mutation; null on legacy rows.",
+    )
+    original_code: Optional[str] = Field(
+        default=None,
+        description="Design-time strategy code before refinement; null on legacy rows.",
+    )
     signal_intelligence_brief: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Signal Intelligence Expert JSON (brief_version, themes, …) or skipped metadata; null for legacy rows.",
@@ -780,6 +1071,11 @@ class StrategyLabRecord(BaseModel):
     )
     paper_trading_error: Optional[str] = None
     paper_trading_verdict: Optional[PaperTradingVerdict] = None
+    # Drift-observability ledgers
+    spec_history: List[SpecRevision] = Field(default_factory=list)
+    code_history: List[CodeRevision] = Field(default_factory=list)
+    gate_timeline: List[GateEvent] = Field(default_factory=list)
+    rule_implementation_map: List[RuleImplementationMap] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -810,6 +1106,13 @@ class PaperTradingComparison(BaseModel):
 
 class PaperTradingSession(BaseModel):
     """Full state of a paper trading session."""
+
+    @classmethod
+    def parse_persisted(cls, raw: Any) -> "PaperTradingSession":
+        """Deserialize a persisted paper-trading session, migrating legacy specs."""
+        if isinstance(raw, cls):
+            return raw
+        return cls.model_validate(raw, context={"legacy_spec": True})
 
     session_id: str
     lab_record_id: str

@@ -1,8 +1,8 @@
 """Unit tests for the orchestrator.
 
-Some tests in this file call the real SE job_store (which now requires
-either a live job service or the in-memory fake).  Marked integration
-pending follow-up to swap those to ``fake_job_client``.
+Routed through the in-memory ``FakeJobServiceClient`` via the autouse
+``_autouse_patched_job_store`` fixture, so direct ``job_store`` calls in
+these tests no longer require a live job service.
 """
 
 from pathlib import Path
@@ -22,7 +22,10 @@ from software_engineering_team.shared.models import (
     TaskUpdate,
 )
 
-pytestmark = [pytest.mark.integration]
+
+@pytest.fixture(autouse=True)
+def _autouse_patched_job_store(patched_job_store):
+    return patched_job_store
 
 
 def test_run_build_verification_appends_fix_line_when_pytest_fails_with_test_error_handlers(

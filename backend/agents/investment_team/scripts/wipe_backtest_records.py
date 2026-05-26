@@ -38,7 +38,9 @@ logger = logging.getLogger("wipe_backtest_records")
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="Print what would be deleted without deleting")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print what would be deleted without deleting"
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -75,7 +77,11 @@ def main(argv: list[str] | None = None) -> int:
     deleted_lab_records = 0
     for lab_id, bt_id in pairs:
         if args.dry_run:
-            logger.info("[dry-run] would delete lab record %s (linked backtest: %s)", lab_id, bt_id or "none")
+            logger.info(
+                "[dry-run] would delete lab record %s (linked backtest: %s)",
+                lab_id,
+                bt_id or "none",
+            )
         elif lab_client.delete_job(lab_id):
             deleted_lab_records += 1
             logger.info("deleted lab record %s (linked backtest: %s)", lab_id, bt_id or "none")

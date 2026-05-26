@@ -3,8 +3,9 @@ API tests for the backend-code-v2 endpoints:
   POST /backend-code-v2/run
   GET /backend-code-v2/status/{job_id}
 
-Hits the team API which calls the real job store; marked integration
-pending a follow-up that mocks job_store at the API boundary.
+Routed through the in-memory ``FakeJobServiceClient`` via the autouse
+``_autouse_patched_job_store`` fixture, so the team API's job-store calls
+land in a per-test in-memory dict.
 """
 
 from __future__ import annotations
@@ -18,8 +19,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-pytestmark = [pytest.mark.integration]
-
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
@@ -31,6 +30,11 @@ _spec = importlib.util.spec_from_file_location(
 _api_main = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_api_main)
 app = _api_main.app
+
+
+@pytest.fixture(autouse=True)
+def _autouse_patched_job_store(patched_job_store):
+    return patched_job_store
 
 
 @pytest.fixture

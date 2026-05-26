@@ -212,6 +212,50 @@ def test_ioc_overrides_requeue_next_bar_policy() -> None:
     assert order_book.all_pending() == []
 
 
+def test_day_order_expires_at_session_close() -> None:
+    """A DAY-TIF order submitted on day D that did not fill must be
+    cancelled by ``OrderBook.expire_day_orders`` when the next session
+    arrives (#379 criterion 7, DAY leg).
+
+    Submits a LIMIT DAY whose price is far enough below the first bar's
+    range that it cannot trigger, then advances to a new session and
+    asserts the order is removed and never fills on the new day's bar.
+    Anchors on ``original_submitted_at`` (immutable) so the test
+    survives any future requeue path that might advance ``submitted_at``.
+    """
+    sim, order_book, portfolio = _make_simulator()
+    order_book.submit(
+        OrderRequest(
+            client_order_id="day-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=100,
+            order_type=OrderType.LIMIT,
+            limit_price=50.0,  # well below the bar range — won't cross
+            tif=TimeInForce.DAY,
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+    )
+
+    # Day-of bar: the LIMIT did not cross, so no fill. Order still pending.
+    outcome = sim.process_bar(_bar("2024-01-01", price=100.0, volume=10_000_000))
+    assert outcome.entry_fills == []
+    assert len(order_book.all_pending()) == 1
+
+    # New session arrives → expire DAY orders submitted on a strictly earlier date.
+    expired = order_book.expire_day_orders("2024-01-02")
+    assert len(expired) == 1
+    assert expired[0].request.client_order_id == "day-1"
+    assert order_book.all_pending() == []
+
+    # Even if the new day's bar would have crossed the limit, the order
+    # is already gone — DAY expiry is durable, not a deferred decision.
+    follow_up = sim.process_bar(_bar("2024-01-02", price=50.0, volume=10_000_000))
+    assert follow_up.entry_fills == []
+    assert "AAA" not in portfolio.positions
+
+
 def test_no_trigger_ioc_same_side_addon_drops_silently() -> None:
     """A same-side IOC LIMIT add-on against an already-open position must be
     silently suppressed (no Fill emitted) — same as the triggered same-side

@@ -26,12 +26,9 @@ from .models import StrategySpec
 from .strategy_lab_context import normalize_asset_class
 from .symbols import (
     COINGECKO_IDS,
-    COMMODITY_SYMBOLS,
-    CRYPTO_SYMBOLS,
-    FOREX_SYMBOLS,
-    FUTURES_SYMBOLS,
-    STOCK_SYMBOLS,
     YAHOO_CRYPTO_TICKERS,
+    asset_class_default_universe,
+    classify_symbol,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -40,6 +37,37 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 _ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
+
+_DEFAULT_MAX_UNIVERSE_SYMBOLS = 20
+
+
+def _max_universe_symbols() -> int:
+    """Env-var ceiling on the asset-class default universe.
+
+    Postcondition: returns an integer ``>= 1``. Reads
+    ``STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`` from the environment; on a
+    non-integer value, emits a ``logger.warning`` and falls back to
+    ``_DEFAULT_MAX_UNIVERSE_SYMBOLS``. Values below 1 are clamped to 1 so
+    the fetch path is never asked to resolve an empty universe.
+
+    Only the *asset-class default* path is capped by this value.
+    ``resolve_strategy_symbols`` returns ``spec.target_symbols`` verbatim
+    when non-empty (override semantics), so explicit operator-selected
+    universes are never truncated by the cap.
+    """
+    raw = os.getenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS")
+    if not raw:
+        return _DEFAULT_MAX_UNIVERSE_SYMBOLS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS=%r; using default %d",
+            raw,
+            _DEFAULT_MAX_UNIVERSE_SYMBOLS,
+        )
+        return _DEFAULT_MAX_UNIVERSE_SYMBOLS
+    return max(1, value)
 
 
 class OHLCVBar(BaseModel):
@@ -230,17 +258,89 @@ class MarketDataService:
         return self.cache.adv_for_bars(bars=bars, lookback=lookback)
 
     def get_symbols_for_strategy(self, strategy: StrategySpec) -> List[str]:
-        """Return relevant symbols based on the strategy's asset class."""
-        asset = normalize_asset_class(strategy.asset_class)
-        symbol_map = {
-            "crypto": CRYPTO_SYMBOLS,
-            "stocks": STOCK_SYMBOLS,
-            "options": STOCK_SYMBOLS,
-            "forex": FOREX_SYMBOLS,
-            "futures": FUTURES_SYMBOLS,
-            "commodities": COMMODITY_SYMBOLS,
-        }
-        return list(symbol_map.get(asset, STOCK_SYMBOLS))
+        """Return the asset-class default symbol list for ``strategy``.
+
+        Thin instance-method wrapper over ``asset_class_default_universe``
+        — kept on the service so callers that already hold a service
+        reference don't need to import the helper. The two stay in
+        lockstep so ``SpecReadinessGate`` and the fetcher always agree on
+        what "default universe" means.
+
+        ``"options"`` deliberately returns ``[]``: option-chain data,
+        Greeks, and a contract execution model are not yet supported.
+        ``StrategySpecValidator`` rejects ``asset_class="options"`` as a
+        critical gate failure upstream; the empty list here is
+        defense-in-depth for any path that skips the validator.
+        """
+        return asset_class_default_universe(strategy.asset_class)
+
+    def resolve_strategy_symbols(self, strategy: StrategySpec) -> List[str]:
+        """Pick the symbol universe a strategy should trade.
+
+        Precondition: ``strategy.target_symbols`` is a (possibly empty) list
+        of normalized tickers (uppercased, stripped, deduped — guaranteed by
+        ``StrategySpec``'s validator). ``strategy.asset_class`` resolves
+        through ``normalize_asset_class`` to one of the supported classes.
+
+        Postcondition:
+
+          * Non-empty ``target_symbols`` ⇒ return ``list(target_symbols)``
+            verbatim (override semantics). The asset-class default does
+            not contribute — an operator-selected universe stands alone so
+            that ``TargetSymbolCoverageGate.check_trades`` and the fetched
+            universe agree on what's tradeable.
+          * Empty ``target_symbols`` ⇒ return the asset-class default
+            truncated to ``_max_universe_symbols()`` entries, in declared
+            order.
+
+        Side effects (best-effort warnings, never raised):
+
+          * Cap truncation: when the raw asset-class default exceeds
+            ``_max_universe_symbols()`` on the empty-targets path, a
+            warning is logged before the slice is taken so the truncation
+            is never silent.
+          * Asset-class mismatch: when ``target_symbols`` is non-empty and
+            contains a ticker whose natural class disagrees with
+            ``strategy.asset_class``, a warning is logged. Ambiguous tickers
+            (cross-asset ETFs like GLD, QQQ — ``classify_symbol`` returns
+            ``None``) do not trigger the warning.
+        """
+        if strategy.target_symbols:
+            self._warn_on_asset_class_mismatch(strategy)
+            return list(strategy.target_symbols)
+        default = self.get_symbols_for_strategy(strategy)
+        cap = _max_universe_symbols()
+        if len(default) > cap:
+            logger.warning(
+                "Strategy %s: asset-class default universe (%d symbols) "
+                "exceeds STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS=%d; truncating "
+                "to first %d. Set spec.target_symbols to opt out of the "
+                "default universe entirely.",
+                strategy.strategy_id,
+                len(default),
+                cap,
+                cap,
+            )
+            default = default[:cap]
+        return default
+
+    def _warn_on_asset_class_mismatch(self, strategy: StrategySpec) -> None:
+        declared = normalize_asset_class(strategy.asset_class)
+        mismatches: list[tuple[str, str]] = []
+        for sym in strategy.target_symbols:
+            natural = classify_symbol(sym)
+            if natural is not None and natural != declared:
+                mismatches.append((sym, natural))
+        if mismatches:
+            logger.warning(
+                "Strategy %s: target_symbols %s do not match asset_class=%s — "
+                "the %s provider chain will be used and may return no data. "
+                "Update target_symbols or asset_class to align.",
+                strategy.strategy_id,
+                mismatches,
+                declared,
+                declared,
+            )
 
     def fetch_multi_symbol(
         self, symbols: List[str], asset_class: str, days: int = 365

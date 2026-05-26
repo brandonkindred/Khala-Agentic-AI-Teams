@@ -53,8 +53,18 @@ class _ReviseTrackingLLM(DummyLLMClient):
             return {
                 "summary": "Fix opening hook and tighten section two.",
                 "changes": [
-                    {"section": "intro", "feedback_ids": [1], "action": "rewrite", "rationale": "Weak opening."},
-                    {"section": "section two", "feedback_ids": [2], "action": "rephrase", "rationale": "Drags."},
+                    {
+                        "section": "intro",
+                        "feedback_ids": [1],
+                        "action": "rewrite",
+                        "rationale": "Weak opening.",
+                    },
+                    {
+                        "section": "section two",
+                        "feedback_ids": [2],
+                        "action": "rephrase",
+                        "rationale": "Drags.",
+                    },
                 ],
                 "risks": [],
             }

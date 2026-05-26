@@ -470,7 +470,7 @@ previously flagged.
 | W10 | UI: filter notice + flag chips + medication banner | FE | P1 |
 | W11 | Observability counters + rejection audit log | P1 |
 | W12 | Replay job on `GUARDRAIL_VERSION` / `KB_VERSION` bump | P2 |
-| W13 | CODEOWNERS entry for `interactions.yaml` — team lead + clinical reviewer | P1 |
+| W13 | (Withdrawn — CODEOWNERS gate removed) | — |
 | W14 | Benchmarks: `check_recommendation` p99 ≤ 10 ms | P2 |
 
 ---
@@ -516,7 +516,7 @@ on → SPEC-007 pipeline).
 
 ### Phase 4 — Replay and cleanup (P1/P2)
 - [ ] W12 replay job live.
-- [ ] W13 CODEOWNERS committed.
+- [ ] ~~W13 CODEOWNERS committed.~~ Withdrawn — CODEOWNERS gate removed.
 - [ ] W14 benchmarks baselined.
 - [ ] Flag default on; flag removal scheduled.
 

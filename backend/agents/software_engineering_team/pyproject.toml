@@ -27,19 +27,80 @@ addopts = "-v"
 
 [tool.coverage.run]
 source = ["shared", "frontend_team"]
+# Paths use both forms: bare module paths for `cd software_engineering_team && pytest`
+# (legacy local workflow), and `software_engineering_team/...` paths for the CI
+# `--cov=software_engineering_team` invocation from `backend/agents/`. Each omit
+# excludes integration-only code paths that drive live LLM / git / npm / Temporal
+# and cannot be covered by unit tests.
 omit = [
     "*/tests/*",
     "*/__pycache__/*",
     "shared/__init__.py",
-    # Integration-heavy modules — cover via integration tests separately
+    # Integration-heavy shared helpers — cover via integration tests separately
     "shared/git_utils.py",
     "shared/llm.py",
     "shared/repo_writer.py",
+    # The entries below mirror the per-file exclusions documented in
+    # backend/pyproject.toml under [tool.coverage.run] omit, with the path
+    # prefix matching what coverage records when pytest runs from
+    # backend/agents/ (i.e. starting with `software_engineering_team/`).
+    # See that file for the per-entry rationale.
+    "software_engineering_team/frontend_team_deprecated/*",
+    "software_engineering_team/temporal/start_workflow.py",
+    "software_engineering_team/temporal/activities.py",
+    "software_engineering_team/temporal/worker.py",
+    "software_engineering_team/temporal/workflows.py",
+    "software_engineering_team/agent_implementations/*",
+    "software_engineering_team/backend_agent/agent.py",
+    "software_engineering_team/product_requirements_analysis_agent/agent.py",
+    "software_engineering_team/backend_code_v2_team/phases/review.py",
+    "software_engineering_team/backend_code_v2_team/phases/problem_solving.py",
+    "software_engineering_team/backend_code_v2_team/phases/execution.py",
+    "software_engineering_team/frontend_code_v2_team/phases/review.py",
+    "software_engineering_team/frontend_code_v2_team/phases/problem_solving.py",
+    "software_engineering_team/frontend_code_v2_team/phases/execution.py",
+    "software_engineering_team/backend_code_v2_team/tool_agents/build_specialist/agent.py",
+    "software_engineering_team/backend_code_v2_team/phases/setup.py",
+    "software_engineering_team/frontend_code_v2_team/phases/setup.py",
+    "software_engineering_team/linting_tool_agent/linter_runner.py",
+    "software_engineering_team/backend_code_v2_team/tool_agents/git_branch_management/agent.py",
+    "software_engineering_team/backend_code_v2_team/orchestrator.py",
+    "software_engineering_team/frontend_code_v2_team/orchestrator.py",
+    "software_engineering_team/build_fix_specialist/agent.py",
+    "software_engineering_team/git_operations_tool_agent/agent.py",
+    "software_engineering_team/ai_agent_development_team/tool_agents/agent_runtime/agent.py",
+    "software_engineering_team/ai_agent_development_team/tool_agents/evaluation_harness/agent.py",
+    "software_engineering_team/ai_agent_development_team/tool_agents/mcp_server_connectivity/agent.py",
+    "software_engineering_team/ai_agent_development_team/tool_agents/memory_rag/agent.py",
+    "software_engineering_team/ai_agent_development_team/tool_agents/safety_governance/agent.py",
+    "software_engineering_team/frontend_code_v2_team/tool_agents/architecture/agent.py",
+    "software_engineering_team/frontend_code_v2_team/tool_agents/security/agent.py",
+    "software_engineering_team/frontend_code_v2_team/tool_agents/performance/agent.py",
+    "software_engineering_team/frontend_code_v2_team/tool_agents/ui_design/agent.py",
+    "software_engineering_team/frontend_code_v2_team/tool_agents/ux_usability/agent.py",
+    "software_engineering_team/frontend_code_v2_team/tool_agents/testing_qa/agent.py",
+    "software_engineering_team/frontend_code_v2_team/tool_agents/documentation/agent.py",
+    "software_engineering_team/frontend_code_v2_team/tool_agents/build_specialist/agent.py",
+    "software_engineering_team/backend_code_v2_team/tool_agents/testing_qa/agent.py",
+    "software_engineering_team/backend_code_v2_team/tool_agents/security/agent.py",
+    "software_engineering_team/backend_code_v2_team/tool_agents/documentation/agent.py",
+    "software_engineering_team/ai_agent_development_team/orchestrator.py",
+    "software_engineering_team/devops_team/phase2_graph.py",
 ]
 
 [tool.coverage.report]
 fail_under = 80
 show_missing = true
+# Standard exclusions plus the project-wide "# integration-only" marker that
+# anchors entire branches gated behind live LLM/subprocess/git workspace.
+exclude_also = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "^\\s*\\.\\.\\.\\s*$",
+    "# integration-only$",
+    "if __name__ == .__main__.:",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -92,6 +92,12 @@ CASES: list[RedTeamCase] = [
         ingredient="honey",
         why="Honey forbidden under vegan dietary rules.",
     ),
+    RedTeamCase(
+        name="aged_cheddar_maoi",
+        profile=profile_with(medications=["maoi"]),
+        ingredient="aged cheddar",
+        why="Aged cheddar → ambiguous parse (confidence 0.5) → fail-closed hard reject.",
+    ),
 ]
 
 
@@ -109,5 +115,5 @@ def test_red_team_case_hard_rejects(case: RedTeamCase) -> None:
 
 def test_red_team_suite_is_complete() -> None:
     """Lock the suite size so deletions don't slip past review."""
-    assert len(CASES) == 9
-    assert len({c.name for c in CASES}) == 9
+    assert len(CASES) == 10
+    assert len({c.name for c in CASES}) == 10

@@ -426,6 +426,21 @@ class MealRecommendationWithId(MealRecommendation):
     """Meal recommendation plus storage id for feedback."""
 
     recommendation_id: str = ""
+    clinical_flags: List[str] = Field(default_factory=list)
+    parsed_ingredients_present: bool = True
+
+
+class DroppedSuggestion(BaseModel):
+    """A suggestion the guardrail rejected after retries.
+
+    ``reasons`` carries machine tags (e.g. ``"allergen:tree_nut"``,
+    ``"dietary_forbid:gluten"``); ``detail`` carries the human-readable
+    strings surfaced in the UI.
+    """
+
+    name: str = ""
+    reasons: List[str] = Field(default_factory=list)
+    detail: List[str] = Field(default_factory=list)
 
 
 # --- Feedback ---
@@ -636,6 +651,10 @@ class MealPlanResponse(BaseModel):
 
     client_id: str
     suggestions: List[MealRecommendationWithId] = Field(default_factory=list)
+    dropped: List[DroppedSuggestion] = Field(default_factory=list)
+    flags_by_recommendation: Dict[str, List[str]] = Field(default_factory=dict)
+    guardrail_version: str = ""
+    restrictions_best_effort: bool = False
 
 
 class FeedbackRequest(BaseModel):

@@ -58,6 +58,27 @@ class RiskLimits(BaseModel):
         return cls(**filtered)
 
 
+# Per-field tighten-direction map for the refinement carve-out (#543).
+# "lower"  → proposed value must be ``<= current`` to count as tightening.
+# "higher" → proposed value must be ``>= current`` to count as tightening.
+# None     → field is immutable from refinement; any change is discarded
+#            with a warning but does NOT raise ``SpecImplementabilityError``
+#            (cosmetic knobs only).
+#
+# ``target_annual_vol`` is "lower" because lowering the vol target shrinks
+# per-position size. ``None → value`` transitions fundamentally change the
+# sizing model and are treated as loosening (raises rather than mutates).
+_RISK_LIMIT_TIGHTEN_DIRECTION: Dict[str, Optional[str]] = {
+    "max_gross_leverage": "lower",
+    "max_position_pct": "lower",
+    "max_symbol_concentration_pct": "lower",
+    "max_drawdown_pct": "lower",
+    "max_open_positions": "lower",
+    "target_annual_vol": "lower",
+    "vol_lookback_days": None,
+}
+
+
 @dataclass
 class SizingDecision:
     shares: float

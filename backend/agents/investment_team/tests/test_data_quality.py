@@ -599,7 +599,7 @@ def test_ohlc_tolerance_absorbs_forex_vendor_noise_eurusd() -> None:
         OHLCVBar(
             date="2024-01-02",
             open=1.0512,
-            high=1.0512,   # one tick below close, but within rounding-noise floor
+            high=1.0512,  # one tick below close, but within rounding-noise floor
             low=1.0510,
             close=1.0513,
             volume=0.0,
@@ -633,7 +633,7 @@ def test_ohlc_tolerance_absorbs_forex_vendor_noise_usdjpy() -> None:
         OHLCVBar(
             date="2024-01-02",
             open=150.1100,
-            high=150.1000,   # 0.01 = 1 pip below close — pure vendor noise
+            high=150.1000,  # 0.01 = 1 pip below close — pure vendor noise
             low=150.0500,
             close=150.1200,
             volume=0.0,

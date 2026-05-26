@@ -1,17 +1,20 @@
-"""Strategy Lab ideation swarm for collaborative strategy refinement.
+"""Strategy Lab design swarm for collaborative strategy refinement.
 
-The ideation cycle uses a Swarm where agents reason about whether the
+The design cycle uses a Swarm where agents reason about whether the
 strategy needs further iteration:
 
-    ideation_agent ←→ refinement_agent ←→ analysis_agent
+    design_agent ←→ design_review_agent ←→ analysis_agent
 
 The swarm allows agents to hand back upstream when quality gates
 identify issues, enabling reasoning-based refinement cycles.
 
 Note: The actual refinement loop in the Strategy Lab orchestrator uses
 deterministic quality gates that MUST NOT be skippable. This swarm is
-for the LLM-driven creative collaboration between ideation and
-analysis agents, not for replacing the mandatory validation pipeline.
+for the LLM-driven creative collaboration between design and review
+agents, not for replacing the mandatory validation pipeline.
+
+The filename remains ``ideation_swarm.py`` for backward-compat; the
+internal node names mirror the orchestrator's split-design pipeline.
 """
 
 from __future__ import annotations
@@ -22,35 +25,36 @@ from shared_graph import build_agent
 
 
 def build_ideation_swarm() -> Swarm:
-    """Build the Strategy Lab ideation swarm.
+    """Build the Strategy Lab design swarm.
 
     Returns
     -------
     Swarm
-        Collaborative swarm for strategy ideation and refinement.
+        Collaborative swarm for strategy design and review.
     """
-    ideation = build_agent(
-        name="strategy_ideator",
+    design = build_agent(
+        name="strategy_designer",
         system_prompt=(
-            "You are a quantitative strategy ideation specialist. Generate novel trading "
-            "strategies with clear hypotheses, signal definitions, and entry/exit rules. "
-            "Consider prior strategy performance and convergence directives. "
-            "When the refinement agent suggests improvements, incorporate them. "
-            "Return structured JSON with strategy specification and Python backtest code."
+            "You are a quantitative strategy design specialist. Author novel trading "
+            "strategy specifications with clear hypotheses, signal definitions, and "
+            "structured entry/exit rules. Consider prior strategy performance and "
+            "convergence directives. When the reviewer suggests revisions, incorporate "
+            "them. Return structured JSON with the strategy specification only — no "
+            "Python code."
         ),
-        description="Generates novel trading strategies",
+        description="Authors novel trading strategy specifications (spec only, no code)",
     )
 
-    refinement = build_agent(
-        name="strategy_refiner",
+    review = build_agent(
+        name="strategy_reviewer",
         system_prompt=(
-            "You are a strategy refinement specialist. Review strategy specifications and "
-            "backtest code for issues. Suggest targeted fixes for validation failures, "
-            "execution errors, or anomalous results. Hand back to ideation if the strategy "
-            "needs fundamental redesign, or to analysis if the strategy is ready for evaluation. "
-            "Return structured JSON with refinement updates and new code."
+            "You are a strategy review specialist. Inspect candidate strategy "
+            "specifications for thesis coherence, signal alignment, risk-control "
+            "completeness, and universe ↔ thesis fit. Do not propose code. Do not "
+            "rewrite the spec. Emit a structured JSON critique the designer can act "
+            "on, with ``ready`` true only when the spec is implementable as-is."
         ),
-        description="Refines strategies based on failure feedback",
+        description="Reviews strategy specs and emits actionable critiques",
     )
 
     analysis = build_agent(
@@ -65,8 +69,8 @@ def build_ideation_swarm() -> Swarm:
     )
 
     return Swarm(
-        nodes=[ideation, refinement, analysis],
-        entry_point=ideation,
+        nodes=[design, review, analysis],
+        entry_point=design,
         max_handoffs=10,
         execution_timeout=300.0,
     )

@@ -136,6 +136,98 @@ def test_span_too_short_for_k_folds_raises():
 
 
 # ---------------------------------------------------------------------------
+# Leak invariant
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "k_folds", "embargo_days", "purge_hold_days"),
+    [
+        ("2022-01-03", "2022-12-30", 5, 2, 1),
+        ("2022-01-03", "2022-12-30", 3, 10, 5),
+        ("2022-01-03", "2022-12-30", 6, 0, 0),
+        ("2020-01-01", "2024-12-30", 8, 5, 7),
+        ("2022-01-03", "2022-12-30", 1, 0, 0),
+    ],
+)
+def test_no_test_window_bar_leaks_into_any_train_range(
+    start: str, end: str, k_folds: int, embargo_days: int, purge_hold_days: int
+):
+    """For every fold, every calendar date inside the test window must be
+    EXCLUDED from every training segment. This is the canonical leak
+    invariant — if even one test-window date is inside a train range, the
+    fold's training set has been contaminated and the OOS test result is
+    overstated.
+
+    The check also asserts the purge / embargo cushions: any pre-test
+    training range must end at least ``purge_hold_days + 1`` calendar
+    days before the test starts; any post-test training range must begin
+    at least ``embargo_days + 1`` calendar days after the test ends.
+    """
+    folds = build_purged_walk_forward(
+        start,
+        end,
+        k_folds=k_folds,
+        embargo_days=embargo_days,
+        purge_hold_days=purge_hold_days,
+    )
+    assert len(folds) == k_folds
+
+    for fold in folds:
+        test_start = fold.test_range.start
+        test_end = fold.test_range.end
+        for tr in fold.train_ranges:
+            # No overlap between [test_start, test_end] and [tr.start, tr.end].
+            overlaps = not (tr.end < test_start or tr.start > test_end)
+            assert not overlaps, (
+                f"fold {fold.fold_index}: train range "
+                f"[{tr.start}, {tr.end}] overlaps test window "
+                f"[{test_start}, {test_end}]"
+            )
+            if tr.end < test_start:
+                # Pre-test segment must respect the purge cushion: end at
+                # least purge_hold_days + 1 days before test_start.
+                gap_days = (test_start - tr.end).days
+                assert gap_days >= purge_hold_days + 1, (
+                    f"fold {fold.fold_index}: pre-test train range ends "
+                    f"only {gap_days} days before test_start (purge cushion "
+                    f"requires >= {purge_hold_days + 1})"
+                )
+            else:
+                # Post-test segment must respect the embargo: start at
+                # least embargo_days + 1 days after test_end.
+                gap_days = (tr.start - test_end).days
+                assert gap_days >= embargo_days + 1, (
+                    f"fold {fold.fold_index}: post-test train range starts "
+                    f"only {gap_days} days after test_end (embargo cushion "
+                    f"requires >= {embargo_days + 1})"
+                )
+
+
+def test_no_test_window_overlaps_across_folds():
+    """Sibling invariant: test windows must tile the span without overlap.
+    If fold A's test bar appears in fold B's test set, the deflated-Sharpe
+    correction has double-counted those observations.
+    """
+    folds = build_purged_walk_forward(
+        "2022-01-03", "2022-12-30", k_folds=5, embargo_days=0, purge_hold_days=0
+    )
+    for i, fold_a in enumerate(folds):
+        for j, fold_b in enumerate(folds):
+            if i >= j:
+                continue
+            overlaps = not (
+                fold_a.test_range.end < fold_b.test_range.start
+                or fold_a.test_range.start > fold_b.test_range.end
+            )
+            assert not overlaps, (
+                f"fold {i} test window [{fold_a.test_range.start}, "
+                f"{fold_a.test_range.end}] overlaps fold {j} test window "
+                f"[{fold_b.test_range.start}, {fold_b.test_range.end}]"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Trade filtering
 # ---------------------------------------------------------------------------
 

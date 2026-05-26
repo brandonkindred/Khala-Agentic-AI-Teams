@@ -15,6 +15,7 @@ from llm_service import get_strands_model
 from .models import StrategyLabRecord, TradeRecord
 from .signal_intelligence_agent import brief_to_prompt_block
 from .signal_intelligence_models import SignalIntelligenceBriefV1
+from .strategy_lab.spec_dsl import format_rules_for_prompt, format_sizing_rule
 from .strategy_lab_context import asset_class_mix_hint, format_prior_results
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ _IDEATION_SYSTEM = (
     "You combine several signal families (price/volatility, macro, sentiment, corporate events) into coherent rules. "
     "You explicitly reason about information not in raw OHLCV: news and social sentiment, issuer filings, "
     "macro and micro structure, liquidity regimes, and confounding drivers that backtests may omit. "
-    "You diversify across asset classes (stocks, crypto, forex, options, futures, commodities) rather than "
+    "You diversify across asset classes (stocks, crypto, forex, futures, commodities) rather than "
     "defaulting to equities."
 )
 
@@ -55,7 +56,7 @@ Name which confounders you are leaning on and how they interact with price signa
 Each prior entry includes outcome, metrics, rationale, and post-backtest analysis. Generate a strategy that **differs** from prior ones and learns from their failures.
 Return ONLY a JSON object with no markdown:
 {{
-  "asset_class": "stocks" | "crypto" | "forex" | "options" | "futures" | "commodities",
+  "asset_class": "stocks" | "crypto" | "forex" | "futures" | "commodities",
   "hypothesis": "1-3 sentence investment thesis tying multiple signals to edge",
   "signal_definition": "Describe the **ensemble** of signals (e.g. price filter + macro gate + sentiment/filings trigger) and how they combine (AND/OR, scoring, veto rules)",
   "signal_sources": ["list of families used, e.g. price_action, macro_rates, news_sentiment, filings, social_sentiment, cross_asset"],
@@ -351,16 +352,19 @@ class StrategyIdeationAgent:
         )
 
         simulated_trades_section = _format_simulated_trades_summary(trades)
-        sizing_rules = "; ".join(strategy.sizing_rules) if strategy.sizing_rules else "(none)"
+        # Issue #551/#553: spec rules are structured DSL nodes. Render via
+        # the spec_dsl formatters so prompt text matches the prose form the
+        # LLM learned to read.
+        sizing_text = format_sizing_rule(strategy.sizing) or "(none)"
         risk_limits = strategy.risk_limits.model_dump_json()
 
         common = dict(
             asset_class=strategy.asset_class,
             hypothesis=strategy.hypothesis,
             signal_definition=strategy.signal_definition,
-            entry_rules="; ".join(strategy.entry_rules),
-            exit_rules="; ".join(strategy.exit_rules),
-            sizing_rules=f"{sizing_rules} | risk_limits: {risk_limits}",
+            entry_rules=format_rules_for_prompt(strategy.entry_rules, separator="; "),
+            exit_rules=format_rules_for_prompt(strategy.exit_rules, separator="; "),
+            sizing_rules=f"{sizing_text} | risk_limits: {risk_limits}",
             rationale=rationale,
             annualized_return_pct=result.annualized_return_pct,
             total_return_pct=result.total_return_pct,
@@ -394,8 +398,8 @@ class StrategyIdeationAgent:
             asset_class=strategy.asset_class,
             hypothesis=strategy.hypothesis,
             signal_definition=strategy.signal_definition,
-            entry_rules="; ".join(strategy.entry_rules),
-            exit_rules="; ".join(strategy.exit_rules),
+            entry_rules=format_rules_for_prompt(strategy.entry_rules, separator="; "),
+            exit_rules=format_rules_for_prompt(strategy.exit_rules, separator="; "),
             annualized_return_pct=result.annualized_return_pct,
             total_return_pct=result.total_return_pct,
             sharpe_ratio=result.sharpe_ratio,

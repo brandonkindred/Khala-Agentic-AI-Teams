@@ -19,6 +19,14 @@ _CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
     "commodities",
 )
 
+# Asset classes the LLM is allowed to choose for new strategies (#535).
+# 'options' is canonical (so ``normalize_asset_class`` preserves it for the
+# validator gate to reject) but not a valid ideation target, so it's
+# excluded from prompt counts and underrepresented-class steering.
+_PROMPT_ASSET_CLASSES: tuple[str, ...] = tuple(
+    c for c in _CANONICAL_ASSET_CLASSES if c != "options"
+)
+
 
 def normalize_asset_class(ac: object) -> str:
     """Map any asset-class string variant to one of the canonical labels.
@@ -35,6 +43,35 @@ def normalize_asset_class(ac: object) -> str:
     if x in _CANONICAL_ASSET_CLASSES:
         return x
     return "stocks"
+
+
+def normalize_asset_class_strict(ac: object) -> str:
+    """Strict variant of :func:`normalize_asset_class`.
+
+    Applies the same alias map (``equity``/``equities``/``stock`` → ``stocks``,
+    ``fx`` → ``forex``, ``commodity``/``metal``/``energy`` → ``commodities``)
+    so callers see the same canonical class the runtime fetch path does, but
+    raises :class:`ValueError` for truly unknown classes instead of silently
+    falling back to ``"stocks"``.
+
+    Use this in gates and other fail-closed paths where a typo'd
+    ``asset_class`` (``"bonds"``, ``"crpto"``) must surface as an error.
+    Runtime paths that need defense-in-depth keep using
+    :func:`normalize_asset_class`.
+    """
+    x = str(ac or "").lower().strip()
+    if x in ("equities", "equity", "stock"):
+        return "stocks"
+    if x in ("fx",):
+        return "forex"
+    if x in ("commodity", "metal", "energy"):
+        return "commodities"
+    if x in _CANONICAL_ASSET_CLASSES:
+        return x
+    raise ValueError(
+        f"unknown asset_class {ac!r}; expected one of {sorted(_CANONICAL_ASSET_CLASSES)} "
+        "or a known alias (equity/equities/stock, fx, commodity/metal/energy)"
+    )
 
 
 def format_prior_results(records: List[StrategyLabRecord], *, max_records: int = 50) -> str:
@@ -71,13 +108,17 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
     if not records:
         return (
             "No prior lab strategies. Choose **asset_class** from "
-            "stocks, crypto, forex, options, futures, or commodities with similar frequency over time — "
+            "stocks, crypto, forex, futures, or commodities with similar frequency over time — "
             "do **not** default to stocks; pick the class that best fits your multi-signal story."
         )
 
     ordered = sorted(records, key=lambda x: x.created_at)
     sample = ordered[-tail:] if len(ordered) > tail else ordered
-    counts = {c: 0 for c in _CANONICAL_ASSET_CLASSES}
+    # #535: count only asset classes the LLM may still target. 'options' is
+    # rejected by StrategySpecValidator, so leaving it in the count dict
+    # would push it into ``underrep`` whenever no options strategies have
+    # run and steer the LLM toward a guaranteed-failure choice.
+    counts = {c: 0 for c in _PROMPT_ASSET_CLASSES}
     for r in sample:
         k = normalize_asset_class(r.strategy.asset_class)
         if k in counts:
@@ -97,7 +138,7 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
     if stock_share > 0.35 and n_sample >= 2:
         parts.append(
             "Equities are relatively heavy in this window — **strongly prefer** "
-            "crypto, forex, options, futures, or commodities for this run if you can state coherent rules."
+            "crypto, forex, futures, or commodities for this run if you can state coherent rules."
         )
     parts.append(
         "Underrepresented line(s) to favor when ties: "

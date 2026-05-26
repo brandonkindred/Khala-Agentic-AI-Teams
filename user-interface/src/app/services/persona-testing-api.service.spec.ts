@@ -96,4 +96,62 @@ describe('PersonaTestingApiService', () => {
     expect(req.request.body).toEqual(payload);
     req.flush({ job_id: 'r1', status: 'running', message: '' });
   });
+
+  it('getRuns', () => {
+    service.getRuns().subscribe();
+    httpMock.expectOne(`${baseUrl}/runs`).flush({ runs: [] });
+  });
+
+  it('getRunStatus', () => {
+    service.getRunStatus('r1').subscribe();
+    httpMock.expectOne(`${baseUrl}/status/r1`).flush({});
+  });
+
+  it('getDecisions', () => {
+    service.getDecisions('r1').subscribe();
+    httpMock.expectOne(`${baseUrl}/decisions/r1`).flush([]);
+  });
+
+  it('getRunArtifacts', () => {
+    service.getRunArtifacts('r1').subscribe();
+    httpMock.expectOne(`${baseUrl}/runs/r1/artifacts`).flush({});
+  });
+
+  it('listJobs default no filter', () => {
+    service.listJobs(false).subscribe();
+    httpMock.expectOne(`${baseUrl}/jobs`).flush({ jobs: [] });
+  });
+
+  it('listJobs runningOnly=true', () => {
+    service.listJobs(true).subscribe();
+    httpMock.expectOne(`${baseUrl}/jobs?running_only=true`).flush({ jobs: [] });
+  });
+
+  it('cancelJob/resumeJob/restartJob/deleteJob', () => {
+    service.cancelJob('j1').subscribe();
+    httpMock.expectOne(`${baseUrl}/job/j1/cancel`).flush({});
+    service.resumeJob('j1').subscribe();
+    httpMock.expectOne(`${baseUrl}/job/j1/resume`).flush({});
+    service.restartJob('j1').subscribe();
+    httpMock.expectOne(`${baseUrl}/job/j1/restart`).flush({});
+    service.deleteJob('j1').subscribe();
+    const del = httpMock.expectOne(`${baseUrl}/job/j1`);
+    expect(del.request.method).toBe('DELETE');
+    del.flush({});
+  });
+
+  it('getChatHistory without/with sinceId', () => {
+    service.getChatHistory('r1').subscribe();
+    httpMock.expectOne(`${baseUrl}/runs/r1/chat`).flush({});
+    service.getChatHistory('r1', 5).subscribe();
+    httpMock.expectOne(`${baseUrl}/runs/r1/chat?since_id=5`).flush({});
+  });
+
+  it('sendChatMessage', () => {
+    service.sendChatMessage('r1', 'hi').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/runs/r1/chat`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body.message).toBe('hi');
+    req.flush({});
+  });
 });

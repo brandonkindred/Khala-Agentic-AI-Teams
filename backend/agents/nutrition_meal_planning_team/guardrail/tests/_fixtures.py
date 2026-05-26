@@ -12,6 +12,7 @@ from agents.nutrition_meal_planning_team.ingredient_kb.taxonomy import (
 )
 from agents.nutrition_meal_planning_team.models import (
     ClientProfile,
+    ClinicalInfo,
     MealRecommendation,
     ResolvedRestriction,
     RestrictionResolution,
@@ -25,10 +26,22 @@ def profile_with(
     *,
     allergens: Iterable[AllergenTag] = (),
     dietary_forbid: Iterable[DietaryTag] = (),
+    medications: Iterable[str] = (),
+    medications_freetext: Iterable[str] = (),
     client_id: str = "test_client",
 ) -> ClientProfile:
     """Build a ClientProfile with the given active tags via SPEC-006
-    ``RestrictionResolution.resolved`` entries."""
+    ``RestrictionResolution.resolved`` entries.
+
+    Preconditions:
+        ``medications`` contains recognised ``Medication`` enum values.
+        ``medications_freetext`` contains unrecognised medication strings
+        (mirrors the real write path in ``patch_clinical``).
+
+    Postconditions:
+        Returned profile has the specified allergens, dietary forbid tags,
+        and medications set on ``clinical.medications`` / ``medications_freetext``.
+    """
     resolved: list[ResolvedRestriction] = []
     for tag in allergens:
         resolved.append(
@@ -44,9 +57,13 @@ def profile_with(
                 dietary_tags_forbid=[tag],
             )
         )
+    med_list = list(medications)
+    med_freetext_list = list(medications_freetext)
+    clinical = ClinicalInfo(medications=med_list, medications_freetext=med_freetext_list)
     return ClientProfile(
         client_id=client_id,
         restriction_resolution=RestrictionResolution(resolved=resolved),
+        clinical=clinical,
     )
 
 

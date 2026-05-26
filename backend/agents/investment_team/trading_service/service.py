@@ -16,7 +16,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date as date_cls
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -29,14 +29,23 @@ from ..models import (
     OrderLifecycleEvent,
     TradeRecord,
 )
+from ..strategy_lab.executor.rule_compiler import (
+    BarSnapshot,
+    ExitIntent,
+    PositionState,
+    evaluate_exit_rules,
+)
+from ..strategy_lab.spec_dsl import ExitRule
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
 from .engine.execution_model import build_execution_model
 from .engine.fill_simulator import FillOutcome, FillSimulator, FillSimulatorConfig
 from .engine.order_book import OrderBook
-from .engine.portfolio import Portfolio
+from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
     OrderRequest,
     OrderSide,
+    OrderType,
+    TimeInForce,
     UnfilledPolicy,
     UnsupportedOrderFeatureError,
 )
@@ -45,6 +54,437 @@ from .strategy.streaming_harness import StrategyRuntimeError, StreamingHarness
 logger = logging.getLogger(__name__)
 
 _MAX_ORDER_EVENTS = 20
+
+# Issue #527 — reserved order ``reason`` prefix the engine stamps on every
+# rule-triggered close order it emits on the strategy's behalf. The conformance
+# quality gate reads this prefix off ``OrderLifecycleEvent`` records to count
+# wrapper-emitted exits and verify each trade obeyed the structured rules.
+ENGINE_EXIT_REASON_PREFIX = "engine_exit:"
+
+
+@dataclass
+class _TrackedPosition:
+    """Per-symbol state the parent engine maintains to evaluate exit rules.
+
+    Mirrors the public :class:`PositionState` shape but is mutable so the bar
+    loop can update watermarks in place. The snapshot handed to
+    :func:`evaluate_exit_rules` is a fresh immutable copy.
+
+    ``entry_order_id`` pins the tracker to a specific :class:`Position`
+    instance. When a same-bar exit-then-re-entry replaces the underlying
+    position, ``portfolio.positions[sym]`` swaps to a new ``Position`` with
+    a different ``entry_order_id``; the tracker reset path in
+    :meth:`TradingService._update_position_tracker` detects that and starts
+    fresh, so a stale trailing watermark can't fire a rule on the
+    brand-new trade.
+
+    ``just_opened`` is ``True`` on the bar a position first appears.
+    :meth:`_EngineExitDispatcher.maybe_emit` skips rule evaluation
+    while this flag is set so the entry bar's pre-fill price action (a
+    limit fill at ``bar.low`` doesn't entitle a take-profit to fire from
+    a pre-entry ``bar.high``) can't queue impossible close orders. The
+    next bar's tracker update clears the flag.
+    """
+
+    side: OrderSide
+    entry_price: float
+    entry_order_id: str
+    just_opened: bool
+    high_since_entry: float
+    low_since_entry: float
+
+    def snapshot(self, symbol: str, qty: float) -> PositionState:
+        # ``PositionState`` (the public evaluator input) carries the
+        # side as a ``"long" | "short"`` Literal; convert at the
+        # boundary so internal dispatcher logic stays enum-typed.
+        return PositionState(
+            symbol=symbol,
+            side="long" if self.side == OrderSide.LONG else "short",
+            qty=qty,
+            entry_price=self.entry_price,
+            high_since_entry=self.high_since_entry,
+            low_since_entry=self.low_since_entry,
+        )
+
+
+@dataclass
+class _EngineExitDispatcher:
+    """Per-run owner of engine-side ``exit_rules`` enforcement.
+
+    Splits the per-bar engine-side enforcement loop into one method
+    per concern so each can be tested and extended in isolation. Holds
+    the run-scoped state that used to be threaded through helper
+    keyword arguments:
+
+    * ``exit_rules`` — the spec's structured close conditions (immutable
+      across the run).
+    * ``engine_exit_bindings`` — ``client_order_id → entry_order_id``
+      bindings consumed by the bar-loop submit step to stamp
+      ``working_against_entry_order_id`` on the resulting
+      ``PendingOrder``. Same map covers engine emissions and same-bar
+      piggybacked strategy orders.
+    * ``_next_seq`` — monotonic counter for engine-issued
+      ``client_order_id``\\ s. Strategy ids are emitted client-side; engine
+      ids must not collide, hence the ``e`` prefix vs the strategy's
+      ``c`` prefix.
+
+    Empty ``exit_rules`` makes :meth:`maybe_emit` a no-op.
+    """
+
+    exit_rules: Sequence[ExitRule]
+    engine_exit_bindings: Dict[str, str] = field(default_factory=dict)
+    _next_seq: int = 0
+
+    # ------------------------------------------------------------------
+
+    def maybe_emit(
+        self,
+        *,
+        cur_bar,
+        position_tracker: Mapping[str, _TrackedPosition],
+        portfolio: Portfolio,
+        pending_for_prev: List[OrderRequest],
+        order_book: OrderBook,
+        result: "TradingServiceResult",
+    ) -> None:
+        """Top-level entry point — call once per bar after strategy orders
+        have been queued into ``pending_for_prev``.
+
+        Dedup model: the engine always emits at the position's full open
+        qty and lets the fill simulator + the position-identity binding
+        handle the rest. Specifically:
+
+        * Engine orders carry ``working_against_entry_order_id`` via
+          ``engine_exit_bindings``. If a same-bar strategy order closes
+          the position first on the next bar, the fill simulator's
+          stale-continuation guard drops the engine close before it
+          falls through to ``_fill_entry``.
+        * If the strategy's same-bar order is partial / clipped (FOK
+          rejection, IOC drop, participation cap, REQUEUE_NEXT_BAR
+          residual), the engine close sits behind it in submission order
+          and ``_fill_exit`` clips ``req.qty`` to ``existing_pos.qty`` —
+          residual exposure gets closed on the same bar rather than
+          waiting for the rule to fire again.
+        * The one explicit guard is on in-flight engine markets: if a
+          prior bar's engine exit is still pending (e.g. REQUEUE
+          residual across bars), skip re-emission so the order book
+          doesn't accumulate redundant engine markets while the rule
+          keeps re-triggering.
+
+        Engine-emitted orders carry ``reason="engine_exit:<rule_kind>"``
+        so the conformance gate can count them off the
+        order-lifecycle event stream.
+        """
+        if not self.exit_rules:
+            return
+
+        sym = cur_bar.symbol
+        gating = self._should_evaluate(sym, position_tracker, portfolio, order_book)
+        if gating is None:
+            return
+        tracked, pos = gating
+
+        intent = self._evaluate(sym, tracked, pos, cur_bar)
+        if intent is None:
+            return
+
+        # Issue #527 — size the close to cover any same-side scale-in
+        # that could grow ``pos.qty`` past the snapshot the engine saw
+        # at emission. Two sources, both BEFORE the engine close on the
+        # next bar:
+        #   * Same-bar queued in ``pending_for_prev`` — strategy order
+        #     submitted on this bar; submits first next bar.
+        #   * Already resting on the order book — a GTC/limit scale-in
+        #     from a prior bar that's still working; could fill
+        #     alongside ``pending_for_prev`` next bar.
+        # ``_fill_exit`` clips the engine close at
+        # ``min(req.qty, existing_pos.qty)``, so without this oversize
+        # the residual exposure stays open even though the structured
+        # exit rule already fired. If any scale-in is rejected /
+        # clipped at fill time the engine close clips back down to the
+        # actual ``existing_pos.qty`` — no over-close risk.
+        scale_in_qty = self._sum_same_side_queued(
+            sym, tracked.side, pending_for_prev
+        ) + self._sum_same_side_resting(sym, tracked.side, order_book)
+
+        req = self._build_close_order(intent, tracked, pos, scale_in_qty)
+        if req is None:
+            return
+
+        pending_for_prev.append(req)
+        self._register_binding(req, pos)
+        self._retire_competing_resting_orders(sym, tracked.side, pos, order_book)
+        self._bind_same_bar_queued_exits(sym, tracked.side, pos, pending_for_prev)
+        self._cancel_pending_entry_continuations(sym, pos, order_book)
+        self._record_emission(req, intent, cur_bar, result)
+
+    # ------------------------------------------------------------------
+    # Sub-steps. Kept as private methods so subclasses or sibling unit
+    # tests can override / poke at a single concern.
+    # ------------------------------------------------------------------
+
+    def _should_evaluate(
+        self,
+        sym: str,
+        position_tracker: Mapping[str, _TrackedPosition],
+        portfolio: Portfolio,
+        order_book: OrderBook,
+    ) -> Optional[tuple[_TrackedPosition, Position]]:
+        """Return ``(tracked, pos)`` if rule evaluation should run for
+        this symbol on this bar, else ``None``.
+
+        Gates:
+        * Tracker has the symbol (a position is open).
+        * Portfolio agrees and has positive qty.
+        * ``tracked.just_opened`` is False — skip the entry bar for
+          non-market fills (see ``_update_position_tracker``).
+        * No in-flight engine market exit already pending on the
+          order book (avoid stacking redundant engine markets across
+          bars while the rule keeps re-triggering).
+        """
+        if sym not in position_tracker:
+            return None
+        pos = portfolio.positions.get(sym)
+        if pos is None or pos.qty <= 0:
+            return None
+        tracked = position_tracker[sym]
+        if tracked.just_opened:
+            return None
+        for po in order_book.pending_for_symbol(sym):
+            po_req = po.request
+            if po_req.order_type != OrderType.MARKET:
+                continue
+            if po_req.side != tracked.side and (po_req.reason or "").startswith(
+                ENGINE_EXIT_REASON_PREFIX
+            ):
+                return None
+        return tracked, pos
+
+    def _evaluate(
+        self,
+        sym: str,
+        tracked: _TrackedPosition,
+        pos: Position,
+        cur_bar,
+    ) -> Optional[ExitIntent]:
+        """Run the pure rule evaluator. Returns at most one intent per
+        symbol — :func:`evaluate_exit_rules` stops at the first
+        triggered rule per position.
+        """
+        snapshot = tracked.snapshot(sym, pos.qty)
+        bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
+        intents = evaluate_exit_rules(self.exit_rules, {sym: snapshot}, {sym: bar_snap})
+        return intents[0] if intents else None
+
+    @staticmethod
+    def _sum_same_side_queued(
+        sym: str,
+        tracked_side: OrderSide,
+        pending_for_prev: List[OrderRequest],
+    ) -> float:
+        """Sum the qty of same-side strategy orders queued for the
+        same symbol — i.e. scale-ins the strategy submitted on this
+        bar that will fill on the next bar before the engine close.
+        """
+        total = 0.0
+        for queued in pending_for_prev:
+            if queued.symbol != sym:
+                continue
+            if queued.side != tracked_side:
+                continue
+            total += queued.qty
+        return total
+
+    @staticmethod
+    def _sum_same_side_resting(
+        sym: str,
+        tracked_side: OrderSide,
+        order_book: OrderBook,
+    ) -> float:
+        """Sum the unfilled qty of same-side orders already resting
+        on the book — i.e. scale-ins the strategy submitted on a
+        prior bar that are still working and could fill on the next
+        bar alongside the engine close (e.g. GTC limits at a deeper
+        price).
+
+        Mirrors :meth:`_sum_same_side_queued` but for the resting
+        side of the world. The two are summed at the call site and
+        passed to :meth:`_build_close_order` as ``scale_in_qty``.
+
+        Excludes already-bound orders — those will be retired by the
+        stale-continuation guard once the engine close fills, so they
+        won't add to the position. ``cumulative_filled_qty`` is
+        subtracted off the unfilled portion: a partially filled
+        scale-in's already-filled qty is already accounted for in
+        ``pos.qty``.
+        """
+        total = 0.0
+        for po in order_book.pending_for_symbol(sym):
+            req = po.request
+            if req.side != tracked_side:
+                continue
+            if po.working_against_entry_order_id is not None:
+                continue
+            remaining = req.qty - po.cumulative_filled_qty
+            if remaining <= 0:
+                continue
+            total += remaining
+        return total
+
+    def _build_close_order(
+        self,
+        intent: ExitIntent,
+        tracked: _TrackedPosition,
+        pos: Position,
+        scale_in_qty: float = 0.0,
+    ) -> Optional[OrderRequest]:
+        """Construct + validate the engine's market close. Returns
+        ``None`` on validation failure (logged, run continues).
+
+        ``scale_in_qty`` is added to ``pos.qty`` so any same-side
+        same-bar strategy order that grows the position next bar is
+        also closed by this emission (see ``_sum_same_side_queued``).
+        """
+        self._next_seq += 1
+        close_side = OrderSide.SHORT if tracked.side == OrderSide.LONG else OrderSide.LONG
+        req = OrderRequest(
+            client_order_id=f"e{self._next_seq}",
+            symbol=intent.symbol,
+            side=close_side,
+            qty=pos.qty + scale_in_qty,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            reason=f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}",
+        )
+        try:
+            req.validate_prices()
+        except Exception as exc:  # pragma: no cover — engine-built request
+            logger.error(
+                "engine-issued exit order failed validation (rule=%s symbol=%s): %s",
+                intent.rule_kind,
+                intent.symbol,
+                exc,
+            )
+            return None
+        return req
+
+    def _register_binding(self, req: OrderRequest, pos: Position) -> None:
+        """Record the binding so the bar-loop submit step can set
+        ``working_against_entry_order_id`` on the resulting
+        ``PendingOrder``.
+        """
+        self.engine_exit_bindings[req.client_order_id] = pos.entry_order_id
+
+    def _retire_competing_resting_orders(
+        self,
+        sym: str,
+        tracked_side: OrderSide,
+        pos: Position,
+        order_book: OrderBook,
+    ) -> None:
+        """Bind any unbound opposite-side resting orders to the position
+        so they retire when the engine close removes the position.
+
+        Without this, an unbound GTC/limit strategy exit
+        (``cumulative_filled_qty==0`` AND
+        ``working_against_entry_order_id is None``) would survive the
+        engine close and, on a later trigger, fall through to
+        ``_fill_entry`` (``existing_pos is None``) — opening an
+        unintended reverse position.
+
+        Carve-outs:
+        * Already-bound orders (prior engine exits, bracket children)
+          keep their binding.
+        * Same-side resting orders are scale-in intents, not closes —
+          left alone.
+        * Partially filled orders are already bound to the position via
+          ``_fill_exit``'s auto-binding.
+        """
+        for resting in order_book.pending_for_symbol(sym):
+            if resting.working_against_entry_order_id is not None:
+                continue
+            if resting.cumulative_filled_qty > 0:
+                continue
+            if resting.request.side == tracked_side:
+                continue
+            resting.working_against_entry_order_id = pos.entry_order_id
+
+    def _bind_same_bar_queued_exits(
+        self,
+        sym: str,
+        tracked_side: OrderSide,
+        pos: Position,
+        pending_for_prev: List[OrderRequest],
+    ) -> None:
+        """Bind same-bar opposite-side strategy orders queued in
+        ``pending_for_prev`` (not yet on the order book). Same effect
+        as :meth:`_retire_competing_resting_orders` but for orders that
+        haven't reached the book yet — the binding goes into
+        ``engine_exit_bindings`` and the submit step applies it.
+        """
+        for queued in pending_for_prev:
+            if queued.symbol != sym:
+                continue
+            if queued.client_order_id in self.engine_exit_bindings:
+                continue
+            if queued.side == tracked_side:
+                continue
+            self.engine_exit_bindings[queued.client_order_id] = pos.entry_order_id
+
+    def _cancel_pending_entry_continuations(
+        self,
+        sym: str,
+        pos: Position,
+        order_book: OrderBook,
+    ) -> None:
+        """Cancel any in-flight continuation of the position's entry
+        order. A partial-fill remainder (``REQUEUE_NEXT_BAR`` or
+        ``TWAP_N``) still on the book would fill on the next bar
+        before the engine's close, growing the position past what the
+        engine sized for and leaving residual exposure after
+        ``_fill_exit`` clips at ``min(req.qty, existing_pos.qty)``.
+
+        Continuations are identified by ``po.order_id ==
+        pos.entry_order_id`` (exact — the strategy can't reuse an
+        engine-issued order_id, and same-side new strategy entries
+        have different order_ids).
+        """
+        for po in order_book.pending_for_symbol(sym):
+            if po.order_id != pos.entry_order_id:
+                continue
+            if po.cumulative_filled_qty <= 0:
+                continue
+            order_book.cancel(po.order_id)
+
+    def _record_emission(
+        self,
+        req: OrderRequest,
+        intent: ExitIntent,
+        cur_bar,
+        result: "TradingServiceResult",
+    ) -> None:
+        """Bump diagnostics counters (global + per-symbol firings,
+        ``orders_emitted`` / ``exits_emitted``) and append the
+        ``OrderLifecycleEvent``.
+        """
+        diag = result.execution_diagnostics
+        diag.orders_emitted += 1
+        diag.exits_emitted += 1
+        diag.exit_rule_firings[intent.rule_kind] = (
+            diag.exit_rule_firings.get(intent.rule_kind, 0) + 1
+        )
+        sym_firings = diag.exit_rule_firings_by_symbol.setdefault(intent.symbol, {})
+        sym_firings[intent.rule_kind] = sym_firings.get(intent.rule_kind, 0) + 1
+        _record_event(
+            diag,
+            "emitted",
+            timestamp=cur_bar.timestamp,
+            symbol=intent.symbol,
+            side=req.side.value,
+            order_type=OrderType.MARKET.value,
+            reason=req.reason,
+        )
+
 
 # Default chunk size for the batched-bar protocol (issue #377). 1 keeps
 # byte-identical behaviour with the per-bar codepath; values >1 only take
@@ -123,6 +563,11 @@ class TradingServiceResult:
     #: Shape: ``{"events": [{rule_id, hit_count, first_true_bar,
     #: last_true_bar}, ...], "truncated": bool}``.
     probe_events: Optional[Dict[str, Any]] = None
+    #: Entry reasons from positions still open at end-of-stream. The
+    #: rule-firing gate unions these with closed-trade entry_reasons so
+    #: a rule whose only firing left an unclosed position is not
+    #: misreported as dead code.
+    open_position_entry_reasons: List[str] = field(default_factory=list)
 
 
 def _record_event(
@@ -394,6 +839,7 @@ class TradingService:
         default_unfilled_policy: UnfilledPolicy = UnfilledPolicy.DROP,
         bar_chunk_size: Optional[int] = None,
         coverage_probe_mode: bool = False,
+        exit_rules: Optional[List[ExitRule]] = None,
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
@@ -410,6 +856,10 @@ class TradingService:
             limits = RiskLimits.from_legacy_dict(risk_limits or {})
         self._risk = RiskFilter(limits)
         self._default_unfilled_policy = default_unfilled_policy
+        # Issue #527 — structured exit rules the parent engine enforces after
+        # each bar's strategy response. Empty list (or None) preserves the
+        # legacy behaviour where strategy code is the only source of exits.
+        self._exit_rules: List[ExitRule] = list(exit_rules or [])
         # Issue #377: when set, overrides ``BAR_CHUNK_SIZE`` env. Paper-trade
         # mode pins this to 1 so live-bar handling never buffers. Reject
         # zero/negative or non-int explicitly so a future caller passing
@@ -441,6 +891,17 @@ class TradingService:
         """
         portfolio = Portfolio(initial_capital=self.config.initial_capital)
         order_book = OrderBook()
+        # Issue #527 — per-position state the engine uses to evaluate
+        # structured exit rules. Keyed by symbol; populated after each bar's
+        # fills are processed. No effect when ``self._exit_rules`` is empty.
+        position_tracker: Dict[str, _TrackedPosition] = {}
+        # Issue #527 — owns engine-side exit-rule enforcement for this
+        # run. Encapsulates the ``client_order_id → entry_order_id``
+        # binding map (consumed by the submit step below), the sequence
+        # counter, and the per-bar dispatch logic split across
+        # :meth:`_EngineExitDispatcher.maybe_emit` sub-steps. No-op
+        # when ``self._exit_rules`` is empty.
+        engine_exits = _EngineExitDispatcher(exit_rules=self._exit_rules)
         execution_model = build_execution_model(
             self.config.execution_model,
             participation_cap=self.config.fill_participation_cap,
@@ -507,6 +968,28 @@ class TradingService:
                     chunk_size,
                 )
 
+            # Issue #527 — engine-side exit-rule enforcement is wired
+            # into the per-bar path only. The chunked path delivers
+            # multiple bars per strategy round-trip; emitting synthetic
+            # closes mid-chunk would require restructuring the rule
+            # evaluator to run inside the chunk replay, which is out of
+            # scope for the MVP. Rather than crashing
+            # ``run_backtest`` for any spec with exit rules whenever
+            # ``BAR_CHUNK_SIZE`` is set globally, fall back to per-bar
+            # mode for this run with a single ``logger.warning``: the
+            # caller asked for chunking, but enforcement is the more
+            # important guarantee.
+            if use_chunked and self._exit_rules:
+                logger.warning(
+                    "BAR_CHUNK_SIZE=%d requested but TradingService.exit_rules "
+                    "is non-empty; engine-side rule enforcement requires the "
+                    "per-bar protocol — falling back to BAR_CHUNK_SIZE=1 for "
+                    "this run. Set bar_chunk_size=1 explicitly to suppress "
+                    "this warning.",
+                    chunk_size,
+                )
+                use_chunked = False
+
             if use_chunked:
                 return self._run_chunked(
                     stream=stream,
@@ -518,6 +1001,8 @@ class TradingService:
                     chunk_size=chunk_size,
                     on_trade=on_trade,
                     eod_buffer=eod_buffer,
+                    position_tracker=position_tracker,
+                    engine_exits=engine_exits,
                 )
 
             # We need one-bar lookahead in the fill simulator, so we buffer
@@ -606,7 +1091,7 @@ class TradingService:
                                 if apply_default and req.unfilled_policy is None:
                                     req.unfilled_policy = self._default_unfilled_policy
                                 equity = portfolio.mark_to_market()
-                                order_book.submit(
+                                submitted_po = order_book.submit(
                                     req,
                                     submitted_at=prev_bar.timestamp,
                                     submitted_equity=equity,
@@ -621,6 +1106,19 @@ class TradingService:
                                         or req.attached_take_profit is not None
                                     ),
                                 )
+                                # Issue #527 — pin engine-emitted exits to the
+                                # Position they target so the fill simulator's
+                                # stale-continuation guard drops them when a
+                                # prior strategy exit closes the position first.
+                                # Without this, an engine_exit submitted while a
+                                # GTC/limit strategy exit is resting on the book
+                                # could fall through to ``_fill_entry`` and open
+                                # a new opposite-side position.
+                                bound_entry = engine_exits.engine_exit_bindings.pop(
+                                    req.client_order_id, None
+                                )
+                                if bound_entry is not None:
+                                    submitted_po.working_against_entry_order_id = bound_entry
                                 result.execution_diagnostics.orders_accepted += 1
                                 _record_event(
                                     result.execution_diagnostics,
@@ -636,7 +1134,7 @@ class TradingService:
                         _apply_fill_outcome_events(result.execution_diagnostics, outcome)
                         for fill in outcome.entry_fills + outcome.exit_fills:
                             harness.send_fill(
-                                fill=fill.model_dump(mode="json", exclude_defaults=True),
+                                fill=fill.model_dump(mode="json"),
                                 state=self._state(portfolio),
                             )
                         result.trades.extend(outcome.closed_trades)
@@ -659,11 +1157,27 @@ class TradingService:
                             )
                             break
 
+                        # Issue #527 — refresh engine-side per-position state
+                        # for ``cur_bar.symbol`` based on the post-fill
+                        # portfolio. No-op when exit_rules is empty (the
+                        # tracker stays empty, the rule-eval block at the
+                        # bottom of the loop short-circuits). Updating here
+                        # — after fills but before send_bar — keeps trailing
+                        # watermarks consistent with every bar the engine
+                        # has actually seen, regardless of strategy behaviour.
+                        if self._exit_rules:
+                            self._update_position_tracker(
+                                tracker=position_tracker,
+                                cur_bar=cur_bar,
+                                portfolio=portfolio,
+                            )
+
                     # 4) Deliver the current bar to the strategy and collect
                     #    any orders it submits in response. Warm-up bars set
                     #    ``ctx.is_warmup = True`` in the subprocess so the
                     #    strategy can short-circuit order emission; we also
-                    #    drop any orders it emits anyway as a safety net.
+                    #    drop any orders it emits anyway as a safety net
+                    #    (handled inside ``_process_bar_strategy_response``).
                     resp = harness.send_bar(
                         bar=cur_bar.model_dump(mode="json"),
                         state=self._state(portfolio),
@@ -676,96 +1190,18 @@ class TradingService:
                         # bars the strategy could actually have signaled on.
                         result.bars_processed += 1
 
-                    if is_warmup:
-                        if resp.orders:
-                            result.warmup_orders_dropped += len(resp.orders)
-                            logger.info(
-                                "dropped %d order(s) submitted during warm-up bar",
-                                len(resp.orders),
-                            )
-                            for o in resp.orders:
-                                _record_event(
-                                    result.execution_diagnostics,
-                                    "warmup_dropped",
-                                    timestamp=cur_bar.timestamp,
-                                    symbol=o.get("symbol"),
-                                    side=o.get("side"),
-                                    order_type=o.get("order_type"),
-                                )
-                        # Cancels during warm-up are also no-ops (no live order book).
-                        prev_bar = cur_bar
-                        continue
-
-                    # Map cancels.
-                    for c in resp.cancels:
-                        oid = c.get("order_id")
-                        if oid:
-                            order_book.cancel(oid)
-
-                    # Orders submitted now are evaluated against the *next*
-                    # bar (look-ahead-safe).
-                    for o in resp.orders:
-                        result.execution_diagnostics.orders_emitted += 1
-                        _record_event(
-                            result.execution_diagnostics,
-                            "emitted",
-                            timestamp=cur_bar.timestamp,
-                            symbol=o.get("symbol"),
-                            side=o.get("side"),
-                            order_type=o.get("order_type"),
-                        )
-                        try:
-                            req = OrderRequest(**o)
-                            req.validate_prices()
-                            pending_for_prev.append(req)
-                            # An opposite-side order against an existing open
-                            # position is the strategy's exit intent. Counted
-                            # here (parent-side, before fill) so the diagnostic
-                            # reflects emission, not execution; #410 owns the
-                            # fill-side ``exit_filled`` event.
-                            held = portfolio.positions.get(req.symbol)
-                            if held is not None and held.side != req.side:
-                                result.execution_diagnostics.exits_emitted += 1
-                        except UnsupportedOrderFeatureError as exc:
-                            # Runtime-support gates from validate_prices ("feature
-                            # ships in a later step of #379") must terminate the
-                            # run, not be silently dropped. Convert to a
-                            # StrategyRuntimeError so the outer loop returns a
-                            # structured ``TradingServiceResult.error`` instead
-                            # of crashing ``TradingService.run()``. The narrow
-                            # subclass keeps unrelated ``NotImplementedError``s
-                            # from strategy code in the generic catch below.
-                            # See #383.
-                            _increment_rejection(
-                                result.execution_diagnostics, "unsupported_feature"
-                            )
-                            _record_event(
-                                result.execution_diagnostics,
-                                "rejected",
-                                timestamp=cur_bar.timestamp,
-                                symbol=o.get("symbol"),
-                                side=o.get("side"),
-                                order_type=o.get("order_type"),
-                                reason="unsupported_feature",
-                                detail=str(exc),
-                            )
-                            raise StrategyRuntimeError(
-                                f"strategy emitted an unsupported order: {exc}",
-                                etype="unsupported_feature",
-                            ) from exc
-                        except Exception as exc:  # malformed request from strategy
-                            logger.warning("dropping malformed order from strategy: %s", exc)
-                            _increment_rejection(result.execution_diagnostics, "malformed_request")
-                            _record_event(
-                                result.execution_diagnostics,
-                                "rejected",
-                                timestamp=cur_bar.timestamp,
-                                symbol=o.get("symbol"),
-                                side=o.get("side"),
-                                order_type=o.get("order_type"),
-                                reason="malformed_request",
-                                detail=str(exc),
-                            )
+                    self._process_bar_strategy_response(
+                        cur_bar=cur_bar,
+                        bar_orders=resp.orders,
+                        bar_cancels=resp.cancels,
+                        is_warmup=is_warmup,
+                        portfolio=portfolio,
+                        order_book=order_book,
+                        pending_for_prev=pending_for_prev,
+                        position_tracker=position_tracker,
+                        engine_exits=engine_exits,
+                        result=result,
+                    )
 
                     prev_bar = cur_bar
 
@@ -809,6 +1245,9 @@ class TradingService:
 
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
+        result.open_position_entry_reasons = [
+            pos.entry_reason for pos in fill_sim.portfolio.positions.values() if pos.entry_reason
+        ]
         return _finalize_diagnostics(result)
 
     # ------------------------------------------------------------------
@@ -834,6 +1273,8 @@ class TradingService:
         chunk_size: int,
         on_trade: Optional[Callable[[TradeRecord], None]],
         eod_buffer: "_StreamingEquityBuffer",
+        position_tracker: Dict[str, _TrackedPosition],
+        engine_exits: _EngineExitDispatcher,
     ) -> TradingServiceResult:
         prev_bar = None
         pending_for_prev: List[OrderRequest] = []
@@ -958,7 +1399,7 @@ class TradingService:
                         # The strategy sees fills from the *previous* chunk
                         # before its next chunk arrives.
                         harness.send_fill(
-                            fill=fill.model_dump(mode="json", exclude_defaults=True),
+                            fill=fill.model_dump(mode="json"),
                             state=self._state(portfolio),
                         )
                     result.trades.extend(outcome.closed_trades)
@@ -982,78 +1423,42 @@ class TradingService:
 
                     result.bars_processed += 1
 
+                    # Issue #527 — refresh engine-side per-position state
+                    # for ``cur_bar.symbol`` based on the post-fill
+                    # portfolio. Mirrors the per-bar (``run``) path's
+                    # placement between fills+drawdown and the strategy-
+                    # response processing step. No-op when exit_rules is
+                    # empty.
+                    if self._exit_rules:
+                        self._update_position_tracker(
+                            tracker=position_tracker,
+                            cur_bar=cur_bar,
+                            portfolio=portfolio,
+                        )
+
                 # 4) Process the strategy's response for this bar.
-                if is_warmup:
-                    if bar_orders:
-                        result.warmup_orders_dropped += len(bar_orders)
-                        logger.info(
-                            "dropped %d order(s) submitted during warm-up bar",
-                            len(bar_orders),
-                        )
-                        for o in bar_orders:
-                            _record_event(
-                                result.execution_diagnostics,
-                                "warmup_dropped",
-                                timestamp=cur_bar.timestamp,
-                                symbol=o.get("symbol"),
-                                side=o.get("side"),
-                                order_type=o.get("order_type"),
-                            )
-                    prev_bar = cur_bar
-                    continue
-
-                for c in bar_cancels:
-                    oid = c.get("order_id")
-                    if oid:
-                        order_book.cancel(oid)
-
-                for o in bar_orders:
-                    result.execution_diagnostics.orders_emitted += 1
-                    _record_event(
-                        result.execution_diagnostics,
-                        "emitted",
-                        timestamp=cur_bar.timestamp,
-                        symbol=o.get("symbol"),
-                        side=o.get("side"),
-                        order_type=o.get("order_type"),
+                try:
+                    self._process_bar_strategy_response(
+                        cur_bar=cur_bar,
+                        bar_orders=bar_orders,
+                        bar_cancels=bar_cancels,
+                        is_warmup=is_warmup,
+                        portfolio=portfolio,
+                        order_book=order_book,
+                        pending_for_prev=pending_for_prev,
+                        position_tracker=position_tracker,
+                        engine_exits=engine_exits,
+                        result=result,
                     )
-                    try:
-                        req = OrderRequest(**o)
-                        req.validate_prices()
-                        pending_for_prev.append(req)
-                        held = portfolio.positions.get(req.symbol)
-                        if held is not None and held.side != req.side:
-                            result.execution_diagnostics.exits_emitted += 1
-                    except UnsupportedOrderFeatureError as exc:
-                        _increment_rejection(result.execution_diagnostics, "unsupported_feature")
-                        _record_event(
-                            result.execution_diagnostics,
-                            "rejected",
-                            timestamp=cur_bar.timestamp,
-                            symbol=o.get("symbol"),
-                            side=o.get("side"),
-                            order_type=o.get("order_type"),
-                            reason="unsupported_feature",
-                            detail=str(exc),
-                        )
-                        chunk_buffer.clear()
-                        raise StrategyRuntimeError(
-                            f"strategy emitted an unsupported order: {exc}",
-                            etype="unsupported_feature",
-                        ) from exc
-                    except Exception as exc:
-                        logger.warning("dropping malformed order from strategy: %s", exc)
-                        _increment_rejection(result.execution_diagnostics, "malformed_request")
-                        _record_event(
-                            result.execution_diagnostics,
-                            "rejected",
-                            timestamp=cur_bar.timestamp,
-                            symbol=o.get("symbol"),
-                            side=o.get("side"),
-                            order_type=o.get("order_type"),
-                            reason="malformed_request",
-                            detail=str(exc),
-                        )
+                except StrategyRuntimeError:
+                    # ``_process_bar_strategy_response`` raises on an
+                    # ``UnsupportedOrderFeatureError`` from the strategy.
+                    # The per-bar path just lets it propagate; the
+                    # chunked path needs to clear the buffer first so
+                    # the outer loop's recovery path doesn't replay
+                    # any buffered bars.
+                    chunk_buffer.clear()
+                    raise
 
                 prev_bar = cur_bar
 
@@ -1127,7 +1532,281 @@ class TradingService:
 
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
+        result.open_position_entry_reasons = [
+            pos.entry_reason for pos in fill_sim.portfolio.positions.values() if pos.entry_reason
+        ]
         return _finalize_diagnostics(result)
+
+    # ------------------------------------------------------------------
+    # Issue #527 — engine-side enforcement of structured ``exit_rules``.
+    # ------------------------------------------------------------------
+
+    def _process_bar_strategy_response(
+        self,
+        *,
+        cur_bar,
+        bar_orders: List[Dict],
+        bar_cancels: List[Dict],
+        is_warmup: bool,
+        portfolio: Portfolio,
+        order_book: OrderBook,
+        pending_for_prev: List[OrderRequest],
+        position_tracker: Dict[str, _TrackedPosition],
+        engine_exits: _EngineExitDispatcher,
+        result: TradingServiceResult,
+    ) -> None:
+        """Apply one bar's strategy response (cancels + orders) to the
+        order book and pending-submit queue, then run the engine's
+        structured-exit-rule enforcement step.
+
+        Shared between the per-bar (``run``) and chunked
+        (``_run_chunked``) paths — extracted because earlier the engine-
+        exit enforcement step lived only in the per-bar copy, so any
+        run with ``BAR_CHUNK_SIZE>1`` silently skipped ``exit_rules``
+        evaluation entirely. The dedup makes that gap structurally
+        impossible.
+
+        Warm-up bars short-circuit: orders submitted during warm-up
+        are dropped with a ``warmup_dropped`` lifecycle event (the
+        strategy is expected to honour ``ctx.is_warmup``; we drop
+        anyway as a safety net), cancels are no-ops (no live book),
+        and the engine-exit step is skipped (no positions exist
+        during warm-up that could trip a rule).
+
+        Orders queued here are look-ahead-safe: the bar-loop caller
+        submits them against the NEXT bar.
+
+        Raises :class:`StrategyRuntimeError` on
+        ``UnsupportedOrderFeatureError`` from
+        ``OrderRequest.validate_prices`` — the chunked caller must
+        ``chunk_buffer.clear()`` before letting it propagate.
+        """
+        if is_warmup:
+            if bar_orders:
+                result.warmup_orders_dropped += len(bar_orders)
+                logger.info(
+                    "dropped %d order(s) submitted during warm-up bar",
+                    len(bar_orders),
+                )
+                for o in bar_orders:
+                    _record_event(
+                        result.execution_diagnostics,
+                        "warmup_dropped",
+                        timestamp=cur_bar.timestamp,
+                        symbol=o.get("symbol"),
+                        side=o.get("side"),
+                        order_type=o.get("order_type"),
+                    )
+            # Cancels during warm-up are no-ops (no live order book).
+            return
+
+        for c in bar_cancels:
+            oid = c.get("order_id")
+            if oid:
+                order_book.cancel(oid)
+
+        # Orders submitted now are evaluated against the *next* bar
+        # (look-ahead-safe).
+        for o in bar_orders:
+            result.execution_diagnostics.orders_emitted += 1
+            _record_event(
+                result.execution_diagnostics,
+                "emitted",
+                timestamp=cur_bar.timestamp,
+                symbol=o.get("symbol"),
+                side=o.get("side"),
+                order_type=o.get("order_type"),
+            )
+            try:
+                req = OrderRequest(**o)
+                req.validate_prices()
+                pending_for_prev.append(req)
+                # An opposite-side order against an existing open
+                # position is the strategy's exit intent. Counted
+                # here (parent-side, before fill) so the diagnostic
+                # reflects emission, not execution; #410 owns the
+                # fill-side ``exit_filled`` event.
+                held = portfolio.positions.get(req.symbol)
+                if held is not None and held.side != req.side:
+                    result.execution_diagnostics.exits_emitted += 1
+            except UnsupportedOrderFeatureError as exc:
+                # Runtime-support gates from validate_prices ("feature
+                # ships in a later step of #379") must terminate the
+                # run, not be silently dropped. Convert to a
+                # StrategyRuntimeError so the outer loop returns a
+                # structured ``TradingServiceResult.error`` instead of
+                # crashing ``TradingService.run()``. The narrow subclass
+                # keeps unrelated ``NotImplementedError``s from strategy
+                # code in the generic catch below. See #383.
+                _increment_rejection(result.execution_diagnostics, "unsupported_feature")
+                _record_event(
+                    result.execution_diagnostics,
+                    "rejected",
+                    timestamp=cur_bar.timestamp,
+                    symbol=o.get("symbol"),
+                    side=o.get("side"),
+                    order_type=o.get("order_type"),
+                    reason="unsupported_feature",
+                    detail=str(exc),
+                )
+                raise StrategyRuntimeError(
+                    f"strategy emitted an unsupported order: {exc}",
+                    etype="unsupported_feature",
+                ) from exc
+            except Exception as exc:  # malformed request from strategy
+                logger.warning("dropping malformed order from strategy: %s", exc)
+                _increment_rejection(result.execution_diagnostics, "malformed_request")
+                _record_event(
+                    result.execution_diagnostics,
+                    "rejected",
+                    timestamp=cur_bar.timestamp,
+                    symbol=o.get("symbol"),
+                    side=o.get("side"),
+                    order_type=o.get("order_type"),
+                    reason="malformed_request",
+                    detail=str(exc),
+                )
+
+        # Issue #527 — engine-side enforcement of structured
+        # ``exit_rules``. Runs after the strategy's orders are queued
+        # so we can dedupe against strategy-emitted closes and any
+        # in-flight engine exit on the order book. No-op when the
+        # spec has no exit rules.
+        engine_exits.maybe_emit(
+            cur_bar=cur_bar,
+            position_tracker=position_tracker,
+            portfolio=portfolio,
+            pending_for_prev=pending_for_prev,
+            order_book=order_book,
+            result=result,
+        )
+
+        # Issue #527 — extend trailing watermarks AFTER rule evaluation
+        # so the next bar's eval has cur_bar's extreme baked in, but
+        # THIS bar's eval did not see ``cur_bar.high`` raise the
+        # trailing floor and then trigger off ``cur_bar.low`` (intrabar
+        # lookahead). No-op when the spec has no exit rules.
+        if self._exit_rules:
+            self._extend_watermarks(tracker=position_tracker, cur_bar=cur_bar)
+
+    @staticmethod
+    def _update_position_tracker(
+        *,
+        tracker: Dict[str, _TrackedPosition],
+        cur_bar,
+        portfolio: Portfolio,
+    ) -> None:
+        """Reconcile ``tracker`` against ``portfolio.positions`` for one symbol.
+
+        Called BEFORE rule evaluation each bar. Handles:
+
+        * Fresh-entry tracker creation (with watermarks initialised at
+          ``entry_price`` regardless of market vs limit entry — see the
+          ``_extend_watermarks`` docstring for why the entry bar's
+          high/low is NOT included here).
+        * Identity reset on same-bar exit + re-entry (different
+          ``entry_order_id``).
+        * ``entry_price`` refresh on scale-ins (partial-fill
+          continuation where ``Portfolio.extend`` updates the weighted-
+          average entry).
+        * ``just_opened`` flip from ``True`` to ``False`` on the first
+          carry-over bar.
+
+        Watermark extension is deliberately split off into
+        :meth:`_extend_watermarks` so trailing-stop rules don't see
+        the current bar's high/low while evaluating against the same
+        bar's high/low (would be intrabar lookahead — a long could
+        use ``cur_bar.high`` to raise the trailing floor and then
+        trigger off ``cur_bar.low`` even if the low printed first).
+        """
+        sym = cur_bar.symbol
+        pos = portfolio.positions.get(sym)
+        if pos is None:
+            # Position closed this bar (or never opened) — drop tracker entry.
+            tracker.pop(sym, None)
+            return
+        existing = tracker.get(sym)
+        if existing is not None and existing.entry_order_id == pos.entry_order_id:
+            # Scale-in refresh: ``Portfolio.extend`` updates
+            # ``pos.entry_price`` to the new weighted-average entry on
+            # ``REQUEUE_NEXT_BAR`` / ``TWAP_N`` continuations. Mirror
+            # that here so ``StopLossRule(basis="entry_price")`` and
+            # ``TakeProfitRule`` evaluate against the position's current
+            # basis rather than the first slice's price.
+            existing.entry_price = pos.entry_price
+            # First carry-over bar — the position has now seen a full
+            # bar of post-entry price action. Rule evaluation may use
+            # whatever watermark extension the prior bar's
+            # ``_extend_watermarks`` step produced.
+            existing.just_opened = False
+        else:
+            # Fresh entry this bar — either truly first entry, or a
+            # same-bar exit + re-entry replaced the prior position
+            # (different ``entry_order_id``).
+            #
+            # Watermarks initialise at ``entry_price`` for BOTH market
+            # and non-market fills. Including the entry bar's high/low
+            # here would create intrabar lookahead for trailing stops
+            # (today's high raises the floor, today's low triggers it,
+            # regardless of which printed first). Non-market entries
+            # additionally set ``just_opened=True`` so rule evaluation
+            # is skipped entirely on the entry bar (the bar's pre-fill
+            # price action is ambiguous). Market entries leave
+            # ``just_opened=False`` so an entry_price stop-loss or
+            # take-profit can fire same-bar from ``bar.high`` / ``bar.low``
+            # against ``entry_price`` (the watermark isn't consulted
+            # for those rule kinds).
+            just_opened = pos.entry_order_type != "market"
+            tracker[sym] = _TrackedPosition(
+                side=pos.side,
+                entry_price=pos.entry_price,
+                entry_order_id=pos.entry_order_id,
+                just_opened=just_opened,
+                high_since_entry=pos.entry_price,
+                low_since_entry=pos.entry_price,
+            )
+
+    @staticmethod
+    def _extend_watermarks(
+        *,
+        tracker: Dict[str, _TrackedPosition],
+        cur_bar,
+    ) -> None:
+        """Extend ``high_since_entry`` / ``low_since_entry`` for the
+        current bar's symbol AFTER rule evaluation.
+
+        Why a separate call: ``_update_position_tracker`` runs before
+        :meth:`_EngineExitDispatcher.maybe_emit` so the tracker
+        reflects the current bar's fills + ``entry_price`` /
+        ``just_opened`` state. Watermark extension is deferred to
+        after rule evaluation so trailing-stop rules see only the
+        watermark "as of the prior bar" — they can't fire from a
+        floor that just moved up on the same bar's high.
+
+        The next bar's evaluation reads the now-extended watermark,
+        which is the intended trailing-stop semantics (track every
+        prior bar's extreme since entry).
+
+        ``just_opened=True`` (non-market entry) skips extension on
+        the entry bar: a limit / stop fill that landed mid-bar shares
+        OHLC with pre-entry price action — including the entry bar's
+        high / low here would let a pre-entry intrabar spike define
+        the trailing watermark and trigger a trailing-high stop on
+        the next bar from price action that happened before the
+        position existed. The tradeoff is losing the entry bar's
+        post-fill range; that's the safer side of the unknowable
+        intrabar fill location.
+        """
+        sym = cur_bar.symbol
+        state = tracker.get(sym)
+        if state is None:
+            return
+        if state.just_opened:
+            return
+        if cur_bar.high > state.high_since_entry:
+            state.high_since_entry = cur_bar.high
+        if cur_bar.low < state.low_since_entry:
+            state.low_since_entry = cur_bar.low
 
     # ------------------------------------------------------------------
 

@@ -23,6 +23,11 @@ from investment_team.market_data_cache import (
     compute_dataset_fingerprint,
 )
 from investment_team.market_data_service import OHLCVBar
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    Predicate,
+    StopLossRule,
+)
 
 
 def _bars(closes: List[float]) -> List[OHLCVBar]:
@@ -111,9 +116,9 @@ def test_backtest_result_fingerprint_stable_across_runs(tmp_path: Path) -> None:
         asset_class="stocks",
         hypothesis="trivial",
         signal_definition="hold-forever",
-        entry_rules=["hold"],
-        exit_rules=["never"],
-        sizing_rules=["full"],
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
+        exit_rules=[StopLossRule(pct=0.03)],
         strategy_code=textwrap.dedent(
             """
             def on_bar(bar, ctx):

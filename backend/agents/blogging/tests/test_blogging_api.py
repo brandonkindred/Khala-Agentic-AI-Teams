@@ -1,8 +1,7 @@
 """Tests for blogging API artifact endpoints.
 
-Calls the real ``create_blog_job`` / ``update_blog_job`` helpers, which
-hit the central job service.  Marked integration pending a follow-up
-that replaces the storage calls with the in-memory fake.
+Backed by an in-memory FakeJobServiceClient — no Postgres or live job service
+required.
 """
 
 import importlib.util
@@ -12,8 +11,6 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
-pytestmark = [pytest.mark.integration]
 
 _blogging_root = Path(__file__).resolve().parent.parent
 if str(_blogging_root) not in sys.path:
@@ -28,24 +25,17 @@ _spec.loader.exec_module(_api_main)
 app = _api_main.app
 
 
+@pytest.fixture(autouse=True)
+def _patched_blog_client(monkeypatch, fake_job_client):
+    from shared import blog_job_store as bjs
+
+    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
+
+
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(app)
-
-
-def test_health_includes_brand_spec_configured(client: TestClient) -> None:
-    """GET /health returns brand_spec_configured when the blogging package has a substantive brand spec file."""
-    r = client.get("/health")
-    assert r.status_code == 200
-    data = r.json()
-    assert data.get("status") == "ok"
-    assert "brand_spec_configured" in data
-    assert isinstance(data["brand_spec_configured"], bool)
-
-
-@pytest.fixture
-def cache_dir(tmp_path: Path):
-    return tmp_path
 
 
 @pytest.fixture
@@ -58,28 +48,28 @@ def artifacts_dir(tmp_path: Path) -> Path:
     return d
 
 
+def test_health_includes_brand_spec_configured(client: TestClient) -> None:
+    """GET /health returns brand_spec_configured when the blogging package has a substantive brand spec file."""
+    r = client.get("/health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("status") == "ok"
+    assert "brand_spec_configured" in data
+    assert isinstance(data["brand_spec_configured"], bool)
+
+
 def test_list_job_artifacts_404_when_job_missing(client: TestClient) -> None:
     """GET /job/{id}/artifacts returns 404 when job_id does not exist."""
     r = client.get(f"/job/{uuid.uuid4()}/artifacts")
     assert r.status_code == 404
 
 
-def test_list_job_artifacts_404_when_no_work_dir(
-    client: TestClient, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_list_job_artifacts_404_when_no_work_dir(client: TestClient) -> None:
     """GET /job/{id}/artifacts returns 404 when job exists but has no work_dir."""
-    from shared.blog_job_store import create_blog_job, get_blog_job
+    from shared.blog_job_store import create_blog_job
 
     job_id = str(uuid.uuid4())
-    create_blog_job(job_id, "Brief", cache_dir=cache_dir)
-    original = _api_main.get_blog_job
-
-    def get_job(jid):
-        if jid == job_id:
-            return get_blog_job(jid, cache_dir=cache_dir)
-        return original(jid)
-
-    monkeypatch.setattr(_api_main, "get_blog_job", get_job)
+    create_blog_job(job_id, "Brief")
     r = client.get(f"/job/{job_id}/artifacts")
     assert r.status_code == 404
     detail = r.json().get("detail", "").lower()
@@ -87,22 +77,14 @@ def test_list_job_artifacts_404_when_no_work_dir(
 
 
 def test_list_job_artifacts_200_when_artifacts_exist(
-    client: TestClient, cache_dir: Path, artifacts_dir: Path, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, artifacts_dir: Path
 ) -> None:
     """GET /job/{id}/artifacts returns 200 with list of existing artifact names."""
-    from shared.blog_job_store import create_blog_job, get_blog_job, update_blog_job
+    from shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
-    create_blog_job(job_id, "Brief", cache_dir=cache_dir)
-    update_blog_job(job_id, work_dir=str(artifacts_dir), cache_dir=cache_dir)
-    original = _api_main.get_blog_job
-
-    def get_job(jid):
-        if jid == job_id:
-            return get_blog_job(jid, cache_dir=cache_dir)
-        return original(jid)
-
-    monkeypatch.setattr(_api_main, "get_blog_job", get_job)
+    create_blog_job(job_id, "Brief")
+    update_blog_job(job_id, work_dir=str(artifacts_dir))
     r = client.get(f"/job/{job_id}/artifacts")
     assert r.status_code == 200
     data = r.json()
@@ -113,52 +95,31 @@ def test_list_job_artifacts_200_when_artifacts_exist(
     assert "final.md" in names
     assert "outline.md" in names
     assert "compliance_report.json" in names
-    # Response includes producer metadata per artifact
     final_meta = next((a for a in artifacts if a["name"] == "final.md"), None)
     assert final_meta is not None
     assert "producer_phase" in final_meta or "producer_agent" in final_meta
 
 
-def test_get_job_artifact_content_404_invalid_name(
-    client: TestClient, cache_dir: Path, artifacts_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_get_job_artifact_content_404_invalid_name(client: TestClient, artifacts_dir: Path) -> None:
     """GET /job/{id}/artifacts/{name} returns 404 when artifact_name is not in ARTIFACT_NAMES."""
-    from shared.blog_job_store import create_blog_job, get_blog_job, update_blog_job
+    from shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
-    create_blog_job(job_id, "Brief", cache_dir=cache_dir)
-    update_blog_job(job_id, work_dir=str(artifacts_dir), cache_dir=cache_dir)
-    original = _api_main.get_blog_job
-
-    def get_job(jid):
-        if jid == job_id:
-            return get_blog_job(jid, cache_dir=cache_dir)
-        return original(jid)
-
-    monkeypatch.setattr(_api_main, "get_blog_job", get_job)
+    create_blog_job(job_id, "Brief")
+    update_blog_job(job_id, work_dir=str(artifacts_dir))
     r = client.get(f"/job/{job_id}/artifacts/../etc/passwd")
     assert r.status_code == 404
     r2 = client.get(f"/job/{job_id}/artifacts/unknown_file.txt")
     assert r2.status_code == 404
 
 
-def test_get_job_artifact_content_200(
-    client: TestClient, cache_dir: Path, artifacts_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_get_job_artifact_content_200(client: TestClient, artifacts_dir: Path) -> None:
     """GET /job/{id}/artifacts/{name} returns 200 with { name, content } for valid artifact."""
-    from shared.blog_job_store import create_blog_job, get_blog_job, update_blog_job
+    from shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
-    create_blog_job(job_id, "Brief", cache_dir=cache_dir)
-    update_blog_job(job_id, work_dir=str(artifacts_dir), cache_dir=cache_dir)
-    original = _api_main.get_blog_job
-
-    def get_job(jid):
-        if jid == job_id:
-            return get_blog_job(jid, cache_dir=cache_dir)
-        return original(jid)
-
-    monkeypatch.setattr(_api_main, "get_blog_job", get_job)
+    create_blog_job(job_id, "Brief")
+    update_blog_job(job_id, work_dir=str(artifacts_dir))
     r = client.get(f"/job/{job_id}/artifacts/final.md")
     assert r.status_code == 200
     data = r.json()
@@ -174,22 +135,14 @@ def test_get_job_artifact_content_200(
 
 
 def test_get_job_artifact_download_returns_attachment(
-    client: TestClient, cache_dir: Path, artifacts_dir: Path, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, artifacts_dir: Path
 ) -> None:
     """GET /job/{id}/artifacts/{name}?download=true returns Content-Disposition attachment with filename."""
-    from shared.blog_job_store import create_blog_job, get_blog_job, update_blog_job
+    from shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
-    create_blog_job(job_id, "Brief", cache_dir=cache_dir)
-    update_blog_job(job_id, work_dir=str(artifacts_dir), cache_dir=cache_dir)
-    original = _api_main.get_blog_job
-
-    def get_job(jid):
-        if jid == job_id:
-            return get_blog_job(jid, cache_dir=cache_dir)
-        return original(jid)
-
-    monkeypatch.setattr(_api_main, "get_blog_job", get_job)
+    create_blog_job(job_id, "Brief")
+    update_blog_job(job_id, work_dir=str(artifacts_dir))
     r = client.get(f"/job/{job_id}/artifacts/final.md", params={"download": True})
     assert r.status_code == 200
     assert "content-disposition" in r.headers
@@ -197,52 +150,23 @@ def test_get_job_artifact_download_returns_attachment(
     assert "final.md" in r.headers["content-disposition"]
 
 
-def test_approve_job_400_when_not_terminal(
-    client: TestClient, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_approve_job_400_when_not_terminal(client: TestClient) -> None:
     """POST /job/{id}/approve returns 400 when job status is not completed or needs_human_review."""
-    from shared.blog_job_store import create_blog_job, get_blog_job
+    from shared.blog_job_store import create_blog_job
 
     job_id = str(uuid.uuid4())
-    create_blog_job(job_id, "Brief", cache_dir=cache_dir)
-    original = _api_main.get_blog_job
-
-    def get_job(jid):
-        if jid == job_id:
-            return get_blog_job(jid, cache_dir=cache_dir)
-        return original(jid)
-
-    monkeypatch.setattr(_api_main, "get_blog_job", get_job)
+    create_blog_job(job_id, "Brief")
     r = client.post(f"/job/{job_id}/approve")
     assert r.status_code == 400
 
 
-def test_approve_job_200_and_includes_approved_at(
-    client: TestClient, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_approve_job_200_and_includes_approved_at(client: TestClient) -> None:
     """POST /job/{id}/approve returns 200 and response includes approved_at when job is completed."""
-    from shared.blog_job_store import (
-        create_blog_job,
-        get_blog_job,
-        update_blog_job,
-    )
+    from shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
-    create_blog_job(job_id, "Brief", cache_dir=cache_dir)
-    update_blog_job(job_id, status="completed", cache_dir=cache_dir)
-    original_get = _api_main.get_blog_job
-    original_approve = _api_main.approve_blog_job
-
-    def get_job(jid):
-        if jid == job_id:
-            return get_blog_job(jid, cache_dir=cache_dir)
-        return original_get(jid)
-
-    def approve(jid):
-        return original_approve(jid, cache_dir=cache_dir)
-
-    monkeypatch.setattr(_api_main, "get_blog_job", get_job)
-    monkeypatch.setattr(_api_main, "approve_blog_job", approve)
+    create_blog_job(job_id, "Brief")
+    update_blog_job(job_id, status="completed")
     r = client.post(f"/job/{job_id}/approve")
     assert r.status_code == 200
     data = r.json()
@@ -250,34 +174,14 @@ def test_approve_job_200_and_includes_approved_at(
     assert data["approved_at"]
 
 
-def test_unapprove_job_200(
-    client: TestClient, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unapprove_job_200(client: TestClient) -> None:
     """POST /job/{id}/unapprove returns 200 and clears approved_at."""
-    from shared.blog_job_store import (
-        approve_blog_job,
-        create_blog_job,
-        get_blog_job,
-        update_blog_job,
-    )
+    from shared.blog_job_store import approve_blog_job, create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
-    create_blog_job(job_id, "Brief", cache_dir=cache_dir)
-    update_blog_job(job_id, status="completed", cache_dir=cache_dir)
-    approve_blog_job(job_id, cache_dir=cache_dir)
-    original_get = _api_main.get_blog_job
-    original_unapprove = _api_main.unapprove_blog_job
-
-    def get_job(jid):
-        if jid == job_id:
-            return get_blog_job(jid, cache_dir=cache_dir)
-        return original_get(jid)
-
-    def unapprove(jid):
-        return original_unapprove(jid, cache_dir=cache_dir)
-
-    monkeypatch.setattr(_api_main, "get_blog_job", get_job)
-    monkeypatch.setattr(_api_main, "unapprove_blog_job", unapprove)
+    create_blog_job(job_id, "Brief")
+    update_blog_job(job_id, status="completed")
+    approve_blog_job(job_id)
     r = client.post(f"/job/{job_id}/unapprove")
     assert r.status_code == 200
     data = r.json()

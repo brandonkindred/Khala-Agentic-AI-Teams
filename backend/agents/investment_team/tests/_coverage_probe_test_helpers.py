@@ -22,6 +22,12 @@ from investment_team.models import (
     StrategySpec,
     SubconditionCoverage,
 )
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    IndicatorRef,
+    Predicate,
+    SignalExitRule,
+)
 from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 
 
@@ -43,9 +49,18 @@ def make_spec(strategy_code: str | None) -> StrategySpec:
         asset_class="stocks",
         hypothesis="hyp",
         signal_definition="sig",
-        entry_rules=["enter when RSI < 25"],
-        exit_rules=["exit when RSI > 70"],
-        sizing_rules=["risk 2% per trade"],
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=25),
+            )
+        ],
+        exit_rules=[
+            SignalExitRule(
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70)
+            )
+        ],
         risk_limits={"max_position_pct": 5},
         speculative=False,
         strategy_code=strategy_code,

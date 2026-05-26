@@ -18,6 +18,7 @@ from ..clinical_taxonomy import (
 from ..clinical_taxonomy import (
     parse_medications as _parse_medications,
 )
+from ..guardrail import GUARDRAIL_VERSION, is_guardrail_enabled
 from ..models import (
     BiometricHistoryResponse,
     BiometricPatchRequest,
@@ -49,9 +50,11 @@ from ..nutrition_calc import (
     compute_daily_targets,
 )
 from ..shared.client_profile_store import ClientProfileStore, get_profile_store
+from ..shared.guardrail_audit_store import GuardrailAuditStore, get_guardrail_audit_store
 from ..shared.meal_feedback_store import MealFeedbackStore, get_meal_feedback_store
 from ..shared.nutrition_plan_store import NutritionPlanStore, get_nutrition_plan_store
 from ..units import coerce_height_cm, coerce_weight_kg
+from .dropped import RecordedSuggestions, run_guardrail_pipeline
 
 
 class SafetyInvariantError(RuntimeError):
@@ -97,10 +100,12 @@ class NutritionMealPlanningOrchestrator:
         meal_feedback_store: Optional[MealFeedbackStore] = None,
         nutrition_plan_store: Optional[NutritionPlanStore] = None,
         llm_model: Optional[Any] = None,
+        guardrail_audit_store: Optional[GuardrailAuditStore] = None,
     ) -> None:
         self.profile_store = profile_store or get_profile_store()
         self.meal_feedback_store = meal_feedback_store or get_meal_feedback_store()
         self.nutrition_plan_store = nutrition_plan_store or get_nutrition_plan_store()
+        self._guardrail_audit_store = guardrail_audit_store or get_guardrail_audit_store()
         model = llm_model or get_strands_model("nutrition_meal_planning")
         self.intake_agent = IntakeProfileAgent(model)
         # SPEC-004: NutritionistAgent is a narrator on top of the
@@ -419,6 +424,7 @@ class NutritionMealPlanningOrchestrator:
         profile = self.profile_store.get_profile(request.client_id)
         if profile is None:
             raise ValueError("Profile not found")
+        guardrail_on = is_guardrail_enabled()
         nutrition_plan = self._get_or_generate_nutrition_plan(profile)
         meal_history = self.meal_feedback_store.get_meal_history(request.client_id, limit=50)
         suggestions = self.meal_planning_agent.run(
@@ -428,8 +434,17 @@ class NutritionMealPlanningOrchestrator:
             period_days=request.period_days,
             meal_types=request.meal_types,
         )
-        with_ids = self._record_suggestions(request.client_id, suggestions)
-        return MealPlanResponse(client_id=request.client_id, suggestions=with_ids)
+        result = self._record_suggestions(
+            request.client_id, profile, suggestions, guardrail_on=guardrail_on
+        )
+        return MealPlanResponse(
+            client_id=request.client_id,
+            suggestions=result.recorded,
+            dropped=result.dropped,
+            flags_by_recommendation=result.flags_by_recommendation,
+            guardrail_version=GUARDRAIL_VERSION if guardrail_on else "",
+            restrictions_best_effort=result.restrictions_best_effort,
+        )
 
     def submit_feedback(self, request: FeedbackRequest) -> FeedbackResponse:
         """Record feedback for a recommendation."""
@@ -749,14 +764,40 @@ class NutritionMealPlanningOrchestrator:
     # --- Private helpers ---
 
     def _record_suggestions(
-        self, client_id: str, suggestions: list
-    ) -> list[MealRecommendationWithId]:
-        """Record each suggestion in the store and attach recommendation IDs."""
-        with_ids: list[MealRecommendationWithId] = []
-        for s in suggestions:
-            rec_id = self.meal_feedback_store.record_recommendation(client_id, s.model_dump())
-            with_ids.append(MealRecommendationWithId(**s.model_dump(), recommendation_id=rec_id))
-        return with_ids
+        self,
+        client_id: str,
+        profile: ClientProfile,
+        suggestions: list,
+        *,
+        guardrail_on: Optional[bool] = None,
+    ) -> RecordedSuggestions:
+        """Check, regenerate, and record suggestions through the guardrail pipeline.
+
+        Preconditions:
+            ``profile`` is a valid ``ClientProfile``.
+        Postconditions:
+            When ``NUTRITION_GUARDRAIL`` is off, returns all suggestions
+            unchanged (legacy pass-through).
+            When on, every returned ``recorded`` entry passed
+            ``check_recommendation``.
+        """
+        enabled = guardrail_on if guardrail_on is not None else is_guardrail_enabled()
+        if not enabled:
+            with_ids: list[MealRecommendationWithId] = []
+            for s in suggestions:
+                rec_id = self.meal_feedback_store.record_recommendation(client_id, s.model_dump())
+                with_ids.append(
+                    MealRecommendationWithId(**s.model_dump(), recommendation_id=rec_id)
+                )
+            return RecordedSuggestions(recorded=with_ids)
+        return run_guardrail_pipeline(
+            client_id,
+            profile,
+            suggestions,
+            self.meal_planning_agent,
+            self.meal_feedback_store,
+            self._guardrail_audit_store,
+        )
 
     def _handle_save_profile(
         self, client_id: str, result: Dict[str, Any], profile: Optional[ClientProfile]
@@ -819,7 +860,8 @@ class NutritionMealPlanningOrchestrator:
             suggestions = self.meal_planning_agent.run(
                 p, np, mh, period_days=period_days, meal_types=meal_types
             )
-            return self._record_suggestions(client_id, suggestions)
+            pipeline_result = self._record_suggestions(client_id, p, suggestions)
+            return pipeline_result.recorded
         except Exception as e:
             logger.warning("Meal plan generation failed during chat: %s", e)
             return []

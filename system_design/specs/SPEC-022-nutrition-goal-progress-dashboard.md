@@ -295,7 +295,7 @@ An explicit "Refresh now" button calls
   dedicated copy-review list (team lead + one external reviewer
   initially).
 - `strings.ts` is checked into the repo; PRs modifying it
-  require the copy reviewer on CODEOWNERS.
+  require copy-review sign-off from the dedicated copy-review list.
 
 ### 4.13 Observability
 
@@ -330,7 +330,7 @@ An explicit "Refresh now" button calls
 | W7 | UI: safety banner (rate_of_loss, bmi_floor, ed filters) | FE | P0 |
 | W8 | UI: ED-adjacent / minor / cohort variant screens | FE | P0 |
 | W9 | UI: weekly-weigh nudge | FE | P1 |
-| W10 | Copy file + copy review process + CODEOWNERS entry | P0 |
+| W10 | Copy file + copy review process | P0 |
 | W11 | Accessibility pass (a11y audit + fixes) | P0 |
 | W12 | UI: empty / cold-start states | FE | P1 |
 | W13 | Observability counters + alerting | P1 |

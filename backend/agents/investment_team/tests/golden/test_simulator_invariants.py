@@ -107,6 +107,7 @@ def _config() -> BacktestConfig:
 
 def _spec(code: str, *, strategy_id: str = "hyp") -> StrategySpec:
     return StrategySpec(
+        timeframe="1d",
         strategy_id=strategy_id,
         authored_by="hypothesis",
         asset_class="stocks",
@@ -139,7 +140,17 @@ def test_fill_is_never_on_the_decision_bar(bars: List[OHLCVBar]) -> None:
 @given(bars=_bar_sequences())
 @settings(max_examples=8, deadline=None)
 def test_trade_pnl_internally_consistent(bars: List[OHLCVBar]) -> None:
-    """``gross_pnl`` reconciles to price-delta × shares and ``net_pnl == gross_pnl`` when costs are zero."""
+    """``gross_pnl`` reconciles to price-delta × shares and ``net_pnl == gross_pnl`` when costs are zero.
+
+    The engine quantizes ``gross_pnl`` to cents (``round(gross, 2)``) and the
+    stored ``entry_price``/``exit_price`` are quantized per the simulator's
+    ``dp = 4 if ref_price < 10 else 2`` rule. Reconstructing the gross from the
+    rounded prices therefore drifts from the stored ``gross_pnl`` by up to the
+    combined half-tick of all three roundings — bounded by
+    ``0.005 + shares × 0.01`` worst case (here ``shares == 5``, so ≈0.055).
+    The absolute tolerance below is sized to absorb that quantization noise
+    without admitting genuine PnL math regressions.
+    """
     spec = _spec(ROUND_TRIP_CODE)
     result = run_backtest(strategy=spec, config=_config(), market_data={"AAA": bars})
     for trade in result.trades:
@@ -147,7 +158,9 @@ def test_trade_pnl_internally_consistent(bars: List[OHLCVBar]) -> None:
             expected_gross = (trade.exit_price - trade.entry_price) * trade.shares
         else:
             expected_gross = (trade.entry_price - trade.exit_price) * trade.shares
-        assert trade.gross_pnl == pytest.approx(expected_gross, rel=1e-4, abs=1e-4)
+        # See the docstring: the absolute tolerance must dominate the engine's
+        # cents-quantization of ``gross_pnl`` and the per-leg price rounding.
+        assert trade.gross_pnl == pytest.approx(expected_gross, rel=1e-3, abs=0.06)
         assert trade.net_pnl == pytest.approx(trade.gross_pnl, rel=1e-4, abs=1e-4)
 
 

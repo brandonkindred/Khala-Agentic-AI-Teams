@@ -66,4 +66,39 @@ describe('MarketResearchApiService', () => {
     expect(req.request.method).toBe('GET');
     req.flush({ status: 'ok' });
   });
+
+  it('submitRun returns submission immediately', () => {
+    service.submitRun({} as never).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/market-research/run`);
+    expect(req.request.method).toBe('POST');
+    req.flush({});
+  });
+
+  it('getStatus returns status', () => {
+    service.getStatus('j1').subscribe();
+    httpMock.expectOne(`${baseUrl}/market-research/status/j1`).flush({});
+  });
+
+  it('run errors on failed status', () => {
+    let err: Error | undefined;
+    service.run({} as never).subscribe({ error: (e) => (err = e as Error) });
+    httpMock.expectOne(`${baseUrl}/market-research/run`).flush({ job_id: 'j1', status: 'pending' });
+    httpMock.expectOne(`${baseUrl}/market-research/status/j1`).flush({
+      job_id: 'j1',
+      status: 'failed',
+      error: 'boom',
+    });
+    expect(err!.message).toContain('boom');
+  });
+
+  it('run errors when cancelled without result', () => {
+    let err: Error | undefined;
+    service.run({} as never).subscribe({ error: (e) => (err = e as Error) });
+    httpMock.expectOne(`${baseUrl}/market-research/run`).flush({ job_id: 'j1', status: 'pending' });
+    httpMock.expectOne(`${baseUrl}/market-research/status/j1`).flush({
+      job_id: 'j1',
+      status: 'cancelled',
+    });
+    expect(err).toBeDefined();
+  });
 });

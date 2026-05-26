@@ -23,6 +23,20 @@ from job_service_client_fake import fake_job_client  # noqa: F401, E402
 from llm_service import DummyLLMClient  # noqa: E402
 
 
+@pytest.fixture
+def patched_job_store(monkeypatch, fake_job_client):  # noqa: F811 (pytest fixture name)
+    """Route the SE ``job_store._client`` factory through the in-memory fake.
+
+    Opt-in shared form of the pattern in ``test_job_store_heartbeat.py``.
+    Tests that want it applied unconditionally should wrap it with their
+    own ``autouse=True`` fixture (see e.g. ``test_api.py``).
+    """
+    from software_engineering_team.shared import job_store as js
+
+    monkeypatch.setattr(js, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",

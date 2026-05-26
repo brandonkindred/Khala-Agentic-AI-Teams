@@ -1,0 +1,36 @@
+<div class="sizing-editor" [formGroup]="group">
+  <mat-form-field appearance="outline" class="kind-field">
+    <mat-label>sizing kind</mat-label>
+    <mat-select formControlName="kind">
+      @for (k of kindOptions; track k) {
+        <mat-option [value]="k">{{ k }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  @switch (currentKind) {
+    @case ('fixed_fraction') {
+      <mat-form-field appearance="outline" class="num-field">
+        <mat-label>fraction (0–1)</mat-label>
+        <input matInput type="number" min="0" max="1" step="0.001" formControlName="fraction" />
+      </mat-form-field>
+    }
+    @case ('volatility_target') {
+      <mat-form-field appearance="outline" class="num-field">
+        <mat-label>target annualised vol</mat-label>
+        <input matInput type="number" min="0" step="0.001" formControlName="target_annual_vol" />
+      </mat-form-field>
+    }
+    @case ('fixed_notional') {
+      <mat-form-field appearance="outline" class="num-field">
+        <mat-label>notional USD</mat-label>
+        <input matInput type="number" min="0" step="1" formControlName="notional_usd" />
+      </mat-form-field>
+    }
+  }
+
+  <mat-form-field appearance="outline" class="note-field">
+    <mat-label>note (optional)</mat-label>
+    <input matInput formControlName="note" />
+  </mat-form-field>
+</div>

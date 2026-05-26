@@ -575,6 +575,7 @@ class FillSimulator:
             entry_order_id=po.order_id,
             entry_client_order_id=req.client_order_id,
             entry_order_type=req.order_type.value,
+            entry_reason=req.reason or "",
             # ``original_qty`` tracks the cumulative entry-filled qty (the
             # qty we expect to exit to fully close), *not* the strategy's
             # original request. Initialized to this slice's filled qty;
@@ -1073,6 +1074,13 @@ class FillSimulator:
             participation_clipped=pos.participation_clipped,
             partial_fill_count=pos.partial_fill_count,
             total_unfilled_qty=pos.total_unfilled_qty,
+            # Issue #527 — propagate the close ``OrderRequest.reason``
+            # onto the trade record so the conformance gate can tell
+            # engine-fired closes (``engine_exit:<kind>``) from
+            # strategy-emitted closes. ``po.request.reason`` is None /
+            # empty for vanilla strategy market exits.
+            entry_reason=pos.entry_reason or None,
+            exit_reason=po.request.reason or None,
         )
         return exit_fill, record
 

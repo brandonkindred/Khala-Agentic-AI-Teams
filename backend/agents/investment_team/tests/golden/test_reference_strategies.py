@@ -33,6 +33,7 @@ def _make_spec(name: str, code: str) -> StrategySpec:
         asset_class="stocks",
         hypothesis="deterministic reference",
         signal_definition="see strategies.py",
+        timeframe="1d",
         strategy_code=code,
     )
 

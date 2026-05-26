@@ -45,4 +45,9 @@ describe('Soc2ComplianceApiService', () => {
     expect(req.request.method).toBe('GET');
     req.flush({ job_id: '123', status: 'completed' });
   });
+
+  it('health', () => {
+    service.health().subscribe();
+    httpMock.expectOne(`${baseUrl}/health`).flush({});
+  });
 });

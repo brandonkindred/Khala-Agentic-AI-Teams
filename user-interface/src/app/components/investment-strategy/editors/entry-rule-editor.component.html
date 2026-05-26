@@ -1,0 +1,29 @@
+<div class="entry-rule-row" [formGroup]="group">
+  <div class="rule-header">
+    <span class="rule-index">#{{ index + 1 }}</span>
+    <mat-form-field appearance="outline" class="side-field">
+      <mat-label>side</mat-label>
+      <mat-select formControlName="side">
+        <mat-option value="long">long</mat-option>
+        <mat-option value="short">short</mat-option>
+      </mat-select>
+    </mat-form-field>
+    <button
+      mat-icon-button
+      color="warn"
+      type="button"
+      class="remove-btn"
+      aria-label="Remove entry rule"
+      (click)="remove.emit()"
+    >
+      <mat-icon>delete</mat-icon>
+    </button>
+  </div>
+
+  <app-predicate-editor [group]="whenGroup" />
+
+  <mat-form-field appearance="outline" class="note-field">
+    <mat-label>note (optional)</mat-label>
+    <input matInput formControlName="note" />
+  </mat-form-field>
+</div>

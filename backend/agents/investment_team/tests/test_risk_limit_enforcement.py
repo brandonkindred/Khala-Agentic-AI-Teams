@@ -53,6 +53,7 @@ def _base_spec(**overrides) -> StrategySpec:
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     kwargs.update(overrides)
     return StrategySpec(**kwargs)

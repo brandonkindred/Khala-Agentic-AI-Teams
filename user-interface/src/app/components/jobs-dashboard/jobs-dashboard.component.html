@@ -6,7 +6,10 @@
     </div>
     <div class="header-actions">
       @if (lastUpdated) {
-        <span class="last-updated">Updated {{ lastUpdated | date:'shortTime' }}</span>
+        <span class="last-updated" matTooltip="Auto-refreshes every 20 seconds">
+          <span class="live-dot" [class.is-paused]="!isPollingActive" aria-hidden="true"></span>
+          Updated {{ lastUpdated | date:'shortTime' }}
+        </span>
       }
       <button mat-icon-button (click)="refresh()" [disabled]="loading" matTooltip="Refresh jobs" aria-label="Refresh jobs">
         <mat-icon [class.spinning]="loading">refresh</mat-icon>
@@ -94,6 +97,9 @@
     </div>
   } @else {
     <div class="jobs-table-container">
+      @if (loading) {
+        <mat-progress-bar class="table-refresh-bar" mode="indeterminate"></mat-progress-bar>
+      }
       <table class="jobs-table">
         <thead>
           <tr>
@@ -155,7 +161,7 @@
                   } @else if (getShowIndeterminate(job)) {
                     <mat-progress-bar mode="indeterminate"></mat-progress-bar>
                   } @else {
-                    <span class="progress-na">—</span>
+                    <span class="cell-empty">·</span>
                   }
                 </div>
               </td>
@@ -171,7 +177,7 @@
                     }
                   </div>
                 } @else {
-                  <span class="agents-na">—</span>
+                  <span class="cell-empty">·</span>
                 }
               </td>
               <td class="col-time">
@@ -199,28 +205,34 @@
                   <button mat-icon-button
                           class="resume-button"
                           (click)="resumeJob($event, job)"
-                          matTooltip="Resume job (continue from where it left off, e.g. after server restart)"
+                          matTooltip="Resume job"
                           [attr.aria-label]="getActionAriaLabel(job, 'Resume')">
                     <mat-icon>play_arrow</mat-icon>
                   </button>
                 }
-                @if (canRestartJob(job)) {
+                @if (hasOverflowActions(job)) {
                   <button mat-icon-button
-                          class="restart-button"
-                          (click)="restartJob($event, job)"
-                          matTooltip="Restart from scratch (same job, workflow runs again from the start)"
-                          [attr.aria-label]="getActionAriaLabel(job, 'Restart')">
-                    <mat-icon>replay</mat-icon>
+                          class="overflow-button"
+                          [matMenuTriggerFor]="overflowMenu"
+                          (click)="$event.stopPropagation()"
+                          matTooltip="More actions"
+                          [attr.aria-label]="getActionAriaLabel(job, 'More actions')">
+                    <mat-icon>more_vert</mat-icon>
                   </button>
-                }
-                @if (canDeleteJob(job)) {
-                  <button mat-icon-button
-                          class="delete-button"
-                          (click)="deleteJob($event, job)"
-                          matTooltip="Delete job"
-                          [attr.aria-label]="getActionAriaLabel(job, 'Delete')">
-                    <mat-icon>delete</mat-icon>
-                  </button>
+                  <mat-menu #overflowMenu="matMenu" xPosition="before">
+                    @if (canRestartJob(job)) {
+                      <button mat-menu-item (click)="restartJob($event, job)">
+                        <mat-icon>replay</mat-icon>
+                        <span>Restart</span>
+                      </button>
+                    }
+                    @if (canDeleteJob(job)) {
+                      <button mat-menu-item (click)="deleteJob($event, job)">
+                        <mat-icon>delete</mat-icon>
+                        <span>Delete</span>
+                      </button>
+                    }
+                  </mat-menu>
                 }
               </td>
             </tr>

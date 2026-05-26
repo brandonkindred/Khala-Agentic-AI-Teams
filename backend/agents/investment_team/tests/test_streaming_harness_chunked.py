@@ -297,6 +297,7 @@ def test_service_chunked_path_runs_round_trip_strategy_without_lookahead() -> No
         asset_class="stocks",
         hypothesis="invariant",
         signal_definition="invariant",
+        timeframe="1d",
         strategy_code=ROUND_TRIP_CODE,
     )
     config = BacktestConfig(

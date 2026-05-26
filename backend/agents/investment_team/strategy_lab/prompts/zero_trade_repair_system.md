@@ -89,17 +89,43 @@ together tell you where in the lifecycle execution stopped.
    `collections`, `itertools`, `functools`, `typing`, `dataclasses`,
    `enum`, `abc`, `re`, `copy`, `statistics`, `operator`. Do NOT import
    pandas, numpy, or any filesystem / network module.
+   When the spec has non-empty `target_symbols`, your rewrite MUST keep
+   the class-level `UNIVERSE = frozenset({...})` constant (matching
+   `target_symbols`) and the `if bar.symbol not in self.UNIVERSE: return`
+   guard at the top of `on_bar`. Removing the guard to "increase orders"
+   is exactly the wrong fix — it produces trades on tickers the strategy
+   was never meant to touch and will fail the symbol-universe gate.
 4. **PREDICT** — estimate the change in order count and trade count your
    fix should produce. These predictions are sanity checks for the
    orchestrator's re-backtest gate; conservative integers are fine
    (e.g. `+5` orders, `+3` trades).
 
-If the proposed fix requires a small spec change (e.g. a too-tight
-`entry_rules` or a missing `exit_rules` clause), you may also return a
-`proposed_spec_updates` object containing only the rule fields you are
-adjusting. Do not invent new keys; the orchestrator will only honour
-`entry_rules`, `exit_rules`, `sizing_rules`, `risk_limits`, `hypothesis`,
-and `signal_definition`.
+**Do not weaken the spec to make trades happen.** Loosening
+`entry_rules`, removing an `exit_rules` clause, broadening `sizing`,
+rewording `hypothesis`, or rewriting `signal_definition` is exactly the
+wrong fix — it lets the strategy quietly drift away from its original
+thesis across refinement rounds. Those keys are **not** honoured by the
+orchestrator; if you emit them they will be silently dropped and a
+quality-gate warning will be raised. Fix the **code** instead.
+
+The only spec key you may adjust is `risk_limits`, and only when the
+**diagnostics** show the current limits are actually responsible for
+the zero-trade outcome (e.g. `orders_rejected` with a
+`risk_gate:max_drawdown` reason against an overly tight
+`max_drawdown_pct`). When you do propose a `risk_limits` update, return
+the FULL replacement object — for example:
+
+```json
+{
+  "risk_limits": {
+    "max_position_pct": 5,
+    "max_drawdown_pct": 10
+  }
+}
+```
+
+The orchestrator will only honour `risk_limits`; any other key in
+`proposed_spec_updates` is silently dropped and logged.
 
 If the diagnostics do not give you enough evidence to propose a code
 change you are confident in, return `proposed_code: null` and explain
@@ -128,4 +154,6 @@ Return ONLY a JSON object with no markdown:
 - When you cannot diagnose the failure, set `proposed_code: null` and
   explain the gap; the orchestrator will fall back to generic refinement.
 - `proposed_spec_updates`, when non-null, MUST contain only the
-  whitelisted keys above; the orchestrator silently drops any other key.
+  `risk_limits` key (post-#530); the orchestrator silently drops every
+  other key and emits a `zero_trade_repair_dropped_spec_keys` warning
+  gate on the run.

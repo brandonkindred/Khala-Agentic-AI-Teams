@@ -24,6 +24,8 @@ from strands import Agent
 
 from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from ..coverage_probe import format_coverage_report
+from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+from ._parse_helpers import StrategySpecParseError, validate_structured_rules
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -33,16 +35,13 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # Spec keys the orchestrator will honour from a ZeroTradeRepairReport's
 # ``proposed_spec_updates``. Anything else is silently dropped — the
 # specialized repair agent must not invent fields.
-_ALLOWED_SPEC_UPDATE_KEYS = frozenset(
-    {
-        "entry_rules",
-        "exit_rules",
-        "sizing_rules",
-        "risk_limits",
-        "hypothesis",
-        "signal_definition",
-    }
-)
+#
+# #530: narrowed to ``risk_limits`` only. The repair agent must fix the
+# **code**, not weaken the **spec**. Rule-shaped keys (entry/exit/sizing),
+# the hypothesis, and the signal_definition stay locked at this stage so
+# a "make trades happen" LLM cannot quietly mutate the thesis. The
+# orchestrator additionally logs and gates off-list proposals.
+_ALLOWED_SPEC_UPDATE_KEYS = frozenset({"risk_limits"})
 
 # Cap on `last_order_events` included in the repair prompt. The model
 # already trims to 20; 10 is enough signal for the LLM to spot the
@@ -67,6 +66,13 @@ class ZeroTradeRepairReport(BaseModel):
     expected_trade_count_change: int = 0
     changes_made: str = ""
     proposed_spec_updates: Optional[Dict[str, Any]] = Field(default=None)
+    # #530: keys the agent filtered out of ``proposed_spec_updates`` before
+    # returning. Populated by ``_coerce_report`` so the orchestrator can
+    # surface a ``logger.warning`` + ``zero_trade_repair_dropped_spec_keys``
+    # quality gate even when the agent strips off-list drift in production
+    # (otherwise the visibility added in #530 would only fire when the agent
+    # is stubbed in tests).
+    dropped_spec_update_keys: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +180,9 @@ class ZeroTradeRepairAgent:
             asset_class=spec.asset_class,
             hypothesis=spec.hypothesis,
             signal_definition=spec.signal_definition,
-            entry_rules=", ".join(spec.entry_rules),
-            exit_rules=", ".join(spec.exit_rules),
-            sizing_rules=", ".join(spec.sizing_rules),
+            entry_rules=format_rules_for_prompt(spec.entry_rules),
+            exit_rules=format_rules_for_prompt(spec.exit_rules),
+            sizing_rules=format_sizing_rule(spec.sizing),
             risk_limits=spec.risk_limits.model_dump_json(),
             strategy_code=code,
             zero_trade_category=diagnostics.zero_trade_category,
@@ -260,8 +266,31 @@ def _coerce_report(
 
     raw_spec_updates = parsed.get("proposed_spec_updates")
     proposed_spec_updates: Optional[Dict[str, Any]]
+    dropped_spec_update_keys: List[str] = []
     if isinstance(raw_spec_updates, dict):
         whitelisted = {k: v for k, v in raw_spec_updates.items() if k in _ALLOWED_SPEC_UPDATE_KEYS}
+        # #530: record what the agent filtered so the orchestrator can
+        # surface it via logger.warning + a quality gate. Without this,
+        # the production agent-to-orchestrator flow would silently drop
+        # the drift because the orchestrator only sees the sanitized
+        # report.
+        dropped_spec_update_keys = sorted(
+            k for k in raw_spec_updates if k not in _ALLOWED_SPEC_UPDATE_KEYS
+        )
+        # Reject prose / invalid structure on the rule-shaped keys so the
+        # orchestrator does not propagate a malformed dict into
+        # `_apply_updates`. The whitelist still gates which fields make it
+        # through (#530); validation only runs on rule-shaped values.
+        try:
+            validate_structured_rules(whitelisted)
+        except StrategySpecParseError as exc:
+            logger.warning(
+                "Zero-trade repair emitted invalid structured rule shape; dropping "
+                "proposed_spec_updates so the orchestrator falls back to generic "
+                "refinement: %s",
+                exc,
+            )
+            whitelisted = {}
         proposed_spec_updates = whitelisted or None
     else:
         proposed_spec_updates = None
@@ -282,6 +311,7 @@ def _coerce_report(
         expected_trade_count_change=_coerce_int(parsed.get("expected_trade_count_change", 0)),
         changes_made=str(parsed.get("changes_made", "")).strip(),
         proposed_spec_updates=proposed_spec_updates,
+        dropped_spec_update_keys=dropped_spec_update_keys,
     )
 
 

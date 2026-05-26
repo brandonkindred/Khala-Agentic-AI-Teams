@@ -123,6 +123,13 @@ def test_summarize_acceptance_reason_all_pass():
     assert summarize_acceptance_reason(results) == "all four criteria met"
 
 
+def test_summarize_acceptance_reason_empty_input():
+    """PR #573 Bug 3: an empty input means no gates were evaluated, not
+    that every gate passed. Returning ``"all four criteria met"`` here
+    (the previous behaviour) would mislead the audit trail."""
+    assert summarize_acceptance_reason([]) == "no acceptance gates evaluated"
+
+
 def test_summarize_acceptance_reason_lists_failing_gates():
     gate = AcceptanceGate()
     results = gate.check(

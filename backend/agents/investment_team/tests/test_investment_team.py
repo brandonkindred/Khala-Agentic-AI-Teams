@@ -1,13 +1,15 @@
+import json
 from typing import Any, Dict, List
 
 import pytest
-from agents.investment_team.agents import (
+
+from investment_team.agents import (
     AgentIdentity,
     FinancialAdvisorAgent,
     PolicyGuardianAgent,
     PromotionGateAgent,
 )
-from agents.investment_team.models import (
+from investment_team.models import (
     IPS,
     AdvisorSessionStatus,
     AdvisorTopic,
@@ -35,8 +37,14 @@ from agents.investment_team.models import (
     ValidationReport,
     ValidationStatus,
 )
-from agents.investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
-from agents.investment_team.tool_agents.web_interfaces import (
+from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    Predicate,
+    SignalExitRule,
+    StopLossRule,
+)
+from investment_team.tool_agents.web_interfaces import (
     BrowserType,
     InvestmentWebInterfaceCoordinator,
     WebAgentConfig,
@@ -124,6 +132,7 @@ def test_promotion_gate_requires_human_approval_for_live() -> None:
         asset_class="equities",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     decision = PromotionGateAgent().decide(
         strategy=strategy,
@@ -156,6 +165,7 @@ def test_promotion_gate_revises_when_validation_strategy_mismatch() -> None:
         asset_class="equities",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     validation = _sample_validation()
     validation.strategy_id = "other"
@@ -340,13 +350,13 @@ def test_web_interface_coordinator_logs_out_when_action_fails() -> None:
 
 
 def test_agent_catalog_includes_global_risk_manager() -> None:
-    from agents.investment_team.agent_catalog import CORE_AGENTS
+    from investment_team.agent_catalog import CORE_AGENTS
 
     assert any(agent.name == "Global Risk Manager Agent" for agent in CORE_AGENTS)
 
 
 def test_spec_models_parse_minimal_promotion_decision() -> None:
-    from agents.investment_team.spec_models import PromotionDecisionV1
+    from investment_team.spec_models import PromotionDecisionV1
 
     decision = PromotionDecisionV1(
         decision_id="d-1",
@@ -373,8 +383,9 @@ def test_backtest_record_captures_strategy_and_metrics() -> None:
         asset_class="equities",
         hypothesis="mean reversion",
         signal_definition="z-score",
-        entry_rules=["z < -2"],
-        exit_rules=["z > -0.5"],
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op="<", rhs=-2))],
+        exit_rules=[SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=-0.5))],
     )
 
     record = BacktestRecord(
@@ -573,7 +584,7 @@ def test_advisor_session_inactive_after_completion() -> None:
 
 
 def test_agent_catalog_includes_financial_advisor() -> None:
-    from agents.investment_team.agent_catalog import CORE_AGENTS
+    from investment_team.agent_catalog import CORE_AGENTS
 
     assert any(agent.name == "Financial Advisor Agent" for agent in CORE_AGENTS)
 
@@ -584,7 +595,7 @@ def test_agent_catalog_includes_financial_advisor() -> None:
 
 
 def test_date_diff_days() -> None:
-    from agents.investment_team.trade_simulator import date_diff_days
+    from investment_team.trade_simulator import date_diff_days
 
     assert date_diff_days("2023-01-01", "2023-12-31") == 364
     assert date_diff_days("2026-01-01", "2026-01-08") == 7
@@ -593,7 +604,7 @@ def test_date_diff_days() -> None:
 
 
 def test_compute_metrics_from_trades() -> None:
-    from agents.investment_team.trade_simulator import compute_metrics
+    from investment_team.trade_simulator import compute_metrics
 
     trades = [
         TradeRecord(
@@ -658,7 +669,7 @@ def test_compute_metrics_from_trades() -> None:
 
 
 def test_compute_metrics_empty_trades() -> None:
-    from agents.investment_team.trade_simulator import compute_metrics
+    from investment_team.trade_simulator import compute_metrics
 
     result = compute_metrics([], 100000.0, "2023-01-01", "2023-12-31")
 
@@ -674,7 +685,7 @@ def test_compute_metrics_log_return_annualization_over_multi_year_span() -> None
     * 252 / N)`` where ``N`` is the number of trading days the curve spans
     — empirically ~9.0 % for ~630 weekdays, well under the naive 10 %.
     """
-    from agents.investment_team.trade_simulator import compute_metrics
+    from investment_team.trade_simulator import compute_metrics
 
     # Exit on a weekday so the gain actually lands inside the equity curve
     # (`build_equity_curve_from_trades` only stamps weekdays). 2023-06-30
@@ -713,7 +724,7 @@ def test_compute_metrics_log_return_annualization_over_multi_year_span() -> None
 
 
 def test_paper_trading_session_model_creation() -> None:
-    from agents.investment_team.models import (
+    from investment_team.models import (
         PaperTradingSession,
         PaperTradingStatus,
     )
@@ -727,6 +738,7 @@ def test_paper_trading_session_model_creation() -> None:
             asset_class="stocks",
             hypothesis="mean reversion",
             signal_definition="RSI oversold bounce",
+            timeframe="1d",
         ),
         status=PaperTradingStatus.COMPLETED,
         initial_capital=100000.0,
@@ -745,7 +757,7 @@ def test_paper_trading_session_model_creation() -> None:
 
 
 def test_compare_performance_aligned() -> None:
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=25.0,
@@ -788,7 +800,7 @@ def test_compare_performance_aligned() -> None:
 
 
 def test_compare_performance_divergent() -> None:
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=25.0,
@@ -825,7 +837,7 @@ def test_compare_performance_divergent() -> None:
 
 def test_compare_performance_zero_backtest_drawdown() -> None:
     """When backtest drawdown is 0, paper drawdown up to 5% is aligned."""
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=10.0,
@@ -874,7 +886,7 @@ def test_compare_performance_zero_backtest_drawdown() -> None:
 
 def test_compare_performance_return_absolute_tolerance() -> None:
     """Phase 5: all returns use ±2.0pp absolute tolerance now."""
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=12.0,
@@ -924,7 +936,7 @@ def test_compare_performance_return_absolute_tolerance() -> None:
 
 def test_compare_performance_insufficient_sample() -> None:
     """Fewer than 30 paper trades → overall_aligned is always False."""
-    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+    from investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
         total_return_pct=10.0,
@@ -961,7 +973,7 @@ def test_compare_performance_insufficient_sample() -> None:
 
 
 def test_paper_trading_verdict_enum_values() -> None:
-    from agents.investment_team.models import PaperTradingVerdict
+    from investment_team.models import PaperTradingVerdict
 
     assert PaperTradingVerdict.READY_FOR_LIVE.value == "ready_for_live"
     assert PaperTradingVerdict.NOT_PERFORMANT.value == "not_performant"
@@ -973,7 +985,7 @@ def test_paper_trading_verdict_enum_values() -> None:
 
 
 def test_market_data_service_get_symbols_for_strategy() -> None:
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
 
@@ -983,10 +995,15 @@ def test_market_data_service_get_symbols_for_strategy() -> None:
         asset_class="stocks",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(stock_strategy)
     assert "AAPL" in symbols
     assert "BTC" not in symbols
+    # Common index / sector ETFs are reachable from the stocks default so
+    # theme-level hypotheses don't fall through to a TSLA/AAPL universe.
+    for etf in ("QQQ", "IWM", "TLT", "EEM", "GDX", "XLE", "XLF"):
+        assert etf in symbols, f"expected {etf} in stocks default, got {symbols}"
 
     crypto_strategy = StrategySpec(
         strategy_id="s2",
@@ -994,6 +1011,7 @@ def test_market_data_service_get_symbols_for_strategy() -> None:
         asset_class="crypto",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(crypto_strategy)
     assert "BTC" in symbols
@@ -1001,7 +1019,7 @@ def test_market_data_service_get_symbols_for_strategy() -> None:
 
 
 def test_market_data_service_get_symbols_for_forex() -> None:
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     strategy = StrategySpec(
@@ -1010,13 +1028,14 @@ def test_market_data_service_get_symbols_for_forex() -> None:
         asset_class="forex",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(strategy)
     assert any("=X" in s for s in symbols)
 
 
 def test_market_data_service_get_symbols_for_futures() -> None:
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     strategy = StrategySpec(
@@ -1025,13 +1044,14 @@ def test_market_data_service_get_symbols_for_futures() -> None:
         asset_class="futures",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(strategy)
     assert any("=F" in s for s in symbols)
 
 
 def test_market_data_service_get_symbols_for_commodities() -> None:
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
     strategy = StrategySpec(
@@ -1040,16 +1060,43 @@ def test_market_data_service_get_symbols_for_commodities() -> None:
         asset_class="commodities",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
     )
     symbols = service.get_symbols_for_strategy(strategy)
     assert "GLD" in symbols
+
+
+def test_market_data_service_get_symbols_for_options_returns_empty() -> None:
+    """#535: 'options' must NOT silently fall back to stock symbols.
+
+    The StrategySpecValidator rejects options upstream as a critical gate
+    failure; the empty list returned here is defense-in-depth so any code
+    path that skips the validator gets an empty universe (and a downstream
+    failure) instead of silently-wrong equity data.
+    """
+    from investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    options_strategy = StrategySpec(
+        strategy_id="s-opt",
+        authored_by="test",
+        asset_class="options",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    symbols = service.get_symbols_for_strategy(options_strategy)
+    assert symbols == [], (
+        f"options must return empty universe, got {symbols} "
+        "(silent fallback to STOCK_SYMBOLS is the bug from #535)"
+    )
 
 
 def test_market_data_service_fetch_ohlcv_range_routes_by_asset_class() -> None:
     """Verify fetch_ohlcv_range tries Yahoo first for all asset classes via the provider chain."""
     from unittest.mock import patch
 
-    from agents.investment_team.market_data_service import MarketDataService
+    from investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
 
@@ -1079,8 +1126,8 @@ def test_market_data_service_fetch_multi_symbol_range(tmp_path) -> None:
     """
     from unittest.mock import patch
 
-    from agents.investment_team.market_data_cache import MarketDataCache
-    from agents.investment_team.market_data_service import MarketDataService, OHLCVBar
+    from investment_team.market_data_cache import MarketDataCache
+    from investment_team.market_data_service import MarketDataService, OHLCVBar
 
     cache = MarketDataCache(cache_root=tmp_path)
     service = MarketDataService(cache=cache)
@@ -1099,8 +1146,563 @@ def test_market_data_service_fetch_multi_symbol_range(tmp_path) -> None:
     assert result["AAPL"][0].close == 153.0
 
 
+def test_strategy_spec_target_symbols_normalization() -> None:
+    """Issue #523 — target_symbols is uppercased, stripped, deduped, preserves order."""
+    spec = StrategySpec(
+        strategy_id="s-norm",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["qqq", " GLD ", "QQQ", "spy"],
+    )
+    assert spec.target_symbols == ["QQQ", "GLD", "SPY"]
+
+    # default (omitted) is an empty list, preserving backward compat
+    bare = StrategySpec(
+        strategy_id="s-bare",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    assert bare.target_symbols == []
+
+    # None coerces to []
+    none_spec = StrategySpec(
+        strategy_id="s-none",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=None,
+    )
+    assert none_spec.target_symbols == []
+
+
+def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
+    """Issue #523 — non-string entries (and non-list values) are rejected."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="s-bad",
+            authored_by="test",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            timeframe="1d",
+            target_symbols=["AAPL", 42],
+        )
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="s-bad2",
+            authored_by="test",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            timeframe="1d",
+            target_symbols="AAPL",  # type: ignore[arg-type]
+        )
+
+
+def test_resolve_strategy_symbols_overrides_default_when_targets_non_empty() -> None:
+    """Non-empty ``target_symbols`` is returned verbatim — the asset-class
+    default does not contribute, so the fetched universe matches what
+    ``TargetSymbolCoverageGate.check_trades`` will allow strategies to
+    trade. Dropping the default-union behavior fixed a conflict where
+    strategies could trade default-injected symbols and be hard-failed
+    by the coverage gate despite honoring the fetched universe."""
+    from investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-override",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="trade ARKK and VOO only",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["ARKK", "VOO"],
+    )
+    assert service.resolve_strategy_symbols(spec) == ["ARKK", "VOO"]
+
+
+def test_resolve_strategy_symbols_targets_not_truncated_by_universe_cap(
+    monkeypatch,
+) -> None:
+    """The universe-size cap only applies on the empty-targets path. Non-empty
+    ``target_symbols`` is returned verbatim regardless of the cap."""
+    from investment_team.market_data_service import MarketDataService
+
+    monkeypatch.setenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS", "2")
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-overflow",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="trade VTI, VOO, and ARKK",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["VTI", "VOO", "ARKK"],
+    )
+    assert service.resolve_strategy_symbols(spec) == ["VTI", "VOO", "ARKK"]
+
+
+def test_classify_symbol_unambiguous_cases() -> None:
+    """Issue #523 — classify_symbol returns the natural asset class for symbols
+    that unambiguously belong to one canonical universe."""
+    from investment_team.symbols import classify_symbol
+
+    assert classify_symbol("BTC") == "crypto"
+    assert classify_symbol("ETH") == "crypto"
+    assert classify_symbol("AAPL") == "stocks"
+    assert classify_symbol("EURUSD=X") == "forex"
+    assert classify_symbol("EURUSD") == "forex"
+    assert classify_symbol("GC=F") == "futures"
+    # Suffix-only fallback (symbol not in any canonical list)
+    assert classify_symbol("BTC-USD") == "crypto"
+    assert classify_symbol("AUDCHF=X") == "forex"
+    assert classify_symbol("RTY=F") == "futures"
+
+
+def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
+    """Issue #523 — cross-asset ETFs and unknown tickers don't get classified
+    so the mismatch warning doesn't false-positive."""
+    from investment_team.symbols import classify_symbol
+
+    # OTHER_SYMBOLS — tradeable as stocks via Yahoo even with non-stock exposure
+    assert classify_symbol("GLD") is None
+    assert classify_symbol("QQQ") is None
+    assert classify_symbol("TLT") is None
+    # Unknown ticker — don't guess
+    assert classify_symbol("NEWCO") is None
+
+
+def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
+    """Issue #523 — a strategy declaring asset_class="stocks" with
+    target_symbols=["BTC"] should emit a warning so the operator sees the
+    mismatch instead of getting an empty fetch silently."""
+    import logging
+
+    from investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-mismatch",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="bitcoin trend follow",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["BTC"],
+    )
+    with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
+        result = service.resolve_strategy_symbols(spec)
+
+    # BTC is unioned onto the stocks default rather than replacing it, but
+    # the mismatched target is still present so the fetch attempts it.
+    assert "BTC" in result
+    # But the operator sees the diagnostic.
+    assert any(
+        "s-mismatch" in r.message and "BTC" in r.message and "stocks" in r.message
+        for r in caplog.records
+    ), f"expected mismatch warning, got: {[r.message for r in caplog.records]}"
+
+
+def test_resolve_strategy_symbols_no_warning_on_matching_asset_class(caplog) -> None:
+    """Issue #523 — no warning when target_symbols match the declared
+    asset_class, nor for cross-asset ETFs (GLD, QQQ) which deliberately
+    aren't classified to avoid false positives."""
+    import logging
+
+    from investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    aligned = StrategySpec(
+        strategy_id="s-aligned",
+        authored_by="test",
+        asset_class="crypto",
+        hypothesis="BTC trend follow",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["BTC"],
+    )
+    qqq_stocks = StrategySpec(
+        strategy_id="s-qqq",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ trend continuation",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["QQQ", "GLD"],
+    )
+    unknown = StrategySpec(
+        strategy_id="s-unknown",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="momentum on a fresh ticker",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["NEWCO"],
+    )
+    with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
+        service.resolve_strategy_symbols(aligned)
+        service.resolve_strategy_symbols(qqq_stocks)
+        service.resolve_strategy_symbols(unknown)
+
+    assert caplog.records == [], f"unexpected warnings: {[r.message for r in caplog.records]}"
+
+
+def test_resolve_strategy_symbols_falls_back_to_asset_class_universe() -> None:
+    """Empty target_symbols returns the full asset-class default universe
+    when it fits under STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS (default 20)."""
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.symbols import STOCK_SYMBOLS
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-default",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    # STOCK_SYMBOLS has 17 entries; the default cap is 20, so nothing is
+    # dropped.
+    assert service.resolve_strategy_symbols(spec) == list(STOCK_SYMBOLS)
+
+
+def test_resolve_strategy_symbols_respects_max_universe_env_var(monkeypatch, caplog) -> None:
+    """Issue #525 — STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS caps the fallback universe
+    and the truncation is logged (no longer silent)."""
+    import logging
+
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.symbols import STOCK_SYMBOLS
+
+    monkeypatch.setenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS", "3")
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-capped",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
+        result = service.resolve_strategy_symbols(spec)
+
+    assert result == list(STOCK_SYMBOLS[:3])
+    assert any(
+        "s-capped" in r.message and "STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS=3" in r.message
+        for r in caplog.records
+    ), f"expected truncation warning, got: {[r.message for r in caplog.records]}"
+
+
+def test_resolve_strategy_symbols_invalid_env_var_falls_back(monkeypatch, caplog) -> None:
+    """Issue #525 — non-integer STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS values fall back
+    to the default cap with a warning."""
+    import logging
+
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.symbols import STOCK_SYMBOLS
+
+    monkeypatch.setenv("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS", "not-a-number")
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-bad-env",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
+        result = service.resolve_strategy_symbols(spec)
+
+    # Default cap is 20; STOCK_SYMBOLS has 17 entries, so the full default
+    # universe survives the fallback.
+    assert result == list(STOCK_SYMBOLS)
+    assert any(
+        "Invalid STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS" in r.message and "not-a-number" in r.message
+        for r in caplog.records
+    ), f"expected invalid-env warning, got: {[r.message for r in caplog.records]}"
+
+
+def test_resolve_strategy_symbols_no_warning_when_under_cap(caplog) -> None:
+    """Issue #525 — fallback universes under the cap emit no truncation warning."""
+    import logging
+
+    from investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-no-warn",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    with caplog.at_level(logging.WARNING, logger="agents.investment_team.market_data_service"):
+        service.resolve_strategy_symbols(spec)
+
+    assert not any("STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS" in r.message for r in caplog.records), (
+        f"unexpected truncation warning: {[r.message for r in caplog.records]}"
+    )
+
+
+def test_resolve_strategy_symbols_stable_across_universe_reordering(
+    monkeypatch,
+) -> None:
+    """Without truncation, reordering the asset-class universe constant
+    returns the same symbol set (modulo order). The reproducibility
+    property the silent slice broke; still holds now that the universe
+    is sourced from ``symbols.STOCK_SYMBOLS`` via
+    ``asset_class_default_universe``."""
+    from investment_team import symbols
+    from investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    spec = StrategySpec(
+        strategy_id="s-reorder",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    baseline = set(service.resolve_strategy_symbols(spec))
+
+    monkeypatch.setattr(symbols, "STOCK_SYMBOLS", list(reversed(symbols.STOCK_SYMBOLS)))
+    reordered = set(service.resolve_strategy_symbols(spec))
+
+    assert baseline == reordered, (
+        f"reordering STOCK_SYMBOLS changed the resolved universe; "
+        f"only_in_baseline={baseline - reordered}, only_in_reordered={reordered - baseline}"
+    )
+
+
+def test_fetch_market_data_uses_target_symbols_when_set() -> None:
+    """When spec.target_symbols is non-empty, the fetcher receives that
+    list verbatim (override semantics) so the fetched universe matches
+    what ``TargetSymbolCoverageGate.check_trades`` lets the strategy
+    trade. The fetch returns a ``_MarketDataFetch`` envelope carrying
+    requested/fetched audit lists alongside the OHLCV dict."""
+    from unittest.mock import patch
+
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.models import BacktestConfig
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
+    orchestrator.market_data_service = MarketDataService()
+    captured: dict = {}
+
+    def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
+        captured["symbols"] = list(symbols)
+        captured["asset_class"] = asset_class
+        return {sym: ["bar"] for sym in symbols}
+
+    spec = StrategySpec(
+        strategy_id="s-tgt",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ trend continuation",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["QQQ"],
+    )
+    config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
+
+    with patch.object(
+        orchestrator.market_data_service, "fetch_multi_symbol_range", side_effect=fake_fetch
+    ):
+        fetch = orchestrator._fetch_market_data(spec, config)
+
+    assert captured["symbols"] == ["QQQ"]
+    assert fetch.requested_symbols == ["QQQ"]
+    assert fetch.fetched_symbols == ["QQQ"]
+
+
+def test_fetch_market_data_falls_back_when_target_symbols_empty() -> None:
+    """Empty target_symbols routes through the asset-class default universe.
+    The full default universe is returned when it fits under the cap."""
+    from unittest.mock import patch
+
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.models import BacktestConfig
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.symbols import STOCK_SYMBOLS
+
+    orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
+    orchestrator.market_data_service = MarketDataService()
+    captured: dict = {}
+
+    def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
+        captured["symbols"] = list(symbols)
+        return {sym: ["bar"] for sym in symbols}
+
+    spec = StrategySpec(
+        strategy_id="s-default",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="generic large-cap momentum",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
+
+    with patch.object(
+        orchestrator.market_data_service, "fetch_multi_symbol_range", side_effect=fake_fetch
+    ):
+        fetch = orchestrator._fetch_market_data(spec, config)
+
+    assert captured["symbols"] == list(STOCK_SYMBOLS)
+    assert fetch.requested_symbols == list(STOCK_SYMBOLS)
+    assert fetch.fetched_symbols == sorted(STOCK_SYMBOLS)
+
+
+def test_fetch_market_data_records_dropped_symbols() -> None:
+    """When the fetch returns empty bars for some symbols, the audit
+    envelope's ``fetched_symbols`` reflects only the symbols that returned
+    usable data. Non-empty ``target_symbols`` rides into the fetcher
+    verbatim (override semantics)."""
+    from unittest.mock import patch
+
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.models import BacktestConfig
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
+    orchestrator.market_data_service = MarketDataService()
+
+    def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
+        # Only AAPL returns bars; MSFT comes back empty (provider had no data).
+        return {sym: ["bar"] if sym == "AAPL" else [] for sym in symbols}
+
+    spec = StrategySpec(
+        strategy_id="s-partial",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="momentum",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["AAPL", "MSFT"],
+    )
+    config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
+
+    with patch.object(
+        orchestrator.market_data_service, "fetch_multi_symbol_range", side_effect=fake_fetch
+    ):
+        fetch = orchestrator._fetch_market_data(spec, config)
+
+    assert fetch.requested_symbols == ["AAPL", "MSFT"]
+    assert fetch.fetched_symbols == ["AAPL"]
+
+
+def test_fetch_market_data_records_intent_on_provider_exception() -> None:
+    """Even when the provider raises, the envelope still carries
+    ``requested_symbols`` so the audit trail reflects intent. With
+    override semantics that intent is exactly ``target_symbols``."""
+    from unittest.mock import patch
+
+    from investment_team.market_data_service import MarketDataService
+    from investment_team.models import BacktestConfig
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    orchestrator = StrategyLabOrchestrator.__new__(StrategyLabOrchestrator)
+    orchestrator.market_data_service = MarketDataService()
+
+    def fake_fetch(*, symbols, asset_class, start_date, end_date, as_of):
+        raise RuntimeError("provider exploded")
+
+    spec = StrategySpec(
+        strategy_id="s-err",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="momentum",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["AAPL", "MSFT"],
+    )
+    config = BacktestConfig(start_date="2023-01-01", end_date="2023-12-31")
+
+    with patch.object(
+        orchestrator.market_data_service, "fetch_multi_symbol_range", side_effect=fake_fetch
+    ):
+        fetch = orchestrator._fetch_market_data(spec, config)
+
+    assert fetch.data is None
+    assert fetch.requested_symbols == ["AAPL", "MSFT"]
+    assert fetch.fetched_symbols == []
+
+
+def test_backtest_record_persists_symbol_audit_fields() -> None:
+    """Issue #525 — BacktestRecord round-trips requested/fetched_symbols and
+    older persisted JSON without the fields deserialises cleanly."""
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+    )
+
+    spec = StrategySpec(
+        strategy_id="s-rt",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="momentum",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    record = BacktestRecord(
+        backtest_id="bt-rt",
+        strategy_id=spec.strategy_id,
+        strategy=spec,
+        config=BacktestConfig(start_date="2023-01-01", end_date="2023-12-31"),
+        submitted_by="test",
+        submitted_at="2024-01-01T00:00:00+00:00",
+        completed_at="2024-01-01T00:01:00+00:00",
+        result=BacktestResult(
+            total_return_pct=0.0,
+            annualized_return_pct=0.0,
+            volatility_pct=0.0,
+            sharpe_ratio=0.0,
+            max_drawdown_pct=0.0,
+            win_rate_pct=0.0,
+            profit_factor=0.0,
+            sortino_ratio=0.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+        ),
+        requested_symbols=["AAPL", "MSFT"],
+        fetched_symbols=["AAPL"],
+    )
+
+    payload = record.model_dump_json()
+    restored = BacktestRecord.model_validate_json(payload)
+    assert restored.requested_symbols == ["AAPL", "MSFT"]
+    assert restored.fetched_symbols == ["AAPL"]
+
+    # Backward-compat: legacy persisted rows without the new fields still load.
+    legacy = json.loads(payload)
+    legacy.pop("requested_symbols")
+    legacy.pop("fetched_symbols")
+    legacy_restored = BacktestRecord.model_validate(legacy)
+    assert legacy_restored.requested_symbols == []
+    assert legacy_restored.fetched_symbols == []
+
+
 def test_agent_catalog_includes_signal_intelligence_expert() -> None:
-    from agents.investment_team.agent_catalog import CORE_AGENTS
+    from investment_team.agent_catalog import CORE_AGENTS
 
     assert any(agent.name == "Signal Intelligence Expert" for agent in CORE_AGENTS)
 
@@ -1250,9 +1852,9 @@ def _make_lab_record(
         asset_class="equities",
         hypothesis="test",
         signal_definition="sig",
-        entry_rules=["e1"],
-        exit_rules=["x1"],
-        sizing_rules=["s1"],
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=1))],
+        exit_rules=[StopLossRule(pct=0.03)],
         risk_limits={},
         speculative=False,
     )

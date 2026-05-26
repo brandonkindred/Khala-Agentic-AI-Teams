@@ -102,6 +102,7 @@ def _strategy() -> StrategySpec:
         asset_class="crypto",
         hypothesis="h",
         signal_definition="s",
+        timeframe="1d",
         entry_rules=[],
         exit_rules=[],
         strategy_code=_SMA_STRATEGY_CODE,

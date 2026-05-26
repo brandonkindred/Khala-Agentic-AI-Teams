@@ -44,9 +44,11 @@ backend/
                              # + releases tables, sprint_planner_agent, _load_requirements_from_sprint
                              # in the SE orchestrator. Phase 3 (#371): release_manager_agent ships sprint
                              # completion → plan/releases/<version>.md + product_delivery_releases row,
-                             # auto-promotes Integration / DevOps / QA failures into sprint-tagged
-                             # feedback_items so the next /groom sees them as candidate backlog seeds;
-                             # POST/GET /releases routes; SE Integration-phase hook (sprint runs only).
+                             # auto-promotes Integration-phase failures into sprint-tagged
+                             # feedback_items (queryable via GET /feedback; operator triage feeds the
+                             # next groom — POST /groom does not consume feedback automatically);
+                             # POST/GET /releases routes; SE Integration-phase hook (legacy SE path
+                             # only — default use_coding_team=True path currently skips the hook).
     shared_agent_invoke/     # Invoke shim mounted inside the sandbox image; exposes POST /_agents/{id}/invoke
     integrations/            # Shared integration contracts (Google login, Medium, etc.)
     artifact_registry/       # Shared artifact persistence
@@ -131,7 +133,7 @@ npm ci
 npm start             # Dev server at localhost:4200
 npm run build         # Production build
 npm test              # Vitest (requires Chrome)
-npm run test:coverage # 80% line coverage target
+npm run test:coverage # 90% line coverage target
 ```
 
 ### Docker (Full Stack)
@@ -205,6 +207,10 @@ The catalog is backed by `backend/agents/agent_registry/`, which loads declarati
 
 The old `/agent-provisioning` route redirects to `/agent-console` for backward compatibility.
 
+### Product Delivery Loop
+
+The `product_delivery` team (`backend/agents/product_delivery/`, mounted at `/api/product-delivery`) wraps the SE 4-phase pipeline in a persistent loop: backlog → grooming (`ProductOwnerAgent`, WSJF/RICE) → sprint planning (`SprintPlannerAgent`, capacity-aware) → SE run with `{sprint_id}` (orchestrator hydrates requirements directly via `_load_requirements_from_sprint`) → Integration-phase release hook (`ReleaseManagerAgent` writes `plan/releases/<version>.md` and a `product_delivery_releases` row, promotes Integration-phase failures into sprint-tagged `feedback_items`) → next groom. The release hook (`_maybe_ship_sprint_release`) fires on the legacy SE path today; the default `use_coding_team=True` path completes before reaching it. See `ARCHITECTURE.md` §11 ("Product Delivery Loop") for the sequence diagram, known limitations, and runtime contracts.
+
 ### LLM Integration
 
 `backend/agents/llm_service/` provides a unified client that supports:
@@ -220,6 +226,17 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 - Known first-party modules: `shared`, `backend_agent`, `frontend_team`, `devops_agent`, `qa_agent`
 - Per-file ignores exist for tests and `agent_implementations/`
 - **TypeScript**: Angular style; SCSS for styling
+
+### Project Rules
+
+- **Never reference GitHub issues in code, comments, or docs.** Do not mention issue numbers (e.g. `#243`, `#369`, `Issue #531`), issue URLs, or "see issue X" anywhere in source code, comments, docstrings, commit messages, changelogs, or documentation. Describe the change on its own terms — what it does and why — without pointing at an external tracker. This rule applies to *new* writing; existing references in this file and historical docs are grandfathered until the surrounding section is rewritten.
+- **Always use `Closes #N` notation in pull requests.** Every PR must reference the associated GitHub issue in its body using GitHub's auto-close keywords (`Closes #N`, `Fixes #N`, or `Resolves #N`) so merging the PR automatically closes the linked issue. This is the *only* place issue numbers belong — PR bodies — and it is required, not optional. If a change has no associated issue, open one first.
+- **Design by Contract (DbC) is mandatory for all code and comments.** Every function, method, and module must make its contract explicit:
+  - **Preconditions** — what callers must guarantee about inputs (types, ranges, invariants, required state). Enforce with `assert` or explicit validation that raises on violation at boundaries.
+  - **Postconditions** — what the function guarantees about its return value and observable side effects when preconditions hold.
+  - **Invariants** — properties of a class/module that hold before and after every public operation.
+  - Document the contract in the docstring under explicit `Preconditions:`, `Postconditions:`, and (where relevant) `Invariants:` sections. Comments that are not part of a contract should still respect the existing "only write a comment when the WHY is non-obvious" rule.
+  - Violations are bugs in the *caller* (precondition) or *callee* (postcondition/invariant) — never silently coerce, never `try`/`except` around a contract failure to hide it.
 
 ## Key Environment Variables
 
@@ -248,6 +265,9 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `ARCHITECT_MODEL_SPECIALIST` / `ARCHITECT_MODEL_ORCHESTRATOR` | Per-role model overrides for the AI Systems team |
 | `ALPHA_VANTAGE_API_KEY` / `FRED_API_KEY` | Market data providers used by the Investment Strategy Lab |
 | `STRATEGY_LAB_MARKET_DATA_*` | Strategy Lab market-data cache/timeout/provider tuning |
+| `STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS` | Hard ceiling on the asset-class default universe used when `spec.target_symbols` is empty (default `20`). When the cap actually truncates the default a `logger.warning` fires. Non-empty `spec.target_symbols` is returned verbatim by `resolve_strategy_symbols` (override semantics) so the fetched universe matches what `TargetSymbolCoverageGate.check_trades` allows the strategy to trade. |
+| `STRATEGY_LAB_ALIGNMENT_RETRIES` | Issue #531. Number of times `_run_alignment_audit` retries on `AlignmentAuditError` (LLM transport / JSON parse failures) before falling closed with `aligned=False` (default `2` → 3 attempts total). Unexpected (non-`AlignmentAuditError`) agent exceptions fail closed immediately without retry. |
+| `STRATEGY_LAB_DESIGN_REVIEW_ROUNDS` | Cap on the design ↔ design-review loop inside `_run_design_attempt` (default `5`, sub-1 values floored to `1`, garbage values fall back to `5`). The loop runs `DesignAgent → SpecReadinessGate → DesignReviewAgent → DesignAgent.revise` until the reviewer marks the spec ready or this cap is reached; exhaustion short-circuits the cycle with `status="failed: design_not_ready"` rather than running code against a spec that never converged. |
 | `INVESTMENT_MARKET_DATA_CACHE_ROOT` | Issue #376. Operator override for the on-disk root of the Investment Team's content-hashed market-data cache. Falls back to `${AGENT_CACHE}/investment_team/market_data`, then to a tempdir (with WARN — non-persistent). |
 | `MARKET_DATA_FETCH_WORKERS` | Issue #376. Worker count for `MarketDataService.fetch_multi_symbol_range` and `MarketDataCache.get_or_fetch_multi`. Default `min(len(symbols), 16)`; the previous hard cap of 5 is gone. |
 | `AUTHOR_PROFILE_PATH` | Path to user/author profile YAML injected into blogging prompts. Falls back to `$AGENT_CACHE/author_profile.yaml`, then to the bundled example. See `backend/agents/blogging/author_profile/`. |
@@ -269,14 +289,15 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 
 ## Testing
 
-- **Backend**: `pytest` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning v3, sales, deepthought, etc.)
-- **Frontend**: Vitest + Angular testing utilities; 80% line coverage target for `src/app`
-- **CI**: GitHub Actions — ruff lint must pass first, then parallel test jobs, then docker smoke test
+- **Coverage requirement: tests must cover at least 90% of code (line coverage) on both backend and frontend.** This is a hard floor for new and modified code; CI enforces it. If a file or branch cannot reach 90%, document the reason explicitly in the PR and add a targeted `# pragma: no cover` (Python) or `/* istanbul ignore next */` (TypeScript) with a one-line justification — do not lower the global threshold.
+- **Backend**: `pytest` with `pytest-cov` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning v3, sales, deepthought, etc.) and fails the build below 90% line coverage.
+- **Frontend**: Vitest + Angular testing utilities; **90% line coverage target** for `src/app`.
+- **CI**: GitHub Actions — ruff lint must pass first, then parallel test jobs (coverage-gated at 90%), then docker smoke test.
 
 ## Reference Docs
 
 - `backend/agents/agent_provisioning_team/AGENT_ANATOMY.md` — Required structure for AI agents (Input/Output, Tools, Memory, Prompts, Security Guardrails, Subagents); diagrams in `design_assets/`
-- `ARCHITECTURE.md` — 26KB detailed architecture with Mermaid diagrams (11 sections)
+- `ARCHITECTURE.md` — detailed architecture with Mermaid diagrams (12 sections, including the Product Delivery Loop)
 - `backend/agents/software_engineering_team/README.md` — 31KB SE team deep dive
 - `docker/README.md` — Full-stack setup, ports, env vars, security
 - `user-interface/README.md` — UI setup and API configuration

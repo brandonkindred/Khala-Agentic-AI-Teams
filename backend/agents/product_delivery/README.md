@@ -30,23 +30,34 @@ If every planned story has reached a terminal status the
    UTC date `YYYY-MM-DD`, with `-N` suffix on collisions).
 3. Records a `product_delivery_releases` row with `notes_path` and
    `shipped_at`.
-4. Promotes Integration / DevOps / QA failures into
-   `product_delivery_feedback_items`, each tagged with `sprint_id` so
-   the next `POST /groom` can scope candidate inputs to "what this
-   sprint surfaced".
+4. Promotes Integration-phase failures (passed by the SE hook as
+   `int_result.issues`) into `product_delivery_feedback_items`, each
+   tagged with `sprint_id`. `ReleaseManagerAgent.ship()` itself accepts
+   `qa_failures` and `devops_failures` arguments, but the SE call site
+   only supplies the Integration list today, so DevOps and QA failures
+   are not currently auto-promoted. These rows are queryable via
+   `GET /api/product-delivery/feedback?product_id=…&status=open`
+   (and the Agent Console Feedback tab); `POST /groom` itself only
+   reads story rows today and does not consume feedback automatically,
+   so triaging the new failures into stories is what feeds the next
+   grooming pass.
 
 Failures are non-fatal — the hook wraps the agent in `try/except` and,
 on agent failure, opens a `release-manager-error` feedback item with
-the exception text + `job_id` so the next grooming sees the gap.
+the exception text + `job_id` so the gap is visible to operators
+reviewing feedback before the next grooming pass.
 
 ## What's deferred to follow-up issues
 
 - Agent Console "Backlog", "Sprints", and "Releases" tabs (Angular).
-- `ARCHITECTURE.md` "Product Delivery Loop" section.
 - Versioning policy beyond date-stamps (semver vs date — issue #371
   explicitly defers this).
 - Temporal-mode plumbing for `sprint_id` runs (Phase 2 raises a 400
   in Temporal mode; same contract here).
+
+For the end-to-end architectural picture (loop diagram + sequence
+diagram + runtime contracts), see
+[`ARCHITECTURE.md` §11 — Product Delivery Loop](../../../ARCHITECTURE.md#11-product-delivery-loop).
 
 ## Schema
 

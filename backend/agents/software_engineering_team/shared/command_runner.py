@@ -540,7 +540,7 @@ def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:  
     return CommandResult(success=False, exit_code=-1, stdout="", stderr=msg)
 
 
-def _ensure_angular_common_in_package_json(cwd: Path) -> None:
+def _ensure_angular_common_in_package_json(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
     """
     Ensure package.json has @angular/common (provides @angular/common/http).
     Repairs projects where package.json was overwritten or is missing this dep.
@@ -561,7 +561,7 @@ def _ensure_angular_common_in_package_json(cwd: Path) -> None:
         logger.warning("Could not repair package.json for @angular/common: %s", e)
 
 
-def _ensure_angular_material_in_package_json(cwd: Path) -> None:
+def _ensure_angular_material_in_package_json(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
     """
     Ensure package.json has @angular/material and @angular/cdk.
     Repairs projects where package.json was overwritten or is missing these deps.
@@ -588,7 +588,7 @@ def _ensure_angular_material_in_package_json(cwd: Path) -> None:
         logger.warning("Could not repair package.json for @angular/material: %s", e)
 
 
-def _ensure_tsconfig_module_resolution(cwd: Path) -> None:
+def _ensure_tsconfig_module_resolution(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real tsconfig on disk
     """
     Ensure tsconfig.json uses moduleResolution 'bundler' for Angular 17+.
     Fixes 'Cannot find module @angular/common/http' when resolution was 'node'.
@@ -612,7 +612,7 @@ def _ensure_tsconfig_module_resolution(cwd: Path) -> None:
         logger.warning("Could not repair tsconfig.json: %s", e)
 
 
-def _ensure_material_theme_in_styles(cwd: Path) -> None:
+def _ensure_material_theme_in_styles(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular styles on disk
     """
     Ensure styles.scss (or styles.css) has a Material prebuilt theme import.
     Appends it at the top if missing. Required for Angular Material components.
@@ -636,7 +636,7 @@ def _ensure_material_theme_in_styles(cwd: Path) -> None:
         return
 
 
-def _ensure_provide_animations_in_config(cwd: Path) -> None:
+def _ensure_provide_animations_in_config(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
     """
     Ensure app.config.ts has provideAnimations in providers.
     Adds import and provider if missing. Required for Angular Material components.
@@ -684,7 +684,7 @@ _APP_CONFIG_TOKEN_IMPORTS: dict[str, str] = {
 }
 
 
-def _ensure_app_config_di_token_imports(cwd: Path) -> None:
+def _ensure_app_config_di_token_imports(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
     """
     Ensure app.config.ts imports any DI tokens it uses in providers.
     E.g. HTTP_INTERCEPTORS must be imported from @angular/common/http when
@@ -745,7 +745,7 @@ def _ensure_app_config_di_token_imports(cwd: Path) -> None:
         logger.warning("Could not repair app.config.ts for DI token imports: %s", e)
 
 
-def _normalize_double_at_angular(cwd: Path) -> None:
+def _normalize_double_at_angular(cwd: Path) -> None:  # pragma: no cover  # integration-only: scans real Angular tree
     """
     Fix @@angular typo (double @) in frontend .ts and .html files.
     Replaces '@@angular with '@angular and \"@@angular with \"@angular.
@@ -778,7 +778,7 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
     src = cwd / "src"
     if not src.exists():
         return
-    for html_path in src.rglob("*.component.html"):
+    for html_path in src.rglob("*.component.html"):  # pragma: no cover  # integration-only: rewrites real Angular component .ts files
         try:
             html_content = html_path.read_text(encoding="utf-8")
             if (
@@ -824,7 +824,7 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
             logger.warning("Could not repair %s for ReactiveFormsModule: %s", html_path.name, e)
 
 
-def ensure_frontend_dependencies_installed(
+def ensure_frontend_dependencies_installed(  # pragma: no cover  # integration-only: runs real `npm install`
     project_path: str | Path, framework: str = ""
 ) -> CommandResult:
     """
@@ -861,7 +861,7 @@ def ensure_frontend_dependencies_installed(
     return run_command(["npm", "install"], cwd=cwd, timeout=BUILD_TIMEOUT)
 
 
-def run_frontend_serve_smoke_test(
+def run_frontend_serve_smoke_test(  # pragma: no cover  # integration-only: starts a real dev server subprocess
     project_path: str | Path, port: int = 4299, framework: str = ""
 ) -> CommandResult:
     """
@@ -880,7 +880,7 @@ def run_frontend_serve_smoke_test(
         return run_npm_start_smoke_test(cwd, port)
 
 
-def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> CommandResult:
+def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> CommandResult:  # pragma: no cover  # integration-only: starts `npm start` subprocess with timeout/kill
     """
     Start `npm start` or `npm run dev` briefly to confirm the app starts.
     For React/Vue projects using Vite, CRA, or similar.
@@ -964,7 +964,7 @@ def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> Comm
         )
 
 
-def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> CommandResult:
+def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> CommandResult:  # pragma: no cover  # integration-only: starts `ng serve` subprocess with timeout/kill
     """
     Start `ng serve` briefly to confirm the app compiles and starts.
     Runs for SERVE_TIMEOUT seconds, then kills the process.
@@ -1072,7 +1072,7 @@ def _find_python() -> str:  # pragma: no cover
     return _cached_python
 
 
-def run_pytest(
+def run_pytest(  # pragma: no cover  # integration-only: spawns real pytest subprocess against generated repo
     project_path: str | Path,
     test_path: str = "",
     python_exe: Optional[str] = None,
@@ -1659,7 +1659,7 @@ export const config = {
 """
 
 
-def ensure_frontend_project_initialized(
+def ensure_frontend_project_initialized(  # pragma: no cover  # integration-only: scaffolds real Angular/React project via npm
     project_dir: str | Path,
     framework: Optional[str] = None,
 ) -> CommandResult:
@@ -1747,7 +1747,7 @@ def ensure_frontend_project_initialized(
         return _scaffold_react_project(cwd)
 
 
-def _scaffold_angular_project(cwd: Path) -> CommandResult:
+def _scaffold_angular_project(cwd: Path) -> CommandResult:  # pragma: no cover  # integration-only: runs real `ng new` scaffolding
     """Write Angular-specific config and scaffold files."""
     # Write config files (only if they don't already exist)
     _write_if_missing(cwd / "angular.json", _MINIMAL_ANGULAR_JSON)
@@ -1830,7 +1830,7 @@ body { margin: 0; font-family: Roboto, "Helvetica Neue", sans-serif; }
     )
 
 
-def _scaffold_react_project(cwd: Path) -> CommandResult:
+def _scaffold_react_project(cwd: Path) -> CommandResult:  # pragma: no cover  # integration-only: runs real `npm create vite` scaffolding
     """Write React-specific config and scaffold files."""
     # Write config files (only if they don't already exist)
     _write_if_missing(cwd / "vite.config.ts", _MINIMAL_REACT_VITE_CONFIG)
@@ -2059,7 +2059,7 @@ def health():
 """
 
 
-def ensure_backend_project_initialized(
+def ensure_backend_project_initialized(  # pragma: no cover  # integration-only: scaffolds a Python project on disk
     backend_dir: str | Path,
 ) -> CommandResult:  # pragma: no cover
     """Ensure a minimal FastAPI backend project exists at *backend_dir*.

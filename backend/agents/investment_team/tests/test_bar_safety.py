@@ -1,6 +1,6 @@
 """Regression tests for the engine-side look-ahead guard (Phase 2).
 
-Covers two surfaces:
+Covers three surfaces:
 
 * ``BarSafetyAssertion.check_fill`` — direct behavior check (enabled /
   disabled, equal / later / earlier bar timestamps).
@@ -8,6 +8,10 @@ Covers two surfaces:
   ``OrderBook`` seeded with an order whose ``submitted_at`` equals the bar
   the simulator is about to fill against must raise ``LookAheadError`` and
   flip ``TradingServiceResult.lookahead_violation``.
+* Requeue + submitted_at refresh — a partial fill with
+  ``REQUEUE_NEXT_BAR`` advances ``submitted_at`` to the fill bar's
+  timestamp, allowing the continuation fill on the next bar without
+  tripping the look-ahead guard.
 """
 
 from __future__ import annotations
@@ -24,7 +28,9 @@ from investment_team.models import BacktestConfig, StrategySpec
 from investment_team.trading_service.data_stream.historical_replay import (
     HistoricalReplayStream,
 )
+from investment_team.trading_service.engine.execution_model import RealisticExecutionModel
 from investment_team.trading_service.engine.fill_simulator import (
+    FillKind,
     FillSimulator,
     FillSimulatorConfig,
 )
@@ -38,6 +44,7 @@ from investment_team.trading_service.strategy.contract import (
     OrderSide,
     OrderType,
     TimeInForce,
+    UnfilledPolicy,
 )
 
 # ---------------------------------------------------------------------------
@@ -267,6 +274,7 @@ def test_end_to_end_round_trip_strategy_never_triggers_safety() -> None:
         asset_class="stocks",
         hypothesis="invariant",
         signal_definition="invariant",
+        timeframe="1d",
         strategy_code=ROUND_TRIP_CODE,
     )
     config = BacktestConfig(
@@ -350,3 +358,71 @@ def test_trading_service_surfaces_lookahead_violation_from_engine() -> None:
     assert outcome.lookahead_violation
     assert outcome.error is not None
     assert "fill must be strictly after submission" in outcome.error
+
+
+# ---------------------------------------------------------------------------
+# Requeue refreshes submitted_at on partial fill
+# ---------------------------------------------------------------------------
+
+
+def test_requeue_on_partial_fill_refreshes_submitted_at() -> None:
+    """A partial fill with ``REQUEUE_NEXT_BAR`` must advance
+    ``submitted_at`` to the fill bar's timestamp so the continuation fill
+    on the *next* bar passes the look-ahead guard.
+
+    Preconditions: order submitted at ``2024-01-01`` with
+    ``unfilled_policy=REQUEUE_NEXT_BAR``, qty large enough to trigger
+    the participation cap on a thin-volume bar.
+
+    Postconditions:
+    - Bar ``2024-01-02``: partial fill emitted with ``FillKind.PARTIAL``;
+      requeued order has ``submitted_at == "2024-01-02"``.
+    - Bar ``2024-01-03``: continuation fill succeeds (no ``LookAheadError``)
+      because ``submitted_at`` was refreshed to ``"2024-01-02"`` (strictly
+      before ``"2024-01-03"``).
+    """
+    portfolio = Portfolio(initial_capital=100_000.0)
+    order_book = OrderBook()
+    risk = RiskFilter(RiskLimits())
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        risk_filter=risk,
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        execution_model=RealisticExecutionModel(participation_cap=0.10),
+        bar_safety=BarSafetyAssertion(enabled=True),
+    )
+
+    req = OrderRequest(
+        client_order_id="c1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=200,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+    )
+    order_book.submit(req, submitted_at="2024-01-01", submitted_equity=100_000.0)
+
+    # Bar 1: thin volume triggers participation cap → partial fill + requeue
+    bar1 = Bar(
+        symbol="AAA", timestamp="2024-01-02",
+        open=100.0, high=101.0, low=99.0, close=100.0, volume=1_000.0,
+    )
+    outcome1 = sim.process_bar(bar1)
+
+    assert len(outcome1.entry_fills) == 1
+    assert outcome1.entry_fills[0].fill_kind == FillKind.PARTIAL
+
+    pending = order_book.all_pending()
+    assert len(pending) == 1
+    assert pending[0].submitted_at.startswith("2024-01-02")
+
+    # Bar 2: the requeued order fills on the next bar without tripping the
+    # look-ahead guard (submitted_at="2024-01-02" < fill_bar="2024-01-03").
+    bar2 = Bar(
+        symbol="AAA", timestamp="2024-01-03",
+        open=100.0, high=101.0, low=99.0, close=100.0, volume=1_000_000.0,
+    )
+    outcome2 = sim.process_bar(bar2)
+    assert len(outcome2.entry_fills) >= 1

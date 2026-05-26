@@ -1,4 +1,4 @@
-"""Unit tests for ``RealisticExecutionModel`` (issue #248).
+"""Unit tests for ``RealisticExecutionModel``.
 
 Covers the three fill-realism fixes:
 
@@ -12,24 +12,34 @@ Covers the three fill-realism fixes:
    ``participation_cap × bar_dollar_volume`` partially fill to the cap;
    remainder is dropped.
 
-Also covers the adverse-selection haircut on limit fills (``next_bar``-aware).
+Also covers the adverse-selection haircut on limit fills (``next_bar``-aware),
+and partial-fill emission through the ``FillSimulator`` integration layer.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from investment_team.execution.risk_filter import RiskFilter, RiskLimits
 from investment_team.trading_service.engine.execution_model import (
     OptimisticExecutionModel,
     RealisticExecutionModel,
     build_execution_model,
 )
+from investment_team.trading_service.engine.fill_simulator import (
+    FillKind,
+    FillSimulator,
+    FillSimulatorConfig,
+)
+from investment_team.trading_service.engine.order_book import OrderBook
+from investment_team.trading_service.engine.portfolio import Portfolio
 from investment_team.trading_service.strategy.contract import (
     Bar,
     OrderRequest,
     OrderSide,
     OrderType,
     TimeInForce,
+    UnfilledPolicy,
 )
 
 
@@ -373,3 +383,136 @@ def test_optimistic_silenced_by_explicit_warn_false(caplog):
     caplog.set_level(logging.WARNING)
     OptimisticExecutionModel(warn=False)
     assert not any("OptimisticExecutionModel selected" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Partial-fill emission through FillSimulator
+# ---------------------------------------------------------------------------
+
+
+def _make_sim(*, participation_cap: float = 0.10) -> tuple:
+    """Build a FillSimulator with a RealisticExecutionModel.
+
+    Preconditions: participation_cap in (0, 1].
+    Postconditions: returns (simulator, order_book, portfolio) triple;
+    portfolio starts at $100k, zero slippage/cost.
+    """
+    portfolio = Portfolio(initial_capital=100_000.0)
+    order_book = OrderBook()
+    risk = RiskFilter(RiskLimits())
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        risk_filter=risk,
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        execution_model=RealisticExecutionModel(participation_cap=participation_cap),
+    )
+    return sim, order_book, portfolio
+
+
+def test_simulator_emits_partial_fill_when_cap_exceeded() -> None:
+    """When order notional exceeds the participation cap the FillSimulator
+    must emit a Fill with ``fill_kind=PARTIAL`` and a positive
+    ``unfilled_qty`` — not silently drop the remainder.
+
+    Preconditions: order qty × bar.open > participation_cap × bar_dollar_vol.
+    Postconditions: exactly one entry fill with PARTIAL kind, unfilled_qty
+    equal to the uncapped remainder, and the order removed (DROP policy).
+    """
+    sim, ob, _ = _make_sim(participation_cap=0.10)
+    # bar_dollar_volume = 100 * 1000 = 100k; 10% cap = 10k
+    # 200 shares @ $100 = $20k notional → qty_fraction = 0.5 → 100 filled
+    req = _req(side=OrderSide.LONG, order_type=OrderType.MARKET, qty=200)
+    ob.submit(req, submitted_at="2024-01-01", submitted_equity=100_000.0)
+
+    bar = _bar(o=100.0, h=101.0, l=99.0, c=100.0, volume=1_000.0)
+    outcome = sim.process_bar(bar)
+
+    assert len(outcome.entry_fills) == 1
+    fill = outcome.entry_fills[0]
+    assert fill.fill_kind == FillKind.PARTIAL
+    assert fill.qty == pytest.approx(100.0)
+    assert fill.unfilled_qty == pytest.approx(100.0)
+    assert len(ob.all_pending()) == 0
+
+
+def test_simulator_emits_full_fill_when_within_cap() -> None:
+    """When order notional fits within the cap the emitted Fill must have
+    ``fill_kind=FULL``.
+
+    Preconditions: order qty × bar.open <= participation_cap × bar_dollar_vol.
+    Postconditions: one entry fill with FULL kind; unfilled_qty is zero or None.
+    """
+    sim, ob, _ = _make_sim(participation_cap=0.10)
+    req = _req(side=OrderSide.LONG, order_type=OrderType.MARKET, qty=5)
+    ob.submit(req, submitted_at="2024-01-01", submitted_equity=100_000.0)
+
+    bar = _bar(o=100.0, h=101.0, l=99.0, c=100.0, volume=1_000_000.0)
+    outcome = sim.process_bar(bar)
+
+    assert len(outcome.entry_fills) == 1
+    fill = outcome.entry_fills[0]
+    assert fill.fill_kind == FillKind.FULL
+    assert (fill.unfilled_qty or 0.0) == pytest.approx(0.0)
+
+
+def test_partial_fill_with_drop_policy_removes_remainder() -> None:
+    """Under ``unfilled_policy=DROP`` (the default), a participation-capped
+    partial fill removes the order from the book after emitting the PARTIAL
+    Fill.
+
+    Preconditions: order with no explicit unfilled_policy (defaults to DROP).
+    Postconditions: order book is empty after the fill; the partial Fill is
+    still emitted so downstream analytics can see the partial.
+    """
+    sim, ob, _ = _make_sim(participation_cap=0.10)
+    req = OrderRequest(
+        client_order_id="c1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=200,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+    )
+    ob.submit(req, submitted_at="2024-01-01", submitted_equity=100_000.0)
+
+    bar = _bar(o=100.0, h=101.0, l=99.0, c=100.0, volume=1_000.0)
+    outcome = sim.process_bar(bar)
+
+    assert outcome.entry_fills[0].fill_kind == FillKind.PARTIAL
+    assert len(ob.all_pending()) == 0
+
+
+def test_partial_fill_with_requeue_policy_retains_order() -> None:
+    """Under ``unfilled_policy=REQUEUE_NEXT_BAR``, the order stays in the
+    book with updated ``remaining_qty`` and a refreshed ``submitted_at``
+    matching the fill bar's timestamp.
+
+    Preconditions: order with REQUEUE_NEXT_BAR policy, qty exceeding cap.
+    Postconditions: one entry fill (PARTIAL), order remains pending with
+    ``remaining_qty == unfilled_qty`` and ``submitted_at == bar.timestamp``.
+    """
+    sim, ob, _ = _make_sim(participation_cap=0.10)
+    req = OrderRequest(
+        client_order_id="c1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=200,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+    )
+    ob.submit(req, submitted_at="2024-01-01", submitted_equity=100_000.0)
+
+    bar = _bar(o=100.0, h=101.0, l=99.0, c=100.0, volume=1_000.0)
+    outcome = sim.process_bar(bar)
+
+    assert len(outcome.entry_fills) == 1
+    assert outcome.entry_fills[0].fill_kind == FillKind.PARTIAL
+    assert outcome.entry_fills[0].unfilled_qty == pytest.approx(100.0)
+
+    pending = ob.all_pending()
+    assert len(pending) == 1
+    po = pending[0]
+    assert po.remaining_qty == pytest.approx(100.0)
+    assert po.submitted_at.startswith("2024-01-02")

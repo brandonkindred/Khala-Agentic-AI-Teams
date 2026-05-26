@@ -10,8 +10,24 @@ here is genuinely shared plumbing:
   objects; still used by legacy test fixtures that predate PR 3.
 * ``indicators.py`` — pre-built technical indicators copied into the
   strategy subprocess by the streaming harness.
+* :mod:`rule_compiler` — pure-functional evaluator for structured
+  ``ExitRule`` discriminated unions (issue #527). The trading service's
+  bar loop calls :func:`evaluate_exit_rules` after delivering each bar to
+  the strategy and emits any returned ``ExitIntent`` as a close order.
 """
 
+from .rule_compiler import (
+    BarSnapshot,
+    ExitIntent,
+    PositionState,
+    evaluate_exit_rules,
+)
 from .trade_builder import build_trade_records
 
-__all__ = ["build_trade_records"]
+__all__ = [
+    "BarSnapshot",
+    "ExitIntent",
+    "PositionState",
+    "build_trade_records",
+    "evaluate_exit_rules",
+]

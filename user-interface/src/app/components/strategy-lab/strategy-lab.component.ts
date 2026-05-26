@@ -642,16 +642,42 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * A failed gate is "remedied" if it failed in an earlier refinement round
-   * and the final round produced a passing result (i.e. `refinement_rounds > 0`
-   * and this gate's round is not the last one that ran).
+   * A failed gate is "remedied" if a later run of the same logical
+   * validator produced a passing result. Two channels:
+   *
+   * - Standard refinement-loop gates (refinement_round >= 0): remedied
+   *   when the gate's round is earlier than the cycle's last round
+   *   (the existing same-round-as-failure rule).
+   * - Pre-synthesis gates (refinement_round = -1, #547 item 1):
+   *   refinement itself is code-only and cannot fix them, but the
+   *   zero-trade repair path (#547 review) re-runs the spec validator
+   *   after committing whitelisted spec updates and emits gates with
+   *   gate_name `zero_trade_repair_<original>`. If any such later
+   *   validator pass produced a passing result for the same logical
+   *   check, the original pre-synthesis warning is remedied.
    */
   isRemedied(gate: QualityGateResult, record: StrategyLabRecord): boolean {
     if (gate.passed) return false;
+
+    const gateRound = gate.refinement_round ?? 0;
+    if (gateRound < 0) {
+      // Pre-synthesis gate. Remedied only if a later validator pass for
+      // the same logical check returned a passing result.
+      const gates = record.quality_gate_results ?? [];
+      const baseName = gate.gate_name;
+      const repairName = `zero_trade_repair_${baseName}`;
+      return gates.some(
+        (g) =>
+          g.passed &&
+          (g.refinement_round ?? -1) >= 0 &&
+          (g.gate_name === baseName || g.gate_name === repairName),
+      );
+    }
+
     const maxRound = record.refinement_rounds ?? 0;
     if (maxRound === 0) return false;
     // Gate failed in an earlier round — the strategy continued past it
-    return (gate.refinement_round ?? 0) < maxRound;
+    return gateRound < maxRound;
   }
 
   gateIcon(gate: QualityGateResult, record: StrategyLabRecord): string {

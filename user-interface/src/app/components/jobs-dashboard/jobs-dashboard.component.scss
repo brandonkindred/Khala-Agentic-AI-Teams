@@ -38,9 +38,27 @@
     gap: var(--kh-space-3);
 
     .last-updated {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--kh-space-2);
       font-size: var(--kh-text-xs);
       color: var(--kh-text-secondary);
       font-family: var(--kh-font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .live-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--kh-success);
+      animation: kh-pulse-live 2s ease-in-out infinite;
+      flex-shrink: 0;
+
+      &.is-paused {
+        animation: none;
+        opacity: 0.45;
+      }
     }
   }
 }
@@ -250,10 +268,21 @@
 // ── Table ───────────────────────────────────────────────────────────────────
 
 .jobs-table-container {
+  position: relative;
   background: var(--kh-surface-2);
   border-radius: var(--kh-radius-lg);
   border: 1px solid var(--kh-border);
+  box-shadow: var(--kh-shadow-md);
   overflow: hidden;
+}
+
+.table-refresh-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 1;
 }
 
 .jobs-table {
@@ -272,8 +301,6 @@
       text-align: left;
       font-weight: 600;
       font-size: var(--kh-text-xs);
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
       color: var(--kh-text-secondary);
       white-space: nowrap;
     }
@@ -311,6 +338,33 @@
         padding: var(--kh-space-2) var(--kh-space-3);
         vertical-align: middle;
       }
+
+      td.col-actions {
+        position: relative;
+        padding-right: calc(var(--kh-space-3) + 22px);
+
+        &::after {
+          content: 'chevron_right';
+          font-family: 'Material Icons';
+          font-feature-settings: 'liga';
+          -webkit-font-smoothing: antialiased;
+          position: absolute;
+          right: var(--kh-space-2);
+          top: 50%;
+          transform: translateY(-50%);
+          font-size: 18px;
+          line-height: 1;
+          color: var(--kh-text-muted);
+          opacity: 0;
+          transition: opacity var(--kh-transition);
+          pointer-events: none;
+        }
+      }
+
+      &:hover td.col-actions::after,
+      &:focus-visible td.col-actions::after {
+        opacity: 1;
+      }
     }
   }
 }
@@ -334,8 +388,16 @@
   50%      { opacity: 1; }
 }
 
+@keyframes kh-pulse-live {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .stuck-indicator { animation: none; opacity: 1; }
+  .stuck-indicator   { animation: none; opacity: 1; }
+  .live-dot          { animation: none; opacity: 1; }
+  .table-refresh-bar { display: none; }
+  .jobs-table tbody tr.job-row td.col-actions::after { transition: none; }
 }
 
 // ── Column Widths ───────────────────────────────────────────────────────────
@@ -368,7 +430,7 @@ tbody .col-actions {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -480,6 +542,7 @@ tbody .col-actions {
   color: var(--kh-text-primary);
   font-family: var(--kh-font-mono);
   font-size: var(--kh-text-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .progress-cell {
@@ -500,18 +563,21 @@ tbody .col-actions {
     text-align: right;
     color: var(--kh-text-tertiary);
     font-family: var(--kh-font-mono);
+    font-variant-numeric: tabular-nums;
   }
 }
 
-.progress-na,
-.agents-na {
-  color: var(--kh-text-secondary);
+.cell-empty {
+  color: var(--kh-text-muted);
+  opacity: 0.5;
+  user-select: none;
 }
 
 .time-ago {
   color: var(--kh-text-secondary);
   font-size: var(--kh-text-xs);
   font-family: var(--kh-font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 // ── Agent Chips ─────────────────────────────────────────────────────────────
@@ -519,7 +585,8 @@ tbody .col-actions {
 .agents-cell {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  column-gap: 8px;
+  row-gap: 4px;
 }
 
 .agent-chip {
@@ -528,7 +595,7 @@ tbody .col-actions {
   gap: 3px;
   padding: 2px 7px 2px 5px;
   border-radius: var(--kh-radius-full);
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   font-weight: 500;
   white-space: nowrap;
   background: var(--kh-accent-subtle);
@@ -604,14 +671,9 @@ tbody .col-actions {
   &:hover { background: var(--kh-accent-subtle) !important; }
 }
 
-.restart-button {
-  color: #c084fc !important;
-  &:hover { background: rgba(168, 85, 247, 0.12) !important; }
-}
-
-.delete-button {
+.overflow-button {
   color: var(--kh-text-muted) !important;
-  &:hover { background: var(--kh-error-subtle) !important; color: var(--kh-error) !important; }
+  &:hover { background: var(--kh-glass) !important; }
 }
 
 // ── Animation ───────────────────────────────────────────────────────────────

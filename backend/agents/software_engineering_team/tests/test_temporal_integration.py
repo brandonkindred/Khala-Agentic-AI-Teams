@@ -1,9 +1,11 @@
 """Tests for Temporal integration: when enabled, API starts workflows instead of threads.
 
-Optional integration test with a real Temporal server (e.g. Docker): start the stack with
-TEMPORAL_ADDRESS set, POST /run-team to start a job, kill the API process, restart it,
-then verify the workflow continues or the job can be resumed via POST /run-team/{id}/resume.
-See ARCHITECTURE.md section \"Temporal (durable execution)\" for env and setup."""
+Routed through the in-memory ``FakeJobServiceClient`` so they run as unit tests
+without a live job service.  A real-Temporal smoke run is still possible by
+starting the stack with ``TEMPORAL_ADDRESS`` set, POSTing /run-team, killing
+the API process, restarting it, and resuming the job — see ARCHITECTURE.md
+section "Temporal (durable execution)" for env and setup.
+"""
 
 import sys
 from pathlib import Path
@@ -11,11 +13,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-
-# Touches the central job service via SE job_store; opt out of unit-default
-# pytest runs.  Follow-up: split this file's pure-mock tests off and convert
-# the storage-touching ones to use ``fake_job_client``.
-pytestmark = [pytest.mark.integration]
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
@@ -31,6 +28,11 @@ _spec = importlib.util.spec_from_file_location(
 _api_main = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_api_main)
 app = _api_main.app
+
+
+@pytest.fixture(autouse=True)
+def _autouse_patched_job_store(patched_job_store):
+    return patched_job_store
 
 
 @pytest.fixture

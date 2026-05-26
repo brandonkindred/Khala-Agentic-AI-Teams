@@ -51,8 +51,6 @@ export class SprintsTabComponent implements OnInit {
   readonly planningId = signal<string | null>(null);
   readonly planResult = signal<SprintPlanResult | null>(null);
   readonly error = signal<string | null>(null);
-  /** When the endpoint isn't implemented yet, degrade silently to empty. */
-  readonly endpointMissing = signal<boolean>(false);
 
   ngOnInit(): void {
     this.refreshProducts();
@@ -87,7 +85,6 @@ export class SprintsTabComponent implements OnInit {
     if (!productId) return;
     this.loadingSprints.set(true);
     this.error.set(null);
-    this.endpointMissing.set(false);
     this.api.listSprints(productId).subscribe({
       next: (rows) => {
         this.sprints.set(rows);
@@ -96,15 +93,7 @@ export class SprintsTabComponent implements OnInit {
       error: (err) => {
         this.sprints.set([]);
         this.loadingSprints.set(false);
-        // The plan calls out graceful degradation: a 404 / 503 on
-        // sprints listing means the route isn't there yet — render an
-        // explainer instead of a hard error so the tab doesn't claim
-        // the loop is broken.
-        if (err?.status === 404 || err?.status === 503) {
-          this.endpointMissing.set(true);
-        } else {
-          this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load sprints.');
-        }
+        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load sprints.');
       },
     });
   }

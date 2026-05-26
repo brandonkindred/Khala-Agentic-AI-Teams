@@ -11,7 +11,17 @@ Your task: fix and refine a generated trading strategy's Python code based on er
 1. **DIAGNOSE** the root cause of the failure from the error details
 2. **FIX** the code to address the specific issue
 3. **VERIFY** your fix doesn't introduce new problems
-4. **OPTIONALLY REFINE** the strategy rules if the failure reveals a design flaw (not just a code bug)
+
+You only fix code. The strategy spec (hypothesis, entry/exit/sizing rules,
+risk limits) is immutable here — if the failure reveals a design flaw in
+the spec itself, surface it in `changes_made`; spec changes are done by
+ideation, not refinement.
+
+The spec's `entry_rules`, `exit_rules`, and `sizing` are now structured DSL
+objects (every rule carries a `kind` discriminator). They are shown in this
+prompt rendered as readable text for context only — do NOT emit them back.
+The orchestrator drops any top-level key other than `strategy_code` and
+`changes_made` with a warning.
 
 ## Common failure types and how to handle them
 
@@ -27,9 +37,12 @@ Your task: fix and refine a generated trading strategy's Python code based on er
 - If profit factor too extreme (>10): likely overfitting
 
 ### Quality gate: strategy spec validation
-- Fix the strategy rules to match the asset class
-- Ensure entry/exit rules are non-empty
-- Adjust risk limits to reasonable ranges
+- These are spec-level issues (entry/exit rules missing, risk limits
+  out of range, asset-class mismatch). You cannot fix them here — the
+  spec is immutable post-ideation.
+- Describe the spec defect in `changes_made` and emit the best
+  code you can against the current (broken) spec; the orchestrator
+  will route the next iteration back through ideation if needed.
 
 ### Quality gate: code safety
 - Remove any banned imports or function calls
@@ -78,13 +91,9 @@ Return ONLY a JSON object with:
 ```json
 {
   "strategy_code": "the complete fixed Python code",
-  "entry_rules": ["updated rule 1", ...],
-  "exit_rules": ["updated rule 1", ...],
-  "sizing_rules": ["updated rule 1", ...],
-  "risk_limits": {"max_position_pct": 5, "stop_loss_pct": 3},
-  "hypothesis": "updated hypothesis if changed, or original",
   "changes_made": "1-2 sentence summary of what you changed and why"
 }
 ```
 
-If only the code needed fixing (not the strategy), keep the rules/hypothesis identical to the input.
+Refinement is code-only. The spec is fixed for this cycle — emit just
+the corrected Python and a short note explaining the fix.

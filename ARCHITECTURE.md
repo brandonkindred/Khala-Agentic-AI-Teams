@@ -17,7 +17,8 @@ This document describes the architecture of the Software Engineering Team — a 
 - [8. DevOps Team Pipeline](#8-devops-team-pipeline)
 - [9. Planning Loop](#9-planning-loop)
 - [10. Plan Folder and Artifacts](#10-plan-folder-and-artifacts)
-- [11. Repo Layout](#11-repo-layout)
+- [11. Product Delivery Loop](#11-product-delivery-loop)
+- [12. Repo Layout](#12-repo-layout)
 
 ---
 
@@ -522,7 +523,102 @@ The `master_plan.md` consolidation includes a risk register and ship checklist.
 
 ---
 
-## 11. Repo Layout
+## 11. Product Delivery Loop
+
+The Product Delivery team (`backend/agents/product_delivery/`) wraps the SE pipeline in a persistent, repeatable loop: backlog → grooming → sprint planning → SE pipeline run → release → feedback intake → next groom. It owns the durable artifacts the SE pipeline doesn't: products, initiatives, epics, stories, sprints, releases, and feedback items. Schema, full API surface, and local smoke tests live in `backend/agents/product_delivery/README.md`; this section documents how the runtime pieces fit together.
+
+The loop is driven by three agents and one orchestrator hook:
+
+- **ProductOwnerAgent** (`product_delivery/product_owner_agent/agent.py`): runs `POST /api/product-delivery/groom`, scores backlog items via WSJF or RICE with per-item rationale, and (when `persist=true`) writes scores back to the store.
+- **SprintPlannerAgent** (`product_delivery/sprint_planner_agent/agent.py`): runs `POST /api/product-delivery/sprints/{id}/plan`, performing capacity-aware greedy selection of scored stories into the sprint via `select_sprint_scope` (no LLM).
+- **SE Orchestrator with `sprint_id`** (`software_engineering_team/orchestrator.py`, `_load_requirements_from_sprint`): when `POST /api/software-engineering/run-team` is called with `{sprint_id}`, the orchestrator skips spec parsing and the Product Requirements Analyst, hydrates `ProductRequirements` directly from the sprint's planned stories + acceptance criteria, and stores `sprint_id` + `story_ids` in job metadata.
+- **ReleaseManagerAgent** (`product_delivery/release_manager_agent/agent.py`): triggered by the SE orchestrator's release hook `_maybe_ship_sprint_release` (`orchestrator.py`), called after the Integration phase. On a sprint run where every planned story has reached a terminal status, the agent writes `plan/releases/<version>.md` via the technical-writer release-notes agent, inserts a `product_delivery_releases` row, and promotes Integration-phase failures (`int_result.issues`) into `product_delivery_feedback_items` tagged with the sprint id. **Today this hook is only reached on the legacy SE pipeline path** — the default `use_coding_team=True` runtime completes the SE job before the Integration block, so release shipping does not currently fire on the default path. See "Known limitations" below.
+
+### The loop
+
+```mermaid
+flowchart TB
+    Backlog["Backlog tables\nproducts → initiatives → epics → stories"]
+    Groom["ProductOwnerAgent\nPOST /groom\n(WSJF or RICE + rationale)"]
+    Plan["SprintPlannerAgent\nPOST /sprints/{id}/plan\n(greedy fit by capacity)"]
+    Run["SE Orchestrator\nPOST /run-team {sprint_id}"]
+
+    subgraph se ["SE pipeline (existing 4 phases)"]
+        direction TB
+        Discovery["Discovery\n(skipped when sprint_id\nhydrates requirements directly)"]
+        Design["Design\nTech Lead + Architecture Expert"]
+        Execution["Execution\nbackend + frontend workers"]
+        Integration["Integration\nintegration_team validation"]
+        Discovery --> Design --> Execution --> Integration
+    end
+
+    Release["ReleaseManagerAgent\n_maybe_ship_sprint_release\n(post-Integration; legacy SE path only)"]
+    Notes["plan/releases/<version>.md\n+ product_delivery_releases row"]
+    Feedback["Auto-feedback\nIntegration-phase failures →\nproduct_delivery_feedback_items\n(tagged with sprint_id)"]
+
+    Backlog --> Groom --> Plan --> Run --> Discovery
+    Integration --> Release
+    Release --> Notes
+    Release --> Feedback
+    Feedback -->|"next sprint"| Groom
+```
+
+### End-to-end sequence
+
+```mermaid
+sequenceDiagram
+    actor Op as Operator / Agent Console
+    participant PD as product_delivery API
+    participant PO as ProductOwnerAgent
+    participant SP as SprintPlannerAgent
+    participant SE as SE Orchestrator
+    participant Pipe as Planning V3 / Coding / DevOps / Integration
+    participant RM as ReleaseManagerAgent
+    participant FB as feedback_items
+
+    Op->>PD: POST /groom {product_id, method}
+    PD->>PO: groom()
+    PO-->>PD: ranked items + rationale (persisted)
+    PD-->>Op: GroomResult
+
+    Op->>PD: POST /sprints/{id}/plan
+    PD->>SP: plan()
+    SP-->>PD: selected stories (capacity fit)
+    PD-->>Op: SprintPlanResult
+
+    Op->>SE: POST /run-team {sprint_id}
+    SE->>SE: _load_requirements_from_sprint
+    SE->>Pipe: Discovery → Design → Execution → Integration
+    Pipe-->>SE: phase outputs / failures
+
+    SE->>RM: _maybe_ship_sprint_release (legacy SE path only)
+    alt all planned stories terminal
+        RM->>RM: write plan/releases/<version>.md
+        RM->>PD: insert product_delivery_releases
+        RM->>FB: promote Integration-phase failures (sprint_id tagged)
+    else open stories remain
+        RM-->>SE: skip (sprint not complete)
+    end
+
+    Note over FB,Op: Failures are queryable via GET /feedback (sprint_id-tagged); operator triages them into stories before the next groom
+```
+
+### Failure and re-entry
+
+Two contracts keep the loop self-healing on the path where the hook actually fires:
+
+1. **Non-fatal release hook** — `_maybe_ship_sprint_release` wraps `ReleaseManagerAgent.ship()` in `try/except`. Agent exceptions never fail the SE job; instead a `release-manager-error` feedback item is opened with the exception text and `job_id`, visible to operators reviewing feedback before the next groom.
+2. **Sprint-scoped feedback as queryable signal** — every Integration-phase failure promoted by the hook carries `sprint_id`, so it surfaces in `GET /api/product-delivery/feedback?product_id=…&status=open` (and the Agent Console Feedback tab). `POST /groom` itself only reads story rows today — it does not consume feedback automatically — so triaging the new feedback into stories (e.g. via the Feedback tab's "link to story" action) is what feeds the next backlog pass.
+
+### Known limitations
+
+- **Default SE path skips the release hook.** The SE orchestrator defaults to `use_coding_team=True` and returns immediately after `run_coding_team_orchestrator`, before reaching the Integration block where `_maybe_ship_sprint_release` is called. Today the documented release-shipping flow only fires on the legacy SE path (`use_coding_team=False`). Wiring the coding_team path to invoke the release hook is tracked as follow-up work.
+- **Only Integration failures auto-promote.** The hook passes only `integration_issues=int_result.issues` to `ReleaseManagerAgent.ship()`. The agent itself accepts `qa_failures` / `devops_failures` arguments, but the SE call site does not supply them today, so DevOps and QA failures are not currently turned into sprint-tagged feedback items.
+- **Temporal mode unsupported for `sprint_id` runs.** `POST /run-team` raises a 400 when `sprint_id` is supplied with `TEMPORAL_ADDRESS` set (same contract as Phase 2/3 — see `product_delivery/README.md`); the in-thread runtime is the only mode wired end-to-end today.
+
+---
+
+## 12. Repo Layout
 
 The repository contains two independent agent systems. The software engineering team is the primary system documented above; a separate blogging agent system exists under `agents/blogging/`.
 

@@ -1,8 +1,9 @@
 """Tests for the run-team API endpoint.
 
-MIXED file: most tests are mock-driven and could run as unit tests, but
-a handful exercise the real job store and would fail without the live
-job service.  Marked integration until we split it.
+Routed through the in-memory ``FakeJobServiceClient`` via the autouse
+``_autouse_patched_job_store`` fixture, so every job-store call (including
+those made by orchestrator background threads spawned from API endpoints)
+lands in a per-test in-memory dict.
 """
 
 import importlib.util
@@ -18,8 +19,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-pytestmark = [pytest.mark.integration]
-
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
@@ -30,6 +29,11 @@ _spec = importlib.util.spec_from_file_location(
 _api_main = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_api_main)
 app = _api_main.app
+
+
+@pytest.fixture(autouse=True)
+def _autouse_patched_job_store(patched_job_store):
+    return patched_job_store
 
 
 @pytest.fixture
