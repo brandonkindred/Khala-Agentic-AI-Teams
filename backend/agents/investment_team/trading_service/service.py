@@ -606,9 +606,7 @@ class _EngineEntryDispatcher:
         if isinstance(sizing, FixedNotionalSizing):
             return max(1, int(float(sizing.notional_usd) / close))
         if isinstance(sizing, VolatilityTargetSizing):
-            from ..strategy_lab.spec_dsl import IndicatorRef
-
-            atr_ref = IndicatorRef(name="atr")
+            atr_ref = self._find_atr_ref()
             view = views.get(cur_bar.symbol)
             if view is None or view.length() == 0:
                 return 1
@@ -617,6 +615,23 @@ class _EngineEntryDispatcher:
                 return 1
             return max(1, int(equity * float(sizing.target_annual_vol) / (close * atr_val)))
         return 1
+
+    def _find_atr_ref(self):
+        """Find an ATR IndicatorRef from the spec's entry rules.
+
+        Scans entry-rule predicates for an ATR indicator and returns it
+        so vol-target sizing uses the spec's configured period.  Falls
+        back to the default ATR(14) when no ATR appears in the rules.
+        """
+        from ..strategy_lab.spec_dsl import IndicatorRef
+
+        for rule in self.entry_rules:
+            if not isinstance(rule, EntryRule):
+                continue
+            for side in (rule.when.lhs, rule.when.rhs):
+                if isinstance(side, IndicatorRef) and side.name == "atr":
+                    return side
+        return IndicatorRef(name="atr")
 
 
 # Default chunk size for the batched-bar protocol (issue #377). 1 keeps
@@ -1316,7 +1331,10 @@ class TradingService:
                                 portfolio=portfolio,
                             )
 
-                        self._append_streaming_bar(streaming_views, cur_bar)
+                    # Append every bar (including warm-up) to the streaming
+                    # view so indicators have full history for predicate
+                    # evaluation once warm-up ends.
+                    self._append_streaming_bar(streaming_views, cur_bar)
 
                     # 4) Deliver the current bar to the strategy and collect
                     #    any orders it submits in response. Warm-up bars set
@@ -1586,7 +1604,10 @@ class TradingService:
                             portfolio=portfolio,
                         )
 
-                    self._append_streaming_bar(streaming_views, cur_bar)
+                # Append every bar (including warm-up) to the streaming
+                # view so indicators have full history for predicate
+                # evaluation once warm-up ends.
+                self._append_streaming_bar(streaming_views, cur_bar)
 
                 # 4) Process the strategy's response for this bar.
                 try:
