@@ -14,14 +14,18 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
@@ -33,15 +37,19 @@ from unified_api.google_browser_login_credentials import (
     google_browser_login_storage_available,
     set_google_browser_login_credentials,
 )
+from unified_api.integration_credentials import get_credential
 from unified_api.integrations_store import (
+    clear_github_config,
     clear_medium_google_oauth_identity,
     clear_medium_session_storage,
     clear_slack_oauth,
     generate_medium_google_oauth_state,
     generate_oauth_state,
+    get_github_config,
     get_integrations_list,
     get_medium_config,
     get_slack_config,
+    set_github_config,
     set_medium_config,
     set_medium_google_oauth_identity,
     set_medium_session_storage_state_json,
@@ -866,3 +874,241 @@ async def medium_clear_session() -> MediumConfigResponse:
     """Remove stored Medium browser session."""
     clear_medium_session_storage()
     return _build_medium_config_response(get_medium_config())
+
+
+# ---------------------------------------------------------------------------
+# GitHub integration
+# ---------------------------------------------------------------------------
+
+_GITHUB_SERVICE = "github"
+_GITHUB_API_BASE = "https://api.github.com"
+
+
+class GitHubConfigResponse(BaseModel):
+    enabled: bool
+    token_configured: bool
+    owner: str
+    repo: str
+    default_label: str
+
+
+class GitHubConfigUpdate(BaseModel):
+    enabled: bool = True
+    token: str = Field(default="", description="Personal Access Token; empty preserves existing")
+    owner: str = ""
+    repo: str = ""
+    default_label: str = ""
+    repo_path: str = Field(default="", description="Operator override for local checkout path")
+
+
+class GitHubIssueItem(BaseModel):
+    number: int
+    title: str
+    body_preview: str
+    labels: list[str]
+    html_url: str
+
+
+class RunGitHubIssueRequest(BaseModel):
+    issue_number: int
+    base_branch: str | None = None
+
+
+class RunGitHubIssueResponse(BaseModel):
+    job_id: str
+    issue_number: int
+    issue_url: str
+    status: str = "pending"
+    message: str = "Job started. Poll GET /api/coding-team/status/{job_id} for progress."
+
+
+def _build_github_config_response(cfg: dict[str, Any]) -> GitHubConfigResponse:
+    return GitHubConfigResponse(
+        enabled=cfg["enabled"],
+        token_configured=cfg["token_configured"],
+        owner=cfg["owner"],
+        repo=cfg["repo"],
+        default_label=cfg["default_label"],
+    )
+
+
+@router.get("/github", response_model=GitHubConfigResponse)
+async def get_github() -> GitHubConfigResponse:
+    """Return GitHub integration config status."""
+    return _build_github_config_response(get_github_config())
+
+
+@router.put("/github", response_model=GitHubConfigResponse)
+async def update_github(body: GitHubConfigUpdate) -> GitHubConfigResponse:
+    """Save or update GitHub integration config (PAT stored encrypted)."""
+    set_github_config(
+        enabled=body.enabled,
+        owner=body.owner,
+        repo=body.repo,
+        personal_access_token=body.token,
+        default_label=body.default_label,
+        repo_path=body.repo_path,
+    )
+    return _build_github_config_response(get_github_config())
+
+
+@router.delete("/github", response_model=GitHubConfigResponse)
+async def delete_github() -> GitHubConfigResponse:
+    """Disconnect GitHub integration (removes PAT and resets config)."""
+    clear_github_config()
+    return _build_github_config_response(get_github_config())
+
+
+@router.get("/github/issues", response_model=list[GitHubIssueItem])
+async def list_github_issues(label: str | None = Query(default=None)) -> list[GitHubIssueItem]:
+    """List open issues from the configured GitHub repository."""
+    cfg = get_github_config()
+    if not cfg["enabled"]:
+        raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
+    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
+    if not token:
+        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
+    owner = cfg["owner"]
+    repo = cfg["repo"]
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+
+    params: dict[str, Any] = {"state": "open", "per_page": 30}
+    use_label = label or cfg["default_label"]
+    if use_label:
+        params["labels"] = use_label
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "khala-integrations",
+    }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues",
+            headers=headers,
+            params=params,
+        )
+
+    if resp.status_code == 401:
+        raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
+
+    items: list[GitHubIssueItem] = []
+    for raw in resp.json():
+        if "pull_request" in raw:
+            continue
+        body = (raw.get("body") or "")[:200]
+        labels = [lbl["name"] for lbl in (raw.get("labels") or []) if isinstance(lbl, dict) and lbl.get("name")]
+        items.append(
+            GitHubIssueItem(
+                number=raw["number"],
+                title=raw.get("title") or "",
+                body_preview=body,
+                labels=labels,
+                html_url=raw.get("html_url") or "",
+            )
+        )
+    return items
+
+
+def _resolve_repo_path(cfg: dict[str, Any]) -> str:
+    """Resolve the local checkout path for the coding team.
+
+    Priority: config override > SE_WORKSPACE_DIR env > WORKSPACE_ROOT env > AGENT_CACHE fallback.
+    """
+    override = cfg.get("repo_path", "").strip()
+    if override:
+        return override
+
+    for env_var in ("SE_WORKSPACE_DIR", "WORKSPACE_ROOT"):
+        val = os.environ.get(env_var, "").strip()
+        if val:
+            return str(Path(val) / f"{cfg['owner']}_{cfg['repo']}")
+
+    cache_dir = os.environ.get("AGENT_CACHE", ".agent_cache")
+    return str(Path(cache_dir) / "github_workspaces" / cfg["owner"] / cfg["repo"])
+
+
+def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str | None:
+    """Clone or fetch the repository. Returns error string on failure, None on success."""
+    path = Path(repo_path)
+    if path.is_dir() and (path / ".git").is_dir():
+        result = subprocess.run(
+            ["git", "-C", repo_path, "fetch", "--all"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            return f"git fetch failed: {result.stderr[:300]}"
+        return None
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    clone_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+    result = subprocess.run(
+        ["git", "clone", clone_url, repo_path],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode != 0:
+        safe_err = result.stderr.replace(token, "***")[:300]
+        return f"git clone failed: {safe_err}"
+    return None
+
+
+@router.post("/github/run-issue", response_model=RunGitHubIssueResponse)
+async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueResponse:
+    """Start the coding team on a specific GitHub issue."""
+    cfg = get_github_config()
+    if not cfg["enabled"]:
+        raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
+    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
+    if not token:
+        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
+    owner = cfg["owner"]
+    repo = cfg["repo"]
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+
+    repo_path = _resolve_repo_path(cfg)
+
+    loop = asyncio.get_running_loop()
+    clone_err = await loop.run_in_executor(None, _ensure_repo_clone, repo_path, owner, repo, token)
+    if clone_err:
+        raise HTTPException(status_code=502, detail=clone_err)
+
+    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
+    if not coding_team_url:
+        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+
+    payload = {
+        "owner": owner,
+        "repo": repo,
+        "repo_path": repo_path,
+        "issue_number": body.issue_number,
+        "github_token": token,
+    }
+    if body.base_branch:
+        payload["base_branch"] = body.base_branch
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(f"{coding_team_url.rstrip('/')}/run-from-github", json=payload)
+
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text[:300])
+        except Exception:
+            detail = resp.text[:300]
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+
+    data = resp.json()
+    return RunGitHubIssueResponse(
+        job_id=data["job_id"],
+        issue_number=data["issue_number"],
+        issue_url=data["issue_url"],
+        status=data.get("status", "pending"),
+        message=data.get("message", ""),
+    )

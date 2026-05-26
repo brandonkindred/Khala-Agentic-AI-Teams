@@ -3,12 +3,17 @@ import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import type {
+  GitHubConfigResponse,
+  GitHubConfigUpdate,
+  GitHubIssueItem,
   GoogleBrowserLoginCredentialsBody,
   GoogleBrowserLoginStatusResponse,
   IntegrationListItem,
   MediumConfigResponse,
   MediumConfigUpdate,
   MediumSessionImportBody,
+  RunGitHubIssueRequest,
+  RunGitHubIssueResponse,
   SlackConfigResponse,
   SlackConfigUpdate,
   SlackOAuthConnectResponse,
@@ -94,5 +99,34 @@ export class IntegrationsApiService {
   /** DELETE /api/integrations/medium/session */
   clearMediumSession(): Observable<MediumConfigResponse> {
     return this.http.delete<MediumConfigResponse>(`${this.baseUrl}/medium/session`);
+  }
+
+  /** GET /api/integrations/github */
+  getGitHubConfig(): Observable<GitHubConfigResponse> {
+    return this.http.get<GitHubConfigResponse>(`${this.baseUrl}/github`);
+  }
+
+  /** PUT /api/integrations/github */
+  updateGitHubConfig(body: GitHubConfigUpdate): Observable<GitHubConfigResponse> {
+    return this.http.put<GitHubConfigResponse>(`${this.baseUrl}/github`, body);
+  }
+
+  /** DELETE /api/integrations/github */
+  deleteGitHubConfig(): Observable<GitHubConfigResponse> {
+    return this.http.delete<GitHubConfigResponse>(`${this.baseUrl}/github`);
+  }
+
+  /** GET /api/integrations/github/issues */
+  getGitHubIssues(label?: string): Observable<GitHubIssueItem[]> {
+    const params: Record<string, string> = {};
+    if (label) {
+      params['label'] = label;
+    }
+    return this.http.get<GitHubIssueItem[]>(`${this.baseUrl}/github/issues`, { params });
+  }
+
+  /** POST /api/integrations/github/run-issue */
+  runGitHubIssue(body: RunGitHubIssueRequest): Observable<RunGitHubIssueResponse> {
+    return this.http.post<RunGitHubIssueResponse>(`${this.baseUrl}/github/run-issue`, body);
   }
 }

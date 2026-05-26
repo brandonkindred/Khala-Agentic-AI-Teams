@@ -585,5 +585,149 @@
       }
     </article>
 
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <!-- GitHub                                                         -->
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <article
+      class="integration-card"
+      [class.integration-card--expanded]="expanded === 'github'"
+      [attr.aria-busy]="githubLoading || null"
+    >
+      <header class="integration-card__head">
+        <div class="integration-card__brand">
+          <div class="integration-card__icon integration-card__icon--github" aria-hidden="true">
+            <mat-icon>code</mat-icon>
+          </div>
+          <div class="integration-card__title-block">
+            <h2 class="integration-card__title">GitHub</h2>
+            <p class="integration-card__tag">
+              @if (githubTokenConfigured && githubOwner && githubRepo) {
+                {{ githubOwner }}/{{ githubRepo }}
+              } @else {
+                Issue-to-PR workflow
+              }
+            </p>
+          </div>
+        </div>
+
+        <div class="integration-card__status">
+          @if (githubLoading) {
+            <mat-spinner diameter="20" class="integration-card__spinner"></mat-spinner>
+          } @else if (githubTokenConfigured && githubOwner && githubRepo) {
+            <span class="status-chip status-chip--success">
+              <mat-icon aria-hidden="true">check_circle</mat-icon>
+              Connected
+            </span>
+          } @else {
+            <span class="status-chip status-chip--neutral">Not configured</span>
+          }
+        </div>
+      </header>
+
+      <p class="integration-card__summary">
+        Connect a GitHub repository so the <strong>Coding Team</strong> can pick up issues and deliver draft PRs autonomously.
+      </p>
+
+      <div class="integration-card__actions">
+        <button
+          type="button"
+          mat-flat-button
+          color="primary"
+          (click)="toggleExpanded('github')"
+          [disabled]="githubLoading"
+        >
+          <mat-icon>{{ expanded === 'github' ? 'expand_less' : 'tune' }}</mat-icon>
+          {{ expanded === 'github' ? 'Hide settings' : (githubTokenConfigured ? 'Manage' : 'Configure') }}
+        </button>
+
+        @if (githubTokenConfigured) {
+          <button
+            type="button"
+            mat-stroked-button
+            color="warn"
+            (click)="disconnectGitHub()"
+            [disabled]="githubDisconnecting || githubSaving"
+          >
+            @if (githubDisconnecting) { Disconnecting… } @else { Disconnect }
+          </button>
+        }
+      </div>
+
+      @if (expanded === 'github') {
+        <div class="integration-card__body">
+          @if (githubError) {
+            <div class="status-banner status-banner--error">
+              <mat-icon aria-hidden="true">error_outline</mat-icon>
+              <span>{{ githubError }}</span>
+            </div>
+          }
+          @if (githubSuccess) {
+            <div class="status-banner status-banner--success">
+              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
+              <span>{{ githubSuccess }}</span>
+            </div>
+          }
+
+          <p class="form-hint">
+            Enter a <strong>Personal Access Token</strong> with <code>repo</code> scope, along with the repository owner and name.
+          </p>
+
+          <div class="form-grid">
+            <mat-form-field appearance="outline">
+              <mat-label>Personal Access Token</mat-label>
+              <input
+                matInput
+                type="password"
+                [(ngModel)]="githubPat"
+                placeholder="ghp_..."
+                autocomplete="new-password"
+              />
+              @if (githubTokenConfigured && !githubPat) {
+                <mat-hint align="end">Saved</mat-hint>
+              }
+              <mat-hint>Classic or fine-grained token with repo access.</mat-hint>
+            </mat-form-field>
+          </div>
+
+          <div class="form-grid form-grid--two">
+            <mat-form-field appearance="outline">
+              <mat-label>Owner / Organization</mat-label>
+              <input matInput [(ngModel)]="githubOwner" placeholder="my-org" autocomplete="off" />
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Repository</mat-label>
+              <input matInput [(ngModel)]="githubRepo" placeholder="my-repo" autocomplete="off" />
+            </mat-form-field>
+          </div>
+
+          <div class="form-grid">
+            <mat-form-field appearance="outline">
+              <mat-label>Default label filter (optional)</mat-label>
+              <input matInput [(ngModel)]="githubDefaultLabel" placeholder="ai-ready" autocomplete="off" />
+              <mat-hint>Only show issues with this label when browsing.</mat-hint>
+            </mat-form-field>
+          </div>
+
+          <div class="setting-row">
+            <mat-slide-toggle [(ngModel)]="githubEnabled" color="primary">
+              Enable GitHub integration
+            </mat-slide-toggle>
+          </div>
+
+          <div class="form-actions">
+            <button
+              mat-flat-button
+              color="primary"
+              type="button"
+              (click)="saveGitHubConfig()"
+              [disabled]="githubSaving || (!githubOwner.trim() && !githubTokenConfigured) || (!githubRepo.trim() && !githubTokenConfigured)"
+            >
+              @if (githubSaving) { Saving… } @else { Save GitHub settings }
+            </button>
+          </div>
+        </div>
+      }
+    </article>
+
   </div>
 </div>
