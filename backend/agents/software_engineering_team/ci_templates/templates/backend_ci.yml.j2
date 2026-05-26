@@ -1,0 +1,85 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "{{ python_version }}"
+      - run: pip install ruff
+      - run: {{ lint_command }}
+      - run: {{ format_check_command }}
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "{{ python_version }}"
+      - run: {{ install_command }}
+      - run: {{ test_command }}
+
+  {% if enable_sast %}
+  sast:
+    name: SAST (bandit)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "{{ python_version }}"
+      - run: pip install bandit
+      - run: bandit -r . -x ./tests -f json -o bandit-report.json || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+  {% endif %}
+
+  {% if enable_sca %}
+  sca:
+    name: SCA (pip-audit)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "{{ python_version }}"
+      - run: pip install pip-audit
+      - run: {{ install_command }}
+      - run: pip-audit --format json --output pip-audit-report.json || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.json
+  {% endif %}
+
+  {% if enable_secrets_scan %}
+  secrets:
+    name: Secrets scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_LICENSE: ${{ "{{" }} secrets.GITLEAKS_LICENSE {{ "}}" }}
+  {% endif %}

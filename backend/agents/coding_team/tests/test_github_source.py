@@ -27,7 +27,7 @@ from coding_team.github_source import (
     pick_ready_issue,
     scrub_token_from_text,
 )
-from coding_team.github_source.client import _is_safe_ref, _parse_next_link
+from coding_team.github_source.client import _check_run_from_payload, _is_safe_ref, _parse_next_link
 from coding_team.models import CodingTeamPlanInput
 
 # ---------------------------------------------------------------------------
@@ -1004,3 +1004,148 @@ class TestStatusResponseSurfacing:
         body = status.json()
         assert body["github_context"]["issue_number"] == 1
         assert body["github_pr_url"] == "https://example/pr/42"
+
+
+# ---------------------------------------------------------------------------
+# Check-runs & CI status (new for issue #244)
+# ---------------------------------------------------------------------------
+
+
+def _check_run_payload(
+    run_id: int,
+    name: str = "lint",
+    status: str = "completed",
+    conclusion: str = "success",
+) -> dict[str, Any]:
+    return {
+        "id": run_id,
+        "name": name,
+        "status": status,
+        "conclusion": conclusion,
+    }
+
+
+class TestCheckRunFromPayload:
+    def test_parses_all_fields(self) -> None:
+        cr = _check_run_from_payload(_check_run_payload(1, "build", "completed", "failure"))
+        assert cr.id == 1
+        assert cr.name == "build"
+        assert cr.status == "completed"
+        assert cr.conclusion == "failure"
+
+    def test_defaults_for_missing_fields(self) -> None:
+        cr = _check_run_from_payload({"id": 2})
+        assert cr.name == ""
+        assert cr.status == "queued"
+        assert cr.conclusion == ""
+
+
+class TestGetCheckRuns:
+    def test_returns_check_runs(self) -> None:
+        runs = [_check_run_payload(1, "lint"), _check_run_payload(2, "test")]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"check_runs": runs})
+
+        client = _client_with(handler)
+        result = client.get_check_runs("org", "repo", "abc123")
+        assert len(result) == 2
+        assert result[0].name == "lint"
+        assert result[1].name == "test"
+
+    def test_empty_check_runs(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"check_runs": []})
+
+        client = _client_with(handler)
+        result = client.get_check_runs("org", "repo", "abc123")
+        assert result == []
+
+    def test_paginates(self) -> None:
+        page1 = [_check_run_payload(1, "lint")]
+        page2 = [_check_run_payload(2, "test")]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "page=2" in str(req.url):
+                return httpx.Response(200, json={"check_runs": page2})
+            return httpx.Response(
+                200,
+                json={"check_runs": page1},
+                headers={"Link": '<https://api.github.com/x?page=2>; rel="next"'},
+            )
+
+        client = _client_with(handler)
+        result = client.get_check_runs("org", "repo", "abc123")
+        assert len(result) == 2
+
+
+class TestGetCombinedStatus:
+    def test_all_passed(self) -> None:
+        runs = [
+            _check_run_payload(1, "lint", "completed", "success"),
+            _check_run_payload(2, "test", "completed", "success"),
+        ]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"check_runs": runs})
+
+        client = _client_with(handler)
+        status = client.get_combined_status("org", "repo", "abc")
+        assert status.all_completed is True
+        assert status.passed is True
+        assert status.total == 2
+        assert status.failed_checks == ()
+        assert status.pending_checks == ()
+
+    def test_one_failed(self) -> None:
+        runs = [
+            _check_run_payload(1, "lint", "completed", "success"),
+            _check_run_payload(2, "test", "completed", "failure"),
+        ]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"check_runs": runs})
+
+        client = _client_with(handler)
+        status = client.get_combined_status("org", "repo", "abc")
+        assert status.all_completed is True
+        assert status.passed is False
+        assert status.failed_checks == ("test",)
+
+    def test_pending_checks(self) -> None:
+        runs = [
+            _check_run_payload(1, "lint", "completed", "success"),
+            _check_run_payload(2, "build", "in_progress", ""),
+        ]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"check_runs": runs})
+
+        client = _client_with(handler)
+        status = client.get_combined_status("org", "repo", "abc")
+        assert status.all_completed is False
+        assert status.passed is False
+        assert status.pending_checks == ("build",)
+
+    def test_no_checks(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"check_runs": []})
+
+        client = _client_with(handler)
+        status = client.get_combined_status("org", "repo", "abc")
+        assert status.all_completed is True
+        assert status.passed is True
+        assert status.total == 0
+
+    def test_neutral_and_skipped_count_as_pass(self) -> None:
+        runs = [
+            _check_run_payload(1, "lint", "completed", "neutral"),
+            _check_run_payload(2, "optional", "completed", "skipped"),
+        ]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"check_runs": runs})
+
+        client = _client_with(handler)
+        status = client.get_combined_status("org", "repo", "abc")
+        assert status.passed is True

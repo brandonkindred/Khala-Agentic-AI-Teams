@@ -8,6 +8,8 @@ the existing orchestrator handle the work.
 
 from .client import (
     MAX_ISSUES_TRAVERSED,
+    CheckRun,
+    CIStatusSummary,
     GitHubAPIError,
     GitHubClient,
     Issue,
@@ -21,6 +23,8 @@ from .dependency_resolver import ReadyCheckResult, is_ready, pick_ready_issue
 from .issue_to_plan import issue_to_plan_input
 
 __all__ = [
+    "CIStatusSummary",
+    "CheckRun",
     "MAX_ISSUES_TRAVERSED",
     "GitHubAPIError",
     "GitHubClient",

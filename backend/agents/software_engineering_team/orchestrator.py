@@ -168,7 +168,9 @@ def _wait_for_user_answers(
     Returns True if answers were received, False if timed out or job failed.
     """
     start = time.time()
-    while time.time() - start < timeout_seconds:  # pragma: no cover  # integration-only: polling loop with real time.sleep
+    while (
+        time.time() - start < timeout_seconds
+    ):  # pragma: no cover  # integration-only: polling loop with real time.sleep
         if not is_waiting_for_answers(job_id):
             return True
         job_data = get_job(job_id)
@@ -567,7 +569,9 @@ def _run_dbc_comments_review(
                 "[%s] DbC: code complies with Design by Contract -- great job coding!",
                 task_id,
             )
-    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        Exception
+    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         # Non-blocking: DbC failure should never stop the pipeline
         logger.warning("[%s] DbC: review failed (non-blocking): %s", task_id, e)
 
@@ -595,8 +599,12 @@ def _run_tech_lead_review(
     completed_tasks = [t for tid, t in all_tasks.items() if tid in completed]
     remaining_ids = set(execution_queue)
     remaining_tasks = [t for tid, t in all_tasks.items() if tid in remaining_ids]
-    max_code_chars = compute_existing_code_chars(tech_lead.llm)  # pragma: no cover  # integration-only: tech-lead review uses live LLM
-    codebase_summary = _truncate_for_context(_read_repo_code(repo_path), max_code_chars)  # pragma: no cover  # integration-only
+    max_code_chars = compute_existing_code_chars(
+        tech_lead.llm
+    )  # pragma: no cover  # integration-only: tech-lead review uses live LLM
+    codebase_summary = _truncate_for_context(
+        _read_repo_code(repo_path), max_code_chars
+    )  # pragma: no cover  # integration-only
 
     new_tasks = tech_lead.review_progress(  # pragma: no cover  # integration-only: LLM call
         task_update=task_update,
@@ -622,7 +630,9 @@ def _run_tech_lead_review(
         )
 
     # Tech Lead triggers the Documentation Agent to update project docs
-    if doc_agent:  # pragma: no cover  # integration-only: documentation agent runs LLM + writes docs to repo
+    if (
+        doc_agent
+    ):  # pragma: no cover  # integration-only: documentation agent runs LLM + writes docs to repo
         tech_lead.trigger_documentation_update(
             doc_agent=doc_agent,
             repo_path=repo_path,
@@ -650,9 +660,13 @@ def _run_code_review(
 
     from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
 
-    llm = agents["code_review"].llm  # pragma: no cover  # integration-only: code review uses live LLM
+    llm = agents[
+        "code_review"
+    ].llm  # pragma: no cover  # integration-only: code review uses live LLM
     max_chars = compute_code_review_total_chars(llm)  # pragma: no cover  # integration-only
-    code_capped = _truncate_for_context(code_to_review, max_chars)  # pragma: no cover  # integration-only
+    code_capped = _truncate_for_context(
+        code_to_review, max_chars
+    )  # pragma: no cover  # integration-only
     review_input = CodeReviewInput(  # pragma: no cover  # integration-only
         code=code_capped,
         spec_content=spec_content,
@@ -731,7 +745,9 @@ def _run_build_verification(
         run_python_syntax_check,
     )
 
-    if agent_type == "frontend":  # pragma: no cover  # integration-only: invokes ng build and downstream LLM fix loop
+    if (
+        agent_type == "frontend"
+    ):  # pragma: no cover  # integration-only: invokes ng build and downstream LLM fix loop
         # repo_path may be frontend repo root (package.json here) or work path (frontend/ subdir)
         frontend_dir = (
             repo_path if (repo_path / "package.json").exists() else (repo_path / "frontend")
@@ -797,7 +813,9 @@ def _run_build_verification(
         if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
             # Install deps before pytest so agent-added packages (e.g. sqlalchemy) are available
             req_txt = backend_dir / "requirements.txt"
-            if req_txt.exists():  # pragma: no cover  # integration-only: shells out to `pip install`
+            if (
+                req_txt.exists()
+            ):  # pragma: no cover  # integration-only: shells out to `pip install`
                 try:
                     pip_result = run_command(
                         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
@@ -847,7 +865,9 @@ def _run_build_verification(
         logger.info("Build verification passed for backend task %s", task_id)
         return True, ""
 
-    elif agent_type == "devops":  # pragma: no cover  # integration-only: docker build + yaml parsing on real workflow files
+    elif (
+        agent_type == "devops"
+    ):  # pragma: no cover  # integration-only: docker build + yaml parsing on real workflow files
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
 
@@ -925,7 +945,9 @@ def _try_build_fix_one_at_a_time(
         run_python_syntax_check,
     )
 
-    if agent_type == "frontend":  # pragma: no cover  # integration-only: invokes ng build + LLM repair loop
+    if (
+        agent_type == "frontend"
+    ):  # pragma: no cover  # integration-only: invokes ng build + LLM repair loop
         project_dir = repo_path if (repo_path / "package.json").exists() else repo_path / "frontend"
         if not (project_dir / "package.json").exists():
             return False, "No frontend project found"
@@ -964,7 +986,9 @@ def _try_build_fix_one_at_a_time(
             )
         language = "typescript"
         prompt_module = "frontend_code_v2_team.prompts"
-    elif agent_type == "backend":  # pragma: no cover  # integration-only: runs python syntax check + pytest + LLM repair loop
+    elif (
+        agent_type == "backend"
+    ):  # pragma: no cover  # integration-only: runs python syntax check + pytest + LLM repair loop
         project_dir = repo_path if any(repo_path.rglob("*.py")) else repo_path / "backend"
         if not project_dir.exists() or not any(project_dir.rglob("*.py")):
             return False, "No Python project found"
@@ -1094,7 +1118,9 @@ def _try_build_fix_one_at_a_time(
         language_conventions = JAVA_CONVENTIONS if language == "java" else PYTHON_CONVENTIONS
 
     max_fix_attempts = 15
-    for attempt in range(max_fix_attempts):  # pragma: no cover  # integration-only: LLM fix loop reruns build/test after each repair
+    for attempt in range(
+        max_fix_attempts
+    ):  # pragma: no cover  # integration-only: LLM fix loop reruns build/test after each repair
         if not issues:
             break
         issue = issues.pop(0)
@@ -1302,7 +1328,9 @@ def _backend_code_v2_worker(
             failed[tid] = "backend team not registered"
         return
 
-    while backend_code_v2_queue:  # pragma: no cover  # integration-only: drains queue by calling backend-code-v2 run_workflow
+    while (
+        backend_code_v2_queue
+    ):  # pragma: no cover  # integration-only: drains queue by calling backend-code-v2 run_workflow
         # Check for cancellation before starting each task
         if is_cancel_requested(job_id):
             logger.info("Backend worker: cancellation detected, stopping")
@@ -2812,6 +2840,32 @@ def run_orchestrator(
                 get_job_fn=lambda jid: get_job(jid),
                 get_llm=get_client,
             )
+
+            # Seed deterministic CI workflows into the generated repo
+            from software_engineering_team.quality_gate_tools import run_ci_gate, seed_ci_workflows
+
+            _repo_path = Path(path)
+            _seed_result = seed_ci_workflows(
+                _repo_path,
+                has_backend=(_repo_path / "backend").is_dir()
+                or (_repo_path / "requirements.txt").exists(),
+                has_frontend=(_repo_path / "frontend").is_dir()
+                or (_repo_path / "package.json").exists(),
+            )
+            if _seed_result:
+                logger.info("Seeded CI workflows: %s", _seed_result)
+
+            # CI gate: verify generated code passes checks (non-blocking)
+            if os.environ.get("SE_CI_GATE_ENABLED", "true").lower() in ("1", "true", "yes"):
+                _ci_result = run_ci_gate(_repo_path)
+                if _ci_result.passed:
+                    logger.info("CI gate: passed")
+                else:
+                    logger.warning("CI gate: %s", _ci_result.summary)
+                update_job(
+                    job_id, ci_gate_passed=_ci_result.passed, ci_gate_summary=_ci_result.summary
+                )
+
             update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
             return
 
@@ -2967,7 +3021,9 @@ def run_orchestrator(
                     path,
                     assignment,
                     summary=getattr(tech_lead_output, "summary", "") or "",
-                    requirement_task_mapping=getattr(tech_lead_output, "requirement_task_mapping", None)
+                    requirement_task_mapping=getattr(
+                        tech_lead_output, "requirement_task_mapping", None
+                    )
                     or [],
                     validation_report=getattr(tech_lead_output, "validation_report", None),
                     plan_dir=plan_dir,
@@ -3071,7 +3127,9 @@ def run_orchestrator(
                 tid
                 for tid in full_order
                 if all_tasks.get(tid)
-                and (all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops")
+                and (
+                    all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops"
+                )
             ]
             backend_queue: List[
                 str
@@ -3087,7 +3145,8 @@ def run_orchestrator(
             frontend_code_v2_queue: List[str] = [
                 tid
                 for tid in full_order
-                if all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
+                if all_tasks.get(tid)
+                and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
             ]
             total_tasks = (
                 len(prefix_queue)
@@ -3207,7 +3266,9 @@ def run_orchestrator(
                 frontend_code_v2_thread.join()
 
             llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed.values())
-            llm_connectivity_failed = any(v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed.values())
+            llm_connectivity_failed = any(
+                v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed.values()
+            )
             remaining_in_queues = (
                 len(backend_code_v2_queue) + len(frontend_queue) + len(frontend_code_v2_queue)
             )
@@ -3309,7 +3370,11 @@ def run_orchestrator(
                                 "Integration agent found %s issues (%s critical/high)",
                                 len(int_result.issues),
                                 len(
-                                    [i for i in int_result.issues if i.severity in ("critical", "high")]
+                                    [
+                                        i
+                                        for i in int_result.issues
+                                        if i.severity in ("critical", "high")
+                                    ]
                                 ),
                             )
                             for i, issue in enumerate(int_result.issues[:10], 1):
@@ -3406,7 +3471,8 @@ def run_orchestrator(
                     for tid in completed_code_task_ids
                 )
                 has_frontend = any(
-                    all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
+                    all_tasks.get(tid)
+                    and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
                     for tid in completed_code_task_ids
                 )
                 if has_backend:
@@ -3522,7 +3588,9 @@ def run_orchestrator(
                 logger.info("")
                 logger.info("=" * BANNER_WIDTH)
                 logger.info("  ★★★  SOFTWARE ENGINEERING TEAM: DELIVERY COMPLETE  ★★★")
-                logger.info("  Job %s finished. All tasks executed. Artifacts in work path.", job_id)
+                logger.info(
+                    "  Job %s finished. All tasks executed. Artifacts in work path.", job_id
+                )
                 logger.info("=" * BANNER_WIDTH)
                 _log_task_breakdown(
                     completed=completed,
@@ -3540,7 +3608,9 @@ def run_orchestrator(
                     status_text="All tasks completed successfully",
                 )
 
-    except CancellationError:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        CancellationError
+    ):  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.info("Orchestrator stopped due to job cancellation: %s", job_id)
         update_job(
             job_id,
@@ -3548,7 +3618,9 @@ def run_orchestrator(
             status_text="Job cancelled by user",
             phase="completed",
         )
-    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        Exception
+    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Orchestrator failed")
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
 
@@ -3870,9 +3942,13 @@ def run_failed_tasks(job_id: str) -> None:
                 status_text="Retry completed",
             )
 
-    except CancellationError:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        CancellationError
+    ):  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.info("Retry orchestrator stopped due to job cancellation: %s", job_id)
         update_job(job_id, status=JOB_STATUS_CANCELLED, status_text="Job cancelled by user")
-    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        Exception
+    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Retry orchestrator failed")
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
