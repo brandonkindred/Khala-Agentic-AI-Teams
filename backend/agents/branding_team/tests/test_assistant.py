@@ -83,6 +83,52 @@ def test_strip_accidental_json_preserves_real_prose() -> None:
     assert _strip_accidental_json(prose) == prose
 
 
+def test_strip_accidental_json_suppresses_nested_mission_with_color_palettes() -> None:
+    """The exact reviewer scenario: outer mission JSON contains a nested
+    structure (color_palettes → list of objects). The flat-regex guard
+    would skip the outer block and only match the inner palette object,
+    which has no mission keys, so the leak would slip through. Brace-
+    balanced scanning must catch the outer block."""
+    raw_json = json.dumps(
+        {
+            "company_name": "Brandon Kindred",
+            "color_palettes": [
+                {"name": "warm", "colors": ["#aa3300", "#ffcc99"]},
+                {"name": "cool", "colors": ["#003366", "#99ccff"]},
+            ],
+        }
+    )
+    assert _strip_accidental_json(raw_json) == ""
+
+
+def test_strip_accidental_json_suppresses_nested_mission_embedded_in_prose() -> None:
+    """Same shape as above, but wrapped in conversational prose."""
+    raw = (
+        'Here is a draft: {"company_name": "Brandon", '
+        '"color_palettes": [{"name": "warm", "colors": ["#a30"]}]} '
+        "let me know what you think."
+    )
+    assert _strip_accidental_json(raw) == ""
+
+
+def test_strip_accidental_json_suppresses_mission_wrapped_one_level_deep() -> None:
+    """LLM occasionally wraps the mission under an outer key (e.g. ``mission``).
+    The recursive mission-field check must still catch it."""
+    raw = '{"mission": {"company_name": "X", "target_audience": "devs"}}'
+    assert _strip_accidental_json(raw) == ""
+
+
+def test_strip_accidental_json_preserves_prose_with_unrelated_nested_json() -> None:
+    """A JSON object embedded in prose that does NOT carry any mission keys
+    (even nested) must pass through unchanged — the guard is mission-
+    specific and must not over-suppress general prose with code examples."""
+    prose = (
+        "For example, the analytics payload looks like "
+        '{"event": "click", "metadata": {"button": "cta"}} — nothing mission-related there.'
+    )
+    assert _strip_accidental_json(prose) == prose
+
+
 def test_merge_mission_update() -> None:
     current = BrandingMission(
         company_name="TBD",

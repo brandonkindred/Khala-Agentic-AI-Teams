@@ -96,13 +96,68 @@ _MISSION_FIELD_NAMES = {
 }
 
 
+def _contains_mission_field(obj: Any) -> bool:
+    """Recursively walk ``obj`` looking for any key in ``_MISSION_FIELD_NAMES``.
+
+    Why recurse: mission payloads embed nested structures (e.g.
+    ``color_palettes`` is a list of dicts). A top-level-only check would
+    miss leaks whose mission keys live one level deep — e.g. an LLM that
+    wraps the payload as ``{"mission": {"company_name": "X"}}``.
+    """
+    if isinstance(obj, dict):
+        if _MISSION_FIELD_NAMES.intersection(obj.keys()):
+            return True
+        return any(_contains_mission_field(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_contains_mission_field(item) for item in obj)
+    return False
+
+
+def _iter_balanced_json_objects(text: str):
+    """Yield ``(start, end)`` index pairs for every brace-balanced ``{...}``
+    block in ``text``, scanned left-to-right at the top level.
+
+    A simple ``re.finditer(r"\\{[^{}]*\\}", text)`` would match only **flat**
+    JSON objects — any nesting inside the candidate causes the regex to
+    match an inner object instead of the outer one. That breaks the
+    mission-JSON guard for realistic leaks like
+    ``{"company_name": "X", "color_palettes": [{"name": "p1"}]}`` where
+    the regex would skip the outer block and only see the inner palette
+    (which carries no mission keys). Brace counting handles arbitrary
+    nesting and skips past each outer object so its interior is not
+    re-scanned in isolation.
+    """
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        end = -1
+        for j in range(i, n):
+            ch = text[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+        if end == -1:
+            return  # unbalanced from here on; no further objects possible
+        yield i, end
+        i = end
+
+
 def _strip_accidental_json(reply: str) -> str:
     """Defensive guard against the conversation LLM ever leaking structured data
     to the user. Returns an empty string in any of the following cases so the
     caller can substitute a graceful fallback prose reply:
 
     - The whole response is a JSON object (with or without surrounding whitespace).
-    - Any contiguous JSON object embedded in prose contains mission-field keys.
+    - Any brace-balanced JSON object embedded in prose contains mission-field
+      keys at any depth (top-level or nested).
 
     Real prose is returned unchanged.
     """
@@ -124,13 +179,13 @@ def _strip_accidental_json(reply: str) -> str:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Embedded JSON object containing mission fields?
-    for match in re.finditer(r"\{[^{}]*\}", stripped):
+    # Embedded JSON object containing mission fields (at any depth)?
+    for start, end in _iter_balanced_json_objects(stripped):
         try:
-            parsed = json.loads(match.group(0))
+            parsed = json.loads(stripped[start:end])
         except (json.JSONDecodeError, TypeError):
             continue
-        if isinstance(parsed, dict) and _MISSION_FIELD_NAMES.intersection(parsed.keys()):
+        if _contains_mission_field(parsed):
             logger.warning(
                 "Branding conversation LLM embedded mission JSON inside prose; suppressing. "
                 "Raw response: %r",
