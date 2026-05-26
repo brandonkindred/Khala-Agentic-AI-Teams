@@ -167,6 +167,102 @@ SCHEMA = TeamSchema(
         )""",
         """CREATE INDEX IF NOT EXISTS idx_guardrail_rejections_client_time
             ON nutrition_guardrail_rejections (client_id, created_at DESC)""",
+        # --- SPEC-008 additions (FDC-backed nutrient data store) ---
+        # Per-food, per-nutrient values normalised from FDC SR Legacy
+        # snapshots. One row per (canonical_id, nutrient, data_version).
+        # The pipeline does atomic version swaps: inserts new-version
+        # rows, deletes old-version rows, commits.
+        """CREATE TABLE IF NOT EXISTS nutrition_nutrient_rows (
+            id              BIGSERIAL PRIMARY KEY,
+            canonical_id    TEXT NOT NULL,
+            nutrient        TEXT NOT NULL,
+            value_per_100g  DOUBLE PRECISION NOT NULL
+                            CHECK (value_per_100g >= 0
+                                   AND value_per_100g != 'NaN'::float8
+                                   AND value_per_100g != 'Infinity'::float8),
+            data_version    TEXT NOT NULL,
+            source          TEXT NOT NULL DEFAULT 'fdc',
+            is_override     BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_nutrient_rows_canonical_nutrient_version
+            ON nutrition_nutrient_rows (canonical_id, nutrient, data_version)""",
+        """CREATE INDEX IF NOT EXISTS idx_nutrient_rows_canonical_version
+            ON nutrition_nutrient_rows (canonical_id, data_version)""",
+        # Override audit log — one row per manual override applied by
+        # the pipeline. Supports traceability and rollback.
+        """CREATE TABLE IF NOT EXISTS nutrition_nutrient_override_log (
+            id              BIGSERIAL PRIMARY KEY,
+            canonical_id    TEXT NOT NULL,
+            nutrient        TEXT NOT NULL,
+            old_value       DOUBLE PRECISION
+                            CHECK (old_value >= 0
+                                   AND old_value != 'NaN'::float8
+                                   AND old_value != 'Infinity'::float8),
+            new_value       DOUBLE PRECISION NOT NULL
+                            CHECK (new_value >= 0
+                                   AND new_value != 'NaN'::float8
+                                   AND new_value != 'Infinity'::float8),
+            reason          TEXT,
+            citation        TEXT,
+            author          TEXT NOT NULL,
+            data_version    TEXT NOT NULL,
+            applied_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_nutrient_override_log_canonical
+            ON nutrition_nutrient_override_log (canonical_id, data_version)""",
+        # Density conversions for volume/count → grams (per food+unit).
+        # Sourced from FDC or manual overrides.
+        """CREATE TABLE IF NOT EXISTS nutrition_density (
+            id              BIGSERIAL PRIMARY KEY,
+            canonical_id    TEXT NOT NULL,
+            unit            TEXT NOT NULL,
+            grams_per_unit  DOUBLE PRECISION NOT NULL
+                            CHECK (grams_per_unit > 0
+                                   AND grams_per_unit != 'NaN'::float8
+                                   AND grams_per_unit != 'Infinity'::float8),
+            data_version    TEXT NOT NULL,
+            source          TEXT NOT NULL DEFAULT 'fdc',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_density_canonical_unit_version
+            ON nutrition_density (canonical_id, unit, data_version)""",
+        # Cooking-method retention factors (nutrient loss + mass change).
+        # Keyed by (canonical_id, method, data_version).
+        """CREATE TABLE IF NOT EXISTS nutrition_retention_factors (
+            id                  BIGSERIAL PRIMARY KEY,
+            canonical_id        TEXT NOT NULL,
+            method              TEXT NOT NULL,
+            nutrient_retention  DOUBLE PRECISION NOT NULL
+                                CHECK (nutrient_retention > 0 AND nutrient_retention <= 1.0
+                                       AND nutrient_retention != 'NaN'::float8),
+            mass_retention      DOUBLE PRECISION NOT NULL
+                                CHECK (mass_retention > 0
+                                       AND mass_retention != 'NaN'::float8
+                                       AND mass_retention != 'Infinity'::float8),
+            data_version        TEXT NOT NULL,
+            source              TEXT NOT NULL DEFAULT 'manual',
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_retention_canonical_method_version
+            ON nutrition_retention_factors (canonical_id, method, data_version)""",
+        # Pipeline run log — one row per ingest execution for audit
+        # and rollback support.
+        """CREATE TABLE IF NOT EXISTS nutrition_pipeline_runs (
+            id              BIGSERIAL PRIMARY KEY,
+            data_version    TEXT NOT NULL,
+            fdc_snapshot    TEXT,
+            foods_loaded    INTEGER NOT NULL DEFAULT 0 CHECK (foods_loaded >= 0),
+            nutrients_written INTEGER NOT NULL DEFAULT 0 CHECK (nutrients_written >= 0),
+            overrides_applied INTEGER NOT NULL DEFAULT 0 CHECK (overrides_applied >= 0),
+            coverage_pct    DOUBLE PRECISION CHECK (coverage_pct >= 0 AND coverage_pct <= 100),
+            status          TEXT NOT NULL DEFAULT 'running',
+            started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            finished_at     TIMESTAMPTZ,
+            error_detail    TEXT
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_pipeline_runs_version
+            ON nutrition_pipeline_runs (data_version, started_at DESC)""",
     ],
     table_names=[
         "nutrition_profiles",
@@ -178,5 +274,10 @@ SCHEMA = TeamSchema(
         "nutrition_pantry",
         "nutrition_pantry_import_drafts",
         "nutrition_guardrail_rejections",
+        "nutrition_nutrient_rows",
+        "nutrition_nutrient_override_log",
+        "nutrition_density",
+        "nutrition_retention_factors",
+        "nutrition_pipeline_runs",
     ],
 )
