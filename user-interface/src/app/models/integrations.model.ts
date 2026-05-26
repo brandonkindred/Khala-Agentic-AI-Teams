@@ -87,3 +87,46 @@ export interface GoogleBrowserLoginCredentialsBody {
   email: string;
   password: string;
 }
+
+/** GitHub config response (GET /api/integrations/github). */
+export interface GitHubConfigResponse {
+  enabled: boolean;
+  token_configured: boolean;
+  owner: string;
+  repo: string;
+  default_label: string;
+}
+
+/** Request body for PUT /api/integrations/github. */
+export interface GitHubConfigUpdate {
+  enabled: boolean;
+  owner: string;
+  repo: string;
+  token: string;
+  default_label: string;
+  repo_path: string;
+}
+
+/** Single GitHub issue item from GET /api/integrations/github/issues. */
+export interface GitHubIssueItem {
+  number: number;
+  title: string;
+  body_preview: string;
+  labels: string[];
+  html_url: string;
+}
+
+/** Request body for POST /api/integrations/github/run-issue. */
+export interface RunGitHubIssueRequest {
+  issue_number: number;
+  base_branch?: string;
+}
+
+/** Response from POST /api/integrations/github/run-issue. */
+export interface RunGitHubIssueResponse {
+  job_id: string;
+  issue_number: number;
+  issue_url: string;
+  status: string;
+  message: string;
+}

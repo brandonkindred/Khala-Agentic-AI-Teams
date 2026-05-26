@@ -3,6 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import type { HealthResponse } from '../models/health.model';
+import type { CodingTeamJobStatus } from '../models/coding-team.model';
 
 /**
  * Coding Team API (Software Engineering sub-team). Base URL from environment.codingTeamApiUrl.
@@ -14,5 +15,9 @@ export class CodingTeamApiService {
 
   health(): Observable<HealthResponse> {
     return this.http.get<HealthResponse>(`${this.baseUrl}/health`);
+  }
+
+  getJobStatus(jobId: string): Observable<CodingTeamJobStatus> {
+    return this.http.get<CodingTeamJobStatus>(`${this.baseUrl}/status/${jobId}`);
   }
 }

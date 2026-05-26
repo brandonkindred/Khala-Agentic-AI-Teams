@@ -70,6 +70,7 @@ _BROWSER_SESSION_ROOT_LOGGED = False
 
 _SLACK_SERVICE = "slack"
 _MEDIUM_SERVICE = "medium"
+_GITHUB_SERVICE = "github"
 
 
 def _get_integrations_path() -> Path:
@@ -502,6 +503,9 @@ def get_integrations_list() -> list[dict[str, Any]]:
         data = _read_raw()
     slack = data.get("slack") or {}
     medium = data.get("medium") or {}
+    github = data.get("github") or {}
+    gh_owner = str(github.get("owner", "")).strip()
+    gh_repo = str(github.get("repo", "")).strip()
     return [
         {
             "id": "slack",
@@ -517,4 +521,75 @@ def get_integrations_list() -> list[dict[str, Any]]:
             or str(medium.get("oauth_provider", "")).strip()
             or None,
         },
+        {
+            "id": "github",
+            "type": "github",
+            "enabled": bool(github.get("enabled", False)),
+            "channel": f"{gh_owner}/{gh_repo}" if gh_owner and gh_repo else None,
+        },
     ]
+
+
+# ---------------------------------------------------------------------------
+# GitHub
+# ---------------------------------------------------------------------------
+
+
+def get_github_config() -> dict[str, Any]:
+    """Return GitHub integration config. PAT from encrypted DB; owner/repo from JSON."""
+    with _LOCK:
+        data = _read_raw()
+    github = data.get("github") or {}
+    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
+    return {
+        "enabled": bool(github.get("enabled", False)),
+        "owner": str(github.get("owner", "")).strip(),
+        "repo": str(github.get("repo", "")).strip(),
+        "default_label": str(github.get("default_label", "")).strip(),
+        "repo_path": str(github.get("repo_path", "")).strip(),
+        "token_configured": bool(token),
+    }
+
+
+def set_github_config(
+    *,
+    enabled: bool,
+    owner: str = "",
+    repo: str = "",
+    personal_access_token: str = "",
+    default_label: str = "",
+    repo_path: str = "",
+) -> None:
+    """Persist GitHub config. PAT goes encrypted to Postgres; rest to JSON.
+
+    Preserves existing values when empty strings are passed for owner/repo/repo_path.
+    """
+    if personal_access_token.strip():
+        set_credential(_GITHUB_SERVICE, "personal_access_token", personal_access_token.strip())
+
+    with _LOCK:
+        data = _read_raw()
+        existing = data.get("github") or {}
+        data["github"] = {
+            "enabled": enabled,
+            "owner": owner.strip() or existing.get("owner", ""),
+            "repo": repo.strip() or existing.get("repo", ""),
+            "default_label": default_label.strip(),
+            "repo_path": repo_path.strip() or existing.get("repo_path", ""),
+        }
+        _write_raw(data)
+
+
+def clear_github_config() -> None:
+    """Remove GitHub PAT and reset config to disabled defaults."""
+    delete_credential(_GITHUB_SERVICE, "personal_access_token")
+    with _LOCK:
+        data = _read_raw()
+        data["github"] = {
+            "enabled": False,
+            "owner": "",
+            "repo": "",
+            "default_label": "",
+            "repo_path": "",
+        }
+        _write_raw(data)

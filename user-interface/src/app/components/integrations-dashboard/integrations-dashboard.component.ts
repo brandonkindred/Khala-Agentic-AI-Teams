@@ -13,6 +13,8 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import type {
+  GitHubConfigResponse,
+  GitHubConfigUpdate,
   GoogleBrowserLoginCredentialsBody,
   MediumConfigResponse,
   MediumConfigUpdate,
@@ -24,7 +26,7 @@ import type {
 
 const SLACK_WEBHOOK_PREFIX = 'https://hooks.slack.com/';
 
-type IntegrationKey = 'google' | 'slack' | 'medium';
+type IntegrationKey = 'google' | 'slack' | 'medium' | 'github';
 
 @Component({
   selector: 'app-integrations-dashboard',
@@ -63,13 +65,14 @@ export class IntegrationsDashboardComponent implements OnInit {
     this.expanded = this.expanded === key ? null : key;
   }
 
-  readonly totalIntegrations = 3;
+  readonly totalIntegrations = 4;
 
   get connectedCount(): number {
     let n = 0;
     if (this.googleBrowserLoginConfigured) n += 1;
     if (this.oauthConnected) n += 1;
     if (this.mediumReadyForStats) n += 1;
+    if (this.githubTokenConfigured && this.githubOwner && this.githubRepo) n += 1;
     return n;
   }
 
@@ -102,6 +105,7 @@ export class IntegrationsDashboardComponent implements OnInit {
     this.loadGoogleBrowserLoginStatus();
     this.loadSlackConfig();
     this.loadMediumConfig();
+    this.loadGitHubConfig();
     this.handleOAuthCallback();
   }
 
@@ -549,6 +553,95 @@ export class IntegrationsDashboardComponent implements OnInit {
       error: (err) => {
         this.error = err?.error?.detail || err?.message || 'Failed to save Slack config.';
         this.saving = false;
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // GitHub
+  // ---------------------------------------------------------------------------
+
+  githubLoading = false;
+  githubSaving = false;
+  githubDisconnecting = false;
+  githubError: string | null = null;
+  githubSuccess: string | null = null;
+
+  githubEnabled = false;
+  githubOwner = '';
+  githubRepo = '';
+  githubPat = '';
+  githubDefaultLabel = '';
+  githubTokenConfigured = false;
+
+  loadGitHubConfig(): void {
+    this.githubLoading = true;
+    this.githubError = null;
+    this.api.getGitHubConfig().subscribe({
+      next: (res: GitHubConfigResponse) => {
+        this.githubEnabled = res.enabled;
+        this.githubOwner = res.owner;
+        this.githubRepo = res.repo;
+        this.githubDefaultLabel = res.default_label;
+        this.githubTokenConfigured = res.token_configured;
+        this.githubPat = '';
+        this.githubLoading = false;
+      },
+      error: (err: { error?: { detail?: string }; message?: string }) => {
+        this.githubError = err?.error?.detail || err?.message || 'Failed to load GitHub config.';
+        this.githubLoading = false;
+      },
+    });
+  }
+
+  saveGitHubConfig(): void {
+    this.githubSaving = true;
+    this.githubError = null;
+    this.githubSuccess = null;
+    const body: GitHubConfigUpdate = {
+      enabled: this.githubEnabled,
+      owner: this.githubOwner.trim(),
+      repo: this.githubRepo.trim(),
+      token: this.githubPat,
+      default_label: this.githubDefaultLabel.trim(),
+      repo_path: '',
+    };
+    this.api.updateGitHubConfig(body).subscribe({
+      next: (res: GitHubConfigResponse) => {
+        this.githubEnabled = res.enabled;
+        this.githubOwner = res.owner;
+        this.githubRepo = res.repo;
+        this.githubDefaultLabel = res.default_label;
+        this.githubTokenConfigured = res.token_configured;
+        this.githubPat = '';
+        this.githubSuccess = 'GitHub integration saved.';
+        this.githubSaving = false;
+      },
+      error: (err: { error?: { detail?: string }; message?: string }) => {
+        this.githubError = err?.error?.detail || err?.message || 'Failed to save GitHub config.';
+        this.githubSaving = false;
+      },
+    });
+  }
+
+  disconnectGitHub(): void {
+    this.githubDisconnecting = true;
+    this.githubError = null;
+    this.githubSuccess = null;
+    this.api.deleteGitHubConfig().subscribe({
+      next: (res: GitHubConfigResponse) => {
+        this.githubEnabled = res.enabled;
+        this.githubOwner = res.owner;
+        this.githubRepo = res.repo;
+        this.githubDefaultLabel = res.default_label;
+        this.githubTokenConfigured = res.token_configured;
+        this.githubPat = '';
+        this.githubSuccess = 'GitHub disconnected.';
+        this.githubDisconnecting = false;
+      },
+      error: (err: { error?: { detail?: string }; message?: string }) => {
+        this.githubError = err?.error?.detail || err?.message || 'Failed to disconnect GitHub.';
+        this.githubDisconnecting = false;
       },
     });
   }

@@ -16,6 +16,193 @@
   <app-health-indicator [healthCheck]="healthCheck" label="Coding Team API" />
 </div>
 
+<!-- ────────────────────────────────────────────────────────────────── -->
+<!-- GitHub Issues Workflow                                             -->
+<!-- ────────────────────────────────────────────────────────────────── -->
+@if (loadingConfig) {
+  <div class="github-section github-section--loading">
+    <mat-spinner diameter="24"></mat-spinner>
+    <span>Checking GitHub integration…</span>
+  </div>
+} @else if (!githubConfigured) {
+  <div class="github-section github-section--unconfigured">
+    <mat-icon>info</mat-icon>
+    <span>
+      GitHub integration is not configured.
+      <a routerLink="/integrations">Set up GitHub</a> to browse issues and start AI-driven coding.
+    </span>
+  </div>
+} @else {
+  <section class="github-section">
+    <div class="github-section__header">
+      <h2>
+        <mat-icon>bug_report</mat-icon>
+        GitHub Issues
+        <span class="github-section__repo">{{ githubOwner }}/{{ githubRepo }}</span>
+      </h2>
+      <button
+        mat-flat-button
+        color="primary"
+        (click)="loadIssues()"
+        [disabled]="loadingIssues"
+      >
+        <mat-icon>refresh</mat-icon>
+        @if (loadingIssues) { Loading… } @else if (issuesLoaded) { Refresh } @else { Load issues }
+      </button>
+    </div>
+
+    @if (issueError) {
+      <div class="github-banner github-banner--error">
+        <mat-icon>error_outline</mat-icon>
+        <span>{{ issueError }}</span>
+      </div>
+    }
+
+    <!-- Active job status -->
+    @if (activeJob) {
+      <div class="github-job-panel">
+        <div class="github-job-panel__header">
+          <mat-icon>engineering</mat-icon>
+          <h3>Working on issue #{{ activeJob.issue_number }}</h3>
+          @if (jobStatus?.status === 'completed' || jobStatus?.status === 'failed' || jobStatus?.status === 'cancelled') {
+            <button mat-button (click)="dismissJob()">
+              <mat-icon>close</mat-icon>
+              Dismiss
+            </button>
+          }
+        </div>
+
+        <div class="github-job-panel__body">
+          <div class="github-job-panel__field">
+            <span class="github-job-panel__label">Job</span>
+            <code>{{ activeJob.job_id | slice:0:12 }}…</code>
+          </div>
+          @if (jobStatus) {
+            <div class="github-job-panel__field">
+              <span class="github-job-panel__label">Status</span>
+              <span class="github-job-status github-job-status--{{ jobStatus.status }}">
+                {{ jobStatus.status }}
+              </span>
+            </div>
+            @if (jobStatus.phase) {
+              <div class="github-job-panel__field">
+                <span class="github-job-panel__label">Phase</span>
+                <span>{{ jobStatus.phase }}</span>
+              </div>
+            }
+            @if (jobStatus.status_text) {
+              <div class="github-job-panel__field">
+                <span class="github-job-panel__label">Detail</span>
+                <span>{{ jobStatus.status_text }}</span>
+              </div>
+            }
+            @if (jobStatus.task_graph_snapshot && jobStatus.task_graph_snapshot.length > 0) {
+              <div class="github-job-tasks">
+                <span class="github-job-panel__label">Tasks</span>
+                <div class="github-job-tasks__list">
+                  @for (task of jobStatus.task_graph_snapshot; track task.id) {
+                    <div class="github-task-chip github-task-chip--{{ task.status }}">
+                      {{ task.title | slice:0:40 }}
+                      <span class="github-task-chip__status">{{ task.status }}</span>
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+            @if (jobStatus.github_pr_url) {
+              <div class="github-job-panel__field github-job-panel__field--pr">
+                <mat-icon>merge_type</mat-icon>
+                <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener">
+                  {{ jobStatus.github_pr_url }}
+                </a>
+              </div>
+            }
+            @if (jobStatus.error) {
+              <div class="github-banner github-banner--error">
+                <mat-icon>error_outline</mat-icon>
+                <span>{{ jobStatus.error }}</span>
+              </div>
+            }
+          } @else {
+            <div class="github-job-panel__field">
+              <mat-spinner diameter="18"></mat-spinner>
+              <span>Starting…</span>
+            </div>
+          }
+        </div>
+      </div>
+    }
+
+    <!-- Issue confirmation -->
+    @if (selectedIssue && !activeJob) {
+      <div class="github-confirm-panel">
+        <h3>Start AI coding on this issue?</h3>
+        <div class="github-confirm-panel__issue">
+          <span class="issue-number">#{{ selectedIssue.number }}</span>
+          <span class="issue-title">{{ selectedIssue.title }}</span>
+        </div>
+        @if (selectedIssue.body_preview) {
+          <p class="github-confirm-panel__preview">{{ selectedIssue.body_preview }}</p>
+        }
+        <p class="github-confirm-panel__hint">
+          The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.
+        </p>
+        <div class="github-confirm-panel__actions">
+          <button
+            mat-flat-button
+            color="primary"
+            (click)="confirmAndRun()"
+            [disabled]="runningIssue"
+          >
+            @if (runningIssue) {
+              <mat-spinner diameter="18"></mat-spinner>
+              Starting…
+            } @else {
+              <ng-container>
+                <mat-icon>play_arrow</mat-icon>
+                Confirm &amp; Start
+              </ng-container>
+            }
+          </button>
+          <button mat-stroked-button (click)="cancelSelection()">Cancel</button>
+        </div>
+      </div>
+    }
+
+    <!-- Issue list -->
+    @if (issuesLoaded && !selectedIssue && !activeJob) {
+      @if (issues.length === 0) {
+        <div class="github-empty">
+          <mat-icon>check_circle_outline</mat-icon>
+          <span>No open issues found.</span>
+        </div>
+      } @else {
+        <div class="github-issues-list">
+          @for (issue of issues; track issue.number) {
+            <button
+              class="github-issue-row"
+              type="button"
+              (click)="selectIssue(issue)"
+            >
+              <span class="github-issue-row__number">#{{ issue.number }}</span>
+              <span class="github-issue-row__title">{{ issue.title }}</span>
+              <span class="github-issue-row__labels">
+                @for (label of issue.labels; track label) {
+                  <span class="github-label-chip">{{ label }}</span>
+                }
+              </span>
+              <mat-icon class="github-issue-row__arrow">chevron_right</mat-icon>
+            </button>
+          }
+        </div>
+      }
+    }
+  </section>
+}
+
+<!-- ────────────────────────────────────────────────────────────────── -->
+<!-- Team Assistant (existing)                                          -->
+<!-- ────────────────────────────────────────────────────────────────── -->
 <app-team-assistant-chat
   [teamApiUrl]="'/api/coding-team/assistant'"
   [teamName]="'Coding Team'"

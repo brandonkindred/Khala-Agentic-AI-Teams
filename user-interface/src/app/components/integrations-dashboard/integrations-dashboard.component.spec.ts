@@ -20,6 +20,7 @@ describe('IntegrationsDashboardComponent', () => {
     disconnectSlack: ReturnType<typeof vi.fn>;
     putGoogleBrowserLoginCredentials: ReturnType<typeof vi.fn>;
     deleteGoogleBrowserLoginCredentials: ReturnType<typeof vi.fn>;
+    getGitHubConfig: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
@@ -34,6 +35,7 @@ describe('IntegrationsDashboardComponent', () => {
       disconnectSlack: vi.fn(),
       putGoogleBrowserLoginCredentials: vi.fn(),
       deleteGoogleBrowserLoginCredentials: vi.fn(),
+      getGitHubConfig: vi.fn(),
     };
     apiSpy.getSlackConfig.mockReturnValue(of({
       enabled: false,
@@ -46,6 +48,7 @@ describe('IntegrationsDashboardComponent', () => {
     }));
     apiSpy.getGoogleBrowserLoginStatus.mockReturnValue(of({ configured: false }));
     apiSpy.getMediumConfig.mockReturnValue(of({ enabled: false }));
+    apiSpy.getGitHubConfig.mockReturnValue(of({ enabled: false, token_configured: false, owner: '', repo: '', default_label: '' }));
 
     await TestBed.configureTestingModule({
       imports: [IntegrationsDashboardComponent, NoopAnimationsModule],
