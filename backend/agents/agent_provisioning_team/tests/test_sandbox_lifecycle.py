@@ -342,6 +342,38 @@ def test_check_docker_available_ignores_default_context(tmp_path: Path) -> None:
             _check_docker_available()
 
 
+def test_check_docker_available_ignores_docker_context_default_env(tmp_path: Path) -> None:
+    """DOCKER_CONTEXT=default points to the local socket, so the socket check
+    must still fire — setting it should not bypass the fast-fail."""
+    from agent_provisioning_team.sandbox.lifecycle import (
+        DockerUnavailableError,
+        _check_docker_available,
+    )
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": "default"}, clear=False),
+        patch(
+            "agent_provisioning_team.sandbox.lifecycle._has_non_default_docker_context",
+            return_value=False,
+        ),
+        patch("pathlib.Path.exists", return_value=False),
+    ):
+        with pytest.raises(DockerUnavailableError):
+            _check_docker_available()
+
+
+def test_check_docker_available_passes_with_non_default_docker_context_env() -> None:
+    """DOCKER_CONTEXT set to a non-default value should skip the socket check."""
+    from agent_provisioning_team.sandbox.lifecycle import _check_docker_available
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": "remote-server"}, clear=False),
+    ):
+        _check_docker_available()
+
+
 def test_state_persists_across_lifecycle_instances(tmp_path: Path) -> None:
     lc1 = _lifecycle(tmp_path)
     with _patched_registry(), _patched_docker():

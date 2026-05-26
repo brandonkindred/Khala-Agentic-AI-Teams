@@ -104,7 +104,8 @@ def _check_docker_available() -> None:
             "Sandbox provisioning requires the 'docker' CLI, but it is not installed or not on PATH. "
             "Install Docker or run the unified API on a host with Docker access."
         )
-    if os.environ.get("DOCKER_HOST") or os.environ.get("DOCKER_CONTEXT"):
+    docker_context = os.environ.get("DOCKER_CONTEXT", "")
+    if os.environ.get("DOCKER_HOST") or (docker_context and docker_context != "default"):
         return
     if _has_non_default_docker_context():
         return
