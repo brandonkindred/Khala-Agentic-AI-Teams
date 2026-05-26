@@ -8,7 +8,6 @@ import pandas as pd
 
 from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
-    EvaluationResult,
     PandasHistoryView,
     StreamingHistoryView,
     compare,
@@ -16,7 +15,6 @@ from investment_team.strategy_lab.executor.predicate_evaluator import (
     evaluate_predicate,
     evaluate_signal_exit_rules,
     relative_miss,
-    resolve_side_value,
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -24,7 +22,6 @@ from investment_team.strategy_lab.spec_dsl import (
     Predicate,
     SignalExitRule,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -239,8 +236,28 @@ def test_evaluate_signal_exit_rules_no_match():
 
 
 def test_streaming_pandas_parity():
-    closes = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0,
-              110.0, 111.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0]
+    closes = [
+        100.0,
+        101.0,
+        102.0,
+        103.0,
+        104.0,
+        105.0,
+        106.0,
+        107.0,
+        108.0,
+        109.0,
+        110.0,
+        111.0,
+        112.0,
+        113.0,
+        114.0,
+        115.0,
+        116.0,
+        117.0,
+        118.0,
+        119.0,
+    ]
     pandas_view = _pandas_view(closes)
     streaming = _streaming_view(closes)
     ref = IndicatorRef(name="sma", params={"period": 5})
@@ -266,10 +283,14 @@ def test_streaming_view_length():
 def test_streaming_view_cache_invalidation():
     view = StreamingHistoryView()
     for c in [100.0, 101.0, 102.0]:
-        view.append(BarRecord(timestamp="2024-01-01", open=c, high=c+1, low=c-1, close=c, volume=1000.0))
+        view.append(
+            BarRecord(timestamp="2024-01-01", open=c, high=c + 1, low=c - 1, close=c, volume=1000.0)
+        )
     ref = IndicatorRef(name="sma", params={"period": 2})
     v1 = view.indicator(ref, 2)
-    view.append(BarRecord(timestamp="2024-01-02", open=200, high=201, low=199, close=200, volume=1000.0))
+    view.append(
+        BarRecord(timestamp="2024-01-02", open=200, high=201, low=199, close=200, volume=1000.0)
+    )
     v2 = view.indicator(ref, 3)
     assert v1 is not None and v2 is not None
     assert v1 != v2

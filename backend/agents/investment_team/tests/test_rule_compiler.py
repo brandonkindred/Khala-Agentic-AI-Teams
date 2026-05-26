@@ -247,21 +247,20 @@ def _build_view(closes: list[float], symbol: str = "AAA") -> StreamingHistoryVie
 
 def test_signal_exit_rule_noop_without_views() -> None:
     pos = _long()
-    rule = SignalExitRule(
-        when=Predicate(lhs="bar.close", op=">", rhs=90.0)
-    )
+    rule = SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=90.0))
     intents = evaluate_exit_rules([rule], {"AAA": pos}, {"AAA": _bar()})
     assert intents == []
 
 
 def test_signal_exit_fires_with_view_when_predicate_satisfied() -> None:
     pos = _long()
-    rule = SignalExitRule(
-        when=Predicate(lhs="bar.close", op=">", rhs=90.0)
-    )
+    rule = SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=90.0))
     views = {"AAA": _build_view([80.0, 90.0, 100.0])}
     intents = evaluate_exit_rules(
-        [rule], {"AAA": pos}, {"AAA": _bar(close=100.0)}, views=views,
+        [rule],
+        {"AAA": pos},
+        {"AAA": _bar(close=100.0)},
+        views=views,
     )
     assert len(intents) == 1
     assert intents[0].rule_kind == "signal_exit"
@@ -269,12 +268,13 @@ def test_signal_exit_fires_with_view_when_predicate_satisfied() -> None:
 
 def test_signal_exit_does_not_fire_when_predicate_not_satisfied() -> None:
     pos = _long()
-    rule = SignalExitRule(
-        when=Predicate(lhs="bar.close", op=">", rhs=200.0)
-    )
+    rule = SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=200.0))
     views = {"AAA": _build_view([80.0, 90.0, 100.0])}
     intents = evaluate_exit_rules(
-        [rule], {"AAA": pos}, {"AAA": _bar(close=100.0)}, views=views,
+        [rule],
+        {"AAA": pos},
+        {"AAA": _bar(close=100.0)},
+        views=views,
     )
     assert intents == []
 
@@ -290,16 +290,17 @@ def test_signal_exit_warmup_returns_none() -> None:
     )
     views = {"AAA": _build_view([100.0, 101.0, 102.0])}
     intents = evaluate_exit_rules(
-        [rule], {"AAA": pos}, {"AAA": _bar()}, views=views,
+        [rule],
+        {"AAA": pos},
+        {"AAA": _bar()},
+        views=views,
     )
     assert intents == []
 
 
 def test_signal_exit_does_not_block_other_rules_in_spec() -> None:
     pos = _long()
-    signal = SignalExitRule(
-        when=Predicate(lhs="bar.close", op=">", rhs=200.0)
-    )
+    signal = SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=200.0))
     views = {"AAA": _build_view([80.0, 90.0, 100.0])}
     intents = evaluate_exit_rules(
         [signal, StopLossRule(pct=0.05)],

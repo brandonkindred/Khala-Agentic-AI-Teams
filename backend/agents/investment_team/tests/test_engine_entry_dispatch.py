@@ -12,7 +12,6 @@ from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     FixedFractionSizing,
     FixedNotionalSizing,
-    IndicatorRef,
     Predicate,
 )
 from investment_team.trading_service.service import (
@@ -21,7 +20,9 @@ from investment_team.trading_service.service import (
 )
 
 
-def _make_bar(symbol="AAA", close=100.0, high=101.0, low=99.0, volume=1000.0, timestamp="2024-01-10"):
+def _make_bar(
+    symbol="AAA", close=100.0, high=101.0, low=99.0, volume=1000.0, timestamp="2024-01-10"
+):
     bar = MagicMock()
     bar.symbol = symbol
     bar.close = close

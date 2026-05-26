@@ -48,9 +48,14 @@ from ..alignment_findings import AlignmentFinding, NearMissVerdict, Severity
 from ..executor import indicators as ind
 from ..executor.predicate_evaluator import (
     PandasHistoryView,
+)
+from ..executor.predicate_evaluator import (
     compare as _compare_shared,
-    evaluate_predicate as _evaluate_predicate_shared,
+)
+from ..executor.predicate_evaluator import (
     relative_miss as _relative_miss_shared,
+)
+from ..executor.predicate_evaluator import (
     resolve_side_value as _resolve_side_value_shared,
 )
 from ..spec_dsl import (

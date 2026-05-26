@@ -32,6 +32,8 @@ from ..models import (
 from ..strategy_lab.executor.predicate_evaluator import (
     BarRecord,
     StreamingHistoryView,
+)
+from ..strategy_lab.executor.predicate_evaluator import (
     evaluate_entry_rules as _evaluate_entry_rules_pred,
 )
 from ..strategy_lab.executor.rule_compiler import (
@@ -45,7 +47,6 @@ from ..strategy_lab.spec_dsl import (
     ExitRule,
     FixedFractionSizing,
     FixedNotionalSizing,
-    SizingRule,
     VolatilityTargetSizing,
 )
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
@@ -287,7 +288,10 @@ class _EngineExitDispatcher:
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
         intents = evaluate_exit_rules(
-            self.exit_rules, {sym: snapshot}, {sym: bar_snap}, views=self.views,
+            self.exit_rules,
+            {sym: snapshot},
+            {sym: bar_snap},
+            views=self.views,
         )
         return intents[0] if intents else None
 
@@ -536,7 +540,10 @@ class _EngineEntryDispatcher:
         sym = cur_bar.symbol
         if portfolio.positions.get(sym) is not None:
             return
-        if any(req.symbol == sym and req.side in (OrderSide.LONG, OrderSide.SHORT) for req in pending_for_prev):
+        if any(
+            req.symbol == sym and req.side in (OrderSide.LONG, OrderSide.SHORT)
+            for req in pending_for_prev
+        ):
             return
         view = views.get(sym)
         if view is None or view.length() == 0:
@@ -1855,14 +1862,16 @@ class TradingService:
         sym = cur_bar.symbol
         if sym not in views:
             views[sym] = StreamingHistoryView()
-        views[sym].append(BarRecord(
-            timestamp=cur_bar.timestamp,
-            open=cur_bar.open,
-            high=cur_bar.high,
-            low=cur_bar.low,
-            close=cur_bar.close,
-            volume=getattr(cur_bar, "volume", 0.0),
-        ))
+        views[sym].append(
+            BarRecord(
+                timestamp=cur_bar.timestamp,
+                open=cur_bar.open,
+                high=cur_bar.high,
+                low=cur_bar.low,
+                close=cur_bar.close,
+                volume=getattr(cur_bar, "volume", 0.0),
+            )
+        )
 
     @staticmethod
     def _update_position_tracker(

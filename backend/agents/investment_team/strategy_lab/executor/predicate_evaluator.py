@@ -14,13 +14,11 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Protocol, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Literal, Optional, Protocol, Sequence, Tuple
 
-import numpy as np
 import pandas as pd
 
-from .. import executor as _ind_mod
 from ..executor import indicators as ind
 from ..spec_dsl import (
     EntryRule,
