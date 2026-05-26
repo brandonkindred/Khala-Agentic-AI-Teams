@@ -129,60 +129,23 @@ isn't defensible, say so and suggest alternatives.
 brand team is beginning to draft initial directions.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STRUCTURED OUTPUT (required)
+HOW TO REPLY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-After your reply to the client, you MUST output a JSON block that updates the mission. Use exactly \
-this format — nothing else between the markdown fence and the JSON:
+Reply in **plain natural language only** — the same way a senior strategist would text a client. \
+No JSON. No code blocks. No field names. No bullet-point dumps unless they genuinely help. Just \
+warm, expert, opinionated prose that:
 
-```mission
-{
-  "company_name": "...",
-  "company_description": "...",
-  "target_audience": "...",
-  "values": ["..."],
-  "differentiators": ["..."],
-  "desired_voice": "...",
-  "existing_brand_material": ["..."],
-  "color_inspiration": ["..."],
-  "color_palettes": [
-    {"name": "Palette Name", "description": "mood description", "colors": ["color1", "color2", "..."], "sentiment": "warm and energetic"}
-  ],
-  "selected_palette_index": null,
-  "visual_style": "...",
-  "typography_preference": "...",
-  "interface_density": "..."
-}
-```
+1. Acknowledges what the client just said by name where relevant ("Brandon Kindred — got it.").
+2. Shares a brief piece of expert framing or context ("In my experience personal brands live or die on a clear point of view…").
+3. Moves the conversation forward with one or two focused questions, OR offers 2–4 curated options for them to react to when they seem unsure.
+4. Stays inside the current phase until its gate condition is met.
 
-- Only include keys you are updating or that the user provided. Omit keys that are unchanged or unknown.
-- Use empty string "" for scalar fields the user hasn't provided yet. Use arrays for values, differentiators, existing_brand_material, color_inspiration as appropriate.
-- `color_palettes`: populate when you present palette options. Each object has name, description, colors (list of color names/descriptions), and sentiment.
-- `selected_palette_index`: set to the 0-based index of the loved/chosen palette ONLY when the client has explicitly chosen one; use null otherwise.
-- `visual_style`, `typography_preference`, `interface_density`: set when the client makes these choices.
-- If the user did not give any new mission info in this turn, still output a ```mission block with empty updates (`{}`) so the parser can merge.
-
-## Suggested Questions (required)
-
-## Suggested Questions (required)
-
-After the ```mission block, output exactly:
-
-```suggestions
-["Question one?", "Question two?", "Question three?"]
-```
-
-Provide 2–4 short follow-up prompts the client could tap. These should be contextually relevant to \
-the current phase and where you are in the conversation. Examples:
-- Phase 1: "What 3 values matter most?", "What makes you different from [competitor]?", "Who's your ideal buyer?"
-- Phase 2: "How should the brand sound?", "Any brands you admire?", "What's the origin story?"
-- Phase 3: "Prefer bold or minimal visuals?", "Any color preferences?", "Share existing logo or assets"
-- Phase 4: "Which channels are highest priority?", "Do you have sub-brands?", "Any naming conventions?"
-- Phase 5: "Who owns the brand internally?", "How will you measure brand health?", "How often should we revisit?"
-"""
+A separate downstream system handles capturing structured fields from the conversation — that is \
+NOT your job. Do not output JSON or structured data of any kind. Write like a human."""
 
 USER_TURN_TEMPLATE = """\
-Current mission state (what we know so far):
+Brand brief so far (for your reference only — do not echo this back as structured data):
 - company_name: {company_name}
 - company_description: {company_description}
 - target_audience: {target_audience}
@@ -202,6 +165,71 @@ Conversation so far:
 
 User: {user_message}
 
-Respond with your reply to the user, then the ```mission JSON block, then the ```suggestions JSON \
-array. Do not add extra text after the suggestions block.\
+Reply as the branding lead would — natural language only, no JSON, no code blocks, no field names.\
+"""
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Silent extractor — second LLM call, never seen by the user.
+# Pulls structured BrandingMission updates from the latest turn.
+# ────────────────────────────────────────────────────────────────────────────
+
+EXTRACTION_SYSTEM_PROMPT = """You are a silent extraction tool that runs after a branding strategist replies to a client. You read the latest exchange and the strategist's reply, then output a JSON object describing what (if anything) was newly learned about the brand. The user never sees your output.
+
+Output ONLY a JSON object — no prose, no markdown fences — with this shape:
+
+{
+  "mission_update": {
+    "company_name": "...",
+    "company_description": "...",
+    "target_audience": "...",
+    "values": ["..."],
+    "differentiators": ["..."],
+    "desired_voice": "...",
+    "existing_brand_material": ["..."],
+    "color_inspiration": ["..."],
+    "color_palettes": [
+      {"name": "Palette Name", "description": "mood description", "colors": ["color1", "color2"], "sentiment": "warm and energetic"}
+    ],
+    "selected_palette_index": null,
+    "visual_style": "...",
+    "typography_preference": "...",
+    "interface_density": "..."
+  },
+  "suggested_questions": ["Question one?", "Question two?"]
+}
+
+Rules:
+- Include ONLY mission_update keys whose values were newly provided or refined in this turn. Omit everything else. If nothing was learned, use `{}`.
+- Treat the client's input as inspiration, not a final answer — only fill fields the client (or strategist on the client's behalf) explicitly committed to.
+- `selected_palette_index`: only set when the client clearly chose a loved palette by name or index.
+- `suggested_questions`: 2–4 short tap-able follow-ups the client might want to send next, contextually relevant to where the strategist just left the conversation. These appear as quick-reply chips in the UI.
+
+Output the JSON object only. No leading or trailing text."""
+
+EXTRACTION_USER_TEMPLATE = """\
+Current brand brief (state before this turn):
+- company_name: {company_name}
+- company_description: {company_description}
+- target_audience: {target_audience}
+- values: {values}
+- differentiators: {differentiators}
+- desired_voice: {desired_voice}
+- existing_brand_material: {existing_brand_material}
+- color_inspiration: {color_inspiration}
+- color_palettes: {color_palettes}
+- selected_palette_index: {selected_palette_index}
+- visual_style: {visual_style}
+- typography_preference: {typography_preference}
+- interface_density: {interface_density}
+
+Conversation so far:
+{conversation_history}
+
+Latest user message: {user_message}
+
+Strategist's reply just sent to the user:
+{assistant_reply}
+
+Output the JSON object now.\
 """

@@ -217,3 +217,86 @@ def test_extract_json_json_repair_unescaped_quotes_in_strings() -> None:
     parsed = client._extract_json(broken_invalid)
     assert parsed["approved"] is False
     assert "Resource" in parsed["feedback_items"][0]["issue"]
+
+
+def test_ollama_chat_round_returns_raw_prose_without_response_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """chat_round must return plain content as-is and NOT request response_format=json_object.
+
+    Regression: the branding conversation agent used to flow through
+    chat_json_round which forced JSON parsing on natural-language replies.
+    """
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    prose = (
+        "Brandon Kindred — got it. Personal brands live or die on a clear point of view. "
+        "What's the work you want to be known for?"
+    )
+    # Stream the prose one character at a time (after JSON-escaping) to mimic
+    # the SSE protocol Ollama uses.
+    encoded = json.dumps(prose)  # quoted + escapes wrapped in "..."
+    sse_lines = [
+        f'data: {{"choices":[{{"delta":{{"content":{encoded}}},"finish_reason":null}}]}}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    captured_payloads: list[dict] = []
+    original_stream = mock_client.__enter__.return_value.stream
+
+    def capturing_stream(method, url, json=None, headers=None):
+        if json is not None:
+            captured_payloads.append(json)
+        return original_stream(method, url, json=json, headers=headers)
+
+    mock_client.__enter__.return_value.stream = capturing_stream
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.chat(
+            [{"role": "user", "content": "tell me about brand strategy"}],
+            response_format="text",
+            temperature=0.2,
+        )
+    assert result == prose
+    assert captured_payloads, "No payload captured"
+    payload = captured_payloads[0]
+    # The critical assertion: chat(response_format="text") MUST NOT force JSON output.
+    assert "response_format" not in payload
+    assert "tools" not in payload
+
+
+def test_ollama_chat_round_returns_tool_calls_when_tools_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When tools are supplied and the model invokes one, chat_round returns
+    a ``__tool_calls__`` dict — same shape as ``chat_json_round`` for tool use."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"do_thing","arguments":"{}"}}]},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "do_thing",
+                "description": "Do a thing",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.chat(
+            [{"role": "user", "content": "go"}],
+            response_format="text",
+            tools=tools,
+            temperature=0.0,
+        )
+    assert isinstance(result, dict)
+    assert "__tool_calls__" in result
+    assert result["__tool_calls__"][0]["function"]["name"] == "do_thing"

@@ -35,7 +35,7 @@ def test_identify_uncertainty_questions_returns_items(monkeypatch) -> None:
     a = _make_agent()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, prompt, system_prompt="": json.dumps(
             [
                 {
@@ -56,7 +56,7 @@ def test_identify_uncertainty_questions_empty_array(monkeypatch) -> None:
     from blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", lambda self, p, system_prompt="": "[]")
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "[]")
     assert a.identify_uncertainty_questions("d", "p") == []
 
 
@@ -66,7 +66,7 @@ def test_identify_uncertainty_questions_no_array(monkeypatch) -> None:
 
     a = _make_agent()
     monkeypatch.setattr(
-        BlogWriterAgent, "_call_agent", lambda self, p, system_prompt="": "no array here"
+        BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no array here"
     )
     assert a.identify_uncertainty_questions("d", "p") == []
 
@@ -77,7 +77,7 @@ def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> 
     a = _make_agent()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, p, system_prompt="": json.dumps(
             [
                 {"question": "What?"},  # missing question_id → assigned auto
@@ -97,7 +97,7 @@ def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
     def boom(self, prompt, system_prompt=""):
         raise RuntimeError("nope")
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     assert a.identify_uncertainty_questions("d", "p") == []
 
 
@@ -185,7 +185,7 @@ def test_revise_from_user_feedback_happy(monkeypatch, tmp_path) -> None:
     a = _make_agent()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, p, system_prompt="": (
             '{"draft": 0}\n---DRAFT---\n# Revised by user feedback\nBody.'
         ),
@@ -224,7 +224,7 @@ def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> 
         call_count["i"] += 1
         return "no marker here"
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", fake)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
     monkeypatch.setattr(
         BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {"draft": "# Fallback"}
     )
@@ -245,7 +245,7 @@ def test_generate_escalation_summary_happy(monkeypatch) -> None:
     a = _make_agent()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, p, system_prompt="": "Summary: stuck on tone and flow.",
     )
     items = [
@@ -268,7 +268,7 @@ def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
     def boom(self, p, system_prompt=""):
         raise RuntimeError("nope")
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     out = a.generate_escalation_summary(
         revision_count=10,
         latest_feedback_items=[],
@@ -305,7 +305,7 @@ def test_revise_with_feedback_batches(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, p, system_prompt="": '{"draft": 0}\n---DRAFT---\n# Revised\nBody.',
     )
 
@@ -360,7 +360,7 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
     import blog_writer_agent.agent as wa_mod
 
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", fail)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fail)
 
     def fail_json(self, p, **kw):
         raise ValueError("nope")
@@ -503,7 +503,7 @@ def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
         raise RuntimeError("nope")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom_json)
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", lambda self, p, **kw: "Plain text plan")
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, p, **kw: "Plain text plan")
     out = a._generate_revision_plan(
         draft="# x",
         feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],

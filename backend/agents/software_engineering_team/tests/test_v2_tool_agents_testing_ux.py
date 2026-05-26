@@ -89,12 +89,14 @@ class TestFETestingQA:
 
         a = mod.TestingQAToolAgent.__new__(mod.TestingQAToolAgent)
         a._model = None
+        a._model_json = None
         a.llm = None
         return a, mod
 
     def test_review_finds_issues(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         resp = (
             "## PASSED ##\nfalse\n## END PASSED ##\n"
             "## ISSUES ##\n"
@@ -109,6 +111,7 @@ class TestFETestingQA:
     def test_problem_solve_fixes_issues(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, "## FILE x.ts ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n")
         out = a.problem_solve(
             _fe_phase_input(
@@ -125,6 +128,7 @@ class TestFETestingQA:
     def test_problem_solve_llm_failure(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, raise_exc=RuntimeError("err"))
         out = a.problem_solve(
             _fe_phase_input(
@@ -148,6 +152,7 @@ class TestFEUxUsability:
 
         a = mod.UxUsabilityToolAgent.__new__(mod.UxUsabilityToolAgent)
         a._model = None
+        a._model_json = None
         a.llm = None
         return a, mod
 
@@ -159,6 +164,7 @@ class TestFEUxUsability:
     def test_plan_with_model_success(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         payload = json.dumps(
             {
                 "user_journeys": "happy: A->B->C",
@@ -176,6 +182,7 @@ class TestFEUxUsability:
     def test_plan_with_model_llm_failure(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, raise_exc=RuntimeError("err"))
         out = a.plan(_fe_phase_input())
         assert "failed" in out.summary
@@ -183,6 +190,7 @@ class TestFEUxUsability:
     def test_plan_with_model_invalid_json(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, "not json")
         out = a.plan(_fe_phase_input())
         # Falls back to default recommendations
@@ -191,6 +199,7 @@ class TestFEUxUsability:
     def test_plan_with_model_text_around_json(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         payload = 'prefix {"user_journeys": "j", "summary": "ok"} suffix'
         _patch(monkeypatch, mod, payload)
         out = a.plan(_fe_phase_input())
@@ -199,6 +208,7 @@ class TestFEUxUsability:
     def test_review_with_text_around_json(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         payload = (
             'preface {"issues": [{"description": "bad", "severity": "high", '
             '"file_path": "a.tsx", "recommendation": "fix"}], "summary": "x"} tail'
@@ -210,6 +220,7 @@ class TestFEUxUsability:
     def test_problem_solve_fixes_issues(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, "## FILE a.tsx ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n")
         out = a.problem_solve(
             _fe_phase_input(
@@ -226,6 +237,7 @@ class TestFEUxUsability:
     def test_problem_solve_llm_failure(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, raise_exc=RuntimeError("err"))
         out = a.problem_solve(
             _fe_phase_input(
@@ -238,6 +250,7 @@ class TestFEUxUsability:
     def test_review_invalid_json(self, monkeypatch):
         a, mod = self._agent()
         a._model = object()
+        a._model_json = object()
         _patch(monkeypatch, mod, "not json")
         out = a.review(_fe_phase_input(current_files={"a.tsx": "x"}))
         assert out.issues == []

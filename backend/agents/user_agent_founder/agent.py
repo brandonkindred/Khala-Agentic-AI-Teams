@@ -227,8 +227,12 @@ class FounderAgent:
 
         self._system_prompt = system_prompt or FOUNDER_SYSTEM_PROMPT
         self._spec_generation_prompt = spec_generation_prompt or SPEC_GENERATION_PROMPT
+        # response_format="text": this Strands agent is used only by
+        # ``_call`` (chat prose). ``generate_spec`` bypasses Strands via
+        # ``_call_text``, and ``answer_question`` uses ``generate_structured``,
+        # so the JSON default would only break the conversational replies.
         self._agent = Agent(
-            model=get_strands_model("user_agent_founder"),
+            model=get_strands_model("user_agent_founder", response_format="text"),
             system_prompt=self._system_prompt,
         )
 

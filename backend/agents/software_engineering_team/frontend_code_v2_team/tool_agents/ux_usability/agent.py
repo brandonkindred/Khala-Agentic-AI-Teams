@@ -8,8 +8,6 @@ from typing import Dict, List
 
 from strands import Agent
 
-from llm_service import get_strands_model
-
 from ...models import (
     ReviewIssue,
     ToolAgentInput,
@@ -137,9 +135,19 @@ class UxUsabilityToolAgent:
     """UX/Usability tool agent: UX design planning and usability review with fixes."""
 
     def __init__(self, llm=None) -> None:
-        from strands.models.model import Model as _StrandsModel
+        from software_engineering_team.shared.strands_model import resolve_strands_model
 
-        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
+        # Two models for two output shapes:
+        #   * ``_model`` (text mode) drives ``problem_solve`` whose output is
+        #     a ``---FILES---`` marker hybrid parsed by
+        #     ``parse_problem_solving_single_issue_template`` — JSON mode
+        #     would clobber the marker.
+        #   * ``_model_json`` (JSON mode) drives ``plan``/``review`` whose
+        #     prompts require strict JSON and whose parser falls back to
+        #     ``{}`` on failure — without JSON mode a prose response would
+        #     silently drop every UX finding.
+        self._model = resolve_strands_model(llm, response_format="text")
+        self._model_json = resolve_strands_model(llm, response_format="json")
         self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
@@ -165,7 +173,7 @@ class UxUsabilityToolAgent:
             spec_content=(inp.task_description or "")[:6000],
         )
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            raw = (lambda _r: str(_r))(Agent(model=self._model_json)(prompt)).strip()
         except Exception as e:
             logger.warning("UX plan LLM call failed: %s", e)
             return ToolAgentPhaseOutput(
@@ -181,8 +189,18 @@ class UxUsabilityToolAgent:
                 try:
                     data = json.loads(raw[start:end])
                 except json.JSONDecodeError:
+                    logger.warning(
+                        "UX plan: model output did not parse as JSON "
+                        "(first 200 chars: %r); falling back to empty plan.",
+                        raw[:200],
+                    )
                     data = {}
             else:
+                logger.warning(
+                    "UX plan: model output contained no JSON object "
+                    "(first 200 chars: %r); falling back to empty plan.",
+                    raw[:200],
+                )
                 data = {}
         recommendations: List[str] = []
         if data.get("user_journeys"):
@@ -214,7 +232,7 @@ class UxUsabilityToolAgent:
             code=code_text,
         )
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            raw = (lambda _r: str(_r))(Agent(model=self._model_json)(prompt)).strip()
         except Exception as e:
             logger.warning("UX review LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="UX review failed (LLM error).")
@@ -227,8 +245,18 @@ class UxUsabilityToolAgent:
                 try:
                     data = json.loads(raw[start:end])
                 except json.JSONDecodeError:
+                    logger.warning(
+                        "UX review: model output did not parse as JSON "
+                        "(first 200 chars: %r); reporting 0 issues.",
+                        raw[:200],
+                    )
                     data = {}
             else:
+                logger.warning(
+                    "UX review: model output contained no JSON object "
+                    "(first 200 chars: %r); reporting 0 issues.",
+                    raw[:200],
+                )
                 data = {}
         issues: List[ReviewIssue] = []
         for item in data.get("issues") or []:

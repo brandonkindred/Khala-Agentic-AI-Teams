@@ -186,7 +186,9 @@ class DummyLLMClient(LLMClient, Model):
 
         # Route through the existing complete_json pattern matcher for rich responses
         response_data = self.complete_json(user_text, system_prompt=system_prompt)
-        response_text = json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+        response_text = (
+            json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+        )
 
         # Check if Strands is requesting structured output via a tool
         structured_tool_name = None
@@ -225,7 +227,11 @@ class DummyLLMClient(LLMClient, Model):
         yield {
             "messageStop": {"stopReason": "tool_use" if structured_tool_name else "end_turn"},
             "metadata": {
-                "usage": {"inputTokens": len(user_text) // 4, "outputTokens": len(response_text) // 4, "totalTokens": (len(user_text) + len(response_text)) // 4},
+                "usage": {
+                    "inputTokens": len(user_text) // 4,
+                    "outputTokens": len(response_text) // 4,
+                    "totalTokens": (len(user_text) + len(response_text)) // 4,
+                },
                 "metrics": {"latencyMs": 1},
             },
         }
@@ -452,8 +458,7 @@ class DummyLLMClient(LLMClient, Model):
                 ],
             }
         elif (
-            ("execution_order" in lowered or "task_assignments" in lowered)
-            and "tasks" in lowered
+            ("execution_order" in lowered or "task_assignments" in lowered) and "tasks" in lowered
         ) or (
             # Strands-migrated Tech Lead: user prompt has product context
             # while execution_order / initiative → epic → story keywords
@@ -523,9 +528,9 @@ class DummyLLMClient(LLMClient, Model):
                 "spec_compliance_notes": "Code aligns with task requirements.",
                 "suggested_commit_message": "",
             }
-        elif ("code to review" in lowered or "review this code" in lowered or "chunk" in lowered) and (
-            "approved" not in lowered or len(lowered) > 200
-        ):
+        elif (
+            "code to review" in lowered or "review this code" in lowered or "chunk" in lowered
+        ) and ("approved" not in lowered or len(lowered) > 200):
             # Catch-all for code review / chunk review prompts routed through Strands
             return {
                 "approved": True,
@@ -763,36 +768,35 @@ class DummyLLMClient(LLMClient, Model):
             }
         return {"output": "Dummy response", "status": "ok"}
 
-    def chat_json_round(
+    def chat(
         self,
         messages: list,
         *,
+        response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
         think: bool = False,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """Support tool-loop tests and Strands structured-output flows.
+    ) -> Any:
+        """One unified dummy chat round, parameterized by ``response_format``.
 
-        Behavior, in order of precedence:
+        Branches, in order of precedence:
 
-        1. **Strands structured output**: when ``tools`` contains a tool whose
-           description marks it as a ``StructuredOutputTool`` (the sentinel
-           Strands' ``Agent`` adds when ``structured_output_model=...`` is
-           used), return a single tool call invoking that tool with the dict
-           produced by the normal ``complete_json`` pattern matcher. This
-           lets Strands-migrated agents run end-to-end against the dummy
-           client without changes.
-
-        2. **Legacy tool loop** (first round, ``tools`` provided): emit a
-           no-op ``git_status`` tool call. Test suites for
-           ``complete_json_with_tool_loop`` register a ``git_status`` handler
-           and expect this handoff.
-
-        3. **Follow-up rounds or no tools**: fall through to
-           ``complete_json`` using the flattened user + system prompts.
+        1. **Strands structured output** (``tools`` contains a
+           ``StructuredOutputTool``): return a single tool call invoking it
+           with the dict produced by the pattern matcher.
+        2. **Legacy tool loop** (``tools`` provided, no prior tool result):
+           emit a no-op ``git_status`` tool call.
+        3. **Follow-up rounds or no tools**: run the user prompt through
+           ``complete_json``. For ``response_format="json"`` return the dict;
+           for ``response_format="text"`` JSON-serialize the dict to a string
+           so callers exercising the prose path see deterministic text.
         """
+        if response_format not in ("json", "text"):
+            raise ValueError(
+                f"response_format must be 'json' or 'text', got {response_format!r}"
+            )
         self._request_count += 1
         system_prompt = None
         user_prompt = ""
@@ -850,7 +854,7 @@ class DummyLLMClient(LLMClient, Model):
                 ]
             }
 
-        return self.complete_json(
+        data = self.complete_json(
             user_prompt,
             temperature=temperature,
             system_prompt=system_prompt,
@@ -858,3 +862,10 @@ class DummyLLMClient(LLMClient, Model):
             think=think,
             **kwargs,
         )
+        if response_format == "text":
+            # Preserve the existing dummy text-mode contract: the pattern
+            # matcher returns dicts; JSON-serialize them so the assertion
+            # shape (``json.loads(text) == {...}``) used across the test
+            # suite continues to hold.
+            return json.dumps(data) if isinstance(data, dict) else str(data)
+        return data

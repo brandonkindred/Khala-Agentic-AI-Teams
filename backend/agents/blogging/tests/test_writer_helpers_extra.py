@@ -29,7 +29,7 @@ def test_writer_fix_deterministic_violations(monkeypatch) -> None:
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, prompt, system_prompt="": (
             '{"draft": 0}\n---DRAFT---\n# Fixed draft\nClean text.'
         ),
@@ -46,7 +46,7 @@ def test_writer_fix_deterministic_violations_swallow_error(monkeypatch) -> None:
     def boom(self, prompt, system_prompt=""):
         raise RuntimeError("LLM down")
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     out = a._fix_deterministic_violations("orig", ["x"])
     assert out == "orig"
 
@@ -56,7 +56,7 @@ def test_writer_fix_deterministic_violations_empty_response(monkeypatch) -> None
     from blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", lambda *a, **kw: "no marker text")
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda *a, **kw: "no marker text")
     assert a._fix_deterministic_violations("orig", ["v"]) == "orig"
 
 
@@ -64,7 +64,7 @@ def test_writer_llm_self_review_no_issues(monkeypatch) -> None:
     from blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", lambda self, prompt, system_prompt="": "[]")
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, prompt, system_prompt="": "[]")
     out = a._llm_self_review("draft text")
     assert out == "draft text"
 
@@ -82,7 +82,7 @@ def test_writer_llm_self_review_with_issues(monkeypatch) -> None:
             return json.dumps([{"location": "intro", "issue": "vague", "fix": "be specific"}])
         return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", fake)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
     out = a._llm_self_review("draft text")
     assert "Better draft" in out
 
@@ -93,7 +93,7 @@ def test_writer_llm_self_review_no_array(monkeypatch) -> None:
 
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(
-        BlogWriterAgent, "_call_agent", lambda self, prompt, system_prompt="": "just text"
+        BlogWriterAgent, "_call_text", lambda self, prompt, system_prompt="": "just text"
     )
     out = a._llm_self_review("draft text")
     assert out == "draft text"
@@ -107,7 +107,7 @@ def test_writer_llm_self_review_exception(monkeypatch) -> None:
     def boom(self, prompt, system_prompt=""):
         raise RuntimeError("LLM down")
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     out = a._llm_self_review("orig")
     assert out == "orig"
 
@@ -119,7 +119,7 @@ def test_writer_self_review_combines_both(monkeypatch) -> None:
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, prompt, system_prompt="": '{"draft": 0}\n---DRAFT---\n# Result\nGood text.',
     )
     # Force at least one violation
@@ -360,7 +360,7 @@ def test_writer_call_agent_json_strips_fences(monkeypatch) -> None:
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_json_raw",
         lambda self, prompt, system_prompt="": '```json\n{"a": 1}\n```',
     )
     data = a._call_agent_json("prompt")

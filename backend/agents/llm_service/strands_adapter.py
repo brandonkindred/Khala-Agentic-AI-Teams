@@ -23,22 +23,33 @@ Design notes
   not stall the event loop.
 * Strands message format is Bedrock-style (``list[Message]`` with
   ``ContentBlock`` items). The adapter flattens these to the OpenAI-compatible
-  chat shape that ``LLMClient.chat_json_round`` accepts.
+  chat shape that ``LLMClient.chat`` accepts.
 * Tool specs are translated from Strands ``ToolSpec`` to the OpenAI
   ``{"type": "function", "function": {...}}`` shape used by
-  ``LLMClient.{complete_json,chat_json_round}``.
-* Responses from ``chat_json_round`` are replayed as a short synthetic stream:
+  ``LLMClient.{complete_json,chat}``.
+* Responses are replayed as a short synthetic stream:
   ``messageStart`` → one ``contentBlockDelta`` (text or tool use) → ``messageStop``.
   This matches what Strands' ``Agent`` loop expects without requiring the
   underlying client to actually stream.
+* ``response_format`` selects the backing call:
+  - ``"json"`` (default) → ``chat(response_format="json")`` — forces JSON output on the
+    wire and parses the result. This preserves backward compatibility for the
+    many Strands agents that ask for JSON in their system prompt and then
+    ``json.loads`` the assistant content (e.g. ``RoutePlannerAgent``).
+  - ``"text"`` → ``chat(response_format="text")`` — free-form prose; no ``response_format`` is
+    forced and no JSON parsing is attempted. Use this only for conversational
+    agents whose replies should be natural language (e.g. branding assistant).
+  The structured-output path (``structured_output``) is unaffected and always
+  uses ``complete_json``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Literal, Optional
 
 from strands.models.model import Model
 from strands.types.content import Messages
@@ -50,7 +61,45 @@ from .interface import LLMClient
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["LLMClientModel", "get_strands_model", "run_json_via_strands"]
+__all__ = ["LLMClientConfig", "LLMClientModel", "get_strands_model", "run_json_via_strands"]
+
+
+ResponseFormat = Literal["json", "text"]
+
+
+@dataclasses.dataclass(frozen=True)
+class LLMClientConfig:
+    """Immutable configuration for an ``LLMClientModel``.
+
+    Replaces the previous mutable ``self.config: Dict[str, Any]`` plus ad-hoc
+    ``clone()`` enumeration of known keys. The dataclass enforces the contract
+    in one place: each field is an explicit name with a default, ``clone()``
+    becomes ``dataclasses.replace`` and inherits unknown-kwarg validation for
+    free, and unknown keys never silently disappear into a dict.
+
+    ``response_format`` is validated in ``__post_init__`` rather than at the
+    ``LLMClientModel`` boundary because the same validation is also needed by
+    ``replace``-style updates.
+    """
+
+    agent_key: Optional[str] = None
+    model_id: Optional[str] = None
+    temperature: float = 0.0
+    max_tokens: Optional[int] = None
+    think: bool = False
+    response_format: ResponseFormat = "json"
+
+    def __post_init__(self) -> None:
+        if self.response_format not in ("json", "text"):
+            raise ValueError(
+                f"response_format must be 'json' or 'text', got {self.response_format!r}"
+            )
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Return a plain dict view — Strands' ``Model.get_config`` contract
+        returns a mutable mapping. Mutations on the returned dict do NOT
+        affect the underlying frozen dataclass."""
+        return dataclasses.asdict(self)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +239,13 @@ class LLMClientModel(Model):
         Default sampling parameters applied to every ``stream`` /
         ``structured_output`` call. Overridable per-call via ``update_config``
         or ``invocation_state``.
+    response_format:
+        Either ``"json"`` (default) or ``"text"``. ``"json"`` routes ``stream``
+        through ``chat(response_format="json")`` (forces JSON output on the wire) which is
+        the safe default for the many Strands agents that ask for JSON in
+        their system prompt and then ``json.loads`` the result. ``"text"``
+        routes through ``chat(response_format="text")`` and returns raw prose — use for
+        conversational agents only.
     """
 
     def __init__(
@@ -201,26 +257,80 @@ class LLMClientModel(Model):
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         think: bool = False,
+        response_format: ResponseFormat = "json",
     ) -> None:
         assert client is not None, "client is required"
         self._client = client
-        self.config: Dict[str, Any] = {
-            "agent_key": agent_key,
-            "model_id": model_id or type(client).__name__,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "think": think,
-        }
+        # The dataclass enforces ``response_format ∈ {"json","text"}``;
+        # invalid values raise ``ValueError`` from ``__post_init__``.
+        self._config = LLMClientConfig(
+            agent_key=agent_key,
+            model_id=model_id or type(client).__name__,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            think=think,
+            response_format=response_format,
+        )
 
     # -- strands.models.Model required interface ---------------------------
 
     def update_config(self, **model_config: Any) -> None:
-        """Shallow-merge ``model_config`` into the adapter's config dict."""
-        self.config.update(model_config)
+        """Replace this model's config with the fields listed in ``model_config``.
+
+        Strands' ``Model.update_config`` is part of the public contract, so we
+        keep the method name. Unlike the previous mutable-dict implementation,
+        this builds a new ``LLMClientConfig`` (which validates), so unknown
+        kwargs raise ``TypeError`` instead of being silently retained.
+        """
+        self._config = dataclasses.replace(self._config, **model_config)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the adapter config (agent_key, model_id, sampling params)."""
-        return self.config
+        """Return the adapter config as a plain dict — Strands' contract.
+
+        The returned dict is a copy; mutations don't affect the frozen
+        underlying ``LLMClientConfig``.
+        """
+        return self._config.as_dict()
+
+    @property
+    def config(self) -> Dict[str, Any]:
+        """Strands' ``Model`` contract exposes ``config`` as a dict — its
+        ``Agent`` loop calls ``model.config.get(...)`` internally. Return the
+        dict view here so that path keeps working; the frozen typed
+        ``LLMClientConfig`` is available on ``self._config`` for internal
+        adapter use where attribute access is cleaner."""
+        return self._config.as_dict()
+
+    def clone(self, **overrides: Any) -> "LLMClientModel":
+        """Return a new ``LLMClientModel`` sharing the backing client but with
+        per-field overrides applied to the config.
+
+        Use this when one caller (e.g. ``BlogWriterAgent``) needs both a JSON
+        and a text variant of the same upstream model — the cached
+        ``get_strands_model`` is for the canonical default, ``clone`` is for
+        deriving the sibling without re-hitting the factory or constructing a
+        fresh backing client.
+
+        Example::
+
+            text_model = json_model.clone(response_format="text")
+
+        The new model is constructed via the normal ``__init__`` path so it
+        re-runs every invariant (``client is not None`` assert, dataclass
+        ``__post_init__`` validation). The cost is one extra
+        ``LLMClientConfig`` construction; the win is the sibling stays valid
+        if ``__init__`` ever grows additional setup.
+        """
+        new_config = dataclasses.replace(self._config, **overrides)
+        return LLMClientModel(
+            self._client,
+            agent_key=new_config.agent_key,
+            model_id=new_config.model_id,
+            temperature=new_config.temperature,
+            max_tokens=new_config.max_tokens,
+            think=new_config.think,
+            response_format=new_config.response_format,
+        )
 
     async def stream(
         self,
@@ -235,10 +345,19 @@ class LLMClientModel(Model):
     ) -> AsyncGenerator[StreamEvent, None]:
         """Run one turn of the backing LLM and synthesize Strands stream events.
 
-        The backing ``LLMClient.chat_json_round`` is called in a worker thread
-        so the event loop stays responsive. The full assistant turn is emitted
-        as a single content delta (text or tool use) — downstream Strands
-        components expect complete blocks, not token-level streaming.
+        The backing ``LLMClient`` call (``chat(response_format="json")`` by default, or
+        ``chat(response_format="text")`` when the model was configured with
+        ``response_format="text"``) is dispatched in a worker thread so the
+        event loop stays responsive. The full assistant turn is emitted as a
+        single content delta (text or tool use) — downstream Strands components
+        expect complete blocks, not token-level streaming.
+
+        Defaulting to ``chat(response_format="json")`` preserves backward compatibility for
+        Strands agents that ask for JSON in their system prompt and then
+        ``json.loads`` the assistant content (e.g.
+        ``RoutePlannerAgent``). Conversational agents that want free-form
+        prose opt into ``response_format="text"`` and are routed through
+        ``chat(response_format="text")`` instead.
 
         ``tool_choice`` is accepted for interface compatibility but is not
         forwarded: ``LLMClient`` does not currently expose a tool_choice knob.
@@ -251,24 +370,39 @@ class LLMClientModel(Model):
         oai_tools = _tool_specs_to_openai(tool_specs)
 
         # Per-call overrides come through ``invocation_state``; fall back to
-        # the model's default config.
+        # the model's default config. Building a transient LLMClientConfig
+        # gives us the same field-level validation as ``clone()`` /
+        # ``update_config`` for free — a typo'd ``response_format="Text"``
+        # raises ``ValueError`` from ``LLMClientConfig.__post_init__``
+        # instead of silently falling back to JSON mode.
         state = invocation_state or {}
-        temperature = float(state.get("temperature", self.config.get("temperature", 0.0)) or 0.0)
-        max_tokens = state.get("max_tokens", self.config.get("max_tokens"))
-        think = bool(state.get("think", self.config.get("think", False)))
+        cfg = self._config
+        try:
+            call_cfg = dataclasses.replace(
+                cfg,
+                **{k: state[k] for k in ("temperature", "max_tokens", "think", "response_format") if k in state},
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invocation_state contains invalid override: {exc}") from exc
+        temperature = float(call_cfg.temperature or 0.0)
+        max_tokens = call_cfg.max_tokens
+        think = bool(call_cfg.think)
+        response_format = call_cfg.response_format
 
         logger.debug(
-            "strands_adapter.stream: messages=%d tools=%s temp=%s think=%s agent_key=%s",
+            "strands_adapter.stream: messages=%d tools=%s temp=%s think=%s response_format=%s agent_key=%s",
             len(oai_messages),
             len(oai_tools) if oai_tools else 0,
             temperature,
             think,
-            self.config.get("agent_key"),
+            response_format,
+            cfg.agent_key,
         )
 
         result = await asyncio.to_thread(
-            self._client.chat_json_round,
+            self._client.chat,
             oai_messages,
+            response_format=response_format,
             temperature=temperature,
             tools=oai_tools,
             think=think,
@@ -301,8 +435,10 @@ class LLMClientModel(Model):
             yield {"messageStop": {"stopReason": "tool_use"}}
             return
 
-        # Plain text / structured response: serialize dict results to JSON so
-        # the caller receives deterministic content.
+        # Plain content. ``chat(response_format="json")`` returns a dict (we JSON-serialize
+        # so downstream JSON-parsing agents like ``RoutePlannerAgent`` see
+        # well-formed JSON text); ``chat(response_format="text")`` returns a string (used as-is).
+        # A dict result from ``chat(response_format="text")`` is also serialized defensively.
         if isinstance(result, str):
             text = result
         else:
@@ -339,8 +475,8 @@ class LLMClientModel(Model):
         ]
         text_prompt = "\n\n".join(p for p in user_parts if p)
 
-        temperature = float(self.config.get("temperature", 0.0) or 0.0)
-        think = bool(self.config.get("think", False))
+        temperature = float(self._config.temperature or 0.0)
+        think = bool(self._config.think)
 
         data = await asyncio.to_thread(
             self._client.complete_json,
@@ -373,6 +509,7 @@ def get_strands_model(
     think: bool = False,
     model_id: Optional[str] = None,
     client: Optional[LLMClient] = None,
+    response_format: str = "json",
 ) -> LLMClientModel:
     """Return a Strands-compatible ``Model`` wired to the Khala LLM service.
 
@@ -381,6 +518,11 @@ def get_strands_model(
     :func:`llm_service.get_client` (respecting ``LLM_PROVIDER``,
     ``LLM_MODEL_<agent_key>``, and the rest of the env contract) and wraps
     the result in :class:`LLMClientModel`.
+
+    ``response_format`` defaults to ``"json"`` (forces JSON output on the wire
+    via ``chat(response_format="json")``) to preserve backward compatibility for Strands
+    agents whose system prompts ask for JSON. Pass ``response_format="text"``
+    for conversational agents that need free-form natural-language replies.
 
     Pass ``client=`` explicitly to inject a ``DummyLLMClient`` or a mock in
     tests without touching the factory cache.
@@ -393,6 +535,7 @@ def get_strands_model(
         temperature=temperature,
         max_tokens=max_tokens,
         think=think,
+        response_format=response_format,
     )
 
 

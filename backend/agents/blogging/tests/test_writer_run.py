@@ -48,7 +48,7 @@ def test_writer_run_happy_with_all_options(monkeypatch, tmp_path) -> None:
     a = _agent()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, p, system_prompt="": '{"draft": 0}\n---DRAFT---\n# A Title\nBody.\n',
     )
     # Disable the self-review path so tests stay deterministic
@@ -100,7 +100,7 @@ def test_writer_run_no_marker_returns_placeholder(monkeypatch) -> None:
     a = _agent()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, p, system_prompt="": "no marker text",
     )
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {})
@@ -115,7 +115,7 @@ def test_writer_run_call_agent_throws_then_json_fallback(monkeypatch) -> None:
     a = _agent()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, p, system_prompt="": (_ for _ in ()).throw(ValueError("oops")),
     )
     monkeypatch.setattr(
@@ -135,7 +135,7 @@ def test_writer_run_call_agent_throws_and_fallback_also_fails(monkeypatch) -> No
     a = _agent()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, p, system_prompt="": (_ for _ in ()).throw(ValueError("oops")),
     )
 
@@ -158,7 +158,7 @@ def test_writer_run_default_length_guidance(monkeypatch) -> None:
         captured["prompt"] = prompt
         return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", fake_call)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
     monkeypatch.setattr(BlogWriterAgent, "_self_review", lambda self, d: d)
     a.run(_writer_input(length_guidance=""))
     assert "TARGET LENGTH" in captured["prompt"]
@@ -178,7 +178,7 @@ def test_writer_revise_single_item_happy(monkeypatch) -> None:
     a = _agent()
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent",
+        "_call_text",
         lambda self, p, system_prompt="": '{"draft": 0}\n---DRAFT---\n# Single Item Revised\nBody.',
     )
     item = FeedbackItem(category="x", severity="minor", issue="i")
@@ -225,7 +225,7 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     def boom(self, p, system_prompt=""):
         raise RuntimeError("transient")
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     monkeypatch.setattr(
         BlogWriterAgent,
         "_call_agent_json",
@@ -275,7 +275,7 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
     def boom(self, p, system_prompt=""):
         raise RuntimeError("nope")
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
 
     def boom_json(self, p, **kw):
         raise ValueError("nope")

@@ -1,49 +1,43 @@
 """Shared utilities for branding team Strands SDK graphs.
 
 Provides:
-- LLM model configuration
-- Agent factory helpers
+- Agent factory helpers (wired to the centralized LLM service)
 - Conditional-edge callables for phase gating
 """
 
 from __future__ import annotations
 
-import os
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from strands import Agent
 
 from branding_team.models import BrandPhase
-
-# ---------------------------------------------------------------------------
-# LLM model configuration
-# ---------------------------------------------------------------------------
-
-DEFAULT_MODEL = "us.anthropic.claude-sonnet-4-20250514"
-
-
-def get_model() -> str:
-    """Return the LLM model string for branding agents.
-
-    Reads ``BRANDING_LLM_MODEL`` env var, falling back to a sensible default.
-    """
-    return os.environ.get("BRANDING_LLM_MODEL", DEFAULT_MODEL)
-
+from llm_service import get_strands_model
 
 # ---------------------------------------------------------------------------
 # Agent factory
 # ---------------------------------------------------------------------------
+
+OutputMode = Literal["json", "text"]
 
 
 def build_agent(
     *,
     name: str,
     system_prompt: str,
+    output_mode: OutputMode = "json",
     structured_output: Any | None = None,
     tools: list | None = None,
     description: str = "",
 ) -> Agent:
     """Create a ``strands.Agent`` pre-configured for branding work.
+
+    The backing model is the project's centralized ``LLMClientModel`` resolved
+    via ``get_strands_model("branding", response_format=output_mode)`` — this
+    routes through Ollama (or any configured ``LLM_PROVIDER``) and inherits
+    retries, telemetry, and per-agent model routing (``LLM_MODEL_branding``).
+    Passing a bare model string here would make Strands treat it as a Bedrock
+    model ID and fail with ``NoCredentialsError`` outside AWS.
 
     Parameters
     ----------
@@ -51,17 +45,30 @@ def build_agent(
         Unique agent name (used as graph node ID).
     system_prompt:
         Full system prompt defining the agent's role and instructions.
+    output_mode:
+        Declarative shape of this agent's output, kept co-located with the
+        system prompt that produces it. ``"json"`` (default) forces
+        ``response_format=json_object`` on the wire — use when the downstream
+        consumer ``json.loads`` / ``model_validate_json`` the assistant
+        content. ``"text"`` uses prose mode — use for conversational replies
+        or template-based outputs (e.g. ``parse_planning_template``) where
+        the consumer extracts structured data from prose itself.
     structured_output:
-        Optional Pydantic ``BaseModel`` subclass for typed output.
+        Optional Pydantic ``BaseModel`` subclass for typed output. When set,
+        ``output_mode`` is ignored — Strands routes through its
+        ``structured_output_model`` flow which uses ``complete_json``
+        regardless of mode.
     tools:
         Optional list of tools the agent may invoke.
     description:
         Short human-readable description of the agent's purpose.
     """
+    if output_mode not in ("json", "text"):
+        raise ValueError(f"output_mode must be 'json' or 'text', got {output_mode!r}")
     kwargs: dict[str, Any] = {
         "name": name,
         "system_prompt": system_prompt,
-        "model": get_model(),
+        "model": get_strands_model("branding", response_format=output_mode),
         "callback_handler": None,
     }
     if structured_output is not None:

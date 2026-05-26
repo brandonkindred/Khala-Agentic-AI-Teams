@@ -35,7 +35,12 @@ def complete_text_with_continuation(
 
     from llm_service import get_strands_model
 
-    agent = Agent(model=get_strands_model(agent_name))
+    # response_format="text" — the module-level docstring and this helper's
+    # docstring both call out that the result is text consumed by
+    # ``output_templates``. Falling through to the default JSON mode would
+    # force response_format=json_object on the wire and break the template
+    # parser.
+    agent = Agent(model=get_strands_model(agent_name, response_format="text"))
     result = agent(prompt)
     return str(result).strip()
 

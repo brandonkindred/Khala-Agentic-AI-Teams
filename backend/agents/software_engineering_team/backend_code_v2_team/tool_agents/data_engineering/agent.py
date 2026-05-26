@@ -16,8 +16,6 @@ import logging
 
 from strands import Agent
 
-from llm_service import get_strands_model
-
 from ...models import (
     ToolAgentInput,
     ToolAgentOutput,
@@ -51,9 +49,13 @@ class DataEngineeringToolAgent:
     """Produces schema definitions, data models, and data integrity checks."""
 
     def __init__(self, llm=None) -> None:
-        from strands.models.model import Model as _StrandsModel
+        from software_engineering_team.shared.strands_model import resolve_strands_model
 
-        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
+        # v2 tool agents consume template-parsed output (parse_review_template /
+        # parse_files_and_summary_template / parse_problem_solving_single_issue_template);
+        # the mixed-mode ones (accessibility / performance / ux_usability) have
+        # JSON paths with defensive fence-stripping fallbacks that work in text mode.
+        self._model = resolve_strands_model(llm, response_format="text")
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)

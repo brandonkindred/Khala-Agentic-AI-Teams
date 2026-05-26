@@ -59,7 +59,7 @@ def test_tool_loop_dummy_runs_git_handler_then_returns_json() -> None:
 
 def test_tool_loop_max_rounds() -> None:
     class LoopLLM(DummyLLMClient):
-        def chat_json_round(self, messages, **kwargs):  # type: ignore[override]
+        def chat(self, messages, **kwargs):  # type: ignore[override]
             return {"__tool_calls__": [{"id": "x", "function": {"name": "a", "arguments": {}}}]}
 
     with pytest.raises(LLMPermanentError, match="max_rounds"):

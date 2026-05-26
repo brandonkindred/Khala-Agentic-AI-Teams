@@ -607,7 +607,9 @@ class OllamaLLMClient(LLMClient):
                                 tool_call_buffers: dict[int, dict] = {}
                                 has_reasoning: bool = False
                                 partial_buf = ""  # buffer for lines split across TCP chunks
-                                usage_data: Optional[Dict[str, Any]] = None  # token usage from final chunk
+                                usage_data: Optional[Dict[str, Any]] = (
+                                    None  # token usage from final chunk
+                                )
                                 for raw_line in response.iter_lines():
                                     if not raw_line:
                                         continue
@@ -628,7 +630,9 @@ class OllamaLLMClient(LLMClient):
                                             except json.JSONDecodeError:
                                                 # Combined still invalid — discard buffer,
                                                 # fall through to try raw_line on its own.
-                                                logger.debug("Discarding unrecoverable partial SSE buffer")
+                                                logger.debug(
+                                                    "Discarding unrecoverable partial SSE buffer"
+                                                )
 
                                     if chunk_data is None:
                                         # Process raw_line normally
@@ -1011,7 +1015,9 @@ class OllamaLLMClient(LLMClient):
                 use_think=think,
             )
         except LLMJsonParseError:
-            self._record_telemetry(status="error", error_type="json_parse", prompt_text=prompt, response_text=content)
+            self._record_telemetry(
+                status="error", error_type="json_parse", prompt_text=prompt, response_text=content
+            )
             # If content starts with '{' but is unparseable, the server likely cut off the
             # response before the JSON was complete (finish_reason="stop" despite truncation).
             # Attempt continuation to recover the rest of the JSON.
@@ -1234,17 +1240,30 @@ class OllamaLLMClient(LLMClient):
             finish_reason="length",
         )
 
-    def chat_json_round(
+    def chat(
         self,
         messages: list,
         *,
+        response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
         think: bool = False,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """One chat completion round for multi-turn tool loops. See ``LLMClient.chat_json_round``."""
+    ) -> Any:
+        """One chat completion round, parameterized by ``response_format``.
+
+        See ``LLMClient.chat``. JSON-only differences from the text path are
+        local to the two if-statements below: the wire payload includes
+        ``response_format=json_object`` when no tools are present, and the
+        assistant content is parsed via ``_extract_json`` instead of being
+        returned raw. Tool-invocation envelopes are returned identically in
+        both modes.
+        """
+        if response_format not in ("json", "text"):
+            raise ValueError(
+                f"response_format must be 'json' or 'text', got {response_format!r}"
+            )
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
         self._current_caller = _caller_tag()
@@ -1267,7 +1286,7 @@ class OllamaLLMClient(LLMClient):
         }
         if tools:
             payload["tools"] = tools
-        else:
+        elif response_format == "json":
             payload["response_format"] = {"type": "json_object"}
         content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
         stripped = (content or "").strip()
@@ -1279,6 +1298,10 @@ class OllamaLLMClient(LLMClient):
                     return parsed
             except json.JSONDecodeError:
                 pass
+        if response_format == "text":
+            self._record_telemetry(status="success")
+            return content
+        # JSON mode: parse with the existing repair/continue fallbacks.
         try:
             result = self._extract_json(content)
             self._record_telemetry(status="success")

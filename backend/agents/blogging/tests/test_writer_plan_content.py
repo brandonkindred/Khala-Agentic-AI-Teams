@@ -73,7 +73,7 @@ def test_complete_plan_json_falls_back_to_parse_json_object(monkeypatch) -> None
     a = _agent_with_guidelines()
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {})
     monkeypatch.setattr(
-        BlogWriterAgent, "_call_agent", lambda self, p, system_prompt="": '{"a": 1}'
+        BlogWriterAgent, "_call_json_raw", lambda self, p, system_prompt="": '{"a": 1}'
     )
     data, retries = a._complete_plan_json(
         "p", system="sys", on_llm_request=lambda m: None, max_parse_retries=2
@@ -92,7 +92,7 @@ def test_complete_plan_json_raises_after_retries(monkeypatch) -> None:
 
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom_json)
     monkeypatch.setattr(
-        BlogWriterAgent, "_call_agent", lambda self, p, system_prompt="": "not json"
+        BlogWriterAgent, "_call_json_raw", lambda self, p, system_prompt="": "not json"
     )
     with pytest.raises(PlanningError):
         a._complete_plan_json("p", system="sys", on_llm_request=None, max_parse_retries=1)
