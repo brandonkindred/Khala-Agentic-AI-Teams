@@ -65,8 +65,8 @@ def flat_close_df(close_value: float, n: int = 30) -> pd.DataFrame:
 def swing_close_df(n: int = 100) -> pd.DataFrame:
     """Sharp alternating moves for ATR-divergence tests."""
     idx = pd.date_range("2024-01-01", periods=n, freq="D")
-    moves = np.array([+0.02, -0.02] * (n // 2))
-    close = 100.0 * np.cumprod(1.0 + moves)
+    tile = np.tile([+0.02, -0.02], (n + 1) // 2)[:n]
+    close = 100.0 * np.cumprod(1.0 + tile)
     return pd.DataFrame(
         {
             "open": close,
@@ -80,10 +80,12 @@ def swing_close_df(n: int = 100) -> pd.DataFrame:
 
 
 def small_swing_df(n: int = 30) -> pd.DataFrame:
-    """30-bar swing fixture for period-shadowing / scope tests."""
+    """Small swing fixture for period-shadowing / scope tests."""
     idx = pd.date_range("2024-01-01", periods=n, freq="D")
-    moves = [-0.005] * 8 + [+0.005] * 8 + [-0.005] * 7 + [+0.005] * 7
-    close = 100.0 * np.cumprod(1.0 + np.array(moves[:n]))
+    half_leg = max(n // 4, 1)
+    pattern = [-0.005] * half_leg + [+0.005] * half_leg
+    moves = (pattern * ((n // len(pattern)) + 1))[:n]
+    close = 100.0 * np.cumprod(1.0 + np.array(moves))
     return pd.DataFrame(
         {
             "open": close,
