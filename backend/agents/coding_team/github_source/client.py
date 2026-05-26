@@ -62,27 +62,6 @@ class Repo:
     default_branch: str
 
 
-@dataclass(frozen=True)
-class CheckRun:
-    """A single GitHub Actions check run attached to a commit."""
-
-    id: int
-    name: str
-    status: str  # queued, in_progress, completed
-    conclusion: str  # success, failure, neutral, cancelled, skipped, timed_out, action_required, ""
-
-
-@dataclass(frozen=True)
-class CIStatusSummary:
-    """Aggregated CI status across all check runs for a commit."""
-
-    all_completed: bool
-    passed: bool
-    total: int
-    failed_checks: tuple[str, ...]
-    pending_checks: tuple[str, ...]
-
-
 class GitHubAPIError(RuntimeError):
     """Raised on any unrecoverable GitHub API failure."""
 
@@ -163,15 +142,6 @@ def _sub_issue_from_payload(payload: dict[str, Any]) -> SubIssue:
         number=int(payload["number"]),
         state=payload.get("state") or "open",
         title=payload.get("title") or "",
-    )
-
-
-def _check_run_from_payload(payload: dict[str, Any]) -> CheckRun:
-    return CheckRun(
-        id=int(payload["id"]),
-        name=payload.get("name") or "",
-        status=payload.get("status") or "queued",
-        conclusion=payload.get("conclusion") or "",
     )
 
 
@@ -398,61 +368,6 @@ class GitHubClient:
         )
         return _pr_from_payload(r.json())
 
-    # ----- CI status ----------------------------------------------------------
-
-    def get_check_runs(self, owner: str, repo: str, ref: str) -> list[CheckRun]:
-        """Return check runs attached to *ref* (SHA, branch, or tag).
-
-        Preconditions:
-            ``ref`` is a valid git ref.
-        Postconditions:
-            Returns a (possibly empty) list of ``CheckRun`` objects.
-        """
-        path = f"/repos/{owner}/{repo}/commits/{ref}/check-runs"
-        params: dict[str, Any] = {"per_page": 100}
-        url: Optional[str] = path
-        out: list[CheckRun] = []
-        while url:
-            response = self._check(self._request("GET", url, params=params))
-            params = None
-            for item in response.json().get("check_runs") or []:
-                out.append(_check_run_from_payload(item))
-            url = _parse_next_link(response.headers.get("Link"))
-        return out
-
-    def get_combined_status(self, owner: str, repo: str, ref: str) -> CIStatusSummary:
-        """Aggregate check-run results for *ref* into a single summary.
-
-        Preconditions:
-            ``ref`` is a valid git ref.
-        Postconditions:
-            ``passed`` is True only when ``all_completed`` is True and every
-            check concluded with "success", "neutral", or "skipped".
-        """
-        checks = self.get_check_runs(owner, repo, ref)
-        if not checks:
-            return CIStatusSummary(
-                all_completed=True,
-                passed=True,
-                total=0,
-                failed_checks=(),
-                pending_checks=(),
-            )
-        pending = tuple(c.name for c in checks if c.status != "completed")
-        failed = tuple(
-            c.name
-            for c in checks
-            if c.status == "completed" and c.conclusion not in ("success", "neutral", "skipped")
-        )
-        all_done = len(pending) == 0
-        return CIStatusSummary(
-            all_completed=all_done,
-            passed=all_done and len(failed) == 0,
-            total=len(checks),
-            failed_checks=failed,
-            pending_checks=pending,
-        )
-
     # ----- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
@@ -467,8 +382,6 @@ class GitHubClient:
 
 # Re-export for convenience in tests / typing.
 __all__ = [
-    "CIStatusSummary",
-    "CheckRun",
     "GitHubAPIError",
     "GitHubClient",
     "Issue",

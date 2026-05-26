@@ -1,4 +1,9 @@
-"""CI/CD tool agent for backend-code-v2: generates CI workflows from deterministic templates."""
+"""
+CI/CD adapter stub for the backend-code-v2 team.
+
+This is a thin adapter that can be extended to call DevOps Team APIs.
+No code from ``backend_agent`` is used.
+"""
 
 from __future__ import annotations
 
@@ -15,54 +20,37 @@ logger = logging.getLogger(__name__)
 
 
 class CicdAdapterAgent:
-    """CI/CD tool agent backed by deterministic Jinja2 templates.
-
-    Invariants:
-        ``deliver()`` always produces valid GitHub Actions YAML via
-        ``ci_templates.render_backend_ci`` — no LLM involved.
-    """
+    """Stub CI/CD tool agent — extend to delegate to the DevOps team."""
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
 
     def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        logger.info("CI/CD: microtask %s (execute — no changes applied)", inp.microtask.id)
-        return ToolAgentOutput(summary="CI/CD execute — no changes applied.")
+        logger.info("CI/CD stub: microtask %s (not yet implemented)", inp.microtask.id)
+        return ToolAgentOutput(
+            summary="CI/CD adapter stub — no changes applied.",
+            recommendations=["Integrate with DevOps Team CI/CD agents for full support."],
+        )
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(
-            recommendations=[
-                "CI pipeline will include: ruff lint, pytest, bandit (SAST), pip-audit (SCA), gitleaks (secrets).",
-                "Workflows are generated from deterministic templates, not LLM.",
-            ],
-            summary="CI/CD planning: template-based pipeline.",
+            recommendations=["Include CI/CD pipeline and deployment steps in the plan."],
+            summary="CI/CD planning stub.",
         )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(
-            summary="CI/CD review: template-generated pipeline is deterministic."
+            recommendations=["Validate pipeline config and build scripts."],
+            summary="CI/CD review stub.",
         )
 
     def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(
             recommendations=["Fix pipeline failures and dependency issues."],
-            summary="CI/CD problem-solving.",
+            summary="CI/CD problem-solving stub.",
         )
 
     def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Generate backend CI workflow from template.
-
-        Postconditions:
-            ``files`` contains a valid ``.github/workflows/backend.yml`` entry.
-        """
-        try:
-            from software_engineering_team.ci_templates import BackendCIParams, render_backend_ci
-
-            workflow = render_backend_ci(BackendCIParams())
-            return ToolAgentPhaseOutput(
-                files={".github/workflows/backend.yml": workflow},
-                summary="Generated backend CI workflow from template.",
-            )
-        except Exception as e:
-            logger.warning("CI/CD deliver failed: %s", e)
-            return ToolAgentPhaseOutput(summary=f"CI/CD deliver failed: {e}")
+        return ToolAgentPhaseOutput(
+            summary="CI/CD deliver stub — validate pipeline before merge.",
+        )
