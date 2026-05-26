@@ -83,9 +83,11 @@ def invoke_outreach(body: dict[str, Any]) -> dict[str, Any]:
     all_variants: list = []
     for prospect in req.prospects:
         dossier = ProspectDossier(
-            prospect_name=prospect.name,
-            company_name=prospect.company,
-            executive_summary="No dossier provided.",
+            prospect_id=prospect.id or "unknown",
+            full_name=prospect.contact_name or prospect.company_name,
+            current_title=prospect.contact_title or "Unknown",
+            current_company=prospect.company_name,
+            executive_summary="Stub dossier for sandbox invoke — no deep research performed.",
         )
         result = agent.generate_sequence(
             prospect_json=prospect.model_dump_json(),
