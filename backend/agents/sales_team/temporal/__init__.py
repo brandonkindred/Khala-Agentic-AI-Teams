@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import Any
-from uuid import uuid4
 
 from temporalio import activity, workflow
 
@@ -15,7 +14,7 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     from sales_team.orchestrator import SalesPodOrchestrator
 
     req = SalesPipelineRequest(**request)
-    job_id = request.get("job_id") or f"temporal_{uuid4().hex[:12]}"
+    job_id = request.get("job_id") or f"temporal_{activity.info().activity_id}"
     result = SalesPodOrchestrator(config=req.config).run(req, job_id=job_id)
     if hasattr(result, "model_dump"):
         return result.model_dump()
