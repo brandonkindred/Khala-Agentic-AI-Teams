@@ -617,12 +617,16 @@ def test_diagnostics_emitted_and_accepted_counts_round_trip() -> None:
     diagnostics = run.service_result.execution_diagnostics
 
     assert run.service_result.error is None, run.service_result.error
-    # SMA(5) crossover emits one long entry then one opposite-side close.
-    assert diagnostics.orders_emitted == 2
-    assert diagnostics.orders_accepted == 2
+    # SMA(5) crossover: strategy emits 1 entry + 1 exit. The engine's
+    # signal-exit dispatcher also emits a close when the SignalExitRule
+    # predicate fires on the same bar (dedup at fill time ensures only
+    # one close fills). Total emits = 3 (1 entry + 1 strategy exit +
+    # 1 engine signal-exit).
+    assert diagnostics.orders_emitted == 3
+    assert diagnostics.orders_accepted == 3
     assert diagnostics.orders_rejected == 0
     assert diagnostics.orders_unfilled == 0
-    assert diagnostics.exits_emitted == 1
+    assert diagnostics.exits_emitted == 2
     # #410: FillSimulator now reports entry/exit fill lifecycle events.
     # The SMA round-trip lands one FULL entry and one FULL exit.
     assert diagnostics.entries_filled == 1

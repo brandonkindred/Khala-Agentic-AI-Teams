@@ -7,6 +7,10 @@ and asserts on the returned intents without touching the trading service.
 
 from __future__ import annotations
 
+from investment_team.strategy_lab.executor.predicate_evaluator import (
+    BarRecord,
+    StreamingHistoryView,
+)
 from investment_team.strategy_lab.executor.rule_compiler import (
     BarSnapshot,
     PositionState,
@@ -216,42 +220,93 @@ def test_position_without_matching_bar_skipped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SignalExitRule — silent no-op (not yet engine-enforced)
+# Helpers for HistoryView-backed tests
 # ---------------------------------------------------------------------------
 
 
-def test_signal_exit_rule_is_silent_noop() -> None:
-    # SignalExitRule is not yet engine-enforced (predicate evaluation needs a
-    # shared per-bar indicator runtime). The evaluator treats it as a no-op
-    # so other rules in the same spec still get enforced — see module
-    # docstring + ``ExitRuleConformanceGate`` for the user-facing surface.
-    pos = _long()
-    rule = SignalExitRule(
-        when=Predicate(
-            lhs=IndicatorRef(name="rsi", params={"period": 14}),
-            op=">",
-            rhs=70.0,
+def _build_view(closes: list[float], symbol: str = "AAA") -> StreamingHistoryView:
+    view = StreamingHistoryView()
+    for i, c in enumerate(closes):
+        view.append(
+            BarRecord(
+                timestamp=f"2024-01-{i + 1:02d}",
+                open=c,
+                high=c + 1,
+                low=c - 1,
+                close=c,
+                volume=1000.0,
+            )
         )
-    )
+    return view
+
+
+# ---------------------------------------------------------------------------
+# SignalExitRule — no-op without views, enforced with views
+# ---------------------------------------------------------------------------
+
+
+def test_signal_exit_rule_noop_without_views() -> None:
+    pos = _long()
+    rule = SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=90.0))
     intents = evaluate_exit_rules([rule], {"AAA": pos}, {"AAA": _bar()})
     assert intents == []
 
 
-def test_signal_exit_does_not_block_other_rules_in_spec() -> None:
-    # Mix SignalExit + StopLoss. StopLoss should still fire even though the
-    # SignalExit is iterated first.
+def test_signal_exit_fires_with_view_when_predicate_satisfied() -> None:
     pos = _long()
-    signal = SignalExitRule(
+    rule = SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=90.0))
+    views = {"AAA": _build_view([80.0, 90.0, 100.0])}
+    intents = evaluate_exit_rules(
+        [rule],
+        {"AAA": pos},
+        {"AAA": _bar(close=100.0)},
+        views=views,
+    )
+    assert len(intents) == 1
+    assert intents[0].rule_kind == "signal_exit"
+
+
+def test_signal_exit_does_not_fire_when_predicate_not_satisfied() -> None:
+    pos = _long()
+    rule = SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=200.0))
+    views = {"AAA": _build_view([80.0, 90.0, 100.0])}
+    intents = evaluate_exit_rules(
+        [rule],
+        {"AAA": pos},
+        {"AAA": _bar(close=100.0)},
+        views=views,
+    )
+    assert intents == []
+
+
+def test_signal_exit_warmup_returns_none() -> None:
+    pos = _long()
+    rule = SignalExitRule(
         when=Predicate(
-            lhs=IndicatorRef(name="rsi", params={"period": 14}),
+            lhs=IndicatorRef(name="sma", params={"period": 50}),
             op=">",
-            rhs=70.0,
+            rhs=90.0,
         )
     )
+    views = {"AAA": _build_view([100.0, 101.0, 102.0])}
+    intents = evaluate_exit_rules(
+        [rule],
+        {"AAA": pos},
+        {"AAA": _bar()},
+        views=views,
+    )
+    assert intents == []
+
+
+def test_signal_exit_does_not_block_other_rules_in_spec() -> None:
+    pos = _long()
+    signal = SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=200.0))
+    views = {"AAA": _build_view([80.0, 90.0, 100.0])}
     intents = evaluate_exit_rules(
         [signal, StopLossRule(pct=0.05)],
         {"AAA": pos},
         {"AAA": _bar(low=94)},
+        views=views,
     )
     assert len(intents) == 1
     assert intents[0].rule_kind == "stop_loss"

@@ -12,10 +12,10 @@ Supported rule kinds (matching the discriminated ``ExitRule`` union in
   ``entry_price`` / ``trailing_high`` / ``trailing_low``.
 * ``TakeProfitRule(pct)`` — close when the bar's high (long) or low
   (short) clears the rule's price target.
-* ``SignalExitRule(when)`` — close when a predicate fires. Not yet
-  engine-enforced (the parent engine has no per-bar indicator runtime
-  today); the evaluator treats it as a silent no-op so a spec mixing
-  signal exits with stop/take-profit still gets the latter enforced.
+* ``SignalExitRule(when)`` — close when a predicate fires.  Requires a
+  ``HistoryView`` per symbol passed via the ``views`` keyword to
+  :func:`evaluate_exit_rules`.  When no view is available, the rule is
+  a silent no-op for backward compatibility.
 
 Bar-counting "time stops" are deliberately absent: real traders close
 on price action, P&L, or signal reversal — not on an arbitrary "Nth
@@ -31,7 +31,7 @@ book.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Mapping, Sequence
+from typing import Literal, Mapping, Optional, Sequence
 
 from ..spec_dsl import (
     ExitRule,
@@ -39,6 +39,7 @@ from ..spec_dsl import (
     StopLossRule,
     TakeProfitRule,
 )
+from .predicate_evaluator import HistoryView, evaluate_signal_exit_rules
 
 ExitRuleKind = Literal["stop_loss", "take_profit", "signal_exit"]
 
@@ -81,6 +82,8 @@ def evaluate_exit_rules(
     rules: Sequence[ExitRule],
     positions: Mapping[str, PositionState],
     bars: Mapping[str, BarSnapshot],
+    *,
+    views: Optional[Mapping[str, HistoryView]] = None,
 ) -> list[ExitIntent]:
     """Return one ``ExitIntent`` per (open position × first triggered rule).
 
@@ -89,8 +92,10 @@ def evaluate_exit_rules(
         position wins. Subsequent rules for the same position are skipped
         on the same bar (only one close per position per bar).
       * Positions with no open qty (or missing from ``bars``) are skipped.
-      * ``SignalExitRule`` is a silent no-op (returns ``False`` from
-        ``_rule_triggers``) — see module docstring for rationale.
+      * ``SignalExitRule`` evaluation requires a ``HistoryView`` for the
+        symbol (passed via ``views``). When ``views`` is ``None`` or the
+        symbol has no view, ``SignalExitRule`` is a silent no-op for
+        backward compatibility.
     """
     intents: list[ExitIntent] = []
     for symbol, position in positions.items():
@@ -99,8 +104,9 @@ def evaluate_exit_rules(
         bar = bars.get(symbol)
         if bar is None:
             continue
+        sym_view = views.get(symbol) if views is not None else None
         for idx, rule in enumerate(rules):
-            if _rule_triggers(rule, position, bar):
+            if _rule_triggers(rule, position, bar, sym_view):
                 intents.append(
                     ExitIntent(
                         symbol=symbol,
@@ -123,7 +129,12 @@ def _kind_of(rule: ExitRule) -> ExitRuleKind:
     raise TypeError(f"unknown ExitRule subclass: {type(rule).__name__}")
 
 
-def _rule_triggers(rule: ExitRule, position: PositionState, bar: BarSnapshot) -> bool:
+def _rule_triggers(
+    rule: ExitRule,
+    position: PositionState,
+    bar: BarSnapshot,
+    view: Optional[HistoryView] = None,
+) -> bool:
     if isinstance(rule, StopLossRule):
         return _stop_loss_triggers(rule, position, bar)
 
@@ -131,13 +142,13 @@ def _rule_triggers(rule: ExitRule, position: PositionState, bar: BarSnapshot) ->
         return _take_profit_triggers(rule, position, bar)
 
     if isinstance(rule, SignalExitRule):
-        # Predicate-based exits need a shared per-bar indicator runtime in
-        # the parent engine — out of scope for the issue #527 MVP. Treat as
-        # a no-op so the evaluator can still process surrounding rules; the
-        # conformance gate flags SignalExit presence in an info row. Callers
-        # who need explicit detection should check ``isinstance`` before
-        # calling :func:`evaluate_exit_rules`.
-        return False
+        if view is None:
+            return False
+        i = view.length() - 1
+        if i < 0:
+            return False
+        match = evaluate_signal_exit_rules([rule], view, i)
+        return match is not None
 
     raise TypeError(f"unknown ExitRule subclass: {type(rule).__name__}")
 
