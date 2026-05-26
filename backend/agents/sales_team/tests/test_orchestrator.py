@@ -38,6 +38,7 @@ from sales_team.models import (
     ProspectList,
     QualificationScoreBody,
     ROIModel,
+    SalesPipelineConfig,
     SalesPipelineRequest,
     SalesProposalBody,
     SPINQuestions,
@@ -1167,3 +1168,102 @@ def test_deep_research_propagates_dossier_field_backfill(
     result = stub_orch.deep_research_only(_deep_request(target=10), persist=False)
     # The orchestrator must have populated those fields when building entries.
     assert result.total_prospects >= 1
+
+
+# ---------------------------------------------------------------------------
+# SalesPipelineConfig plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_config_defaults_match_legacy_constants() -> None:
+    """Default SalesPipelineConfig reproduces the prior hardcoded behaviour."""
+    cfg = SalesPipelineConfig()
+    assert cfg.dossier_confidence_threshold == 0.6
+    assert cfg.decision_maker_workers == 8
+    assert cfg.dossier_workers == 4
+    assert cfg.critic_max_refinements == 1
+    assert cfg.learning_insights_ttl_s == 3600
+
+
+def test_request_carries_default_config() -> None:
+    req = SalesPipelineRequest(
+        product_name="P",
+        value_proposition="A valid long value proposition",
+        icp=IdealCustomerProfile(),
+    )
+    assert isinstance(req.config, SalesPipelineConfig)
+    assert req.config.critic_max_refinements == 1
+
+
+def test_request_accepts_custom_config() -> None:
+    custom = SalesPipelineConfig(critic_max_refinements=3, dossier_workers=2)
+    req = SalesPipelineRequest(
+        product_name="P",
+        value_proposition="A valid long value proposition",
+        icp=IdealCustomerProfile(),
+        config=custom,
+    )
+    assert req.config.critic_max_refinements == 3
+    assert req.config.dossier_workers == 2
+
+
+def test_orchestrator_accepts_config() -> None:
+    cfg = SalesPipelineConfig(decision_maker_workers=2, dossier_workers=1)
+    o = orch_mod.SalesPodOrchestrator(config=cfg)
+    assert o.config.decision_maker_workers == 2
+
+
+def test_run_uses_request_config_critic_refinements(
+    monkeypatch: pytest.MonkeyPatch, stub_orch, sample_icp, sample_prospect, sample_dossier
+) -> None:
+    """Setting critic_max_refinements=0 skips the critic loop entirely."""
+    monkeypatch.setattr(orch_mod, "load_current_insights", lambda: None)
+    monkeypatch.setattr(orch_mod, "record_stage_outcome", lambda outcome: outcome)
+
+    stub_orch.load_dossiers_for_prospects = MagicMock(
+        return_value={sample_prospect.id: sample_dossier}
+    )
+    stub_orch.prospector.prospect.return_value = ProspectList(prospects=[sample_prospect])
+    stub_orch.outreach.generate_sequence.return_value = _good_variant_list()
+    stub_orch.qualifier.qualify.return_value = _qualifier_body("disqualify")
+    stub_orch.coach.review.return_value = _coaching_report()
+
+    request = SalesPipelineRequest(
+        product_name="P",
+        value_proposition="A valid long value proposition",
+        icp=sample_icp,
+        entry_stage=PipelineStage.PROSPECTING,
+        config=SalesPipelineConfig(critic_max_refinements=0),
+    )
+    result = stub_orch.run(request, job_id="j-no-critic")
+    assert len(result.outreach_sequences) == 1
+    # Critic was never called because max_refinements=0.
+    stub_orch.outreach_critic.review.assert_not_called()
+
+
+def test_stage_methods_are_individually_callable(
+    monkeypatch: pytest.MonkeyPatch, stub_orch, sample_icp, sample_prospect
+) -> None:
+    """Stage methods can be called directly without running the full pipeline."""
+    monkeypatch.setattr(orch_mod, "load_current_insights", lambda: None)
+    stub_orch.prospector.prospect.return_value = ProspectList(prospects=[sample_prospect])
+
+    ctx = orch_mod._RunContext(
+        request=SalesPipelineRequest(
+            product_name="P",
+            value_proposition="A valid long value proposition",
+            icp=sample_icp,
+        ),
+        job_id="j-stage",
+        icp_json=sample_icp.model_dump_json(indent=2),
+        product="P",
+        vp="A valid long value proposition",
+        company_context="",
+        cases="",
+        entry=PipelineStage.PROSPECTING,
+        insights_ctx=None,
+        config=SalesPipelineConfig(),
+        update=orch_mod._noop_update,
+    )
+    prospects = stub_orch._run_prospecting(ctx)
+    assert prospects == [sample_prospect]

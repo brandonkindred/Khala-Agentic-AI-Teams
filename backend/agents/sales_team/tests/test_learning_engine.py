@@ -207,3 +207,53 @@ def test_refresh_loads_outcomes_when_caller_passes_none(monkeypatch: pytest.Monk
     insights = engine.refresh()  # default args
     assert insights.total_outcomes_analyzed == 0
     assert captured == {"stage_loaded": 1, "deal_loaded": 1}
+
+
+# ---------------------------------------------------------------------------
+# Concurrent refresh serialization (_REFRESH_LOCK)
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_refreshes_serialize_versions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two concurrent refresh() calls must produce monotonically increasing
+    versions — the lock prevents both from reading the same current_version."""
+    import threading
+
+    versions_saved: list[int] = []
+    current_version = {"v": 0}
+
+    def _fake_load_insights():
+        return LearningInsights(insights_version=current_version["v"])
+
+    def _fake_save(insights: LearningInsights) -> None:
+        current_version["v"] = insights.insights_version
+        versions_saved.append(insights.insights_version)
+
+    monkeypatch.setattr(le_mod, "load_current_insights", _fake_load_insights)
+    monkeypatch.setattr(le_mod, "save_insights", _fake_save)
+    monkeypatch.setattr(le_mod, "load_stage_outcomes", lambda: [])
+    monkeypatch.setattr(le_mod, "load_deal_outcomes", lambda: [])
+
+    engine = LearningEngine(llm_client=CannedLLM([]))
+
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def _worker() -> None:
+        try:
+            barrier.wait(timeout=2)
+            engine.refresh()
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_worker)
+    t2 = threading.Thread(target=_worker)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not errors, f"Unexpected errors: {errors}"
+    assert len(versions_saved) == 2
+    assert versions_saved[0] != versions_saved[1], "Both refreshes wrote the same version"
+    assert sorted(versions_saved) == [1, 2]
