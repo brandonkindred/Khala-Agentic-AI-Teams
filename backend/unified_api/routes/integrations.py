@@ -1035,18 +1035,46 @@ def _resolve_repo_path(cfg: dict[str, Any]) -> str:
     return str(Path(cache_dir) / "github_workspaces" / cfg["owner"] / cfg["repo"])
 
 
+def _git_auth_env(token: str) -> dict[str, str]:
+    """Build env dict that injects a Bearer token via GIT_CONFIG_* env vars.
+
+    Unlike ``-c http.extraHeader``, environment-based config is transient
+    and never written to ``.git/config`` — safe for clone and fetch alike.
+    """
+    return {
+        **os.environ,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
 def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str | None:
     """Clone or fetch the repository. Returns error string on failure, None on success.
 
-    Auth is passed via ``-c http.extraHeader`` so the token never persists
-    in ``.git/config`` (unlike ``https://token@host`` remote URLs).
+    Auth is passed via ``GIT_CONFIG_*`` environment variables so the token
+    is transient and never persisted in ``.git/config``.
     """
-    auth_header = f"Authorization: Bearer {token}"
+    env = _git_auth_env(token)
+    expected_suffix = f"{owner}/{repo}"
     path = Path(repo_path)
+
     if path.is_dir() and (path / ".git").is_dir():
+        url_check = subprocess.run(
+            ["git", "-C", repo_path, "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10,
+        )
+        url_out = url_check.stdout.strip()
+        if url_check.returncode != 0 or expected_suffix not in url_out:
+            return (
+                f"existing checkout at {repo_path} does not match "
+                f"{owner}/{repo} (remote origin: {url_out[:120]})"
+            )
+
         result = subprocess.run(
-            ["git", "-C", repo_path, "-c", f"http.extraHeader={auth_header}", "fetch", "--all"],
-            capture_output=True, text=True, timeout=120,
+            ["git", "-C", repo_path, "fetch", "--all"],
+            capture_output=True, text=True, timeout=120, env=env,
         )
         if result.returncode != 0:
             return f"git fetch failed: {result.stderr[:300]}"
@@ -1055,8 +1083,8 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
     path.parent.mkdir(parents=True, exist_ok=True)
     clone_url = f"https://github.com/{owner}/{repo}.git"
     result = subprocess.run(
-        ["git", "clone", "-c", f"http.extraHeader={auth_header}", clone_url, repo_path],
-        capture_output=True, text=True, timeout=300,
+        ["git", "clone", clone_url, repo_path],
+        capture_output=True, text=True, timeout=300, env=env,
     )
     if result.returncode != 0:
         safe_err = result.stderr.replace(token, "***")[:300]

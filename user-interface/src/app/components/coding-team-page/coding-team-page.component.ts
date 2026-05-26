@@ -6,8 +6,8 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
 import { RouterLink } from '@angular/router';
-import { Subscription, interval } from 'rxjs';
-import { switchMap, takeWhile } from 'rxjs/operators';
+import { EMPTY, Subscription, interval } from 'rxjs';
+import { catchError, switchMap, takeWhile } from 'rxjs/operators';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
@@ -128,19 +128,31 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     });
   }
 
+  private pollErrors = 0;
+
   private startPolling(jobId: string): void {
     this.stopPolling();
+    this.pollErrors = 0;
     this.pollSub = interval(5000)
       .pipe(
-        switchMap(() => this.api.getJobStatus(jobId)),
+        switchMap(() =>
+          this.api.getJobStatus(jobId).pipe(
+            catchError(() => {
+              this.pollErrors++;
+              if (this.pollErrors >= 3) {
+                this.issueError = 'Lost connection to the coding team — status polling failed.';
+                this.stopPolling();
+              }
+              return EMPTY;
+            }),
+          ),
+        ),
         takeWhile((status) => !['completed', 'failed', 'cancelled'].includes(status.status), true),
       )
       .subscribe({
         next: (status: CodingTeamJobStatus) => {
+          this.pollErrors = 0;
           this.jobStatus = status;
-        },
-        error: () => {
-          // polling error — job might have been cleaned up
         },
       });
   }

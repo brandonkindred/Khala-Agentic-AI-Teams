@@ -640,7 +640,7 @@
           {{ expanded === 'github' ? 'Hide settings' : (githubTokenConfigured ? 'Manage' : 'Configure') }}
         </button>
 
-        @if (githubTokenConfigured) {
+        @if (githubTokenConfigured || githubOwner || githubRepo) {
           <button
             type="button"
             mat-stroked-button
