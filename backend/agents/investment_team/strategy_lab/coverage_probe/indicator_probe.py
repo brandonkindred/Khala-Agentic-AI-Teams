@@ -261,441 +261,496 @@ def run_indicator_probe(
         )
 
 
+@dataclass(frozen=True)
+class _GroupResult:
+    """Per-group evaluation rollup produced by ``CoverageAggregator``.
+
+    Carries all per-group data that downstream classification stages need,
+    eliminating the ``base += legs`` pointer-walk over flat arrays.
+
+    Invariants:
+        ``len(leg_hits) == len(last_true_per_sub) == len(group.subconds)``.
+        ``conjunction_hits >= 0``.
+        ``group.ancestor_count <= len(leg_hits)``.
+    """
+
+    group: _Group
+    leg_hits: Tuple[int, ...]
+    conjunction_hits: int
+    evaluated: bool
+    last_true_per_sub: Tuple[Optional[str], ...]
+
+
+@dataclass(frozen=True)
+class _BlockerResult:
+    """Classification output from ``CoverageAggregator._classify_blockers``.
+
+    Invariants:
+        If ``conjunction_group`` is not ``None``, ``conjunction_blocker``
+        is also not ``None``.
+    """
+
+    zero_hit_blockers: List[LikelyBlocker]
+    conjunction_blocker: Optional[LikelyBlocker]
+    conjunction_group: Optional[_Group]
+
+
+class CoverageAggregator:
+    """Three-stage pipeline for indicator-coverage aggregation.
+
+    Replaces the monolithic ``_aggregate`` function with structured per-group
+    evaluation, blocker classification, and report assembly. The three
+    stages must be called in order via :meth:`run`.
+
+    Preconditions:
+        ``groups`` is non-empty (the caller checks for empty groups
+        before constructing the aggregator).
+    Postconditions:
+        :meth:`run` returns a valid ``CoverageReport``.
+    Invariants:
+        After :meth:`_evaluate_groups`, ``_total_eval_bars`` and
+        ``_per_symbol_bars`` are populated and used by subsequent stages.
+    """
+
+    def __init__(
+        self,
+        groups: List[_Group],
+        market_data: Dict[str, pd.DataFrame],
+        base_kwargs: Dict[str, object],
+    ) -> None:
+        self._groups = groups
+        self._market_data = market_data
+        self._base_kwargs = base_kwargs
+        self._total_eval_bars: int = 0
+        self._per_symbol_bars: Dict[str, int] = {}
+
+    def run(self) -> CoverageReport:
+        """Execute the three-stage pipeline and return a ``CoverageReport``.
+
+        Postconditions:
+            Returns a ``CoverageReport`` with one of ``UNKNOWN_LOW_COVERAGE``,
+            ``INDICATOR_FILTER_TOO_RESTRICTIVE``, ``CONJUNCTION_NEVER_TRUE``,
+            or ``COVERAGE_OK``.
+        """
+        results = self._evaluate_groups()
+
+        if self._total_eval_bars == 0:
+            return CoverageReport(
+                coverage_category=CoverageCategory.UNKNOWN_LOW_COVERAGE,
+                summary="no bars evaluated",
+                subconditions=[],
+                **self._base_kwargs,
+            )
+
+        subcoverages = self._build_subcoverages(results)
+        blocker_result = self._classify_blockers(results)
+        return self._assemble_report(results, blocker_result, subcoverages)
+
+    # ------------------------------------------------------------------
+    # Stage 1: per-symbol × per-group evaluation
+    # ------------------------------------------------------------------
+
+    def _evaluate_groups(self) -> List[_GroupResult]:
+        """Evaluate all subconditions across all symbols and return per-group rollups.
+
+        Preconditions:
+            ``self._groups`` is non-empty with at least one subcond total.
+        Postconditions:
+            ``self._total_eval_bars`` and ``self._per_symbol_bars`` are set.
+            Returned list has one ``_GroupResult`` per group, even if
+            unevaluated (``evaluated=False``).
+        """
+        groups = self._groups
+        n_groups = len(groups)
+        flat_subconds: List[_Subcond] = [s for g in groups for s in g.subconds]
+        n_flat = len(flat_subconds)
+
+        sub_hit_counts: List[int] = [0] * n_flat
+        sub_last_true: List[Optional[str]] = [None] * n_flat
+        group_conjunction_hits: List[int] = [0] * n_groups
+        group_evaluated: List[bool] = [False] * n_groups
+        total_eval_bars = 0
+        per_symbol_bars: Dict[str, int] = {}
+
+        for symbol, df in self._market_data.items():
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+            global_idx = 0
+            symbol_contributed = False
+            for group_idx, group in enumerate(groups):
+                if group.target_symbols is not None and symbol not in group.target_symbols:
+                    global_idx += len(group.subconds)
+                    continue
+                if group.denied_symbols is not None and symbol in group.denied_symbols:
+                    global_idx += len(group.subconds)
+                    continue
+                group_masks: List[pd.Series] = []
+                for sub in group.subconds:
+                    if sub.target_symbols is not None and symbol not in sub.target_symbols:
+                        mask = pd.Series(False, index=df.index, dtype=bool)
+                    elif sub.or_legs is not None:
+                        leg_masks: List[pd.Series] = []
+                        for leg in sub.or_legs:
+                            if leg.target_symbols is not None and symbol not in leg.target_symbols:
+                                leg_masks.append(pd.Series(False, index=df.index, dtype=bool))
+                                continue
+                            try:
+                                leg_series = leg.evaluate(df)
+                            except Exception as exc:  # noqa: BLE001  # pragma: no cover — defensive catch on or-leg evaluator
+                                logger.debug("or-leg %r failed on %s: %s", leg.label, symbol, exc)
+                                leg_series = pd.Series(False, index=df.index, dtype=bool)
+                            leg_masks.append(
+                                pd.Series(leg_series, index=df.index).fillna(False).astype(bool)
+                            )
+                        if leg_masks:
+                            mask = leg_masks[0]
+                            for m in leg_masks[1:]:
+                                mask = mask | m
+                        else:
+                            mask = pd.Series(False, index=df.index, dtype=bool)
+                    else:
+                        try:
+                            series = sub.evaluate(df)
+                        except Exception as exc:  # noqa: BLE001  # pragma: no cover — defensive catch on subcond evaluator
+                            logger.debug("subcondition %r failed on %s: %s", sub.label, symbol, exc)
+                            series = pd.Series(False, index=df.index, dtype=bool)
+                        mask = pd.Series(series, index=df.index).fillna(False).astype(bool)
+                    hits = int(mask.sum())
+                    sub_hit_counts[global_idx] += hits
+                    if hits:
+                        last_bar = str(mask[mask].index[-1])
+                        if (
+                            sub_last_true[global_idx] is None
+                            or last_bar > sub_last_true[global_idx]
+                        ):
+                            sub_last_true[global_idx] = last_bar
+                    group_masks.append(mask)
+                    global_idx += 1
+                if group_masks:
+                    if group.combinator == "or":
+                        ancestor_masks = group_masks[: group.ancestor_count]
+                        or_tail_masks = group_masks[group.ancestor_count :]
+                        if ancestor_masks:
+                            conjunction_mask = ancestor_masks[0]
+                            for m in ancestor_masks[1:]:
+                                conjunction_mask = conjunction_mask & m
+                        else:
+                            conjunction_mask = pd.Series(True, index=df.index, dtype=bool)
+                        if or_tail_masks:
+                            or_mask = or_tail_masks[0]
+                            for m in or_tail_masks[1:]:
+                                or_mask = or_mask | m
+                            conjunction_mask = conjunction_mask & or_mask
+                    else:
+                        conjunction_mask = group_masks[0]
+                        for m in group_masks[1:]:
+                            conjunction_mask = conjunction_mask & m
+                    group_conjunction_hits[group_idx] += int(conjunction_mask.sum())
+                    group_evaluated[group_idx] = True
+                    symbol_contributed = True
+            if symbol_contributed:
+                total_eval_bars += len(df)
+                per_symbol_bars[symbol] = per_symbol_bars.get(symbol, 0) + len(df)
+
+        self._total_eval_bars = total_eval_bars
+        self._per_symbol_bars = per_symbol_bars
+
+        # Convert flat arrays into per-group _GroupResult instances.
+        results: List[_GroupResult] = []
+        offset = 0
+        for group_idx, group in enumerate(groups):
+            n_legs = len(group.subconds)
+            results.append(
+                _GroupResult(
+                    group=group,
+                    leg_hits=tuple(sub_hit_counts[offset : offset + n_legs]),
+                    conjunction_hits=group_conjunction_hits[group_idx],
+                    evaluated=group_evaluated[group_idx],
+                    last_true_per_sub=tuple(sub_last_true[offset : offset + n_legs]),
+                )
+            )
+            offset += n_legs
+        return results
+
+    # ------------------------------------------------------------------
+    # Subcondition coverage deduplication
+    # ------------------------------------------------------------------
+
+    def _build_subcoverages(self, results: List[_GroupResult]) -> List[SubconditionCoverage]:
+        """Deduplicate subconditions by ``(label, effective_symbols)`` and compute hit rates.
+
+        Preconditions:
+            ``self._total_eval_bars > 0``, ``self._per_symbol_bars`` populated.
+        Postconditions:
+            No duplicate ``(label, effective_symbols)`` keys in the returned list.
+            Every ``hit_rate`` is in ``[0.0, 1.0]``.
+        """
+        subcoverages: List[SubconditionCoverage] = []
+        seen_keys: set = set()
+        for result in results:
+            group = result.group
+            group_syms = (
+                frozenset(group.target_symbols) if group.target_symbols is not None else None
+            )
+            for k, sub in enumerate(group.subconds):
+                hits = result.leg_hits[k]
+                last = result.last_true_per_sub[k]
+                if group_syms is None and sub.target_symbols is None:
+                    effective_syms: Optional[frozenset] = None
+                elif group_syms is None:
+                    effective_syms = sub.target_symbols
+                elif sub.target_symbols is None:
+                    effective_syms = group_syms
+                else:
+                    effective_syms = group_syms & sub.target_symbols
+                key = (sub.label, effective_syms)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                if effective_syms is not None:
+                    denom = sum(self._per_symbol_bars.get(s, 0) for s in effective_syms)
+                else:
+                    denom = self._total_eval_bars
+                rate = (hits / denom) if denom > 0 else 0.0
+                label = sub.label
+                if effective_syms:
+                    label = f"{label} [{','.join(sorted(effective_syms))}]"
+                subcoverages.append(
+                    SubconditionCoverage(
+                        label=label,
+                        hit_count=hits,
+                        hit_rate=min(max(rate, 0.0), 1.0),
+                        last_true_bar=last,
+                    )
+                )
+        return subcoverages
+
+    # ------------------------------------------------------------------
+    # Stage 2: blocker classification (zero-hit + conjunction-never-true)
+    # ------------------------------------------------------------------
+
+    def _classify_blockers(self, results: List[_GroupResult]) -> _BlockerResult:
+        """Detect zero-hit blockers and conjunction-never-true groups.
+
+        Preconditions:
+            ``results`` is the output of ``_evaluate_groups()``.
+        Postconditions:
+            Returned ``_BlockerResult.zero_hit_blockers`` contains at most
+            one entry per ``(label, symbols_key)`` pair.
+            If ``conjunction_group`` is set, ``conjunction_blocker`` is set.
+        """
+        blockers: List[LikelyBlocker] = []
+        flagged_keys: set = set()
+
+        for result in results:
+            if not result.evaluated:
+                continue
+            group = result.group
+            legs = len(group.subconds)
+            leg_labels = [group.subconds[k].label for k in range(legs)]
+            symbols_key = (
+                frozenset(group.target_symbols) if group.target_symbols is not None else None
+            )
+
+            def _flag_and_zero(
+                k: int, _labels=leg_labels, _sym_key=symbols_key, _grp=group
+            ) -> None:
+                key = (_labels[k], _sym_key)
+                if key in flagged_keys:
+                    return
+                flagged_keys.add(key)
+                evidence = _labels[k]
+                if _grp.target_symbols:
+                    evidence = f"{evidence} [{','.join(sorted(_grp.target_symbols))}]"
+                blockers.append(
+                    LikelyBlocker(
+                        reason="indicator_filter_zero_hits",
+                        evidence=evidence,
+                        hit_rate=0.0,
+                    )
+                )
+
+            if group.combinator == "and":
+                for k in range(legs):
+                    if result.leg_hits[k] == 0 and not group.subconds[k].has_unknown_leg:
+                        _flag_and_zero(k)
+            else:  # "or"
+                for k in range(group.ancestor_count):
+                    if result.leg_hits[k] == 0 and not group.subconds[k].has_unknown_leg:
+                        _flag_and_zero(k)
+                or_tail_hits = result.leg_hits[group.ancestor_count :]
+                or_tail_labels = leg_labels[group.ancestor_count :]
+                if (
+                    or_tail_hits
+                    and all(h == 0 for h in or_tail_hits)
+                    and not group.has_unknown_or_leg
+                ):
+                    evidence = " OR ".join(or_tail_labels)
+                    if group.target_symbols:
+                        evidence = f"{evidence} [{','.join(sorted(group.target_symbols))}]"
+                    blockers.append(
+                        LikelyBlocker(
+                            reason="or_group_never_fires",
+                            evidence=evidence,
+                            hit_rate=0.0,
+                        )
+                    )
+
+        # Conjunction-never-true: find any single predicate whose individual
+        # legs all fire but whose bar-wise conjunction is empty.
+        conjunction_blocker: Optional[LikelyBlocker] = None
+        conjunction_group: Optional[_Group] = None
+
+        for result in results:
+            if not result.evaluated or result.conjunction_hits != 0:
+                continue
+            group = result.group
+            legs = len(group.subconds)
+            if group.has_unknown_or_leg or any(
+                group.subconds[k].has_unknown_leg for k in range(legs)
+            ):
+                continue
+            if group.combinator == "and":
+                if legs >= 2 and all(result.leg_hits[k] > 0 for k in range(legs)):
+                    conjunction_group = group
+                    break
+            else:  # "or"
+                if group.ancestor_count >= 1 and legs > group.ancestor_count:
+                    ancestor_hits_ok = all(
+                        result.leg_hits[k] > 0 for k in range(group.ancestor_count)
+                    )
+                    or_tail_any_fire = any(
+                        result.leg_hits[k] > 0 for k in range(group.ancestor_count, legs)
+                    )
+                    if ancestor_hits_ok and or_tail_any_fire:
+                        conjunction_group = group
+                        break
+
+        if conjunction_group is not None:
+            conjunction_blocker = LikelyBlocker(
+                reason="conjunction_never_true",
+                evidence=" AND ".join(s.label for s in conjunction_group.subconds),
+                hit_rate=0.0,
+            )
+
+        return _BlockerResult(
+            zero_hit_blockers=blockers,
+            conjunction_blocker=conjunction_blocker,
+            conjunction_group=conjunction_group,
+        )
+
+    # ------------------------------------------------------------------
+    # Stage 3: final category classification + report assembly
+    # ------------------------------------------------------------------
+
+    def _assemble_report(
+        self,
+        results: List[_GroupResult],
+        blocker_result: _BlockerResult,
+        subcoverages: List[SubconditionCoverage],
+    ) -> CoverageReport:
+        """Classify the coverage category and build the final report.
+
+        Preconditions:
+            ``results``, ``blocker_result``, and ``subcoverages`` are
+            outputs of the preceding pipeline stages.
+        Postconditions:
+            Returns a ``CoverageReport`` with one of
+            ``INDICATOR_FILTER_TOO_RESTRICTIVE``,
+            ``CONJUNCTION_NEVER_TRUE``, ``UNKNOWN_LOW_COVERAGE``, or
+            ``COVERAGE_OK``.
+        """
+        if blocker_result.zero_hit_blockers:
+            blockers = blocker_result.zero_hit_blockers
+            if any(b.reason == "indicator_filter_zero_hits" for b in blockers):
+                summary = (
+                    f"{len(blockers)} of {len(subcoverages)} indicator subconditions never fired"
+                )
+            else:
+                summary = "or-predicate has no firing leg"
+            return CoverageReport(
+                coverage_category=CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE,
+                summary=summary,
+                subconditions=subcoverages,
+                likely_blockers=blockers[:_MAX_LIKELY_BLOCKERS],
+                **self._base_kwargs,
+            )
+
+        if blocker_result.conjunction_blocker is not None:
+            return CoverageReport(
+                coverage_category=CoverageCategory.CONJUNCTION_NEVER_TRUE,
+                summary="individual subconditions fire but their conjunction is never true",
+                subconditions=subcoverages,
+                likely_blockers=[blocker_result.conjunction_blocker][:_MAX_LIKELY_BLOCKERS],
+                **self._base_kwargs,
+            )
+
+        # Unknown-evidence polarity check. OR-unknown widens the recognised
+        # mask (recognised firing = positive evidence); AND-unknown narrows
+        # it (recognised AND = superset, not proof).
+        has_unknown_evidence = False
+        has_recognised_evidence = False
+        for result in results:
+            if not result.evaluated:
+                continue
+            group = result.group
+            group_or_unknown = group.has_unknown_or_leg or any(
+                sub.has_unknown_leg for sub in group.subconds
+            )
+            group_and_unknown = group.has_unknown_and_conjunct
+            group_unknown = group_or_unknown or group_and_unknown
+            if group_unknown:
+                has_unknown_evidence = True
+                if group_and_unknown:
+                    pass
+                elif result.conjunction_hits > 0 and any(h > 0 for h in result.leg_hits):
+                    has_recognised_evidence = True
+            else:
+                if any(h > 0 for h in result.leg_hits):
+                    has_recognised_evidence = True
+
+        if has_unknown_evidence and not has_recognised_evidence:
+            return CoverageReport(
+                coverage_category=CoverageCategory.UNKNOWN_LOW_COVERAGE,
+                summary=(
+                    "predicate has un-modellable alternative(s) and recognised legs "
+                    "produced no firing bars — coverage is unknown"
+                ),
+                subconditions=subcoverages,
+                likely_blockers=[],
+                **self._base_kwargs,
+            )
+
+        return CoverageReport(
+            coverage_category=CoverageCategory.COVERAGE_OK,
+            summary="indicator subconditions fired at least once",
+            subconditions=subcoverages,
+            likely_blockers=[],
+            **self._base_kwargs,
+        )
+
+
 def _aggregate(
     groups: List[_Group],
     market_data: Dict[str, pd.DataFrame],
     base_kwargs: Dict[str, object],
 ) -> CoverageReport:
-    flat_subconds: List[_Subcond] = [s for g in groups for s in g.subconds]
-    # Track each flat subcond's owning-group symbol filter so the
-    # SubconditionCoverage dedupe can keep symbol-gated duplicates
-    # distinct — otherwise a "close > 50 [AAPL]" branch and a
-    # "close > 50 [MSFT]" branch collapse into one entry and a
-    # symbol-specific zero-hit blocker is hidden.
-    flat_subcond_symbols: List[Optional[frozenset]] = []
-    for g in groups:
-        syms = frozenset(g.target_symbols) if g.target_symbols is not None else None
-        flat_subcond_symbols.extend([syms] * len(g.subconds))
+    """Aggregate indicator-coverage evaluation into a ``CoverageReport``.
+
+    Preconditions:
+        ``groups`` may be empty (returns ``UNKNOWN_LOW_COVERAGE``).
+        ``market_data`` values are DataFrames with OHLCV columns.
+    Postconditions:
+        Returns a valid ``CoverageReport``.
+    """
+    flat_subconds = [s for g in groups for s in g.subconds]
     if not flat_subconds:
         return CoverageReport(
             coverage_category=CoverageCategory.UNKNOWN_LOW_COVERAGE,
             summary="no recognized indicator subconditions found",
             **base_kwargs,
         )
-
-    sub_hit_counts: List[int] = [0] * len(flat_subconds)
-    sub_last_true: List[Optional[str]] = [None] * len(flat_subconds)
-    group_conjunction_hits: List[int] = [0] * len(groups)
-    group_evaluated: List[bool] = [False] * len(groups)
-    total_eval_bars = 0
-    # Per-symbol bar count of the symbols that actually contributed to
-    # at least one group. Used so a symbol-gated row's hit_rate divides
-    # by the matching-symbol bars rather than the full universe — two
-    # always-true gated branches would otherwise both report 0.5 instead
-    # of 1.0 because each branch's hits come from one symbol's bars but
-    # the global denominator includes both.
-    per_symbol_bars: Dict[str, int] = {}
-
-    for symbol, df in market_data.items():
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            continue
-        global_idx = 0
-        symbol_contributed = False
-        for group_idx, group in enumerate(groups):
-            # Symbol-gated groups (``if bar.symbol == "AAPL" and ...``)
-            # only consider DataFrames matching one of the gate's symbols.
-            if group.target_symbols is not None and symbol not in group.target_symbols:
-                global_idx += len(group.subconds)
-                continue
-            # Exclude-shaped early-return guards
-            # (``if bar.symbol == "AAPL": return``) leave a denylist on
-            # every group emitted past the guard. Skip those symbols so
-            # data the live entry path never reaches can't supply
-            # positive coverage.
-            if group.denied_symbols is not None and symbol in group.denied_symbols:
-                global_idx += len(group.subconds)
-                continue
-            group_masks: List[pd.Series] = []
-            for sub in group.subconds:
-                # Per-subcond symbol filter (compound OR legs that
-                # captured a ``bar.symbol == "X"`` gate). When the
-                # current DataFrame's symbol isn't in the leg's filter,
-                # force its mask to all-False so its contribution to
-                # both hit count and conjunction is zero — without this
-                # an unrelated symbol could appear to satisfy the leg.
-                if sub.target_symbols is not None and symbol not in sub.target_symbols:
-                    mask = pd.Series(False, index=df.index, dtype=bool)
-                elif sub.or_legs is not None:
-                    # Compound OR with per-leg symbol gates — evaluate
-                    # each leg under its own ``target_symbols`` filter
-                    # and OR the masks. Without this the OR wrapper
-                    # would drop the per-leg gates and an unrelated
-                    # symbol's prices could satisfy a leg restricted to
-                    # AAPL/MSFT, falsely flipping the OR (and the
-                    # enclosing AND) to true.
-                    leg_masks: List[pd.Series] = []
-                    for leg in sub.or_legs:
-                        if leg.target_symbols is not None and symbol not in leg.target_symbols:
-                            leg_masks.append(pd.Series(False, index=df.index, dtype=bool))
-                            continue
-                        try:
-                            leg_series = leg.evaluate(df)
-                        except Exception as exc:  # noqa: BLE001  # pragma: no cover — defensive catch on or-leg evaluator
-                            logger.debug("or-leg %r failed on %s: %s", leg.label, symbol, exc)
-                            leg_series = pd.Series(False, index=df.index, dtype=bool)
-                        leg_masks.append(
-                            pd.Series(leg_series, index=df.index).fillna(False).astype(bool)
-                        )
-                    if leg_masks:
-                        mask = leg_masks[0]
-                        for m in leg_masks[1:]:
-                            mask = mask | m
-                    else:
-                        mask = pd.Series(False, index=df.index, dtype=bool)
-                else:
-                    try:
-                        series = sub.evaluate(df)
-                    except Exception as exc:  # noqa: BLE001  # pragma: no cover — defensive catch on subcond evaluator
-                        logger.debug("subcondition %r failed on %s: %s", sub.label, symbol, exc)
-                        series = pd.Series(False, index=df.index, dtype=bool)
-                    mask = pd.Series(series, index=df.index).fillna(False).astype(bool)
-                hits = int(mask.sum())
-                sub_hit_counts[global_idx] += hits
-                if hits:
-                    last_bar = str(mask[mask].index[-1])
-                    if sub_last_true[global_idx] is None or last_bar > sub_last_true[global_idx]:
-                        sub_last_true[global_idx] = last_bar
-                group_masks.append(mask)
-                global_idx += 1
-            if group_masks:
-                # For AND groups the conjunction is the bar-wise AND
-                # of every leg's mask. For OR groups with AND-required
-                # ancestors plus an OR tail, the actual predicate is
-                # ``ancestors AND (or_tail_1 OR or_tail_2 OR ...)`` —
-                # taking the AND of every group mask would require
-                # ALL OR legs to fire, which is too restrictive.
-                # Combine ancestors-AND with or-tail-OR so the
-                # conjunction count reflects the real predicate and
-                # downstream classification can flag a never-true
-                # nested OR predicate. For plain OR groups (no
-                # ancestors), the predicate is just ``or_1 OR or_2
-                # OR ...`` so use the bar-wise OR — without this,
-                # disjoint firing legs (e.g. ``close > 100 or close
-                # < 50``) AND to zero and the unknown-leg fallthrough
-                # mis-reports a clearly-firing predicate as
-                # ``UNKNOWN_LOW_COVERAGE``.
-                if group.combinator == "or":
-                    ancestor_masks = group_masks[: group.ancestor_count]
-                    or_tail_masks = group_masks[group.ancestor_count :]
-                    if ancestor_masks:
-                        conjunction_mask = ancestor_masks[0]
-                        for m in ancestor_masks[1:]:
-                            conjunction_mask = conjunction_mask & m
-                    else:
-                        conjunction_mask = pd.Series(True, index=df.index, dtype=bool)
-                    if or_tail_masks:
-                        or_mask = or_tail_masks[0]
-                        for m in or_tail_masks[1:]:
-                            or_mask = or_mask | m
-                        conjunction_mask = conjunction_mask & or_mask
-                else:
-                    conjunction_mask = group_masks[0]
-                    for m in group_masks[1:]:
-                        conjunction_mask = conjunction_mask & m
-                group_conjunction_hits[group_idx] += int(conjunction_mask.sum())
-                group_evaluated[group_idx] = True
-                symbol_contributed = True
-        if symbol_contributed:
-            total_eval_bars += len(df)
-            per_symbol_bars[symbol] = per_symbol_bars.get(symbol, 0) + len(df)
-
-    if total_eval_bars == 0:
-        return CoverageReport(
-            coverage_category=CoverageCategory.UNKNOWN_LOW_COVERAGE,
-            summary="no bars evaluated",
-            subconditions=[],
-            **base_kwargs,
-        )
-
-    # Deduplicate the SubconditionCoverage list by (label, effective_symbols)
-    # so symbol-gated duplicates stay distinct — same predicate text
-    # under two different ``bar.symbol == "X"`` branches must surface as
-    # two coverage rows so a per-symbol zero-hit blocker is visible.
-    # The effective filter is the intersection of the group-level filter
-    # (from outer ``bar.symbol == "X"`` ancestors) and the per-subcond
-    # filter (from compound OR legs that captured a symbol gate).
-    subcoverages: List[SubconditionCoverage] = []
-    seen_keys: set = set()
-    for sub, group_syms, hits, last in zip(
-        flat_subconds, flat_subcond_symbols, sub_hit_counts, sub_last_true
-    ):
-        if group_syms is None and sub.target_symbols is None:
-            effective_syms: Optional[frozenset] = None
-        elif group_syms is None:
-            effective_syms = sub.target_symbols
-        elif sub.target_symbols is None:
-            effective_syms = group_syms
-        else:
-            effective_syms = group_syms & sub.target_symbols
-        key = (sub.label, effective_syms)
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        # Per-row denominator: a symbol-gated row's hits only come from
-        # bars in its target_symbols, so dividing by the global total
-        # would understate the per-symbol coverage rate. Restrict the
-        # denominator to the bars that could have contributed.
-        if effective_syms is not None:
-            denom = sum(per_symbol_bars.get(s, 0) for s in effective_syms)
-        else:
-            denom = total_eval_bars
-        rate = (hits / denom) if denom > 0 else 0.0
-        # Augment the rendered label with the symbol filter so the
-        # report distinguishes symbol-gated duplicates without growing
-        # the model schema.
-        label = sub.label
-        if effective_syms:
-            label = f"{label} [{','.join(sorted(effective_syms))}]"
-        subcoverages.append(
-            SubconditionCoverage(
-                label=label,
-                hit_count=hits,
-                hit_rate=min(max(rate, 0.0), 1.0),
-                last_true_bar=last,
-            )
-        )
-
-    # Per-group zero-hit detection. The blocker rule depends on the
-    # group's combinator:
-    #
-    # - ``and`` groups: a single zero-hit leg blocks the predicate
-    #   (existing behaviour).
-    # - ``or`` groups: only ALL legs being zero blocks the predicate;
-    #   any firing leg satisfies the disjunction.
-    blockers: List[LikelyBlocker] = []
-    flagged_keys: set = set()
-    base = 0
-    for group_idx, group in enumerate(groups):
-        legs = len(group.subconds)
-        if not group_evaluated[group_idx]:
-            base += legs
-            continue
-        leg_hits = [sub_hit_counts[base + k] for k in range(legs)]
-        leg_labels = [group.subconds[k].label for k in range(legs)]
-        # ``target_symbols`` is a regular ``set`` (mutable, unhashable)
-        # — freeze it for the dedupe key.
-        symbols_key = frozenset(group.target_symbols) if group.target_symbols is not None else None
-
-        def _flag_and_zero(k: int) -> None:
-            """Flag a single zero-hit AND-required leg (ancestor or AND-group)."""
-            key = (leg_labels[k], symbols_key)
-            if key in flagged_keys:
-                return
-            flagged_keys.add(key)
-            evidence = leg_labels[k]
-            if group.target_symbols:
-                evidence = f"{evidence} [{','.join(sorted(group.target_symbols))}]"
-            blockers.append(
-                LikelyBlocker(
-                    reason="indicator_filter_zero_hits",
-                    evidence=evidence,
-                    hit_rate=0.0,
-                )
-            )
-
-        if group.combinator == "and":
-            for k in range(legs):
-                # Suppress the AND zero-hit blocker for nested-OR
-                # subconds whose source AST had at least one
-                # un-modellable leg. With an unknown alternative
-                # present we can't prove the OR is unreachable, so
-                # flagging based on the recognised legs' zero hits
-                # would be a false positive.
-                if leg_hits[k] == 0 and not group.subconds[k].has_unknown_leg:
-                    _flag_and_zero(k)
-        else:  # "or"
-            # Ancestors are still AND-required even when the group's
-            # own predicate is a disjunction — a zero-hit ancestor
-            # blocks the predicate regardless of whether any OR leg
-            # fires. Apply the AND zero-hit rule to positions
-            # [0..ancestor_count) and the disjunction-all-zero rule to
-            # the OR-leg tail.
-            for k in range(group.ancestor_count):
-                if leg_hits[k] == 0 and not group.subconds[k].has_unknown_leg:
-                    _flag_and_zero(k)
-            or_tail_hits = leg_hits[group.ancestor_count :]
-            or_tail_labels = leg_labels[group.ancestor_count :]
-            # Suppress the all-zero-OR-tail blocker when at least one
-            # leg of the source predicate could not be statically
-            # modelled (e.g. ``self.custom_ok(bar)``). With an
-            # un-modelled alternative present we can't prove the OR is
-            # unreachable, so flagging would be a false positive.
-            if or_tail_hits and all(h == 0 for h in or_tail_hits) and not group.has_unknown_or_leg:
-                evidence = " OR ".join(or_tail_labels)
-                if group.target_symbols:
-                    evidence = f"{evidence} [{','.join(sorted(group.target_symbols))}]"
-                blockers.append(
-                    LikelyBlocker(
-                        reason="or_group_never_fires",
-                        evidence=evidence,
-                        hit_rate=0.0,
-                    )
-                )
-        base += legs
-
-    if blockers:
-        if any(b.reason == "indicator_filter_zero_hits" for b in blockers):
-            summary = f"{len(blockers)} of {len(subcoverages)} indicator subconditions never fired"
-        else:
-            summary = "or-predicate has no firing leg"
-        return CoverageReport(
-            coverage_category=CoverageCategory.INDICATOR_FILTER_TOO_RESTRICTIVE,
-            summary=summary,
-            subconditions=subcoverages,
-            likely_blockers=blockers[:_MAX_LIKELY_BLOCKERS],
-            **base_kwargs,
-        )
-
-    # Find any single ``if`` predicate whose component masks all fire
-    # individually but whose true conjunction is empty. We flag
-    # CONJUNCTION_NEVER_TRUE for two shapes:
-    #
-    # - **AND groups** with 2+ legs, each individually firing, but
-    #   their bar-wise AND is zero — a real per-predicate
-    #   contradiction.
-    # - **OR groups** with one or more AND-required ancestors PLUS at
-    #   least one OR-tail leg, where each ancestor and at least one
-    #   OR-tail leg individually fire but the actual predicate
-    #   ``ancestors AND (or_tail_1 OR or_tail_2 OR ...)`` is empty.
-    #   Without this an ancestor-and-(disjoint OR tail) predicate is
-    #   silently classified as ``COVERAGE_OK``.
-    #
-    # We never flag this for plain OR groups (no ancestors): their
-    # bar-wise AND is meaningless under disjunction semantics, and
-    # the OR-tail-all-zero rule already covers their unreachability.
-    empty_conj_group: Optional[_Group] = None
-    base = 0
-    for group_idx, group in enumerate(groups):
-        legs = len(group.subconds)
-        if not group_evaluated[group_idx] or group_conjunction_hits[group_idx] != 0:
-            base += legs
-            continue
-        if group.has_unknown_or_leg or any(group.subconds[k].has_unknown_leg for k in range(legs)):
-            # Unknown alternative present — can't prove the predicate
-            # is unreachable. Suppress the blocker (mirrors the OR
-            # zero-hit suppression elsewhere). The group-level flag
-            # covers OR groups whose entire OR-tail leg was un-modellable
-            # (and therefore not in ``group.subconds``); the per-subcond
-            # flag covers nested-OR ``_Subcond``s synthesised by
-            # ``_build_compound_or_subcond`` whose recognised legs DID
-            # land in ``group.subconds`` but which had a sibling
-            # un-modellable leg.
-            base += legs
-            continue
-        if group.combinator == "and":
-            if legs >= 2 and all(sub_hit_counts[base + k] > 0 for k in range(legs)):
-                empty_conj_group = group
-                break
-        else:  # "or"
-            if group.ancestor_count >= 1 and legs > group.ancestor_count:
-                ancestor_hits_ok = all(
-                    sub_hit_counts[base + k] > 0 for k in range(group.ancestor_count)
-                )
-                or_tail_any_fire = any(
-                    sub_hit_counts[base + k] > 0 for k in range(group.ancestor_count, legs)
-                )
-                if ancestor_hits_ok and or_tail_any_fire:
-                    empty_conj_group = group
-                    break
-        base += legs
-
-    if empty_conj_group is not None:
-        return CoverageReport(
-            coverage_category=CoverageCategory.CONJUNCTION_NEVER_TRUE,
-            summary="individual subconditions fire but their conjunction is never true",
-            subconditions=subcoverages,
-            likely_blockers=[
-                LikelyBlocker(
-                    reason="conjunction_never_true",
-                    evidence=" AND ".join(s.label for s in empty_conj_group.subconds),
-                    hit_rate=0.0,
-                )
-            ][:_MAX_LIKELY_BLOCKERS],
-            **base_kwargs,
-        )
-
-    # Final fallthrough check: if every group with an unknown leg /
-    # alternative / conjunct has produced no positive recognised
-    # evidence, we have no positive evidence the predicate fires —
-    # only an un-modellable component that *might* (OR-unknown) or
-    # *might not* (AND-unknown). Return ``UNKNOWN_LOW_COVERAGE``
-    # rather than ``COVERAGE_OK`` so a sparse / zero-trade backtest
-    # isn't mislabelled "healthy" when the probe genuinely doesn't
-    # know.
-    #
-    # Polarity differs by unknown kind:
-    #   - OR-leg / nested-OR unknown: an unknown alternative widens
-    #     the recognised mask. Recognised conjunction firing is
-    #     still sound positive evidence — the predicate fires at
-    #     least at those bars, possibly more.
-    #   - AND-conjunct unknown: an unknown conjunct narrows the
-    #     recognised mask. The recognised AND is only a SUPERSET of
-    #     the real predicate, so its conjunction firing does NOT
-    #     prove the real predicate fires. Such a group cannot
-    #     contribute positive evidence on its own.
-    base = 0
-    has_unknown_evidence = False
-    has_recognised_evidence = False
-    for group_idx, group in enumerate(groups):
-        legs = len(group.subconds)
-        if not group_evaluated[group_idx]:
-            base += legs
-            continue
-        leg_hits = [sub_hit_counts[base + k] for k in range(legs)]
-        group_or_unknown = group.has_unknown_or_leg or any(
-            group.subconds[k].has_unknown_leg for k in range(legs)
-        )
-        group_and_unknown = group.has_unknown_and_conjunct
-        group_unknown = group_or_unknown or group_and_unknown
-        if group_unknown:
-            has_unknown_evidence = True
-            if group_and_unknown:
-                # AND-conjunct unknown: recognised mask is a superset
-                # of the real predicate. Conjunction hits only bound
-                # the real predicate from above and cannot supply
-                # positive evidence — skip without contributing.
-                pass
-            elif group_conjunction_hits[group_idx] > 0 and any(h > 0 for h in leg_hits):
-                # OR-side unknown only: a recognised alternative
-                # firing is sufficient positive evidence because the
-                # unknown alternative can only widen the disjunction.
-                has_recognised_evidence = True
-        else:
-            # Group has no unknown legs and got past the blocker
-            # checks → its mere existence is recognised coverage.
-            if any(h > 0 for h in leg_hits):
-                has_recognised_evidence = True
-        base += legs
-
-    if has_unknown_evidence and not has_recognised_evidence:
-        return CoverageReport(
-            coverage_category=CoverageCategory.UNKNOWN_LOW_COVERAGE,
-            summary=(
-                "predicate has un-modellable alternative(s) and recognised legs "
-                "produced no firing bars — coverage is unknown"
-            ),
-            subconditions=subcoverages,
-            likely_blockers=[],
-            **base_kwargs,
-        )
-
-    return CoverageReport(
-        coverage_category=CoverageCategory.COVERAGE_OK,
-        summary="indicator subconditions fired at least once",
-        subconditions=subcoverages,
-        likely_blockers=[],
-        **base_kwargs,
-    )
+    return CoverageAggregator(groups, market_data, base_kwargs).run()
 
 
 # ---------------------------------------------------------------------------
