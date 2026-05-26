@@ -167,6 +167,41 @@ def test_rule1_canonicalizes_bare_forex_against_provider_suffix() -> None:
     assert not rule1_failures, rule1_failures
 
 
+def test_rule1_canonicalizes_bare_crypto_against_usd_suffix() -> None:
+    """``BTC`` in hypothesis matches ``BTC-USD`` in target_symbols.
+
+    Crypto tickers use the yfinance ``-USD`` quote-suffix convention
+    (``BTC-USD``, ``ETH-USD``, ...). The bare alias from the canonical
+    symbol list must canonicalize equal to its provider-suffixed form so
+    a hypothesis that names ``BTC`` does not false-critical against a
+    spec whose ``target_symbols`` were correctly populated as ``BTC-USD``.
+    """
+    spec = _spec(
+        hypothesis="BTC momentum after a volatility-contraction regime.",
+        target_symbols=["BTC-USD"],
+        asset_class="crypto",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    rule1_failures = [
+        c for c in _critical(results) if "target_symbols" in c or "Hypothesis names symbol" in c
+    ]
+    assert not rule1_failures, rule1_failures
+
+
+def test_rule1_canonicalizes_multiple_crypto_against_usd_suffix() -> None:
+    """Mixed bare/provider-suffix crypto tickers all canonicalize correctly."""
+    spec = _spec(
+        hypothesis="Pair-trade BTC long vs ETH short on momentum divergence.",
+        target_symbols=["BTC-USD", "ETH-USD"],
+        asset_class="crypto",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    rule1_failures = [
+        c for c in _critical(results) if "target_symbols" in c or "Hypothesis names symbol" in c
+    ]
+    assert not rule1_failures, rule1_failures
+
+
 def test_rule1_passes_when_no_symbols_in_hypothesis_and_no_targets() -> None:
     spec = _spec(
         hypothesis="RSI(14) below 30 signals long entry.",

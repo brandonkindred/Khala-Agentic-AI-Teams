@@ -34,15 +34,21 @@ from investment_team.strategy_lab.spec_dsl import (
 
 
 class _CapturingAgent:
-    """Records the prompts the design agent sends and returns scripted output."""
+    """Records the prompts the design agent sends and returns scripted output.
 
-    def __init__(self, payload: str) -> None:
-        self._payload = payload
+    Accepts either a single payload (replayed every call) or a list of
+    payloads (consumed in order; the last one repeats if the agent makes
+    more calls than supplied).
+    """
+
+    def __init__(self, payload: str | List[str]) -> None:
+        self._payloads: List[str] = [payload] if isinstance(payload, str) else list(payload)
         self.calls: List[str] = []
 
     def __call__(self, prompt: str) -> str:
         self.calls.append(prompt)
-        return self._payload
+        idx = min(len(self.calls) - 1, len(self._payloads) - 1)
+        return self._payloads[idx]
 
 
 def _payload(
@@ -98,7 +104,7 @@ def _structured_sizing() -> Dict[str, Any]:
     return {"kind": "fixed_fraction", "fraction": 0.02}
 
 
-def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str) -> _CapturingAgent:
+def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str | List[str]) -> _CapturingAgent:
     """Replace the in-module ``Agent``/``get_strands_model`` with stubs.
 
     Returns the capturing agent so the test can inspect the prompt
@@ -337,3 +343,144 @@ def test_revise_strips_stray_strategy_code(monkeypatch: pytest.MonkeyPatch) -> N
     critique = SpecCritique(ready=False, rationale="r", issues=[])
     parsed, _ = DesignAgent().revise(_prior_spec(), critique)
     assert "strategy_code" not in parsed
+
+
+# ---------------------------------------------------------------------------
+# Parse-retry — recover from a single LLM DSL slip without killing the cycle
+# ---------------------------------------------------------------------------
+
+
+def _bar_close_as_indicator_ref_payload() -> str:
+    """Real-world failure shape #1: LLM wraps bar.close as an IndicatorRef.
+
+    The schema accepts ``"bar.close"`` as a bare string literal on a
+    Predicate side, NOT as ``{"name": "bar.close"}``. Pydantic rejects
+    this because ``"bar.close"`` is not in the ``IndicatorName`` literal.
+    """
+    return _payload(
+        entry_rules=[
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "lhs": {"name": "bar.close"},
+                    "op": "cross_above",
+                    "rhs": {"name": "ema", "params": {"period": 20}},
+                },
+            }
+        ],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+
+
+def _sma_of_atr_payload() -> str:
+    """Real-world failure shape #2: SMA-of-ATR.
+
+    The schema's ``source`` field accepts only price/volume bar fields
+    (close/high/low/open/volume/hl2/ohlc4), not indicator names. The DSL
+    has no indicator-of-indicator form.
+    """
+    return _payload(
+        entry_rules=[
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "lhs": {"name": "atr", "params": {"period": 14}},
+                    "op": ">",
+                    "rhs": {"name": "sma", "params": {"period": 20}, "source": "atr"},
+                },
+            }
+        ],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+
+
+def _good_payload() -> str:
+    return _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+
+
+def test_run_retries_parse_error_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single LLM DSL slip should not kill the cycle: the agent must
+    re-prompt with the pydantic error and accept the corrected output."""
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", raising=False)
+    capture = _patch_design(
+        monkeypatch,
+        [_bar_close_as_indicator_ref_payload(), _good_payload()],
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 2
+    assert parsed["asset_class"] == "stocks"
+    # Second call MUST include corrective context referencing the
+    # offending field so the model can self-correct.
+    retry_prompt = capture.calls[1]
+    assert "entry_rules[0]" in retry_prompt
+    assert "bar.close" in retry_prompt
+
+
+def test_run_retries_sma_of_atr_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Second observed failure shape: SMA-of-ATR. Same recovery contract."""
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", raising=False)
+    capture = _patch_design(
+        monkeypatch,
+        [_sma_of_atr_payload(), _good_payload()],
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 2
+    assert parsed["asset_class"] == "stocks"
+    retry_prompt = capture.calls[1]
+    assert "entry_rules[0]" in retry_prompt
+
+
+def test_run_exhausts_parse_retries_and_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If every attempt fails, the agent must still raise StrategySpecParseError
+    so the orchestrator's existing error path takes over."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "2")
+    capture = _patch_design(monkeypatch, _bar_close_as_indicator_ref_payload())
+
+    with pytest.raises(StrategySpecParseError):
+        DesignAgent().run(prior_records=[])
+
+    # retries=2 means 1 initial + 2 retries = 3 total attempts.
+    assert len(capture.calls) == 3
+
+
+def test_run_parse_retries_zero_means_single_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STRATEGY_LAB_DESIGN_PARSE_RETRIES=0`` disables retry entirely —
+    the agent makes one attempt and raises on failure. Preserves the
+    pre-retry contract for callers that explicitly opt out."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "0")
+    capture = _patch_design(monkeypatch, _bar_close_as_indicator_ref_payload())
+
+    with pytest.raises(StrategySpecParseError):
+        DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 1
+
+
+def test_revise_also_retries_on_parse_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``revise()`` shares ``_invoke_and_parse`` and must inherit the
+    same retry behaviour — a revision step is a DSL drift point too."""
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", raising=False)
+    capture = _patch_design(
+        monkeypatch,
+        [_sma_of_atr_payload(), _good_payload()],
+    )
+
+    critique = SpecCritique(ready=False, rationale="r", issues=[])
+    parsed, _ = DesignAgent().revise(_prior_spec(), critique)
+
+    assert len(capture.calls) == 2
+    assert parsed["asset_class"] == "stocks"

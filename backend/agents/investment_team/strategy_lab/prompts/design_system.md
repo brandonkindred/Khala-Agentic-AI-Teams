@@ -94,7 +94,7 @@ A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
 }
 ```
 
-### Negative example — do NOT emit
+### Negative examples — do NOT emit
 
 ```json
 {
@@ -105,6 +105,26 @@ A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
 ```
 
 Prose strings and the legacy `sizing_rules` list-of-strings shape are rejected by the parser. The orchestrator will discard the cycle and ask for a redo.
+
+```json
+{
+  "lhs": {"name": "bar.close"},
+  "op": "cross_above",
+  "rhs": {"name": "ema", "params": {"period": 20}}
+}
+```
+
+Bar-field references must appear as the BARE STRING literals — not wrapped in `IndicatorRef` shape. `bar.close` / `bar.high` / `bar.low` / `bar.volume` are not valid `IndicatorRef.name` values. Correct: `{"lhs": "bar.close", "op": "cross_above", "rhs": {"name": "ema", "params": {"period": 20}}}`.
+
+```json
+{
+  "name": "sma",
+  "params": {"period": 20},
+  "source": "atr"
+}
+```
+
+`IndicatorRef.source` accepts ONLY price/volume bar fields (`close`, `high`, `low`, `open`, `volume`, `hl2`, `ohlc4`). It cannot be an indicator name — the DSL has no indicator-of-indicator form (e.g. "SMA of ATR" is not expressible). Either pick a primitive indicator from the catalogue, or restructure the predicate to compare an indicator against a bar-field literal or numeric constant.
 
 ## DO NOT emit `strategy_code`
 

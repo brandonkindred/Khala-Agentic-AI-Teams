@@ -169,15 +169,20 @@ def _default_universe_for(asset_class: str) -> List[str]:
 
 def _canonicalize_ticker(symbol: str) -> str:
     # Strip Yahoo provider suffixes so bare aliases compare equal to their
-    # provider-form counterparts. Post: returns an upper-cased string with no
-    # `=F` / `=X` suffix.
+    # provider-form counterparts: ``=F`` for futures (``ES=F`` → ``ES``),
+    # ``=X`` for forex (``EURUSD=X`` → ``EURUSD``), and ``-USD`` for the
+    # crypto quote-suffix convention (``BTC-USD`` → ``BTC``). Without the
+    # ``-USD`` strip, a hypothesis that names ``BTC`` would false-critical
+    # against a correctly populated ``target_symbols=["BTC-USD"]`` in
+    # Rule 1's set-membership check.
+    # Post: returns an upper-cased string with no `=F` / `=X` / `-USD` suffix.
     assert isinstance(symbol, str), "symbol must be a str"
     s = symbol.upper()
-    for suffix in ("=F", "=X"):
+    for suffix in ("=F", "=X", "-USD"):
         if s.endswith(suffix):
             s = s[: -len(suffix)]
             break
-    assert not s.endswith(("=F", "=X")), "canonical form must not retain a provider suffix"
+    assert not s.endswith(("=F", "=X", "-USD")), "canonical form must not retain a provider suffix"
     return s
 
 

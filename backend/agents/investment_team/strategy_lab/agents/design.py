@@ -19,6 +19,7 @@ Invariants:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -206,35 +207,123 @@ class DesignAgent:
         Post: returns ``(parsed, rationale)`` with no ``strategy_code`` key
         and rule fields that pass :func:`validate_structured_rules`. Raises
         ``ValueError`` on malformed JSON or
-        :class:`StrategySpecParseError` on prose/off-shape rules.
+        :class:`StrategySpecParseError` on prose/off-shape rules after the
+        retry budget is exhausted.
+
+        On :class:`StrategySpecParseError` the agent re-prompts the LLM
+        with the offending field and pydantic error as feedback (the model
+        often slips the DSL by exactly one field — wrapping a bar-field
+        literal in an IndicatorRef, or naming an indicator in ``source``).
+        Budget is set by ``STRATEGY_LAB_DESIGN_PARSE_RETRIES`` (default 2
+        retries → 3 attempts total; ``0`` disables retry).
         """
+        retries = _design_parse_retries()
         agent = Agent(
             model=get_strands_model("strategy_design"),
             system_prompt=system_prompt,
             tools=[],
         )
 
-        result = agent(user_prompt)
-        parsed = extract_json_object(str(result))
+        prompt = user_prompt
+        for attempt in range(retries + 1):
+            result = agent(prompt)
+            parsed = extract_json_object(str(result))
 
-        # Logged-and-dropped (not raised): a stray ``strategy_code`` is
-        # prompt drift, not a usable-spec failure.
-        if "strategy_code" in parsed:
-            parsed.pop("strategy_code", None)
-            logger.warning(
-                "DesignAgent stripped stray strategy_code field from LLM response "
-                "(code synthesis is a separate phase)."
-            )
+            # Logged-and-dropped (not raised): a stray ``strategy_code`` is
+            # prompt drift, not a usable-spec failure.
+            if "strategy_code" in parsed:
+                parsed.pop("strategy_code", None)
+                logger.warning(
+                    "DesignAgent stripped stray strategy_code field from LLM response "
+                    "(code synthesis is a separate phase)."
+                )
 
-        rationale = parsed.pop("rationale", "")
+            rationale = parsed.pop("rationale", "")
 
-        try:
-            validate_structured_rules(parsed)
-        except StrategySpecParseError as exc:
-            logger.warning("DesignAgent emitted invalid rule shape: %s", exc)
-            raise
+            try:
+                validate_structured_rules(parsed)
+                return parsed, rationale
+            except StrategySpecParseError as exc:
+                logger.warning(
+                    "DesignAgent emitted invalid rule shape (attempt %d/%d): %s",
+                    attempt + 1,
+                    retries + 1,
+                    exc,
+                )
+                if attempt >= retries:
+                    raise
+                prompt = _build_correction_prompt(user_prompt, exc)
 
-        return parsed, rationale
+        # Unreachable: the loop either returns on success or re-raises on
+        # the final attempt. Kept so type-checkers see a definite return.
+        raise AssertionError("unreachable: _invoke_and_parse loop exited without return")
+
+
+def _design_parse_retries() -> int:
+    """Resolve the retry budget for ``_invoke_and_parse``.
+
+    Returns the configured number of retries on
+    :class:`StrategySpecParseError` from ``STRATEGY_LAB_DESIGN_PARSE_RETRIES``
+    (default 2, sub-zero values clamped to 0). Garbage values fall back
+    to the default rather than raising — the surrounding cycle is
+    already best-effort.
+    """
+    try:
+        return max(int(os.environ.get("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "2")), 0)
+    except ValueError:
+        return 2
+
+
+_CORRECTION_PREAMBLE = """\
+Your previous JSON response was rejected by the DSL validator. Reissue
+the ENTIRE JSON object with the offending field fixed; do not change any
+other rule that was not flagged.
+
+Offending field: {field}
+Rejected payload: {payload}
+Validator error:
+{pydantic_error}
+
+Read the system prompt's DSL section before retrying. Common drifts that
+match what you just emitted:
+
+- Bar-field literals ("bar.close", "bar.high", "bar.low", "bar.volume")
+  appear as BARE STRINGS on a Predicate's `lhs` or `rhs`. They must NOT
+  be wrapped in IndicatorRef shape — `{{"name": "bar.close"}}` is invalid
+  because `bar.close` is not an IndicatorName.
+
+- `IndicatorRef.source` accepts only price/volume bar fields ("close",
+  "high", "low", "open", "volume", "hl2", "ohlc4"). It cannot be an
+  indicator name (e.g. `source: "atr"`). The DSL has no
+  indicator-of-indicator form — express the same idea with a primitive
+  indicator from the catalogue or by comparing the indicator against a
+  numeric constant or a bar-field literal.
+
+--- ORIGINAL TASK BELOW ---
+{original_prompt}
+"""
+
+
+def _build_correction_prompt(user_prompt: str, exc: "StrategySpecParseError") -> str:
+    """Render a re-prompt that quotes the offending field and pydantic error.
+
+    Pre: ``exc`` carries ``field``, ``payload``, and a chained
+    ``ValidationError`` accessible via ``exc.__cause__``.
+    Post: returns a string that the LLM can read as "your last attempt
+    failed for this specific reason; reissue the corrected JSON."
+    """
+    cause = exc.__cause__ or exc
+    return _CORRECTION_PREAMBLE.format(
+        field=exc.field,
+        payload=_truncate(exc.payload),
+        pydantic_error=_truncate(str(cause), limit=1200),
+        original_prompt=user_prompt,
+    )
+
+
+def _truncate(value: Any, limit: int = 400) -> str:
+    text = value if isinstance(value, str) else repr(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _format_issues(critique: "SpecCritique") -> str:
