@@ -17,10 +17,22 @@ from __future__ import annotations
 
 import ast
 import logging
+import operator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as _field
-from typing import Callable, Dict, Iterator, List, Optional, Protocol, Tuple, Union
+from typing import (
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import pandas as pd
 
@@ -38,6 +50,35 @@ _OHLCV_COLUMNS = frozenset({"open", "high", "low", "close", "volume"})
 _MAX_SUBCONDITIONS = 16
 _MAX_LIKELY_BLOCKERS = 6
 _MAX_LABEL_LEN = 80
+
+
+@dataclass(frozen=True)
+class _CombinatorOps:
+    """Strategy object parameterising AND vs OR compound-subcond building."""
+
+    reduce: Callable[[pd.Series, pd.Series], pd.Series]
+    identity: bool
+    combine_symbols: Callable[[frozenset, frozenset], frozenset]
+    on_unknown_term: Literal["abort", "track"]
+    expose_or_legs: bool
+
+
+_AND_OPS = _CombinatorOps(
+    reduce=operator.and_,
+    identity=True,
+    combine_symbols=frozenset.__and__,
+    on_unknown_term="abort",
+    expose_or_legs=False,
+)
+
+_OR_OPS = _CombinatorOps(
+    reduce=operator.or_,
+    identity=False,
+    combine_symbols=frozenset.__or__,
+    on_unknown_term="track",
+    expose_or_legs=True,
+)
+
 
 _CMP_OPS: Dict[type, Callable[[pd.Series, pd.Series], pd.Series]] = {
     ast.Lt: lambda a, b: a < b,
@@ -75,7 +116,7 @@ class _Subcond:
     # denominator to those symbols' bars. ``None`` = applies to all.
     target_symbols: Optional[frozenset] = None
     # Inner OR-leg subconds, exposed for symbol-aware evaluation when
-    # this subcond was synthesised by ``_build_compound_or_subcond``.
+    # this subcond was synthesised by ``_build_compound_subcond``.
     # The aggregator iterates these legs per-symbol and skips any whose
     # ``target_symbols`` doesn't include the current symbol — without
     # this an unrelated symbol could satisfy a leg gated to AAPL/MSFT
@@ -1082,9 +1123,10 @@ class SubconditionVisitor:
             # leaving the AND predicate's coverage decision based on
             # only the surviving Compare conjuncts.
             if isinstance(term, ast.BoolOp) and isinstance(term.op, ast.Or):
-                or_compound = _build_compound_or_subcond(
+                or_compound = _build_compound_subcond(
                     term,
                     self._name_periods,
+                    _OR_OPS,
                     self._name_evaluators,
                     self._name_strings,
                     self._bar_name,
@@ -1268,9 +1310,10 @@ class SubconditionVisitor:
                 # AND of all inner masks — that compound mask is what
                 # the disjunction needs to test. Drops cleanly to None
                 # when no inner term is recognisable.
-                compound = _build_compound_and_subcond(
+                compound = _build_compound_subcond(
                     leg,
                     self._name_periods,
+                    _AND_OPS,
                     self._name_evaluators,
                     self._name_strings,
                     self._bar_name,
@@ -1362,7 +1405,7 @@ class SubconditionVisitor:
         # the probe had no representation of the OR mask at the
         # nested level.
         #
-        # ``_build_compound_or_subcond`` already does the leg
+        # ``_build_compound_subcond`` already does the leg
         # synthesis (compound OR-of-masks evaluator + per-leg symbol
         # gates rolled into ``target_symbols`` when every leg is
         # symbol-gated). Reuse it here so the nested body is
@@ -1371,8 +1414,13 @@ class SubconditionVisitor:
         body_ancestors = ancestors
         body_symbols = ancestor_symbols
         body_unknown = ancestor_unknown or has_unknown_leg
-        or_compound = _build_compound_or_subcond(
-            test, self._name_periods, self._name_evaluators, self._name_strings, self._bar_name
+        or_compound = _build_compound_subcond(
+            test,
+            self._name_periods,
+            _OR_OPS,
+            self._name_evaluators,
+            self._name_strings,
+            self._bar_name,
         )
         if or_compound is not None:
             body_ancestors = ancestors + [or_compound]
@@ -2862,205 +2910,121 @@ def _build_truthy_subcond(
     return _Subcond(label=label, evaluate=_eval)
 
 
-def _build_compound_and_subcond(
-    leg: ast.BoolOp,
+def _reduce_masks(
+    fns: Sequence[Callable[[pd.DataFrame], pd.Series]],
+    ops: _CombinatorOps,
+    df: pd.DataFrame,
+) -> pd.Series:
+    """Evaluate *fns* and fold their boolean masks with *ops.reduce*."""
+    masks: List[pd.Series] = []
+    for fn in fns:
+        try:
+            series = fn(df)
+        except Exception:  # noqa: BLE001  # pragma: no cover — defensive catch on inner evaluator
+            series = pd.Series(False, index=df.index, dtype=bool)
+        masks.append(pd.Series(series, index=df.index).fillna(False).astype(bool))
+    if not masks:
+        return pd.Series(ops.identity, index=df.index, dtype=bool)
+    result = masks[0]
+    for m in masks[1:]:
+        result = ops.reduce(result, m)
+    return result
+
+
+def _build_compound_subcond(
+    node: ast.BoolOp,
     name_periods: Dict[str, int],
+    ops: _CombinatorOps,
     name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
     name_strings: Optional["_NameStrings"] = None,
     bar_name: str = "bar",
 ) -> Optional[_Subcond]:
-    """Build a single subcond for an ``and``-conjunction inside an OR leg.
+    """Build a single ``_Subcond`` for a compound AND or OR expression.
 
-    For predicates like ``(close > 100 and volume > 0) or (rsi(close)
-    < 30 and volume > 0)`` each OR leg is an ``ast.BoolOp(And, ...)``
-    rather than an ``ast.Compare``. The disjunction's truthfulness on a
-    given bar depends on the bar-wise AND of each leg's inner
-    conjuncts, so we synthesise one ``_Subcond`` whose evaluator runs
-    the inner subconds and ANDs their masks together.
+    Parameterised by *ops* (``_AND_OPS`` or ``_OR_OPS``).
 
-    Returns ``None`` if no inner term is recognisable (so the OR leg is
-    simply skipped, matching how unrecognised top-level legs are
-    handled). **Also returns ``None`` when any inner conjunct can't be
-    modelled**, even if other conjuncts are recognised — the
-    synthesised AND-of-known-conjuncts would be an upper bound on the
-    actual mask (the AND fires on a SUBSET of the recognised mask, not
-    a superset), so claiming the leg fires whenever the recognised
-    half does would be too permissive. Declining lets the parent
-    ``_process_or_if`` / ``_build_compound_or_subcond`` mark the
-    enclosing OR as having an unknown leg and suppress its
-    ``or_group_never_fires`` blocker.
+    **AND mode** (``_AND_OPS``): synthesises a subcond whose evaluator
+    ANDs the inner conjuncts' masks. Returns ``None`` when any inner
+    conjunct is unmodellable — the AND-of-known-conjuncts would be a
+    superset of the actual mask, which is too permissive.
+
+    **OR mode** (``_OR_OPS``): synthesises a subcond whose evaluator ORs
+    the inner legs' masks. Tracks an ``has_unknown_leg`` flag when a leg
+    is unmodellable (rather than aborting) so the parent AND group can
+    suppress false-positive blockers. Exposes inner legs via
+    ``_Subcond.or_legs`` for the aggregator's symbol-aware evaluation.
     """
     inner: List[_Subcond] = []
     leg_symbols: Optional[set] = None
-    for term in _flatten_top_terms(leg):
-        if isinstance(term, ast.Compare):
-            # Symbol gates inside a compound OR leg constrain THAT leg
-            # to the gated symbols. Capture them here so the synthetic
-            # subcond carries a per-leg filter; otherwise the price/
-            # indicator mask would evaluate against every DataFrame and
-            # an unrelated symbol could appear to satisfy the leg.
-            sym = _symbol_gate(term, name_strings, bar_name)
-            if sym is not None:
-                if leg_symbols is None:
-                    leg_symbols = set(sym)
-                else:  # pragma: no cover — multiple symbol gates inside one OR leg rare in generated strategies
-                    # Same intra-predicate intersection rule as the
-                    # AND path: ``bar.symbol == "X" and bar.symbol == "Y"``
-                    # is unreachable.
-                    leg_symbols &= sym
-                continue
-            sub = _build_subcond(term, name_periods, name_evaluators)
-        else:
-            sub = _build_truthy_subcond(term, name_periods, name_evaluators)
-        if sub is not None:
-            inner.append(sub)
-        else:
-            # An unmodellable conjunct (e.g. ``self.custom_ok(bar)`` or
-            # an unsupported expression) means we can't soundly compute
-            # the AND mask — the recognised conjuncts' AND is a
-            # superset of the real mask. Decline so the parent OR
-            # treats this leg as unknown rather than reporting it as
-            # firing whenever the recognised half fires.
-            return None
-    target_symbols = frozenset(leg_symbols) if leg_symbols is not None else None
-    # Empty intersection means the leg's symbol filter is unsatisfiable
-    # — drop it like the existing _process_if path does for AND groups.
-    if (
-        target_symbols is not None and not target_symbols
-    ):  # pragma: no cover — empty intra-leg symbol-intersection unreachable in generated strategies
-        return None
-    if not inner:  # pragma: no cover — OR leg with only symbol gate (no indicator) rare in generated strategies
-        return None
-    if len(inner) == 1 and target_symbols is None:
-        # Only one recognisable conjunct and no per-leg filter — emit
-        # it directly so the report row reflects the actual AST node
-        # rather than wrapping a single mask in a redundant compound
-        # layer.
-        return inner[0]
-
-    label = _format_compound_label(leg)
-    inner_fns = [s.evaluate for s in inner]
-
-    def _eval_compound(df: pd.DataFrame) -> pd.Series:
-        masks: List[pd.Series] = []
-        for fn in inner_fns:
-            try:
-                series = fn(df)
-            except Exception:  # noqa: BLE001  # pragma: no cover — defensive catch on inner conjunct evaluator
-                series = pd.Series(False, index=df.index, dtype=bool)
-            masks.append(pd.Series(series, index=df.index).fillna(False).astype(bool))
-        if (
-            not masks
-        ):  # pragma: no cover — empty conjunction unreachable (decline-if-not-inner above)
-            return pd.Series(True, index=df.index, dtype=bool)
-        result = masks[0]
-        for m in masks[1:]:
-            result = result & m
-        return result
-
-    return _Subcond(label=label, evaluate=_eval_compound, target_symbols=target_symbols)
-
-
-def _build_compound_or_subcond(
-    leg: ast.BoolOp,
-    name_periods: Dict[str, int],
-    name_evaluators: Optional[Dict[str, Callable[[pd.DataFrame], pd.Series]]] = None,
-    name_strings: Optional["_NameStrings"] = None,
-    bar_name: str = "bar",
-) -> Optional[_Subcond]:
-    """Build a single subcond for an ``or``-disjunction inside a larger
-    AND predicate.
-
-    For predicates like ``if close > 0 and (volume < 0 or close < -1):``
-    the inner ``BoolOp(Or, ...)`` is one term of the outer AND, but it
-    isn't a Compare or a truthiness expression — without explicit
-    handling it gets dropped and the AND classification is based on
-    only the surviving Compare conjuncts. Build an outer ``_Subcond``
-    whose evaluator is the bar-wise OR of each inner leg's mask. The
-    leg can itself be a ``Compare``, a ``BoolOp(And)`` (delegated to
-    the existing AND compound builder), or a truthiness term.
-
-    Returns ``None`` when no inner leg is recognisable.
-    """
-    inner: List[_Subcond] = []
     has_unknown_leg = False
-    for term in leg.values:
+
+    terms = _flatten_top_terms(node) if not ops.expose_or_legs else node.values
+
+    for term in terms:
         if isinstance(term, ast.Compare):
-            # ``bar.symbol == "X"`` as a standalone OR leg is a symbol
-            # allowlist — the leg is true exactly on bars from "X".
-            # Without this branch ``_build_subcond`` rejects the gate
-            # (no data-dependent operand), the leg is dropped, and a
-            # surrounding AND like
-            # ``(bar.symbol == "AAPL" or bar.symbol == "MSFT") and close > 100``
-            # collapses to just ``close > 100`` evaluated against every
-            # symbol — an unrelated symbol then satisfies the predicate
-            # and the probe falsely reports COVERAGE_OK.
             sym = _symbol_gate(term, name_strings, bar_name)
             if sym is not None:
-                inner.append(
-                    _Subcond(
-                        label=_format_label(term),
-                        evaluate=_always_true,
-                        target_symbols=frozenset(sym),
+                if ops.expose_or_legs:
+                    inner.append(
+                        _Subcond(
+                            label=_format_label(term),
+                            evaluate=_always_true,
+                            target_symbols=frozenset(sym),
+                        )
                     )
-                )
+                else:
+                    if leg_symbols is None:
+                        leg_symbols = set(sym)
+                    else:  # pragma: no cover — multiple symbol gates inside one AND leg rare
+                        leg_symbols &= sym
                 continue
             sub = _build_subcond(term, name_periods, name_evaluators)
-        elif isinstance(term, ast.BoolOp) and isinstance(term.op, ast.And):
-            sub = _build_compound_and_subcond(
-                term, name_periods, name_evaluators, name_strings, bar_name
+        elif ops.expose_or_legs and isinstance(term, ast.BoolOp) and isinstance(term.op, ast.And):
+            sub = _build_compound_subcond(
+                term, name_periods, _AND_OPS, name_evaluators, name_strings, bar_name
             )
         else:
             sub = _build_truthy_subcond(term, name_periods, name_evaluators)
+
         if sub is not None:
             inner.append(sub)
+        elif ops.on_unknown_term == "abort":
+            return None
         else:
-            # Track un-modellable legs (e.g. ``self.custom_ok(bar)`` —
-            # custom method calls). The synthesised OR-compound subcond
-            # carries a ``has_unknown_leg`` flag so the parent AND
-            # group's zero-hit blocker rule can suppress false
-            # positives when the recognised legs zero out but an
-            # unknown alternative may still make the OR fire.
             has_unknown_leg = True
-    if not inner:  # pragma: no cover — fully-unmodellable OR leg list declines in current corpus
+
+    if ops.expose_or_legs:
+        target_symbols = None
+    else:
+        target_symbols = frozenset(leg_symbols) if leg_symbols is not None else None
+        if (
+            target_symbols is not None and not target_symbols
+        ):  # pragma: no cover — empty intra-leg symbol-intersection unreachable
+            return None
+
+    if not inner:  # pragma: no cover — fully-unmodellable term list declines in current corpus
         return None
-    if (
-        len(inner) == 1 and not has_unknown_leg
-    ):  # pragma: no cover — single-recognised-leg OR collapses to inner[0]; rare in generated strategies
-        return inner[0]
 
-    label = _format_compound_label(leg)
+    if not ops.expose_or_legs:
+        if len(inner) == 1 and target_symbols is None:
+            return inner[0]
+    else:
+        if (
+            len(inner) == 1 and not has_unknown_leg
+        ):  # pragma: no cover — single-recognised-leg OR rare
+            return inner[0]
+
+    label = _format_compound_label(node)
     inner_legs: Tuple[_Subcond, ...] = tuple(inner)
+    inner_fns = [s.evaluate for s in inner_legs]
 
-    def _eval_or(
-        df: pd.DataFrame,
-    ) -> (
-        pd.Series
-    ):  # pragma: no cover — symbol-blind fallback; aggregator uses or_legs path instead
-        # Symbol-blind fallback: used outside the aggregator (e.g. unit
-        # tests that call ``sub.evaluate(df)`` directly). The aggregator
-        # prefers ``or_legs`` so per-leg ``target_symbols`` are honoured;
-        # this path simply ORs every leg's mask.
-        masks: List[pd.Series] = []
-        for leg_sub in inner_legs:
-            try:
-                series = leg_sub.evaluate(df)
-            except Exception:  # noqa: BLE001
-                series = pd.Series(False, index=df.index, dtype=bool)
-            masks.append(pd.Series(series, index=df.index).fillna(False).astype(bool))
-        if not masks:
-            return pd.Series(False, index=df.index, dtype=bool)
-        result = masks[0]
-        for m in masks[1:]:
-            result = result | m
-        return result
+    def _eval(df: pd.DataFrame) -> pd.Series:
+        return _reduce_masks(inner_fns, ops, df)
 
-    # Outer target_symbols: when every leg is symbol-gated, the OR can
-    # only fire on bars from the union of those gates. Restricting the
-    # outer subcond keeps the per-row hit-rate denominator aligned with
-    # the bars that could have contributed. If any leg is unconstrained,
-    # the OR can fire on any symbol so the outer gate stays ``None``.
-    leg_filters = [leg_sub.target_symbols for leg_sub in inner_legs]
+    if not ops.expose_or_legs:
+        return _Subcond(label=label, evaluate=_eval, target_symbols=target_symbols)
+
+    leg_filters = [s.target_symbols for s in inner_legs]
     if leg_filters and all(f is not None for f in leg_filters):
         union: frozenset = frozenset()
         for f in leg_filters:
@@ -3071,7 +3035,7 @@ def _build_compound_or_subcond(
 
     return _Subcond(
         label=label,
-        evaluate=_eval_or,
+        evaluate=_eval,
         target_symbols=outer_target,
         or_legs=inner_legs,
         has_unknown_leg=has_unknown_leg,
