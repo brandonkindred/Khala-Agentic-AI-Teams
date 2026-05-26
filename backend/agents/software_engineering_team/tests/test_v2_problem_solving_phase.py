@@ -142,7 +142,7 @@ def test_run_batch_coding_fixes_llm_failure(monkeypatch):
     )
 
     monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent("", raise_exc=RuntimeError("boom")))
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_batch_coding_fixes(
         llm=MagicMock(),
@@ -168,7 +168,7 @@ def test_run_batch_coding_fixes_success(monkeypatch):
         "## SUMMARY ##\nall fixed\n## END SUMMARY ##\n"
     )
     monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_batch_coding_fixes(
         llm=MagicMock(),
@@ -195,7 +195,7 @@ def test_run_batch_coding_fixes_partial_with_unresolved(monkeypatch):
         "## SUMMARY ##\nok\n## END SUMMARY ##\n"
     )
     monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_batch_coding_fixes(
         llm=MagicMock(),
@@ -218,7 +218,7 @@ def test_run_batch_coding_fixes_with_callback(monkeypatch):
         "Agent",
         lambda *a, **kw: _StubAgent("## SUMMARY ##\nok\n## END SUMMARY ##\n"),
     )
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     msgs = []
     run_batch_coding_fixes(
@@ -255,7 +255,7 @@ def test_run_problem_solving_llm_failure(monkeypatch):
     monkeypatch.setattr(
         ps_mod, "Agent", lambda *a, **kw: _StubAgent("", raise_exc=RuntimeError("err"))
     )
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_problem_solving(
         llm=MagicMock(),
@@ -280,7 +280,7 @@ def test_run_problem_solving_fix_success(monkeypatch):
         "## SUMMARY ##\nfixed\n## END SUMMARY ##\n"
     )
     monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_problem_solving(
         llm=MagicMock(),
@@ -307,7 +307,7 @@ def test_run_problem_solving_with_tool_agents(monkeypatch):
         "## SUMMARY ##\nok\n## END SUMMARY ##\n"
     )
     monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     tool_agent = MagicMock()
     tool_agent.problem_solve.return_value = ToolAgentPhaseOutput(
@@ -335,7 +335,7 @@ def test_run_problem_solving_tool_agent_raises(monkeypatch):
 
     resp = "## RESOLVED ##\nyes\n## END RESOLVED ##\n## SUMMARY ##\nok\n## END SUMMARY ##\n"
     monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     tool_agent = MagicMock()
     tool_agent.problem_solve.side_effect = RuntimeError("crash")
@@ -377,7 +377,7 @@ def test_run_problem_solving_for_microtask_success(monkeypatch):
         "## SUMMARY ##\nfixed\n## END SUMMARY ##\n"
     )
     monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     msgs = []
     out = run_problem_solving_for_microtask(
@@ -470,7 +470,7 @@ def test_run_code_review_fixes_with_actionable(monkeypatch):
         "## SUMMARY ##\nok\n## END SUMMARY ##\n"
     )
     monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(ps_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_code_review_fixes(
         llm=MagicMock(),

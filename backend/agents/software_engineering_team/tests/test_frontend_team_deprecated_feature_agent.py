@@ -281,7 +281,10 @@ def test_llm_allowed_extensions_returns_empty_on_exception(monkeypatch):
             raise RuntimeError("err")
 
     monkeypatch.setattr(feature_mod, "Agent", lambda *a, **kw: _BadAgent())
-    monkeypatch.setattr(feature_mod, "get_strands_model", lambda: object())
+    monkeypatch.setattr(
+        "software_engineering_team.shared.strands_model.resolve_text_mode_strands_model",
+        lambda llm: object(),
+    )
     assert _llm_allowed_extensions(None, {".svg"}) == set()
 
 
@@ -293,7 +296,10 @@ def test_llm_allowed_extensions_returns_none(monkeypatch):
             return "none"
 
     monkeypatch.setattr(feature_mod, "Agent", lambda *a, **kw: _StubAgent())
-    monkeypatch.setattr(feature_mod, "get_strands_model", lambda: object())
+    monkeypatch.setattr(
+        "software_engineering_team.shared.strands_model.resolve_text_mode_strands_model",
+        lambda llm: object(),
+    )
     assert _llm_allowed_extensions(None, {".svg"}) == set()
 
 
@@ -305,7 +311,10 @@ def test_llm_allowed_extensions_returns_match(monkeypatch):
             return ".svg, .md"
 
     monkeypatch.setattr(feature_mod, "Agent", lambda *a, **kw: _StubAgent())
-    monkeypatch.setattr(feature_mod, "get_strands_model", lambda: object())
+    monkeypatch.setattr(
+        "software_engineering_team.shared.strands_model.resolve_text_mode_strands_model",
+        lambda llm: object(),
+    )
     out = _llm_allowed_extensions(None, {".svg", ".md", ".weird"})
     assert ".svg" in out
     assert ".md" in out
@@ -321,7 +330,10 @@ def test_llm_allowed_root_paths_exception(monkeypatch):
             raise RuntimeError("err")
 
     monkeypatch.setattr(feature_mod, "Agent", lambda *a, **kw: _BadAgent())
-    monkeypatch.setattr(feature_mod, "get_strands_model", lambda: object())
+    monkeypatch.setattr(
+        "software_engineering_team.shared.strands_model.resolve_text_mode_strands_model",
+        lambda llm: object(),
+    )
     out = _llm_allowed_root_paths(None, ["foo.js"])
     # Returns empty set (or None depending on implementation)
     assert out == set() or out is None or isinstance(out, set)

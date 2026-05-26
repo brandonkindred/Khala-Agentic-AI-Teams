@@ -70,7 +70,7 @@ def test_fe_run_llm_review(monkeypatch):
         "## SUMMARY ##\nbad\n## END SUMMARY ##\n"
     )
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(review_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     issues = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.ts": "code"})
     assert len(issues) == 1
@@ -82,7 +82,7 @@ def test_fe_run_review_clean(monkeypatch, tmp_path: Path):
 
     resp = "## PASSED ##\ntrue\n## END PASSED ##\n## ISSUES ##\n## END ISSUES ##\n## SUMMARY ##\nok\n## END SUMMARY ##\n"
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(review_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_review(
         llm=MagicMock(),
@@ -99,7 +99,7 @@ def test_fe_run_review_build_fails(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
-    monkeypatch.setattr(review_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_review(
         llm=MagicMock(),
@@ -117,7 +117,7 @@ def test_fe_run_review_with_qa_agent(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
-    monkeypatch.setattr(review_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     qa_agent = MagicMock()
 
@@ -144,7 +144,7 @@ def test_fe_run_review_with_linting_failures(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
-    monkeypatch.setattr(review_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     class _Issue:
         severity = "error"
@@ -173,7 +173,7 @@ def test_fe_run_review_with_security_agent(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
-    monkeypatch.setattr(review_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     sec_agent = MagicMock()
 
@@ -200,7 +200,7 @@ def test_fe_run_review_with_code_review_agent(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
-    monkeypatch.setattr(review_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     cr_agent = MagicMock()
 
@@ -235,7 +235,7 @@ def test_fe_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, t
             "## SUMMARY ##\nbad\n## END SUMMARY ##\n"
         ),
     )
-    monkeypatch.setattr(review_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     cr_agent = MagicMock()
     cr_agent.run.side_effect = RuntimeError("crash")
@@ -260,7 +260,7 @@ def test_fe_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
-    monkeypatch.setattr(review_mod, "_resolve_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     tool_agent = MagicMock()
     tool_agent.review.return_value = ToolAgentPhaseOutput(
