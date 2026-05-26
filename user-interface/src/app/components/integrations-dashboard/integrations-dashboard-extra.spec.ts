@@ -17,6 +17,7 @@ interface ApiStub {
   mediumBrowserLoginSession: ReturnType<typeof vi.fn>;
   getSlackOAuthUrl: ReturnType<typeof vi.fn>;
   disconnectSlack: ReturnType<typeof vi.fn>;
+  getGitHubConfig: ReturnType<typeof vi.fn>;
 }
 
 describe('IntegrationsDashboardComponent (extra coverage)', () => {
@@ -54,6 +55,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
       updateMediumConfig: vi.fn().mockReturnValue(of({ enabled: true, oauth_provider: 'google', session_configured: true })),
       mediumBrowserLoginSession: vi.fn().mockReturnValue(of({ enabled: true, oauth_provider: 'google', session_configured: true })),
       getSlackOAuthUrl: vi.fn().mockReturnValue(of({ url: 'https://slack.com/oauth' })),
+      getGitHubConfig: vi.fn().mockReturnValue(of({ enabled: false, token_configured: false, owner: '', repo: '', default_label: '' })),
       disconnectSlack: vi.fn().mockReturnValue(of({
         enabled: false,
         webhook_configured: false,
