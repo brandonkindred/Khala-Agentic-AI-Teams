@@ -652,6 +652,43 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     expect(component.editPanelOpen).toBe(false);
   });
 
+  it('onMissionUpdateFromPanel creates conversation when none exists yet', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.selectedBrand = null;
+    component.selectedClient = workspaceClient;
+    component.activeConversationId = null;
+    component.conversationMission = null;
+    api.createConversation.mockReturnValue(of({
+      conversation_id: 'conv-new',
+      brand_id: null,
+      messages: [],
+      mission: { company_name: 'Fresh', company_description: 'd', target_audience: 'a' },
+      latest_output: null,
+      suggested_questions: [],
+    }));
+
+    component.onMissionUpdateFromPanel({ company_name: 'Fresh' });
+
+    expect(api.createConversation).toHaveBeenCalledWith(expect.stringContaining('Fresh'), false);
+    expect(component.activeConversationId).toBe('conv-new');
+  });
+
+  it('openEditPanelForNewBrand syncs query params to clear stale URL', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.selectedBrand = makeBrand('b1');
+    component.activeConversationId = 'conv-b1';
+    router.navigate.mockClear();
+
+    component.openEditPanelForNewBrand();
+
+    expect(router.navigate).toHaveBeenCalled();
+    const lastCall = router.navigate.mock.calls[router.navigate.mock.calls.length - 1];
+    expect(lastCall[1].queryParams.brandId).toBeUndefined();
+    expect(lastCall[1].queryParams.conversationId).toBeUndefined();
+  });
+
   it('onSkipSaveChange resets brand and conversation when skip is true', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();

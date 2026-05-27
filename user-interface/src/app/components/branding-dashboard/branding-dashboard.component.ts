@@ -433,6 +433,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.conversationLatestOutput = null;
     this.editPanelOpen = true;
     this.showCreateBrand = true;
+    this.syncQueryParams();
   }
 
   get canCreateBrandFromChat(): boolean {
@@ -505,6 +506,22 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         },
         error: () => {
           // Optimistic local update already applied; backend will reconcile on next chat turn.
+        },
+      });
+    } else {
+      const summary = this.buildMissionSummaryMessage(patch);
+      this.api.createConversation(summary, this.skipSave).subscribe({
+        next: (res) => {
+          this.activeConversationId = res.conversation_id;
+          this.conversationMission = res.mission ?? this.conversationMission;
+          this.conversationLatestOutput = res.latest_output ?? this.conversationLatestOutput;
+          if (res.brand_id && !this.selectedBrand) {
+            this.onBrandAutoCreated(res.brand_id);
+          }
+          this.syncQueryParams();
+        },
+        error: () => {
+          // Optimistic local update already applied; conversation will be created on next chat interaction.
         },
       });
     }
