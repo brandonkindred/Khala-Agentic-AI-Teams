@@ -341,7 +341,7 @@ class PredicateConformanceGate(GateResultsMixin):
         position_open = fixture.rule_kind == "signal_exit"
 
         for i, verdict in enumerate(fixture.expected_verdicts):
-            bar_orders = orders_at.get(i, [])
+            bar_orders = [o for o in orders_at.get(i, []) if o.symbol == fixture.symbol]
             has_entry = any(o.side in entry_sides for o in bar_orders)
             has_exit = any(o.side in exit_sides for o in bar_orders)
 
@@ -361,10 +361,11 @@ class PredicateConformanceGate(GateResultsMixin):
                     elif not verdict and has_exit and position_open:
                         false_positives.append(i)
 
-            if has_entry and not position_open:
-                position_open = True
-            if has_exit and position_open:
-                position_open = False
+            if verdict is not None:
+                if has_entry and not position_open:
+                    position_open = True
+                if has_exit and position_open:
+                    position_open = False
 
         if not false_positives and not false_negatives:
             return self._info(
