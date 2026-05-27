@@ -292,37 +292,35 @@ class PredicateConformanceGate(GateResultsMixin):
             except Exception:
                 pass
 
-        order_bars = {o.bar_index for o in ctx.orders}
+        orders_at: Dict[int, List[_OrderRecord]] = {}
+        for o in ctx.orders:
+            orders_at.setdefault(o.bar_index, []).append(o)
 
         false_positives: List[int] = []
         false_negatives: List[int] = []
         position_open = False
 
         for i, verdict in enumerate(fixture.expected_verdicts):
-            if verdict is None:
-                continue
+            bar_orders = orders_at.get(i, [])
+            has_entry = any(str(o.side).lower() in ("buy", "long") for o in bar_orders)
+            has_exit = any(str(o.side).lower() in ("sell", "short", "flat") for o in bar_orders)
 
-            has_order = i in order_bars
+            if verdict is not None:
+                if fixture.rule_kind == "entry":
+                    if verdict and not position_open and not has_entry:
+                        false_negatives.append(i)
+                    elif not verdict and has_entry and not position_open:
+                        false_positives.append(i)
+                else:
+                    if verdict and position_open and not has_exit:
+                        false_negatives.append(i)
+                    elif not verdict and has_exit and position_open:
+                        false_positives.append(i)
 
-            if fixture.rule_kind == "entry":
-                if verdict and not position_open and not has_order:
-                    false_negatives.append(i)
-                elif not verdict and has_order and not position_open:
-                    false_positives.append(i)
-
-                if has_order and not position_open:
-                    position_open = True
-                for o in ctx.orders:
-                    if o.bar_index == i and str(o.side).lower() in ("sell", "short"):
-                        position_open = False
-            else:
-                if verdict and position_open and not has_order:
-                    false_negatives.append(i)
-                elif not verdict and has_order and position_open:
-                    false_positives.append(i)
-
-                if has_order and position_open:
-                    position_open = False
+            if has_entry and not position_open:
+                position_open = True
+            if has_exit and position_open:
+                position_open = False
 
         if not false_positives and not false_negatives:
             return self._info(
@@ -361,6 +359,18 @@ def _exec_strategy(code: str) -> Optional[Type]:
     """
     _BLOCKED = frozenset({"exec", "eval", "compile", "__import__", "open", "input", "breakpoint"})
     safe_builtins = {k: v for k, v in vars(builtins).items() if k not in _BLOCKED}
+
+    contract_module = _build_contract_stub()
+    stub_strategy_cls = contract_module.Strategy
+    safe_builtins = dict(safe_builtins)
+
+    def _restricted_import(name, *args, **kwargs):
+        if name == "contract":
+            return contract_module
+        raise ImportError(f"import of {name!r} is not allowed in the shadow harness")
+
+    safe_builtins["__import__"] = _restricted_import
+
     namespace: Dict[str, Any] = {
         "__builtins__": safe_builtins,
         "math": math,
@@ -373,10 +383,51 @@ def _exec_strategy(code: str) -> Optional[Type]:
         return None
 
     for obj in namespace.values():
-        if isinstance(obj, type) and obj.__name__ != "Strategy" and _has_on_bar(obj):
+        if isinstance(obj, type) and obj is not stub_strategy_cls and _has_on_bar(obj):
             return obj
 
     return None
+
+
+def _build_contract_stub():
+    """Build a fake ``contract`` module with the types LLM-generated code imports.
+
+    The code synthesis prompt instructs the LLM to write
+    ``from contract import OrderSide, OrderType, Strategy, TimeInForce``.
+    This stub provides those names so ``exec()`` succeeds without importing
+    the real trading-service contract (which would pull in Pydantic,
+    subprocess protocol, etc.).
+    """
+    import enum
+    import types
+
+    mod = types.ModuleType("contract")
+
+    class _OrderSide(str, enum.Enum):
+        LONG = "long"
+        SHORT = "short"
+
+    class _OrderType(str, enum.Enum):
+        MARKET = "market"
+        LIMIT = "limit"
+        STOP = "stop"
+        TRAILING_STOP = "trailing_stop"
+
+    class _TimeInForce(str, enum.Enum):
+        DAY = "day"
+        GTC = "gtc"
+        IOC = "ioc"
+        FOK = "fok"
+
+    class _Strategy:
+        def on_bar(self, ctx, bar):
+            pass
+
+    mod.OrderSide = _OrderSide
+    mod.OrderType = _OrderType
+    mod.TimeInForce = _TimeInForce
+    mod.Strategy = _Strategy
+    return mod
 
 
 def _has_on_bar(cls: type) -> bool:

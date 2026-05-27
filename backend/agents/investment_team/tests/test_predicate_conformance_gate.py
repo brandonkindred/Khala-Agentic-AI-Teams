@@ -260,6 +260,80 @@ class TestSignalExitConformance:
         assert any(r.passed for r in results)
 
 
+class TestContractImport:
+    def test_strategy_with_contract_import(self):
+        """Real LLM-generated code uses ``from contract import Strategy, ...``."""
+        code = textwrap.dedent("""\
+            from contract import OrderSide, OrderType, Strategy, TimeInForce
+
+            class MyStrategy(Strategy):
+                UNIVERSE = frozenset({"TEST"})
+                def on_bar(self, ctx, bar):
+                    if ctx.is_warmup:
+                        return
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    position = ctx.position(bar.symbol)
+                    if position is None and bar.close > 50:
+                        ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+                    elif position is not None and bar.close <= 50:
+                        ctx.submit_order(symbol=bar.symbol, side="sell", qty=1.0)
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")],
+        )
+        results = gate.check(code, spec)
+        passed = [r for r in results if r.passed]
+        assert len(passed) >= 1, "Strategy with contract import should pass conformance"
+
+    def test_non_contract_import_fails_gracefully(self):
+        """Importing an unknown module should not crash the gate."""
+        code = textwrap.dedent("""\
+            import numpy as np
+
+            class MyStrategy:
+                def on_bar(self, ctx, bar):
+                    pass
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")],
+        )
+        results = gate.check(code, spec)
+        criticals = [r for r in results if not r.passed and r.severity == "critical"]
+        assert len(criticals) >= 1
+        assert "subclass" in criticals[0].details.lower()
+
+
+class TestSignalExitDrift:
+    def test_missing_signal_exit_detected(self):
+        """Strategy that opens a position but never exits on the predicate."""
+        code = textwrap.dedent("""\
+            class MyStrategy:
+                UNIVERSE = frozenset({"TEST"})
+                _entered = False
+                def on_bar(self, ctx, bar):
+                    if ctx.is_warmup:
+                        return
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    position = ctx.position(bar.symbol)
+                    if position is None and not self._entered:
+                        ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+                        self._entered = True
+                    # DRIFT: never exits on signal — ignores exit predicate
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            exit_rules=[SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=110.0))],
+        )
+        results = gate.check(code, spec)
+        criticals = [r for r in results if not r.passed and r.severity == "critical"]
+        assert len(criticals) >= 1, "Should detect missing signal exit"
+        assert "false negative" in criticals[0].details.lower()
+
+
 class TestRuleIdOnResults:
     def test_rule_id_set_on_every_result(self):
         gate = PredicateConformanceGate()
