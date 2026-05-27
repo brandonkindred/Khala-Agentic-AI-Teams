@@ -1449,6 +1449,42 @@ class StrategyLabOrchestrator:
             if round_outcome.terminate:
                 break
 
+        has_reports = bool(alignment_reports)
+        last_report = alignment_reports[-1] if has_reports else None
+
+        unresolved_criticals: List[Any] = []
+        if last_report and last_report.alignment_findings:
+            unresolved_criticals = [
+                f
+                for f in last_report.alignment_findings
+                if not f.passed and f.severity == "critical"
+            ]
+
+        last_aligned = has_reports and last_report.aligned  # type: ignore[union-attr]
+        if unresolved_criticals and last_aligned:
+            logger.warning(
+                "Alignment report claims aligned but %d critical findings "
+                "remain unresolved for %s; overriding trades_aligned=False",
+                len(unresolved_criticals),
+                spec.strategy_id,
+            )
+            last_report.aligned = False  # type: ignore[union-attr]
+            last_report.rationale = (  # type: ignore[union-attr]
+                f"Override: deterministic gate found {len(unresolved_criticals)} "
+                "unresolved critical finding(s) despite report claiming aligned"
+            )
+            for gate in reversed(all_gate_results):
+                if gate.gate_name == "trade_alignment":
+                    gate.passed = False
+                    gate.severity = "critical"
+                    gate.details = last_report.rationale  # type: ignore[union-attr]
+                    break
+
+        trades_aligned_final = last_aligned and not unresolved_criticals
+        rejection_reason: Optional[str] = None
+        if has_reports and not trades_aligned_final:
+            rejection_reason = "alignment_unresolved"
+
         return _AlignmentLoopOutcome(
             spec=spec,
             code=code,
@@ -1456,7 +1492,8 @@ class StrategyLabOrchestrator:
             metrics=metrics,
             alignment_attempts=alignment_attempts,
             alignment_reports=alignment_reports,
-            trades_aligned=bool(alignment_reports and alignment_reports[-1].aligned),
+            trades_aligned=trades_aligned_final,
+            rejection_reason=rejection_reason,
         )
 
     def _run_alignment_round(
@@ -2025,13 +2062,23 @@ class StrategyLabOrchestrator:
 
         if execution_succeeded and trades and alignment_reports and not trades_aligned:
             last_report = alignment_reports[-1]
-            # NOTE: do NOT name this ``rationale`` — the strategy-rationale
-            # string is bound by the caller's ideation result and is also
-            # what gets persisted to ``StrategyLabRecord.strategy_rationale``.
-            align_rationale = (last_report.rationale or "").strip()
+            alignment_criticals = [
+                f
+                for f in last_report.alignment_findings
+                if not f.passed and f.severity == "critical"
+            ]
+            if alignment_criticals:
+                detail = "; ".join(
+                    f"[{f.check_name}] trade#{f.trade_num}: {f.details}"
+                    for f in alignment_criticals[:10]
+                )
+                if len(alignment_criticals) > 10:
+                    detail += f" (+{len(alignment_criticals) - 10} more)"
+            else:
+                detail = (last_report.rationale or "").strip()
             suffix = (
-                f"alignment_failed: {align_rationale}"
-                if align_rationale
+                f"alignment_unresolved: {detail}"
+                if detail
                 else "alignment_failed: trades did not implement strategy spec"
             )
             metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
@@ -2621,9 +2668,13 @@ class StrategyLabOrchestrator:
         metrics = alignment_outcome.metrics
         alignment_rounds = alignment_outcome.alignment_rounds
         trades_aligned = alignment_outcome.trades_aligned
-        # ``alignment_reports`` flows through to the alignment-veto guard
-        # below; the guard reads it to know whether the audit actually ran
-        # (skipped when ``market_data`` is None).
+        alignment_rejection_reason = alignment_outcome.rejection_reason
+        if alignment_rejection_reason:
+            logger.info(
+                "Alignment loop for %s ended with rejection_reason=%s",
+                spec.strategy_id,
+                alignment_rejection_reason,
+            )
         alignment_reports = alignment_outcome.alignment_reports
 
         # ── Phase 2.6: TRIAL COUNTING (issue #247) ────────────────────

@@ -1312,3 +1312,223 @@ def test_loop_persists_alignment_findings_for_record() -> None:
     last_report = outcome.alignment_reports[-1]
     assert last_report.alignment_findings
     assert all(f.passed for f in last_report.alignment_findings)
+
+
+# ---------------------------------------------------------------------------
+# `_run_trade_alignment_loop` — rejection_reason + explicit trades_aligned
+# ---------------------------------------------------------------------------
+
+
+def test_loop_sets_rejection_reason_on_unresolved_criticals() -> None:
+    """When the loop exits with unresolved critical findings (e.g. no fix
+    proposed), the outcome carries ``rejection_reason='alignment_unresolved'``
+    and ``trades_aligned=False``."""
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_misaligned_check_result()],
+        propose_results=[],
+    )
+
+    outcome = orch._run_trade_alignment_loop(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        execution_succeeded=True,
+        all_gate_results=[],
+        emit=lambda *_a, **_kw: None,
+    )
+
+    assert outcome.trades_aligned is False
+    assert outcome.rejection_reason == "alignment_unresolved"
+
+
+def test_loop_no_rejection_reason_when_aligned() -> None:
+    """When the loop succeeds (all critical findings pass), rejection_reason
+    is ``None`` and ``trades_aligned=True``."""
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_aligned_check_result()],
+    )
+
+    outcome = orch._run_trade_alignment_loop(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        execution_succeeded=True,
+        all_gate_results=[],
+        emit=lambda *_a, **_kw: None,
+    )
+
+    assert outcome.trades_aligned is True
+    assert outcome.rejection_reason is None
+
+
+def test_loop_no_rejection_reason_when_skipped() -> None:
+    """When the loop is skipped (execution failed), rejection_reason is
+    ``None`` — alignment was not attempted, not failed."""
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[],
+    )
+
+    outcome = orch._run_trade_alignment_loop(
+        spec=_spec(),
+        code="code-v0",
+        trades=[],
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        execution_succeeded=False,
+        all_gate_results=[],
+        emit=lambda *_a, **_kw: None,
+    )
+
+    assert outcome.trades_aligned is False
+    assert outcome.rejection_reason is None
+
+
+def test_loop_cross_check_overrides_inconsistent_aligned_flag() -> None:
+    """If ``report.aligned=True`` leaks through but critical findings with
+    ``passed=False`` remain, the explicit cross-check forces
+    ``trades_aligned=False``. This is a defence-in-depth net — normally
+    the clamp at ``_run_alignment_audit`` prevents this state."""
+    inconsistent_result = AlignmentCheckResult(
+        aligned=True,
+        findings=[
+            AlignmentFinding(
+                trade_num=1,
+                rule_id="entry[0]",
+                check_name="entry_signal",
+                passed=False,
+                severity="critical",
+                details="entry signal violated",
+            )
+        ],
+        gate_results=[],
+        rationale="all green",
+    )
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[inconsistent_result],
+    )
+
+    all_gate_results: List[QualityGateResult] = []
+    outcome = orch._run_trade_alignment_loop(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        execution_succeeded=True,
+        all_gate_results=all_gate_results,
+        emit=lambda *_a, **_kw: None,
+    )
+
+    assert outcome.trades_aligned is False
+    assert outcome.rejection_reason == "alignment_unresolved"
+    last_report = outcome.alignment_reports[-1]
+    assert last_report.aligned is False, (
+        "cross-check must also clamp report.aligned so "
+        "_resolve_alignment_report_for_analysis sees the override"
+    )
+    assert "Override" in last_report.rationale
+    alignment_gates = [g for g in all_gate_results if g.gate_name == "trade_alignment"]
+    assert alignment_gates, "aggregate trade_alignment gate must exist"
+    assert alignment_gates[-1].passed is False, (
+        "cross-check must also flip the aggregate gate row so the "
+        "persisted audit trail is consistent with the override"
+    )
+    assert alignment_gates[-1].severity == "critical"
+
+
+# ---------------------------------------------------------------------------
+# Alignment veto — critical finding details in acceptance_reason
+# ---------------------------------------------------------------------------
+
+
+def test_alignment_veto_surfaces_critical_finding_details() -> None:
+    """The alignment veto in ``_run_verification_phase`` surfaces the
+    deterministic critical-finding details — not the LLM's vague
+    rationale string — into ``metrics.acceptance_reason``."""
+    orch = StrategyLabOrchestrator()
+
+    findings = [
+        AlignmentFinding(
+            trade_num=2,
+            rule_id="entry[0]",
+            check_name="entry_signal",
+            passed=False,
+            severity="critical",
+            details="rsi above 30 at entry",
+            computed_value=42.0,
+            expected_value=30.0,
+        ),
+        AlignmentFinding(
+            trade_num=5,
+            rule_id="universe",
+            check_name="universe",
+            passed=False,
+            severity="critical",
+            details="traded XYZ not in spec universe",
+        ),
+    ]
+    report = TradeAlignmentReport(
+        aligned=False,
+        rationale="vague LLM narrative",
+        alignment_findings=findings,
+    )
+
+    _events, emit = _collect_emit()
+    verification = orch._run_verification_phase(
+        spec=_spec(),
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        execution_succeeded=True,
+        trades_aligned=False,
+        alignment_reports=[report],
+        all_gate_results=[],
+        emit=emit,
+    )
+
+    reason = verification.metrics.acceptance_reason or ""
+    assert "entry_signal" in reason
+    assert "rsi above 30 at entry" in reason
+    assert "universe" in reason
+    assert "traded XYZ not in spec universe" in reason
+    assert "vague LLM narrative" not in reason
+    assert verification.is_winning is False
+
+
+def test_alignment_veto_falls_back_to_rationale_when_no_findings() -> None:
+    """When ``alignment_findings`` is empty (defensive path), the veto
+    falls back to the report's rationale string."""
+    orch = StrategyLabOrchestrator()
+
+    report = TradeAlignmentReport(
+        aligned=False,
+        rationale="some fallback reason",
+        alignment_findings=[],
+    )
+
+    _events, emit = _collect_emit()
+    verification = orch._run_verification_phase(
+        spec=_spec(),
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        execution_succeeded=True,
+        trades_aligned=False,
+        alignment_reports=[report],
+        all_gate_results=[],
+        emit=emit,
+    )
+
+    reason = verification.metrics.acceptance_reason or ""
+    assert "some fallback reason" in reason
+    assert verification.is_winning is False

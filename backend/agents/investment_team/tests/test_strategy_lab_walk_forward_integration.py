@@ -864,7 +864,7 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
     """#529: even when the walk-forward acceptance gate passes every check,
     a final alignment report with ``aligned=False`` must veto publication.
     The audit trail keeps the ``trade_alignment`` gate (passed=False) on
-    ``quality_gate_results`` and surfaces ``alignment_failed`` on
+    ``quality_gate_results`` and surfaces ``alignment_unresolved`` on
     ``acceptance_reason`` for downstream consumers."""
 
     from investment_team.models import StrategyLabRecord
@@ -930,7 +930,7 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
     assert all(g["passed"] is False for g in alignment_gates)
     assert record.analysis_narrative  # narrative still generated for context
     reason = record.backtest.result.acceptance_reason or ""
-    assert "alignment_failed" in reason
+    assert "alignment_unresolved" in reason
     assert "entries fire before signal triggers" in reason
     # When the acceptance gate fully passed but alignment vetoed, the
     # ``"all four criteria met"`` summary is no longer truthful — the
@@ -1021,7 +1021,7 @@ def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monke
     ]
     assert alignment_gates and all(g["passed"] is False for g in alignment_gates)
     reason = record.backtest.result.acceptance_reason or ""
-    assert "alignment_failed" in reason
+    assert "alignment_unresolved" in reason
     # Bug 1 symmetry on the fallback path: the anomaly recheck admitted
     # the run (no criticals + return > threshold), so its
     # ``"walk_forward_fallback_passed: ..."`` summary is no longer
@@ -1097,8 +1097,8 @@ def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
     assert "trade count below floor" in reason
     # Alignment cause appended after a " | " boundary so the categories
     # are distinguishable.
-    assert " | alignment_failed:" in reason, (
-        f"expected ' | alignment_failed:' boundary in {reason!r}"
+    assert " | alignment_unresolved:" in reason, (
+        f"expected ' | alignment_unresolved:' boundary in {reason!r}"
     )
     assert "entries fire on wrong symbol" in reason
     # PR #573 round-4 regression guard (rationale-shadowing).

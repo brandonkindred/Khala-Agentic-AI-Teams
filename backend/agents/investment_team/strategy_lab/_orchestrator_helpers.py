@@ -109,6 +109,7 @@ class _AlignmentLoopOutcome:
     alignment_attempts: List[str] = field(default_factory=list)
     alignment_reports: List[Any] = field(default_factory=list)
     trades_aligned: bool = False
+    rejection_reason: Optional[str] = None
 
     @property
     def alignment_rounds(self) -> int:
