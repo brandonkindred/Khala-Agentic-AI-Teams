@@ -310,14 +310,18 @@ class PredicateConformanceGate(GateResultsMixin):
         for o in ctx.orders:
             orders_at.setdefault(o.bar_index, []).append(o)
 
+        is_short_entry = fixture.side == "short"
+        entry_sides = ("sell", "short") if is_short_entry else ("buy", "long")
+        exit_sides = ("buy", "long") if is_short_entry else ("sell", "short", "flat")
+
         false_positives: List[int] = []
         false_negatives: List[int] = []
         position_open = False
 
         for i, verdict in enumerate(fixture.expected_verdicts):
             bar_orders = orders_at.get(i, [])
-            has_entry = any(o.side in ("buy", "long") for o in bar_orders)
-            has_exit = any(o.side in ("sell", "short", "flat") for o in bar_orders)
+            has_entry = any(o.side in entry_sides for o in bar_orders)
+            has_exit = any(o.side in exit_sides for o in bar_orders)
 
             if verdict is not None:
                 if fixture.rule_kind == "entry":
@@ -375,12 +379,37 @@ def _exec_strategy(code: str) -> Optional[Type]:
     safe_builtins = {k: v for k, v in vars(builtins).items() if k not in _BLOCKED}
 
     contract_module = _build_contract_stub()
+    indicators_module = _build_indicators_stub()
     stub_strategy_cls = contract_module.Strategy
     safe_builtins = dict(safe_builtins)
+
+    _ALLOWED_STDLIB = frozenset(
+        {
+            "math",
+            "datetime",
+            "collections",
+            "itertools",
+            "functools",
+            "typing",
+            "dataclasses",
+            "enum",
+            "abc",
+            "re",
+            "copy",
+            "statistics",
+            "operator",
+        }
+    )
+    _real_import = builtins.__import__
 
     def _restricted_import(name, *args, **kwargs):
         if name == "contract":
             return contract_module
+        if name == "indicators":
+            return indicators_module
+        top = name.split(".")[0]
+        if top in _ALLOWED_STDLIB:
+            return _real_import(name, *args, **kwargs)
         raise ImportError(f"import of {name!r} is not allowed in the shadow harness")
 
     safe_builtins["__import__"] = _restricted_import
@@ -441,6 +470,36 @@ def _build_contract_stub():
     mod.OrderType = _OrderType
     mod.TimeInForce = _TimeInForce
     mod.Strategy = _Strategy
+    return mod
+
+
+def _build_indicators_stub():
+    """Build a stub ``indicators`` module matching the sandbox helpers.
+
+    The code synthesis prompt allows ``from indicators import sma, ema, ...``.
+    The shadow harness doesn't need real indicator values (the predicate
+    evaluator computes ground truth separately), so these stubs return
+    zero — they just need to exist so the ``exec()`` succeeds.
+    """
+    import types
+
+    mod = types.ModuleType("indicators")
+
+    def _noop(*_args, **_kwargs):
+        return 0.0
+
+    for name in (
+        "sma",
+        "ema",
+        "rsi",
+        "macd",
+        "bollinger_bands",
+        "atr",
+        "adx",
+        "stochastic",
+        "vwap",
+    ):
+        setattr(mod, name, _noop)
     return mod
 
 

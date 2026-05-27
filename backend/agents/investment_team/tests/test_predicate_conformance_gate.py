@@ -392,6 +392,87 @@ class TestOnStartHook:
         assert len(passed) >= 1, "Strategy with on_start should pass"
 
 
+class TestSandboxImports:
+    def test_strategy_importing_indicators(self):
+        """Strategies that use ``from indicators import sma`` must not crash."""
+        code = textwrap.dedent("""\
+            from contract import Strategy
+            from indicators import sma
+
+            class MyStrategy(Strategy):
+                UNIVERSE = frozenset({"TEST"})
+                def on_bar(self, ctx, bar):
+                    if ctx.is_warmup:
+                        return
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    history = ctx.history(bar.symbol, 20)
+                    if len(history) < 20:
+                        return
+                    position = ctx.position(bar.symbol)
+                    if position is None and bar.close > 50:
+                        ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")],
+        )
+        results = gate.check(code, spec)
+        # Should not fail with "Could not extract Strategy subclass"
+        strategy_fail = [r for r in results if "subclass" in r.details.lower()]
+        assert len(strategy_fail) == 0
+
+    def test_strategy_importing_datetime(self):
+        """Stdlib imports like datetime must be allowed."""
+        code = textwrap.dedent("""\
+            import datetime
+
+            class MyStrategy:
+                UNIVERSE = frozenset({"TEST"})
+                def on_bar(self, ctx, bar):
+                    if ctx.is_warmup:
+                        return
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    position = ctx.position(bar.symbol)
+                    if position is None and bar.close > 50:
+                        ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")],
+        )
+        results = gate.check(code, spec)
+        strategy_fail = [r for r in results if "subclass" in r.details.lower()]
+        assert len(strategy_fail) == 0
+
+
+class TestShortEntryStrategy:
+    def test_faithful_short_entry_passes(self):
+        """A short-entry strategy that correctly fires on predicate-true bars."""
+        code = textwrap.dedent("""\
+            class MyStrategy:
+                UNIVERSE = frozenset({"TEST"})
+                def on_bar(self, ctx, bar):
+                    if ctx.is_warmup:
+                        return
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    position = ctx.position(bar.symbol)
+                    if position is None and bar.close > 50:
+                        ctx.submit_order(symbol=bar.symbol, side="short", qty=1.0)
+                    elif position is not None and bar.close <= 50:
+                        ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            entry_rules=[EntryRule(when=_pred_close_gt_50(), side="short")],
+        )
+        results = gate.check(code, spec)
+        passed = [r for r in results if r.passed]
+        assert len(passed) >= 1, "Faithful short-entry strategy should pass"
+
+
 class TestRuleIdOnResults:
     def test_rule_id_set_on_every_result(self):
         gate = PredicateConformanceGate()
