@@ -468,25 +468,27 @@ def _segment(field_name: str, value: float, n: int) -> List[OHLCVBar]:
     if field_name == "volume":
         return [_make_bar(_BASE_CLOSE, volume=value) for _ in range(n)]
     if field_name == "high":
+        base = max(0.01, value - 1)
         return [
             OHLCVBar(
                 date="placeholder",
-                open=_BASE_CLOSE,
+                open=base,
                 high=value,
-                low=min(value - 2, _BASE_CLOSE - 1),
-                close=_BASE_CLOSE,
+                low=max(0.01, base - 1),
+                close=base,
                 volume=_BASE_VOLUME,
             )
             for _ in range(n)
         ]
     if field_name == "low":
+        base = value + 1
         return [
             OHLCVBar(
                 date="placeholder",
-                open=_BASE_CLOSE,
-                high=max(value + 2, _BASE_CLOSE + 1),
+                open=base,
+                high=base + 1,
                 low=value,
-                close=_BASE_CLOSE,
+                close=base,
                 volume=_BASE_VOLUME,
             )
             for _ in range(n)
