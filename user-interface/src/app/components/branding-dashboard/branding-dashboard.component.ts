@@ -492,7 +492,12 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
       });
       if (this.activeConversationId) {
         const summary = this.buildMissionSummaryMessage(patch);
-        this.api.sendConversationMessage(this.activeConversationId, summary, this.skipSave).subscribe();
+        this.api.sendConversationMessage(this.activeConversationId, summary, this.skipSave).subscribe({
+          next: (res) => {
+            this.conversationMission = res.mission ?? this.conversationMission;
+            this.conversationLatestOutput = res.latest_output ?? this.conversationLatestOutput;
+          },
+        });
       }
     } else if (this.activeConversationId) {
       const summary = this.buildMissionSummaryMessage(patch);
@@ -534,8 +539,12 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     if (patch.company_description) parts.push(`We do: ${patch.company_description}.`);
     if (patch.target_audience) parts.push(`Our target audience is ${patch.target_audience}.`);
     if (patch.desired_voice) parts.push(`Our desired voice is ${patch.desired_voice}.`);
-    if (patch.values?.length) parts.push(`Our values are: ${patch.values.join(', ')}.`);
-    if (patch.differentiators?.length) parts.push(`Our differentiators are: ${patch.differentiators.join(', ')}.`);
+    if (patch.values !== undefined) {
+      parts.push(patch.values.length ? `Our values are: ${patch.values.join(', ')}.` : 'We have no specific values.');
+    }
+    if (patch.differentiators !== undefined) {
+      parts.push(patch.differentiators.length ? `Our differentiators are: ${patch.differentiators.join(', ')}.` : 'We have no specific differentiators.');
+    }
     return parts.length > 0 ? parts.join(' ') : 'I updated brand details via the edit panel.';
   }
 
