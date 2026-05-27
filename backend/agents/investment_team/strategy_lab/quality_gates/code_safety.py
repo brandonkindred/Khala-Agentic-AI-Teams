@@ -443,10 +443,11 @@ def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
     Post: False if ``spec`` is None or ``sides`` is empty. Otherwise
           True iff for every side ∈ ``sides`` there exists a rule
           in ``spec.exit_rules`` that triggers on that side per the
-          basis-vs-side compatibility map: ``TakeProfitRule`` and
-          ``StopLossRule(basis="entry_price")`` cover both sides;
-          ``StopLossRule(basis="trailing_high")`` covers only long;
-          ``StopLossRule(basis="trailing_low")`` covers only short.
+          basis-vs-side compatibility map: ``TakeProfitRule``,
+          ``SignalExitRule``, and ``StopLossRule(basis="entry_price")``
+          cover both sides; ``StopLossRule(basis="trailing_high")``
+          covers only long; ``StopLossRule(basis="trailing_low")``
+          covers only short.
     """
     if spec is None or not sides:
         return False
@@ -463,6 +464,8 @@ def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
                 return side == "long"
             if basis == "trailing_low":
                 return side == "short"
+        if isinstance(rule, SignalExitRule):
+            return True
         return False
 
     for side in sides:
