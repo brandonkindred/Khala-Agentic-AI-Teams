@@ -1428,6 +1428,12 @@ def test_loop_cross_check_overrides_inconsistent_aligned_flag() -> None:
 
     assert outcome.trades_aligned is False
     assert outcome.rejection_reason == "alignment_unresolved"
+    last_report = outcome.alignment_reports[-1]
+    assert last_report.aligned is False, (
+        "cross-check must also clamp report.aligned so "
+        "_resolve_alignment_report_for_analysis sees the override"
+    )
+    assert "Override" in last_report.rationale
 
 
 # ---------------------------------------------------------------------------

@@ -1468,6 +1468,11 @@ class StrategyLabOrchestrator:
                 len(unresolved_criticals),
                 spec.strategy_id,
             )
+            last_report.aligned = False  # type: ignore[union-attr]
+            last_report.rationale = (  # type: ignore[union-attr]
+                f"Override: deterministic gate found {len(unresolved_criticals)} "
+                "unresolved critical finding(s) despite report claiming aligned"
+            )
 
         trades_aligned_final = last_aligned and not unresolved_criticals
         rejection_reason: Optional[str] = None
