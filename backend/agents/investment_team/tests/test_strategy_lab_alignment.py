@@ -1414,6 +1414,7 @@ def test_loop_cross_check_overrides_inconsistent_aligned_flag() -> None:
         check_results=[inconsistent_result],
     )
 
+    all_gate_results: List[QualityGateResult] = []
     outcome = orch._run_trade_alignment_loop(
         spec=_spec(),
         code="code-v0",
@@ -1422,7 +1423,7 @@ def test_loop_cross_check_overrides_inconsistent_aligned_flag() -> None:
         market_data=_market_data(),
         config=_config(),
         execution_succeeded=True,
-        all_gate_results=[],
+        all_gate_results=all_gate_results,
         emit=lambda *_a, **_kw: None,
     )
 
@@ -1434,6 +1435,13 @@ def test_loop_cross_check_overrides_inconsistent_aligned_flag() -> None:
         "_resolve_alignment_report_for_analysis sees the override"
     )
     assert "Override" in last_report.rationale
+    alignment_gates = [g for g in all_gate_results if g.gate_name == "trade_alignment"]
+    assert alignment_gates, "aggregate trade_alignment gate must exist"
+    assert alignment_gates[-1].passed is False, (
+        "cross-check must also flip the aggregate gate row so the "
+        "persisted audit trail is consistent with the override"
+    )
+    assert alignment_gates[-1].severity == "critical"
 
 
 # ---------------------------------------------------------------------------

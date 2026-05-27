@@ -1473,6 +1473,12 @@ class StrategyLabOrchestrator:
                 f"Override: deterministic gate found {len(unresolved_criticals)} "
                 "unresolved critical finding(s) despite report claiming aligned"
             )
+            for gate in reversed(all_gate_results):
+                if gate.gate_name == "trade_alignment":
+                    gate.passed = False
+                    gate.severity = "critical"
+                    gate.details = last_report.rationale  # type: ignore[union-attr]
+                    break
 
         trades_aligned_final = last_aligned and not unresolved_criticals
         rejection_reason: Optional[str] = None
