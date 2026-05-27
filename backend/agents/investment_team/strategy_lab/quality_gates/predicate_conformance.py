@@ -273,7 +273,7 @@ class PredicateConformanceGate(GateResultsMixin):
                     )
                 ]
 
-            fixtures = generate_conformance_fixtures(spec)
+            fixtures = generate_conformance_fixtures(spec, compiled_code=code)
             if not fixtures:
                 return [self._info("No conformance fixtures generated.")]
 
@@ -559,6 +559,20 @@ def _build_contract_stub():
         IOC = "ioc"
         FOK = "fok"
 
+    class _UnfilledPolicy(str, enum.Enum):
+        CANCEL = "cancel"
+        IOC = "ioc"
+
+    class _StopAttachment:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class _LimitAttachment:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
     class _Strategy:
         def on_bar(self, ctx, bar):
             pass
@@ -566,6 +580,9 @@ def _build_contract_stub():
     mod.OrderSide = _OrderSide
     mod.OrderType = _OrderType
     mod.TimeInForce = _TimeInForce
+    mod.UnfilledPolicy = _UnfilledPolicy
+    mod.StopAttachment = _StopAttachment
+    mod.LimitAttachment = _LimitAttachment
     mod.Strategy = _Strategy
     return mod
 

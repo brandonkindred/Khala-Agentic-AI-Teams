@@ -63,7 +63,9 @@ class ConformanceFixture:
     unsynthesizable_reason: Optional[str] = None
 
 
-def generate_conformance_fixtures(spec: Any) -> List[ConformanceFixture]:
+def generate_conformance_fixtures(
+    spec: Any, *, compiled_code: str = ""
+) -> List[ConformanceFixture]:
     """Build one ``ConformanceFixture`` per predicate-bearing rule in ``spec``.
 
     Preconditions:
@@ -72,7 +74,7 @@ def generate_conformance_fixtures(spec: Any) -> List[ConformanceFixture]:
       Returns one fixture per ``EntryRule`` and ``SignalExitRule``.
       ``StopLossRule`` / ``TakeProfitRule`` members are skipped.
     """
-    symbol = _resolve_probe_symbol(spec, "")
+    symbol = _resolve_probe_symbol(spec, compiled_code)
     fixtures: List[ConformanceFixture] = []
 
     for idx, rule in enumerate(getattr(spec, "entry_rules", []) or []):
