@@ -265,7 +265,7 @@ class PredicateConformanceGate(GateResultsMixin):
             results: List[QualityGateResult] = []
 
             for fixture in fixtures:
-                result = self._check_fixture(strategy_cls, fixture, demote=demote)
+                result = self._check_fixture(strategy_cls, fixture, spec=spec, demote=demote)
                 results.append(result)
 
             return results
@@ -275,6 +275,7 @@ class PredicateConformanceGate(GateResultsMixin):
         strategy_cls: Type,
         fixture: ConformanceFixture,
         *,
+        spec: Any = None,
         demote: bool = False,
     ) -> QualityGateResult:
         if not fixture.synthesizable:
@@ -311,8 +312,12 @@ class PredicateConformanceGate(GateResultsMixin):
             orders_at.setdefault(o.bar_index, []).append(o)
 
         is_short_entry = fixture.side == "short"
+        if fixture.rule_kind == "signal_exit" and fixture.side is None:
+            is_short_entry = _infer_short_from_spec(spec)
         entry_sides = ("sell", "short") if is_short_entry else ("buy", "long")
         exit_sides = ("buy", "long") if is_short_entry else ("sell", "short", "flat")
+
+        other_rule_verdicts = _compute_other_rule_verdicts(spec, fixture) if spec else None
 
         false_positives: List[int] = []
         false_negatives: List[int] = []
@@ -328,7 +333,11 @@ class PredicateConformanceGate(GateResultsMixin):
                     if verdict and not position_open and not has_entry:
                         false_negatives.append(i)
                     elif not verdict and has_entry and not position_open:
-                        false_positives.append(i)
+                        other_fires = (
+                            other_rule_verdicts is not None and other_rule_verdicts.get(i) is True
+                        )
+                        if not other_fires:
+                            false_positives.append(i)
                 else:
                     if verdict and position_open and not has_exit:
                         false_negatives.append(i)
@@ -360,6 +369,54 @@ class PredicateConformanceGate(GateResultsMixin):
         if demote:
             return self._warning(detail, rule_id=fixture.rule_id)
         return self._critical(detail, rule_id=fixture.rule_id)
+
+
+# ---------------------------------------------------------------------------
+# Multi-rule attribution helpers
+# ---------------------------------------------------------------------------
+
+
+def _infer_short_from_spec(spec: Any) -> bool:
+    """True when the spec's entry rules are all short-side."""
+    entry_rules = getattr(spec, "entry_rules", []) or []
+    shorts = [r for r in entry_rules if isinstance(r, _EntryRule) and r.side == "short"]
+    return len(shorts) > 0 and len(shorts) == len(
+        [r for r in entry_rules if isinstance(r, _EntryRule)]
+    )
+
+
+def _compute_other_rule_verdicts(
+    spec: Any, fixture: ConformanceFixture
+) -> Optional[Dict[int, bool]]:
+    """For multi-entry specs, check whether ANY other entry rule fires per bar.
+
+    Returns a dict mapping bar index → True when another rule's predicate
+    is satisfied. Used to suppress false-positive reports when the strategy
+    correctly fires for a different entry rule on that bar.
+    """
+    if fixture.rule_kind != "entry":
+        return None
+    entry_rules = [r for r in (getattr(spec, "entry_rules", []) or []) if isinstance(r, _EntryRule)]
+    if len(entry_rules) <= 1:
+        return None
+
+    from ..executor.predicate_evaluator import PandasHistoryView, evaluate_predicate
+    from .rule_probes.synthesizer import _bars_to_df
+
+    df = _bars_to_df(fixture.bars)
+    cache: dict = {}
+    view = PandasHistoryView(df, cache)
+    other_fires: Dict[int, bool] = {}
+    for i in range(len(fixture.bars)):
+        for idx, rule in enumerate(entry_rules):
+            rid = f"entry[{idx}]"
+            if rid == fixture.rule_id:
+                continue
+            result = evaluate_predicate(rule.when, view, i)
+            if result.status == "satisfied":
+                other_fires[i] = True
+                break
+    return other_fires
 
 
 # ---------------------------------------------------------------------------
@@ -474,32 +531,86 @@ def _build_contract_stub():
 
 
 def _build_indicators_stub():
-    """Build a stub ``indicators`` module matching the sandbox helpers.
+    """Build a shadow ``indicators`` module with real computations.
 
-    The code synthesis prompt allows ``from indicators import sma, ema, ...``.
-    The shadow harness doesn't need real indicator values (the predicate
-    evaluator computes ground truth separately), so these stubs return
-    zero — they just need to exist so the ``exec()`` succeeds.
+    Strategy code calls ``from indicators import sma, ema, ...`` with
+    list inputs (``[b.close for b in history]``) and expects scalar
+    returns. These wrappers convert to pandas, call the real executor
+    indicators, and return the last value — matching the engine's
+    predicate evaluator so branch conditions evaluate identically.
     """
     import types
 
+    import numpy as np
+    import pandas as pd
+
+    from ..executor import indicators as _real
+
     mod = types.ModuleType("indicators")
 
-    def _noop(*_args, **_kwargs):
-        return 0.0
+    def _last(series: pd.Series) -> float:
+        if series.empty:
+            return 0.0
+        val = series.iloc[-1]
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return 0.0
+        return float(val)
 
-    for name in (
-        "sma",
-        "ema",
-        "rsi",
-        "macd",
-        "bollinger_bands",
-        "atr",
-        "adx",
-        "stochastic",
-        "vwap",
-    ):
-        setattr(mod, name, _noop)
+    def sma(data, period):
+        return _last(_real.sma(pd.Series(data), int(period)))
+
+    def ema(data, period):
+        return _last(_real.ema(pd.Series(data), int(period)))
+
+    def rsi(data, period=14):
+        return _last(_real.rsi(pd.Series(data), int(period)))
+
+    def macd(data, fast=12, slow=26, signal=9):
+        ml, sl, hist = _real.macd(
+            pd.Series(data), fast=int(fast), slow=int(slow), signal=int(signal)
+        )
+        return _last(ml), _last(sl), _last(hist)
+
+    def bollinger_bands(data, period=20, num_std=2.0):
+        upper, middle, lower = _real.bollinger_bands(
+            pd.Series(data), period=int(period), num_std=float(num_std)
+        )
+        return _last(upper), _last(middle), _last(lower)
+
+    def atr(high, low, close, period=14):
+        return _last(
+            _real.atr(pd.Series(high), pd.Series(low), pd.Series(close), period=int(period))
+        )
+
+    def adx(high, low, close, period=14):
+        return _last(
+            _real.adx(pd.Series(high), pd.Series(low), pd.Series(close), period=int(period))
+        )
+
+    def stochastic(high, low, close, k_period=14, d_period=3):
+        k, d = _real.stochastic(
+            pd.Series(high),
+            pd.Series(low),
+            pd.Series(close),
+            k_period=int(k_period),
+            d_period=int(d_period),
+        )
+        return _last(k), _last(d)
+
+    def vwap(high, low, close, volume):
+        return _last(
+            _real.vwap(pd.Series(high), pd.Series(low), pd.Series(close), pd.Series(volume))
+        )
+
+    mod.sma = sma
+    mod.ema = ema
+    mod.rsi = rsi
+    mod.macd = macd
+    mod.bollinger_bands = bollinger_bands
+    mod.atr = atr
+    mod.adx = adx
+    mod.stochastic = stochastic
+    mod.vwap = vwap
     return mod
 
 

@@ -425,32 +425,29 @@ def _oscillate_price_vs_price(
     rhs: str,
     op: str,
 ) -> Optional[List[OHLCVBar]]:
-    """Oscillate high-low spread so ``bar.high > bar.low`` alternates satisfaction."""
+    """Vary the relationship between two price fields across bars.
+
+    For ``close vs open``, ``high vs low``, etc.: alternate bars where
+    lhs > rhs and bars where lhs < rhs so the predicate state changes.
+    """
+    lhs_f = _price_field(lhs)
+    rhs_f = _price_field(rhs)
     bars: List[OHLCVBar] = []
     for cycle in range(6):
         for _ in range(_OSCILLATION_SEGMENT):
             if cycle % 2 == 0:
-                bars.append(
-                    OHLCVBar(
-                        date="placeholder",
-                        open=100,
-                        high=105,
-                        low=95,
-                        close=100,
-                        volume=_BASE_VOLUME,
-                    )
-                )
+                vals = {lhs_f: 105.0, rhs_f: 95.0}
             else:
-                bars.append(
-                    OHLCVBar(
-                        date="placeholder",
-                        open=100,
-                        high=100.5,
-                        low=99.5,
-                        close=100,
-                        volume=_BASE_VOLUME,
-                    )
-                )
+                vals = {lhs_f: 95.0, rhs_f: 105.0}
+            o = vals.get("open", 100.0)
+            h = vals.get("high", 106.0)
+            lo = vals.get("low", 94.0)
+            c = vals.get("close", 100.0)
+            h = max(h, o, c, lo)
+            lo = min(lo, o, c, h)
+            bars.append(
+                OHLCVBar(date="placeholder", open=o, high=h, low=lo, close=c, volume=_BASE_VOLUME)
+            )
     return bars
 
 
@@ -461,6 +458,32 @@ def _oscillate_price_vs_price(
 
 def _segment(field_name: str, value: float, n: int) -> List[OHLCVBar]:
     """Build ``n`` bars with the given field set to ``value``."""
+    if field_name == "volume":
+        return [_make_bar(_BASE_CLOSE, volume=value) for _ in range(n)]
+    if field_name == "high":
+        return [
+            OHLCVBar(
+                date="placeholder",
+                open=_BASE_CLOSE,
+                high=value,
+                low=min(value - 2, _BASE_CLOSE - 1),
+                close=_BASE_CLOSE,
+                volume=_BASE_VOLUME,
+            )
+            for _ in range(n)
+        ]
+    if field_name == "low":
+        return [
+            OHLCVBar(
+                date="placeholder",
+                open=_BASE_CLOSE,
+                high=max(value + 2, _BASE_CLOSE + 1),
+                low=value,
+                close=_BASE_CLOSE,
+                volume=_BASE_VOLUME,
+            )
+            for _ in range(n)
+        ]
     return [_make_bar(value) for _ in range(n)]
 
 
