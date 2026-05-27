@@ -496,13 +496,19 @@ def _build_crossing_series(field_name: str, low_val: float, high_val: float) -> 
     bars: List[OHLCVBar] = []
     seg = 12
     values = [low_val, high_val, low_val, high_val, low_val]
+
+    def _bar_for_field(val: float) -> OHLCVBar:
+        if field_name == "volume":
+            return _make_bar(_BASE_CLOSE, volume=max(0.0, val))
+        return _make_bar(max(0.02, val))
+
     for i, val in enumerate(values):
         if i > 0:
             prev_val = values[i - 1]
             for step in range(4):
                 interp = prev_val + (val - prev_val) * (step + 1) / 4
-                bars.append(_make_bar(max(0.02, interp)))
-        bars.extend([_make_bar(val) for _ in range(seg)])
+                bars.append(_bar_for_field(interp))
+        bars.extend([_bar_for_field(val) for _ in range(seg)])
     return bars
 
 

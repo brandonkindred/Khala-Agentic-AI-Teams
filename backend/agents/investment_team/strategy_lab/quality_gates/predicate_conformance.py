@@ -163,14 +163,23 @@ class _ShadowContext:
             )
         )
         if side_lower in ("buy", "long"):
-            self._positions[symbol] = _SimplePosition(
-                symbol=symbol,
-                side="long",
-                entry_price=self._last_close(symbol),
-            )
-        elif side_lower in ("sell", "short"):
-            if symbol in self._positions:
+            if symbol in self._positions and self._positions[symbol].side == "short":
                 del self._positions[symbol]
+            else:
+                self._positions[symbol] = _SimplePosition(
+                    symbol=symbol,
+                    side="long",
+                    entry_price=self._last_close(symbol),
+                )
+        elif side_lower in ("sell", "short"):
+            if symbol in self._positions and self._positions[symbol].side == "long":
+                del self._positions[symbol]
+            else:
+                self._positions[symbol] = _SimplePosition(
+                    symbol=symbol,
+                    side="short",
+                    entry_price=self._last_close(symbol),
+                )
         return f"shadow_{self._current_bar_index}"
 
     def cancel(self, order_id: str) -> None:
@@ -299,6 +308,14 @@ class PredicateConformanceGate(GateResultsMixin):
             except Exception:
                 pass
 
+        if fixture.rule_kind == "signal_exit":
+            pos_side = "short" if _infer_short_from_spec(spec) else "long"
+            ctx._positions[fixture.symbol] = _SimplePosition(
+                symbol=fixture.symbol,
+                side=pos_side,
+                entry_price=100.0,
+            )
+
         for i, bar in enumerate(fixture.bars):
             shadow_bar = _to_shadow_bar(bar, fixture.symbol)
             ctx._ingest_bar(shadow_bar, i)
@@ -321,7 +338,7 @@ class PredicateConformanceGate(GateResultsMixin):
 
         false_positives: List[int] = []
         false_negatives: List[int] = []
-        position_open = False
+        position_open = fixture.rule_kind == "signal_exit"
 
         for i, verdict in enumerate(fixture.expected_verdicts):
             bar_orders = orders_at.get(i, [])
