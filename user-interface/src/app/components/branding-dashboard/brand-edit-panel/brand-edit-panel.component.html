@@ -29,13 +29,39 @@
       </mat-form-field>
 
       <mat-form-field appearance="outline">
-        <mat-label>Values (comma-separated)</mat-label>
-        <input matInput formControlName="values_csv" />
+        <mat-label>Values</mat-label>
+        <mat-chip-grid #valuesGrid>
+          @for (val of values; track val) {
+            <mat-chip-row (removed)="removeValue(val)">
+              {{ val }}
+              <button matChipRemove><mat-icon>cancel</mat-icon></button>
+            </mat-chip-row>
+          }
+          <input
+            placeholder="Add a value..."
+            [matChipInputFor]="valuesGrid"
+            [matChipInputSeparatorKeyCodes]="separatorKeyCodes"
+            (matChipInputTokenEnd)="addValue($event)"
+          />
+        </mat-chip-grid>
       </mat-form-field>
 
       <mat-form-field appearance="outline">
-        <mat-label>Differentiators (comma-separated)</mat-label>
-        <input matInput formControlName="differentiators_csv" />
+        <mat-label>Differentiators</mat-label>
+        <mat-chip-grid #diffGrid>
+          @for (diff of differentiators; track diff) {
+            <mat-chip-row (removed)="removeDifferentiator(diff)">
+              {{ diff }}
+              <button matChipRemove><mat-icon>cancel</mat-icon></button>
+            </mat-chip-row>
+          }
+          <input
+            placeholder="Add a differentiator..."
+            [matChipInputFor]="diffGrid"
+            [matChipInputSeparatorKeyCodes]="separatorKeyCodes"
+            (matChipInputTokenEnd)="addDifferentiator($event)"
+          />
+        </mat-chip-grid>
       </mat-form-field>
 
       <mat-slide-toggle

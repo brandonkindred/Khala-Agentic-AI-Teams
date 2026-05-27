@@ -159,14 +159,12 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
   // Save-as-brand modal
   // ---------------------------------------------------------------------
 
-  it('onOpenSaveAsBrand opens dialog with current client and reloads clients', async () => {
+  it('onOpenSaveAsBrand opens dialog', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
-    api.listClients.mockClear();
     component.onOpenSaveAsBrand();
     expect(component.showSaveAsBrandDialog).toBe(true);
-    expect(component.saveToAgencyClientId).toBe('w1');
-    expect(api.listClients).toHaveBeenCalled();
+    expect(component.saveToAgencyError).toBeNull();
   });
 
   it('closeSaveAsBrandDialog resets dialog state', async () => {
@@ -174,38 +172,9 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.showSaveAsBrandDialog = true;
     component.saveToAgencyBrandName = 'N';
-    component.saveToAgencyNewClientName = 'C';
     component.closeSaveAsBrandDialog();
     expect(component.showSaveAsBrandDialog).toBe(false);
     expect(component.saveToAgencyBrandName).toBe('');
-  });
-
-  it('createClientForSave creates a client and updates state', async () => {
-    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
-    fixture.detectChanges();
-    api.createClient.mockReturnValue(of({ ...workspaceClient, id: 'w2', name: 'New' }));
-    component.saveToAgencyNewClientName = 'New';
-    component.createClientForSave();
-    expect(api.createClient).toHaveBeenCalledWith({ name: 'New' });
-    expect(component.saveToAgencyClientId).toBe('w2');
-  });
-
-  it('createClientForSave skips empty name', async () => {
-    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
-    fixture.detectChanges();
-    api.createClient.mockClear();
-    component.saveToAgencyNewClientName = '   ';
-    component.createClientForSave();
-    expect(api.createClient).not.toHaveBeenCalled();
-  });
-
-  it('createClientForSave handles error', async () => {
-    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
-    fixture.detectChanges();
-    api.createClient.mockReturnValue(throwError(() => ({ message: 'err' })));
-    component.saveToAgencyNewClientName = 'x';
-    component.createClientForSave();
-    expect(component.saveToAgencyError).toBe('err');
   });
 
   it('saveConversationToAgency requires mission and client', async () => {
@@ -217,7 +186,6 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
 
     component.conversationMission = { company_name: 'C', company_description: 'd', target_audience: 'a', values: [], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
     component.selectedClient = null;
-    component.saveToAgencyClientId = null;
     component.saveConversationToAgency();
     expect(component.saveToAgencyError).toContain('Workspace');
   });

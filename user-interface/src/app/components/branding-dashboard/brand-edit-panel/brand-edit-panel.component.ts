@@ -1,11 +1,12 @@
 import { Component, EventEmitter, Input, OnChanges, Output, SimpleChanges, inject } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
+import { MatChipsModule, MatChipInputEvent } from '@angular/material/chips';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
-import { MatExpansionModule } from '@angular/material/expansion';
+import { COMMA, ENTER } from '@angular/cdk/keycodes';
 import type { Brand, BrandingMissionSnapshot } from '../../../models';
 
 @Component({
@@ -14,11 +15,11 @@ import type { Brand, BrandingMissionSnapshot } from '../../../models';
   imports: [
     ReactiveFormsModule,
     MatButtonModule,
+    MatChipsModule,
     MatFormFieldModule,
     MatIconModule,
     MatInputModule,
     MatSlideToggleModule,
-    MatExpansionModule,
   ],
   templateUrl: './brand-edit-panel.component.html',
   styleUrl: './brand-edit-panel.component.scss',
@@ -34,13 +35,15 @@ export class BrandEditPanelComponent implements OnChanges {
 
   private readonly fb = inject(FormBuilder);
 
+  readonly separatorKeyCodes = [ENTER, COMMA] as const;
+  values: string[] = [];
+  differentiators: string[] = [];
+
   form = this.fb.nonNullable.group({
     company_name: ['', [Validators.required, Validators.minLength(2)]],
     company_description: ['', [Validators.required, Validators.minLength(10)]],
     target_audience: ['', [Validators.required, Validators.minLength(3)]],
     desired_voice: [''],
-    values_csv: [''],
-    differentiators_csv: [''],
   });
 
   ngOnChanges(changes: SimpleChanges): void {
@@ -51,6 +54,28 @@ export class BrandEditPanelComponent implements OnChanges {
     if (justOpened || brandSwitch || missionCleared || (!this.open && (changes['mission'] || changes['brand']))) {
       this.patchFormFromMission();
     }
+  }
+
+  addValue(event: MatChipInputEvent): void {
+    const val = (event.value ?? '').trim();
+    if (val) this.values.push(val);
+    event.chipInput.clear();
+  }
+
+  removeValue(val: string): void {
+    const idx = this.values.indexOf(val);
+    if (idx >= 0) this.values.splice(idx, 1);
+  }
+
+  addDifferentiator(event: MatChipInputEvent): void {
+    const val = (event.value ?? '').trim();
+    if (val) this.differentiators.push(val);
+    event.chipInput.clear();
+  }
+
+  removeDifferentiator(val: string): void {
+    const idx = this.differentiators.indexOf(val);
+    if (idx >= 0) this.differentiators.splice(idx, 1);
   }
 
   onApply(): void {
@@ -64,10 +89,8 @@ export class BrandEditPanelComponent implements OnChanges {
       company_description: raw.company_description,
       target_audience: raw.target_audience,
       desired_voice: raw.desired_voice,
-      values: raw.values_csv ? raw.values_csv.split(',').map((v: string) => v.trim()).filter(Boolean) : [],
-      differentiators: raw.differentiators_csv
-        ? raw.differentiators_csv.split(',').map((v: string) => v.trim()).filter(Boolean)
-        : [],
+      values: [...this.values],
+      differentiators: [...this.differentiators],
     };
     this.missionUpdate.emit(patch);
   }
@@ -83,7 +106,9 @@ export class BrandEditPanelComponent implements OnChanges {
   private patchFormFromMission(): void {
     const m = this.brand?.mission ?? this.mission;
     if (!m) {
-      this.form.reset({ company_name: '', company_description: '', target_audience: '', desired_voice: '', values_csv: '', differentiators_csv: '' });
+      this.form.reset({ company_name: '', company_description: '', target_audience: '', desired_voice: '' });
+      this.values = [];
+      this.differentiators = [];
       return;
     }
     this.form.patchValue({
@@ -91,8 +116,8 @@ export class BrandEditPanelComponent implements OnChanges {
       company_description: m.company_description || '',
       target_audience: m.target_audience || '',
       desired_voice: m.desired_voice || '',
-      values_csv: (m.values ?? []).join(', '),
-      differentiators_csv: (m.differentiators ?? []).join(', '),
     });
+    this.values = [...(m.values ?? [])];
+    this.differentiators = [...(m.differentiators ?? [])];
   }
 }
