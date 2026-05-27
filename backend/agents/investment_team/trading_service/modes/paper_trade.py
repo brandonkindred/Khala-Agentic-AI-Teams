@@ -245,6 +245,7 @@ def run_paper_trade(
         # handle entries in the strategy subprocess.
         entry_rules=list(strategy.entry_rules) if not strategy.requires_custom_code else None,
         sizing=strategy.sizing if not strategy.requires_custom_code else None,
+        target_symbols=list(strategy.target_symbols) if not strategy.requires_custom_code else None,
     )
 
     # First attempt: primary provider.

@@ -529,6 +529,7 @@ class _EngineEntryDispatcher:
     entry_rules: Sequence[EntryRule]
     sizing: Any
     exit_rules: Sequence[Any] = ()
+    target_symbols: frozenset[str] = frozenset()
     _next_seq: int = 0
 
     def maybe_emit(
@@ -541,6 +542,8 @@ class _EngineEntryDispatcher:
         result: "TradingServiceResult",
     ) -> None:
         if not self.entry_rules or self.sizing is None:
+            return
+        if self.target_symbols and cur_bar.symbol not in self.target_symbols:
             return
         sym = cur_bar.symbol
         if portfolio.positions.get(sym) is not None:
@@ -1002,6 +1005,7 @@ class TradingService:
         exit_rules: Optional[List[ExitRule]] = None,
         entry_rules: Optional[List[EntryRule]] = None,
         sizing: Optional[Any] = None,
+        target_symbols: Optional[List[str]] = None,
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
@@ -1024,6 +1028,7 @@ class TradingService:
         self._exit_rules: List[ExitRule] = list(exit_rules or [])
         self._entry_rules: List[EntryRule] = list(entry_rules or [])
         self._sizing = sizing
+        self._target_symbols: frozenset[str] = frozenset(target_symbols or ())
         # Issue #377: when set, overrides ``BAR_CHUNK_SIZE`` env. Paper-trade
         # mode pins this to 1 so live-bar handling never buffers. Reject
         # zero/negative or non-int explicitly so a future caller passing
@@ -1071,6 +1076,7 @@ class TradingService:
             entry_rules=self._entry_rules,
             sizing=self._sizing,
             exit_rules=self._exit_rules,
+            target_symbols=self._target_symbols,
         )
         execution_model = build_execution_model(
             self.config.execution_model,
