@@ -373,7 +373,11 @@ class _EngineExitDispatcher:
             qty=pos.qty + scale_in_qty,
             order_type=OrderType.MARKET,
             tif=TimeInForce.DAY,
-            reason=f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}",
+            reason=(
+                f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
+                if intent.rule_kind == "signal_exit"
+                else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
+            ),
         )
         try:
             req.validate_prices()
