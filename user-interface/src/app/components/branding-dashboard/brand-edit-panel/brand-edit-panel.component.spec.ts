@@ -3,6 +3,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { BrandEditPanelComponent } from './brand-edit-panel.component';
 import type { BrandingMissionSnapshot, Brand } from '../../../models';
+import { MatChipInputEvent } from '@angular/material/chips';
 
 describe('BrandEditPanelComponent', () => {
   let component: BrandEditPanelComponent;
@@ -37,8 +38,8 @@ describe('BrandEditPanelComponent', () => {
       open: { currentValue: true, previousValue: false, firstChange: false, isFirstChange: () => false },
     });
     expect(component.form.value.company_name).toBe('Acme');
-    expect(component.form.value.values_csv).toBe('integrity, quality');
-    expect(component.form.value.differentiators_csv).toBe('speed');
+    expect(component.values).toEqual(['integrity', 'quality']);
+    expect(component.differentiators).toEqual(['speed']);
   });
 
   it('patches form from brand.mission when brand is provided', () => {
@@ -49,9 +50,10 @@ describe('BrandEditPanelComponent', () => {
       brand: { currentValue: component.brand, previousValue: null, firstChange: false, isFirstChange: () => false },
     });
     expect(component.form.value.company_name).toBe('Acme');
+    expect(component.values).toEqual(['integrity', 'quality']);
   });
 
-  it('onApply emits missionUpdate with parsed values', () => {
+  it('onApply emits missionUpdate with values and differentiators arrays', () => {
     const spy = vi.fn();
     component.missionUpdate.subscribe(spy);
     component.form.setValue({
@@ -59,9 +61,9 @@ describe('BrandEditPanelComponent', () => {
       company_description: 'New desc here',
       target_audience: 'developers',
       desired_voice: 'bold',
-      values_csv: 'honesty, trust',
-      differentiators_csv: 'reliability',
     });
+    component.values = ['honesty', 'trust'];
+    component.differentiators = ['reliability'];
     component.onApply();
     expect(spy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -72,7 +74,7 @@ describe('BrandEditPanelComponent', () => {
     );
   });
 
-  it('onApply emits empty arrays (not undefined) when values/differentiators are cleared', () => {
+  it('onApply emits empty arrays when values/differentiators are cleared', () => {
     const spy = vi.fn();
     component.missionUpdate.subscribe(spy);
     component.form.setValue({
@@ -80,9 +82,9 @@ describe('BrandEditPanelComponent', () => {
       company_description: 'Clearing values test',
       target_audience: 'testers',
       desired_voice: '',
-      values_csv: '',
-      differentiators_csv: '',
     });
+    component.values = [];
+    component.differentiators = [];
     component.onApply();
     expect(spy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -100,8 +102,6 @@ describe('BrandEditPanelComponent', () => {
       company_description: '',
       target_audience: '',
       desired_voice: '',
-      values_csv: '',
-      differentiators_csv: '',
     });
     component.onApply();
     expect(spy).not.toHaveBeenCalled();
@@ -145,6 +145,7 @@ describe('BrandEditPanelComponent', () => {
       open: { currentValue: true, previousValue: false, firstChange: false, isFirstChange: () => false },
     });
     expect(component.form.value.company_name).toBe('Acme');
+    expect(component.values).toEqual(['integrity', 'quality']);
 
     component.mission = null;
     component.brand = null;
@@ -152,6 +153,65 @@ describe('BrandEditPanelComponent', () => {
       mission: { currentValue: null, previousValue: mission, firstChange: false, isFirstChange: () => false },
     });
     expect(component.form.value.company_name).toBe('');
-    expect(component.form.value.values_csv).toBe('');
+    expect(component.values).toEqual([]);
+    expect(component.differentiators).toEqual([]);
+  });
+
+  describe('chip input methods', () => {
+    const makeChipEvent = (value: string): MatChipInputEvent => ({
+      value,
+      chipInput: { clear: vi.fn() } as unknown as MatChipInputEvent['chipInput'],
+      input: document.createElement('input'),
+    });
+
+    it('addValue adds a trimmed value and clears the input', () => {
+      const event = makeChipEvent('  innovation  ');
+      component.addValue(event);
+      expect(component.values).toEqual(['innovation']);
+      expect(event.chipInput.clear).toHaveBeenCalled();
+    });
+
+    it('addValue ignores empty strings', () => {
+      const event = makeChipEvent('   ');
+      component.addValue(event);
+      expect(component.values).toEqual([]);
+    });
+
+    it('removeValue removes the matching value', () => {
+      component.values = ['a', 'b', 'c'];
+      component.removeValue('b');
+      expect(component.values).toEqual(['a', 'c']);
+    });
+
+    it('removeValue does nothing for non-existent value', () => {
+      component.values = ['a', 'b'];
+      component.removeValue('z');
+      expect(component.values).toEqual(['a', 'b']);
+    });
+
+    it('addDifferentiator adds a trimmed value and clears the input', () => {
+      const event = makeChipEvent('scalability');
+      component.addDifferentiator(event);
+      expect(component.differentiators).toEqual(['scalability']);
+      expect(event.chipInput.clear).toHaveBeenCalled();
+    });
+
+    it('addDifferentiator ignores empty strings', () => {
+      const event = makeChipEvent('');
+      component.addDifferentiator(event);
+      expect(component.differentiators).toEqual([]);
+    });
+
+    it('removeDifferentiator removes the matching value', () => {
+      component.differentiators = ['fast', 'reliable'];
+      component.removeDifferentiator('fast');
+      expect(component.differentiators).toEqual(['reliable']);
+    });
+
+    it('removeDifferentiator does nothing for non-existent value', () => {
+      component.differentiators = ['fast'];
+      component.removeDifferentiator('slow');
+      expect(component.differentiators).toEqual(['fast']);
+    });
   });
 });

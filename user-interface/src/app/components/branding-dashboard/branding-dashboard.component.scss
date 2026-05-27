@@ -61,7 +61,7 @@
 .save-as-brand-overlay {
   position: relative;
   margin-top: 16px;
-  border: 2px solid #58a6ff;
+  border: 2px solid var(--kh-accent);
   max-width: 480px;
 
   mat-card-header {
@@ -71,7 +71,7 @@
   }
 
   .success-message {
-    color: #3fb950;
+    color: var(--kh-success);
     margin-bottom: 8px;
   }
 
@@ -90,10 +90,6 @@
   }
 }
 
-.save-advanced-panel {
-  margin-top: 12px;
-}
-
 mat-form-field {
   width: 100%;
 }
@@ -102,29 +98,8 @@ mat-card {
   margin-bottom: 16px;
 }
 
-.agency-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.new-client-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.client-name-input {
-  padding: 8px 12px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  min-width: 180px;
-}
-
 .brand-item--highlight {
-  background: rgba(88, 166, 255, 0.12);
+  background: var(--kh-accent-muted);
 }
 
 .split-button {
@@ -159,7 +134,7 @@ mat-card {
 .action-message {
   margin-top: 12px;
   padding: 8px;
-  background: #e8f5e9;
-  border-radius: 4px;
+  background: var(--kh-success-subtle);
+  border-radius: var(--kh-radius-sm);
   font-size: 0.9rem;
 }

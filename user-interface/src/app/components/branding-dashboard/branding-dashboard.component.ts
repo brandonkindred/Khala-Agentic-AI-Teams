@@ -8,7 +8,6 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
-import { MatOption, MatSelectModule } from '@angular/material/select';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatExpansionModule } from '@angular/material/expansion';
@@ -47,8 +46,6 @@ const WORKSPACE_CLIENT_NAME = 'My brands';
     MatInputModule,
     MatButtonModule,
     MatIconModule,
-    MatSelectModule,
-    MatOption,
     MatMenuModule,
     MatSnackBarModule,
     MatExpansionModule,
@@ -171,10 +168,12 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   }
 
   onWorkspaceChange(client: Client): void {
+    this.closeSaveAsBrandDialog();
     this.selectClient(client);
   }
 
   onBrandChange(brand: Brand): void {
+    this.closeSaveAsBrandDialog();
     this.resumeOrStartBrand(brand);
   }
 
@@ -185,52 +184,31 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
 
   onOpenSaveAsBrand(): void {
     this.showSaveAsBrandDialog = true;
-    this.saveToAgencyClientId = this.selectedClient?.id ?? null;
+    this.saveToAgencyMission = this.conversationMission;
     this.saveToAgencyError = null;
-    this.loadClients();
   }
 
   showSaveAsBrandDialog = false;
-  saveToAgencyClientId: string | null = null;
   saveToAgencyBrandName = '';
-  saveToAgencyNewClientName = '';
   saveToAgencyError: string | null = null;
   saveToAgencySuccess: string | null = null;
-  saveModalAdvanced = false;
+  private saveToAgencyMission: BrandingMissionSnapshot | null = null;
 
   closeSaveAsBrandDialog(): void {
     this.showSaveAsBrandDialog = false;
-    this.saveToAgencyClientId = null;
     this.saveToAgencyBrandName = '';
-    this.saveToAgencyNewClientName = '';
     this.saveToAgencyError = null;
     this.saveToAgencySuccess = null;
-    this.saveModalAdvanced = false;
-  }
-
-  createClientForSave(): void {
-    const name = this.saveToAgencyNewClientName.trim();
-    if (!name) return;
-    this.api.createClient({ name }).subscribe({
-      next: (client) => {
-        this.clients = [...this.clients, client];
-        this.saveToAgencyClientId = client.id;
-        this.saveToAgencyNewClientName = '';
-        this.loadClients();
-      },
-      error: (err) => {
-        this.saveToAgencyError = err?.error?.detail ?? err?.message ?? 'Failed to create workspace';
-      },
-    });
+    this.saveToAgencyMission = null;
   }
 
   saveConversationToAgency(): void {
-    const mission = this.conversationMission;
+    const mission = this.saveToAgencyMission;
     if (!mission) {
       this.saveToAgencyError = 'No mission to save.';
       return;
     }
-    const clientId = this.saveToAgencyClientId ?? this.selectedClient?.id;
+    const clientId = this.selectedClient?.id;
     if (!clientId) {
       this.saveToAgencyError = 'Workspace is not ready. Refresh the page and try again.';
       return;

@@ -160,37 +160,6 @@
         <button mat-raised-button color="primary" type="button" (click)="saveConversationToAgency()">Save brand</button>
         <button mat-stroked-button type="button" (click)="closeSaveAsBrandDialog()">Cancel</button>
       </div>
-
-      <mat-expansion-panel [(expanded)]="saveModalAdvanced" class="save-advanced-panel">
-        <mat-expansion-panel-header>
-          <mat-panel-title>Advanced</mat-panel-title>
-        </mat-expansion-panel-header>
-        <div class="agency-actions">
-          <button mat-stroked-button type="button" (click)="loadClients()">Reload workspaces</button>
-          @if (clients.length > 0) {
-            <mat-form-field appearance="outline">
-              <mat-label>Workspace</mat-label>
-              <mat-select [(ngModel)]="saveToAgencyClientId" name="saveClient">
-                <mat-option [value]="null">-- Select workspace --</mat-option>
-                @for (c of clients; track c.id) {
-                  <mat-option [value]="c.id">{{ c.name }}</mat-option>
-                }
-              </mat-select>
-            </mat-form-field>
-          }
-        </div>
-        <p class="new-client-row">
-          <input
-            type="text"
-            [(ngModel)]="saveToAgencyNewClientName"
-            placeholder="New workspace name"
-            class="client-name-input"
-          />
-          <button mat-stroked-button type="button" (click)="createClientForSave()" [disabled]="!saveToAgencyNewClientName.trim()">
-            Add workspace
-          </button>
-        </p>
-      </mat-expansion-panel>
     </mat-card-content>
   </mat-card>
 }

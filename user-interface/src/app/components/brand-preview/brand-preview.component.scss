@@ -1,33 +1,18 @@
 // ---------------------------------------------------------------------------
-// Brand Preview Panel — Premium SaaS Design
+// Brand Preview Panel — Khala Design System tokens
 // ---------------------------------------------------------------------------
 
-$surface-base: #0c0f14;
-$surface-raised: #12161e;
-$surface-card: #181d27;
-$border-subtle: rgba(255, 255, 255, 0.06);
-$border-default: rgba(255, 255, 255, 0.1);
-$text-primary: #f0f3f8;
-$text-secondary: #8b95a5;
-$text-muted: #5c6678;
-$accent-blue: #6c8cff;
+// Component-local accent (no global purple token)
 $accent-purple: #a78bfa;
-$accent-teal: #2dd4bf;
-$accent-green: #34d399;
-$accent-amber: #fbbf24;
-$accent-rose: #fb7185;
-$radius-sm: 8px;
-$radius-md: 12px;
-$radius-lg: 16px;
 
 // ---------------------------------------------------------------------------
 // Panel container
 // ---------------------------------------------------------------------------
 
 .preview-panel {
-  background: $surface-base;
-  border: 1px solid $border-subtle;
-  border-radius: $radius-lg;
+  background: var(--kh-surface-1);
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-xl);
   height: 100%;
   min-height: 400px;
   display: flex;
@@ -36,7 +21,7 @@ $radius-lg: 16px;
   position: relative;
 
   &.has-content {
-    border-color: $border-default;
+    border-color: var(--kh-border);
   }
 
   &::before {
@@ -47,7 +32,7 @@ $radius-lg: 16px;
     transform: translateX(-50%);
     width: 60%;
     height: 1px;
-    background: linear-gradient(90deg, transparent, $accent-blue, transparent);
+    background: linear-gradient(90deg, transparent, var(--kh-info), transparent);
     opacity: 0.5;
     z-index: 1;
   }
@@ -62,7 +47,7 @@ $radius-lg: 16px;
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid $border-subtle;
+  border-bottom: 1px solid var(--kh-border-subtle);
   flex-shrink: 0;
   gap: 12px;
 }
@@ -84,7 +69,7 @@ $radius-lg: 16px;
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: linear-gradient(135deg, rgba($accent-blue, 0.15), rgba($accent-purple, 0.15));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--kh-info) 15%, transparent), rgba($accent-purple, 0.15));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -93,7 +78,7 @@ $radius-lg: 16px;
     font-size: 20px;
     width: 20px;
     height: 20px;
-    background: linear-gradient(135deg, $accent-blue, $accent-purple);
+    background: linear-gradient(135deg, var(--kh-info), $accent-purple);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
@@ -103,18 +88,18 @@ $radius-lg: 16px;
 .panel-title {
   font-size: 0.9375rem;
   font-weight: 600;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   margin: 0;
   letter-spacing: -0.01em;
 }
 
 .panel-subtitle {
   font-size: 0.75rem;
-  color: $text-muted;
+  color: var(--kh-text-muted);
   transition: color 0.3s;
 
   &.active {
-    color: $accent-teal;
+    color: var(--kh-success);
   }
 }
 
@@ -124,7 +109,7 @@ $radius-lg: 16px;
   align-items: center;
   gap: 6px;
   padding: 8px 14px;
-  border-radius: $radius-sm;
+  border-radius: var(--kh-radius-md);
   font-size: 0.8125rem;
   font-weight: 500;
   cursor: pointer;
@@ -138,14 +123,14 @@ $radius-lg: 16px;
 }
 
 .save-btn {
-  border: 1px solid rgba($accent-blue, 0.3);
-  background: rgba($accent-blue, 0.08);
-  color: $accent-blue;
+  border: 1px solid color-mix(in srgb, var(--kh-info) 30%, transparent);
+  background: color-mix(in srgb, var(--kh-info) 8%, transparent);
+  color: var(--kh-info);
 
   &:hover {
-    background: rgba($accent-blue, 0.16);
-    border-color: rgba($accent-blue, 0.5);
-    box-shadow: 0 0 16px rgba($accent-blue, 0.15);
+    background: color-mix(in srgb, var(--kh-info) 16%, transparent);
+    border-color: color-mix(in srgb, var(--kh-info) 50%, transparent);
+    box-shadow: 0 0 16px color-mix(in srgb, var(--kh-info) 15%, transparent);
   }
 }
 
@@ -190,7 +175,7 @@ $radius-lg: 16px;
   width: 36px;
   height: 36px;
   z-index: 1;
-  background: linear-gradient(135deg, $accent-blue, $accent-purple);
+  background: linear-gradient(135deg, var(--kh-info), $accent-purple);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -204,7 +189,7 @@ $radius-lg: 16px;
   &.orb-1 {
     width: 60px;
     height: 60px;
-    background: radial-gradient(circle, rgba($accent-blue, 0.15) 0%, transparent 70%);
+    background: radial-gradient(circle, color-mix(in srgb, var(--kh-info) 15%, transparent) 0%, transparent 70%);
     top: -5px;
     left: -5px;
     animation-delay: 0s;
@@ -222,7 +207,7 @@ $radius-lg: 16px;
   &.orb-3 {
     width: 40px;
     height: 40px;
-    background: radial-gradient(circle, rgba($accent-teal, 0.1) 0%, transparent 70%);
+    background: radial-gradient(circle, color-mix(in srgb, var(--kh-success) 10%, transparent) 0%, transparent 70%);
     top: 5px;
     right: 0;
     animation-delay: -4s;
@@ -237,14 +222,14 @@ $radius-lg: 16px;
 .empty-title {
   font-size: 1.125rem;
   font-weight: 600;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   margin: 0 0 0.5rem;
   letter-spacing: -0.01em;
 }
 
 .empty-description {
   font-size: 0.875rem;
-  color: $text-secondary;
+  color: var(--kh-text-secondary);
   line-height: 1.6;
   max-width: 300px;
   margin: 0 0 1.5rem;
@@ -263,24 +248,24 @@ $radius-lg: 16px;
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
-  border-radius: $radius-sm;
-  background: $surface-raised;
-  border: 1px solid $border-subtle;
+  border-radius: var(--kh-radius-md);
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
   font-size: 0.8125rem;
-  color: $text-secondary;
+  color: var(--kh-text-secondary);
   transition: all 0.2s;
 
   mat-icon {
     font-size: 16px;
     width: 16px;
     height: 16px;
-    color: $accent-blue;
+    color: var(--kh-info);
     flex-shrink: 0;
   }
 
   &:hover {
-    border-color: $border-default;
-    color: $text-primary;
+    border-color: var(--kh-border);
+    color: var(--kh-text-primary);
   }
 }
 
@@ -302,11 +287,11 @@ $radius-lg: 16px;
   }
 
   &::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--kh-glass);
     border-radius: 2px;
 
     &:hover {
-      background: rgba(255, 255, 255, 0.14);
+      background: var(--kh-glass-hover);
     }
   }
 }
@@ -336,9 +321,9 @@ $radius-lg: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 2px solid $border-default;
-  background: $surface-raised;
-  color: $text-muted;
+  border: 2px solid var(--kh-border);
+  background: var(--kh-surface-2);
+  color: var(--kh-text-muted);
   transition: all 0.25s;
   flex-shrink: 0;
   z-index: 2;
@@ -350,28 +335,28 @@ $radius-lg: 16px;
   }
 
   .phase-completed & {
-    border-color: $accent-green;
-    background: rgba($accent-green, 0.15);
-    color: $accent-green;
+    border-color: var(--kh-success);
+    background: color-mix(in srgb, var(--kh-success) 15%, transparent);
+    color: var(--kh-success);
   }
 
   .phase-in-progress & {
-    border-color: $accent-blue;
-    background: rgba($accent-blue, 0.15);
-    color: $accent-blue;
-    box-shadow: 0 0 0 3px rgba($accent-blue, 0.15);
+    border-color: var(--kh-info);
+    background: color-mix(in srgb, var(--kh-info) 15%, transparent);
+    color: var(--kh-info);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--kh-info) 15%, transparent);
   }
 }
 
 .phase-connector {
   flex: 1;
   width: 2px;
-  background: $border-default;
+  background: var(--kh-border);
   margin-top: 4px;
   min-height: 12px;
 
   .phase-completed & {
-    background: rgba($accent-green, 0.4);
+    background: color-mix(in srgb, var(--kh-success) 40%, transparent);
   }
 }
 
@@ -391,12 +376,12 @@ $radius-lg: 16px;
 .phase-label {
   font-size: 0.9375rem;
   font-weight: 600;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   margin: 0;
   letter-spacing: -0.01em;
 
   .phase-not-started & {
-    color: $text-secondary;
+    color: var(--kh-text-secondary);
   }
 }
 
@@ -411,21 +396,21 @@ $radius-lg: 16px;
   border: 1px solid;
 
   &.chip-completed {
-    color: $accent-green;
-    background: rgba($accent-green, 0.1);
-    border-color: rgba($accent-green, 0.3);
+    color: var(--kh-success);
+    background: color-mix(in srgb, var(--kh-success) 10%, transparent);
+    border-color: color-mix(in srgb, var(--kh-success) 30%, transparent);
   }
 
   &.chip-in-progress {
-    color: $accent-blue;
-    background: rgba($accent-blue, 0.1);
-    border-color: rgba($accent-blue, 0.3);
+    color: var(--kh-info);
+    background: color-mix(in srgb, var(--kh-info) 10%, transparent);
+    border-color: color-mix(in srgb, var(--kh-info) 30%, transparent);
   }
 
   &.chip-not-started {
-    color: $text-muted;
+    color: var(--kh-text-muted);
     background: rgba(255, 255, 255, 0.04);
-    border-color: $border-default;
+    border-color: var(--kh-border);
   }
 }
 
@@ -437,7 +422,7 @@ $radius-lg: 16px;
 
 .phase-empty {
   font-size: 0.8125rem;
-  color: $text-muted;
+  color: var(--kh-text-muted);
   margin: 0;
   line-height: 1.5;
 }
@@ -459,14 +444,14 @@ $radius-lg: 16px;
 }
 
 .foundation-card {
-  background: $surface-raised;
-  border: 1px solid $border-subtle;
-  border-radius: $radius-sm;
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-md);
   padding: 10px 14px;
   transition: border-color 0.2s;
 
   &:hover {
-    border-color: $border-default;
+    border-color: var(--kh-border);
   }
 
   &.full-width {
@@ -478,7 +463,7 @@ $radius-lg: 16px;
   display: block;
   font-size: 0.6875rem;
   font-weight: 500;
-  color: $text-muted;
+  color: var(--kh-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin-bottom: 4px;
@@ -487,7 +472,7 @@ $radius-lg: 16px;
 .field-value {
   display: block;
   font-size: 0.8125rem;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   line-height: 1.5;
 }
 
@@ -506,7 +491,7 @@ $radius-lg: 16px;
 .tag-group-label {
   display: block;
   font-size: 0.6875rem;
-  color: $text-muted;
+  color: var(--kh-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin-bottom: 6px;
@@ -537,21 +522,21 @@ $radius-lg: 16px;
   }
 
   &.tag-diff {
-    background: rgba($accent-teal, 0.08);
-    border-color: rgba($accent-teal, 0.2);
-    color: $accent-teal;
+    background: color-mix(in srgb, var(--kh-success) 8%, transparent);
+    border-color: color-mix(in srgb, var(--kh-success) 20%, transparent);
+    color: var(--kh-success);
   }
 
   &.tag-color {
-    background: rgba($accent-amber, 0.08);
-    border-color: rgba($accent-amber, 0.2);
-    color: $accent-amber;
+    background: var(--kh-accent-muted);
+    border-color: var(--kh-accent-subtle);
+    color: var(--kh-accent);
   }
 
   &.tag-muted {
-    background: $surface-raised;
-    border-color: $border-default;
-    color: $text-secondary;
+    background: var(--kh-surface-2);
+    border-color: var(--kh-border);
+    color: var(--kh-text-secondary);
   }
 }
 
@@ -560,16 +545,16 @@ $radius-lg: 16px;
 // ---------------------------------------------------------------------------
 
 .voice-card {
-  background: $surface-raised;
-  border: 1px solid $border-subtle;
-  border-radius: $radius-sm;
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-md);
   padding: 12px 16px;
-  border-left: 3px solid $accent-teal;
+  border-left: 3px solid var(--kh-success);
 }
 
 .voice-text {
   font-size: 0.8125rem;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   line-height: 1.6;
   margin: 0;
   font-style: italic;
@@ -586,15 +571,15 @@ $radius-lg: 16px;
 }
 
 .palette-card {
-  background: $surface-raised;
-  border: 1px solid $border-subtle;
-  border-radius: $radius-md;
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-lg);
   padding: 14px;
   transition: all 0.25s;
 
   &.palette-selected {
-    border-color: rgba($accent-green, 0.4);
-    background: rgba($accent-green, 0.04);
+    border-color: color-mix(in srgb, var(--kh-success) 40%, transparent);
+    background: color-mix(in srgb, var(--kh-success) 4%, transparent);
   }
 }
 
@@ -608,7 +593,7 @@ $radius-lg: 16px;
 .palette-name {
   font-size: 0.8125rem;
   font-weight: 600;
-  color: $text-primary;
+  color: var(--kh-text-primary);
 }
 
 .selected-badge {
@@ -617,8 +602,8 @@ $radius-lg: 16px;
   gap: 4px;
   font-size: 0.6875rem;
   font-weight: 500;
-  color: $accent-green;
-  background: rgba($accent-green, 0.1);
+  color: var(--kh-success);
+  background: var(--kh-success-subtle);
   padding: 3px 8px;
   border-radius: 20px;
 
@@ -631,7 +616,7 @@ $radius-lg: 16px;
 
 .palette-description {
   font-size: 0.75rem;
-  color: $text-secondary;
+  color: var(--kh-text-secondary);
   margin: 0 0 10px;
   line-height: 1.5;
 }
@@ -639,7 +624,7 @@ $radius-lg: 16px;
 .swatch-strip {
   display: flex;
   gap: 4px;
-  border-radius: $radius-sm;
+  border-radius: var(--kh-radius-md);
   overflow: hidden;
 }
 
@@ -677,12 +662,12 @@ $radius-lg: 16px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--kh-font-mono);
 }
 
 .palette-mood {
   font-size: 0.6875rem;
-  color: $text-muted;
+  color: var(--kh-text-muted);
   font-style: italic;
   margin: 8px 0 0;
 }
@@ -695,10 +680,10 @@ $radius-lg: 16px;
   justify-content: center;
   gap: 6px;
   padding: 8px 12px;
-  border-radius: $radius-sm;
-  border: 1px solid $border-default;
+  border-radius: var(--kh-radius-md);
+  border: 1px solid var(--kh-border);
   background: transparent;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   font-size: 0.8125rem;
   font-weight: 500;
   cursor: pointer;
@@ -711,16 +696,16 @@ $radius-lg: 16px;
   }
 
   &:hover:not(:disabled) {
-    border-color: rgba($accent-blue, 0.4);
-    background: rgba($accent-blue, 0.06);
-    color: $accent-blue;
+    border-color: color-mix(in srgb, var(--kh-info) 40%, transparent);
+    background: color-mix(in srgb, var(--kh-info) 6%, transparent);
+    color: var(--kh-info);
   }
 
   &.is-selected,
   &:disabled {
-    border-color: rgba($accent-green, 0.4);
-    background: rgba($accent-green, 0.1);
-    color: $accent-green;
+    border-color: color-mix(in srgb, var(--kh-success) 40%, transparent);
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
     cursor: default;
   }
 }
@@ -736,7 +721,7 @@ $radius-lg: 16px;
 .block-title {
   font-size: 0.75rem;
   font-weight: 600;
-  color: $text-secondary;
+  color: var(--kh-text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin: 0 0 8px;
@@ -747,7 +732,7 @@ $radius-lg: 16px;
 
 .block-text {
   font-size: 0.8125rem;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   line-height: 1.6;
   margin: 0;
 }
@@ -756,7 +741,7 @@ $radius-lg: 16px;
   margin: 0;
   padding-left: 1.125rem;
   font-size: 0.8125rem;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   line-height: 1.7;
 
   li {
@@ -766,13 +751,13 @@ $radius-lg: 16px;
     }
 
     &::marker {
-      color: $text-muted;
+      color: var(--kh-text-muted);
     }
   }
 }
 
 .wiki-meta {
-  color: $text-muted;
+  color: var(--kh-text-muted);
   font-size: 0.75rem;
   margin-left: 4px;
 }
@@ -784,21 +769,21 @@ $radius-lg: 16px;
 }
 
 .do-block {
-  background: rgba($accent-green, 0.04);
-  border: 1px solid rgba($accent-green, 0.12);
-  border-radius: $radius-sm;
+  background: color-mix(in srgb, var(--kh-success) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--kh-success) 12%, transparent);
+  border-radius: var(--kh-radius-md);
   padding: 12px;
 }
 
 .dont-block {
-  background: rgba($accent-rose, 0.04);
-  border: 1px solid rgba($accent-rose, 0.12);
-  border-radius: $radius-sm;
+  background: color-mix(in srgb, var(--kh-error) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--kh-error) 12%, transparent);
+  border-radius: var(--kh-radius-md);
   padding: 12px;
 }
 
 .do-title {
-  color: $accent-green !important;
+  color: var(--kh-success) !important;
   mat-icon {
     font-size: 16px;
     width: 16px;
@@ -807,7 +792,7 @@ $radius-lg: 16px;
 }
 
 .dont-title {
-  color: $accent-rose !important;
+  color: var(--kh-error) !important;
   mat-icon {
     font-size: 16px;
     width: 16px;
@@ -823,21 +808,21 @@ $radius-lg: 16px;
 }
 
 .moodboard-card {
-  background: $surface-raised;
-  border: 1px solid $border-subtle;
-  border-radius: $radius-md;
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-lg);
   padding: 16px;
   transition: border-color 0.2s;
 
   &:hover {
-    border-color: $border-default;
+    border-color: var(--kh-border);
   }
 }
 
 .moodboard-title {
   font-size: 0.875rem;
   font-weight: 600;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   margin: 0 0 12px;
 }
 
@@ -853,7 +838,7 @@ $radius-lg: 16px;
   display: block;
   font-size: 0.6875rem;
   font-weight: 500;
-  color: $text-muted;
+  color: var(--kh-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin-bottom: 4px;
@@ -861,7 +846,7 @@ $radius-lg: 16px;
 
 .moodboard-detail p {
   font-size: 0.8125rem;
-  color: $text-secondary;
+  color: var(--kh-text-secondary);
   line-height: 1.5;
   margin: 0;
 }
@@ -876,7 +861,7 @@ $radius-lg: 16px;
   width: 28px;
   height: 28px;
   border-radius: 6px;
-  border: 1px solid $border-default;
+  border: 1px solid var(--kh-border);
 }
 
 // ---------------------------------------------------------------------------
@@ -896,16 +881,16 @@ $radius-lg: 16px;
 }
 
 .brand-book-dialog {
-  background: $surface-base;
-  border: 1px solid $border-default;
-  border-radius: $radius-lg;
+  background: var(--kh-surface-1);
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-xl);
   width: 100%;
   max-width: 640px;
   max-height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--kh-shadow-lg);
 }
 
 .brand-book-dialog-header {
@@ -913,14 +898,14 @@ $radius-lg: 16px;
   align-items: center;
   justify-content: space-between;
   padding: 14px 20px;
-  border-bottom: 1px solid $border-subtle;
+  border-bottom: 1px solid var(--kh-border-subtle);
   gap: 12px;
 
   h3 {
     margin: 0;
     font-size: 0.9375rem;
     font-weight: 600;
-    color: $text-primary;
+    color: var(--kh-text-primary);
   }
 }
 
@@ -936,9 +921,9 @@ $radius-lg: 16px;
   align-items: center;
   gap: 4px;
   padding: 6px 10px;
-  border-radius: $radius-sm;
+  border-radius: var(--kh-radius-md);
   background: transparent;
-  color: $text-secondary;
+  color: var(--kh-text-secondary);
   border: 1px solid transparent;
   cursor: pointer;
   font-size: 0.8125rem;
@@ -951,8 +936,8 @@ $radius-lg: 16px;
   }
 
   &:hover {
-    border-color: $border-default;
-    color: $text-primary;
+    border-color: var(--kh-border);
+    color: var(--kh-text-primary);
   }
 }
 
@@ -965,7 +950,7 @@ $radius-lg: 16px;
   font-family: inherit;
   font-size: 0.8125rem;
   line-height: 1.7;
-  color: $text-primary;
+  color: var(--kh-text-primary);
   margin: 0;
   padding: 20px;
   overflow-y: auto;

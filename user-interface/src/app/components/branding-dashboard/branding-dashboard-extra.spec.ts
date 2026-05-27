@@ -159,14 +159,29 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
   // Save-as-brand modal
   // ---------------------------------------------------------------------
 
-  it('onOpenSaveAsBrand opens dialog with current client and reloads clients', async () => {
+  it('onOpenSaveAsBrand opens dialog', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
-    api.listClients.mockClear();
     component.onOpenSaveAsBrand();
     expect(component.showSaveAsBrandDialog).toBe(true);
-    expect(component.saveToAgencyClientId).toBe('w1');
-    expect(api.listClients).toHaveBeenCalled();
+    expect(component.saveToAgencyError).toBeNull();
+  });
+
+  it('changing workspace closes the save dialog', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.showSaveAsBrandDialog = true;
+    const otherClient = { ...workspaceClient, id: 'w2', name: 'Other' };
+    component.onWorkspaceChange(otherClient);
+    expect(component.showSaveAsBrandDialog).toBe(false);
+  });
+
+  it('changing brand closes the save dialog', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.showSaveAsBrandDialog = true;
+    component.onBrandChange(makeBrand('b2'));
+    expect(component.showSaveAsBrandDialog).toBe(false);
   });
 
   it('closeSaveAsBrandDialog resets dialog state', async () => {
@@ -174,50 +189,22 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.showSaveAsBrandDialog = true;
     component.saveToAgencyBrandName = 'N';
-    component.saveToAgencyNewClientName = 'C';
     component.closeSaveAsBrandDialog();
     expect(component.showSaveAsBrandDialog).toBe(false);
     expect(component.saveToAgencyBrandName).toBe('');
-  });
-
-  it('createClientForSave creates a client and updates state', async () => {
-    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
-    fixture.detectChanges();
-    api.createClient.mockReturnValue(of({ ...workspaceClient, id: 'w2', name: 'New' }));
-    component.saveToAgencyNewClientName = 'New';
-    component.createClientForSave();
-    expect(api.createClient).toHaveBeenCalledWith({ name: 'New' });
-    expect(component.saveToAgencyClientId).toBe('w2');
-  });
-
-  it('createClientForSave skips empty name', async () => {
-    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
-    fixture.detectChanges();
-    api.createClient.mockClear();
-    component.saveToAgencyNewClientName = '   ';
-    component.createClientForSave();
-    expect(api.createClient).not.toHaveBeenCalled();
-  });
-
-  it('createClientForSave handles error', async () => {
-    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
-    fixture.detectChanges();
-    api.createClient.mockReturnValue(throwError(() => ({ message: 'err' })));
-    component.saveToAgencyNewClientName = 'x';
-    component.createClientForSave();
-    expect(component.saveToAgencyError).toBe('err');
   });
 
   it('saveConversationToAgency requires mission and client', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
     component.conversationMission = null;
+    component.onOpenSaveAsBrand();
     component.saveConversationToAgency();
     expect(component.saveToAgencyError).toContain('No mission');
 
     component.conversationMission = { company_name: 'C', company_description: 'd', target_audience: 'a', values: [], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
+    component.onOpenSaveAsBrand();
     component.selectedClient = null;
-    component.saveToAgencyClientId = null;
     component.saveConversationToAgency();
     expect(component.saveToAgencyError).toContain('Workspace');
   });
@@ -227,6 +214,7 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.conversationMission = { company_name: 'C', company_description: 'd', target_audience: 'a', values: [], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
     component.selectedClient = workspaceClient;
+    component.onOpenSaveAsBrand();
     api.createBrand.mockReturnValue(of(makeBrand('b-new', { name: 'My Brand' })));
     api.listBrands.mockReturnValue(of([makeBrand('b-new', { name: 'My Brand' })]));
     component.saveConversationToAgency();
@@ -239,10 +227,10 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.conversationMission = { company_name: 'C', company_description: 'd', target_audience: 'a', values: [], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
     component.selectedClient = workspaceClient;
+    component.onOpenSaveAsBrand();
     api.runBrand.mockReturnValue(throwError(() => ({ message: 'fail' })));
     api.createBrand.mockReturnValue(of(makeBrand('b-new')));
     component.saveConversationToAgency();
-    // No assertion failure; run failure should be handled by the component
     expect(api.runBrand).toHaveBeenCalled();
   });
 
@@ -251,9 +239,24 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.conversationMission = { company_name: 'C', company_description: 'd', target_audience: 'a', values: [], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
     component.selectedClient = workspaceClient;
+    component.onOpenSaveAsBrand();
     api.createBrand.mockReturnValue(throwError(() => ({ error: { detail: 'createbrand-fail' } })));
     component.saveConversationToAgency();
     expect(component.saveToAgencyError).toBe('createbrand-fail');
+  });
+
+  it('saveConversationToAgency preserves mission snapshot after workspace change', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    const originalMission = { company_name: 'Original', company_description: 'desc', target_audience: 'audience', values: ['v1'], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
+    component.conversationMission = originalMission;
+    component.selectedClient = workspaceClient;
+    component.onOpenSaveAsBrand();
+    component.conversationMission = { company_name: 'Overwritten', company_description: 'other', target_audience: 'other', values: [], differentiators: [], desired_voice: '' } as BrandingMissionSnapshot;
+    api.createBrand.mockReturnValue(of(makeBrand('b-new', { name: 'Original' })));
+    api.listBrands.mockReturnValue(of([makeBrand('b-new', { name: 'Original' })]));
+    component.saveConversationToAgency();
+    expect(api.createBrand).toHaveBeenCalledWith('w1', expect.objectContaining({ company_name: 'Original' }));
   });
 
   // ---------------------------------------------------------------------
