@@ -168,10 +168,12 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   }
 
   onWorkspaceChange(client: Client): void {
+    this.closeSaveAsBrandDialog();
     this.selectClient(client);
   }
 
   onBrandChange(brand: Brand): void {
+    this.closeSaveAsBrandDialog();
     this.resumeOrStartBrand(brand);
   }
 

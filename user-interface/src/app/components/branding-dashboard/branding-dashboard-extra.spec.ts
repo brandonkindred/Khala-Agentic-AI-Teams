@@ -167,6 +167,23 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     expect(component.saveToAgencyError).toBeNull();
   });
 
+  it('changing workspace closes the save dialog', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.showSaveAsBrandDialog = true;
+    const otherClient = { ...workspaceClient, id: 'w2', name: 'Other' };
+    component.onWorkspaceChange(otherClient);
+    expect(component.showSaveAsBrandDialog).toBe(false);
+  });
+
+  it('changing brand closes the save dialog', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.showSaveAsBrandDialog = true;
+    component.onBrandChange(makeBrand('b2'));
+    expect(component.showSaveAsBrandDialog).toBe(false);
+  });
+
   it('closeSaveAsBrandDialog resets dialog state', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
