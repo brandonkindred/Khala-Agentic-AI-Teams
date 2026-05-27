@@ -168,7 +168,7 @@ class _ShadowContext:
             else:
                 self._positions[symbol] = _SimplePosition(
                     symbol=symbol,
-                    side="long",
+                    side=_SideStr("long"),
                     entry_price=self._last_close(symbol),
                 )
         elif side_lower in ("sell", "short"):
@@ -177,7 +177,7 @@ class _ShadowContext:
             else:
                 self._positions[symbol] = _SimplePosition(
                     symbol=symbol,
-                    side="short",
+                    side=_SideStr("short"),
                     entry_price=self._last_close(symbol),
                 )
         return f"shadow_{self._current_bar_index}"
@@ -200,12 +200,20 @@ class _ShadowContext:
         return 0.0
 
 
+class _SideStr(str):
+    """String subclass with a ``.value`` attribute matching ``OrderSide`` enum behavior."""
+
+    @property
+    def value(self) -> str:
+        return str(self)
+
+
 @dataclass
 class _SimplePosition:
     """Minimal stand-in for ``_PositionSnapshot``."""
 
     symbol: str
-    side: str = "long"
+    side: _SideStr = _SideStr("long")
     entry_price: float = 0.0
     qty: float = 1.0
 
@@ -309,7 +317,7 @@ class PredicateConformanceGate(GateResultsMixin):
                 pass
 
         if fixture.rule_kind == "signal_exit":
-            pos_side = "short" if _infer_short_from_spec(spec) else "long"
+            pos_side = _SideStr("short") if _infer_short_from_spec(spec) else _SideStr("long")
             ctx._positions[fixture.symbol] = _SimplePosition(
                 symbol=fixture.symbol,
                 side=pos_side,
