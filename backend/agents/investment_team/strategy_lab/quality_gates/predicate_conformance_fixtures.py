@@ -452,11 +452,10 @@ def _oscillate_price_vs_price(
             h = vals.get("high", 106.0)
             lo = vals.get("low", 94.0)
             c = vals.get("close", 100.0)
+            v = vals.get("volume", _BASE_VOLUME)
             h = max(h, o, c, lo)
             lo = min(lo, o, c, h)
-            bars.append(
-                OHLCVBar(date="placeholder", open=o, high=h, low=lo, close=c, volume=_BASE_VOLUME)
-            )
+            bars.append(OHLCVBar(date="placeholder", open=o, high=h, low=lo, close=c, volume=v))
     return bars
 
 

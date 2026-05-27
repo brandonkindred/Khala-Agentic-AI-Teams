@@ -560,8 +560,9 @@ def _build_contract_stub():
         FOK = "fok"
 
     class _UnfilledPolicy(str, enum.Enum):
-        CANCEL = "cancel"
-        IOC = "ioc"
+        DROP = "drop"
+        REQUEUE_NEXT_BAR = "requeue_next_bar"
+        TWAP_N = "twap_n"
 
     class _StopAttachment:
         def __init__(self, **kwargs):
