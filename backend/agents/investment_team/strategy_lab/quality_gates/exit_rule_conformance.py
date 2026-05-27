@@ -94,13 +94,33 @@ class ExitRuleConformanceGate(GateResultsMixin):
             for rule in take_profits:
                 results.append(self._check_take_profit(rule, trades, exit_rules, firings))
 
-            # ---- SignalExitRule — not yet engine-enforced ----
+            # ---- SignalExitRule — engine-enforced via _EngineExitDispatcher ----
             signal_exits = [r for r in exit_rules if isinstance(r, SignalExitRule)]
             if signal_exits:
-                results.append(
-                    self._info(f"{len(signal_exits)} SignalExitRule(s) present but not yet "
-                            "engine-enforced (see rule_compiler module docstring).")
-                )
+                engine_signal_firings = firings.get("signal_exit", 0)
+                if trades and engine_signal_firings > 0:
+                    results.append(
+                        self._info(
+                            f"{len(signal_exits)} SignalExitRule(s) — "
+                            f"{engine_signal_firings} engine signal_exit firing(s) "
+                            f"recorded across {len(trades)} trade(s)."
+                        )
+                    )
+                elif trades:
+                    results.append(
+                        self._info(
+                            f"{len(signal_exits)} SignalExitRule(s) — zero engine "
+                            f"signal_exit firings across {len(trades)} trade(s); "
+                            "other exit rules may have closed positions first."
+                        )
+                    )
+                else:
+                    results.append(
+                        self._info(
+                            f"{len(signal_exits)} SignalExitRule(s) — zero trades; "
+                            "no firings to verify."
+                        )
+                    )
 
             # ---- Aggregate: engine emitted at least one exit when expected ----
             if diagnostics is not None:

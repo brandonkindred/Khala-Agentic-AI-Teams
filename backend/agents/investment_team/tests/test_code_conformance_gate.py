@@ -283,12 +283,15 @@ def test_entry_coverage_passes_when_entry_branch_present() -> None:
 
 def test_entry_coverage_fails_when_entry_submit_order_dropped() -> None:
     """Mandatory acceptance test from the issue: drop the entry
-    submit_order from a working strategy → critical failure on check #3."""
+    submit_order from a working strategy → critical failure on check #3.
+    Uses requires_custom_code=True so the gate applies (engine-managed
+    specs skip check #3)."""
     code = _HAPPY_CODE.replace(
         'ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")',
         "pass  # entry submit_order removed",
     )
-    results = CodeConformanceGate().check(code, _happy_spec())
+    spec = _happy_spec().model_copy(update={"requires_custom_code": True})
+    results = CodeConformanceGate().check(code, spec)
     crits = _critical_details(results)
     assert any("entry rule" in c.lower() for c in crits), crits
 
@@ -327,6 +330,7 @@ def test_entry_coverage_ignores_unreachable_helper_branches() -> None:
         exit_rules=[StopLossRule(pct=0.05)],
         target_symbols=["QQQ"],
     )
+    spec = spec.model_copy(update={"requires_custom_code": True})
     results = CodeConformanceGate().check(code, spec)
     crits = _critical_details(results)
     assert any("entry rule" in c.lower() and "reachable" in c.lower() for c in crits), crits
@@ -343,9 +347,8 @@ def test_signal_exit_coverage_passes_with_position_qty_close() -> None:
 
 
 def test_signal_exit_coverage_fails_when_no_position_qty_close() -> None:
-    # Spec declares a signal-exit but the code only closes via stop-loss
-    # (qty=pos.qty kept, but every exit happens in the stop-loss branch
-    # — fine in isolation, but we drop the rsi branch entirely).
+    # Spec declares a signal-exit but the code only closes via stop-loss.
+    # Uses requires_custom_code=True so the gate applies.
     code = textwrap.dedent(
         """
         from contract import Strategy
@@ -365,8 +368,6 @@ def test_signal_exit_coverage_fails_when_no_position_qty_close() -> None:
                 if pos is None and fast > slow:
                     ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
                 elif pos is not None and bar.close < pos.entry_price * 0.95:
-                    # Closes via a constant qty instead of pos.qty — does
-                    # not satisfy the signal-exit shape.
                     ctx.submit_order(symbol=bar.symbol, qty=1, side="SHORT")
         """
     )
@@ -375,6 +376,7 @@ def test_signal_exit_coverage_fails_when_no_position_qty_close() -> None:
         exit_rules=[_rsi_signal_exit(), StopLossRule(pct=0.05)],
         target_symbols=["QQQ"],
     )
+    spec = spec.model_copy(update={"requires_custom_code": True})
     results = CodeConformanceGate().check(code, spec)
     crits = _critical_details(results)
     assert any("signal-exit" in c.lower() for c in crits), crits
@@ -753,6 +755,7 @@ def test_branch_coverage_does_not_double_count_nested_branches() -> None:
         exit_rules=[StopLossRule(pct=0.05)],
         target_symbols=["QQQ"],
     )
+    spec = spec.model_copy(update={"requires_custom_code": True})
     results = CodeConformanceGate().check(code, spec)
     crits = _critical_details(results)
     assert any("2 entry rule" in c and "only 1" in c for c in crits), crits

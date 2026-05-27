@@ -104,8 +104,8 @@ def test_entry_only_rsi() -> None:
     spec = _spec(entry_rules=[_rsi_lt_30_entry()])
     code = compile_strategy(spec)
     assert "_ind_rsi_" in code
-    assert "OrderSide.LONG" in code
-    assert "ctx.submit_order" in code
+    assert "ctx.submit_order" not in code
+    assert "OrderSide" not in code
     assert _strategy_subclass_count(code) == 1
 
 
@@ -115,8 +115,7 @@ def test_signal_exit_only() -> None:
         exit_rules=[_rsi_gt_70_exit()],
     )
     code = compile_strategy(spec)
-    assert "qty=position.qty" in code
-    assert code.count("ctx.submit_order") == 2  # one entry, one signal exit
+    assert "ctx.submit_order" not in code
 
 
 def test_stop_loss_present_no_inline_or_bracket() -> None:
@@ -174,24 +173,24 @@ def test_trailing_stop_loss_compiles_without_inline_emission() -> None:
 
 
 def test_fixed_fraction_sizing() -> None:
+    """Sizing is engine-managed — compiled code does NOT inline qty math."""
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         sizing=FixedFractionSizing(fraction=0.05),
     )
     code = compile_strategy(spec)
-    assert "ctx.equity * 0.05" in code
-    assert "max(1, int(" in code
+    assert "ctx.submit_order" not in code
+    assert _strategy_subclass_count(code) == 1
 
 
 def test_fixed_notional_sizing() -> None:
+    """Sizing is engine-managed — compiled code does NOT inline qty math."""
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         sizing=FixedNotionalSizing(notional_usd=10_000.0),
     )
     code = compile_strategy(spec)
-    assert "10000.0 / bar.close" in code
-    # Sizing gate also requires *somewhere* in the class to read ctx.equity.
-    assert "ctx.equity" in code
+    assert "ctx.submit_order" not in code
 
 
 def test_volatility_target_with_atr() -> None:
@@ -209,7 +208,7 @@ def test_volatility_target_with_atr() -> None:
     )
     code = compile_strategy(spec)
     assert "_ind_atr_" in code
-    assert "ctx.equity * 0.2" in code
+    assert "ctx.submit_order" not in code
 
 
 def test_volatility_target_without_atr_raises_compiler_error() -> None:
@@ -249,15 +248,16 @@ def test_multi_rule_full_spec() -> None:
     )
     code = compile_strategy(spec)
     assert _strategy_subclass_count(code) == 1
-    assert "self._cross_prev" in code  # per-symbol cross_* state dict present
+    assert "ctx.submit_order" not in code
     assert "position.entry_price" in code  # stop/take-profit gate compliance
 
 
-def test_cross_above_emits_per_symbol_prev_state() -> None:
-    """Cross state must be keyed by ``bar.symbol``.
+def test_cross_above_no_inline_state() -> None:
+    """Cross predicates are evaluated engine-side by the predicate evaluator.
 
-    Otherwise a multi-symbol run would compare this bar's value against
-    a different symbol's previous bar and forge false cross triggers.
+    The compiled code no longer maintains ``_cross_prev`` state — the
+    engine's ``StreamingHistoryView`` handles cross semantics via
+    ``i`` vs ``i-1`` bar indices.
     """
     entry = EntryRule(
         side="long",
@@ -269,23 +269,9 @@ def test_cross_above_emits_per_symbol_prev_state() -> None:
     )
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
-    # __init__ creates the per-symbol dict.
-    tree = ast.parse(code)
-    init_methods = [
-        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "__init__"
-    ]
-    assert init_methods, "compiled class must define __init__ for cross-state"
-    cross_prev_assignments = [
-        node
-        for method in init_methods
-        for node in ast.walk(method)
-        if isinstance(node, ast.Assign)
-        and any(isinstance(t, ast.Attribute) and t.attr == "_cross_prev" for t in node.targets)
-    ]
-    assert len(cross_prev_assignments) == 1, "expected `self._cross_prev = {}` in __init__"
-    # on_bar reads the per-symbol slice and writes back.
-    assert "self._cross_prev.get(bar.symbol" in code
-    assert "self._cross_prev.setdefault(bar.symbol" in code
+    assert "_cross_prev" not in code
+    assert "ctx.submit_order" not in code
+    assert "_ind_ema_" in code
 
 
 # ---------------------------------------------------------------------------
@@ -684,20 +670,19 @@ def test_stop_and_take_profit_do_not_emit_inline_exits() -> None:
     assert ctx.orders == [], "stop/take-profit closes should come from the engine, not the strategy"
 
 
-def test_entry_only_with_no_exits_is_pre_safety_gate_concern() -> None:
-    """Entry-only specs are valid input to the compiler; the safety
-    gate is what rejects them (no exit path). This test pins that
-    expectation so the compiler doesn't grow a silent reject.
+def test_entry_only_with_no_exits_safety_gate_rejects() -> None:
+    """Entry-only specs with no exit rules: safety gate rejects because
+    neither the strategy nor the engine has an exit path. The compiled
+    code has zero submit_order calls (engine-managed entries), but the
+    engine needs at least one exit rule to close positions.
     """
-    spec = _spec(entry_rules=[_rsi_lt_30_entry()])
+    spec = _spec(entry_rules=[_rsi_lt_30_entry()], exit_rules=[])
     code = compile_strategy(spec)
-    # Compilation succeeds — module is valid Python.
     ns, *_ = _exec_module(code)
     assert "CompiledStrategy" in ns
-    # But CodeSafetyChecker rejects because there's no exit submit_order.
     safety = CodeSafetyChecker().check(code, spec)
     criticals = _critical_details(safety)
-    assert any("exit" in c.lower() for c in criticals), criticals
+    assert any("submit_order" in c.lower() or "exit" in c.lower() for c in criticals), criticals
 
 
 def test_no_indicators_import_in_emitted_code() -> None:
@@ -778,9 +763,9 @@ def test_macd_helper_defensive_fast_slow_returns_none() -> None:
     assert strat.macd(bars, fast=30, slow=10, signal=9) is None
 
 
-def test_cross_state_isolated_per_symbol() -> None:
-    """Run on_bar for two different symbols and verify the second
-    symbol's first bar doesn't pick up the first symbol's prev value.
+def test_cross_predicates_no_inline_state() -> None:
+    """Cross predicates are fully engine-managed. The compiled code no
+    longer maintains ``_cross_prev`` state.
     """
     entry = EntryRule(
         side="long",
@@ -792,34 +777,20 @@ def test_cross_state_isolated_per_symbol() -> None:
     )
     spec = _spec(
         entry_rules=[entry],
-        # Two-symbol universe so the universe guard accepts both.
         target_symbols=["AAA", "BBB"],
     )
     code = compile_strategy(spec)
+    assert "_cross_prev" not in code
+    assert "ctx.submit_order" not in code
     ns, *_ = _exec_module(code)
     strat = ns["CompiledStrategy"]()
-
-    # Symbol A: descending closes — fast SMA below slow SMA on the
-    # latest bar. After on_bar, A's _cross_prev has its own values.
-    bars_a = [_SyntheticBar(symbol="AAA", close=100.0 - i) for i in range(30)]
-    ctx = _SyntheticContext(history=bars_a)
-    strat.on_bar(ctx, bars_a[-1])
-    # Symbol B's first bar should not see symbol A's previous values.
-    assert "AAA" in strat._cross_prev
-    assert "BBB" not in strat._cross_prev
-
-    bars_b = [_SyntheticBar(symbol="BBB", close=100.0 + i) for i in range(30)]
-    ctx_b = _SyntheticContext(history=bars_b)
-    strat.on_bar(ctx_b, bars_b[-1])
-    # Now both symbols have their own slots — no overlap.
-    assert "BBB" in strat._cross_prev
-    assert strat._cross_prev["AAA"] != strat._cross_prev["BBB"]
+    assert not hasattr(strat, "_cross_prev")
 
 
-def test_multiple_entry_rules_one_bar_emits_one_entry() -> None:
-    """Two entry predicates true on the same bar must emit one entry, not two."""
-    # Two entry rules; both will fire on a flat-history bar because
-    # each predicate threshold is generous.
+def test_multiple_entry_rules_no_inline_orders() -> None:
+    """Multi-entry specs compile to a thin shim with zero submit_order calls.
+    Entry dedup is handled by the engine's _EngineEntryDispatcher.
+    """
     rule_a = EntryRule(
         side="long",
         when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=99.0),
@@ -830,14 +801,8 @@ def test_multiple_entry_rules_one_bar_emits_one_entry() -> None:
     )
     spec = _spec(entry_rules=[rule_a, rule_b])
     code = compile_strategy(spec)
-    assert "entry_submitted" in code
-    ns, _OrderSide, *_ = _exec_module(code)
-    strat = ns["CompiledStrategy"]()
-    history = [_SyntheticBar(close=100.0) for _ in range(25)]
-    ctx = _SyntheticContext(history=history, position=None)
-    strat.on_bar(ctx, history[-1])
-    # Exactly ONE entry submission, not two.
-    assert len(ctx.orders) == 1, ctx.orders
+    assert "entry_submitted" not in code
+    assert "ctx.submit_order" not in code
 
 
 def test_spec_hash_ignores_non_dsl_fields() -> None:
@@ -861,12 +826,12 @@ def test_spec_hash_ignores_non_dsl_fields() -> None:
     )
 
 
-def test_exit_rules_emitted_in_author_order() -> None:
-    """Multiple signal-exit rules are emitted in author-declared order.
+def test_signal_exit_rules_not_inlined() -> None:
+    """Signal-exit rules are engine-enforced via _EngineExitDispatcher.
 
-    Stop-loss and take-profit are engine-enforced and not inlined;
-    only signal-exit rules appear in the emitted ``on_bar``. They
-    must execute in spec order, guarded by ``exit_submitted``.
+    The compiled code does NOT inline signal-exit predicate checks or
+    submit_order calls. The engine evaluates SignalExitRule predicates
+    deterministically using the shared predicate_evaluator.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -890,13 +855,9 @@ def test_exit_rules_emitted_in_author_order() -> None:
         ],
     )
     code = compile_strategy(spec)
-    # Both signal-exit branches emit ``compiled_signal_exit`` reasons.
-    # The first branch's predicate (rsi > 70) must appear before the
-    # second's (bar.close > 200) in the emitted source.
-    rsi_pred_pos = code.find("> 70.0")
-    bar_pred_pos = code.find("bar.close > 200.0")
-    assert rsi_pred_pos != -1 and bar_pred_pos != -1
-    assert rsi_pred_pos < bar_pred_pos
+    assert "compiled_signal_exit" not in code
+    assert "exit_submitted" not in code
+    assert "ctx.submit_order" not in code
 
 
 def test_compiled_code_flows_into_orchestrator_local_variable() -> None:
@@ -1201,9 +1162,9 @@ def test_volatility_target_with_single_atr_period_used_twice_compiles() -> None:
 def test_no_inline_or_bracket_engine_exits_when_stop_loss_present() -> None:
     """Stop-loss / take-profit emit no inline close and no bracket leg.
 
-    Bracket prices computed at signal time are wrong on gap opens
-    (market orders fill on the next bar's open). The engine uses the
-    post-fill ``position.entry_price``.
+    The compiled code is a pure indicator shim — zero submit_order
+    calls. Engine's evaluate_exit_rules handles stop/take-profit;
+    engine's _EngineEntryDispatcher handles entries.
     """
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
@@ -1212,9 +1173,7 @@ def test_no_inline_or_bracket_engine_exits_when_stop_loss_present() -> None:
     code = compile_strategy(spec)
     assert 'reason="compiled_stop_loss"' not in code
     assert 'reason="compiled_take_profit"' not in code
-    # The ONLY strategy-emitted submit_order is the entry — no bracket
-    # legs, no inline closes. Engine's evaluate_exit_rules handles both.
-    assert code.count("ctx.submit_order") == 1
+    assert code.count("ctx.submit_order") == 0
     assert "attached_stop_loss" not in code
     assert "attached_take_profit" not in code
     assert "StopAttachment" not in code
@@ -1251,14 +1210,16 @@ def test_safety_gate_accepts_entries_only_when_spec_has_stop_loss() -> None:
 
 
 def test_safety_gate_rejects_entries_only_without_engine_handled_exit() -> None:
-    """Sanity check: an entry-only spec with no engine-handled exit
-    rules (and no signal_exit) must still fail the safety gate.
+    """Spec with entry rules but no exit rules: safety gate rejects because
+    the spec is NOT fully engine-managed (no exit rules). The compiled code
+    has zero submit_order calls but with no exit rules, the engine can't
+    close positions, so the gate fires.
     """
     spec = _spec(entry_rules=[_rsi_lt_30_entry()], exit_rules=[])
     code = compile_strategy(spec)
     results = CodeSafetyChecker().check(code, spec)
     criticals = _critical_details(results)
-    assert any("exit" in c.lower() for c in criticals), criticals
+    assert criticals, "expected at least one critical for entry-only spec with no exits"
 
 
 def test_requires_custom_code_defensive_on_malformed_string() -> None:

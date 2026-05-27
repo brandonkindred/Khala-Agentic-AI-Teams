@@ -384,6 +384,23 @@ def _find_enclosing_funcdef(
     return enclosing
 
 
+def _is_engine_managed(spec: Any) -> bool:
+    """True when the engine dispatchers own entry and exit decisions for this spec.
+
+    Pre:  ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: True when entry rules exist AND ``requires_custom_code`` is False —
+    the compiled output is a thin indicator shim with zero ``submit_order``
+    calls, and all orders come from ``_EngineEntryDispatcher`` /
+    ``_EngineExitDispatcher``.
+    """
+    if spec is None:
+        return False
+    if getattr(spec, "requires_custom_code", False):
+        return False
+    entry_rules = getattr(spec, "entry_rules", None)
+    return bool(entry_rules)
+
+
 class CodeConformanceGate(GateResultsMixin):
     """Deterministic gate that checks generated code implements ``spec``.
 
@@ -436,7 +453,7 @@ class CodeConformanceGate(GateResultsMixin):
             results.extend(self._check_stop_loss_enforcement(cls, spec))
             results.extend(self._check_take_profit_enforcement(cls, spec))
             results.extend(self._check_bar_counting_exit(cls))
-            results.extend(self._check_sizing_math(cls))
+            results.extend(self._check_sizing_math(cls, spec))
             results.extend(self._check_no_extra_side_effects(tree, cls))
 
             return results or [self._info("Code conforms to spec across all conformance checks.")]
@@ -507,15 +524,19 @@ class CodeConformanceGate(GateResultsMixin):
         if not entry_rules:
             return ()
 
+        if _is_engine_managed(spec):
+            return (
+                self._info(
+                    f"Spec declares {len(entry_rules)} entry rule(s); entries are "
+                    "engine-managed via _EngineEntryDispatcher — no inline "
+                    "submit_order entry branches required."
+                ),
+            )
+
         reachable = _methods_reachable_from_on_bar(cls)
         branches = _find_if_branches_with_submit_order(cls, reachable_method_names=reachable)
         entry_branches: List[tuple[ast.If, List[ast.Call]]] = []
         for if_node, calls in branches:
-            # A branch counts as an entry path when it contains either:
-            # - an explicit ``side=`` literal that isn't a position close, OR
-            # - a ``**kwargs`` spread whose contents we can't statically
-            #   resolve (treat optimistically — same lenient stance the
-            #   CodeSafetyChecker order-flow gate takes on unknown sides).
             if any(
                 _submit_order_is_kwargs_spread(c)
                 or (_submit_order_has_side_literal(c) and not _submit_order_closes_position(c))
@@ -558,14 +579,20 @@ class CodeConformanceGate(GateResultsMixin):
         if not signal_exits:
             return ()
 
+        if _is_engine_managed(spec):
+            return (
+                self._info(
+                    f"Spec declares {len(signal_exits)} signal-exit rule(s); "
+                    "signal exits are engine-managed via _EngineExitDispatcher "
+                    "— no inline submit_order exit branches required."
+                ),
+            )
+
         reachable = _methods_reachable_from_on_bar(cls)
         branches = _find_if_branches_with_submit_order(cls, reachable_method_names=reachable)
         exit_branches = [
             (if_node, calls)
             for if_node, calls in branches
-            # Same lenient stance as entry coverage: a ``**kwargs`` spread
-            # may dynamically carry ``qty=position.qty`` so we can't fail
-            # closed on it.
             if any(
                 _submit_order_closes_position(c) or _submit_order_is_kwargs_spread(c) for c in calls
             )
@@ -685,7 +712,7 @@ class CodeConformanceGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Check 8 — sizing math present
     # ------------------------------------------------------------------
-    def _check_sizing_math(self, cls: ast.ClassDef) -> Iterable[QualityGateResult]:
+    def _check_sizing_math(self, cls: ast.ClassDef, spec: Any = None) -> Iterable[QualityGateResult]:
         all_submit_calls = [
             sub
             for method in _iter_strategy_methods(cls)
@@ -694,8 +721,6 @@ class CodeConformanceGate(GateResultsMixin):
         ]
         entry_submit_calls = [c for c in all_submit_calls if not _submit_order_closes_position(c)]
         if not entry_submit_calls:
-            # No entry submit_orders to size — Check #3 will already have
-            # fired, so silence this one to avoid noisy double-failure.
             return ()
 
         # Hardcoded-int qty on every entry is an immediate fail regardless
