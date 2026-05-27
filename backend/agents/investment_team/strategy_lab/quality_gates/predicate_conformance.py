@@ -36,6 +36,7 @@ import logging
 import math
 import statistics
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, ClassVar, Dict, List, Optional, Type
 
 from ..spec_dsl import EntryRule as _EntryRule
@@ -46,6 +47,13 @@ from .predicate_conformance_fixtures import ConformanceFixture, generate_conform
 logger = logging.getLogger(__name__)
 
 GATE: str = "predicate_conformance"
+
+
+def _normalize_side(side: Any) -> str:
+    """Extract the lowercase side string, handling ``str(Enum)`` values."""
+    if isinstance(side, Enum):
+        return str(side.value).lower()
+    return str(side).lower()
 
 
 def _code_conformance_retries() -> int:
@@ -144,16 +152,16 @@ class _ShadowContext:
         parent_order_id: Any = None,
         oco_group_id: Any = None,
     ) -> str:
+        side_lower = _normalize_side(side)
         self.orders.append(
             _OrderRecord(
                 bar_index=self._current_bar_index,
                 symbol=symbol,
-                side=str(side),
+                side=side_lower,
                 qty=qty,
                 reason=reason,
             )
         )
-        side_lower = str(side).lower()
         if side_lower in ("buy", "long"):
             self._positions[symbol] = _SimplePosition(
                 symbol=symbol,
@@ -284,6 +292,12 @@ class PredicateConformanceGate(GateResultsMixin):
                 rule_id=fixture.rule_id,
             )
 
+        if callable(getattr(strategy, "on_start", None)):
+            try:
+                strategy.on_start(ctx)
+            except Exception:
+                pass
+
         for i, bar in enumerate(fixture.bars):
             shadow_bar = _to_shadow_bar(bar, fixture.symbol)
             ctx._ingest_bar(shadow_bar, i)
@@ -302,8 +316,8 @@ class PredicateConformanceGate(GateResultsMixin):
 
         for i, verdict in enumerate(fixture.expected_verdicts):
             bar_orders = orders_at.get(i, [])
-            has_entry = any(str(o.side).lower() in ("buy", "long") for o in bar_orders)
-            has_exit = any(str(o.side).lower() in ("sell", "short", "flat") for o in bar_orders)
+            has_entry = any(o.side in ("buy", "long") for o in bar_orders)
+            has_exit = any(o.side in ("sell", "short", "flat") for o in bar_orders)
 
             if verdict is not None:
                 if fixture.rule_kind == "entry":

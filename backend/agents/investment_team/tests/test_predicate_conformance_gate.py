@@ -334,6 +334,64 @@ class TestSignalExitDrift:
         assert "false negative" in criticals[0].details.lower()
 
 
+class TestEnumSideHandling:
+    def test_strategy_using_orderside_enum(self):
+        """Strategies that pass ``OrderSide.LONG`` must be handled correctly."""
+        code = textwrap.dedent("""\
+            from contract import OrderSide, Strategy
+
+            class MyStrategy(Strategy):
+                UNIVERSE = frozenset({"TEST"})
+                def on_bar(self, ctx, bar):
+                    if ctx.is_warmup:
+                        return
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    position = ctx.position(bar.symbol)
+                    if position is None and bar.close > 50:
+                        ctx.submit_order(symbol=bar.symbol, side=OrderSide.LONG, qty=1.0)
+                    elif position is not None and bar.close <= 50:
+                        ctx.submit_order(symbol=bar.symbol, side=OrderSide.SHORT, qty=1.0)
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")],
+        )
+        results = gate.check(code, spec)
+        passed = [r for r in results if r.passed]
+        assert len(passed) >= 1, "Strategy using OrderSide enum should pass"
+
+
+class TestOnStartHook:
+    def test_strategy_with_on_start(self):
+        """Strategy that initialises state in on_start must not crash the shadow run."""
+        code = textwrap.dedent("""\
+            class MyStrategy:
+                UNIVERSE = frozenset({"TEST"})
+                def on_start(self, ctx):
+                    self._ready = True
+                def on_bar(self, ctx, bar):
+                    if ctx.is_warmup:
+                        return
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    if not self._ready:
+                        return
+                    position = ctx.position(bar.symbol)
+                    if position is None and bar.close > 50:
+                        ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+                    elif position is not None and bar.close <= 50:
+                        ctx.submit_order(symbol=bar.symbol, side="sell", qty=1.0)
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")],
+        )
+        results = gate.check(code, spec)
+        passed = [r for r in results if r.passed]
+        assert len(passed) >= 1, "Strategy with on_start should pass"
+
+
 class TestRuleIdOnResults:
     def test_rule_id_set_on_every_result(self):
         gate = PredicateConformanceGate()
