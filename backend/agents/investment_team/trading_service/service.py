@@ -528,6 +528,7 @@ class _EngineEntryDispatcher:
 
     entry_rules: Sequence[EntryRule]
     sizing: Any
+    exit_rules: Sequence[Any] = ()
     _next_seq: int = 0
 
     def maybe_emit(
@@ -621,16 +622,23 @@ class _EngineEntryDispatcher:
         return 1
 
     def _find_atr_ref(self):
-        """Find an ATR IndicatorRef from the spec's entry rules.
+        """Find an ATR IndicatorRef from the spec's entry or exit rules.
 
-        Scans entry-rule predicates for an ATR indicator and returns it
-        so vol-target sizing uses the spec's configured period.  Falls
-        back to the default ATR(14) when no ATR appears in the rules.
+        Scans entry-rule predicates first, then signal-exit predicates,
+        and returns the first ATR indicator so vol-target sizing uses the
+        spec's configured period. Falls back to default ATR(14) when no
+        ATR appears in any rule.
         """
-        from ..strategy_lab.spec_dsl import IndicatorRef
+        from ..strategy_lab.spec_dsl import IndicatorRef, SignalExitRule
 
         for rule in self.entry_rules:
             if not isinstance(rule, EntryRule):
+                continue
+            for side in (rule.when.lhs, rule.when.rhs):
+                if isinstance(side, IndicatorRef) and side.name == "atr":
+                    return side
+        for rule in self.exit_rules:
+            if not isinstance(rule, SignalExitRule):
                 continue
             for side in (rule.when.lhs, rule.when.rhs):
                 if isinstance(side, IndicatorRef) and side.name == "atr":
@@ -1062,6 +1070,7 @@ class TradingService:
         engine_entries = _EngineEntryDispatcher(
             entry_rules=self._entry_rules,
             sizing=self._sizing,
+            exit_rules=self._exit_rules,
         )
         execution_model = build_execution_model(
             self.config.execution_model,
