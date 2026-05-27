@@ -474,6 +474,9 @@ def _exec_strategy(code: str) -> Optional[Type]:
             "copy",
             "statistics",
             "operator",
+            "decimal",
+            "fractions",
+            "json",
         }
     )
     _real_import = builtins.__import__
@@ -500,6 +503,15 @@ def _exec_strategy(code: str) -> Optional[Type]:
         exec(code, namespace)  # noqa: S102
     except Exception:
         return None
+
+    for obj in namespace.values():
+        if (
+            isinstance(obj, type)
+            and obj is not stub_strategy_cls
+            and issubclass(obj, stub_strategy_cls)
+            and _has_on_bar(obj)
+        ):
+            return obj
 
     for obj in namespace.values():
         if isinstance(obj, type) and obj is not stub_strategy_cls and _has_on_bar(obj):
