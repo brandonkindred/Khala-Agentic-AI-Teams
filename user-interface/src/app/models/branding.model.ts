@@ -244,10 +244,12 @@ export interface ConversationMessage {
 export interface CreateConversationRequest {
   initial_message?: string | null;
   brand_id?: string | null;
+  skip_save?: boolean;
 }
 
 export interface SendMessageRequest {
   message: string;
+  skip_save?: boolean;
 }
 
 export interface ConversationStateResponse {

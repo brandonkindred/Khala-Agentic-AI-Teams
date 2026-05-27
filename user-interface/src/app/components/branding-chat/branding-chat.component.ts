@@ -50,6 +50,7 @@ export interface BrandingChatState {
 export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecked {
   @Input() conversationId: string | null = null;
   @Input() brandId: string | null = null;
+  @Input() skipSave = false;
   @Output() stateChange = new EventEmitter<BrandingChatState>();
   @Output() brandAutoCreated = new EventEmitter<string>();
 
@@ -111,7 +112,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
       this._conversationId = res.conversation_id;
     }
     // Detect auto-created brand: brand_id appeared where there was none before.
-    if (res.brand_id && !this._lastBrandId) {
+    if (res.brand_id && !this._lastBrandId && !this.skipSave) {
       this.brandAutoCreated.emit(res.brand_id);
     }
     this._lastBrandId = res.brand_id ?? null;
@@ -142,7 +143,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
   retryStartConversation(): void {
     this.error = null;
     this.loading = true;
-    this.api.createConversation().subscribe({
+    this.api.createConversation(null, this.skipSave).subscribe({
       next: (res) => {
         this.applyState(res);
         this.loading = false;
@@ -174,7 +175,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
     }
     // No conversation ID — create a new unattached conversation.
     // The backend will auto-create a brand once the user provides enough info.
-    this.api.createConversation().subscribe({
+    this.api.createConversation(null, this.skipSave).subscribe({
       next: (res) => this.applyState(res),
       error: (err) => {
         this.error = this.isUnreachableError(err)
@@ -195,7 +196,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
         { role: 'user', content: message, timestamp: new Date().toISOString() },
       ];
       this.loading = true;
-      this.api.createConversation(message).subscribe({
+      this.api.createConversation(message, this.skipSave).subscribe({
         next: (res) => {
           this.applyState(res);
           this.error = null;
@@ -215,7 +216,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
     ];
     this.loading = true;
     this.error = null;
-    this.api.sendConversationMessage(cid, message).subscribe({
+    this.api.sendConversationMessage(cid, message, this.skipSave).subscribe({
       next: (res) => {
         this.applyState(res);
         this.loading = false;

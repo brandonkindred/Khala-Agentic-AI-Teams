@@ -185,15 +185,22 @@ export class BrandingApiService {
     );
   }
 
-  createConversation(initialMessage?: string | null): Observable<ConversationStateResponse> {
+  createConversation(initialMessage?: string | null, skipSave?: boolean): Observable<ConversationStateResponse> {
     const body: CreateConversationRequest = initialMessage != null ? { initial_message: initialMessage } : {};
+    if (skipSave) body.skip_save = true;
     return this.http.post<ConversationStateResponse>(`${this.baseUrl}/conversations`, body);
   }
 
-  sendConversationMessage(conversationId: string, message: string): Observable<ConversationStateResponse> {
+  sendConversationMessage(
+    conversationId: string,
+    message: string,
+    skipSave?: boolean,
+  ): Observable<ConversationStateResponse> {
+    const body: Record<string, unknown> = { message };
+    if (skipSave) body['skip_save'] = true;
     return this.http.post<ConversationStateResponse>(
       `${this.baseUrl}/conversations/${conversationId}/messages`,
-      { message }
+      body,
     );
   }
 

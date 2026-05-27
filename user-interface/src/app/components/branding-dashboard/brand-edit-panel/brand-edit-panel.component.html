@@ -1,0 +1,54 @@
+@if (open) {
+  <aside class="edit-panel" aria-live="polite" aria-label="Edit brand details">
+    <header>
+      <h2>Edit details</h2>
+      <button mat-icon-button (click)="onClose()" aria-label="Close detail panel">
+        <mat-icon>close</mat-icon>
+      </button>
+    </header>
+
+    <form [formGroup]="form" (ngSubmit)="onApply()" class="edit-form">
+      <mat-form-field appearance="outline">
+        <mat-label>Company name</mat-label>
+        <input matInput formControlName="company_name" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Company description</mat-label>
+        <textarea matInput rows="3" formControlName="company_description"></textarea>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Target audience</mat-label>
+        <input matInput formControlName="target_audience" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Desired voice</mat-label>
+        <input matInput formControlName="desired_voice" placeholder="e.g. clear, confident, human" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Values (comma-separated)</mat-label>
+        <input matInput formControlName="values_csv" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Differentiators (comma-separated)</mat-label>
+        <input matInput formControlName="differentiators_csv" />
+      </mat-form-field>
+
+      <mat-slide-toggle
+        [checked]="skipSave"
+        (change)="onSkipSaveToggle($event.checked)"
+        class="skip-save-toggle"
+      >
+        Don't save this brand
+      </mat-slide-toggle>
+
+      <button mat-raised-button color="primary" type="submit" [disabled]="form.invalid">
+        Apply changes
+      </button>
+    </form>
+  </aside>
+}

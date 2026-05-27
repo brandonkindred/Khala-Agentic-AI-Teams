@@ -94,7 +94,7 @@ describe('BrandingChatComponent', () => {
     fixture.detectChanges();
     component.form.setValue({ message: 'hello' });
     component.onSubmit();
-    expect(apiSpy.sendConversationMessage).toHaveBeenCalledWith('conv-1', 'hello');
+    expect(apiSpy.sendConversationMessage).toHaveBeenCalledWith('conv-1', 'hello', false);
   });
 
   it('onSubmit creates new conversation if not present', () => {
@@ -103,7 +103,7 @@ describe('BrandingChatComponent', () => {
     component.form.setValue({ message: 'hello' });
     apiSpy.createConversation.mockClear();
     component.onSubmit();
-    expect(apiSpy.createConversation).toHaveBeenCalledWith('hello');
+    expect(apiSpy.createConversation).toHaveBeenCalledWith('hello', false);
   });
 
   it('onSubmit sendConversationMessage error', () => {

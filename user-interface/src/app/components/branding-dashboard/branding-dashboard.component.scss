@@ -1,13 +1,24 @@
-.branding-tabs {
-  .tab-label {
-    margin-left: 6px;
-  }
-}
-
 .page-intro {
   max-width: 52rem;
   margin-bottom: 0.5rem;
   line-height: 1.5;
+}
+
+.chat-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 8px 0;
+}
+
+.toolbar-spacer {
+  flex: 1 1 auto;
+}
+
+.edit-details-btn {
+  margin-left: auto;
 }
 
 .chat-view {
@@ -83,50 +94,12 @@
   margin-top: 12px;
 }
 
-.form-view {
-  padding-top: 8px;
-}
-
-.brand-summary-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-  padding: 8px 0;
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: var(--mat-card-elevated-container-color, var(--mat-sys-surface, #fff));
-}
-
-.brand-count {
-  font-weight: 500;
-}
-
-.session-form {
-  display: grid;
-  gap: 12px;
-}
-
 mat-form-field {
   width: 100%;
 }
 
 mat-card {
   margin-bottom: 16px;
-}
-
-.question-item {
-  border: 1px solid #e0e0e0;
-  border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 12px;
-}
-
-.answer-field {
-  width: 100%;
 }
 
 .agency-actions {
@@ -150,53 +123,8 @@ mat-card {
   min-width: 180px;
 }
 
-.new-brand-form {
-  display: grid;
-  gap: 12px;
-  margin: 12px 0;
-  padding: 12px;
-  border: 1px solid #e0e0e0;
-  border-radius: 8px;
-}
-
-.selected-brand-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-  padding: 12px 0;
-  margin-top: 12px;
-  border-top: 1px solid #eee;
-  border-radius: 4px;
-  transition: background 0.3s ease;
-}
-
-.brand-item__header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-}
-
-.brand-meta {
-  color: var(--mat-sys-on-surface-variant, #666);
-  font-size: 0.9rem;
-}
-
 .brand-item--highlight {
   background: rgba(88, 166, 255, 0.12);
-}
-
-.hint {
-  margin-top: 12px;
-  color: var(--mat-sys-on-surface-variant, #666);
-  font-style: italic;
-}
-
-.brand-actions {
-  display: flex;
-  gap: 8px;
-  margin-left: auto;
 }
 
 .split-button {

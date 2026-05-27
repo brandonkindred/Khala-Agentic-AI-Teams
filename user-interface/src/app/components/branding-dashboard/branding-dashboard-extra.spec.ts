@@ -7,7 +7,7 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { BrandingApiService, type BrandJobStatus } from '../../services/branding-api.service';
 import { BrandActivityService } from '../../services/brand-activity.service';
 import { BrandingDashboardComponent } from './branding-dashboard.component';
-import type { Brand, Client, BrandingMissionSnapshot, BrandingSessionResponse } from '../../models';
+import type { Brand, Client, BrandingMissionSnapshot } from '../../models';
 
 const workspaceClient: Client = { id: 'w1', name: 'My brands', created_at: '2020-01-01', updated_at: '2020-01-01' };
 
@@ -43,14 +43,10 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     listJobs: ReturnType<typeof vi.fn>;
     requestMarketResearch: ReturnType<typeof vi.fn>;
     requestDesignAssets: ReturnType<typeof vi.fn>;
-    createSession: ReturnType<typeof vi.fn>;
-    answerQuestion: ReturnType<typeof vi.fn>;
-    getSession: ReturnType<typeof vi.fn>;
     getConversation: ReturnType<typeof vi.fn>;
     createConversation: ReturnType<typeof vi.fn>;
-    listConversations: ReturnType<typeof vi.fn>;
-    sendChatMessage: ReturnType<typeof vi.fn>;
-    streamConversation: ReturnType<typeof vi.fn>;
+    updateBrand: ReturnType<typeof vi.fn>;
+    sendConversationMessage: ReturnType<typeof vi.fn>;
   };
   let snackBar: { open: ReturnType<typeof vi.fn> };
   let router: { navigate: ReturnType<typeof vi.fn> };
@@ -89,14 +85,10 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
       listJobs: vi.fn().mockReturnValue(of([])),
       requestMarketResearch: vi.fn().mockReturnValue(of({ summary: 'A long market research summary' })),
       requestDesignAssets: vi.fn().mockReturnValue(of({ request_id: 'r1', status: 'queued' })),
-      createSession: vi.fn().mockReturnValue(of({ session_id: 's1', open_questions: [] } as BrandingSessionResponse)),
-      answerQuestion: vi.fn().mockReturnValue(of({ session_id: 's1', open_questions: [] } as BrandingSessionResponse)),
-      getSession: vi.fn().mockReturnValue(of({ session_id: 's1', open_questions: [] } as BrandingSessionResponse)),
       getConversation: vi.fn().mockReturnValue(of({ conversation_id: 'c1', messages: [], mission: null, latest_output: null, suggested_questions: [] })),
       createConversation: vi.fn().mockReturnValue(of({ conversation_id: 'c1', messages: [], mission: null, latest_output: null, suggested_questions: [] })),
-      listConversations: vi.fn().mockReturnValue(of([])),
-      sendChatMessage: vi.fn().mockReturnValue(of({ conversation_id: 'c1', messages: [], mission: null, latest_output: null, suggested_questions: [] })),
-      streamConversation: vi.fn().mockReturnValue(of()),
+      updateBrand: vi.fn().mockReturnValue(of(makeBrand('b1'))),
+      sendConversationMessage: vi.fn().mockReturnValue(of({ conversation_id: 'c1', messages: [], mission: { company_name: 'New', company_description: 'd', target_audience: 'a' }, latest_output: null, suggested_questions: [] })),
     };
   });
 
@@ -341,11 +333,18 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
   // openFormTabForNewBrand / startFreshConversation / canCreateBrandFromChat
   // ---------------------------------------------------------------------
 
-  it('openFormTabForNewBrand toggles form tab and create flag', async () => {
+  it('openEditPanelForNewBrand clears brand and conversation state, opens panel', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
-    component.openFormTabForNewBrand();
-    expect(component.selectedTabIndex).toBe(1);
+    component.selectedBrand = makeBrand('b1');
+    component.activeConversationId = 'conv-b1';
+    component.conversationMission = { company_name: 'C' } as BrandingMissionSnapshot;
+    component.openEditPanelForNewBrand();
+    expect(component.selectedBrand).toBeNull();
+    expect(component.activeConversationId).toBeNull();
+    expect(component.conversationMission).toBeNull();
+    expect(component.conversationLatestOutput).toBeNull();
+    expect(component.editPanelOpen).toBe(true);
     expect(component.showCreateBrand).toBe(true);
   });
 
@@ -512,7 +511,7 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
   // Activity callbacks
   // ---------------------------------------------------------------------
 
-  it('onActivityOpen and onActivityDismiss', async () => {
+  it('onActivityOpen selects brand and onActivityDismiss removes chip', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
     const store = TestBed.inject(BrandActivityService);
@@ -520,7 +519,7 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     component.brands = [brand];
     const activity = store.start('run', 'b1');
     component.onActivityOpen(activity);
-    expect(component.selectedTabIndex).toBe(0);
+    expect(component.selectedBrand?.id).toBe('b1');
 
     component.onActivityDismiss(activity);
     expect(store.snapshot().some((a) => a.id === activity.id)).toBe(false);
@@ -568,80 +567,160 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
   });
 
   // ---------------------------------------------------------------------
-  // Session start / answer / polling
+  // Edit panel / skipSave / missionUpdate
   // ---------------------------------------------------------------------
 
-  it('startSession submits valid form and starts polling', async () => {
+  it('onMissionUpdateFromPanel patches conversationMission and calls updateBrand', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
-    component.form.setValue({
-      company_name: 'Acme',
-      company_description: 'we make widgets',
-      target_audience: 'companies',
-      desired_voice: 'clear',
-      values_csv: 'integrity, quality',
-      differentiators_csv: 'fast',
-    });
-    component.startSession();
-    expect(api.createSession).toHaveBeenCalled();
-    expect(component.session).toBeTruthy();
+    component.selectedClient = workspaceClient;
+    component.selectedBrand = makeBrand('b1');
+    component.brands = [component.selectedBrand];
+    component.activeConversationId = 'conv-b1';
+    component.conversationMission = { company_name: 'Old', company_description: 'd', target_audience: 'a' } as BrandingMissionSnapshot;
+    component.editPanelOpen = true;
+    const updatedMission = { ...component.selectedBrand.mission, company_name: 'New' };
+    api.updateBrand.mockReturnValue(of(makeBrand('b1', { mission: updatedMission })));
+
+    component.onMissionUpdateFromPanel({ company_name: 'New' });
+
+    expect(component.conversationMission?.company_name).toBe('New');
+    expect(component.selectedBrand?.mission.company_name).toBe('New');
+    expect(api.updateBrand).toHaveBeenCalled();
+    expect(api.sendConversationMessage).toHaveBeenCalledWith('conv-b1', expect.stringContaining('New'), false);
+    expect(component.editPanelOpen).toBe(false);
   });
 
-  it('startSession marks invalid form as touched and does not call API', async () => {
+  it('onMissionUpdateFromPanel works without existing mission', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
-    api.createSession.mockClear();
-    component.startSession();
-    expect(api.createSession).not.toHaveBeenCalled();
+    component.conversationMission = null;
+    component.selectedBrand = null;
+    component.onMissionUpdateFromPanel({ company_name: 'X' });
+    expect(component.conversationMission?.company_name).toBe('X');
   });
 
-  it('startSession handles error', async () => {
+  it('onMissionUpdateFromPanel syncs edits to conversation when no brand is selected', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
-    component.form.setValue({
-      company_name: 'Acme',
-      company_description: 'we make widgets',
-      target_audience: 'companies',
-      desired_voice: 'clear',
-      values_csv: '',
-      differentiators_csv: '',
-    });
-    api.createSession.mockReturnValue(throwError(() => ({ message: 'no' })));
-    component.startSession();
-    expect(component.error).toBe('no');
+    component.selectedBrand = null;
+    component.selectedClient = workspaceClient;
+    component.activeConversationId = 'conv-orphan';
+    component.conversationMission = { company_name: 'Old', company_description: 'd', target_audience: 'a' } as BrandingMissionSnapshot;
+
+    component.onMissionUpdateFromPanel({ company_name: 'New' });
+
+    expect(api.sendConversationMessage).toHaveBeenCalledWith('conv-orphan', expect.stringContaining('New'), false);
+    expect(component.conversationMission?.company_name).toBe('New');
   });
 
-  it('submitAnswer submits answer for question', async () => {
+  it('onMissionUpdateFromPanel reconciles auto-created brand from conversation response', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
-    component.session = { session_id: 's1', open_questions: [] } as BrandingSessionResponse;
-    component.answers = { q1: 'my-answer' };
-    component.submitAnswer({ id: 'q1' } as never);
-    expect(api.answerQuestion).toHaveBeenCalledWith('s1', 'q1', 'my-answer');
-    expect(component.answers['q1']).toBe('');
+    component.selectedBrand = null;
+    component.selectedClient = workspaceClient;
+    component.activeConversationId = 'conv-orphan';
+    component.conversationMission = { company_name: 'Old', company_description: 'd', target_audience: 'a' } as BrandingMissionSnapshot;
+    api.sendConversationMessage.mockReturnValue(of({
+      conversation_id: 'conv-orphan',
+      brand_id: 'auto-b1',
+      messages: [],
+      mission: { company_name: 'New', company_description: 'd', target_audience: 'a' },
+      latest_output: null,
+      suggested_questions: [],
+    }));
+    api.listBrands.mockReturnValue(of([makeBrand('auto-b1', { name: 'Auto' })]));
+
+    component.onMissionUpdateFromPanel({ company_name: 'New' });
+
+    expect(api.listBrands).toHaveBeenCalledWith('w1');
+    expect(component.selectedBrand?.id).toBe('auto-b1');
   });
 
-  it('submitAnswer no-ops without session or empty answer', async () => {
+  it('onMissionUpdateFromPanel handles updateBrand error without crashing', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
-    component.session = null;
-    component.submitAnswer({ id: 'q1' } as never);
-    expect(api.answerQuestion).not.toHaveBeenCalled();
-
-    component.session = { session_id: 's1', open_questions: [] } as BrandingSessionResponse;
-    component.answers = { q1: '   ' };
-    component.submitAnswer({ id: 'q1' } as never);
-    expect(api.answerQuestion).not.toHaveBeenCalled();
+    component.selectedClient = workspaceClient;
+    const brand = makeBrand('b1');
+    component.selectedBrand = brand;
+    component.brands = [brand];
+    component.conversationMission = { company_name: 'Old', company_description: 'd', target_audience: 'a' } as BrandingMissionSnapshot;
+    api.updateBrand.mockReturnValue(throwError(() => ({ message: 'update-fail' })));
+    component.onMissionUpdateFromPanel({ company_name: 'Y' });
+    expect(api.updateBrand).toHaveBeenCalledWith('w1', 'b1', expect.objectContaining({ company_name: 'Y' }));
+    expect(component.conversationMission?.company_name).toBe('Y');
+    expect(component.editPanelOpen).toBe(false);
   });
 
-  it('submitAnswer handles error', async () => {
+  it('onMissionUpdateFromPanel creates conversation when none exists yet', async () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
-    component.session = { session_id: 's1', open_questions: [] } as BrandingSessionResponse;
-    component.answers = { q1: 'a' };
-    api.answerQuestion.mockReturnValue(throwError(() => ({ message: 'no' })));
-    component.submitAnswer({ id: 'q1' } as never);
-    expect(component.error).toBe('no');
+    component.selectedBrand = null;
+    component.selectedClient = workspaceClient;
+    component.activeConversationId = null;
+    component.conversationMission = null;
+    api.createConversation.mockReturnValue(of({
+      conversation_id: 'conv-new',
+      brand_id: null,
+      messages: [],
+      mission: { company_name: 'Fresh', company_description: 'd', target_audience: 'a' },
+      latest_output: null,
+      suggested_questions: [],
+    }));
+
+    component.onMissionUpdateFromPanel({ company_name: 'Fresh' });
+
+    expect(api.createConversation).toHaveBeenCalledWith(expect.stringContaining('Fresh'), false);
+    expect(component.activeConversationId).toBe('conv-new');
+  });
+
+  it('openEditPanelForNewBrand syncs query params to clear stale URL', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.selectedBrand = makeBrand('b1');
+    component.activeConversationId = 'conv-b1';
+    router.navigate.mockClear();
+
+    component.openEditPanelForNewBrand();
+
+    expect(router.navigate).toHaveBeenCalled();
+    const lastCall = router.navigate.mock.calls[router.navigate.mock.calls.length - 1];
+    expect(lastCall[1].queryParams.brandId).toBeUndefined();
+    expect(lastCall[1].queryParams.conversationId).toBeUndefined();
+  });
+
+  it('onSkipSaveChange resets brand and conversation when skip is true', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.selectedBrand = makeBrand('b1');
+    component.activeConversationId = 'conv-1';
+    component.conversationMission = { company_name: 'C' } as BrandingMissionSnapshot;
+
+    component.onSkipSaveChange(true);
+
+    expect(component.skipSave).toBe(true);
+    expect(component.selectedBrand).toBeNull();
+    expect(component.activeConversationId).toBeNull();
+    expect(component.conversationMission).toBeNull();
+  });
+
+  it('onSkipSaveChange with false does not reset state', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    component.selectedBrand = makeBrand('b1');
+    component.onSkipSaveChange(false);
+    expect(component.skipSave).toBe(false);
+    expect(component.selectedBrand).not.toBeNull();
+  });
+
+  it('toggleEditPanel toggles editPanelOpen', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    expect(component.editPanelOpen).toBe(false);
+    component.toggleEditPanel();
+    expect(component.editPanelOpen).toBe(true);
+    component.toggleEditPanel();
+    expect(component.editPanelOpen).toBe(false);
   });
 
   // ---------------------------------------------------------------------
