@@ -182,6 +182,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
 
   onOpenSaveAsBrand(): void {
     this.showSaveAsBrandDialog = true;
+    this.saveToAgencyMission = this.conversationMission;
     this.saveToAgencyError = null;
   }
 
@@ -189,16 +190,18 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   saveToAgencyBrandName = '';
   saveToAgencyError: string | null = null;
   saveToAgencySuccess: string | null = null;
+  private saveToAgencyMission: BrandingMissionSnapshot | null = null;
 
   closeSaveAsBrandDialog(): void {
     this.showSaveAsBrandDialog = false;
     this.saveToAgencyBrandName = '';
     this.saveToAgencyError = null;
     this.saveToAgencySuccess = null;
+    this.saveToAgencyMission = null;
   }
 
   saveConversationToAgency(): void {
-    const mission = this.conversationMission;
+    const mission = this.saveToAgencyMission;
     if (!mission) {
       this.saveToAgencyError = 'No mission to save.';
       return;

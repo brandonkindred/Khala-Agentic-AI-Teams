@@ -181,10 +181,12 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
     fixture.detectChanges();
     component.conversationMission = null;
+    component.onOpenSaveAsBrand();
     component.saveConversationToAgency();
     expect(component.saveToAgencyError).toContain('No mission');
 
     component.conversationMission = { company_name: 'C', company_description: 'd', target_audience: 'a', values: [], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
+    component.onOpenSaveAsBrand();
     component.selectedClient = null;
     component.saveConversationToAgency();
     expect(component.saveToAgencyError).toContain('Workspace');
@@ -195,6 +197,7 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.conversationMission = { company_name: 'C', company_description: 'd', target_audience: 'a', values: [], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
     component.selectedClient = workspaceClient;
+    component.onOpenSaveAsBrand();
     api.createBrand.mockReturnValue(of(makeBrand('b-new', { name: 'My Brand' })));
     api.listBrands.mockReturnValue(of([makeBrand('b-new', { name: 'My Brand' })]));
     component.saveConversationToAgency();
@@ -207,10 +210,10 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.conversationMission = { company_name: 'C', company_description: 'd', target_audience: 'a', values: [], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
     component.selectedClient = workspaceClient;
+    component.onOpenSaveAsBrand();
     api.runBrand.mockReturnValue(throwError(() => ({ message: 'fail' })));
     api.createBrand.mockReturnValue(of(makeBrand('b-new')));
     component.saveConversationToAgency();
-    // No assertion failure; run failure should be handled by the component
     expect(api.runBrand).toHaveBeenCalled();
   });
 
@@ -219,9 +222,24 @@ describe('BrandingDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.conversationMission = { company_name: 'C', company_description: 'd', target_audience: 'a', values: [], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
     component.selectedClient = workspaceClient;
+    component.onOpenSaveAsBrand();
     api.createBrand.mockReturnValue(throwError(() => ({ error: { detail: 'createbrand-fail' } })));
     component.saveConversationToAgency();
     expect(component.saveToAgencyError).toBe('createbrand-fail');
+  });
+
+  it('saveConversationToAgency preserves mission snapshot after workspace change', async () => {
+    await buildModule({ snapshot: { queryParamMap: { get: () => null } } });
+    fixture.detectChanges();
+    const originalMission = { company_name: 'Original', company_description: 'desc', target_audience: 'audience', values: ['v1'], differentiators: [], desired_voice: 'v' } as BrandingMissionSnapshot;
+    component.conversationMission = originalMission;
+    component.selectedClient = workspaceClient;
+    component.onOpenSaveAsBrand();
+    component.conversationMission = { company_name: 'Overwritten', company_description: 'other', target_audience: 'other', values: [], differentiators: [], desired_voice: '' } as BrandingMissionSnapshot;
+    api.createBrand.mockReturnValue(of(makeBrand('b-new', { name: 'Original' })));
+    api.listBrands.mockReturnValue(of([makeBrand('b-new', { name: 'Original' })]));
+    component.saveConversationToAgency();
+    expect(api.createBrand).toHaveBeenCalledWith('w1', expect.objectContaining({ company_name: 'Original' }));
   });
 
   // ---------------------------------------------------------------------
