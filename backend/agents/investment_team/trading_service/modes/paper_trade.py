@@ -239,6 +239,13 @@ def run_paper_trade(
         # leak open positions when ``strategy_code`` is purely entry-driven.
         # Empty list is a no-op.
         exit_rules=list(strategy.exit_rules),
+        # Engine-managed entries: for non-custom specs, the compiled code
+        # emits zero submit_order calls — _EngineEntryDispatcher evaluates
+        # entry predicates deterministically. Custom-code specs continue to
+        # handle entries in the strategy subprocess.
+        entry_rules=list(strategy.entry_rules) if not strategy.requires_custom_code else None,
+        sizing=strategy.sizing if not strategy.requires_custom_code else None,
+        target_symbols=list(strategy.target_symbols) if not strategy.requires_custom_code else None,
     )
 
     # First attempt: primary provider.

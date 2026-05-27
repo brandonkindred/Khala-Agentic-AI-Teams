@@ -185,6 +185,7 @@ def run_backtest(
             exit_rules=list(strategy.exit_rules),
             entry_rules=list(strategy.entry_rules) if not strategy.requires_custom_code else None,
             sizing=strategy.sizing if not strategy.requires_custom_code else None,
+            target_symbols=list(strategy.target_symbols) if not strategy.requires_custom_code else None,
         )
         outcome = service.run(stream)
         run_metrics = compute_metrics(

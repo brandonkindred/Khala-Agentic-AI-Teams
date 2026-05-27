@@ -2,23 +2,27 @@
 
 A strategy whose entry rules never fire in the backtest is one where
 the rule was dead code — the predicate was unreachable given the data,
-or the compiler emitted it but the runtime conditions never aligned.
-Such a strategy is less than what the spec describes and should not be
-published as implementing the full spec.
+or the conditions never aligned at runtime. Such a strategy is less
+than what the spec describes and should not be published as implementing
+the full spec.
 
-This gate reads ``TradeRecord.entry_reason`` (populated by the fill
-simulator from the compiler's ``reason="compiled_entry:entry[{idx}]"``
-annotation) and counts how many trades cite each spec entry rule.
+This gate reads ``TradeRecord.entry_reason`` and ``exit_reason``
+(populated by the fill simulator from the engine dispatchers' reason
+annotations) and counts how many trades cite each spec rule.
+
+Reason prefixes matched:
+  - Entries: ``engine_entry:entry[N]`` (engine-managed) or
+    ``compiled_entry:entry[N]`` (legacy/custom-code).
+  - Signal exits: ``engine_exit:signal_exit[N]`` (engine-managed) or
+    ``compiled_signal_exit:exit[N]`` (legacy/custom-code).
+
 Rules with zero citations are flagged:
 
-* **critical** — an entry rule that never fired. The strategy didn't
-  exercise a signal the spec declared. Dead-code entry rules are the
-  clearest indicator that the compiled code doesn't match the spec.
-* **warning** — a ``SignalExitRule`` that never fired. Signal exits
-  compete with stop-loss and take-profit (which take priority in the
-  engine), so a zero count is suspicious but not always dead code.
+* **critical** — an entry rule that never fired.
+* **warning** — a ``SignalExitRule`` that never fired (signal exits
+  compete with stop-loss/take-profit which fire first in the engine).
 * **info-skip** — when ``spec.requires_custom_code=True`` (LLM-authored
-  code path), the compiler's ``reason`` annotation is absent, so the
+  code path), the reason annotation format is unpredictable, so the
   gate has no signal to evaluate.
 
 Wired from
@@ -35,8 +39,8 @@ from ..models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
 GATE = "rule_firing_rate_realism"
 
-_ENTRY_REASON_RE = re.compile(r"^compiled_entry:entry\[(\d+)]$")
-_EXIT_REASON_RE = re.compile(r"^compiled_signal_exit:exit\[(\d+)]$")
+_ENTRY_REASON_RE = re.compile(r"^(?:compiled_entry|engine_entry):entry\[(\d+)]$")
+_EXIT_REASON_RE = re.compile(r"^(?:compiled_signal_exit:exit|engine_exit:signal_exit)\[(\d+)]$")
 
 
 class RuleFiringRateGate(GateResultsMixin):
@@ -150,9 +154,10 @@ def _count_exit_hits(trades: List[TradeRecord]) -> dict:
     """Return ``{rule_index: count}`` from ``exit_reason`` annotations.
 
     Postconditions:
-      - Only ``compiled_signal_exit:exit[N]`` patterns are matched;
-        engine-fired exits (``engine_exit:stop_loss``, etc.) are
-        ignored — they're not spec signal-exit rules.
+      - Matches ``engine_exit:signal_exit[N]`` (engine-managed) and
+        ``compiled_signal_exit:exit[N]`` (legacy/custom-code). Other
+        engine exits (``engine_exit:stop_loss[N]``, etc.) are ignored
+        — they're not signal-exit rules.
     """
     hits: dict = {}
     for t in trades:

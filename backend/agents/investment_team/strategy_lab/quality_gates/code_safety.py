@@ -6,7 +6,7 @@ import ast
 from dataclasses import dataclass
 from typing import Any, ClassVar, Iterable, List
 
-from ..spec_dsl import StopLossRule, TakeProfitRule
+from ..spec_dsl import SignalExitRule, StopLossRule, TakeProfitRule
 from .code_safety_ast import (
     _BANNED_CALL_PATTERNS,
     _LOOKAHEAD_PATTERNS,
@@ -90,10 +90,10 @@ def _spec_has_engine_handled_exit(spec: Any) -> bool:
     """True iff ``spec.exit_rules`` contains a rule the engine enforces.
 
     Pre:  ``spec`` is a ``StrategySpec`` or ``None``.
-    Post: True only when ``spec.exit_rules`` contains at least one
-          ``StopLossRule`` or ``TakeProfitRule`` (rule kinds enforced
-          engine-side via ``evaluate_exit_rules``). ``SignalExitRule``
-          is a no-op in the evaluator and never satisfies this check.
+    Post: True when ``spec.exit_rules`` contains at least one
+          ``StopLossRule``, ``TakeProfitRule``, or ``SignalExitRule``
+          (all enforced engine-side via ``evaluate_exit_rules`` /
+          ``_EngineExitDispatcher``).
     Invariant: stop-loss/take-profit basis-vs-side coverage is NOT
           checked here — callers must additionally invoke
           :func:`_engine_exits_cover_sides` against the relevant
@@ -104,7 +104,26 @@ def _spec_has_engine_handled_exit(spec: Any) -> bool:
     exit_rules = getattr(spec, "exit_rules", None)
     if not exit_rules:
         return False
-    return any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
+    return any(isinstance(r, (StopLossRule, TakeProfitRule, SignalExitRule)) for r in exit_rules)
+
+
+def _spec_is_fully_engine_managed(spec: Any) -> bool:
+    """True when both entries and exits are engine-managed for this spec.
+
+    Pre:  ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: True when entry rules exist, at least one exit rule is
+          engine-handled, and the spec is NOT custom-code. The compiled
+          strategy is a pure indicator shim with zero ``submit_order``
+          calls — all orders come from the engine dispatchers.
+    """
+    if spec is None:
+        return False
+    if getattr(spec, "requires_custom_code", False):
+        return False
+    entry_rules = getattr(spec, "entry_rules", None)
+    if not entry_rules:
+        return False
+    return _spec_has_engine_handled_exit(spec)
 
 
 def _hook_calls_include_entry(cls: ast.ClassDef, calls: List[ast.Call]) -> bool:
@@ -424,10 +443,11 @@ def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
     Post: False if ``spec`` is None or ``sides`` is empty. Otherwise
           True iff for every side ∈ ``sides`` there exists a rule
           in ``spec.exit_rules`` that triggers on that side per the
-          basis-vs-side compatibility map: ``TakeProfitRule`` and
-          ``StopLossRule(basis="entry_price")`` cover both sides;
-          ``StopLossRule(basis="trailing_high")`` covers only long;
-          ``StopLossRule(basis="trailing_low")`` covers only short.
+          basis-vs-side compatibility map: ``TakeProfitRule``,
+          ``SignalExitRule``, and ``StopLossRule(basis="entry_price")``
+          cover both sides; ``StopLossRule(basis="trailing_high")``
+          covers only long; ``StopLossRule(basis="trailing_low")``
+          covers only short.
     """
     if spec is None or not sides:
         return False
@@ -444,6 +464,8 @@ def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
                 return side == "long"
             if basis == "trailing_low":
                 return side == "short"
+        if isinstance(rule, SignalExitRule):
+            return True
         return False
 
     for side in sides:
@@ -698,11 +720,14 @@ class CodeSafetyChecker(GateResultsMixin):
         #   - a single entry with an ``attached_stop_loss`` /
         #     ``attached_take_profit`` bracket leg;
         #   - an entries-only flow whose missing exit is supplied by
-        #     ``spec.exit_rules`` (engine-handled relaxation below).
+        #     ``spec.exit_rules`` (engine-handled relaxation below);
+        #   - zero calls when the spec is fully engine-managed.
         if len(ctx.strategy_classes) != 1:
             return ()
         hook_calls = _collect_hook_submit_calls(ctx.strategy_classes[0])
         if not hook_calls:
+            if _spec_is_fully_engine_managed(ctx.spec):
+                return ()
             return (
                 self._critical(
                     "No ctx.submit_order call reachable from on_bar — strategy "

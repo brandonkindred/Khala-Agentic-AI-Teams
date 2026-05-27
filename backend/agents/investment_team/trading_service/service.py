@@ -373,7 +373,11 @@ class _EngineExitDispatcher:
             qty=pos.qty + scale_in_qty,
             order_type=OrderType.MARKET,
             tif=TimeInForce.DAY,
-            reason=f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}",
+            reason=(
+                f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
+                if intent.rule_kind == "signal_exit"
+                else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
+            ),
         )
         try:
             req.validate_prices()
@@ -524,6 +528,8 @@ class _EngineEntryDispatcher:
 
     entry_rules: Sequence[EntryRule]
     sizing: Any
+    exit_rules: Sequence[Any] = ()
+    target_symbols: frozenset[str] = frozenset()
     _next_seq: int = 0
 
     def maybe_emit(
@@ -536,6 +542,8 @@ class _EngineEntryDispatcher:
         result: "TradingServiceResult",
     ) -> None:
         if not self.entry_rules or self.sizing is None:
+            return
+        if self.target_symbols and cur_bar.symbol not in self.target_symbols:
             return
         sym = cur_bar.symbol
         if portfolio.positions.get(sym) is not None:
@@ -617,16 +625,23 @@ class _EngineEntryDispatcher:
         return 1
 
     def _find_atr_ref(self):
-        """Find an ATR IndicatorRef from the spec's entry rules.
+        """Find an ATR IndicatorRef from the spec's entry or exit rules.
 
-        Scans entry-rule predicates for an ATR indicator and returns it
-        so vol-target sizing uses the spec's configured period.  Falls
-        back to the default ATR(14) when no ATR appears in the rules.
+        Scans entry-rule predicates first, then signal-exit predicates,
+        and returns the first ATR indicator so vol-target sizing uses the
+        spec's configured period. Falls back to default ATR(14) when no
+        ATR appears in any rule.
         """
-        from ..strategy_lab.spec_dsl import IndicatorRef
+        from ..strategy_lab.spec_dsl import IndicatorRef, SignalExitRule
 
         for rule in self.entry_rules:
             if not isinstance(rule, EntryRule):
+                continue
+            for side in (rule.when.lhs, rule.when.rhs):
+                if isinstance(side, IndicatorRef) and side.name == "atr":
+                    return side
+        for rule in self.exit_rules:
+            if not isinstance(rule, SignalExitRule):
                 continue
             for side in (rule.when.lhs, rule.when.rhs):
                 if isinstance(side, IndicatorRef) and side.name == "atr":
@@ -990,6 +1005,7 @@ class TradingService:
         exit_rules: Optional[List[ExitRule]] = None,
         entry_rules: Optional[List[EntryRule]] = None,
         sizing: Optional[Any] = None,
+        target_symbols: Optional[List[str]] = None,
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
@@ -1012,6 +1028,7 @@ class TradingService:
         self._exit_rules: List[ExitRule] = list(exit_rules or [])
         self._entry_rules: List[EntryRule] = list(entry_rules or [])
         self._sizing = sizing
+        self._target_symbols: frozenset[str] = frozenset(target_symbols or ())
         # Issue #377: when set, overrides ``BAR_CHUNK_SIZE`` env. Paper-trade
         # mode pins this to 1 so live-bar handling never buffers. Reject
         # zero/negative or non-int explicitly so a future caller passing
@@ -1058,6 +1075,8 @@ class TradingService:
         engine_entries = _EngineEntryDispatcher(
             entry_rules=self._entry_rules,
             sizing=self._sizing,
+            exit_rules=self._exit_rules,
+            target_symbols=self._target_symbols,
         )
         execution_model = build_execution_model(
             self.config.execution_model,
