@@ -538,7 +538,9 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     if (patch.company_name) parts.push(`Our company name is ${patch.company_name}.`);
     if (patch.company_description) parts.push(`We do: ${patch.company_description}.`);
     if (patch.target_audience) parts.push(`Our target audience is ${patch.target_audience}.`);
-    if (patch.desired_voice) parts.push(`Our desired voice is ${patch.desired_voice}.`);
+    if (patch.desired_voice !== undefined) {
+      parts.push(patch.desired_voice ? `Our desired voice is ${patch.desired_voice}.` : 'We have no specific desired voice.');
+    }
     if (patch.values !== undefined) {
       parts.push(patch.values.length ? `Our values are: ${patch.values.join(', ')}.` : 'We have no specific values.');
     }

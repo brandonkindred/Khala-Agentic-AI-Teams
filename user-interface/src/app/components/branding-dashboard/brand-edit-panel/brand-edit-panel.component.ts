@@ -63,7 +63,7 @@ export class BrandEditPanelComponent implements OnChanges {
       company_name: raw.company_name,
       company_description: raw.company_description,
       target_audience: raw.target_audience,
-      desired_voice: raw.desired_voice || undefined,
+      desired_voice: raw.desired_voice,
       values: raw.values_csv ? raw.values_csv.split(',').map((v: string) => v.trim()).filter(Boolean) : [],
       differentiators: raw.differentiators_csv
         ? raw.differentiators_csv.split(',').map((v: string) => v.trim()).filter(Boolean)
