@@ -429,6 +429,8 @@ def _compute_other_rule_verdicts(
             rid = f"entry[{idx}]"
             if rid == fixture.rule_id:
                 continue
+            if fixture.side is not None and rule.side != fixture.side:
+                continue
             result = evaluate_predicate(rule.when, view, i)
             if result.status == "satisfied":
                 other_fires[i] = True

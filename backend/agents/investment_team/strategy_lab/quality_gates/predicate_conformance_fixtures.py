@@ -260,7 +260,14 @@ def _oscillate_price_vs_number(
     if op in ("cross_above", "cross_below"):
         return _build_crossing_series(fld, below, above)
 
-    bars: List[OHLCVBar] = []
+    if op == "==":
+        bars: List[OHLCVBar] = []
+        for cycle in range(6):
+            val = threshold if cycle % 2 == 0 else above
+            bars.extend(_segment(fld, val, _OSCILLATION_SEGMENT))
+        return bars
+
+    bars = []
     for cycle in range(6):
         val = below if cycle % 2 == 0 else above
         bars.extend(_segment(fld, val, _OSCILLATION_SEGMENT))
