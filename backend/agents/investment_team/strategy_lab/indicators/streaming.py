@@ -119,8 +119,15 @@ def macd_components(
     computable for lack of history is returned as ``None`` — the macd_line
     needs ``slow`` bars, the signal/histogram need ``slow + signal - 1``.
     """
-    assert fast >= 1 and slow > fast, "macd: fast < slow precondition violated"
-    assert signal >= 1, "macd: signal >= 1 precondition violated"
+    # Validate as raises (not asserts) — preconditions must hold even when
+    # the interpreter is started with ``python -O`` and bare ``assert`` is
+    # compiled out.
+    if not (fast >= 1 and slow > fast):
+        raise ValueError(
+            f"macd_components: require fast >= 1 and slow > fast (got fast={fast}, slow={slow})"
+        )
+    if signal < 1:
+        raise ValueError(f"macd_components: require signal >= 1 (got signal={signal})")
 
     if len(bars) < slow:
         return None, None, None
@@ -194,25 +201,52 @@ class IndicatorRegistry:
         return state.get("fp") == fp
 
     @staticmethod
-    def _is_one_step_advance(
+    def _advance_kind(
         state: Dict[str, Any],
         bars: Sequence[Any],
         fp: Tuple[int, int, Optional[str]],
-    ) -> bool:
-        """Detect ``bars`` having advanced by exactly one bar since ``state``."""
+    ) -> str:
+        """Classify how ``bars`` advanced since ``state``.
+
+        Returns one of:
+
+        * ``"expand"`` — ``bars`` is exactly one bar longer than the cached
+          fingerprint and the previous-last bar is now at index ``-2``
+          (the typical pure-extension call shape, e.g. ``bars[:n]`` →
+          ``bars[:n+1]``).
+        * ``"slide"`` — ``bars`` has the same length as the cached
+          fingerprint but the previous-last bar is at index ``-2``: the
+          oldest bar dropped, a new one was appended (the steady-state
+          shape of a bounded sliding-window history like
+          ``ctx.history(symbol, depth)`` after warm-up).
+        * ``"none"`` — everything else: cold-start, replay/seek, multi-bar
+          jump, cross-symbol bleed, or first call after a different bar at
+          ``-2``. The caller falls back to a full rebuild.
+
+        Both ``"expand"`` and ``"slide"`` require the previous-bar match
+        AND the length delta to fit. Earlier revisions accepted any
+        previous-bar match (id OR timestamp) with no length check, which
+        let cross-symbol or jump-and-replay scenarios slip through as
+        "single-step" and silently corrupt the cached ``macd_line``.
+        """
         prev_fp = state.get("fp")
-        if prev_fp is None:
-            return False
-        if len(bars) < 2:
-            return False
-        # New tail differs from the cached one (otherwise it's the same bar).
+        if prev_fp is None or len(bars) < 2:
+            return "none"
+        # Same bar — caller handles separately.
         if prev_fp == fp:
-            return False
-        # The previous-bar identity in ``bars`` must match the cache's last
-        # seen bar — either by object id or by timestamp.
+            return "none"
         prev_bar = bars[-2]
         prev_ts = getattr(prev_bar, "timestamp", None)
-        return prev_fp[0] == id(prev_bar) or (prev_ts is not None and prev_fp[2] == prev_ts)
+        prev_matches = (prev_fp[0] == id(prev_bar)) or (
+            prev_ts is not None and prev_fp[2] == prev_ts
+        )
+        if not prev_matches:
+            return "none"
+        if len(bars) == prev_fp[1] + 1:
+            return "expand"
+        if len(bars) == prev_fp[1]:
+            return "slide"
+        return "none"
 
     # ----- EMA -----------------------------------------------------------
 
@@ -481,17 +515,31 @@ class IndicatorRegistry:
         if len(bars) < min_bars:
             return None
 
-        key = ("macd", fast, slow, signal, source)
+        # The macd_line lives on ``self`` for the lifetime of the registry.
+        # If two symbols (or two unrelated bar streams) ever share a
+        # registry, the cache must not conflate them — include
+        # ``bars[-1].symbol`` in the key so the slots are disjoint.
+        symbol = getattr(bars[-1], "symbol", None)
+        key = ("macd", symbol, fast, slow, signal, source)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"].get(select)
 
+        kind = self._advance_kind(state, bars, fp) if state is not None else "none"
         macd_line: Deque[float]
-        if state is not None and self._is_one_step_advance(state, bars, fp):
+        if kind in ("expand", "slide"):
             macd_line = state["macd_line"]
             ef = windowed_ema(bars[-fast:], fast, source)
             es = windowed_ema(bars[-slow:], slow, source)
+            if kind == "slide":
+                # ``bars`` slid forward by one bar: the oldest bar dropped
+                # off the front, so its macd value (``macd_line[0]``) is
+                # no longer in the legacy windowed-EMA window. Pop it.
+                # Without this, the deque grows past the legacy bound and
+                # the signal-EMA seeds from a bar that legacy would no
+                # longer see — silent semantic divergence on every slide.
+                macd_line.popleft()
             macd_line.append(ef - es)
         else:
             # Cold-start: replay the legacy outer loop so the macd_line

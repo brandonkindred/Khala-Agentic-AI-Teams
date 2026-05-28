@@ -351,51 +351,45 @@ class StreamingHistoryView:
     """``HistoryView`` backed by a bounded deque of bars.
 
     Designed for the engine's per-bar loop. Bars are appended
-    incrementally; indicator values are computed against the full deque
-    on demand and cached so repeated predicates within the same bar
-    share the work.
+    incrementally; indicator values are computed lazily against the full
+    deque on first access.
 
-    Earlier revisions of this view dropped the DataFrame and cleared the
-    indicator cache on every ``append``, which forced a full O(N) pandas
-    rebuild for the next predicate evaluation. The view now keeps the
-    DataFrame and the indicator series alive across bars: when only a
-    single new bar has been appended since the last computation, the
-    indicator series is extended by one row instead of recomputed.
+    Cache scope is **same-bar dedupe only**: when multiple predicates on
+    the same bar reference the same ``IndicatorRef``, the cached
+    ``pd.Series`` is reused. When a new bar is appended the cache is
+    invalidated and the next access rebuilds. We do NOT attempt to extend
+    the cached indicator series row-by-row because the underlying
+    indicators in :mod:`strategy_lab.executor.indicators` are pandas
+    ``rolling`` / ``ewm`` series with no per-bar scalar entry point that
+    would match their legacy semantics bit-for-bit; substituting the
+    :class:`IndicatorRegistry` here would silently change the
+    windowed-vs-true-EMA shape and drift the alignment audit.
+
+    Earlier revisions of this view tried to maintain incremental
+    DataFrame + indicator series across bars. Profiling showed the
+    indicator cache was rebuilt from scratch on every bar anyway (the
+    cached series always failed its length check after each append), and
+    the bookkeeping included a bug where the rollover flag fired on
+    every post-saturation append rather than only the first — so the
+    "incremental" path was the legacy full-rebuild path with extra
+    state. This revision simplifies back to the honest invariant: caches
+    are per-bar.
 
     The deque is bounded to ``max_bars`` (default 500, matching the
-    ``StrategyContext._ingest_bar`` retention ceiling). When the bounded
-    deque rolls over (oldest row dropped on append), the cache falls back
-    to a full rebuild on next access — that path runs at most once per
-    ring rollover, so the amortised cost remains ``O(1)`` per bar.
+    ``StrategyContext._ingest_bar`` retention ceiling).
     """
 
     def __init__(self, max_bars: int = 500) -> None:
         self._bars: deque[BarRecord] = deque(maxlen=max_bars)
+        # Identity of the (len, last-bar) pair the caches are aligned
+        # with. ``None`` means caches are empty.
+        self._cache_key: Optional[Tuple[int, int]] = None
         self._df: Optional[pd.DataFrame] = None
-        # Number of rows the cached ``_df`` and each cached indicator
-        # series cover. Drifts behind ``len(self._bars)`` until the next
-        # ``_sync`` runs from ``indicator()`` / ``_ensure_df()``.
-        self._df_rows: int = 0
         self._indicator_cache: Dict[str, pd.Series] = {}
-        # True when the next ``_sync`` cannot be incremental — typically
-        # because the bounded deque rolled over and the cached prefix is
-        # no longer aligned with the live deque.
-        self._needs_full_rebuild: bool = False
 
     def append(self, bar: BarRecord) -> None:
-        """Append a bar, marking caches for incremental refresh.
-
-        The DataFrame / indicator cache is NOT cleared here. The next
-        ``indicator()`` or ``_ensure_df()`` call observes
-        ``len(self._bars) != self._df_rows`` and either appends one row
-        (the common case) or rebuilds from scratch when the bounded
-        deque has rolled over.
-        """
-        rollover = len(self._bars) == self._bars.maxlen
+        """Append a bar; the indicator cache invalidates lazily on next access."""
         self._bars.append(bar)
-        if rollover:
-            # Oldest row was just dropped — cached prefix is stale.
-            self._needs_full_rebuild = True
 
     def length(self) -> int:
         return len(self._bars)
@@ -408,9 +402,7 @@ class StreamingHistoryView:
         df = self._ensure_df()
         key = ref.model_dump_json()
         series = self._indicator_cache.get(key)
-        if series is None or len(series) != len(df):
-            # Either first call for this ref or the deque rolled over and
-            # forced a rebuild — recompute against the live DataFrame.
+        if series is None:
             series = compute_indicator_series(ref, df)
             self._indicator_cache[key] = series
         if i >= len(series):
@@ -420,38 +412,18 @@ class StreamingHistoryView:
             return None
         return float(value)
 
+    def _current_cache_key(self) -> Optional[Tuple[int, int]]:
+        if not self._bars:
+            return None
+        return (len(self._bars), id(self._bars[-1]))
+
     def _ensure_df(self) -> pd.DataFrame:
-        if (
-            self._df is not None
-            and not self._needs_full_rebuild
-            and self._df_rows == len(self._bars)
-        ):
+        ck = self._current_cache_key()
+        if self._df is not None and self._cache_key == ck:
             return self._df
-
-        if (
-            self._df is not None
-            and not self._needs_full_rebuild
-            and self._df_rows < len(self._bars)
-        ):
-            # Incremental extend: append only the new rows.
-            tail = list(self._bars)[self._df_rows :]
-            new_rows = pd.DataFrame(
-                [
-                    {
-                        "open": b.open,
-                        "high": b.high,
-                        "low": b.low,
-                        "close": b.close,
-                        "volume": b.volume,
-                    }
-                    for b in tail
-                ]
-            )
-            self._df = pd.concat([self._df, new_rows], ignore_index=True)
-            self._df_rows = len(self._bars)
-            return self._df
-
-        # Cold start or rollover-triggered rebuild.
+        # Bars advanced since last sync (any append, including rollover)
+        # — invalidate both the DataFrame and every cached indicator
+        # series in one pass.
         rows = [
             {
                 "open": b.open,
@@ -463,11 +435,6 @@ class StreamingHistoryView:
             for b in self._bars
         ]
         self._df = pd.DataFrame(rows)
-        self._df_rows = len(self._bars)
-        self._needs_full_rebuild = False
-        # The DataFrame's row count just changed shape — any previously
-        # cached indicator series is misaligned and must be rebuilt on
-        # next access. ``indicator()`` already gates on
-        # ``len(series) != len(df)``, so we just drop the cache here.
         self._indicator_cache.clear()
+        self._cache_key = ck
         return self._df

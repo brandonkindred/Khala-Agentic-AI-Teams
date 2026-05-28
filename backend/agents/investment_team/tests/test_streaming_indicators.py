@@ -191,6 +191,144 @@ def test_macd_fast_gte_slow_returns_none() -> None:
 
 
 # ---------------------------------------------------------------------------
+# MACD — sliding-window correctness
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("select", ["macd", "signal", "histogram"])
+def test_macd_sliding_window_matches_legacy(select: str) -> None:
+    """A registry driven with a fixed-length sliding window (the shape
+    ``ctx.history(symbol, depth)`` returns in production) must produce
+    the same value as a fresh cold-compute on the same slice — i.e. the
+    cached macd_line is trimmed when the window slides.
+
+    Earlier revisions only handled the *expanding*-bars shape and would
+    let the cached macd_line grow past the legacy bound on every slide,
+    silently shifting the signal-EMA seed and returning wrong values.
+    """
+    bars = _series(120, seed=88)
+    window_size = 40  # > slow + signal so signal is computable from the slice
+    reg = IndicatorRegistry()
+    for offset in range(0, len(bars) - window_size + 1):
+        sliding = bars[offset : offset + window_size]
+        streaming = reg.macd(sliding, fast=12, slow=26, signal=9, select=select)
+        cold = _legacy_macd(sliding, fast=12, slow=26, signal=9, select=select)
+        assert streaming == cold, (
+            f"select={select} offset={offset} streaming={streaming!r} cold={cold!r}"
+        )
+
+
+def test_macd_sliding_window_keeps_macd_line_bounded() -> None:
+    """After many slide-steps the macd_line deque must not grow past
+    ``window_size - slow + 1`` — otherwise the signal-EMA per-call cost
+    drifts to O(bars_seen) instead of O(window)."""
+    bars = _series(500, seed=89)
+    window_size = 40
+    reg = IndicatorRegistry()
+    for offset in range(0, len(bars) - window_size + 1):
+        reg.macd(
+            bars[offset : offset + window_size],
+            fast=12,
+            slow=26,
+            signal=9,
+            select="signal",
+        )
+    # The single cached macd_line for this (symbol, params) key must not
+    # have been allowed to balloon past the windowed bound.
+    cached = next(iter(reg._state.values()))
+    expected_max = window_size - 26 + 1
+    assert len(cached["macd_line"]) == expected_max
+
+
+# ---------------------------------------------------------------------------
+# MACD — symbol isolation
+# ---------------------------------------------------------------------------
+
+
+def test_macd_isolates_symbols_when_registry_shared() -> None:
+    """A registry driven with bars from two different symbols must keep
+    each symbol's macd_line in its own cache slot.
+
+    Without symbol in the key, the previous design would let an
+    AAPL-bar advance silently mutate the cached MSFT macd_line whenever
+    the two symbols' bars shared a timestamp (the common case for daily
+    aligned histories)."""
+
+    @dataclass
+    class _SymBar:
+        symbol: str
+        timestamp: str
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        close: float = 100.0
+        volume: float = 1.0
+
+    aapl = [
+        _SymBar(symbol="AAPL", timestamp=f"2024-01-{i + 1:02d}", close=100.0 + i * 0.5)
+        for i in range(60)
+    ]
+    msft = [
+        _SymBar(symbol="MSFT", timestamp=f"2024-01-{i + 1:02d}", close=200.0 - i * 0.3)
+        for i in range(60)
+    ]
+    reg = IndicatorRegistry()
+    for n in range(34, 61):
+        v_a = reg.macd(aapl[:n], fast=12, slow=26, signal=9, select="signal")
+        v_b = reg.macd(msft[:n], fast=12, slow=26, signal=9, select="signal")
+        a_ref = IndicatorRegistry().macd(aapl[:n], fast=12, slow=26, signal=9, select="signal")
+        b_ref = IndicatorRegistry().macd(msft[:n], fast=12, slow=26, signal=9, select="signal")
+        assert v_a == a_ref, f"n={n} AAPL drifted: {v_a!r} != {a_ref!r}"
+        assert v_b == b_ref, f"n={n} MSFT drifted: {v_b!r} != {b_ref!r}"
+
+
+# ---------------------------------------------------------------------------
+# Advance-kind discriminator
+# ---------------------------------------------------------------------------
+
+
+def test_advance_kind_classifies_expand_slide_and_none() -> None:
+    """The discriminator must distinguish expansion (warm-up), slide
+    (steady state), and anything else (cold-start fallback)."""
+    bars = _series(60, seed=90)
+    reg = IndicatorRegistry()
+    # Cold-start at len = 40 (well past warm-up so state is populated).
+    reg.macd(bars[:40], fast=12, slow=26, signal=9, select="signal")
+    state = next(iter(reg._state.values()))
+
+    # Expand: same id at -2, length grew by 1.
+    fp_expand = reg._bar_fingerprint(bars[:41])
+    assert reg._advance_kind(state, bars[:41], fp_expand) == "expand"
+
+    # Slide: previous-last bar id still appears at -2 but length unchanged.
+    sliding = bars[1:41]  # starts one bar later, same length as bars[:40]
+    fp_slide = reg._bar_fingerprint(sliding)
+    assert reg._advance_kind(state, sliding, fp_slide) == "slide"
+
+    # Multi-bar jump: length grew by more than 1 — must NOT be classified
+    # as a single-step advance even if bars[-2].timestamp aliases the
+    # cached fingerprint's timestamp.
+    big_jump = bars[:43]
+    fp_jump = reg._bar_fingerprint(big_jump)
+    assert reg._advance_kind(state, big_jump, fp_jump) == "none"
+
+
+# ---------------------------------------------------------------------------
+# Precondition validation
+# ---------------------------------------------------------------------------
+
+
+def test_macd_components_raises_value_error_on_bad_params() -> None:
+    """``macd_components`` must raise ValueError (not bare ``assert``)
+    when preconditions fail — asserts disappear under ``python -O``."""
+    bars = _series(60)
+    with pytest.raises(ValueError, match="fast"):
+        macd_components(bars, fast=30, slow=10, signal=9)
+    with pytest.raises(ValueError, match="signal"):
+        macd_components(bars, fast=12, slow=26, signal=0)
+
+
+# ---------------------------------------------------------------------------
 # Other indicators — windowed parity
 # ---------------------------------------------------------------------------
 

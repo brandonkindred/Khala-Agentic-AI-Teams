@@ -422,13 +422,22 @@ _HELPER_BODIES: dict[str, str] = {
                 return None
             # The macd_line is the difference of fast/slow windowed EMAs at
             # every bar end from ``slow`` to ``len(history)``. The legacy
-            # template rebuilt that line in full on every call. We instead
-            # carry it forward in ``self._ind_state`` keyed by the helper's
-            # parameter signature and append one new value per bar — when
-            # the previous call's last bar matches ``history[-2]``. Cold
-            # start (and any replay/seek) falls back to a full rebuild,
-            # preserving bit-identical legacy semantics.
-            key = ("macd", fast, slow, signal, source)
+            # template rebuilt that line in full on every call. We carry
+            # it forward in ``self._ind_state`` and maintain it
+            # incrementally: on a one-bar advance we either ``expand``
+            # (history grew, e.g. during warm-up) or ``slide`` (history
+            # length unchanged, oldest bar dropped — the steady-state
+            # shape of ``ctx.history(symbol, depth)``). On slide we drop
+            # the front of macd_line so the deque stays bounded and the
+            # signal-EMA seeds from the same bar the legacy windowed
+            # template would have used. Cold-start / replay / cross-symbol
+            # fall back to a full rebuild.
+            # Symbol is part of the key — the same strategy instance fires
+            # on_bar for every symbol in UNIVERSE, and a key without symbol
+            # would let an AAPL advance silently mutate the MSFT macd_line
+            # whenever the two share a bar timestamp.
+            symbol = getattr(history[-1], "symbol", None)
+            key = ("macd", symbol, fast, slow, signal, source)
             state = self._ind_state.get(key)
             last_bar = history[-1]
             new_ts = getattr(last_bar, "timestamp", None)
@@ -438,15 +447,20 @@ _HELPER_BODIES: dict[str, str] = {
                 return state["value"].get(select)
             alpha_f = 2.0 / (fast + 1.0)
             alpha_s = 2.0 / (slow + 1.0)
-            can_step = False
+            kind = "none"
             if state is not None and new_len >= 2:
                 prev_bar = history[-2]
                 prev_ts = getattr(prev_bar, "timestamp", None)
                 prev_fp = state["fp"]
-                can_step = (prev_fp[0] == id(prev_bar)) or (
+                prev_matches = (prev_fp[0] == id(prev_bar)) or (
                     prev_ts is not None and prev_fp[2] == prev_ts
                 )
-            if can_step:
+                if prev_matches:
+                    if new_len == prev_fp[1] + 1:
+                        kind = "expand"
+                    elif new_len == prev_fp[1]:
+                        kind = "slide"
+            if kind in ("expand", "slide"):
                 macd_line = state["macd_line"]
                 ef = self._src(history[-fast], source)
                 for b in history[-fast + 1:]:
@@ -454,6 +468,8 @@ _HELPER_BODIES: dict[str, str] = {
                 es = self._src(history[-slow], source)
                 for b in history[-slow + 1:]:
                     es = alpha_s * self._src(b, source) + (1.0 - alpha_s) * es
+                if kind == "slide":
+                    macd_line.pop(0)
                 macd_line.append(ef - es)
             else:
                 macd_line = []

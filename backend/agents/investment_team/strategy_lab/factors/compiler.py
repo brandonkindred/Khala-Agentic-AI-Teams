@@ -178,26 +178,38 @@ return 100.0 - (100.0 / (1.0 + rs))
     MACDSignal: """\
 if len(bars) < {slow} + {signal}:
     return NAN
-# Streaming-cache the macd_line so subsequent bars cost O(slow) instead
-# of O((N - slow) * (fast + slow)) per call. The cache is keyed by the
-# factor signature so two factors with different params don't collide.
-_macd_key = ('macd_signal_{fast}_{slow}_{signal}',)
-_state = self._ind_state.get(_macd_key) if hasattr(self, '_ind_state') else None
+# Streaming-cache the macd_line. The cache key includes the bar's symbol
+# so a strategy whose on_bar fires across multiple tickers does not
+# silently mutate one symbol's macd_line with another symbol's bars.
+# We then classify the call as ``expand`` (history grew by one bar — the
+# warm-up shape), ``slide`` (history length unchanged, oldest bar dropped —
+# the steady-state shape of a bounded history window), or fall back to a
+# full rebuild. On slide we drop the front of macd_line so it stays
+# bounded and the signal-EMA seeds from the same bar the legacy
+# windowed-EMA implementation would have used.
+_symbol = getattr(bars[-1], 'symbol', None)
+_macd_key = ('macd_signal_{fast}_{slow}_{signal}', _symbol)
+_state = self._ind_state.get(_macd_key)
 _last = bars[-1]
 _new_fp = (id(_last), len(bars), getattr(_last, 'timestamp', None))
 if _state is not None and _state['fp'] == _new_fp:
     return _state['value']
-_can_step = False
+_kind = 'none'
 if _state is not None and len(bars) >= 2:
     _prev = bars[-2]
     _prev_ts = getattr(_prev, 'timestamp', None)
     _prev_fp = _state['fp']
-    _can_step = (_prev_fp[0] == id(_prev)) or (
+    _prev_matches = (_prev_fp[0] == id(_prev)) or (
         _prev_ts is not None and _prev_fp[2] == _prev_ts
     )
+    if _prev_matches:
+        if len(bars) == _prev_fp[1] + 1:
+            _kind = 'expand'
+        elif len(bars) == _prev_fp[1]:
+            _kind = 'slide'
 _alpha_f = 2.0 / ({fast} + 1)
 _alpha_s = 2.0 / ({slow} + 1)
-if _can_step:
+if _kind == 'expand' or _kind == 'slide':
     macd_line = _state['macd_line']
     _ef = bars[-{fast}].close
     for _b in bars[-{fast} + 1:]:
@@ -205,6 +217,8 @@ if _can_step:
     _es = bars[-{slow}].close
     for _b in bars[-{slow} + 1:]:
         _es = _alpha_s * _b.close + (1 - _alpha_s) * _es
+    if _kind == 'slide':
+        macd_line.pop(0)
     macd_line.append(_ef - _es)
 else:
     macd_line = []
@@ -223,8 +237,7 @@ _alpha_g = 2.0 / ({signal} + 1)
 val = macd_line[0]
 for _x in macd_line[1:]:
     val = _alpha_g * _x + (1 - _alpha_g) * val
-if hasattr(self, '_ind_state'):
-    self._ind_state[_macd_key] = {{'fp': _new_fp, 'value': val, 'macd_line': macd_line}}
+self._ind_state[_macd_key] = {{'fp': _new_fp, 'value': val, 'macd_line': macd_line}}
 return val
 """,
     BollingerZ: """\
