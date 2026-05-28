@@ -9,6 +9,7 @@ Provider priority:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from datetime import date, timedelta
@@ -466,9 +467,18 @@ class MarketDataService:
             logger.warning("yfinance not installed — skipping Yahoo for %s", symbol)
             return []
 
-        # Map crypto symbols to Yahoo tickers (e.g. BTC → BTC-USD)
+        # Map crypto symbols to Yahoo tickers (e.g. BTC → BTC-USD). Callers
+        # may pass either the bare alias (``"BTC"``) or the already-suffixed
+        # Yahoo form (``"BTC-USD"``); both must round-trip to the canonical
+        # ``-USD`` form exactly once. The lookup is keyed by the BARE alias,
+        # so strip a trailing ``-USD`` first — otherwise the fallback branch
+        # would double the suffix to ``"BTC-USD-USD"`` and yfinance would
+        # burn three retries before reporting it as delisted.
         if asset_class == "crypto":
-            yf_symbol = YAHOO_CRYPTO_TICKERS.get(symbol.upper(), f"{symbol.upper()}-USD")
+            bare = symbol.upper()
+            if bare.endswith("-USD"):
+                bare = bare[: -len("-USD")]
+            yf_symbol = YAHOO_CRYPTO_TICKERS.get(bare, f"{bare}-USD")
         else:
             yf_symbol = symbol
 
@@ -612,7 +622,13 @@ class MarketDataService:
         if asset_class != "crypto":
             return []
 
-        coin_id = COINGECKO_IDS.get(symbol.upper())
+        # COINGECKO_IDS is keyed by the BARE alias (``"BTC"``, ``"ETH"``).
+        # Callers may pass the Yahoo-suffixed form (``"BTC-USD"``); strip the
+        # suffix before lookup so the fallback provider works for both.
+        bare = symbol.upper()
+        if bare.endswith("-USD"):
+            bare = bare[: -len("-USD")]
+        coin_id = COINGECKO_IDS.get(bare)
         if not coin_id:
             logger.warning("Unknown crypto symbol %s — no CoinGecko mapping", symbol)
             return []
@@ -792,12 +808,23 @@ class MarketDataService:
         """
         bars: List[OHLCVBar] = []
         repairs = 0
+        dropped_nan = 0
         for idx, row in df.iterrows():  # type: ignore[union-attr]
             bar_date = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
             o = round(float(row["Open"]), 4)
             h = round(float(row["High"]), 4)
             ll = round(float(row["Low"]), 4)
             c = round(float(row["Close"]), 4)
+            # Drop rows where any OHLC value is non-finite. yfinance
+            # occasionally surfaces NaN rows during data gaps; without this
+            # filter a NaN close propagates straight into the gate's market
+            # sample provider and trips the sizing-realisability critical
+            # with ``got nan``, killing the cycle before any trade can run.
+            if not (
+                math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)
+            ):
+                dropped_nan += 1
+                continue
             h_fixed = max(o, h, ll, c)
             l_fixed = min(o, h, ll, c)
             if h_fixed != h or l_fixed != ll:
@@ -817,5 +844,10 @@ class MarketDataService:
                 "yfinance: repaired OHLC invariants on %d/%d bars",
                 repairs,
                 len(bars),
+            )
+        if dropped_nan > 0:
+            logger.warning(
+                "yfinance: dropped %d bar(s) with non-finite OHLC values",
+                dropped_nan,
             )
         return bars

@@ -165,14 +165,16 @@ def _design_review_rounds() -> int:
     Pre: env value, when set, parses to ``int`` and is ``>= 1`` after the
     ``max(.., 1)`` clamp.
     Post: returns a positive integer cap on the number of design ↔ review
-    iterations per ``_run_design_attempt``. Default 5 mirrors the issue
-    spec; a sub-1 override floors to 1 so the loop runs at least once.
+    iterations per ``_run_design_attempt``. Default 20 gives the design ↔
+    review loop room to converge on specs with subtle thesis / math /
+    completeness issues; a sub-1 override floors to 1 so the loop runs at
+    least once.
     """
-    raw = os.environ.get("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "5")
+    raw = os.environ.get("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "20")
     try:
         return max(int(raw), 1)
     except ValueError:
-        return 5
+        return 20
 
 
 def _orchestrator_runner(code, market_data, config, *, strategy=None, **kwargs):

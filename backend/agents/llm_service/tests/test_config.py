@@ -30,7 +30,7 @@ def test_resolve_model_global_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_model_agent_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("LLM_MODEL_backend", raising=False)
-    assert config.resolve_model("backend") == "qwen3.5:397b-cloud"
+    assert config.resolve_model("backend") == "deepseek-v4-pro:cloud"
 
 
 def test_resolve_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:

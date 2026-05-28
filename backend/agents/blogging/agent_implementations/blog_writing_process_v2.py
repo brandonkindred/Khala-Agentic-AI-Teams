@@ -80,7 +80,7 @@ MAX_REWRITE_ITERATIONS = 100
 COPY_EDIT_ESCALATION_THRESHOLD = 10
 
 # Default model - use environment variable or this default
-DEFAULT_MODEL = "qwen3.5:397b-cloud"
+DEFAULT_MODEL = "deepseek-v4-pro:cloud"
 
 PipelineStatus = Literal["PASS", "FAIL", "NEEDS_HUMAN_REVIEW"]
 
@@ -204,9 +204,7 @@ def run_planning(
     # Planning convergence cap: honour the critic's max iterations when the
     # critic is enabled, since the critic can reject plans the planner would
     # otherwise accept. Fall back to the planner's own iteration cap otherwise.
-    planning_max_iter = (
-        plan_critic_max_iterations() if plan_critic is not None else 5
-    )
+    planning_max_iter = plan_critic_max_iterations() if plan_critic is not None else 5
 
     try:
         planning_draft_agent = BlogWriterAgent(
@@ -545,7 +543,9 @@ def _run_title_selection(
 
                     logger.info(
                         "Title feedback (round %s): %r rated %r — generating replacement",
-                        title_round, rated_title, rating_type,
+                        title_round,
+                        rated_title,
+                        rating_type,
                     )
 
                     feedback_prompt = (
@@ -554,7 +554,9 @@ def _run_title_selection(
                     )
                     if plan.target_reader:
                         feedback_prompt += f"TARGET READER: {plan.target_reader}\n\n"
-                    section_titles = [sec.title for sec in sorted(plan.sections, key=lambda s: s.order)]
+                    section_titles = [
+                        sec.title for sec in sorted(plan.sections, key=lambda s: s.order)
+                    ]
                     if section_titles:
                         feedback_prompt += "ARTICLE SECTIONS:\n"
                         feedback_prompt += "\n".join(f"- {t}" for t in section_titles) + "\n\n"
@@ -565,7 +567,9 @@ def _run_title_selection(
                         "- Be specific about what the reader will gain.\n\n"
                     )
                     if all_liked:
-                        feedback_prompt += "Titles the user LIKED (generate a title with a similar style/angle):\n"
+                        feedback_prompt += (
+                            "Titles the user LIKED (generate a title with a similar style/angle):\n"
+                        )
                         feedback_prompt += "\n".join(f"- {t}" for t in all_liked) + "\n\n"
                     if all_disliked:
                         feedback_prompt += "Titles the user DISLIKED (avoid this style/angle):\n"
@@ -587,7 +591,9 @@ def _run_title_selection(
                             if isinstance(t, dict) and t.get("title"):
                                 replacement = {
                                     "title": t["title"],
-                                    "probability_of_success": float(t.get("probability_of_success", 0.5)),
+                                    "probability_of_success": float(
+                                        t.get("probability_of_success", 0.5)
+                                    ),
                                 }
                     except Exception as e:
                         logger.warning("Failed to generate replacement title: %s", e)
@@ -598,7 +604,9 @@ def _run_title_selection(
                             for tc in title_choices
                         ]
                     else:
-                        title_choices = [tc for tc in title_choices if tc.get("title") != rated_title]
+                        title_choices = [
+                            tc for tc in title_choices if tc.get("title") != rated_title
+                        ]
 
                     title_round += 1
                     job_updater(
@@ -657,7 +665,7 @@ def run_pipeline(
     Args:
         brief: The research brief input describing the blog topic.
         work_dir: Optional directory for artifact persistence.
-        llm_client: Optional LLM client (defaults to qwen3.5:397b-cloud).
+        llm_client: Optional LLM client (defaults to deepseek-v4-pro:cloud).
         draft_editor_iterations: Number of draft/copy-edit iterations.
         max_rewrite_iterations: Max compliance rewrite attempts.
         run_gates: Whether to run validators/compliance gates.
@@ -918,7 +926,11 @@ def run_pipeline(
 
                 # User provided feedback — re-plan with their input
                 user_feedback_text = feedback_data.get("feedback", "")
-                logger.info("Outline feedback (revision %s): %s chars", outline_revision, len(user_feedback_text))
+                logger.info(
+                    "Outline feedback (revision %s): %s chars",
+                    outline_revision,
+                    len(user_feedback_text),
+                )
                 outline_revision += 1
 
                 _update(
@@ -1629,7 +1641,11 @@ def run_pipeline(
                     status_text="Finalizing...",
                 )
 
-                title_options = [selected_title] if selected_title else [tc.title for tc in plan.title_candidates[:5]]
+                title_options = (
+                    [selected_title]
+                    if selected_title
+                    else [tc.title for tc in plan.title_candidates[:5]]
+                )
                 pack = PublishingPack(
                     title_options=title_options,
                     meta_description=draft_result.draft[:155].strip() or None,
@@ -1816,9 +1832,7 @@ def main() -> None:
     )
 
     work_dir = Path(__file__).resolve().parent / "run_dir"
-    planning_phase_result, draft_result, status = run_pipeline(
-        brief, work_dir=work_dir
-    )
+    planning_phase_result, draft_result, status = run_pipeline(brief, work_dir=work_dir)
     plan = planning_phase_result.content_plan
 
     print("\n--- Title choices ---")

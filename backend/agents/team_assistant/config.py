@@ -19,7 +19,7 @@ from team_assistant.launch_spec import BuiltBody, LaunchSpec, declarative_builde
 # Fallback when neither the conversation context nor the LLM_MODEL env var
 # supplies a model name. Matches docker/.env.example so local dev works
 # out of the box.
-_DEFAULT_LLM_MODEL = "qwen3.5:397b-cloud"
+_DEFAULT_LLM_MODEL = "deepseek-v4-pro:cloud"
 
 
 @dataclass

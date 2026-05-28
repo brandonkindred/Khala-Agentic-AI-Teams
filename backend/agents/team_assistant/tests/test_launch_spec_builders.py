@@ -276,7 +276,7 @@ def test_social_marketing_builder_uses_hardcoded_default_when_env_missing(
     """No context value, no env var → bundled docker/.env.example default."""
     monkeypatch.delenv("LLM_MODEL", raising=False)
     built = _builder("social_marketing")({"client_id": "c-1", "brand_id": "b-1"})
-    assert built.json["llm_model_name"] == "qwen3.5:397b-cloud"
+    assert built.json["llm_model_name"] == "deepseek-v4-pro:cloud"
 
 
 def test_sales_body_builder_decomposes_icp() -> None:

@@ -18,7 +18,9 @@ Invariants:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -33,7 +35,7 @@ from ._parse_helpers import (
     extract_json_object,
     validate_structured_rules,
 )
-from .design_review import format_prior_critiques
+from .design_review import _coerce_critique, format_prior_critiques
 from .model_factory import get_strands_model
 
 if TYPE_CHECKING:
@@ -44,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _SYSTEM_PROMPT = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
+_SELF_REVIEW_SYSTEM_PROMPT = (_PROMPT_DIR / "design_self_review_system.md").read_text(
+    encoding="utf-8"
+)
 
 _DESIGN_USER_TEMPLATE = """\
 Design ONE novel swing-style strategy (typical holds ~2-14 days unless the asset class implies shorter).
@@ -171,7 +176,8 @@ class DesignAgent:
             convergence_directives=directives_text,
         )
 
-        return self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
+        strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
+        return self._with_self_review(strategy_dict, rationale)
 
     def revise(
         self,
@@ -197,7 +203,8 @@ class DesignAgent:
             prior_critiques_block=prior_critiques_block,
         )
 
-        return self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
+        strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
+        return self._with_self_review(strategy_dict, rationale)
 
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
         """Call the LLM, parse JSON, strip any stray ``strategy_code``, validate rules.
@@ -206,35 +213,236 @@ class DesignAgent:
         Post: returns ``(parsed, rationale)`` with no ``strategy_code`` key
         and rule fields that pass :func:`validate_structured_rules`. Raises
         ``ValueError`` on malformed JSON or
-        :class:`StrategySpecParseError` on prose/off-shape rules.
+        :class:`StrategySpecParseError` on prose/off-shape rules after the
+        retry budget is exhausted.
+
+        On :class:`StrategySpecParseError` the agent re-prompts the LLM
+        with the offending field and pydantic error as feedback (the model
+        often slips the DSL by exactly one field — wrapping a bar-field
+        literal in an IndicatorRef, or naming an indicator in ``source``).
+        Budget is set by ``STRATEGY_LAB_DESIGN_PARSE_RETRIES`` (default 2
+        retries → 3 attempts total; ``0`` disables retry).
         """
+        retries = _design_parse_retries()
         agent = Agent(
             model=get_strands_model("strategy_design"),
             system_prompt=system_prompt,
             tools=[],
         )
 
-        result = agent(user_prompt)
-        parsed = extract_json_object(str(result))
+        prompt = user_prompt
+        for attempt in range(retries + 1):
+            result = agent(prompt)
+            parsed = extract_json_object(str(result))
 
-        # Logged-and-dropped (not raised): a stray ``strategy_code`` is
-        # prompt drift, not a usable-spec failure.
-        if "strategy_code" in parsed:
-            parsed.pop("strategy_code", None)
-            logger.warning(
-                "DesignAgent stripped stray strategy_code field from LLM response "
-                "(code synthesis is a separate phase)."
-            )
+            # Logged-and-dropped (not raised): a stray ``strategy_code`` is
+            # prompt drift, not a usable-spec failure.
+            if "strategy_code" in parsed:
+                parsed.pop("strategy_code", None)
+                logger.warning(
+                    "DesignAgent stripped stray strategy_code field from LLM response "
+                    "(code synthesis is a separate phase)."
+                )
 
-        rationale = parsed.pop("rationale", "")
+            rationale = parsed.pop("rationale", "")
+
+            try:
+                validate_structured_rules(parsed)
+                return parsed, rationale
+            except StrategySpecParseError as exc:
+                logger.warning(
+                    "DesignAgent emitted invalid rule shape (attempt %d/%d): %s",
+                    attempt + 1,
+                    retries + 1,
+                    exc,
+                )
+                if attempt >= retries:
+                    raise
+                prompt = _build_correction_prompt(user_prompt, exc)
+
+        # Unreachable: the loop either returns on success or re-raises on
+        # the final attempt. Kept so type-checkers see a definite return.
+        raise AssertionError("unreachable: _invoke_and_parse loop exited without return")
+
+    def _with_self_review(
+        self, strategy_dict: Dict[str, Any], rationale: str
+    ) -> Tuple[Dict[str, Any], str]:
+        """Audit a freshly emitted spec and self-revise once if needed.
+
+        Pre: ``strategy_dict`` is a validated spec dict and ``rationale``
+        is its accompanying rationale (the tuple returned by
+        :meth:`_invoke_and_parse`).
+        Post: returns either the original ``(strategy_dict, rationale)``
+        unchanged (when self-review is disabled, marks the spec ready, or
+        fails best-effort) or a self-revised ``(strategy_dict, rationale)``
+        tuple. Never raises — the external review loop is still
+        authoritative; this is purely an internal pre-flight.
+
+        The self-review fires on every spec the designer emits — both
+        initial generation from :meth:`run` and each external-loop
+        revision from :meth:`revise` — because the recurring failure
+        mode is the designer slipping the same prose ↔ predicate or
+        risk-math contradiction on round after round of revisions.
+        """
+        if not _design_self_review_enabled():
+            return strategy_dict, rationale
 
         try:
-            validate_structured_rules(parsed)
-        except StrategySpecParseError as exc:
-            logger.warning("DesignAgent emitted invalid rule shape: %s", exc)
-            raise
+            critique = self._self_review(strategy_dict)
+        except Exception as exc:
+            logger.warning(
+                "DesignAgent self-review failed (%s: %s); returning original spec",
+                type(exc).__name__,
+                exc,
+            )
+            return strategy_dict, rationale
 
-        return parsed, rationale
+        if critique.ready:
+            return strategy_dict, rationale
+
+        # Self-revision: reuse the same revision template the external
+        # loop uses so the LLM sees a familiar prompt shape. Build the
+        # ``prior_spec_json`` directly from the dict (no need to round-
+        # trip through ``StrategySpec`` construction).
+        spec_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
+        issues_block = _format_issues(critique)
+        revision_prompt = _REVISION_USER_TEMPLATE.format(
+            prior_spec_json=spec_json,
+            ready="false",
+            rationale=critique.rationale or "(self-review flagged issues)",
+            issues_block=issues_block,
+            n_prior_critiques=0,
+            prior_critiques_block=format_prior_critiques(None),
+        )
+
+        try:
+            return self._invoke_and_parse(_SYSTEM_PROMPT, revision_prompt)
+        except Exception as exc:
+            # Best-effort contract: any self-revision failure — DSL parse
+            # rejection (``StrategySpecParseError``), malformed JSON
+            # (``ValueError`` from ``extract_json_object``), or LLM
+            # transport error — must fall back to the original valid
+            # spec. The external ``DesignReviewAgent`` loop remains
+            # authoritative; this pre-flight never aborts the cycle.
+            logger.warning(
+                "DesignAgent self-revision failed (%s: %s); "
+                "returning pre-revision spec",
+                type(exc).__name__,
+                exc,
+            )
+            return strategy_dict, rationale
+
+    def _self_review(self, strategy_dict: Dict[str, Any]) -> "SpecCritique":
+        """Audit ``strategy_dict`` for prose↔predicate + risk-math contradictions.
+
+        Pre: ``strategy_dict`` is a parsed, DSL-valid spec dict (no
+        ``strategy_code`` key).
+        Post: returns a :class:`SpecCritique`. Best-effort — any LLM
+        transport or JSON parse failure raises and the caller falls back
+        to the original spec.
+        """
+        agent = Agent(
+            model=get_strands_model("strategy_design"),
+            system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
+            tools=[],
+        )
+        spec_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
+        user_prompt = (
+            "Audit the following candidate StrategySpec for the two "
+            "failure modes named in the system prompt. Return ONLY the JSON "
+            "verdict, no markdown.\n\n"
+            f"```json\n{spec_json}\n```\n"
+        )
+        result = agent(user_prompt)
+        parsed = extract_json_object(str(result))
+        return _coerce_critique(parsed, readiness_findings=[])
+
+
+def _design_parse_retries() -> int:
+    """Resolve the retry budget for ``_invoke_and_parse``.
+
+    Returns the configured number of retries on
+    :class:`StrategySpecParseError` from ``STRATEGY_LAB_DESIGN_PARSE_RETRIES``
+    (default 2, sub-zero values clamped to 0). Garbage values fall back
+    to the default rather than raising — the surrounding cycle is
+    already best-effort.
+    """
+    try:
+        return max(int(os.environ.get("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "2")), 0)
+    except ValueError:
+        return 2
+
+
+def _design_self_review_enabled() -> bool:
+    """Resolve the on/off toggle for :meth:`DesignAgent._with_self_review`.
+
+    Reads ``STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED`` (default ``true``;
+    accepted truthy values are ``"true"`` / ``"1"`` / ``"yes"``, case-
+    insensitive; anything else is treated as ``false``). When disabled
+    the designer reverts to its pre-change single-call behaviour on
+    both ``run()`` and ``revise()`` — the external review loop still
+    runs unchanged.
+    """
+    raw = os.environ.get("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
+    return raw.strip().lower() in {"true", "1", "yes"}
+
+
+_CORRECTION_PREAMBLE = """\
+Your previous JSON response was rejected by the DSL validator. Reissue
+the ENTIRE JSON object with the offending field fixed; do not change any
+other rule that was not flagged.
+
+Offending field: {field}
+Rejected payload: {payload}
+Validator error:
+{pydantic_error}
+
+Read the system prompt's DSL section before retrying. Common drifts that
+match what you just emitted:
+
+- Bar-field literals ("bar.close", "bar.high", "bar.low", "bar.volume")
+  appear as BARE STRINGS on a Predicate's `lhs` or `rhs`. They must NOT
+  be wrapped in IndicatorRef shape — `{{"name": "bar.close"}}` is invalid
+  because `bar.close` is not an IndicatorName.
+
+- `IndicatorRef.source` accepts only price/volume bar fields ("close",
+  "high", "low", "open", "volume", "hl2", "ohlc4"). It cannot be an
+  indicator name (e.g. `source: "atr"`). The DSL has no
+  indicator-of-indicator form — express the same idea with a primitive
+  indicator from the catalogue or by comparing the indicator against a
+  numeric constant or a bar-field literal.
+
+- `source` is a TOP-LEVEL field on `IndicatorRef`, not a member of
+  `params`. Each indicator's `params` schema accepts only the keys listed
+  in the catalogue (e.g. `sma`/`ema` accept only `period`); putting
+  `source` inside `params` trips the "unexpected param" validator.
+  Correct shape: `{{"name": "sma", "params": {{"period": 20}}, "source": "volume"}}`.
+
+--- ORIGINAL TASK BELOW ---
+{original_prompt}
+"""
+
+
+def _build_correction_prompt(user_prompt: str, exc: "StrategySpecParseError") -> str:
+    """Render a re-prompt that quotes the offending field and pydantic error.
+
+    Pre: ``exc`` carries ``field``, ``payload``, and a chained
+    ``ValidationError`` accessible via ``exc.__cause__``.
+    Post: returns a string that the LLM can read as "your last attempt
+    failed for this specific reason; reissue the corrected JSON."
+    """
+    cause = exc.__cause__ or exc
+    return _CORRECTION_PREAMBLE.format(
+        field=exc.field,
+        payload=_truncate(exc.payload),
+        pydantic_error=_truncate(str(cause), limit=1200),
+        original_prompt=user_prompt,
+    )
+
+
+def _truncate(value: Any, limit: int = 400) -> str:
+    text = value if isinstance(value, str) else repr(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _format_issues(critique: "SpecCritique") -> str:

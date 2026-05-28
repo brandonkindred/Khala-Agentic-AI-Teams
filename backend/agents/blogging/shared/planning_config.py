@@ -51,7 +51,7 @@ def plan_critic_model_override() -> Optional[str]:
     """
     When set, the plan-critic uses this Ollama model instead of the pipeline default.
 
-    Unset by default; stays on qwen3.5 via the shared client. This hook exists so
+    Unset by default; stays on the shared-client default model. This hook exists so
     per-role model diversification can be enabled later without further code changes.
     """
     raw = (os.environ.get("BLOG_PLAN_CRITIC_MODEL") or "").strip()

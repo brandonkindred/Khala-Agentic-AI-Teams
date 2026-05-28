@@ -19,8 +19,16 @@ Return `ready = true` only when **both** of the following hold:
 
 - **Thesis coherence** — does the rule set actually test what `hypothesis` claims? A momentum thesis with a mean-reversion entry rule is incoherent.
 - **Signal alignment** — `entry_rules` and `exit_rules` should refer to a consistent indicator family / parameterisation. A swing strategy with a 200-day SMA filter and a 5-minute take_profit is suspect.
+- **Hypothesis ↔ rules completeness** — every filter, condition, or indicator named in `hypothesis` / `signal_definition` MUST appear as a structured predicate. If the hypothesis says "only enter when ADX > 25 confirms trend," there MUST be an ADX-based predicate. Missing filters are NOT acceptable — the backtest will not test the actual claimed edge, and the strategy result becomes a lie. Flag as critical and demand the designer either add the predicate or rewrite the prose.
 - **Risk control completeness** — is there at least one meaningful exit besides a far-tailed stop? Does the strategy have any positive-edge exit, or only a stop and a "hope"?
 - **Universe ↔ thesis fit** — if the hypothesis names QQQ, does `target_symbols` include it? If the hypothesis is asset-class-wide ("US large-caps"), is `target_symbols` empty as intended?
+- **Mathematical coherence of sizing + risk + stops** — verify the algebra:
+  - `sizing` position size ≤ `risk_limits.max_position_pct` (e.g. `fraction=0.10` with `max_position_pct=5` is a contradiction).
+  - Per-trade risk = position size × `stop_loss.pct`. Reject "10% fraction × 20% stop = 2% per trade" if the hypothesis claims tight risk control.
+  - `take_profit.pct` vs `stop_loss.pct` — payoff ratio implies a required win rate (`p ≥ stop / (stop + tp)`). Reject if the hypothesis cannot defend that win rate.
+  - `volatility_target` sizing implies stops sized to that vol budget — a 5% annual vol target with a 20% stop is incoherent.
+  - `max_drawdown_pct` must be reachable but not trivial (single losing streak shouldn't blow through it; nor should it be unreachable by design).
+  When the spec's numbers don't make sense together, flag as critical and quote the specific contradiction (e.g. "fraction=0.10 vs max_position_pct=5: sizing exceeds limit").
 - **Sizing realism** — does the sizing rule combine with `risk_limits` to produce something a real account could execute?
 - **Loose / hand-wavy hypothesis or signal_definition** — a one-line hypothesis with no measurable signal claim is not ready.
 

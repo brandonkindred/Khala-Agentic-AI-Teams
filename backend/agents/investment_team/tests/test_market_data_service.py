@@ -61,7 +61,9 @@ def test_max_universe_symbols_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _bar(close: float = 100.0, volume: float = 1_000_000.0) -> OHLCVBar:
-    return OHLCVBar(date="2024-01-01", open=close, high=close + 0.5, low=close - 0.5, close=close, volume=volume)
+    return OHLCVBar(
+        date="2024-01-01", open=close, high=close + 0.5, low=close - 0.5, close=close, volume=volume
+    )
 
 
 def test_compute_adv_returns_none_when_empty() -> None:
@@ -117,7 +119,9 @@ def test_get_named_provider_chain_for_stocks_with_alpha_key(
 ) -> None:
     import investment_team.market_data_service as mds
 
-    monkeypatch.setattr(mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False)
+    monkeypatch.setattr(
+        mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False
+    )
     chain = MarketDataService()._get_named_provider_chain("stocks")
     slugs = [s for s, _ in chain]
     assert "alphavantage" in slugs
@@ -156,9 +160,7 @@ def test_fetch_with_providers_falls_through_to_next_on_exception(
         calls.append("second")
         return [_bar(close=300)]
 
-    monkeypatch.setattr(
-        svc, "_get_named_provider_chain", lambda _: [("a", _first), ("b", _second)]
-    )
+    monkeypatch.setattr(svc, "_get_named_provider_chain", lambda _: [("a", _first), ("b", _second)])
     bars, slug = svc._fetch_with_providers("AAA", "stocks", "s", "e")
     assert slug == "b"
     assert bars[0].close == 300
@@ -213,8 +215,14 @@ def test_df_to_bars_normalises_ohlc_invariants() -> None:
 
     # Bar A: H/L outside envelope → must be repaired.
     rows = [
-        (_Index("2024-01-01"), _Row({"Open": 100, "High": 95, "Low": 105, "Close": 102, "Volume": 1000})),
-        (_Index("2024-01-02"), _Row({"Open": 102, "High": 110, "Low": 100, "Close": 108, "Volume": 2000})),
+        (
+            _Index("2024-01-01"),
+            _Row({"Open": 100, "High": 95, "Low": 105, "Close": 102, "Volume": 1000}),
+        ),
+        (
+            _Index("2024-01-02"),
+            _Row({"Open": 102, "High": 110, "Low": 100, "Close": 108, "Volume": 2000}),
+        ),
     ]
     bars = MarketDataService._df_to_bars(_DF(rows))
     assert len(bars) == 2
@@ -223,6 +231,74 @@ def test_df_to_bars_normalises_ohlc_invariants() -> None:
     assert bars[0].low == 95
     # Volume forwarded.
     assert bars[0].volume == 1000
+
+
+def test_df_to_bars_filters_nan_rows() -> None:
+    """Rows containing NaN in any OHLC field must be dropped.
+
+    yfinance occasionally surfaces NaN rows during data gaps; left unfiltered,
+    a NaN close propagates straight into the SpecReadinessGate's market sample
+    provider (which then trips the sizing realisability critical with
+    ``got nan``). Filter at the data boundary so no downstream consumer ever
+    sees a non-finite OHLC value.
+    """
+    import math
+
+    class _Row:
+        def __init__(self, data: Dict[str, float]) -> None:
+            self._d = data
+
+        def __getitem__(self, key: str) -> float:
+            return self._d[key]
+
+        def get(self, key: str, default: float = 0.0) -> float:
+            return self._d.get(key, default)
+
+    class _Index:
+        def __init__(self, label: str) -> None:
+            self._label = label
+
+        def strftime(self, fmt: str) -> str:  # noqa: ARG002 — accept arbitrary fmt
+            return self._label
+
+    class _DF:
+        def __init__(self, rows: List[Tuple[_Index, _Row]]) -> None:
+            self._rows = rows
+
+        def iterrows(self):
+            return iter(self._rows)
+
+    rows = [
+        # Good bar — kept.
+        (
+            _Index("2024-01-01"),
+            _Row({"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000}),
+        ),
+        # NaN Close — dropped.
+        (
+            _Index("2024-01-02"),
+            _Row({"Open": 100, "High": 101, "Low": 99, "Close": float("nan"), "Volume": 1000}),
+        ),
+        # +inf Open — dropped.
+        (
+            _Index("2024-01-03"),
+            _Row({"Open": float("inf"), "High": 101, "Low": 99, "Close": 100, "Volume": 1000}),
+        ),
+        # Good bar — kept.
+        (
+            _Index("2024-01-04"),
+            _Row({"Open": 102, "High": 103, "Low": 101, "Close": 102, "Volume": 2000}),
+        ),
+    ]
+    bars = MarketDataService._df_to_bars(_DF(rows))
+    assert [b.date for b in bars] == ["2024-01-01", "2024-01-04"]
+    assert all(
+        math.isfinite(b.open)
+        and math.isfinite(b.high)
+        and math.isfinite(b.low)
+        and math.isfinite(b.close)
+        for b in bars
+    )
 
 
 def test_df_to_bars_falls_back_when_index_has_no_strftime() -> None:
@@ -318,6 +394,69 @@ def test_fetch_yahoo_crypto_maps_symbol(monkeypatch: pytest.MonkeyPatch) -> None
     assert captured["sym"] == "BTC-USD"
 
 
+def test_fetch_yahoo_crypto_idempotent_on_provider_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Crypto symbols already in Yahoo form (``ETH-USD``) must NOT have
+    ``-USD`` appended a second time.
+
+    Operators and the spec-readiness gate both accept the Yahoo-suffixed
+    form as a valid ``target_symbols`` entry; the fetcher must round-trip
+    that form unchanged rather than producing ``ETH-USD-USD``, which
+    yfinance reports as a delisted symbol after three retries.
+    """
+    captured: Dict[str, str] = {}
+
+    class _DF:
+        empty = True
+
+        def iterrows(self):
+            return iter([])
+
+    class _Ticker:
+        def __init__(self, sym):
+            captured["sym"] = sym
+
+        def history(self, **kwargs):
+            return _DF()
+
+    fake_yf = types.ModuleType("yfinance")
+    fake_yf.Ticker = _Ticker  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+
+    MarketDataService()._fetch_yahoo("ETH-USD", "crypto", "2024-01-01", "2024-01-31", max_retries=1)
+    assert captured["sym"] == "ETH-USD"
+
+
+def test_fetch_yahoo_crypto_unknown_symbol_appends_usd_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crypto symbol not in ``YAHOO_CRYPTO_TICKERS`` and lacking the
+    ``-USD`` suffix still gets the suffix appended exactly once."""
+    captured: Dict[str, str] = {}
+
+    class _DF:
+        empty = True
+
+        def iterrows(self):
+            return iter([])
+
+    class _Ticker:
+        def __init__(self, sym):
+            captured["sym"] = sym
+
+        def history(self, **kwargs):
+            return _DF()
+
+    fake_yf = types.ModuleType("yfinance")
+    fake_yf.Ticker = _Ticker  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+
+    # "DOGE" is not in YAHOO_CRYPTO_TICKERS — exercise the fallback path.
+    MarketDataService()._fetch_yahoo("DOGE", "crypto", "2024-01-01", "2024-01-31", max_retries=1)
+    assert captured["sym"] == "DOGE-USD"
+
+
 # ---------------------------------------------------------------------------
 # _fetch_twelve_data (httpx stub)
 # ---------------------------------------------------------------------------
@@ -333,7 +472,9 @@ class _StubResp:
             import httpx
 
             raise httpx.HTTPStatusError(
-                f"HTTP {self.status_code}", request=None, response=_StubHttpResponse(self.status_code)  # type: ignore[arg-type]
+                f"HTTP {self.status_code}",
+                request=None,
+                response=_StubHttpResponse(self.status_code),  # type: ignore[arg-type]
             )
 
     def json(self) -> Dict[str, Any]:
@@ -378,11 +519,20 @@ def _install_httpx_stub(
 def test_fetch_twelve_data_success(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {
         "values": [
-            {"datetime": "2024-01-02", "open": "1.0", "high": "1.5", "low": "0.5", "close": "1.2", "volume": "1000"}
+            {
+                "datetime": "2024-01-02",
+                "open": "1.0",
+                "high": "1.5",
+                "low": "0.5",
+                "close": "1.2",
+                "volume": "1000",
+            }
         ]
     }
     _install_httpx_stub(monkeypatch, {"twelvedata": _StubResp(payload)})
-    bars = MarketDataService()._fetch_twelve_data("AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1)
+    bars = MarketDataService()._fetch_twelve_data(
+        "AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1
+    )
     assert len(bars) == 1
     assert bars[0].close == 1.2
 
@@ -390,13 +540,17 @@ def test_fetch_twelve_data_success(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_fetch_twelve_data_returns_empty_on_error_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"status": "error", "message": "bad symbol"}
     _install_httpx_stub(monkeypatch, {"twelvedata": _StubResp(payload)})
-    bars = MarketDataService()._fetch_twelve_data("AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1)
+    bars = MarketDataService()._fetch_twelve_data(
+        "AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1
+    )
     assert bars == []
 
 
 def test_fetch_twelve_data_returns_empty_on_missing_values(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_httpx_stub(monkeypatch, {"twelvedata": _StubResp({"values": None})})
-    bars = MarketDataService()._fetch_twelve_data("AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1)
+    bars = MarketDataService()._fetch_twelve_data(
+        "AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1
+    )
     assert bars == []
 
 
@@ -404,18 +558,29 @@ def test_fetch_twelve_data_repairs_ohlc_invariants(monkeypatch: pytest.MonkeyPat
     payload = {
         "values": [
             # High=0.5 but close=1.0 → repair high to max(open, high, low, close).
-            {"datetime": "2024-01-02", "open": "1.0", "high": "0.5", "low": "1.5", "close": "1.0", "volume": "100"}
+            {
+                "datetime": "2024-01-02",
+                "open": "1.0",
+                "high": "0.5",
+                "low": "1.5",
+                "close": "1.0",
+                "volume": "100",
+            }
         ]
     }
     _install_httpx_stub(monkeypatch, {"twelvedata": _StubResp(payload)})
-    bars = MarketDataService()._fetch_twelve_data("AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1)
+    bars = MarketDataService()._fetch_twelve_data(
+        "AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1
+    )
     assert bars[0].high == 1.5
     assert bars[0].low == 0.5
 
 
 def test_fetch_twelve_data_swallows_generic_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_httpx_stub(monkeypatch, RuntimeError("boom"))
-    bars = MarketDataService()._fetch_twelve_data("AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1)
+    bars = MarketDataService()._fetch_twelve_data(
+        "AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1
+    )
     assert bars == []
 
 
@@ -425,17 +590,23 @@ def test_fetch_twelve_data_swallows_generic_exception(monkeypatch: pytest.Monkey
 
 
 def test_fetch_coingecko_returns_empty_for_non_crypto(monkeypatch: pytest.MonkeyPatch) -> None:
-    bars = MarketDataService()._fetch_coingecko("AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1)
+    bars = MarketDataService()._fetch_coingecko(
+        "AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1
+    )
     assert bars == []
 
 
 def test_fetch_coingecko_returns_empty_for_unknown_coin(monkeypatch: pytest.MonkeyPatch) -> None:
-    bars = MarketDataService()._fetch_coingecko("XYZ", "crypto", "2024-01-01", "2024-01-31", max_retries=1)
+    bars = MarketDataService()._fetch_coingecko(
+        "XYZ", "crypto", "2024-01-01", "2024-01-31", max_retries=1
+    )
     assert bars == []
 
 
 def test_fetch_coingecko_returns_empty_for_bad_dates(monkeypatch: pytest.MonkeyPatch) -> None:
-    bars = MarketDataService()._fetch_coingecko("BTC", "crypto", "bad-date", "2024-01-31", max_retries=1)
+    bars = MarketDataService()._fetch_coingecko(
+        "BTC", "crypto", "bad-date", "2024-01-31", max_retries=1
+    )
     assert bars == []
 
 
@@ -449,7 +620,9 @@ def test_fetch_coingecko_success(monkeypatch: pytest.MonkeyPatch) -> None:
         ]
     }
     _install_httpx_stub(monkeypatch, {"coingecko": _StubResp(payload)})
-    bars = MarketDataService()._fetch_coingecko("BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1)
+    bars = MarketDataService()._fetch_coingecko(
+        "BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1
+    )
     assert len(bars) >= 1
     # Volume defaults to 0.0 for the synthesised OHLCV.
     assert all(b.volume == 0.0 for b in bars)
@@ -459,13 +632,17 @@ def test_fetch_coingecko_returns_empty_on_unexpected_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_httpx_stub(monkeypatch, {"coingecko": _StubResp({"unexpected": True})})
-    bars = MarketDataService()._fetch_coingecko("BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1)
+    bars = MarketDataService()._fetch_coingecko(
+        "BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1
+    )
     assert bars == []
 
 
 def test_fetch_coingecko_swallows_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_httpx_stub(monkeypatch, RuntimeError("boom"))
-    bars = MarketDataService()._fetch_coingecko("BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1)
+    bars = MarketDataService()._fetch_coingecko(
+        "BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1
+    )
     assert bars == []
 
 
@@ -485,7 +662,9 @@ def test_fetch_alphavantage_returns_empty_without_key(monkeypatch: pytest.Monkey
 def test_fetch_alphavantage_handles_error_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     import investment_team.market_data_service as mds
 
-    monkeypatch.setattr(mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False)
+    monkeypatch.setattr(
+        mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False
+    )
     _install_httpx_stub(monkeypatch, {"alphavantage": _StubResp({"Error Message": "bad"})})
     bars = MarketDataService()._fetch_alphavantage("AAA", "stocks", "2024-01-01", "2024-01-31")
     assert bars == []
@@ -494,7 +673,9 @@ def test_fetch_alphavantage_handles_error_payload(monkeypatch: pytest.MonkeyPatc
 def test_fetch_alphavantage_handles_missing_ts(monkeypatch: pytest.MonkeyPatch) -> None:
     import investment_team.market_data_service as mds
 
-    monkeypatch.setattr(mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False)
+    monkeypatch.setattr(
+        mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False
+    )
     _install_httpx_stub(monkeypatch, {"alphavantage": _StubResp({"Meta Data": {}})})
     bars = MarketDataService()._fetch_alphavantage("AAA", "stocks", "2024-01-01", "2024-01-31")
     assert bars == []
@@ -503,7 +684,9 @@ def test_fetch_alphavantage_handles_missing_ts(monkeypatch: pytest.MonkeyPatch) 
 def test_fetch_alphavantage_stocks_success(monkeypatch: pytest.MonkeyPatch) -> None:
     import investment_team.market_data_service as mds
 
-    monkeypatch.setattr(mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False)
+    monkeypatch.setattr(
+        mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False
+    )
     payload = {
         "Time Series (Daily)": {
             "2024-01-15": {
@@ -533,7 +716,9 @@ def test_fetch_alphavantage_stocks_success(monkeypatch: pytest.MonkeyPatch) -> N
 def test_fetch_alphavantage_forex_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     import investment_team.market_data_service as mds
 
-    monkeypatch.setattr(mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False)
+    monkeypatch.setattr(
+        mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False
+    )
     payload = {
         "Time Series FX (Daily)": {
             "2024-01-15": {"1. open": "1.0", "2. high": "1.1", "3. low": "0.9", "4. close": "1.05"}
@@ -547,7 +732,9 @@ def test_fetch_alphavantage_forex_branch(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_fetch_alphavantage_crypto_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     import investment_team.market_data_service as mds
 
-    monkeypatch.setattr(mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False)
+    monkeypatch.setattr(
+        mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False
+    )
     payload = {
         "Time Series (Digital Currency Daily)": {
             "2024-01-15": {
@@ -568,7 +755,9 @@ def test_fetch_alphavantage_crypto_branch(monkeypatch: pytest.MonkeyPatch) -> No
 def test_fetch_alphavantage_swallows_generic_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     import investment_team.market_data_service as mds
 
-    monkeypatch.setattr(mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False)
+    monkeypatch.setattr(
+        mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False
+    )
     _install_httpx_stub(monkeypatch, RuntimeError("network"))
     bars = MarketDataService()._fetch_alphavantage("AAA", "stocks", "2024-01-01", "2024-01-31")
     assert bars == []
@@ -642,7 +831,9 @@ def test_resolve_strategy_symbols_returns_targets_verbatim(monkeypatch: pytest.M
     assert svc.resolve_strategy_symbols(spec) == ["AAPL", "MSFT"]
 
 
-def test_resolve_strategy_symbols_truncates_default_universe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_strategy_symbols_truncates_default_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from investment_team.models import StrategySpec
 
     # Cap at 2 — the asset-class default for stocks is much longer.

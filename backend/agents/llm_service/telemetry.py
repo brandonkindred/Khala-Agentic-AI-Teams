@@ -11,7 +11,7 @@ Usage::
     record_llm_call(
         team="blogging",
         agent_key="blog_writer",
-        model="qwen3.5:397b-cloud",
+        model="deepseek-v4-pro:cloud",
         caller_tag="blog_writer_agent.agent.write_draft",
         prompt_tokens=1200,
         completion_tokens=3500,

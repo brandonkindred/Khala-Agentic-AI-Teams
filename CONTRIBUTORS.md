@@ -94,7 +94,7 @@ OLLAMA_API_KEY=your_ollama_key
 
 # Software Engineering (for real LLM runs)
 LLM_PROVIDER=ollama
-LLM_MODEL=qwen3.5:397b-cloud
+LLM_MODEL=deepseek-v4-pro:cloud
 LLM_BASE_URL=http://127.0.0.1:11434
 
 # SOC2 (optional)

@@ -94,7 +94,7 @@ A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
 }
 ```
 
-### Negative example — do NOT emit
+### Negative examples — do NOT emit
 
 ```json
 {
@@ -106,9 +106,72 @@ A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
 
 Prose strings and the legacy `sizing_rules` list-of-strings shape are rejected by the parser. The orchestrator will discard the cycle and ask for a redo.
 
+```json
+{
+  "lhs": {"name": "bar.close"},
+  "op": "cross_above",
+  "rhs": {"name": "ema", "params": {"period": 20}}
+}
+```
+
+Bar-field references must appear as the BARE STRING literals — not wrapped in `IndicatorRef` shape. `bar.close` / `bar.high` / `bar.low` / `bar.volume` are not valid `IndicatorRef.name` values. Correct: `{"lhs": "bar.close", "op": "cross_above", "rhs": {"name": "ema", "params": {"period": 20}}}`.
+
+```json
+{
+  "name": "sma",
+  "params": {"period": 20},
+  "source": "atr"
+}
+```
+
+`IndicatorRef.source` accepts ONLY price/volume bar fields (`close`, `high`, `low`, `open`, `volume`, `hl2`, `ohlc4`). It cannot be an indicator name — the DSL has no indicator-of-indicator form (e.g. "SMA of ATR" is not expressible). Either pick a primitive indicator from the catalogue, or restructure the predicate to compare an indicator against a bar-field literal or numeric constant.
+
+```json
+{
+  "name": "sma",
+  "params": {"period": 20, "source": "volume"}
+}
+```
+
+`source` is a TOP-LEVEL field on `IndicatorRef`, not a param. Each indicator's `params` schema accepts only the keys listed in the catalogue (e.g. `sma`/`ema` accept only `period`); placing `source` inside `params` trips the "unexpected param" validator. Correct: `{"name": "sma", "params": {"period": 20}, "source": "volume"}`.
+
 ## DO NOT emit `strategy_code`
 
 Code synthesis is a separate phase. If you include a `strategy_code` field in your JSON, it will be discarded with a warning. Your job ends at the spec.
+
+## Hypothesis ↔ predicates must agree (completeness)
+
+Every indicator AND every filter / condition you NAME in `hypothesis` or `signal_definition` MUST also appear as a structured object in `entry_rules` or `exit_rules`. "Filter" includes anything you describe as a precondition: trend confirmations ("only long when ADX > 25"), regime gates ("only enter when above the 200-day SMA"), volatility filters ("skip days when ATR is below its 20-day mean"), volume confirmations ("require volume > 20-day average"), session windows, etc.
+
+The reviewer will reject specs whose prose makes claims the rules cannot test. **Critical engine semantics you must internalize before resolving a mismatch:**
+
+- A `Predicate` has exactly ONE `lhs`, ONE `op`, ONE `rhs`. The DSL has **no** `AND` / `OR` combinator inside a predicate.
+- `entry_rules` is evaluated as **OR**: the engine enters as soon as the FIRST listed rule's predicate fires. Adding a second entry rule does NOT tighten the condition — it broadens it.
+- There is no way to express "long when ADX > 25 **AND** close > SMA200" as two separate `entry_rules`. Doing so would make the engine enter on `ADX > 25 OR close > SMA200`, which is a different (looser) strategy than the one your prose describes.
+
+Three correct ways to resolve a mismatch:
+
+1. **Pick the single most discriminating predicate** and put it in one `entry_rule`. Document the other conditions in `signal_definition` only if they are loose context (regime narrative), NOT if they are part of the entry trigger. If the reviewer asks "does the rule test what the prose claims?", the honest answer must be yes.
+2. **Trim the prose** so it only names filters the single entry predicate genuinely implements. If your thesis was "ADX > 25 AND close > SMA200" but you can only encode one, rewrite the hypothesis around whichever predicate you kept.
+3. **Mark the spec `requires_custom_code: true`** if and only if the strategy genuinely cannot be expressed with the single-predicate DSL form. This is an escape hatch, not a default — most strategies should be expressible in the DSL after step 1 or 2.
+
+Pick whichever option best matches your real signal — DO NOT silently encode an AND-thesis as multiple OR'd entry rules, and DO NOT leave the mismatch unresolved on the next round.
+
+## Mathematical coherence of risk and sizing (mandatory)
+
+`sizing`, `risk_limits`, and the stop / take-profit rules form a coupled system. The reviewer will reject specs whose numbers contradict each other. Do the arithmetic in your head before writing the spec:
+
+- **Position size ≤ position cap.** If `sizing.fraction = 0.10` (10% per trade) but `risk_limits.max_position_pct = 5`, you have a contradiction — the sizing rule asks for 10% of capital but the risk limit caps positions at 5%. Either lower the fraction or raise the cap. Same applies to `fixed_notional`: with `initial_capital = $100k` and `risk_limits.max_position_pct = 5`, `notional_usd ≤ $5,000`.
+
+- **Per-trade $ risk = position size × stop_loss.pct.** Sanity-check this. A 10% fraction with a 5% stop risks 0.5% of equity per trade — defensible. A 25% fraction with a 10% stop risks 2.5% per trade — aggressive but consistent. A 50% fraction with a 20% stop risks 10% per trade — likely a typo. Document this number in `risk_limits` (e.g. `"max_loss_per_trade_pct": 1.5`) and confirm it falls out of your sizing math.
+
+- **Take-profit ≥ stop in magnitude when targeting positive expectancy at <50% win rate.** A 1% take-profit paired with a 5% stop needs >83% wins to break even before costs — almost no real edge clears that bar. If your `take_profit.pct < stop_loss.pct`, your `hypothesis` must explicitly defend the high win-rate assumption.
+
+- **Volatility-target sizing implies a notional consistent with `target_annual_vol`.** Pairing `target_annual_vol = 0.05` (5%) with a stop_loss of 20% means the strategy holds positions through losses ~4× its annual vol budget — incoherent. Match the stop to the vol scale.
+
+- **`max_drawdown_pct` should be reachable but not trivial.** A 50-trade strategy with 2% per-trade risk should not declare `max_drawdown_pct = 5` (one losing streak of 3 trades crosses it). Conversely, `max_drawdown_pct = 80` is not a meaningful limit. Aim for 2-3× the standard deviation of cumulative losses under your sizing.
+
+When in doubt, add an explicit `note` on the sizing or stop rule that shows the arithmetic ("5% fraction × 4% stop = 0.20% portfolio risk per trade"). The reviewer should not have to do the multiplication.
 
 ## Asset class diversity
 
