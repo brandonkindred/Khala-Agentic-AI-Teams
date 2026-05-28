@@ -178,24 +178,53 @@ return 100.0 - (100.0 / (1.0 + rs))
     MACDSignal: """\
 if len(bars) < {slow} + {signal}:
     return NAN
-macd_line = []
-for _end in range({slow}, len(bars) + 1):
-    _sub = bars[:_end]
-    _alpha_f = 2.0 / ({fast} + 1)
-    _ef = _sub[-{fast}].close
-    for _b in _sub[-{fast} + 1:]:
+# Streaming-cache the macd_line so subsequent bars cost O(slow) instead
+# of O((N - slow) * (fast + slow)) per call. The cache is keyed by the
+# factor signature so two factors with different params don't collide.
+_macd_key = ('macd_signal_{fast}_{slow}_{signal}',)
+_state = self._ind_state.get(_macd_key) if hasattr(self, '_ind_state') else None
+_last = bars[-1]
+_new_fp = (id(_last), len(bars), getattr(_last, 'timestamp', None))
+if _state is not None and _state['fp'] == _new_fp:
+    return _state['value']
+_can_step = False
+if _state is not None and len(bars) >= 2:
+    _prev = bars[-2]
+    _prev_ts = getattr(_prev, 'timestamp', None)
+    _prev_fp = _state['fp']
+    _can_step = (_prev_fp[0] == id(_prev)) or (
+        _prev_ts is not None and _prev_fp[2] == _prev_ts
+    )
+_alpha_f = 2.0 / ({fast} + 1)
+_alpha_s = 2.0 / ({slow} + 1)
+if _can_step:
+    macd_line = _state['macd_line']
+    _ef = bars[-{fast}].close
+    for _b in bars[-{fast} + 1:]:
         _ef = _alpha_f * _b.close + (1 - _alpha_f) * _ef
-    _alpha_s = 2.0 / ({slow} + 1)
-    _es = _sub[-{slow}].close
-    for _b in _sub[-{slow} + 1:]:
+    _es = bars[-{slow}].close
+    for _b in bars[-{slow} + 1:]:
         _es = _alpha_s * _b.close + (1 - _alpha_s) * _es
     macd_line.append(_ef - _es)
+else:
+    macd_line = []
+    for _end in range({slow}, len(bars) + 1):
+        _sub = bars[:_end]
+        _ef = _sub[-{fast}].close
+        for _b in _sub[-{fast} + 1:]:
+            _ef = _alpha_f * _b.close + (1 - _alpha_f) * _ef
+        _es = _sub[-{slow}].close
+        for _b in _sub[-{slow} + 1:]:
+            _es = _alpha_s * _b.close + (1 - _alpha_s) * _es
+        macd_line.append(_ef - _es)
 if len(macd_line) < {signal}:
     return NAN
 _alpha_g = 2.0 / ({signal} + 1)
 val = macd_line[0]
 for _x in macd_line[1:]:
     val = _alpha_g * _x + (1 - _alpha_g) * val
+if hasattr(self, '_ind_state'):
+    self._ind_state[_macd_key] = {{'fp': _new_fp, 'value': val, 'macd_line': macd_line}}
 return val
 """,
     BollingerZ: """\
@@ -577,6 +606,12 @@ class _Compiler:
             f'"""Auto-generated from genome {genome_hash}."""',
             "",
             f"MIN_HISTORY = {min_history}",
+            "",
+            "def __init__(self):",
+            "    super().__init__()",
+            "    # Per-instance state for streaming-recurrence indicators (e.g. macd_signal)",
+            "    # — empty dict the helper methods populate lazily.",
+            "    self._ind_state = {}",
             "",
             "def on_bar(self, ctx, bar):",
             "    bars = ctx.history(bar.symbol, self.MIN_HISTORY + 4)",

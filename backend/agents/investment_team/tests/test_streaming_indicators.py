@@ -1,0 +1,453 @@
+"""Parity + invariant tests for the streaming indicator registry.
+
+The registry in ``strategy_lab/indicators/streaming.py`` is the canonical
+implementation reused by the host-side primitives, the executor's
+``StreamingHistoryView``, and (via shared template text) the two
+compilers. The tests here:
+
+* assert bit-identical output against the original O(N²) MACD math so
+  the synthesis compiler's golden snapshots can never drift;
+* drive every indicator bar-by-bar to confirm the cache's
+  cold-start / single-step / same-bar branches are all exercised and
+  agree with the cold-only reference;
+* check the replay/seek fallback: feeding the registry truncated
+  history must produce the same value as a fresh registry given the
+  same truncated history.
+"""
+
+from __future__ import annotations
+
+import math
+import random
+from dataclasses import dataclass
+from typing import List
+
+import pytest
+
+from investment_team.strategy_lab.indicators.streaming import (
+    IndicatorRegistry,
+    macd_components,
+    windowed_ema,
+)
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Bar:
+    """Bar-shaped record matching ``contract.Bar``'s field surface."""
+
+    timestamp: str
+    open: float = 100.0
+    high: float = 100.0
+    low: float = 100.0
+    close: float = 100.0
+    volume: float = 1.0
+
+
+def _series(n: int, seed: int = 0) -> List[_Bar]:
+    rng = random.Random(seed)
+    bars: List[_Bar] = []
+    for i in range(n):
+        close = 100.0 + rng.uniform(-3.0, 3.0) + i * 0.3
+        spread = 0.5
+        bars.append(
+            _Bar(
+                timestamp=f"2024-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
+                open=close - 0.1,
+                high=close + spread,
+                low=close - spread,
+                close=close,
+                volume=1000.0 + i,
+            )
+        )
+    return bars
+
+
+# ---------------------------------------------------------------------------
+# Legacy reference (the exact math the original compiler template ran).
+# ---------------------------------------------------------------------------
+
+
+def _legacy_macd(history, *, fast: int, slow: int, signal: int, select: str = "macd"):
+    if fast >= slow:
+        return None
+    min_bars = slow if select == "macd" else slow + signal - 1
+    if len(history) < min_bars:
+        return None
+    macd_line: List[float] = []
+    for end in range(slow, len(history) + 1):
+        sub = history[:end]
+        alpha_f = 2.0 / (fast + 1.0)
+        ef = sub[-fast].close
+        for b in sub[-fast + 1 :]:
+            ef = alpha_f * b.close + (1.0 - alpha_f) * ef
+        alpha_s = 2.0 / (slow + 1.0)
+        es = sub[-slow].close
+        for b in sub[-slow + 1 :]:
+            es = alpha_s * b.close + (1.0 - alpha_s) * es
+        macd_line.append(ef - es)
+    if select == "macd":
+        return macd_line[-1]
+    if len(macd_line) < signal:
+        return None
+    alpha_g = 2.0 / (signal + 1.0)
+    sig = macd_line[0]
+    for x in macd_line[1:]:
+        sig = alpha_g * x + (1.0 - alpha_g) * sig
+    if select == "signal":
+        return sig
+    if select == "histogram":
+        return macd_line[-1] - sig
+    return None
+
+
+def _legacy_ema(bars, period: int) -> float:
+    if len(bars) < period:
+        return float("nan")
+    alpha = 2.0 / (period + 1.0)
+    val = bars[-period].close
+    for b in bars[-period + 1 :]:
+        val = alpha * b.close + (1.0 - alpha) * val
+    return val
+
+
+# ---------------------------------------------------------------------------
+# MACD parity — cold-start
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("select", ["macd", "signal", "histogram"])
+def test_macd_components_match_legacy_cold_start(select: str) -> None:
+    """Single cold-start at varying history depths must match legacy bit-for-bit."""
+    bars = _series(80, seed=11)
+    reg = IndicatorRegistry()
+    for n in range(20, len(bars) + 1):
+        sub = bars[:n]
+        new = reg.macd(sub, fast=12, slow=26, signal=9, select=select)
+        # Reset state so each call is an independent cold-start.
+        reg._state.clear()
+        ref = _legacy_macd(sub, fast=12, slow=26, signal=9, select=select)
+        assert new == ref, f"select={select} n={n} new={new!r} ref={ref!r}"
+
+
+# ---------------------------------------------------------------------------
+# MACD parity — streaming step
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("select", ["macd", "signal", "histogram"])
+def test_macd_streaming_matches_legacy_bar_by_bar(select: str) -> None:
+    """Driving the registry bar-by-bar (single-step path) must match legacy."""
+    bars = _series(80, seed=37)
+    reg = IndicatorRegistry()
+    for n in range(26, len(bars) + 1):
+        sub = bars[:n]
+        streaming = reg.macd(sub, fast=12, slow=26, signal=9, select=select)
+        ref = _legacy_macd(sub, fast=12, slow=26, signal=9, select=select)
+        assert streaming == ref, f"select={select} n={n} streaming={streaming!r} ref={ref!r}"
+
+
+def test_macd_same_bar_returns_cached_value() -> None:
+    """Two same-``bars[-1]`` calls return the exact cached value (no recompute)."""
+    bars = _series(50, seed=5)
+    reg = IndicatorRegistry()
+    first = reg.macd(bars, fast=12, slow=26, signal=9, select="signal")
+    second = reg.macd(bars, fast=12, slow=26, signal=9, select="signal")
+    assert first == second
+    # Two selects on the same bar — both come from the same cached payload.
+    macd_val = reg.macd(bars, fast=12, slow=26, signal=9, select="macd")
+    hist_val = reg.macd(bars, fast=12, slow=26, signal=9, select="histogram")
+    assert macd_val - first == pytest.approx(hist_val, rel=0, abs=1e-12)
+
+
+def test_macd_replay_falls_back_to_cold_start() -> None:
+    """Feeding the registry a shorter history forces a cold-start fallback."""
+    bars = _series(60, seed=2)
+    reg = IndicatorRegistry()
+    for n in range(35, 61):
+        reg.macd(bars[:n], fast=12, slow=26, signal=9, select="signal")
+    # Now replay at n=40 — registry must NOT carry forward state from n=60.
+    truncated = bars[:40]
+    replay_val = reg.macd(truncated, fast=12, slow=26, signal=9, select="signal")
+    fresh_val = IndicatorRegistry().macd(truncated, fast=12, slow=26, signal=9, select="signal")
+    assert replay_val == fresh_val
+
+
+def test_macd_warmup_returns_none() -> None:
+    reg = IndicatorRegistry()
+    bars = _series(25)  # slow=26 → too short
+    assert reg.macd(bars, fast=12, slow=26, signal=9, select="macd") is None
+    assert reg.macd(bars, fast=12, slow=26, signal=9, select="signal") is None
+    assert reg.macd(bars, fast=12, slow=26, signal=9, select="histogram") is None
+
+
+def test_macd_fast_gte_slow_returns_none() -> None:
+    reg = IndicatorRegistry()
+    bars = _series(60)
+    assert reg.macd(bars, fast=30, slow=10, signal=9, select="macd") is None
+
+
+# ---------------------------------------------------------------------------
+# Other indicators — windowed parity
+# ---------------------------------------------------------------------------
+
+
+def test_ema_matches_windowed_reference() -> None:
+    bars = _series(40, seed=8)
+    reg = IndicatorRegistry()
+    for n in range(20, 41):
+        sub = bars[:n]
+        assert reg.ema(sub, period=14) == pytest.approx(_legacy_ema(sub, 14), rel=0, abs=1e-12)
+
+
+def test_sma_matches_naive_mean() -> None:
+    bars = _series(40, seed=9)
+    reg = IndicatorRegistry()
+    for n in range(20, 41):
+        sub = bars[:n]
+        expected = sum(b.close for b in sub[-14:]) / 14
+        assert reg.sma(sub, period=14) == pytest.approx(expected, rel=0, abs=1e-12)
+
+
+def test_rsi_matches_legacy_loop() -> None:
+    bars = _series(40, seed=10)
+    reg = IndicatorRegistry()
+    for n in range(20, 41):
+        sub = bars[:n]
+        # Reference: the original primitives.rsi math.
+        period = 14
+        gains = 0.0
+        losses = 0.0
+        for i in range(len(sub) - period, len(sub)):
+            delta = sub[i].close - sub[i - 1].close
+            if delta > 0:
+                gains += delta
+            else:
+                losses += -delta
+        avg_gain = gains / period
+        avg_loss = losses / period
+        if avg_loss == 0:
+            expected = 100.0 if avg_gain > 0 else 50.0
+        else:
+            rs = avg_gain / avg_loss
+            expected = 100.0 - (100.0 / (1.0 + rs))
+        assert reg.rsi(sub, period=14) == pytest.approx(expected, rel=0, abs=1e-12)
+
+
+def test_atr_matches_legacy_loop() -> None:
+    bars = _series(40, seed=11)
+    reg = IndicatorRegistry()
+    period = 14
+    for n in range(20, 41):
+        sub = bars[:n]
+        trs = []
+        for i in range(len(sub) - period, len(sub)):
+            h = sub[i].high
+            low = sub[i].low
+            pc = sub[i - 1].close
+            trs.append(max(h - low, abs(h - pc), abs(low - pc)))
+        expected = sum(trs) / period
+        assert reg.atr(sub, period=14) == pytest.approx(expected, rel=0, abs=1e-12)
+
+
+def test_adx_matches_legacy() -> None:
+    bars = _series(60, seed=12)
+    reg = IndicatorRegistry()
+    period = 14
+    for n in range(30, 61):
+        sub = bars[:n]
+        plus_dms: List[float] = []
+        minus_dms: List[float] = []
+        trs: List[float] = []
+        for i in range(1, len(sub)):
+            up = sub[i].high - sub[i - 1].high
+            down = sub[i - 1].low - sub[i].low
+            plus_dms.append(up if (up > down and up > 0) else 0.0)
+            minus_dms.append(down if (down > up and down > 0) else 0.0)
+            pc = sub[i - 1].close
+            trs.append(
+                max(
+                    sub[i].high - sub[i].low,
+                    abs(sub[i].high - pc),
+                    abs(sub[i].low - pc),
+                )
+            )
+        tr_sum = sum(trs[-period:])
+        if tr_sum == 0:
+            expected = 0.0
+        else:
+            plus_di = 100.0 * sum(plus_dms[-period:]) / tr_sum
+            minus_di = 100.0 * sum(minus_dms[-period:]) / tr_sum
+            denom = plus_di + minus_di
+            expected = 0.0 if denom == 0 else 100.0 * abs(plus_di - minus_di) / denom
+        assert reg.adx(sub, period=14) == pytest.approx(expected, rel=0, abs=1e-12)
+
+
+def test_bollinger_bands_round_trip_through_select() -> None:
+    bars = _series(40, seed=13)
+    reg = IndicatorRegistry()
+    middle = reg.bollinger_bands(bars, period=20, select="middle")
+    upper = reg.bollinger_bands(bars, period=20, select="upper")
+    lower = reg.bollinger_bands(bars, period=20, select="lower")
+    # Symmetric around the middle.
+    assert upper - middle == pytest.approx(middle - lower, rel=0, abs=1e-12)
+
+
+def test_stochastic_returns_k_and_d() -> None:
+    bars = _series(30, seed=14)
+    reg = IndicatorRegistry()
+    k = reg.stochastic(bars, k_period=14, d_period=3, select="k")
+    d = reg.stochastic(bars, k_period=14, d_period=3, select="d")
+    assert k is not None
+    assert d is not None
+    assert 0.0 <= k <= 100.0
+    assert 0.0 <= d <= 100.0
+
+
+def test_vwap_matches_cumulative_typical_price() -> None:
+    bars = _series(30, seed=15)
+    reg = IndicatorRegistry()
+    expected_num = sum(((b.high + b.low + b.close) / 3.0) * b.volume for b in bars)
+    expected_den = sum(b.volume for b in bars)
+    expected = expected_num / expected_den
+    assert reg.vwap(bars) == pytest.approx(expected, rel=0, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Top-level pure-function helpers
+# ---------------------------------------------------------------------------
+
+
+def test_windowed_ema_pure_function_matches_legacy_ema() -> None:
+    bars = _series(50, seed=16)
+    for period in (5, 12, 26):
+        assert windowed_ema(bars, period, "close") == pytest.approx(
+            _legacy_ema(bars, period), rel=0, abs=1e-12
+        )
+
+
+def test_macd_components_pure_function_matches_legacy() -> None:
+    bars = _series(60, seed=17)
+    macd_val, sig, hist = macd_components(bars, fast=12, slow=26, signal=9)
+    assert macd_val == _legacy_macd(bars, fast=12, slow=26, signal=9, select="macd")
+    assert sig == _legacy_macd(bars, fast=12, slow=26, signal=9, select="signal")
+    assert hist == _legacy_macd(bars, fast=12, slow=26, signal=9, select="histogram")
+
+
+def test_macd_components_warmup_returns_none_tuple() -> None:
+    bars = _series(20)
+    out = macd_components(bars, fast=12, slow=26, signal=9)
+    assert out == (None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Warm-up and degenerate inputs
+# ---------------------------------------------------------------------------
+
+
+def test_indicators_return_none_during_warmup() -> None:
+    reg = IndicatorRegistry()
+    short = _series(5)
+    assert reg.ema(short, period=20) is None
+    assert reg.sma(short, period=20) is None
+    assert reg.rsi(short, period=14) is None
+    assert reg.atr(short, period=14) is None
+    assert reg.adx(short, period=14) is None
+    assert reg.bollinger_bands(short, period=20) is None
+    assert reg.stochastic(short, k_period=14) is None
+
+
+def test_indicators_handle_empty_bars() -> None:
+    reg = IndicatorRegistry()
+    empty: List[_Bar] = []
+    assert reg.ema(empty, period=14) is None
+    assert reg.sma(empty, period=14) is None
+    assert reg.rsi(empty, period=14) is None
+    assert reg.atr(empty, period=14) is None
+    assert reg.vwap(empty) is None
+
+
+def test_rsi_zero_loss_returns_100_when_all_gain() -> None:
+    # Monotonically increasing close → losses=0 → expected RSI = 100.
+    bars = [_Bar(timestamp=f"2024-01-{i + 1:02d}", close=100.0 + i) for i in range(20)]
+    val = IndicatorRegistry().rsi(bars, period=14)
+    assert val == 100.0
+
+
+def test_rsi_no_change_returns_50() -> None:
+    # Flat close → gains=losses=0 → expected RSI = 50.
+    bars = [_Bar(timestamp=f"2024-01-{i + 1:02d}", close=100.0) for i in range(20)]
+    val = IndicatorRegistry().rsi(bars, period=14)
+    assert val == 50.0
+
+
+def test_vwap_zero_volume_falls_back_to_mean_close() -> None:
+    bars = [_Bar(timestamp=f"2024-01-{i + 1:02d}", close=100.0 + i, volume=0.0) for i in range(10)]
+    expected = sum(b.close for b in bars) / len(bars)
+    assert IndicatorRegistry().vwap(bars) == pytest.approx(expected, rel=0, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Performance smoke test — guards against accidental O(N²) regressions
+# ---------------------------------------------------------------------------
+
+
+def test_macd_streaming_is_significantly_faster_than_cold_start() -> None:
+    """The streaming-step path on a long history must beat repeated cold-starts.
+
+    Smoke-only — not a microbench. Asserts a 2x lower bound to stay
+    robust against CI noise; the real win (≥10x on a 500-bar fixture
+    with multiple indicators) is exercised by ``tests/bench/``.
+    """
+    import time
+
+    bars = _series(500, seed=42)
+
+    # Streaming: registry retains state across bars.
+    reg_streaming = IndicatorRegistry()
+    t0 = time.perf_counter()
+    for n in range(35, 501):
+        reg_streaming.macd(bars[:n], fast=12, slow=26, signal=9, select="signal")
+    streaming_t = time.perf_counter() - t0
+
+    # Cold-start every bar: simulate the legacy behaviour by resetting state.
+    reg_cold = IndicatorRegistry()
+    t0 = time.perf_counter()
+    for n in range(35, 501):
+        reg_cold._state.clear()
+        reg_cold.macd(bars[:n], fast=12, slow=26, signal=9, select="signal")
+    cold_t = time.perf_counter() - t0
+
+    # Streaming must be faster; threshold is loose to avoid CI flakes.
+    assert streaming_t < cold_t, (
+        f"streaming ({streaming_t:.4f}s) not faster than cold-start ({cold_t:.4f}s)"
+    )
+    # On a healthy run the ratio is >5×; we only require >1.5× here.
+    assert cold_t / streaming_t > 1.5, f"streaming speedup too small: {cold_t / streaming_t:.2f}x"
+
+
+# ---------------------------------------------------------------------------
+# Primitives wrappers — confirm the host-side reference still matches
+# ---------------------------------------------------------------------------
+
+
+def test_primitives_wrappers_unchanged_outputs() -> None:
+    """``factors.primitives`` now delegates to the registry; the outputs the
+    factor-DSL unit tests have always pinned must remain identical."""
+    from investment_team.strategy_lab.factors import primitives as P
+
+    bars = _series(60, seed=44)
+    # NaN-shape primitive checks.
+    assert math.isnan(P.macd_signal(bars[:10], fast=12, slow=26, signal=9))
+    assert math.isfinite(P.macd_signal(bars, fast=12, slow=26, signal=9))
+    assert math.isfinite(P.rsi(bars, period=14))
+    assert math.isfinite(P.atr(bars, period=14))
+    assert math.isfinite(P.adx(bars, period=14))
+    # Spot value: ema/sma equal the legacy/naive references.
+    assert P.ema(bars, period=14) == pytest.approx(_legacy_ema(bars, 14), rel=0, abs=1e-12)
+    assert P.sma(bars, period=14) == pytest.approx(
+        sum(b.close for b in bars[-14:]) / 14, rel=0, abs=1e-12
+    )

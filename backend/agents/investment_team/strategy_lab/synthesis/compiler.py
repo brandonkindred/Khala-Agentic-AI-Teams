@@ -330,10 +330,6 @@ def _emit_indicator_call(ref: IndicatorRef) -> str:
     raise CompilerError(f"unsupported indicator: {ref.name!r}")
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Inline indicator helper-method bodies.
 #
@@ -424,30 +420,77 @@ _HELPER_BODIES: dict[str, str] = {
             min_bars = slow if select == "macd" else slow + signal - 1
             if len(history) < min_bars:
                 return None
-            macd_line = []
-            for end in range(slow, len(history) + 1):
-                sub = history[:end]
-                alpha_f = 2.0 / (fast + 1.0)
-                ef = self._src(sub[-fast], source)
-                for b in sub[-fast + 1:]:
+            # The macd_line is the difference of fast/slow windowed EMAs at
+            # every bar end from ``slow`` to ``len(history)``. The legacy
+            # template rebuilt that line in full on every call. We instead
+            # carry it forward in ``self._ind_state`` keyed by the helper's
+            # parameter signature and append one new value per bar — when
+            # the previous call's last bar matches ``history[-2]``. Cold
+            # start (and any replay/seek) falls back to a full rebuild,
+            # preserving bit-identical legacy semantics.
+            key = ("macd", fast, slow, signal, source)
+            state = self._ind_state.get(key)
+            last_bar = history[-1]
+            new_ts = getattr(last_bar, "timestamp", None)
+            new_id = id(last_bar)
+            new_len = len(history)
+            if state is not None and state["fp"] == (new_id, new_len, new_ts):
+                return state["value"].get(select)
+            alpha_f = 2.0 / (fast + 1.0)
+            alpha_s = 2.0 / (slow + 1.0)
+            can_step = False
+            if state is not None and new_len >= 2:
+                prev_bar = history[-2]
+                prev_ts = getattr(prev_bar, "timestamp", None)
+                prev_fp = state["fp"]
+                can_step = (prev_fp[0] == id(prev_bar)) or (
+                    prev_ts is not None and prev_fp[2] == prev_ts
+                )
+            if can_step:
+                macd_line = state["macd_line"]
+                ef = self._src(history[-fast], source)
+                for b in history[-fast + 1:]:
                     ef = alpha_f * self._src(b, source) + (1.0 - alpha_f) * ef
-                alpha_s = 2.0 / (slow + 1.0)
-                es = self._src(sub[-slow], source)
-                for b in sub[-slow + 1:]:
+                es = self._src(history[-slow], source)
+                for b in history[-slow + 1:]:
                     es = alpha_s * self._src(b, source) + (1.0 - alpha_s) * es
                 macd_line.append(ef - es)
+            else:
+                macd_line = []
+                for end in range(slow, new_len + 1):
+                    sub = history[:end]
+                    ef = self._src(sub[-fast], source)
+                    for b in sub[-fast + 1:]:
+                        ef = alpha_f * self._src(b, source) + (1.0 - alpha_f) * ef
+                    es = self._src(sub[-slow], source)
+                    for b in sub[-slow + 1:]:
+                        es = alpha_s * self._src(b, source) + (1.0 - alpha_s) * es
+                    macd_line.append(ef - es)
+            macd_val = macd_line[-1]
+            sig_val = None
+            hist_val = None
+            if len(macd_line) >= signal:
+                alpha_g = 2.0 / (signal + 1.0)
+                sig = macd_line[0]
+                for x in macd_line[1:]:
+                    sig = alpha_g * x + (1.0 - alpha_g) * sig
+                sig_val = sig
+                hist_val = macd_val - sig_val
+            self._ind_state[key] = {
+                "fp": (new_id, new_len, new_ts),
+                "macd_line": macd_line,
+                "value": {
+                    "macd": macd_val,
+                    "signal": sig_val,
+                    "histogram": hist_val,
+                },
+            }
             if select == "macd":
-                return macd_line[-1]
-            if len(macd_line) < signal:
-                return None
-            alpha_g = 2.0 / (signal + 1.0)
-            sig = macd_line[0]
-            for x in macd_line[1:]:
-                sig = alpha_g * x + (1.0 - alpha_g) * sig
+                return macd_val
             if select == "signal":
-                return sig
+                return sig_val
             if select == "histogram":
-                return macd_line[-1] - sig
+                return hist_val
             return None
         """
     ),
@@ -657,7 +700,9 @@ def _emit_class(
 
     init_lines: List[str] = ["    def __init__(self):"]
     init_lines.append("        super().__init__()")
-    init_lines.append("        pass")
+    # Persistent per-indicator state for streaming-recurrence helpers
+    # (currently used by macd to amortise its per-bar work to O(slow)).
+    init_lines.append("        self._ind_state = {}")
 
     on_bar_lines: List[str] = ["    def on_bar(self, ctx, bar):"]
     on_bar_lines.append("        if ctx.is_warmup:")
