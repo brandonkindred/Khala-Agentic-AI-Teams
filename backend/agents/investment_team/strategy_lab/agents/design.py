@@ -317,10 +317,17 @@ class DesignAgent:
 
         try:
             return self._invoke_and_parse(_SYSTEM_PROMPT, revision_prompt)
-        except StrategySpecParseError as exc:
+        except Exception as exc:
+            # Best-effort contract: any self-revision failure — DSL parse
+            # rejection (``StrategySpecParseError``), malformed JSON
+            # (``ValueError`` from ``extract_json_object``), or LLM
+            # transport error — must fall back to the original valid
+            # spec. The external ``DesignReviewAgent`` loop remains
+            # authoritative; this pre-flight never aborts the cycle.
             logger.warning(
-                "DesignAgent self-revision rejected by DSL parser (%s); "
+                "DesignAgent self-revision failed (%s: %s); "
                 "returning pre-revision spec",
+                type(exc).__name__,
                 exc,
             )
             return strategy_dict, rationale

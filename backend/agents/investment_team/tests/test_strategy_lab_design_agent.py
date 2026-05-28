@@ -698,3 +698,37 @@ def test_self_review_garbage_response_falls_back_to_original(
     assert len(capture.calls) == 2  # generation + self-review; no revision attempted
     assert parsed["asset_class"] == "stocks"
     assert any("self-review" in rec.message.lower() for rec in caplog.records)
+
+
+def test_self_revision_garbage_response_falls_back_to_original(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Self-revision is best-effort: when self-review flags issues but the
+    follow-up revision call returns malformed JSON (``ValueError`` from
+    ``extract_json_object``, not :class:`StrategySpecParseError`), the
+    designer must fall back to the original valid spec and log a warning.
+    Regression guard for a bug where only ``StrategySpecParseError`` was
+    caught, leaking ``ValueError`` and aborting the whole cycle."""
+    capture = _patch_design(
+        monkeypatch,
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            # Self-revision LLM returns no JSON object — ``extract_json_object``
+            # will raise ``ValueError``.
+            "the model rambled but never produced JSON",
+        ],
+        enable_self_review=True,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
+        parsed, _ = DesignAgent().run(prior_records=[])
+
+    # All three calls fired (generation + verdict + revision attempt),
+    # but the malformed revision was discarded and the original spec is
+    # returned unchanged.
+    assert len(capture.calls) == 3
+    assert parsed["asset_class"] == "stocks"
+    assert any(
+        "self-revision failed" in rec.message.lower() for rec in caplog.records
+    )

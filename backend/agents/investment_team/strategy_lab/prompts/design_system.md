@@ -143,12 +143,19 @@ Code synthesis is a separate phase. If you include a `strategy_code` field in yo
 
 Every indicator AND every filter / condition you NAME in `hypothesis` or `signal_definition` MUST also appear as a structured object in `entry_rules` or `exit_rules`. "Filter" includes anything you describe as a precondition: trend confirmations ("only long when ADX > 25"), regime gates ("only enter when above the 200-day SMA"), volatility filters ("skip days when ATR is below its 20-day mean"), volume confirmations ("require volume > 20-day average"), session windows, etc.
 
-The reviewer will reject specs whose prose makes claims the rules cannot test. Two correct ways to resolve a mismatch:
+The reviewer will reject specs whose prose makes claims the rules cannot test. **Critical engine semantics you must internalize before resolving a mismatch:**
 
-1. Add the missing predicate so the rules actually implement the filter you described. A multi-condition entry is expressed as MULTIPLE entries in `entry_rules` (the engine fires a trade when ANY entry rule matches) OR — preferred for AND-conditions — a single entry whose `when` is the most specific condition, with the prose making the other filters explicit so the reviewer can confirm coverage. The DSL has no first-class `AND`/`OR` combinator today; if your thesis needs strict conjunction across N indicators, encode each as its own entry rule and explain the OR/AND combination logic in `signal_definition` so the reviewer can adjudicate.
-2. Trim the prose so it only names filters the rules genuinely implement.
+- A `Predicate` has exactly ONE `lhs`, ONE `op`, ONE `rhs`. The DSL has **no** `AND` / `OR` combinator inside a predicate.
+- `entry_rules` is evaluated as **OR**: the engine enters as soon as the FIRST listed rule's predicate fires. Adding a second entry rule does NOT tighten the condition — it broadens it.
+- There is no way to express "long when ADX > 25 **AND** close > SMA200" as two separate `entry_rules`. Doing so would make the engine enter on `ADX > 25 OR close > SMA200`, which is a different (looser) strategy than the one your prose describes.
 
-Pick whichever better matches your actual signal — DO NOT leave the mismatch unresolved on the next round.
+Three correct ways to resolve a mismatch:
+
+1. **Pick the single most discriminating predicate** and put it in one `entry_rule`. Document the other conditions in `signal_definition` only if they are loose context (regime narrative), NOT if they are part of the entry trigger. If the reviewer asks "does the rule test what the prose claims?", the honest answer must be yes.
+2. **Trim the prose** so it only names filters the single entry predicate genuinely implements. If your thesis was "ADX > 25 AND close > SMA200" but you can only encode one, rewrite the hypothesis around whichever predicate you kept.
+3. **Mark the spec `requires_custom_code: true`** if and only if the strategy genuinely cannot be expressed with the single-predicate DSL form. This is an escape hatch, not a default — most strategies should be expressible in the DSL after step 1 or 2.
+
+Pick whichever option best matches your real signal — DO NOT silently encode an AND-thesis as multiple OR'd entry rules, and DO NOT leave the mismatch unresolved on the next round.
 
 ## Mathematical coherence of risk and sizing (mandatory)
 
