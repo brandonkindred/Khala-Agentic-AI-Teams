@@ -83,6 +83,7 @@ from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.cost_stress_realism import CostStressRealismGate
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult, StrategyLabPhase
+from .quality_gates.predicate_conformance import PredicateConformanceGate
 from .quality_gates.realism import (
     LiquidityRealismGate,
     RegimeCoverageGate,
@@ -397,6 +398,7 @@ class StrategyLabOrchestrator:
         # ``investment_team.strategy_lab.orchestrator.run_strategy_code``
         # apply to probe execution as well as the main pipeline.
         self.rule_probes_gate = RuleProbesGate(runner=_orchestrator_runner)
+        self.predicate_conformance_gate = PredicateConformanceGate()
         self.anomaly_detector = BacktestAnomalyDetector()
         self.acceptance_gate = AcceptanceGate()
         self.target_symbol_coverage_gate = TargetSymbolCoverageGate()
@@ -994,6 +996,7 @@ class StrategyLabOrchestrator:
         # can stamp the cause onto ``acceptance_reason`` instead of the
         # generic ``publication_disabled`` message.
         runtime_lookahead_violation = False
+        predicate_conformance_attempts = 0
 
         for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
@@ -1018,6 +1021,13 @@ class StrategyLabOrchestrator:
             if not any(not g.passed and g.severity == "critical" for g in round_gate_results):
                 probe_gates = self.rule_probes_gate.check(code, spec)
                 round_gate_results.extend(probe_gates)
+            if not any(not g.passed and g.severity == "critical" for g in round_gate_results):
+                pred_conf_gates = self.predicate_conformance_gate.check(
+                    code, spec, attempt=predicate_conformance_attempts,
+                )
+                round_gate_results.extend(pred_conf_gates)
+                if any(not g.passed and g.severity == "critical" for g in pred_conf_gates):
+                    predicate_conformance_attempts += 1
             self.record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
 
             checks_total = len(round_gate_results)

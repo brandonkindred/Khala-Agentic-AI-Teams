@@ -773,6 +773,7 @@ def _wire_run_cycle_stubs(
     # way other gates are neutralised — the walk-forward path is the
     # subject under test, not synthesis-phase code conformance.
     monkeypatch.setattr(orch.code_conformance_gate, "check", lambda *a, **kw: [])
+    monkeypatch.setattr(orch.predicate_conformance_gate, "check", lambda *a, **kw: [])
     # Drive the deterministic gate's verdict directly; the LLM
     # ``propose_code_fix`` is only consulted for the misaligned arm
     # and returns a report with no proposed_code so the loop's
