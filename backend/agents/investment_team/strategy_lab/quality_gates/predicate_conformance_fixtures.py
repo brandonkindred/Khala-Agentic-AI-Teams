@@ -444,7 +444,12 @@ def _oscillate_price_vs_price(
     bars: List[OHLCVBar] = []
     for cycle in range(6):
         for _ in range(_OSCILLATION_SEGMENT):
-            if cycle % 2 == 0:
+            if op == "==":
+                if cycle % 2 == 0:
+                    vals = {lhs_f: 100.0, rhs_f: 100.0}
+                else:
+                    vals = {lhs_f: 105.0, rhs_f: 95.0}
+            elif cycle % 2 == 0:
                 vals = {lhs_f: 105.0, rhs_f: 95.0}
             else:
                 vals = {lhs_f: 95.0, rhs_f: 105.0}
