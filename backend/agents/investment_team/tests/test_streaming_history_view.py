@@ -97,15 +97,20 @@ def test_rollover_rebuilds_cache_against_live_deque() -> None:
 def test_repeated_appends_match_fresh_view_value() -> None:
     """After every append, the cached indicator value must equal the
     value a freshly-constructed view (seeded with the same bar tail)
-    returns. The previous version of this test only asserted that
-    successive values were unequal — an off-by-one staleness on a
-    monotonically-increasing close series would have passed silently."""
+    returns. AND the append counter must advance one step per append
+    (defends against an off-by-one in the counter bump that the
+    monotone-close inequality check would otherwise miss)."""
     ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
     view = StreamingHistoryView(max_bars=5)
     for i in range(5):
         view.append(_bar(i))
+    assert view._append_counter == 5
     for i in range(5, 12):
+        before = view._append_counter
         view.append(_bar(i))
+        assert view._append_counter == before + 1, (
+            f"counter bumped by {view._append_counter - before}, not 1"
+        )
         live = view.indicator(ref, 4)
         # The view holds the trailing 5 bars (deque maxlen=5), so the
         # fresh-reference must be seeded with the same tail.
@@ -119,7 +124,13 @@ def test_batched_appends_do_not_yield_stale_cache_under_id_reuse() -> None:
     a sequence of appends without intervening ``indicator()`` calls
     could otherwise place a fresh BarRecord at an address recently
     freed by the evicted oldest bar and produce a false cache hit.
-    Regression for finding #1 of the deep code review.
+
+    Asserts BOTH the public observable (live value matches fresh view)
+    AND the internal counter invariant: the cache_counter must lag the
+    append_counter after batched appends, then catch up on the next
+    indicator() call. Pins the counter mechanism directly so the test
+    fails loudly under any revert to the id-based key, regardless of
+    whether CPython id-reuse happens to fire on the run.
     """
     ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
     view = StreamingHistoryView(max_bars=5)
@@ -127,16 +138,27 @@ def test_batched_appends_do_not_yield_stale_cache_under_id_reuse() -> None:
         view.append(_bar(i))
     # Seed the cache.
     view.indicator(ref, 4)
-    # Batched appends with NO intervening indicator() calls — exactly
-    # the pattern that triggers id-reuse on a bounded deque.
+    assert view._cache_counter == view._append_counter == 5
+
+    # Batched appends with NO intervening indicator() calls.
     for i in range(5, 20):
         view.append(_bar(i))
-    # Now the deque holds bars [15..19]. The cached entry was built from
-    # bars [0..4]. id(self._bars[-1]) MAY collide with the original id;
-    # the counter-based cache key must catch this anyway.
+    # The cache_counter must lag the append_counter by exactly the
+    # number of unflushed appends — pins counter-based invalidation
+    # independent of CPython id-reuse semantics.
+    assert view._append_counter == 20
+    assert view._cache_counter == 5, (
+        "cache_counter must NOT have advanced silently — the public "
+        "API never accessed the cache during the batched appends."
+    )
+
+    # Now query indicator() — the counter mismatch must trigger a
+    # rebuild against the live deque.
     live = view.indicator(ref, 4)
     expected = _fresh_view_value([_bar(j) for j in range(15, 20)], ref, 4)
     assert live == expected, f"batched-append stale cache: live={live!r} expected={expected!r}"
+    # After indicator(), cache_counter catches up.
+    assert view._cache_counter == view._append_counter == 20
 
 
 def test_indicator_returns_none_on_empty_view() -> None:

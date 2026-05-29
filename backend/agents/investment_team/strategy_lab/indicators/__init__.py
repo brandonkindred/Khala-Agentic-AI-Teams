@@ -1,19 +1,25 @@
 """Canonical streaming indicator recurrences for the Strategy Lab.
 
-This package is the single source of truth for indicator math used by:
+This package houses the host-side indicator math used by:
 
-* :mod:`strategy_lab.factors.primitives` — the host-side reference
-  implementation imported by unit tests and the alignment audit.
+* :mod:`strategy_lab.factors.primitives` — the reference implementation
+  imported by unit tests and the alignment audit. Built from
+  :func:`windowed_ema` / :func:`macd_components` directly.
 * :mod:`strategy_lab.executor.predicate_evaluator` — ``StreamingHistoryView``
-  uses :class:`IndicatorRegistry` to amortise per-bar work to ``O(1)`` after
-  the initial cold-start, instead of rebuilding a pandas DataFrame and
-  rerunning every indicator series on every appended bar.
+  provides same-bar dedupe over the pandas DataFrame; the
+  ``IndicatorRegistry`` is not yet wired through to the view (the
+  consumer-side API mismatch is documented in the view's docstring).
 
-The recurrences in :mod:`streaming` and the inline text templates consumed
-by :mod:`strategy_lab.synthesis.compiler` and
-:mod:`strategy_lab.factors.compiler` (in :mod:`templates`) are kept in
-lock-step by ``tests/test_streaming_indicators.py``: any drift between a
-template and its canonical Python counterpart fails the parity suite.
+The MACD streaming recurrence is implemented in **three independent
+sites** (registry's :meth:`IndicatorRegistry._macd_value`, the synthesis
+compiler's emitted MACD helper, and the factors compiler's emitted
+MACDSignal helper). Each site re-implements the same fingerprint /
+classify / single-step / signal-EMA logic — there is no shared
+template module today. Parity is enforced by ``tests/test_streaming_indicators.py``
+(registry parity vs. legacy reference) and ``tests/test_strategy_compiler.py``
+(compiled-output parity vs. fresh cold-compute on the same slice).
+Drift between the three implementations IS possible; any change to the
+recurrence must land in all three sites in lockstep.
 """
 
 from __future__ import annotations

@@ -436,9 +436,14 @@ _HELPER_BODIES: dict[str, str] = {
             # on_bar for every symbol in UNIVERSE, and a key without symbol
             # would let an AAPL advance silently mutate the MSFT macd_line
             # whenever the two share a bar timestamp.
-            # Fingerprint is a 4-tuple (id, len, ts, close). The close leg
-            # defends against fresh-copy callers where every bar object is
-            # reallocated and id() never carries across calls.
+            # Fingerprint is a 4-tuple (id, len, ts, close). Close is
+            # normalised: None / bool / NaN all coerce to None so the
+            # tuple comparison stays well-behaved. The close leg of
+            # prev_matches is a CONDITIONAL fallback that only fires
+            # when the ts-leg is unavailable on both sides — restricts
+            # the close-based rescue to fresh-copy callers that also
+            # drop timestamps, and prevents flat-market false-merges and
+            # source!=close false-matches for the common case.
             # Relies on the emitted __init__ initialising self._ind_state;
             # bypassing __init__ via cls.__new__ is not supported.
             symbol = getattr(history[-1], "symbol", None)
@@ -448,7 +453,13 @@ _HELPER_BODIES: dict[str, str] = {
             new_ts = getattr(last_bar, "timestamp", None)
             new_id = id(last_bar)
             new_len = len(history)
-            new_close = float(last_bar.close)
+            raw_close = getattr(last_bar, "close", None)
+            if raw_close is None or isinstance(raw_close, bool):
+                new_close = None
+            else:
+                new_close = float(raw_close)
+                if math.isnan(new_close):
+                    new_close = None
             new_fp = (new_id, new_len, new_ts, new_close)
             if state is not None and state["fp"] == new_fp:
                 return state["value"].get(select)
@@ -458,12 +469,23 @@ _HELPER_BODIES: dict[str, str] = {
             if state is not None and new_len >= 2:
                 prev_bar = history[-2]
                 prev_ts = getattr(prev_bar, "timestamp", None)
-                prev_close = float(prev_bar.close)
+                prev_raw_close = getattr(prev_bar, "close", None)
+                if prev_raw_close is None or isinstance(prev_raw_close, bool):
+                    prev_close = None
+                else:
+                    prev_close = float(prev_raw_close)
+                    if math.isnan(prev_close):
+                        prev_close = None
                 prev_fp = state["fp"]
+                ts_leg_available = prev_fp[2] is not None and prev_ts is not None
                 prev_matches = (
                     (prev_fp[0] == id(prev_bar))
-                    or (prev_ts is not None and prev_fp[2] == prev_ts)
-                    or (prev_fp[3] == prev_close)
+                    or (ts_leg_available and prev_fp[2] == prev_ts)
+                    or (
+                        not ts_leg_available
+                        and prev_close is not None
+                        and prev_fp[3] == prev_close
+                    )
                 )
                 if prev_matches:
                     if new_len == prev_fp[1] + 1:
@@ -501,9 +523,12 @@ _HELPER_BODIES: dict[str, str] = {
             hist_val = None
             if len(macd_line) >= signal:
                 alpha_g = 2.0 / (signal + 1.0)
-                sig = macd_line[0]
-                for i in range(1, len(macd_line)):
-                    sig = alpha_g * macd_line[i] + (1.0 - alpha_g) * sig
+                # Iterator walk avoids deque __getitem__ O(min(i, n-i))
+                # — random-access would make this loop O(n^2).
+                _macd_iter = iter(macd_line)
+                sig = next(_macd_iter)
+                for _macd_x in _macd_iter:
+                    sig = alpha_g * _macd_x + (1.0 - alpha_g) * sig
                 sig_val = sig
                 hist_val = macd_val - sig_val
             self._ind_state[key] = {

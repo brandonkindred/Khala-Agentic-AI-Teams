@@ -388,8 +388,13 @@ class StreamingHistoryView:
         self._bars: deque[BarRecord] = deque(maxlen=max_bars)
         # Monotonic append counter; bumped on every append(). The cached
         # DataFrame is keyed by the counter snapshot taken when it was
-        # last built. Never recycled, so id-reuse on the deque cannot
-        # produce a false cache hit.
+        # last built. Never recycled within a single process, so
+        # id-reuse on the deque cannot produce a false cache hit.
+        # NB: the counter is **instance-lifetime only**. Any future
+        # serialisation/warm-restart of this view must atomically
+        # restore (or reset) BOTH ``_append_counter`` and
+        # ``_cache_counter`` alongside ``_df`` / ``_indicator_cache`` —
+        # otherwise the cache identity invariant breaks silently.
         self._append_counter: int = 0
         self._cache_counter: Optional[int] = None
         self._df: Optional[pd.DataFrame] = None

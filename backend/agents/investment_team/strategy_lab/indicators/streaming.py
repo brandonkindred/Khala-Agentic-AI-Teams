@@ -211,7 +211,16 @@ class IndicatorRegistry:
         last = bars[-1]
         ts = getattr(last, "timestamp", None)
         close = getattr(last, "close", None)
-        close_val = float(close) if close is not None else None
+        # Normalise `close` for tuple-equality: reject `bool` (silent
+        # int-subclass coercion to 0.0/1.0 would collide with real penny
+        # closes) and NaN (NaN != NaN under IEEE 754 would break same-bar
+        # dedupe). Both fall to ``None`` so the close-leg of prev_matches
+        # degrades cleanly to id/ts.
+        if close is None or isinstance(close, bool):
+            close_val: Optional[float] = None
+        else:
+            close_f = float(close)
+            close_val = None if math.isnan(close_f) else close_f
         return id(last), len(bars), ts, close_val
 
     def _peek(self, key: Tuple) -> Optional[Dict[str, Any]]:
@@ -248,12 +257,18 @@ class IndicatorRegistry:
           ``-2``. The caller falls back to a full rebuild.
 
         Both ``"expand"`` and ``"slide"`` require the previous-bar match
-        AND the length delta to fit. ``prev_matches`` accepts id, ``ts``,
-        OR ``close`` — the content leg defends against fresh-copy
-        callers where every bar object is reallocated and ``id`` never
-        carries across calls (Pydantic re-validation, model_dump round
-        trips). Earlier revisions used only id/ts and could silently
-        regress to cold-start on every call under such patterns.
+        AND the length delta to fit. ``prev_matches`` accepts id-match
+        OR ts-match; the ``close`` leg is a **conditional fallback**
+        that only fires when the ts-leg is unavailable (cached
+        ``prev_fp[2] is None`` AND current ``prev_ts is None``). Without
+        the conditional gate, two unrelated symbol-less streams that
+        share a boundary close value can silently merge through the
+        close-leg, AND a strategy using a non-close ``source`` can
+        false-match by close while the underlying source values differ.
+        Restricting close to the ts-absent path keeps the fresh-copy
+        rescue (Pydantic re-validation, model_dump round trips — those
+        callers usually drop timestamps too) while preserving the
+        strict id+ts gate for the common case.
         """
         prev_fp = state.get("fp")
         if prev_fp is None or len(bars) < 2:
@@ -264,11 +279,18 @@ class IndicatorRegistry:
         prev_bar = bars[-2]
         prev_ts = getattr(prev_bar, "timestamp", None)
         prev_close = getattr(prev_bar, "close", None)
-        prev_close_val = float(prev_close) if prev_close is not None else None
+        if prev_close is None or isinstance(prev_close, bool):
+            prev_close_val: Optional[float] = None
+        else:
+            prev_close_f = float(prev_close)
+            prev_close_val = None if math.isnan(prev_close_f) else prev_close_f
+        ts_leg_available = prev_fp[2] is not None and prev_ts is not None
         prev_matches = (
             (prev_fp[0] == id(prev_bar))
-            or (prev_ts is not None and prev_fp[2] == prev_ts)
-            or (prev_close_val is not None and prev_fp[3] == prev_close_val)
+            or (ts_leg_available and prev_fp[2] == prev_ts)
+            or (
+                not ts_leg_available and prev_close_val is not None and prev_fp[3] == prev_close_val
+            )
         )
         if not prev_matches:
             return "none"
@@ -539,8 +561,20 @@ class IndicatorRegistry:
         source: str,
         select: str,
     ) -> Optional[float]:
-        if fast >= slow:
-            return None
+        # Enforce the same precondition floor as ``macd_components``.
+        # Without this, ``_macd_value`` silently accepts ``signal=1``
+        # (alpha_g=1.0 → signal == macd, histogram ≡ 0) and ``fast=1``
+        # (degenerate 1-period EMA), where the cold standalone path
+        # raises — same parameters, two contracts.
+        if not (fast >= 2 and slow > fast):
+            raise ValueError(
+                f"macd: require fast >= 2 and slow > fast (got fast={fast}, slow={slow})"
+            )
+        if signal < 2:
+            raise ValueError(
+                f"macd: require signal >= 2 (got signal={signal}); "
+                "signal=1 makes the EMA recurrence trivial (signal == macd, histogram ≡ 0)"
+            )
         min_bars = slow if select == "macd" else slow + signal - 1
         if len(bars) < min_bars:
             return None
@@ -592,9 +626,14 @@ class IndicatorRegistry:
         hist_val: Optional[float] = None
         if len(macd_line) >= signal:
             alpha_g = 2.0 / (signal + 1.0)
-            sig = macd_line[0]
-            for x_idx in range(1, len(macd_line)):
-                sig = alpha_g * macd_line[x_idx] + (1.0 - alpha_g) * sig
+            # Iterator-based walk avoids ``deque.__getitem__(i)``'s
+            # ``O(min(i, n-i))`` indexing cost — random-access on a
+            # deque would make this signal-EMA loop ``O(n^2)`` for
+            # long ``macd_line``. Equivalent values; cheaper traversal.
+            it = iter(macd_line)
+            sig = next(it)
+            for x in it:
+                sig = alpha_g * x + (1.0 - alpha_g) * sig
             sig_val = sig
             hist_val = macd_val - sig_val
 
@@ -626,10 +665,14 @@ class IndicatorRegistry:
     ) -> Optional[float]:
         """MACD ``(line | signal | histogram)`` at ``bars[-1]``.
 
-        Pre: ``2 <= fast < slow``; ``signal >= 1``.
+        Pre: ``2 <= fast < slow``; ``signal >= 2``. Matches the DSL
+        bounds in :mod:`strategy_lab.spec_dsl` and the precondition floor
+        in :func:`macd_components`. Out-of-range parameters raise
+        ``ValueError`` (not ``assert``, so the check survives
+        ``python -O``).
         Post: returns ``None`` during warm-up (``len(bars) < slow`` for
-        ``select='macd'``, ``len(bars) < slow + signal - 1`` otherwise) or
-        when ``fast >= slow``. Otherwise returns the requested component.
+        ``select='macd'``, ``len(bars) < slow + signal - 1`` otherwise).
+        Otherwise returns the requested component.
         """
         return self._macd_value(
             bars,

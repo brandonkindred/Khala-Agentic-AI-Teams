@@ -178,25 +178,32 @@ return 100.0 - (100.0 / (1.0 + rs))
     MACDSignal: """\
 if len(bars) < {slow} + {signal}:
     return NAN
-# Streaming-cache the macd_line. The cache key includes the bar's symbol
-# so a strategy whose on_bar fires across multiple tickers does not
-# silently mutate one symbol's macd_line with another symbol's bars.
-# We then classify the call as ``expand`` (history grew by one bar — the
-# warm-up shape), ``slide`` (history length unchanged, oldest bar dropped —
-# the steady-state shape of a bounded history window), or fall back to a
-# full rebuild. On slide we popleft the front of macd_line so it stays
-# bounded and the signal-EMA seeds from the same bar the legacy
-# windowed-EMA implementation would have used. The fingerprint includes
-# bars[-1].close (a 4-tuple) so a fresh-copy ctx.history caller, where
-# id() never carries across calls, still classifies as expand/slide
-# instead of regressing to cold-start every bar.
+# Streaming-cache the macd_line. Cache key includes the bar's symbol so
+# a strategy whose on_bar fires across multiple tickers does not
+# silently mutate one symbol's macd_line with another's bars. Classify
+# each call as ``expand`` (history grew by one bar — the warm-up
+# shape), ``slide`` (history length unchanged, oldest bar dropped — the
+# steady-state shape of a bounded history window), or cold-rebuild.
+# The 4-tuple fingerprint (id, len, ts, close) tolerates fresh-copy
+# ctx.history callers; the close leg is a CONDITIONAL fallback — only
+# activated when ts is unavailable on both sides — so a non-close
+# source value or a flat market cannot silently merge unrelated streams
+# through coincident closes. State is always written, even during
+# warm-up (with val=NAN), so same-bar repeat calls during warm-up share
+# the cache instead of cold-rebuilding every bar.
 # Relies on the emitted __init__ initialising self._ind_state;
 # bypassing __init__ via cls.__new__ is not supported.
 _symbol = getattr(bars[-1], 'symbol', None)
 _macd_key = ('macd_signal_{fast}_{slow}_{signal}', _symbol)
 _state = self._ind_state.get(_macd_key)
 _last = bars[-1]
-_new_close = float(_last.close)
+_raw_close = getattr(_last, 'close', None)
+if _raw_close is None or isinstance(_raw_close, bool):
+    _new_close = None
+else:
+    _new_close = float(_raw_close)
+    if math.isnan(_new_close):
+        _new_close = None
 _new_fp = (id(_last), len(bars), getattr(_last, 'timestamp', None), _new_close)
 if _state is not None and _state['fp'] == _new_fp:
     return _state['value']
@@ -204,12 +211,19 @@ _kind = 'none'
 if _state is not None and len(bars) >= 2:
     _prev = bars[-2]
     _prev_ts = getattr(_prev, 'timestamp', None)
-    _prev_close = float(_prev.close)
+    _prev_raw_close = getattr(_prev, 'close', None)
+    if _prev_raw_close is None or isinstance(_prev_raw_close, bool):
+        _prev_close = None
+    else:
+        _prev_close = float(_prev_raw_close)
+        if math.isnan(_prev_close):
+            _prev_close = None
     _prev_fp = _state['fp']
+    _ts_leg_available = _prev_fp[2] is not None and _prev_ts is not None
     _prev_matches = (
         (_prev_fp[0] == id(_prev))
-        or (_prev_ts is not None and _prev_fp[2] == _prev_ts)
-        or (_prev_fp[3] == _prev_close)
+        or (_ts_leg_available and _prev_fp[2] == _prev_ts)
+        or (not _ts_leg_available and _prev_close is not None and _prev_fp[3] == _prev_close)
     )
     if _prev_matches:
         if len(bars) == _prev_fp[1] + 1:
@@ -244,11 +258,15 @@ else:
             _es = _alpha_s * _b.close + (1 - _alpha_s) * _es
         macd_line.append(_ef - _es)
 if len(macd_line) < {signal}:
-    return NAN
-_alpha_g = 2.0 / ({signal} + 1)
-val = macd_line[0]
-for _i in range(1, len(macd_line)):
-    val = _alpha_g * macd_line[_i] + (1 - _alpha_g) * val
+    val = NAN
+else:
+    _alpha_g = 2.0 / ({signal} + 1)
+    # Iterator walk avoids deque.__getitem__ O(min(i, n-i)) indexing
+    # cost — random-access on a deque would make signal-EMA O(n^2).
+    _it = iter(macd_line)
+    val = next(_it)
+    for _x in _it:
+        val = _alpha_g * _x + (1 - _alpha_g) * val
 self._ind_state[_macd_key] = {{'fp': _new_fp, 'value': val, 'macd_line': macd_line}}
 return val
 """,

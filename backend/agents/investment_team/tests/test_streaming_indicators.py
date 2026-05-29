@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import random
+from collections import deque
 from dataclasses import dataclass
 from typing import List
 
@@ -184,10 +185,20 @@ def test_macd_warmup_returns_none() -> None:
     assert reg.macd(bars, fast=12, slow=26, signal=9, select="histogram") is None
 
 
-def test_macd_fast_gte_slow_returns_none() -> None:
+def test_macd_raises_value_error_on_bad_params() -> None:
+    """``IndicatorRegistry.macd`` enforces the same precondition floor as
+    ``macd_components`` — fast >= 2, slow > fast, signal >= 2. Earlier
+    revisions silently returned None / degenerate results for invalid
+    inputs while ``macd_components`` raised: same parameters, two
+    contracts. The registry now raises in lock-step."""
     reg = IndicatorRegistry()
     bars = _series(60)
-    assert reg.macd(bars, fast=30, slow=10, signal=9, select="macd") is None
+    with pytest.raises(ValueError):
+        reg.macd(bars, fast=30, slow=10, signal=9, select="macd")
+    with pytest.raises(ValueError):
+        reg.macd(bars, fast=1, slow=26, signal=9, select="macd")
+    with pytest.raises(ValueError):
+        reg.macd(bars, fast=12, slow=26, signal=1, select="macd")
 
 
 # ---------------------------------------------------------------------------
@@ -333,31 +344,142 @@ def test_advance_kind_rejects_multi_bar_jump_when_prev_matches() -> None:
 
     bars0 = [_AliasBar(timestamp=f"T_{i}", close=100.0 + i) for i in range(10)]
     reg = IndicatorRegistry()
-    # Manually inject state so we don't need MACD's min_bars warm-up to
-    # populate it — the test is about _advance_kind in isolation.
+    # Manually inject state — use deque() to match the registry's actual
+    # invariant (Deque[float] for macd_line). Earlier revisions injected
+    # [] (list), which would silently violate the popleft assumption in
+    # any test that exercised the slide branch.
     fp_seed = reg._bar_fingerprint(bars0)
     reg._state[("macd", None, 12, 26, 9, "close")] = {
         "fp": fp_seed,
-        "macd_line": [],
+        "macd_line": deque(),
         "value": {"macd": 0.0, "signal": None, "histogram": None},
     }
     state = reg._state[("macd", None, 12, 26, 9, "close")]
 
     # Construct a candidate where bars[-2] aliases the cached prev bar by
-    # timestamp+close (id will differ — fresh object), and total length
-    # is prev_fp[1] + 2 (multi-bar jump). prev_matches=True via the
-    # close/timestamp legs of the OR, length-delta gate must reject.
+    # timestamp (id will differ — fresh object), and total length is
+    # prev_fp[1] + 2 (multi-bar jump). prev_matches=True via the
+    # timestamp leg, length-delta gate must reject.
     aliased_prev = _AliasBar(timestamp=bars0[-1].timestamp, close=bars0[-1].close)
     multi_jump = (
         list(bars0[:-1])
         + [_AliasBar(timestamp="T_10", close=110.0)]
-        + [aliased_prev]  # bars[-2] aliases cached prev by ts+close
+        + [aliased_prev]  # bars[-2] aliases cached prev by ts
         + [_AliasBar(timestamp="T_11", close=111.0)]
     )
     assert len(multi_jump) == len(bars0) + 2  # delta = +2 (multi-bar jump)
     fp_multi = reg._bar_fingerprint(multi_jump)
-    # prev_matches=True, length delta=+2 → must classify as "none".
+    # prev_matches=True via timestamp leg, length delta=+2 → "none".
     assert reg._advance_kind(state, multi_jump, fp_multi) == "none"
+
+
+def test_advance_kind_close_leg_rescues_fresh_copy_callers() -> None:
+    """The close-leg of ``prev_matches`` is a conditional fallback that
+    fires only when the timestamp leg is unavailable on BOTH sides —
+    the canonical fresh-copy scenario where ``ctx.history`` returns
+    re-validated bar wrappers without timestamps. With the close-leg,
+    the registry still classifies sliding/expanding as such (avoiding
+    silent cold-rebuild every call). Without it (the pre-fix behaviour),
+    fresh-copy callers regressed to legacy O(N) per bar."""
+
+    @dataclass
+    class _NoTsBar:
+        # Deliberately no `timestamp` attribute: getattr fallback to None.
+        close: float
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+
+    bars = [_NoTsBar(close=100.0 + i * 0.5) for i in range(35)]
+    reg = IndicatorRegistry()
+    # Cold-start cached state at bars[:34] (just past warm-up for signal).
+    reg.macd(bars[:34], fast=12, slow=26, signal=9, select="signal")
+    cached_state = reg._state[("macd", None, 12, 26, 9, "close")]
+    cached_fp = cached_state["fp"]
+    assert cached_fp[2] is None  # confirms ts leg is unavailable
+    assert cached_fp[3] is not None  # close leg IS populated
+
+    # Now build bars[:35] but rebuild the wrappers (fresh copies with
+    # different id but identical close at index -2). The timestamp leg
+    # remains unavailable; the close leg must rescue.
+    fresh_bars = [_NoTsBar(close=b.close) for b in bars[:35]]
+    fp_fresh = reg._bar_fingerprint(fresh_bars)
+    # bars[-2] in fresh_bars is fresh_bars[33], whose close matches
+    # cached_fp[3] (the previously-last bar's close).
+    assert reg._advance_kind(cached_state, fresh_bars, fp_fresh) == "expand"
+
+
+def test_advance_kind_close_leg_does_not_fire_when_ts_available() -> None:
+    """When timestamps ARE present, the close-leg must NOT activate —
+    two unrelated symbol-less streams sharing a boundary close (flat
+    market, integer-tick prices) would otherwise silently merge.
+    Locks in the conditional gate on the close-leg."""
+
+    @dataclass
+    class _Bar:
+        timestamp: str
+        close: float
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+
+    reg = IndicatorRegistry()
+    # Stream A cached state — last bar has ts="A_T_9", close=100.0.
+    stream_a_last = _Bar(timestamp="A_T_9", close=100.0)
+    fp_a = (id(stream_a_last), 10, "A_T_9", 100.0)
+    reg._state[("macd", None, 12, 26, 9, "close")] = {
+        "fp": fp_a,
+        "macd_line": deque(),
+        "value": {"macd": 0.0, "signal": None, "histogram": None},
+    }
+    state = reg._state[("macd", None, 12, 26, 9, "close")]
+
+    # Stream B advance — bars[-2] has DIFFERENT id, DIFFERENT timestamp,
+    # but the SAME close (100.0). Old (unconditional close-leg) behavior:
+    # prev_matches=True via close, length delta=+1 → expand, corrupted.
+    # New (conditional close-leg): ts_leg_available=True (both have ts),
+    # ts mismatch → prev_matches=False → "none".
+    stream_b_prev = _Bar(timestamp="B_T_5", close=100.0)
+    stream_b_new = _Bar(timestamp="B_T_6", close=101.0)
+    fresh_b = [_Bar(timestamp=f"B_T_{i}", close=99.0 + i * 0.1) for i in range(9)]
+    fresh_b.extend([stream_b_prev, stream_b_new])  # len = 11 = prev_fp[1] + 1
+    fp_b = reg._bar_fingerprint(fresh_b)
+    assert reg._advance_kind(state, fresh_b, fp_b) == "none"
+
+
+def test_bar_fingerprint_normalises_pathological_close_values() -> None:
+    """The close slot in the fingerprint must reject ``bool`` (silent
+    int-subclass coercion to 0.0/1.0) and NaN (NaN != NaN would break
+    tuple-equality). Both fall to None so the close leg degrades
+    cleanly to id/ts."""
+    import math as _math
+
+    @dataclass
+    class _Bar:
+        close: object  # untyped to allow bool/NaN/None
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+        timestamp: str = "T"
+
+    reg = IndicatorRegistry()
+    # NaN close → close-slot is None.
+    fp_nan = reg._bar_fingerprint([_Bar(close=_math.nan)])
+    assert fp_nan[3] is None
+    # True/False → None (bool is an int subclass; float(True) == 1.0).
+    fp_true = reg._bar_fingerprint([_Bar(close=True)])
+    assert fp_true[3] is None
+    fp_false = reg._bar_fingerprint([_Bar(close=False)])
+    assert fp_false[3] is None
+    # None close → None.
+    fp_none = reg._bar_fingerprint([_Bar(close=None)])
+    assert fp_none[3] is None
+    # Real float → float.
+    fp_real = reg._bar_fingerprint([_Bar(close=100.5)])
+    assert fp_real[3] == 100.5
 
 
 # ---------------------------------------------------------------------------
