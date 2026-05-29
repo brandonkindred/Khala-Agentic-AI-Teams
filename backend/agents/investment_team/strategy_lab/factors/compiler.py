@@ -184,23 +184,32 @@ if len(bars) < {slow} + {signal}:
 # We then classify the call as ``expand`` (history grew by one bar — the
 # warm-up shape), ``slide`` (history length unchanged, oldest bar dropped —
 # the steady-state shape of a bounded history window), or fall back to a
-# full rebuild. On slide we drop the front of macd_line so it stays
+# full rebuild. On slide we popleft the front of macd_line so it stays
 # bounded and the signal-EMA seeds from the same bar the legacy
-# windowed-EMA implementation would have used.
+# windowed-EMA implementation would have used. The fingerprint includes
+# bars[-1].close (a 4-tuple) so a fresh-copy ctx.history caller, where
+# id() never carries across calls, still classifies as expand/slide
+# instead of regressing to cold-start every bar.
+# Relies on the emitted __init__ initialising self._ind_state;
+# bypassing __init__ via cls.__new__ is not supported.
 _symbol = getattr(bars[-1], 'symbol', None)
 _macd_key = ('macd_signal_{fast}_{slow}_{signal}', _symbol)
 _state = self._ind_state.get(_macd_key)
 _last = bars[-1]
-_new_fp = (id(_last), len(bars), getattr(_last, 'timestamp', None))
+_new_close = float(_last.close)
+_new_fp = (id(_last), len(bars), getattr(_last, 'timestamp', None), _new_close)
 if _state is not None and _state['fp'] == _new_fp:
     return _state['value']
 _kind = 'none'
 if _state is not None and len(bars) >= 2:
     _prev = bars[-2]
     _prev_ts = getattr(_prev, 'timestamp', None)
+    _prev_close = float(_prev.close)
     _prev_fp = _state['fp']
-    _prev_matches = (_prev_fp[0] == id(_prev)) or (
-        _prev_ts is not None and _prev_fp[2] == _prev_ts
+    _prev_matches = (
+        (_prev_fp[0] == id(_prev))
+        or (_prev_ts is not None and _prev_fp[2] == _prev_ts)
+        or (_prev_fp[3] == _prev_close)
     )
     if _prev_matches:
         if len(bars) == _prev_fp[1] + 1:
@@ -211,17 +220,20 @@ _alpha_f = 2.0 / ({fast} + 1)
 _alpha_s = 2.0 / ({slow} + 1)
 if _kind == 'expand' or _kind == 'slide':
     macd_line = _state['macd_line']
+    # Compute-then-mutate: finish the EMA loops BEFORE touching the
+    # cached deque, so any raise leaves the cache untouched.
     _ef = bars[-{fast}].close
     for _b in bars[-{fast} + 1:]:
         _ef = _alpha_f * _b.close + (1 - _alpha_f) * _ef
     _es = bars[-{slow}].close
     for _b in bars[-{slow} + 1:]:
         _es = _alpha_s * _b.close + (1 - _alpha_s) * _es
+    _new_macd = _ef - _es
     if _kind == 'slide':
-        macd_line.pop(0)
-    macd_line.append(_ef - _es)
+        macd_line.popleft()
+    macd_line.append(_new_macd)
 else:
-    macd_line = []
+    macd_line = deque()
     for _end in range({slow}, len(bars) + 1):
         _sub = bars[:_end]
         _ef = _sub[-{fast}].close
@@ -235,8 +247,8 @@ if len(macd_line) < {signal}:
     return NAN
 _alpha_g = 2.0 / ({signal} + 1)
 val = macd_line[0]
-for _x in macd_line[1:]:
-    val = _alpha_g * _x + (1 - _alpha_g) * val
+for _i in range(1, len(macd_line)):
+    val = _alpha_g * macd_line[_i] + (1 - _alpha_g) * val
 self._ind_state[_macd_key] = {{'fp': _new_fp, 'value': val, 'macd_line': macd_line}}
 return val
 """,
@@ -669,6 +681,9 @@ class _Compiler:
             '"""\n'
             "from contract import OrderSide, OrderType, Strategy\n"
             "import math\n"
+            # ``deque`` backs the MACDSignal helper's cached ``macd_line``;
+            # popleft is O(1) where ``list.pop(0)`` would be O(N).
+            "from collections import deque\n"
             "\n"
             'NAN = float("nan")\n'
             "\n"

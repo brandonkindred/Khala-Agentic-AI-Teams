@@ -114,7 +114,10 @@ def macd_components(
     ``len(bars)``, and the signal line is the EMA of that macd_line seeded
     from its first element.
 
-    Pre: ``2 <= fast < slow``; ``signal >= 1``.
+    Pre: ``2 <= fast < slow``; ``signal >= 2``. Matches the DSL bounds in
+    :mod:`strategy_lab.spec_dsl`. ``signal == 1`` collapses the EMA
+    recurrence to ``signal_val == macd_val`` (alpha = 1.0) and produces
+    histogram identically zero, so it is rejected as a degenerate input.
     Post: returns ``(macd, signal, histogram)``. Any leg that is not yet
     computable for lack of history is returned as ``None`` — the macd_line
     needs ``slow`` bars, the signal/histogram need ``slow + signal - 1``.
@@ -122,12 +125,15 @@ def macd_components(
     # Validate as raises (not asserts) — preconditions must hold even when
     # the interpreter is started with ``python -O`` and bare ``assert`` is
     # compiled out.
-    if not (fast >= 1 and slow > fast):
+    if not (fast >= 2 and slow > fast):
         raise ValueError(
-            f"macd_components: require fast >= 1 and slow > fast (got fast={fast}, slow={slow})"
+            f"macd_components: require fast >= 2 and slow > fast (got fast={fast}, slow={slow})"
         )
-    if signal < 1:
-        raise ValueError(f"macd_components: require signal >= 1 (got signal={signal})")
+    if signal < 2:
+        raise ValueError(
+            f"macd_components: require signal >= 2 (got signal={signal}); "
+            "signal=1 makes the EMA recurrence trivial (signal == macd, histogram ≡ 0)"
+        )
 
     if len(bars) < slow:
         return None, None, None
@@ -170,8 +176,16 @@ class IndicatorRegistry:
 
     Invariant: for each ``key`` in :attr:`_state`, the cached value is the
     indicator's output AT the bar identified by the cache's stored
-    ``last_id`` / ``last_ts`` / ``last_len`` triple. Any drift forces a
-    cold-start, never a silent stale read.
+    fingerprint (``id``, ``len``, ``timestamp``, ``close``). Any drift
+    forces a cold-start, never a silent stale read.
+
+    Multi-stream precondition: when a single registry instance is shared
+    across multiple bar streams (e.g. one strategy's ``on_bar`` firing
+    for every symbol in ``UNIVERSE``), the bar objects MUST carry a
+    ``symbol`` attribute so MACD's symbol-slotted cache key keeps each
+    stream isolated. Bars without a ``symbol`` attribute share one cache
+    slot under ``symbol=None``; safe for a single such stream, unsafe
+    across multiple unrelated symbol-less streams.
     """
 
     def __init__(self) -> None:
@@ -180,31 +194,41 @@ class IndicatorRegistry:
     # ----- key/fingerprint helpers --------------------------------------
 
     @staticmethod
-    def _bar_fingerprint(bars: Sequence[Any]) -> Tuple[int, int, Optional[str]]:
-        """Return ``(id(last_bar), len(bars), last_ts)`` for advance detection.
+    def _bar_fingerprint(
+        bars: Sequence[Any],
+    ) -> Tuple[int, int, Optional[str], Optional[float]]:
+        """Return ``(id, len, timestamp, close)`` for advance detection.
 
         Pre: ``bars`` is non-empty.
-        Post: tuple uniquely identifies this exact ``bars`` slice for cache
-        validation. ``id`` defends against same-bar repeat calls;
-        ``timestamp`` defends against truncation that happens to land on
-        the same memory address.
+        Post: 4-tuple uniquely identifies this ``bars`` slice for cache
+        validation. ``id`` covers in-place same-bar reads; ``timestamp``
+        covers same-object replay; ``close`` defends against fresh-copy
+        callers (e.g. a ``ctx.history`` implementation that rebuilds bar
+        wrappers per call) — without it, the id and timestamp legs of
+        ``_advance_kind``'s ``prev_matches`` can both fail simultaneously
+        and the registry silently regresses to cold-start every call.
         """
         last = bars[-1]
         ts = getattr(last, "timestamp", None)
-        return id(last), len(bars), ts
+        close = getattr(last, "close", None)
+        close_val = float(close) if close is not None else None
+        return id(last), len(bars), ts, close_val
 
     def _peek(self, key: Tuple) -> Optional[Dict[str, Any]]:
         return self._state.get(key)
 
     @staticmethod
-    def _is_same_bar(state: Dict[str, Any], fp: Tuple[int, int, Optional[str]]) -> bool:
+    def _is_same_bar(
+        state: Dict[str, Any],
+        fp: Tuple[int, int, Optional[str], Optional[float]],
+    ) -> bool:
         return state.get("fp") == fp
 
     @staticmethod
     def _advance_kind(
         state: Dict[str, Any],
         bars: Sequence[Any],
-        fp: Tuple[int, int, Optional[str]],
+        fp: Tuple[int, int, Optional[str], Optional[float]],
     ) -> str:
         """Classify how ``bars`` advanced since ``state``.
 
@@ -224,10 +248,12 @@ class IndicatorRegistry:
           ``-2``. The caller falls back to a full rebuild.
 
         Both ``"expand"`` and ``"slide"`` require the previous-bar match
-        AND the length delta to fit. Earlier revisions accepted any
-        previous-bar match (id OR timestamp) with no length check, which
-        let cross-symbol or jump-and-replay scenarios slip through as
-        "single-step" and silently corrupt the cached ``macd_line``.
+        AND the length delta to fit. ``prev_matches`` accepts id, ``ts``,
+        OR ``close`` — the content leg defends against fresh-copy
+        callers where every bar object is reallocated and ``id`` never
+        carries across calls (Pydantic re-validation, model_dump round
+        trips). Earlier revisions used only id/ts and could silently
+        regress to cold-start on every call under such patterns.
         """
         prev_fp = state.get("fp")
         if prev_fp is None or len(bars) < 2:
@@ -237,8 +263,12 @@ class IndicatorRegistry:
             return "none"
         prev_bar = bars[-2]
         prev_ts = getattr(prev_bar, "timestamp", None)
-        prev_matches = (prev_fp[0] == id(prev_bar)) or (
-            prev_ts is not None and prev_fp[2] == prev_ts
+        prev_close = getattr(prev_bar, "close", None)
+        prev_close_val = float(prev_close) if prev_close is not None else None
+        prev_matches = (
+            (prev_fp[0] == id(prev_bar))
+            or (prev_ts is not None and prev_fp[2] == prev_ts)
+            or (prev_close_val is not None and prev_fp[3] == prev_close_val)
         )
         if not prev_matches:
             return "none"
@@ -530,8 +560,13 @@ class IndicatorRegistry:
         macd_line: Deque[float]
         if kind in ("expand", "slide"):
             macd_line = state["macd_line"]
+            # Compute-then-mutate: finish every fallible operation (the
+            # EMA recurrences) BEFORE touching the cached deque, so a
+            # raise anywhere above leaves the cache untouched and the
+            # next call cleanly cold-rebuilds.
             ef = windowed_ema(bars[-fast:], fast, source)
             es = windowed_ema(bars[-slow:], slow, source)
+            new_val = ef - es
             if kind == "slide":
                 # ``bars`` slid forward by one bar: the oldest bar dropped
                 # off the front, so its macd value (``macd_line[0]``) is
@@ -540,7 +575,7 @@ class IndicatorRegistry:
                 # the signal-EMA seeds from a bar that legacy would no
                 # longer see — silent semantic divergence on every slide.
                 macd_line.popleft()
-            macd_line.append(ef - es)
+            macd_line.append(new_val)
         else:
             # Cold-start: replay the legacy outer loop so the macd_line
             # matches the original window-by-window construction. From

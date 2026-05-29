@@ -313,19 +313,81 @@ def test_advance_kind_classifies_expand_slide_and_none() -> None:
     assert reg._advance_kind(state, big_jump, fp_jump) == "none"
 
 
+def test_advance_kind_rejects_multi_bar_jump_when_prev_matches() -> None:
+    """A multi-bar jump where ``bars[-2]`` aliases the cached prev bar by
+    timestamp (or close) but length delta is non-±1 must still classify
+    as ``none``. Without the length-delta guard, the registry would
+    single-step over a multi-bar gap and silently corrupt ``macd_line``.
+    The previous ``_advance_kind`` test's ``big_jump`` path exits early
+    via prev_matches=False; this case drives prev_matches=True.
+    """
+
+    @dataclass
+    class _AliasBar:
+        timestamp: str
+        close: float
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+
+    bars0 = [_AliasBar(timestamp=f"T_{i}", close=100.0 + i) for i in range(10)]
+    reg = IndicatorRegistry()
+    # Manually inject state so we don't need MACD's min_bars warm-up to
+    # populate it — the test is about _advance_kind in isolation.
+    fp_seed = reg._bar_fingerprint(bars0)
+    reg._state[("macd", None, 12, 26, 9, "close")] = {
+        "fp": fp_seed,
+        "macd_line": [],
+        "value": {"macd": 0.0, "signal": None, "histogram": None},
+    }
+    state = reg._state[("macd", None, 12, 26, 9, "close")]
+
+    # Construct a candidate where bars[-2] aliases the cached prev bar by
+    # timestamp+close (id will differ — fresh object), and total length
+    # is prev_fp[1] + 2 (multi-bar jump). prev_matches=True via the
+    # close/timestamp legs of the OR, length-delta gate must reject.
+    aliased_prev = _AliasBar(timestamp=bars0[-1].timestamp, close=bars0[-1].close)
+    multi_jump = (
+        list(bars0[:-1])
+        + [_AliasBar(timestamp="T_10", close=110.0)]
+        + [aliased_prev]  # bars[-2] aliases cached prev by ts+close
+        + [_AliasBar(timestamp="T_11", close=111.0)]
+    )
+    assert len(multi_jump) == len(bars0) + 2  # delta = +2 (multi-bar jump)
+    fp_multi = reg._bar_fingerprint(multi_jump)
+    # prev_matches=True, length delta=+2 → must classify as "none".
+    assert reg._advance_kind(state, multi_jump, fp_multi) == "none"
+
+
 # ---------------------------------------------------------------------------
 # Precondition validation
 # ---------------------------------------------------------------------------
 
 
-def test_macd_components_raises_value_error_on_bad_params() -> None:
-    """``macd_components`` must raise ValueError (not bare ``assert``)
-    when preconditions fail — asserts disappear under ``python -O``."""
+@pytest.mark.parametrize(
+    "fast, slow, signal",
+    [
+        (30, 10, 9),  # fast >= slow
+        (1, 26, 9),  # fast < 2
+        (0, 26, 9),  # fast = 0
+        (-3, 26, 9),  # negative fast
+        (12, 26, 0),  # signal = 0
+        (12, 26, 1),  # signal = 1 (degenerate)
+        (12, 26, -1),  # negative signal
+    ],
+)
+def test_macd_components_raises_value_error_on_bad_params(
+    fast: int, slow: int, signal: int
+) -> None:
+    """``macd_components`` must raise ValueError for every malformed
+    parameter combination — asserts disappear under ``python -O``, and
+    the precondition floor must match the DSL bounds (fast >= 2,
+    slow > fast, signal >= 2).
+    """
     bars = _series(60)
-    with pytest.raises(ValueError, match="fast"):
-        macd_components(bars, fast=30, slow=10, signal=9)
-    with pytest.raises(ValueError, match="signal"):
-        macd_components(bars, fast=12, slow=26, signal=0)
+    with pytest.raises(ValueError):
+        macd_components(bars, fast=fast, slow=slow, signal=signal)
 
 
 # ---------------------------------------------------------------------------

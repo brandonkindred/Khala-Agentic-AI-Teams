@@ -198,8 +198,10 @@ def test_compiled_module_imports_only_sandbox_whitelisted_modules():
                 imported_modules.add(alias.name.split(".")[0])
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported_modules.add(node.module.split(".")[0])
-    # Compiler emits ``from contract import ...`` and ``import math`` only.
-    assert imported_modules <= {"contract", "math"}, imported_modules
+    # Compiler emits ``from contract import ...``, ``import math``, and
+    # ``from collections import deque`` (deque backs the streaming MACD
+    # cache's macd_line). All three are on the sandbox import whitelist.
+    assert imported_modules <= {"collections", "contract", "math"}, imported_modules
 
 
 # ---------------------------------------------------------------------------

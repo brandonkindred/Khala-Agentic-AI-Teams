@@ -436,6 +436,11 @@ _HELPER_BODIES: dict[str, str] = {
             # on_bar for every symbol in UNIVERSE, and a key without symbol
             # would let an AAPL advance silently mutate the MSFT macd_line
             # whenever the two share a bar timestamp.
+            # Fingerprint is a 4-tuple (id, len, ts, close). The close leg
+            # defends against fresh-copy callers where every bar object is
+            # reallocated and id() never carries across calls.
+            # Relies on the emitted __init__ initialising self._ind_state;
+            # bypassing __init__ via cls.__new__ is not supported.
             symbol = getattr(history[-1], "symbol", None)
             key = ("macd", symbol, fast, slow, signal, source)
             state = self._ind_state.get(key)
@@ -443,7 +448,9 @@ _HELPER_BODIES: dict[str, str] = {
             new_ts = getattr(last_bar, "timestamp", None)
             new_id = id(last_bar)
             new_len = len(history)
-            if state is not None and state["fp"] == (new_id, new_len, new_ts):
+            new_close = float(last_bar.close)
+            new_fp = (new_id, new_len, new_ts, new_close)
+            if state is not None and state["fp"] == new_fp:
                 return state["value"].get(select)
             alpha_f = 2.0 / (fast + 1.0)
             alpha_s = 2.0 / (slow + 1.0)
@@ -451,9 +458,12 @@ _HELPER_BODIES: dict[str, str] = {
             if state is not None and new_len >= 2:
                 prev_bar = history[-2]
                 prev_ts = getattr(prev_bar, "timestamp", None)
+                prev_close = float(prev_bar.close)
                 prev_fp = state["fp"]
-                prev_matches = (prev_fp[0] == id(prev_bar)) or (
-                    prev_ts is not None and prev_fp[2] == prev_ts
+                prev_matches = (
+                    (prev_fp[0] == id(prev_bar))
+                    or (prev_ts is not None and prev_fp[2] == prev_ts)
+                    or (prev_fp[3] == prev_close)
                 )
                 if prev_matches:
                     if new_len == prev_fp[1] + 1:
@@ -462,17 +472,21 @@ _HELPER_BODIES: dict[str, str] = {
                         kind = "slide"
             if kind in ("expand", "slide"):
                 macd_line = state["macd_line"]
+                # Compute-then-mutate: finish the EMA loops BEFORE
+                # touching the cached deque, so any raise leaves the
+                # cache untouched and the next call cleanly cold-rebuilds.
                 ef = self._src(history[-fast], source)
                 for b in history[-fast + 1:]:
                     ef = alpha_f * self._src(b, source) + (1.0 - alpha_f) * ef
                 es = self._src(history[-slow], source)
                 for b in history[-slow + 1:]:
                     es = alpha_s * self._src(b, source) + (1.0 - alpha_s) * es
+                new_macd_val = ef - es
                 if kind == "slide":
-                    macd_line.pop(0)
-                macd_line.append(ef - es)
+                    macd_line.popleft()
+                macd_line.append(new_macd_val)
             else:
-                macd_line = []
+                macd_line = deque()
                 for end in range(slow, new_len + 1):
                     sub = history[:end]
                     ef = self._src(sub[-fast], source)
@@ -488,12 +502,12 @@ _HELPER_BODIES: dict[str, str] = {
             if len(macd_line) >= signal:
                 alpha_g = 2.0 / (signal + 1.0)
                 sig = macd_line[0]
-                for x in macd_line[1:]:
-                    sig = alpha_g * x + (1.0 - alpha_g) * sig
+                for i in range(1, len(macd_line)):
+                    sig = alpha_g * macd_line[i] + (1.0 - alpha_g) * sig
                 sig_val = sig
                 hist_val = macd_val - sig_val
             self._ind_state[key] = {
-                "fp": (new_id, new_len, new_ts),
+                "fp": new_fp,
                 "macd_line": macd_line,
                 "value": {
                     "macd": macd_val,
@@ -678,7 +692,11 @@ def _emit_imports() -> str:
     # No ``OrderSide`` / ``OrderType`` / ``TimeInForce`` — the compiled
     # shim emits zero ``submit_order`` calls; all orders come from the
     # engine dispatchers.
-    return "import math\nfrom contract import Strategy\n"
+    # ``deque`` backs the MACD helper's cached ``macd_line``; popleft is
+    # O(1) where ``list.pop(0)`` would be O(N) and dominate the per-bar
+    # cost the cache exists to amortise. ``collections`` is on the
+    # sandbox import whitelist.
+    return "import math\nfrom collections import deque\nfrom contract import Strategy\n"
 
 
 def _indent_method(body: str, spaces: int = 4) -> str:

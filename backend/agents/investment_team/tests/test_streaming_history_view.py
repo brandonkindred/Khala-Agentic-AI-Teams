@@ -3,9 +3,9 @@
 The view's contract is **same-bar dedupe**: within one bar, multiple
 predicates that reference the same ``IndicatorRef`` share the cached
 ``pd.Series``. Once a new bar is appended the cache invalidates and the
-next access rebuilds. These tests pin that contract and verify the
-rollover path correctly invalidates the cache when the bounded deque
-drops its oldest bar.
+next access rebuilds the DataFrame and any cached indicator series.
+Invalidation is driven by a monotonic per-instance append counter so
+CPython id-reuse on the bounded deque cannot produce a false cache hit.
 """
 
 from __future__ import annotations
@@ -26,6 +26,19 @@ def _bar(i: int) -> BarRecord:
         close=100.0 + i * 0.2,
         volume=1000.0 + i,
     )
+
+
+def _fresh_view_value(bars: list[BarRecord], ref: IndicatorRef, i: int) -> float | None:
+    """Build a fresh view seeded with ``bars`` and read ``indicator(ref, i)``.
+
+    Used as the bit-exact reference for cache-consistency checks: any
+    stale-cache regression produces a value that differs from the
+    fresh-view computation on the same input.
+    """
+    fresh = StreamingHistoryView(max_bars=max(len(bars), 1))
+    for b in bars:
+        fresh.append(b)
+    return fresh.indicator(ref, i)
 
 
 def test_same_bar_returns_cached_series() -> None:
@@ -81,24 +94,58 @@ def test_rollover_rebuilds_cache_against_live_deque() -> None:
     assert val != pre
 
 
-def test_repeated_appends_do_not_accumulate_stale_cache() -> None:
-    """Successive appends without a rebuild in between must not silently
-    return values from an earlier bar. Regression check for the prior
-    revision's ``_needs_full_rebuild=True`` set on every saturated
-    append: that flag bypassed the cache reuse entirely, masking the
-    bug below."""
+def test_repeated_appends_match_fresh_view_value() -> None:
+    """After every append, the cached indicator value must equal the
+    value a freshly-constructed view (seeded with the same bar tail)
+    returns. The previous version of this test only asserted that
+    successive values were unequal — an off-by-one staleness on a
+    monotonically-increasing close series would have passed silently."""
+    ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
     view = StreamingHistoryView(max_bars=5)
     for i in range(5):
         view.append(_bar(i))
-    ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
-    last = view.indicator(ref, 4)
     for i in range(5, 12):
         view.append(_bar(i))
-        # Each indicator() call must see the freshly-appended bar.
-        new_val = view.indicator(ref, 4)
-        assert new_val is not None
-        assert new_val != last
-        last = new_val
+        live = view.indicator(ref, 4)
+        # The view holds the trailing 5 bars (deque maxlen=5), so the
+        # fresh-reference must be seeded with the same tail.
+        expected = _fresh_view_value([_bar(j) for j in range(i - 4, i + 1)], ref, 4)
+        assert live == expected, f"i={i} live={live!r} expected={expected!r}"
+
+
+def test_batched_appends_do_not_yield_stale_cache_under_id_reuse() -> None:
+    """The cache key is keyed on a monotonic append counter, not on
+    ``id(self._bars[-1])`` — CPython recycles freed dataclass slots, so
+    a sequence of appends without intervening ``indicator()`` calls
+    could otherwise place a fresh BarRecord at an address recently
+    freed by the evicted oldest bar and produce a false cache hit.
+    Regression for finding #1 of the deep code review.
+    """
+    ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
+    view = StreamingHistoryView(max_bars=5)
+    for i in range(5):
+        view.append(_bar(i))
+    # Seed the cache.
+    view.indicator(ref, 4)
+    # Batched appends with NO intervening indicator() calls — exactly
+    # the pattern that triggers id-reuse on a bounded deque.
+    for i in range(5, 20):
+        view.append(_bar(i))
+    # Now the deque holds bars [15..19]. The cached entry was built from
+    # bars [0..4]. id(self._bars[-1]) MAY collide with the original id;
+    # the counter-based cache key must catch this anyway.
+    live = view.indicator(ref, 4)
+    expected = _fresh_view_value([_bar(j) for j in range(15, 20)], ref, 4)
+    assert live == expected, f"batched-append stale cache: live={live!r} expected={expected!r}"
+
+
+def test_indicator_returns_none_on_empty_view() -> None:
+    """``indicator()`` must defend its precondition: an empty view
+    returns ``None`` instead of raising KeyError from pandas when the
+    DataFrame has no OHLCV columns."""
+    view = StreamingHistoryView()
+    ref = IndicatorRef(name="sma", params={"period": 5}, source="close")
+    assert view.indicator(ref, 0) is None
 
 
 def test_multi_indicator_share_dataframe() -> None:
