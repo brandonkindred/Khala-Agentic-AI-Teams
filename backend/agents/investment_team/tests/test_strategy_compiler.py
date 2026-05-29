@@ -743,11 +743,27 @@ def test_macd_fast_greater_than_slow_raises() -> None:
         compile_strategy(spec)
 
 
-def test_macd_helper_defensive_fast_slow_returns_none() -> None:
-    """Defense-in-depth: even if a spec slipped past the front-door
-    check, the helper must return None rather than IndexError."""
-    # Build the code via a valid spec, then exec the module and call
-    # the helper with a fast >= slow combo directly.
+@pytest.mark.parametrize(
+    "fast, slow, signal",
+    [
+        (30, 10, 9),  # fast >= slow (legacy case)
+        (1, 26, 9),  # fast < 2
+        (12, 26, 1),  # signal < 2 (degenerate: alpha_g=1 → signal == macd)
+    ],
+)
+def test_macd_helper_returns_none_on_bad_params(fast: int, slow: int, signal: int) -> None:
+    """Defense-in-depth across the three-site MACD contract: registry
+    raises ValueError, both compiled templates return None (synthesis) /
+    NAN (factors). The compiled synthesis helper must reject every
+    parameter combination that the registry rejects — fast < 2,
+    slow <= fast, OR signal < 2.
+
+    Prior versions checked only ``fast >= slow``; ``fast=1`` and
+    ``signal=1`` slipped through and produced degenerate values where
+    the registry would have raised. The new contract closes the
+    three-site precondition drift the ``indicators/__init__.py``
+    docstring identified.
+    """
     spec = _spec(
         entry_rules=[
             EntryRule(
@@ -760,7 +776,94 @@ def test_macd_helper_defensive_fast_slow_returns_none() -> None:
     ns, *_ = _exec_module(code)
     strat = ns["CompiledStrategy"]()
     bars = [_SyntheticBar(close=100.0 + i) for i in range(60)]
-    assert strat.macd(bars, fast=30, slow=10, signal=9) is None
+    assert strat.macd(bars, fast=fast, slow=slow, signal=signal) is None
+
+
+def test_macd_helper_isolates_symbols_on_shared_instance() -> None:
+    """The compiled MACD helper carries ``self._ind_state`` for the life
+    of the strategy instance, and ``on_bar`` fires for every symbol in
+    UNIVERSE on the same instance. The helper must keep each symbol's
+    macd_line in its own cache slot — otherwise an AAPL advance at T+1
+    after an MSFT@T cold-start would mutate MSFT's cached macd_line.
+    """
+    spec = _spec(
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="macd", params={"output": "signal"}),
+                    op=">",
+                    rhs=0.0,
+                ),
+            )
+        ],
+        target_symbols=["AAPL", "MSFT"],
+    )
+    code = compile_strategy(spec)
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+
+    aapl = [
+        _SyntheticBar(symbol="AAPL", timestamp=f"2024-01-{i + 1:02d}", close=100.0 + i * 0.5)
+        for i in range(50)
+    ]
+    msft = [
+        _SyntheticBar(symbol="MSFT", timestamp=f"2024-01-{i + 1:02d}", close=200.0 - i * 0.3)
+        for i in range(50)
+    ]
+
+    # Interleave the two symbols; compare each call to a fresh-instance
+    # cold-compute on the same per-symbol slice.
+    for n in range(34, 50):
+        v_a = strat.macd(aapl[:n], fast=12, slow=26, signal=9, source="close", select="signal")
+        v_b = strat.macd(msft[:n], fast=12, slow=26, signal=9, source="close", select="signal")
+        ref_a = ns["CompiledStrategy"]().macd(
+            aapl[:n], fast=12, slow=26, signal=9, source="close", select="signal"
+        )
+        ref_b = ns["CompiledStrategy"]().macd(
+            msft[:n], fast=12, slow=26, signal=9, source="close", select="signal"
+        )
+        assert v_a == ref_a, f"n={n} AAPL contaminated: {v_a!r} vs {ref_a!r}"
+        assert v_b == ref_b, f"n={n} MSFT contaminated: {v_b!r} vs {ref_b!r}"
+
+
+def test_macd_helper_matches_legacy_on_sliding_window() -> None:
+    """``ctx.history(symbol, depth)`` returns a sliding bounded window —
+    the steady-state shape after warm-up. The compiled MACD helper must
+    match a cold-start reference on each slide, otherwise the cached
+    macd_line drifts every bar."""
+    spec = _spec(
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="macd", params={"output": "signal"}),
+                    op=">",
+                    rhs=0.0,
+                ),
+            )
+        ],
+    )
+    code = compile_strategy(spec)
+    ns, *_ = _exec_module(code)
+    strat = ns["CompiledStrategy"]()
+
+    bars = [
+        _SyntheticBar(
+            symbol="QQQ",
+            timestamp=f"2024-01-{i + 1:02d}",
+            close=100.0 + (i * 0.4) - (1.0 if i % 5 == 0 else 0.0),
+        )
+        for i in range(120)
+    ]
+    window_size = 40
+    for offset in range(0, len(bars) - window_size + 1):
+        sliding = bars[offset : offset + window_size]
+        streamed = strat.macd(sliding, fast=12, slow=26, signal=9, source="close", select="signal")
+        cold = ns["CompiledStrategy"]().macd(
+            sliding, fast=12, slow=26, signal=9, source="close", select="signal"
+        )
+        assert streamed == cold, f"offset={offset} streamed={streamed!r} cold={cold!r}"
 
 
 def test_cross_predicates_no_inline_state() -> None:

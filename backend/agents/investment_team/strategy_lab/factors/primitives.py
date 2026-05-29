@@ -12,16 +12,20 @@ These reference implementations exist for two reasons:
 * Documentation — they double as the spec the compiler templates in
   :file:`compiler.py` are checked against.
 
-The compiler does NOT import this module (the sandbox import whitelist
-forbids it).  It emits independently-templated helper methods that
-implement the same arithmetic.  When changing a primitive, update both
-this file and the matching template in :file:`compiler.py`.
+The OHLCV-derivable primitives delegate to
+:class:`strategy_lab.indicators.streaming.IndicatorRegistry` — the
+canonical, host-side recurrence implementation. The compiler still emits
+inline templated bodies (the sandbox import whitelist forbids
+non-``contract`` / non-``math`` imports), but the templates are kept in
+lock-step with the registry by ``tests/test_streaming_indicators.py``.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any, List, Optional, Sequence
+from typing import Any, Optional, Sequence
+
+from ..indicators.streaming import IndicatorRegistry, macd_components, windowed_ema
 
 NAN = float("nan")
 
@@ -31,6 +35,10 @@ def _isnan(x: float) -> bool:
         return math.isnan(x)
     except (TypeError, ValueError):
         return False
+
+
+def _or_nan(value: Optional[float]) -> float:
+    return NAN if value is None else float(value)
 
 
 # ---------------------------------------------------------------------------
@@ -57,53 +65,27 @@ def sma(bars: Sequence[Any], period: int) -> float:
 def ema(bars: Sequence[Any], period: int) -> float:
     if len(bars) < period:
         return NAN
-    alpha = 2.0 / (period + 1)
-    val = bars[-period].close
-    for b in bars[-period + 1 :]:
-        val = alpha * b.close + (1 - alpha) * val
-    return val
+    return windowed_ema(bars, period, "close")
 
 
 def rsi(bars: Sequence[Any], period: int = 14) -> float:
-    if len(bars) < period + 1:
-        return NAN
-    gains = 0.0
-    losses = 0.0
-    for i in range(len(bars) - period, len(bars)):
-        delta = bars[i].close - bars[i - 1].close
-        if delta > 0:
-            gains += delta
-        else:
-            losses += -delta
-    avg_gain = gains / period
-    avg_loss = losses / period
-    if avg_loss == 0:
-        return 100.0 if avg_gain > 0 else 50.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
+    return _or_nan(IndicatorRegistry().rsi(bars, period=period, source="close"))
 
 
 def macd_signal(bars: Sequence[Any], fast: int, slow: int, signal: int) -> float:
-    """EMA-of-EMA-difference signal line."""
-    if len(bars) < slow + signal:
+    """EMA-of-EMA-difference signal line.
+
+    Warm-up threshold is ``slow + signal - 1`` — the smallest ``len(bars)``
+    at which ``len(macd_line) == signal`` and the signal-EMA fills.
+    Matches :func:`macd_components`, :meth:`IndicatorRegistry.macd`, and
+    both compiler templates so the 'canonical reference implementation'
+    contract documented at :mod:`strategy_lab.indicators` holds at the
+    warm-up boundary.
+    """
+    if len(bars) < slow + signal - 1:
         return NAN
-    macd_line: List[float] = []
-    for end in range(slow, len(bars) + 1):
-        sub = bars[:end]
-        f = ema(sub, fast)
-        s = ema(sub, slow)
-        if _isnan(f) or _isnan(s):
-            macd_line.append(NAN)
-        else:
-            macd_line.append(f - s)
-    valid = [x for x in macd_line if not _isnan(x)]
-    if len(valid) < signal:
-        return NAN
-    alpha = 2.0 / (signal + 1)
-    val = valid[0]
-    for x in valid[1:]:
-        val = alpha * x + (1 - alpha) * val
-    return val
+    _, sig, _ = macd_components(bars, fast=fast, slow=slow, signal=signal, source="close")
+    return _or_nan(sig)
 
 
 def bollinger_z(bars: Sequence[Any], period: int) -> float:
@@ -120,49 +102,12 @@ def bollinger_z(bars: Sequence[Any], period: int) -> float:
 
 
 def atr(bars: Sequence[Any], period: int = 14) -> float:
-    if len(bars) < period + 1:
-        return NAN
-    trs: List[float] = []
-    for i in range(len(bars) - period, len(bars)):
-        high = bars[i].high
-        low = bars[i].low
-        prev_close = bars[i - 1].close
-        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-    return sum(trs) / period
+    return _or_nan(IndicatorRegistry().atr(bars, period=period))
 
 
 def adx(bars: Sequence[Any], period: int = 14) -> float:
     """Wilder's ADX, smoothed once."""
-    if len(bars) < 2 * period + 1:
-        return NAN
-    plus_dms: List[float] = []
-    minus_dms: List[float] = []
-    trs: List[float] = []
-    for i in range(1, len(bars)):
-        up = bars[i].high - bars[i - 1].high
-        down = bars[i - 1].low - bars[i].low
-        plus_dm = up if up > down and up > 0 else 0.0
-        minus_dm = down if down > up and down > 0 else 0.0
-        prev_close = bars[i - 1].close
-        tr = max(
-            bars[i].high - bars[i].low,
-            abs(bars[i].high - prev_close),
-            abs(bars[i].low - prev_close),
-        )
-        plus_dms.append(plus_dm)
-        minus_dms.append(minus_dm)
-        trs.append(tr)
-
-    if sum(trs[-period:]) == 0:
-        return 0.0
-
-    plus_di = 100.0 * sum(plus_dms[-period:]) / sum(trs[-period:])
-    minus_di = 100.0 * sum(minus_dms[-period:]) / sum(trs[-period:])
-    if plus_di + minus_di == 0:
-        return 0.0
-    dx = 100.0 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    # Wilder smoothing of DX is approximated by the most recent DX for Phase A.
-    return dx
+    return _or_nan(IndicatorRegistry().adx(bars, period=period))
 
 
 def stochastic_k(bars: Sequence[Any], period: int = 14) -> float:

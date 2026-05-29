@@ -59,8 +59,14 @@ def test_rsi_lookback_is_period_plus_one() -> None:
     assert _lookback(RSI(period=14)) == 15
 
 
-def test_macd_signal_lookback_is_slow_plus_signal() -> None:
-    assert _lookback(MACDSignal(fast=12, slow=26, signal=9)) == 35
+def test_macd_signal_lookback_is_slow_plus_signal_minus_one() -> None:
+    # Signal-EMA fills at ``len(macd_line) >= signal``, i.e. at
+    # ``len(bars) == slow + signal - 1``. Matches the registry's
+    # ``_macd_value`` gate and the synthesis compiler's ``_lookback_for``
+    # for ``output='signal'``. Prior version was off-by-one (returned
+    # ``slow + signal``), so factors-compiled MACDSignal genomes fired
+    # signals one bar later than equivalent synthesis-spec strategies.
+    assert _lookback(MACDSignal(fast=12, slow=26, signal=9)) == 34
 
 
 def test_atr_lookback_is_period_plus_one() -> None:

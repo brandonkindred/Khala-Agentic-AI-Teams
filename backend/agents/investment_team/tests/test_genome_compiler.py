@@ -182,24 +182,99 @@ def test_compiled_module_parses_as_python(name, genome):
     )
 
 
+def _imported_modules(code: str) -> set[str]:
+    tree = ast.parse(code)
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    return imported
+
+
 def test_compiled_module_imports_only_sandbox_whitelisted_modules():
-    """Compiler output must only import from ``contract`` + stdlib."""
+    """Non-MACD genome emits only ``contract`` + ``math``. ``collections``
+    is gated on the genome actually using MACDSignal — see the next test."""
     code = compile_genome(
         _g(
             CrossOver(fast=SMA(period=5), slow=SMA(period=15)),
             CrossUnder(fast=SMA(period=5), slow=SMA(period=15)),
         )
     )
-    tree = ast.parse(code)
-    imported_modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                imported_modules.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported_modules.add(node.module.split(".")[0])
-    # Compiler emits ``from contract import ...`` and ``import math`` only.
-    assert imported_modules <= {"contract", "math"}, imported_modules
+    assert _imported_modules(code) == {"contract", "math"}
+
+
+def test_compiled_macd_genome_imports_collections_for_deque():
+    """When the genome includes a MACDSignal node, ``from collections
+    import deque`` is emitted to back the cached macd_line. Gating the
+    import on actual usage keeps non-MACD strategies clean and avoids
+    spurious F401 under any future linter pass on generated code."""
+    from investment_team.strategy_lab.factors.models import MACDSignal
+
+    code = compile_genome(
+        _g(
+            CompareGT(left=MACDSignal(fast=12, slow=26, signal=9), right=Const(value=0.0)),
+            CompareLT(left=MACDSignal(fast=12, slow=26, signal=9), right=Const(value=0.0)),
+        )
+    )
+    assert _imported_modules(code) == {"collections", "contract", "math"}
+
+
+def test_compiled_macd_genome_cache_key_embeds_source():
+    """The factors MACDSignal helper's cache key must include the
+    ``source`` axis (``_close`` suffix) so any future DSL extension
+    adding a non-close source cannot silently collide on the same
+    ``(fast, slow, signal, symbol)`` tuple. Matches the registry and
+    synthesis key shapes ``(name, symbol, fast, slow, signal, source)``."""
+    from investment_team.strategy_lab.factors.models import MACDSignal
+
+    code = compile_genome(
+        _g(
+            CompareGT(left=MACDSignal(fast=12, slow=26, signal=9), right=Const(value=0.0)),
+            CompareLT(left=MACDSignal(fast=12, slow=26, signal=9), right=Const(value=0.0)),
+        )
+    )
+    assert "macd_signal_12_26_9_close" in code, (
+        "factors cache key must embed the source axis for forward-compat"
+    )
+
+
+def test_compiled_macd_rejects_non_integer_params_at_compile_time():
+    """The factors MACDSignal template interpolates fast/slow/signal as
+    raw literals: ``not ({signal} >= 2)``. A NaN-valued ``signal`` would
+    emit unbound identifier ``nan`` and produce ``NameError`` at module
+    exec time. Reject malformed params loudly at compile time rather
+    than letting the bad source string through.
+
+    Pydantic's ge=2 constraint normally catches malformed params at
+    model construction, so this defence-in-depth path is reachable
+    only via ``model_construct`` (validation bypass) or future schema
+    drift. ``model_construct`` simulates the bypass.
+    """
+    from investment_team.strategy_lab.factors.models import MACDSignal
+
+    # NaN signal — simulates a validation-bypass path that lets a NaN
+    # slip into the genome. The compile-time gate must catch this
+    # before the unbound ``nan`` identifier is emitted.
+    nan_node = MACDSignal.model_construct(fast=12, slow=26, signal=float("nan"))
+    with pytest.raises(TypeError, match="must be an int"):
+        compile_genome(
+            _g(
+                CompareGT(left=nan_node, right=Const(value=0.0)),
+                CompareLT(left=Const(value=0.0), right=Const(value=0.0)),
+            )
+        )
+    # Out-of-range int (Pydantic ge=2 normally rejects this).
+    bad_node = MACDSignal.model_construct(fast=1, slow=26, signal=9)
+    with pytest.raises(ValueError, match=">= 2"):
+        compile_genome(
+            _g(
+                CompareGT(left=bad_node, right=Const(value=0.0)),
+                CompareLT(left=Const(value=0.0), right=Const(value=0.0)),
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

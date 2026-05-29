@@ -94,7 +94,22 @@ def _lookback(node: BaseModel) -> int:
     if isinstance(node, RSI):
         return node.period + 1
     if isinstance(node, MACDSignal):
-        return node.slow + node.signal
+        # Matches the registry's signal-line gate (``slow + signal - 1``)
+        # and the synthesis compiler's ``_lookback_for`` for ``output='signal'``.
+        # The signal-EMA is computable as soon as ``len(macd_line) >= signal``,
+        # which occurs at ``len(bars) == slow + signal - 1``.
+        #
+        # BACKWARDS-COMPATIBILITY NOTE: prior revisions returned
+        # ``slow + signal`` (one bar later). Genomes with MACDSignal
+        # compiled against the old code fire signals one bar later than
+        # they do now. Any persisted backtest output (equity curves,
+        # trade records, deflated Sharpe values) pre-dating this fix
+        # will not bit-reproduce against re-runs through the corrected
+        # compiler. The change is INTENTIONAL — it brings factor-DSL
+        # into alignment with the registry, synthesis compiler, and the
+        # reference primitive — but downstream pipelines that hash or
+        # diff stored backtest artefacts may need to re-baseline.
+        return node.slow + node.signal - 1
     if isinstance(node, ATR):
         return node.period + 1
     if isinstance(node, ADX):
@@ -176,26 +191,201 @@ rs = avg_gain / avg_loss
 return 100.0 - (100.0 / (1.0 + rs))
 """,
     MACDSignal: """\
-if len(bars) < {slow} + {signal}:
+# Precondition defense-in-depth: matches IndicatorRegistry._macd_value,
+# but returns NAN (sandbox can't propagate ValueError cleanly).
+# ``not (x >= y)`` rather than ``x < y`` so NaN parameters trip the gate
+# (NaN is unordered with everything; ``NaN < 2`` is False under IEEE 754).
+if not ({fast} >= 2) or not ({slow} > {fast}) or not ({signal} >= 2):
     return NAN
-macd_line = []
-for _end in range({slow}, len(bars) + 1):
-    _sub = bars[:_end]
-    _alpha_f = 2.0 / ({fast} + 1)
-    _ef = _sub[-{fast}].close
-    for _b in _sub[-{fast} + 1:]:
+# True warm-up: need at least ``slow`` bars to seed the first macd_line
+# entry. The signal-EMA fills at ``len(macd_line) >= signal``, i.e. at
+# ``len(bars) >= slow + signal - 1`` — matches the registry's gate and
+# the synthesis compiler's ``min_bars`` for ``output='signal'``.
+if len(bars) < {slow}:
+    return NAN
+# Streaming-cache the macd_line. Cache key includes the bar's symbol so
+# a strategy whose on_bar fires across multiple tickers does not
+# silently mutate one symbol's macd_line with another's bars. Classify
+# each call as ``expand`` (history grew by one bar — the warm-up
+# shape), ``slide`` (history length unchanged, oldest bar dropped — the
+# steady-state shape of a bounded history window), or cold-rebuild.
+# The 4-tuple fingerprint (id, len, ts, close) tolerates fresh-copy
+# ctx.history callers; the close leg is a CONDITIONAL fallback that
+# fires only when ts is unavailable on BOTH sides — so a non-close
+# source value or a flat market cannot silently merge unrelated streams
+# through coincident closes. Cache state is written on every code path
+# including warm-up (with val=NAN when len(macd_line) < signal), so
+# same-bar repeat calls during the [slow, slow+signal-1) warm-up window
+# share the cache instead of cold-rebuilding every bar.
+#
+# Reachability note: in the genome's on_bar flow this helper is gated
+# by ``MIN_HISTORY = _lookback(MACDSignal) = slow + signal - 1``, so
+# ``len(bars) < slow + signal - 1`` is unreachable through the normal
+# on_bar dispatch. The warm-up cache write is reachable from:
+#   (a) direct helper invocation (e.g. tests, ad-hoc probes);
+#   (b) cross-helper bar sharing where another indicator with a
+#       smaller lookback drives MIN_HISTORY lower than this helper's
+#       own minimum bar count.
+# Both pathways exist and the defense-in-depth amortisation matters
+# for them; the comment on `same-bar repeat calls during warm-up
+# share the cache` is true within those contexts.
+# Relies on the emitted __init__ initialising self._ind_state;
+# bypassing __init__ via cls.__new__ is not supported.
+# All bar-attribute reads route through a narrow try/except so a
+# raising @property/Pydantic computed_field on close/timestamp/symbol
+# degrades to None instead of crashing the helper. Mirrors
+# indicators/streaming.py::_safe_getattr verbatim — only descriptor /
+# resolution errors are caught; programmer/runtime sentinels propagate.
+_safe_exc = (AttributeError, TypeError, ValueError, RuntimeError, LookupError)
+try:
+    _symbol = getattr(bars[-1], 'symbol', None)
+except NotImplementedError:
+    raise
+except _safe_exc:
+    _symbol = None
+# Cache key embeds ``source='close'`` (the only source the factor DSL's
+# MACDSignal supports today) so future cross-source extensions cannot
+# silently collide. Matches the registry and synthesis key shapes.
+_macd_key = ('macd_signal_{fast}_{slow}_{signal}_close', _symbol)
+_state = self._ind_state.get(_macd_key)
+_last = bars[-1]
+try:
+    _raw_close = getattr(_last, 'close', None)
+except NotImplementedError:
+    raise
+except _safe_exc:
+    _raw_close = None
+# Close normalisation: mirrors indicators/streaming.py::_normalise_close
+# verbatim. Inlined because the sandbox import whitelist forbids the
+# host indicators package. Detects third-party bool scalars by
+# top-level module + exact-name allowlist (covers numpy.ma submodules,
+# pyarrow, polars); guards ``__module__`` against ``None`` (type()-built
+# classes); catches OverflowError for astronomical-magnitude ints.
+if _raw_close is None or isinstance(_raw_close, bool):
+    _new_close = None
+else:
+    _cls = type(_raw_close)
+    _mod = getattr(_cls, '__module__', None)
+    _nm = getattr(_cls, '__name__', '')
+    if (
+        isinstance(_mod, str)
+        and isinstance(_nm, str)
+        and _mod.split('.', 1)[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
+        and _nm.lower() in ('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')
+    ):
+        _new_close = None
+    else:
+        try:
+            _new_close = float(_raw_close)
+        except (TypeError, ValueError, OverflowError):
+            _new_close = None
+        else:
+            if math.isnan(_new_close) or math.isinf(_new_close):
+                _new_close = None
+try:
+    _new_ts = getattr(_last, 'timestamp', None)
+except NotImplementedError:
+    raise
+except _safe_exc:
+    _new_ts = None
+_new_fp = (id(_last), len(bars), _new_ts, _new_close)
+if _state is not None and _state['fp'] == _new_fp:
+    return _state['value']
+_kind = 'none'
+if _state is not None and len(bars) >= 2:
+    _prev = bars[-2]
+    try:
+        _prev_ts = getattr(_prev, 'timestamp', None)
+    except NotImplementedError:
+        raise
+    except _safe_exc:
+        _prev_ts = None
+    _prev_fp = _state['fp']
+    _both_have_ts = _prev_fp[2] is not None and _prev_ts is not None
+    _both_ts_absent = _prev_fp[2] is None and _prev_ts is None
+    if _prev_fp[0] == id(_prev):
+        _prev_matches = True
+    elif _both_have_ts and _prev_fp[2] == _prev_ts:
+        _prev_matches = True
+    elif _both_ts_absent:
+        # Defer close compute to the close-leg branch; avoids wasted
+        # float() in the common id/ts-match path AND prevents crashes
+        # when prev_close is non-numeric. See indicators/streaming.py
+        # ::_normalise_close for the full bool/NaN/inf/non-numeric
+        # taxonomy this inlines.
+        try:
+            _prev_raw_close = getattr(_prev, 'close', None)
+        except NotImplementedError:
+            raise
+        except _safe_exc:
+            _prev_raw_close = None
+        if _prev_raw_close is None or isinstance(_prev_raw_close, bool):
+            _prev_close = None
+        else:
+            _prev_cls = type(_prev_raw_close)
+            _prev_mod = getattr(_prev_cls, '__module__', None)
+            _prev_nm = getattr(_prev_cls, '__name__', '')
+            if (
+                isinstance(_prev_mod, str)
+                and isinstance(_prev_nm, str)
+                and _prev_mod.split('.', 1)[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
+                and _prev_nm.lower() in ('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')
+            ):
+                _prev_close = None
+            else:
+                try:
+                    _prev_close = float(_prev_raw_close)
+                except (TypeError, ValueError, OverflowError):
+                    _prev_close = None
+                else:
+                    if math.isnan(_prev_close) or math.isinf(_prev_close):
+                        _prev_close = None
+        _prev_matches = _prev_close is not None and _prev_fp[3] == _prev_close
+    else:
+        _prev_matches = False
+    if _prev_matches:
+        if len(bars) == _prev_fp[1] + 1:
+            _kind = 'expand'
+        elif len(bars) == _prev_fp[1]:
+            _kind = 'slide'
+_alpha_f = 2.0 / ({fast} + 1)
+_alpha_s = 2.0 / ({slow} + 1)
+if _kind == 'expand' or _kind == 'slide':
+    macd_line = _state['macd_line']
+    # Compute-then-mutate: finish the EMA loops BEFORE touching the
+    # cached deque, so any raise leaves the cache untouched.
+    _ef = bars[-{fast}].close
+    for _b in bars[-{fast} + 1:]:
         _ef = _alpha_f * _b.close + (1 - _alpha_f) * _ef
-    _alpha_s = 2.0 / ({slow} + 1)
-    _es = _sub[-{slow}].close
-    for _b in _sub[-{slow} + 1:]:
+    _es = bars[-{slow}].close
+    for _b in bars[-{slow} + 1:]:
         _es = _alpha_s * _b.close + (1 - _alpha_s) * _es
-    macd_line.append(_ef - _es)
+    _new_macd = _ef - _es
+    if _kind == 'slide':
+        macd_line.popleft()
+    macd_line.append(_new_macd)
+else:
+    macd_line = deque()
+    for _end in range({slow}, len(bars) + 1):
+        _sub = bars[:_end]
+        _ef = _sub[-{fast}].close
+        for _b in _sub[-{fast} + 1:]:
+            _ef = _alpha_f * _b.close + (1 - _alpha_f) * _ef
+        _es = _sub[-{slow}].close
+        for _b in _sub[-{slow} + 1:]:
+            _es = _alpha_s * _b.close + (1 - _alpha_s) * _es
+        macd_line.append(_ef - _es)
 if len(macd_line) < {signal}:
-    return NAN
-_alpha_g = 2.0 / ({signal} + 1)
-val = macd_line[0]
-for _x in macd_line[1:]:
-    val = _alpha_g * _x + (1 - _alpha_g) * val
+    val = NAN
+else:
+    _alpha_g = 2.0 / ({signal} + 1)
+    # Iterator walk avoids deque.__getitem__ O(min(i, n-i)) indexing
+    # cost — random-access on a deque would make signal-EMA O(n^2).
+    _it = iter(macd_line)
+    val = next(_it)
+    for _x in _it:
+        val = _alpha_g * _x + (1 - _alpha_g) * val
+self._ind_state[_macd_key] = {{'fp': _new_fp, 'value': val, 'macd_line': macd_line}}
 return val
 """,
     BollingerZ: """\
@@ -424,6 +614,24 @@ class _Compiler:
             if fname == "type":
                 continue
             params[fname] = getattr(node, fname)
+        # Compile-time precondition for MACDSignal: the template interpolates
+        # ``{fast}``, ``{slow}``, ``{signal}`` directly into the emitted source
+        # (``not ({signal} >= 2)``). If a validation-bypass path lets a
+        # ``float('nan')`` slip into the genome, ``repr(float('nan'))`` is
+        # ``'nan'`` — emitted code would reference unbound identifier ``nan``
+        # and the module would raise ``NameError`` at exec time instead of
+        # the documented runtime gate. Reject malformed params loudly here
+        # before any source string is built. Spec_dsl normally validates
+        # these as ``int`` ge 2 so this is defence-in-depth.
+        if isinstance(node, MACDSignal):
+            for pname in ("fast", "slow", "signal"):
+                val = params[pname]
+                if not isinstance(val, int) or isinstance(val, bool):
+                    raise TypeError(
+                        f"MACDSignal.{pname} must be an int, got {type(val).__name__}={val!r}"
+                    )
+                if val < 2:
+                    raise ValueError(f"MACDSignal.{pname} must be >= 2 at compile time, got {val}")
         return template.format(**params)
 
     @staticmethod
@@ -578,6 +786,12 @@ class _Compiler:
             "",
             f"MIN_HISTORY = {min_history}",
             "",
+            "def __init__(self):",
+            "    super().__init__()",
+            "    # Per-instance state for streaming-recurrence indicators (e.g. macd_signal)",
+            "    # — empty dict the helper methods populate lazily.",
+            "    self._ind_state = {}",
+            "",
             "def on_bar(self, ctx, bar):",
             "    bars = ctx.history(bar.symbol, self.MIN_HISTORY + 4)",
             "    if len(bars) < self.MIN_HISTORY:",
@@ -614,6 +828,13 @@ class _Compiler:
         class_body = "\n".join(class_body_lines)
         indented_class_body = textwrap.indent(class_body, "    ")
 
+        # ``deque`` is only emitted when the genome includes a MACDSignal
+        # node — keeps non-MACD strategy modules clean and avoids
+        # spurious F401 warnings under any future linter pass over
+        # generated code.
+        needs_deque = any(isinstance(node, MACDSignal) for node, _ in self._methods.values())
+        deque_import = "from collections import deque\n" if needs_deque else ""
+
         return (
             f'"""Compiled strategy {genome_hash}.\n'
             "\n"
@@ -621,6 +842,7 @@ class _Compiler:
             '"""\n'
             "from contract import OrderSide, OrderType, Strategy\n"
             "import math\n"
+            f"{deque_import}"
             "\n"
             'NAN = float("nan")\n'
             "\n"

@@ -351,10 +351,34 @@ class StreamingHistoryView:
     """``HistoryView`` backed by a bounded deque of bars.
 
     Designed for the engine's per-bar loop. Bars are appended
-    incrementally; indicator values are lazily computed from the
-    full deque (converted to a DataFrame on each access).  The
-    DataFrame + indicator series are cached and invalidated when a
-    new bar is appended.
+    incrementally; indicator values are computed lazily against the full
+    deque on first access.
+
+    **Cache scope is same-bar dedupe only.** When multiple predicates on
+    the same bar reference the same ``IndicatorRef``, the cached
+    ``pd.Series`` is reused; when a new bar is appended the cache is
+    invalidated and the next access rebuilds the DataFrame and re-runs
+    every cached indicator over the full deque. The view does NOT
+    deliver bar-to-bar streaming for non-MACD indicators.
+
+    The real blocker for bar-to-bar streaming is the consumer API:
+    :meth:`indicator` is called with an explicit bar index ``i`` (used by
+    ``cross_above`` / ``cross_below`` to read ``i`` and ``i - 1``), so a
+    cached value must be addressable at any index — not just the
+    trailing bar. The indicator routines in
+    :mod:`strategy_lab.executor.indicators` return full ``pd.Series``
+    objects (``rolling`` / ``ewm``), not per-bar scalars; the
+    :class:`IndicatorRegistry` is per-bar-scalar shaped and would need a
+    per-ref scalar array to back the indexed read. That refactor is
+    deferred — the honest contract today is same-bar dedupe of the
+    pandas materialisation, and the docstring says so.
+
+    Cache invalidation is driven by a monotonic per-instance counter
+    bumped on every :meth:`append`. CPython recycles object ids after
+    garbage collection — a bounded deque rolling over can place a fresh
+    ``BarRecord`` at an address recently freed by the evicted oldest
+    bar, so an id-based key would silently match a stale entry under
+    batched-append patterns. The counter is never recycled.
 
     The deque is bounded to ``max_bars`` (default 500, matching the
     ``StrategyContext._ingest_bar`` retention ceiling).
@@ -362,14 +386,24 @@ class StreamingHistoryView:
 
     def __init__(self, max_bars: int = 500) -> None:
         self._bars: deque[BarRecord] = deque(maxlen=max_bars)
+        # Monotonic append counter; bumped on every append(). The cached
+        # DataFrame is keyed by the counter snapshot taken when it was
+        # last built. Never recycled within a single process, so
+        # id-reuse on the deque cannot produce a false cache hit.
+        # NB: the counter is **instance-lifetime only**. Any future
+        # serialisation/warm-restart of this view must atomically
+        # restore (or reset) BOTH ``_append_counter`` and
+        # ``_cache_counter`` alongside ``_df`` / ``_indicator_cache`` —
+        # otherwise the cache identity invariant breaks silently.
+        self._append_counter: int = 0
+        self._cache_counter: Optional[int] = None
         self._df: Optional[pd.DataFrame] = None
         self._indicator_cache: Dict[str, pd.Series] = {}
 
     def append(self, bar: BarRecord) -> None:
-        """Append a bar and invalidate caches."""
+        """Append a bar; the indicator cache invalidates lazily on next access."""
         self._bars.append(bar)
-        self._df = None
-        self._indicator_cache.clear()
+        self._append_counter += 1
 
     def length(self) -> int:
         return len(self._bars)
@@ -379,11 +413,14 @@ class StreamingHistoryView:
         return float(getattr(b, field_name))
 
     def indicator(self, ref: IndicatorRef, i: int) -> Optional[float]:
+        if not self._bars:
+            return None
+        df = self._ensure_df()
         key = ref.model_dump_json()
-        if key not in self._indicator_cache:
-            df = self._ensure_df()
-            self._indicator_cache[key] = compute_indicator_series(ref, df)
-        series = self._indicator_cache[key]
+        series = self._indicator_cache.get(key)
+        if series is None:
+            series = compute_indicator_series(ref, df)
+            self._indicator_cache[key] = series
         if i >= len(series):
             return None
         value = series.iloc[i]
@@ -392,8 +429,11 @@ class StreamingHistoryView:
         return float(value)
 
     def _ensure_df(self) -> pd.DataFrame:
-        if self._df is not None:
+        if self._df is not None and self._cache_counter == self._append_counter:
             return self._df
+        # Bars advanced since last sync (any append, including rollover)
+        # — invalidate both the DataFrame and every cached indicator
+        # series in one pass.
         rows = [
             {
                 "open": b.open,
@@ -405,4 +445,6 @@ class StreamingHistoryView:
             for b in self._bars
         ]
         self._df = pd.DataFrame(rows)
+        self._indicator_cache.clear()
+        self._cache_counter = self._append_counter
         return self._df
