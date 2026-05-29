@@ -182,26 +182,44 @@ def test_compiled_module_parses_as_python(name, genome):
     )
 
 
+def _imported_modules(code: str) -> set[str]:
+    tree = ast.parse(code)
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    return imported
+
+
 def test_compiled_module_imports_only_sandbox_whitelisted_modules():
-    """Compiler output must only import from ``contract`` + stdlib."""
+    """Non-MACD genome emits only ``contract`` + ``math``. ``collections``
+    is gated on the genome actually using MACDSignal — see the next test."""
     code = compile_genome(
         _g(
             CrossOver(fast=SMA(period=5), slow=SMA(period=15)),
             CrossUnder(fast=SMA(period=5), slow=SMA(period=15)),
         )
     )
-    tree = ast.parse(code)
-    imported_modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                imported_modules.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported_modules.add(node.module.split(".")[0])
-    # Compiler emits ``from contract import ...``, ``import math``, and
-    # ``from collections import deque`` (deque backs the streaming MACD
-    # cache's macd_line). All three are on the sandbox import whitelist.
-    assert imported_modules <= {"collections", "contract", "math"}, imported_modules
+    assert _imported_modules(code) == {"contract", "math"}
+
+
+def test_compiled_macd_genome_imports_collections_for_deque():
+    """When the genome includes a MACDSignal node, ``from collections
+    import deque`` is emitted to back the cached macd_line. Gating the
+    import on actual usage keeps non-MACD strategies clean and avoids
+    spurious F401 under any future linter pass on generated code."""
+    from investment_team.strategy_lab.factors.models import MACDSignal
+
+    code = compile_genome(
+        _g(
+            CompareGT(left=MACDSignal(fast=12, slow=26, signal=9), right=Const(value=0.0)),
+            CompareLT(left=MACDSignal(fast=12, slow=26, signal=9), right=Const(value=0.0)),
+        )
+    )
+    assert _imported_modules(code) == {"collections", "contract", "math"}
 
 
 # ---------------------------------------------------------------------------

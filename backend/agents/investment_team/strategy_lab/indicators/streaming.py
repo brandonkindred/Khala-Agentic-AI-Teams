@@ -162,6 +162,57 @@ def macd_components(
 # ---------------------------------------------------------------------------
 
 
+def _normalise_close(raw: Any) -> Optional[float]:
+    """Normalise a bar's ``close`` value into a safe fingerprint slot.
+
+    Returns ``None`` for any value the cache cannot meaningfully discriminate
+    on, otherwise a finite ``float``:
+
+    * ``None`` (missing data)
+    * Python ``bool`` (``True``/``False`` would silently float-coerce to
+      1.0/0.0 and collide with a real penny close)
+    * ``numpy.bool_`` (which is NOT a subclass of ``bool`` since numpy >= 1.20,
+      so the ``isinstance`` check above misses it; detect by type name
+      since the registry can't import numpy under the sandbox whitelist)
+    * Anything that ``float()`` refuses (``pd.NA``, ``pd.NaT``, a string
+      that won't parse, ``complex``, ``Decimal('NaN')`` — all raise
+      ``TypeError`` / ``ValueError``); we catch and degrade to ``None``
+      rather than crashing the cache lookup
+    * ``NaN`` (would break tuple-equality via IEEE 754 ``NaN != NaN``)
+    * ``inf`` / ``-inf`` (poisons the EMA recurrence — ``alpha * inf`` is
+      ``inf`` forever — and would corrupt the cached macd_line until the
+      registry is destroyed)
+
+    Pre: caller is responsible for canonicalising ``Decimal`` prices to
+    ``float`` BEFORE invoking the registry — two ``Decimal`` values
+    differing past the 17th significant digit collapse to the same
+    IEEE-754 double after ``float()`` and produce false same-bar hits.
+
+    Post: returned value is ``None`` or a finite ``float`` safe for
+    tuple-equality and EMA arithmetic.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    # numpy boolean scalars (np.bool_) and pandas boolean sentinels are
+    # NOT subclasses of Python ``bool`` under numpy >= 1.20. Their
+    # ``isinstance(x, bool)`` check above misses them, and ``float()``
+    # silently coerces to 1.0/0.0 — exactly the penny-close collision
+    # the bool guard is meant to prevent. Detect by ``__module__`` plus
+    # a case-insensitive ``bool`` substring in the type name. NumPy 2.x
+    # changes the type name to ``bool``; numpy 1.x is ``bool_``; both
+    # land here.
+    cls = type(raw)
+    if cls.__module__ in ("numpy", "pandas") and "bool" in cls.__name__.lower():
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(val) or math.isinf(val):
+        return None
+    return val
+
+
 class IndicatorRegistry:
     """Per-instance cache that turns repeated indicator calls into O(1) work.
 
@@ -210,17 +261,11 @@ class IndicatorRegistry:
         """
         last = bars[-1]
         ts = getattr(last, "timestamp", None)
-        close = getattr(last, "close", None)
-        # Normalise `close` for tuple-equality: reject `bool` (silent
-        # int-subclass coercion to 0.0/1.0 would collide with real penny
-        # closes) and NaN (NaN != NaN under IEEE 754 would break same-bar
-        # dedupe). Both fall to ``None`` so the close-leg of prev_matches
-        # degrades cleanly to id/ts.
-        if close is None or isinstance(close, bool):
-            close_val: Optional[float] = None
-        else:
-            close_f = float(close)
-            close_val = None if math.isnan(close_f) else close_f
+        # ``_normalise_close`` handles None/bool/numpy.bool_/NaN/inf/non-numeric
+        # uniformly — see its docstring for the full taxonomy. Any pathological
+        # value falls through as ``None`` so the close-leg of prev_matches
+        # degrades cleanly to id/ts and tuple-equality stays well-behaved.
+        close_val = _normalise_close(getattr(last, "close", None))
         return id(last), len(bars), ts, close_val
 
     def _peek(self, key: Tuple) -> Optional[Dict[str, Any]]:
@@ -257,18 +302,33 @@ class IndicatorRegistry:
           ``-2``. The caller falls back to a full rebuild.
 
         Both ``"expand"`` and ``"slide"`` require the previous-bar match
-        AND the length delta to fit. ``prev_matches`` accepts id-match
-        OR ts-match; the ``close`` leg is a **conditional fallback**
-        that only fires when the ts-leg is unavailable (cached
-        ``prev_fp[2] is None`` AND current ``prev_ts is None``). Without
-        the conditional gate, two unrelated symbol-less streams that
-        share a boundary close value can silently merge through the
-        close-leg, AND a strategy using a non-close ``source`` can
-        false-match by close while the underlying source values differ.
-        Restricting close to the ts-absent path keeps the fresh-copy
-        rescue (Pydantic re-validation, model_dump round trips — those
-        callers usually drop timestamps too) while preserving the
-        strict id+ts gate for the common case.
+        AND the length delta to fit. ``prev_matches`` accepts id-match OR
+        (both-sides-have-ts AND ts-match); the ``close`` leg is a
+        **conditional fallback** that fires only when ts is unavailable
+        on BOTH sides (cached ``prev_fp[2] is None`` AND current
+        ``prev_ts is None``). Without the symmetric gate, two unrelated
+        symbol-less streams that share a boundary close value can silently
+        merge through the close-leg, AND a strategy using a non-close
+        ``source`` can false-match by close while the underlying source
+        values differ. Restricting close to the ts-symmetrically-absent
+        path keeps the fresh-copy rescue (Pydantic re-validation,
+        model_dump round trips that drop timestamps on both sides) while
+        preserving the strict id+ts gate for the common case.
+
+        Trade-off (intentional): fresh-copy callers that re-stamp
+        timestamps between bars (e.g. UTC normalisation, Period →
+        Timestamp coercion) — id differs, ts differs, close coincides —
+        will cold-rebuild every bar. The cache miss is the price of
+        symmetric ts handling; callers that care about hit-rate must
+        canonicalise timestamps to a stable form before invoking. Pinned
+        by ``test_advance_kind_pydantic_round_trip_with_stamped_timestamps_cold_rebuilds``.
+
+        ``prev_close_val`` is computed LAZILY inside the close-leg branch
+        rather than eagerly. The OR-chain short-circuits on id/ts match,
+        so wasting a ``float()`` per call in the common path is wasteful;
+        and a non-numeric ``prev_close`` (str, ``pd.NA``, etc.) would
+        crash the helper from inside ``_advance_kind`` even when id/ts
+        would have classified cleanly. Deferring the compute fixes both.
         """
         prev_fp = state.get("fp")
         if prev_fp is None or len(bars) < 2:
@@ -278,20 +338,21 @@ class IndicatorRegistry:
             return "none"
         prev_bar = bars[-2]
         prev_ts = getattr(prev_bar, "timestamp", None)
-        prev_close = getattr(prev_bar, "close", None)
-        if prev_close is None or isinstance(prev_close, bool):
-            prev_close_val: Optional[float] = None
+        # ts-leg is usable only when BOTH sides have a timestamp; otherwise
+        # the leg is meaningless (None == anything is False). The close-leg
+        # then activates as a conditional fallback IFF both sides are ts-less
+        # — see docstring trade-off note.
+        both_have_ts = prev_fp[2] is not None and prev_ts is not None
+        both_ts_absent = prev_fp[2] is None and prev_ts is None
+        if prev_fp[0] == id(prev_bar):
+            prev_matches = True
+        elif both_have_ts and prev_fp[2] == prev_ts:
+            prev_matches = True
+        elif both_ts_absent:
+            prev_close_val = _normalise_close(getattr(prev_bar, "close", None))
+            prev_matches = prev_close_val is not None and prev_fp[3] == prev_close_val
         else:
-            prev_close_f = float(prev_close)
-            prev_close_val = None if math.isnan(prev_close_f) else prev_close_f
-        ts_leg_available = prev_fp[2] is not None and prev_ts is not None
-        prev_matches = (
-            (prev_fp[0] == id(prev_bar))
-            or (ts_leg_available and prev_fp[2] == prev_ts)
-            or (
-                not ts_leg_available and prev_close_val is not None and prev_fp[3] == prev_close_val
-            )
-        )
+            prev_matches = False
         if not prev_matches:
             return "none"
         if len(bars) == prev_fp[1] + 1:
@@ -667,12 +728,14 @@ class IndicatorRegistry:
 
         Pre: ``2 <= fast < slow``; ``signal >= 2``. Matches the DSL
         bounds in :mod:`strategy_lab.spec_dsl` and the precondition floor
-        in :func:`macd_components`. Out-of-range parameters raise
-        ``ValueError`` (not ``assert``, so the check survives
-        ``python -O``).
+        in :func:`macd_components`.
         Post: returns ``None`` during warm-up (``len(bars) < slow`` for
         ``select='macd'``, ``len(bars) < slow + signal - 1`` otherwise).
         Otherwise returns the requested component.
+        Raises: ``ValueError`` when any precondition is violated:
+        ``fast < 2``, ``slow <= fast``, or ``signal < 2``. The raise
+        survives ``python -O`` (stripped ``assert`` cannot — see
+        :func:`macd_components` rationale).
         """
         return self._macd_value(
             bars,

@@ -743,11 +743,27 @@ def test_macd_fast_greater_than_slow_raises() -> None:
         compile_strategy(spec)
 
 
-def test_macd_helper_defensive_fast_slow_returns_none() -> None:
-    """Defense-in-depth: even if a spec slipped past the front-door
-    check, the helper must return None rather than IndexError."""
-    # Build the code via a valid spec, then exec the module and call
-    # the helper with a fast >= slow combo directly.
+@pytest.mark.parametrize(
+    "fast, slow, signal",
+    [
+        (30, 10, 9),  # fast >= slow (legacy case)
+        (1, 26, 9),  # fast < 2
+        (12, 26, 1),  # signal < 2 (degenerate: alpha_g=1 → signal == macd)
+    ],
+)
+def test_macd_helper_returns_none_on_bad_params(fast: int, slow: int, signal: int) -> None:
+    """Defense-in-depth across the three-site MACD contract: registry
+    raises ValueError, both compiled templates return None (synthesis) /
+    NAN (factors). The compiled synthesis helper must reject every
+    parameter combination that the registry rejects — fast < 2,
+    slow <= fast, OR signal < 2.
+
+    Prior versions checked only ``fast >= slow``; ``fast=1`` and
+    ``signal=1`` slipped through and produced degenerate values where
+    the registry would have raised. The new contract closes the
+    three-site precondition drift the ``indicators/__init__.py``
+    docstring identified.
+    """
     spec = _spec(
         entry_rules=[
             EntryRule(
@@ -760,7 +776,7 @@ def test_macd_helper_defensive_fast_slow_returns_none() -> None:
     ns, *_ = _exec_module(code)
     strat = ns["CompiledStrategy"]()
     bars = [_SyntheticBar(close=100.0 + i) for i in range(60)]
-    assert strat.macd(bars, fast=30, slow=10, signal=9) is None
+    assert strat.macd(bars, fast=fast, slow=slow, signal=signal) is None
 
 
 def test_macd_helper_isolates_symbols_on_shared_instance() -> None:

@@ -151,7 +151,8 @@ def compile_strategy(spec: Any) -> str:
 
     parts: List[str] = []
     parts.append(_emit_header(spec))
-    parts.append(_emit_imports())
+    # ``deque`` is only needed by the MACD helper's cached macd_line.
+    parts.append(_emit_imports(needs_deque="macd" in used_helper_names))
     parts.append(
         _emit_class(
             target_symbols=target_symbols,
@@ -414,38 +415,41 @@ _HELPER_BODIES: dict[str, str] = {
     "macd": textwrap.dedent(
         """\
         def macd(self, history, fast=12, slow=26, signal=9, source="close", select="macd"):
-            # Defence-in-depth — front-door rejects fast >= slow.
-            if fast >= slow:
+            # Defence-in-depth: matches IndicatorRegistry._macd_value's
+            # precondition floor. Returns None (the sandbox can't propagate
+            # ValueError cleanly through predicate evaluation) for any
+            # malformed parameter that slipped past spec_dsl validation.
+            if fast < 2 or slow <= fast or signal < 2:
                 return None
-            min_bars = slow if select == "macd" else slow + signal - 1
-            if len(history) < min_bars:
+            # True warm-up gate: ``slow`` bars are needed before macd_line
+            # has its first element. For ``select='signal'``/``'histogram'``
+            # we still pass through the body during the warm-up window
+            # ``[slow, slow + signal - 1)`` so the cache is populated with
+            # ``sig_val=None``/``hist_val=None`` — same-bar repeat calls
+            # then hit the fast path instead of cold-rebuilding.
+            if len(history) < slow:
                 return None
             # The macd_line is the difference of fast/slow windowed EMAs at
-            # every bar end from ``slow`` to ``len(history)``. The legacy
-            # template rebuilt that line in full on every call. We carry
-            # it forward in ``self._ind_state`` and maintain it
-            # incrementally: on a one-bar advance we either ``expand``
-            # (history grew, e.g. during warm-up) or ``slide`` (history
-            # length unchanged, oldest bar dropped — the steady-state
-            # shape of ``ctx.history(symbol, depth)``). On slide we drop
-            # the front of macd_line so the deque stays bounded and the
-            # signal-EMA seeds from the same bar the legacy windowed
-            # template would have used. Cold-start / replay / cross-symbol
-            # fall back to a full rebuild.
+            # every bar end from ``slow`` to ``len(history)``. We carry it
+            # forward in ``self._ind_state`` and maintain it incrementally:
+            # on a one-bar advance we either ``expand`` (history grew, e.g.
+            # during warm-up) or ``slide`` (history length unchanged, oldest
+            # bar dropped — the steady-state shape of ``ctx.history(symbol,
+            # depth)``). On slide we drop the front of macd_line so the
+            # deque stays bounded. Cold-start / replay / cross-symbol fall
+            # back to a full rebuild.
             # Symbol is part of the key — the same strategy instance fires
-            # on_bar for every symbol in UNIVERSE, and a key without symbol
-            # would let an AAPL advance silently mutate the MSFT macd_line
-            # whenever the two share a bar timestamp.
+            # on_bar for every symbol in UNIVERSE.
             # Fingerprint is a 4-tuple (id, len, ts, close). Close is
-            # normalised: None / bool / NaN all coerce to None so the
-            # tuple comparison stays well-behaved. The close leg of
-            # prev_matches is a CONDITIONAL fallback that only fires
-            # when the ts-leg is unavailable on both sides — restricts
-            # the close-based rescue to fresh-copy callers that also
-            # drop timestamps, and prevents flat-market false-merges and
-            # source!=close false-matches for the common case.
-            # Relies on the emitted __init__ initialising self._ind_state;
-            # bypassing __init__ via cls.__new__ is not supported.
+            # normalised inline — see indicators/streaming.py::_normalise_close
+            # for the full taxonomy (None/bool/numpy.bool_/NaN/inf/non-numeric
+            # all collapse to None). The close leg of prev_matches fires
+            # only when ts is unavailable on BOTH sides — restricts the
+            # close-based rescue to fresh-copy callers that also drop
+            # timestamps, and prevents flat-market false-merges. ``prev_close``
+            # is computed lazily inside the close-leg so non-numeric prev
+            # closes cannot crash the helper from inside _advance_kind.
+            # Relies on the emitted __init__ initialising self._ind_state.
             symbol = getattr(history[-1], "symbol", None)
             key = ("macd", symbol, fast, slow, signal, source)
             state = self._ind_state.get(key)
@@ -456,10 +460,16 @@ _HELPER_BODIES: dict[str, str] = {
             raw_close = getattr(last_bar, "close", None)
             if raw_close is None or isinstance(raw_close, bool):
                 new_close = None
+            elif type(raw_close).__module__ in ("numpy", "pandas") and "bool" in type(raw_close).__name__.lower():
+                new_close = None
             else:
-                new_close = float(raw_close)
-                if math.isnan(new_close):
+                try:
+                    new_close = float(raw_close)
+                except (TypeError, ValueError):
                     new_close = None
+                else:
+                    if math.isnan(new_close) or math.isinf(new_close):
+                        new_close = None
             new_fp = (new_id, new_len, new_ts, new_close)
             if state is not None and state["fp"] == new_fp:
                 return state["value"].get(select)
@@ -469,24 +479,30 @@ _HELPER_BODIES: dict[str, str] = {
             if state is not None and new_len >= 2:
                 prev_bar = history[-2]
                 prev_ts = getattr(prev_bar, "timestamp", None)
-                prev_raw_close = getattr(prev_bar, "close", None)
-                if prev_raw_close is None or isinstance(prev_raw_close, bool):
-                    prev_close = None
-                else:
-                    prev_close = float(prev_raw_close)
-                    if math.isnan(prev_close):
-                        prev_close = None
                 prev_fp = state["fp"]
-                ts_leg_available = prev_fp[2] is not None and prev_ts is not None
-                prev_matches = (
-                    (prev_fp[0] == id(prev_bar))
-                    or (ts_leg_available and prev_fp[2] == prev_ts)
-                    or (
-                        not ts_leg_available
-                        and prev_close is not None
-                        and prev_fp[3] == prev_close
-                    )
-                )
+                both_have_ts = prev_fp[2] is not None and prev_ts is not None
+                both_ts_absent = prev_fp[2] is None and prev_ts is None
+                if prev_fp[0] == id(prev_bar):
+                    prev_matches = True
+                elif both_have_ts and prev_fp[2] == prev_ts:
+                    prev_matches = True
+                elif both_ts_absent:
+                    prev_raw_close = getattr(prev_bar, "close", None)
+                    if prev_raw_close is None or isinstance(prev_raw_close, bool):
+                        prev_close = None
+                    elif type(prev_raw_close).__module__ in ("numpy", "pandas") and "bool" in type(prev_raw_close).__name__.lower():
+                        prev_close = None
+                    else:
+                        try:
+                            prev_close = float(prev_raw_close)
+                        except (TypeError, ValueError):
+                            prev_close = None
+                        else:
+                            if math.isnan(prev_close) or math.isinf(prev_close):
+                                prev_close = None
+                    prev_matches = prev_close is not None and prev_fp[3] == prev_close
+                else:
+                    prev_matches = False
                 if prev_matches:
                     if new_len == prev_fp[1] + 1:
                         kind = "expand"
@@ -709,7 +725,7 @@ def _emit_header(spec: Any) -> str:
     )
 
 
-def _emit_imports() -> str:
+def _emit_imports(*, needs_deque: bool = False) -> str:
     # The sandbox ``indicators`` module uses pandas-Series signatures
     # incompatible with the compiled per-bar call shape, so it is
     # deliberately NOT imported — helper bodies are inlined as class
@@ -718,10 +734,15 @@ def _emit_imports() -> str:
     # shim emits zero ``submit_order`` calls; all orders come from the
     # engine dispatchers.
     # ``deque`` backs the MACD helper's cached ``macd_line``; popleft is
-    # O(1) where ``list.pop(0)`` would be O(N) and dominate the per-bar
-    # cost the cache exists to amortise. ``collections`` is on the
-    # sandbox import whitelist.
-    return "import math\nfrom collections import deque\nfrom contract import Strategy\n"
+    # O(1) where ``list.pop(0)`` would be O(N) and dominates the per-bar
+    # cost the cache exists to amortise. Emitted only when the strategy
+    # uses MACD — non-MACD specs get a cleaner import surface and any
+    # future linter run on emitted modules won't flag F401.
+    lines = ["import math"]
+    if needs_deque:
+        lines.append("from collections import deque")
+    lines.append("from contract import Strategy")
+    return "\n".join(lines) + "\n"
 
 
 def _indent_method(body: str, spaces: int = 4) -> str:

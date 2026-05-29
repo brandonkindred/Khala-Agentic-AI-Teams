@@ -450,15 +450,18 @@ def test_advance_kind_close_leg_does_not_fire_when_ts_available() -> None:
 
 
 def test_bar_fingerprint_normalises_pathological_close_values() -> None:
-    """The close slot in the fingerprint must reject ``bool`` (silent
-    int-subclass coercion to 0.0/1.0) and NaN (NaN != NaN would break
-    tuple-equality). Both fall to None so the close leg degrades
-    cleanly to id/ts."""
+    """The close slot in the fingerprint must collapse every pathological
+    value to None so tuple-equality stays well-behaved and the close-leg
+    of prev_matches degrades cleanly to id/ts. Covered: None, Python
+    bool, NaN, +inf/-inf, non-numeric strings.
+
+    NumPy/pandas-specific cases (numpy.bool_, pd.NA, pd.NaT) are pinned
+    by `test_bar_fingerprint_handles_numpy_and_pandas_pathologies`."""
     import math as _math
 
     @dataclass
     class _Bar:
-        close: object  # untyped to allow bool/NaN/None
+        close: object  # untyped to allow bool/NaN/None/inf
         open: float = 100.0
         high: float = 100.0
         low: float = 100.0
@@ -466,20 +469,329 @@ def test_bar_fingerprint_normalises_pathological_close_values() -> None:
         timestamp: str = "T"
 
     reg = IndicatorRegistry()
-    # NaN close → close-slot is None.
-    fp_nan = reg._bar_fingerprint([_Bar(close=_math.nan)])
-    assert fp_nan[3] is None
-    # True/False → None (bool is an int subclass; float(True) == 1.0).
-    fp_true = reg._bar_fingerprint([_Bar(close=True)])
-    assert fp_true[3] is None
-    fp_false = reg._bar_fingerprint([_Bar(close=False)])
-    assert fp_false[3] is None
-    # None close → None.
-    fp_none = reg._bar_fingerprint([_Bar(close=None)])
-    assert fp_none[3] is None
-    # Real float → float.
-    fp_real = reg._bar_fingerprint([_Bar(close=100.5)])
-    assert fp_real[3] == 100.5
+    assert reg._bar_fingerprint([_Bar(close=_math.nan)])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=True)])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=False)])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=None)])[3] is None
+    # inf would saturate the EMA recurrence (`alpha * inf = inf`) and
+    # poison the cached macd_line for the registry's lifetime; collapse
+    # to None so the close-leg of prev_matches doesn't admit it.
+    assert reg._bar_fingerprint([_Bar(close=_math.inf)])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=-_math.inf)])[3] is None
+    # Non-numeric strings raise ValueError from float() and would
+    # otherwise crash the fingerprint; degrade to None.
+    assert reg._bar_fingerprint([_Bar(close="not a number")])[3] is None
+    # Real float passes through.
+    assert reg._bar_fingerprint([_Bar(close=100.5)])[3] == 100.5
+    # Integer coerces to float.
+    assert reg._bar_fingerprint([_Bar(close=42)])[3] == 42.0
+
+
+def test_bar_fingerprint_handles_numpy_and_pandas_pathologies() -> None:
+    """The close-slot normalisation must catch numpy.bool_ (NOT a
+    subclass of Python bool since numpy >= 1.20) and pandas missing-data
+    sentinels (pd.NA / pd.NaT — both raise TypeError from float()).
+    Previous code missed both."""
+    np = pytest.importorskip("numpy")
+    pd = pytest.importorskip("pandas")
+
+    @dataclass
+    class _Bar:
+        close: object
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+        timestamp: str = "T"
+
+    reg = IndicatorRegistry()
+    # numpy.bool_ would silently coerce to 1.0/0.0 via float() and
+    # collide with real penny closes; isinstance(np.bool_(True), bool)
+    # is False under numpy >= 1.20.
+    assert reg._bar_fingerprint([_Bar(close=np.bool_(True))])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=np.bool_(False))])[3] is None
+    # pd.NA / pd.NaT raise TypeError from float() — must degrade to None
+    # instead of crashing the fingerprint.
+    assert reg._bar_fingerprint([_Bar(close=pd.NA)])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=pd.NaT)])[3] is None
+    # numpy.nan / numpy.inf also degrade.
+    assert reg._bar_fingerprint([_Bar(close=np.nan)])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=np.inf)])[3] is None
+
+
+def test_advance_kind_close_leg_does_not_fire_when_ts_asymmetric() -> None:
+    """The close-leg must only fire when ts is unavailable on BOTH
+    sides. If the cached fp has a ts but the new prev_bar doesn't (or
+    vice versa), the close-leg must NOT activate — otherwise unrelated
+    streams that drift in/out of ts coverage can silently merge through
+    coincident closes. Locks in the symmetric-absence semantic of the
+    new ``both_ts_absent`` gate."""
+
+    @dataclass
+    class _TSBar:
+        timestamp: str
+        close: float
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+
+    @dataclass
+    class _NoTSBar:
+        # No `timestamp` attribute on purpose.
+        close: float
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+
+    reg = IndicatorRegistry()
+    # Case A: cached side has ts, current side does NOT — asymmetric.
+    cached_state = {
+        "fp": (12345, 10, "T_9", 100.0),
+        "macd_line": deque(),
+        "value": {"macd": 0.0, "signal": None, "histogram": None},
+    }
+    fresh_a = [_NoTSBar(close=99.0 + i * 0.1) for i in range(9)]
+    fresh_a.extend([_NoTSBar(close=100.0), _NoTSBar(close=101.0)])  # len=11
+    fp_a = reg._bar_fingerprint(fresh_a)
+    # bars[-2] has close=100.0 matching cached fp[3], but ts is asymmetric.
+    # MUST NOT classify as expand/slide — close-leg is gated on
+    # symmetric ts absence.
+    assert reg._advance_kind(cached_state, fresh_a, fp_a) == "none"
+
+    # Case B: cached side has NO ts, current side does — also asymmetric.
+    cached_state_no_ts = {
+        "fp": (54321, 10, None, 100.0),
+        "macd_line": deque(),
+        "value": {"macd": 0.0, "signal": None, "histogram": None},
+    }
+    fresh_b = [_TSBar(timestamp=f"U_{i}", close=99.0 + i * 0.1) for i in range(9)]
+    fresh_b.extend([_TSBar(timestamp="U_9", close=100.0), _TSBar(timestamp="U_10", close=101.0)])
+    fp_b = reg._bar_fingerprint(fresh_b)
+    assert reg._advance_kind(cached_state_no_ts, fresh_b, fp_b) == "none"
+
+
+def test_advance_kind_pydantic_round_trip_with_stamped_timestamps_cold_rebuilds() -> None:
+    """Pins the conditional close-leg trade-off: callers that re-stamp
+    timestamps between fresh-copy bars (e.g. UTC normalisation,
+    Period→Timestamp coercion) will cold-rebuild every bar because id
+    differs, ts differs, and the close-leg is gated on symmetric ts
+    absence. This is intentional — cross-stream false-merge correctness
+    over hit-rate. Documented in `_advance_kind`'s docstring; this test
+    ensures future gate revisions surface the trade-off."""
+
+    @dataclass
+    class _StampedBar:
+        timestamp: str
+        close: float
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+
+    reg = IndicatorRegistry()
+    # Cached state with timestamp "A_T_9".
+    cached_bar = _StampedBar(timestamp="A_T_9", close=100.0)
+    cached_state = {
+        "fp": (id(cached_bar), 10, "A_T_9", 100.0),
+        "macd_line": deque(),
+        "value": {"macd": 0.0, "signal": None, "histogram": None},
+    }
+    # Fresh-copy caller re-stamps timestamps to a different format —
+    # id differs, ts differs, close coincides. Close-leg would have
+    # rescued under the pre-fix unconditional gate; new code falls to
+    # cold-rebuild (kind='none').
+    fresh = [_StampedBar(timestamp=f"B_T_{i}", close=99.0 + i * 0.1) for i in range(9)]
+    fresh.extend(
+        [_StampedBar(timestamp="B_T_9", close=100.0), _StampedBar(timestamp="B_T_10", close=101.0)]
+    )
+    fp_fresh = reg._bar_fingerprint(fresh)
+    assert reg._advance_kind(cached_state, fresh, fp_fresh) == "none"
+
+
+# ---------------------------------------------------------------------------
+# Warm-up cache amortisation (factors + synthesis compilers)
+# ---------------------------------------------------------------------------
+
+
+def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -> None:
+    """During the ``[slow, slow + signal - 1)`` warm-up window, the
+    factors MACDSignal helper must write ``value=NAN`` to ``_ind_state``
+    so same-bar repeat calls share the cache. Prior version returned NAN
+    at the outer guard before any cache write, so repeated calls during
+    warm-up cold-rebuilt every time."""
+    import sys
+    import types as _types
+
+    from investment_team.execution.risk_filter import RiskLimits
+    from investment_team.strategy_lab.factors.compiler import compile_genome
+    from investment_team.strategy_lab.factors.models import (
+        CompareGT,
+        Const,
+        Genome,
+        MACDSignal,
+        PctOfEquity,
+    )
+
+    # Stub the sandbox `contract` module the compiled output expects.
+    fake = _types.ModuleType("contract")
+
+    class _Strategy:
+        pass
+
+    class _OrderSide:
+        LONG = "LONG"
+        SHORT = "SHORT"
+
+    class _OrderType:
+        MARKET = "MARKET"
+
+    fake.Strategy = _Strategy
+    fake.OrderSide = _OrderSide
+    fake.OrderType = _OrderType
+    sys.modules["contract"] = fake
+
+    genome = Genome(
+        asset_class="stocks",
+        hypothesis="macd warmup cache check",
+        entry=CompareGT(left=MACDSignal(fast=12, slow=26, signal=9), right=Const(value=0.0)),
+        exit=CompareGT(left=Const(value=0.0), right=MACDSignal(fast=12, slow=26, signal=9)),
+        sizing=PctOfEquity(pct=2.0),
+        risk_limits=RiskLimits(),
+        metadata={},
+    )
+    code = compile_genome(genome)
+    ns: dict = {}
+    exec(code, ns)
+    strat = ns["GeneratedStrategy"]()
+
+    # Build bars in the warm-up window: len(bars) == slow (26), so
+    # macd_line has exactly 1 entry → signal-EMA needs >= 9 → val=NAN.
+    @dataclass
+    class _Bar:
+        timestamp: str
+        close: float
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+        symbol: str = "QQQ"
+
+    bars = [_Bar(timestamp=f"D_{i:02d}", close=100.0 + i * 0.3) for i in range(26)]
+
+    # The MACDSignal helper is the one that returns NaN at warm-up;
+    # other helpers (Const(0.0), CompareGT) return 0.0/False.
+    macd_helpers = [
+        name
+        for name in dir(strat)
+        if name.startswith("_n_") and math.isnan(getattr(strat, name)(bars))
+        if isinstance(getattr(strat, name)(bars), float)
+    ]
+    # Reset _ind_state since the introspection above populated it.
+    strat._ind_state = {}
+    assert len(macd_helpers) >= 1
+    helper = getattr(strat, macd_helpers[0])
+
+    # First call populates the cache with val=NAN.
+    result_1 = helper(bars)
+    assert math.isnan(result_1)
+    # Cache MUST be populated with the NAN value (was not previously —
+    # outer guard returned NAN before any cache write).
+    assert len(strat._ind_state) >= 1
+    cached_state = next(iter(strat._ind_state.values()))
+    assert math.isnan(cached_state["value"])
+
+    # Second same-bar call must hit the same-bar cache fast-path.
+    fp_before = cached_state["fp"]
+    result_2 = helper(bars)
+    assert math.isnan(result_2)
+    # fp slot is the same object after the second call (same-bar return).
+    cached_state_after = next(iter(strat._ind_state.values()))
+    assert cached_state_after["fp"] == fp_before
+
+
+def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select() -> None:
+    """During the ``[slow, slow + signal - 1)`` warm-up window for
+    ``select='signal'`` / ``'histogram'``, the synthesis MACD helper
+    must write the cache with ``sig_val=None`` so same-bar repeat calls
+    share the cache. Prior version returned None at the outer guard
+    before any cache write — the canonical signal-cross entry rule
+    cold-rebuilt on every warm-up bar."""
+    import sys
+    import types as _types
+
+    from investment_team.strategy_lab.spec_dsl import (
+        EntryRule,
+        FixedFractionSizing,
+        IndicatorRef,
+        Predicate,
+    )
+    from investment_team.strategy_lab.synthesis import compile_strategy
+
+    fake = _types.ModuleType("contract")
+
+    class _Strategy:
+        pass
+
+    fake.Strategy = _Strategy
+    sys.modules["contract"] = fake
+
+    from investment_team.models import StrategySpec
+
+    spec = StrategySpec(
+        strategy_id="warmup-cache-test",
+        authored_by="t",
+        asset_class="stocks",
+        hypothesis="t",
+        signal_definition="t",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="macd", params={"output": "signal"}),
+                    op=">",
+                    rhs=0.0,
+                ),
+            )
+        ],
+        exit_rules=[],
+        sizing=FixedFractionSizing(fraction=0.02),
+        target_symbols=["QQQ"],
+    )
+    code = compile_strategy(spec)
+    ns: dict = {}
+    exec(code, ns)
+    strat = ns["CompiledStrategy"]()
+
+    @dataclass
+    class _Bar:
+        symbol: str
+        timestamp: str
+        close: float
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+
+    # len(bars) == slow (26) — inside the warm-up window for signal
+    # (needs slow+signal-1 = 34). Macd-line has length 1; sig_val=None.
+    bars = [_Bar(symbol="QQQ", timestamp=f"D_{i:02d}", close=100.0 + i * 0.3) for i in range(26)]
+
+    result_1 = strat.macd(bars, fast=12, slow=26, signal=9, source="close", select="signal")
+    assert result_1 is None
+    # Cache MUST be populated even during warm-up so repeat calls hit
+    # the same-bar fast-path.
+    assert len(strat._ind_state) >= 1
+    cached = next(iter(strat._ind_state.values()))
+    assert cached["value"]["signal"] is None
+    assert cached["value"]["histogram"] is None
+    assert cached["value"]["macd"] is not None  # macd_val IS computable at slow bars
+
+    # Second same-bar call hits the cache.
+    result_2 = strat.macd(bars, fast=12, slow=26, signal=9, source="close", select="signal")
+    assert result_2 is None
 
 
 # ---------------------------------------------------------------------------

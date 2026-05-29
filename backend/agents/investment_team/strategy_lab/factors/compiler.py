@@ -94,7 +94,11 @@ def _lookback(node: BaseModel) -> int:
     if isinstance(node, RSI):
         return node.period + 1
     if isinstance(node, MACDSignal):
-        return node.slow + node.signal
+        # Matches the registry's signal-line gate (``slow + signal - 1``)
+        # and the synthesis compiler's ``_lookback_for`` for ``output='signal'``.
+        # The signal-EMA is computable as soon as ``len(macd_line) >= signal``,
+        # which occurs at ``len(bars) == slow + signal - 1``.
+        return node.slow + node.signal - 1
     if isinstance(node, ATR):
         return node.period + 1
     if isinstance(node, ADX):
@@ -176,7 +180,15 @@ rs = avg_gain / avg_loss
 return 100.0 - (100.0 / (1.0 + rs))
 """,
     MACDSignal: """\
-if len(bars) < {slow} + {signal}:
+# Precondition defense-in-depth: matches IndicatorRegistry._macd_value,
+# but returns NAN (sandbox can't propagate ValueError cleanly).
+if {fast} < 2 or {slow} <= {fast} or {signal} < 2:
+    return NAN
+# True warm-up: need at least ``slow`` bars to seed the first macd_line
+# entry. The signal-EMA fills at ``len(macd_line) >= signal``, i.e. at
+# ``len(bars) >= slow + signal - 1`` — matches the registry's gate and
+# the synthesis compiler's ``min_bars`` for ``output='signal'``.
+if len(bars) < {slow}:
     return NAN
 # Streaming-cache the macd_line. Cache key includes the bar's symbol so
 # a strategy whose on_bar fires across multiple tickers does not
@@ -185,25 +197,36 @@ if len(bars) < {slow} + {signal}:
 # shape), ``slide`` (history length unchanged, oldest bar dropped — the
 # steady-state shape of a bounded history window), or cold-rebuild.
 # The 4-tuple fingerprint (id, len, ts, close) tolerates fresh-copy
-# ctx.history callers; the close leg is a CONDITIONAL fallback — only
-# activated when ts is unavailable on both sides — so a non-close
+# ctx.history callers; the close leg is a CONDITIONAL fallback that
+# fires only when ts is unavailable on BOTH sides — so a non-close
 # source value or a flat market cannot silently merge unrelated streams
-# through coincident closes. State is always written, even during
-# warm-up (with val=NAN), so same-bar repeat calls during warm-up share
-# the cache instead of cold-rebuilding every bar.
+# through coincident closes. Cache state is written on every code path
+# including warm-up (with val=NAN when len(macd_line) < signal), so
+# same-bar repeat calls during the [slow, slow+signal-1) warm-up window
+# share the cache instead of cold-rebuilding every bar.
 # Relies on the emitted __init__ initialising self._ind_state;
 # bypassing __init__ via cls.__new__ is not supported.
 _symbol = getattr(bars[-1], 'symbol', None)
 _macd_key = ('macd_signal_{fast}_{slow}_{signal}', _symbol)
 _state = self._ind_state.get(_macd_key)
 _last = bars[-1]
+# Close normalisation: see indicators/streaming.py::_normalise_close for
+# the full taxonomy (None/bool/numpy.bool_/NaN/inf/non-numeric → None).
+# Inlined here because the sandbox import whitelist forbids importing
+# from the host indicators package.
 _raw_close = getattr(_last, 'close', None)
 if _raw_close is None or isinstance(_raw_close, bool):
     _new_close = None
+elif type(_raw_close).__module__ in ('numpy', 'pandas') and 'bool' in type(_raw_close).__name__.lower():
+    _new_close = None
 else:
-    _new_close = float(_raw_close)
-    if math.isnan(_new_close):
+    try:
+        _new_close = float(_raw_close)
+    except (TypeError, ValueError):
         _new_close = None
+    else:
+        if math.isnan(_new_close) or math.isinf(_new_close):
+            _new_close = None
 _new_fp = (id(_last), len(bars), getattr(_last, 'timestamp', None), _new_close)
 if _state is not None and _state['fp'] == _new_fp:
     return _state['value']
@@ -211,20 +234,33 @@ _kind = 'none'
 if _state is not None and len(bars) >= 2:
     _prev = bars[-2]
     _prev_ts = getattr(_prev, 'timestamp', None)
-    _prev_raw_close = getattr(_prev, 'close', None)
-    if _prev_raw_close is None or isinstance(_prev_raw_close, bool):
-        _prev_close = None
-    else:
-        _prev_close = float(_prev_raw_close)
-        if math.isnan(_prev_close):
-            _prev_close = None
     _prev_fp = _state['fp']
-    _ts_leg_available = _prev_fp[2] is not None and _prev_ts is not None
-    _prev_matches = (
-        (_prev_fp[0] == id(_prev))
-        or (_ts_leg_available and _prev_fp[2] == _prev_ts)
-        or (not _ts_leg_available and _prev_close is not None and _prev_fp[3] == _prev_close)
-    )
+    _both_have_ts = _prev_fp[2] is not None and _prev_ts is not None
+    _both_ts_absent = _prev_fp[2] is None and _prev_ts is None
+    if _prev_fp[0] == id(_prev):
+        _prev_matches = True
+    elif _both_have_ts and _prev_fp[2] == _prev_ts:
+        _prev_matches = True
+    elif _both_ts_absent:
+        # Defer close compute to the close-leg branch; avoids wasted
+        # float() in the common id/ts-match path AND prevents crashes
+        # when prev_close is non-numeric.
+        _prev_raw_close = getattr(_prev, 'close', None)
+        if _prev_raw_close is None or isinstance(_prev_raw_close, bool):
+            _prev_close = None
+        elif type(_prev_raw_close).__module__ in ('numpy', 'pandas') and 'bool' in type(_prev_raw_close).__name__.lower():
+            _prev_close = None
+        else:
+            try:
+                _prev_close = float(_prev_raw_close)
+            except (TypeError, ValueError):
+                _prev_close = None
+            else:
+                if math.isnan(_prev_close) or math.isinf(_prev_close):
+                    _prev_close = None
+        _prev_matches = _prev_close is not None and _prev_fp[3] == _prev_close
+    else:
+        _prev_matches = False
     if _prev_matches:
         if len(bars) == _prev_fp[1] + 1:
             _kind = 'expand'
@@ -692,6 +728,13 @@ class _Compiler:
         class_body = "\n".join(class_body_lines)
         indented_class_body = textwrap.indent(class_body, "    ")
 
+        # ``deque`` is only emitted when the genome includes a MACDSignal
+        # node — keeps non-MACD strategy modules clean and avoids
+        # spurious F401 warnings under any future linter pass over
+        # generated code.
+        needs_deque = any(isinstance(node, MACDSignal) for node, _ in self._methods.values())
+        deque_import = "from collections import deque\n" if needs_deque else ""
+
         return (
             f'"""Compiled strategy {genome_hash}.\n'
             "\n"
@@ -699,9 +742,7 @@ class _Compiler:
             '"""\n'
             "from contract import OrderSide, OrderType, Strategy\n"
             "import math\n"
-            # ``deque`` backs the MACDSignal helper's cached ``macd_line``;
-            # popleft is O(1) where ``list.pop(0)`` would be O(N).
-            "from collections import deque\n"
+            f"{deque_import}"
             "\n"
             'NAN = float("nan")\n'
             "\n"
