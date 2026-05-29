@@ -171,17 +171,24 @@ def _normalise_close(raw: Any) -> Optional[float]:
     * ``None`` (missing data)
     * Python ``bool`` (``True``/``False`` would silently float-coerce to
       1.0/0.0 and collide with a real penny close)
-    * ``numpy.bool_`` (which is NOT a subclass of ``bool`` since numpy >= 1.20,
-      so the ``isinstance`` check above misses it; detect by type name
-      since the registry can't import numpy under the sandbox whitelist)
+    * Third-party boolean scalars (``numpy.bool_`` in numpy 1.x or
+      ``numpy.bool`` in numpy 2.x, ``numpy.ma.bool_``, pandas
+      ``BooleanScalar``, ``pyarrow.BooleanScalar``, Polars boolean
+      scalars). Detected by ``(top-level module, exact type-name
+      allowlist)`` — broader than the Python ``isinstance(x, bool)``
+      check, which misses these because they are NOT subclasses of
+      Python ``bool``.
     * Anything that ``float()`` refuses (``pd.NA``, ``pd.NaT``, a string
-      that won't parse, ``complex``, ``Decimal('NaN')`` — all raise
-      ``TypeError`` / ``ValueError``); we catch and degrade to ``None``
-      rather than crashing the cache lookup
-    * ``NaN`` (would break tuple-equality via IEEE 754 ``NaN != NaN``)
+      that won't parse, ``complex``) — raises ``TypeError`` /
+      ``ValueError`` / ``OverflowError`` (astronomical-magnitude ints).
+      All three are caught and degrade to ``None`` rather than crashing
+      the cache lookup.
+    * ``NaN`` (would break tuple-equality via IEEE 754 ``NaN != NaN``).
+      Note: ``float(Decimal('NaN'))`` returns ``nan`` WITHOUT raising —
+      it's caught here at the ``math.isnan`` gate, NOT by the except.
     * ``inf`` / ``-inf`` (poisons the EMA recurrence — ``alpha * inf`` is
       ``inf`` forever — and would corrupt the cached macd_line until the
-      registry is destroyed)
+      registry is destroyed).
 
     Pre: caller is responsible for canonicalising ``Decimal`` prices to
     ``float`` BEFORE invoking the registry — two ``Decimal`` values
@@ -190,27 +197,63 @@ def _normalise_close(raw: Any) -> Optional[float]:
 
     Post: returned value is ``None`` or a finite ``float`` safe for
     tuple-equality and EMA arithmetic.
+
+    Note (DbC): this helper silently degrades the fingerprint slot to
+    ``None`` for pathological closes; the loud-fail signal for
+    non-numeric closes still surfaces downstream inside
+    :func:`windowed_ema` (which calls ``float(bar.close)`` directly and
+    propagates the ``TypeError`` from ``pd.NA``, etc). The cache layer
+    is intentionally lenient; the indicator-math layer remains strict.
     """
     if raw is None or isinstance(raw, bool):
         return None
-    # numpy boolean scalars (np.bool_) and pandas boolean sentinels are
-    # NOT subclasses of Python ``bool`` under numpy >= 1.20. Their
-    # ``isinstance(x, bool)`` check above misses them, and ``float()``
-    # silently coerces to 1.0/0.0 — exactly the penny-close collision
-    # the bool guard is meant to prevent. Detect by ``__module__`` plus
-    # a case-insensitive ``bool`` substring in the type name. NumPy 2.x
-    # changes the type name to ``bool``; numpy 1.x is ``bool_``; both
-    # land here.
+    # Third-party boolean scalars are NOT subclasses of Python ``bool``
+    # under numpy >= 1.20, pandas Boolean dtype, PyArrow, Polars, etc.
+    # ``isinstance(x, bool)`` above misses them, and ``float()`` would
+    # silently coerce to 1.0/0.0 — the penny-close collision the guard
+    # exists to prevent. Detect by (top-level module, exact type-name
+    # allowlist) so:
+    #   * numpy submodules (``numpy.ma.core``, ``numpy.dtypes``) are
+    #     covered via ``split('.')[0] == 'numpy'``.
+    #   * pyarrow's ``pyarrow.lib`` and Polars' ``polars`` get the same
+    #     handling.
+    #   * Substring matches (e.g. ``BooleanIndex``, ``BoolDtype``) are
+    #     rejected by the exact-name allowlist, which only catches
+    #     genuine scalar booleans.
     cls = type(raw)
-    if cls.__module__ in ("numpy", "pandas") and "bool" in cls.__name__.lower():
+    if cls.__module__.split(".")[0] in (
+        "numpy",
+        "pandas",
+        "pyarrow",
+        "polars",
+    ) and cls.__name__.lower() in ("bool", "bool_", "booleanscalar", "boolean"):
         return None
     try:
         val = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if math.isnan(val) or math.isinf(val):
         return None
     return val
+
+
+def _safe_read_close(bar: Any) -> Any:
+    """Read ``bar.close`` defensively.
+
+    ``getattr(bar, 'close', None)`` only uses the default when the
+    attribute name doesn't resolve. If ``close`` is a Python
+    ``@property`` or a Pydantic ``computed_field`` whose body raises
+    (lazy DB session, Decimal('NaN') intermediate, AttributeError from
+    deeper in the descriptor), the exception propagates — that crashed
+    the indicator helper from inside ``_advance_kind`` whenever the
+    deferred close-leg ran. This wrapper traps any descriptor-raise and
+    degrades to ``None`` so the cache layer remains exception-safe; the
+    indicator-math layer (windowed_ema) is still strict.
+    """
+    try:
+        return getattr(bar, "close", None)
+    except Exception:
+        return None
 
 
 class IndicatorRegistry:
@@ -265,7 +308,7 @@ class IndicatorRegistry:
         # uniformly — see its docstring for the full taxonomy. Any pathological
         # value falls through as ``None`` so the close-leg of prev_matches
         # degrades cleanly to id/ts and tuple-equality stays well-behaved.
-        close_val = _normalise_close(getattr(last, "close", None))
+        close_val = _normalise_close(_safe_read_close(last))
         return id(last), len(bars), ts, close_val
 
     def _peek(self, key: Tuple) -> Optional[Dict[str, Any]]:
@@ -349,7 +392,7 @@ class IndicatorRegistry:
         elif both_have_ts and prev_fp[2] == prev_ts:
             prev_matches = True
         elif both_ts_absent:
-            prev_close_val = _normalise_close(getattr(prev_bar, "close", None))
+            prev_close_val = _normalise_close(_safe_read_close(prev_bar))
             prev_matches = prev_close_val is not None and prev_fp[3] == prev_close_val
         else:
             prev_matches = False
@@ -623,21 +666,28 @@ class IndicatorRegistry:
         select: str,
     ) -> Optional[float]:
         # Enforce the same precondition floor as ``macd_components``.
-        # Without this, ``_macd_value`` silently accepts ``signal=1``
-        # (alpha_g=1.0 → signal == macd, histogram ≡ 0) and ``fast=1``
-        # (degenerate 1-period EMA), where the cold standalone path
-        # raises — same parameters, two contracts.
-        if not (fast >= 2 and slow > fast):
+        # Use ``not (x >= y)`` rather than ``x < y`` so NaN-typed
+        # parameters (NaN is unordered with everything under IEEE 754,
+        # so ``NaN < 2`` is False — a strict ``<`` check would silently
+        # admit NaN and poison the macd_line recurrence).
+        if not (fast >= 2) or not (slow > fast):
             raise ValueError(
                 f"macd: require fast >= 2 and slow > fast (got fast={fast}, slow={slow})"
             )
-        if signal < 2:
+        if not (signal >= 2):
             raise ValueError(
                 f"macd: require signal >= 2 (got signal={signal}); "
                 "signal=1 makes the EMA recurrence trivial (signal == macd, histogram ≡ 0)"
             )
-        min_bars = slow if select == "macd" else slow + signal - 1
-        if len(bars) < min_bars:
+        # True warm-up gate: need at least ``slow`` bars to compute the
+        # first macd_line entry. For ``select='signal'``/``'histogram'``,
+        # the signal-EMA only fills at ``len(macd_line) >= signal`` (i.e.
+        # ``len(bars) >= slow + signal - 1``) — but we still pass through
+        # the body during the warm-up window and write the cache with
+        # ``sig_val=None`` so same-bar repeat calls hit the fast path
+        # instead of cold-rebuilding. Matches the synthesis and factors
+        # compiled templates' structure.
+        if len(bars) < slow:
             return None
 
         # The macd_line lives on ``self`` for the lifetime of the registry.
@@ -728,14 +778,18 @@ class IndicatorRegistry:
 
         Pre: ``2 <= fast < slow``; ``signal >= 2``. Matches the DSL
         bounds in :mod:`strategy_lab.spec_dsl` and the precondition floor
-        in :func:`macd_components`.
-        Post: returns ``None`` during warm-up (``len(bars) < slow`` for
-        ``select='macd'``, ``len(bars) < slow + signal - 1`` otherwise).
-        Otherwise returns the requested component.
+        in :func:`macd_components`. NaN-typed parameters are caught
+        (``not (x >= 2)`` rather than ``x < 2`` so NaN trips the gate).
+        Post: returns ``None`` during warm-up (``len(bars) < slow``).
+        For ``select='signal'`` / ``'histogram'``, returns ``None`` while
+        ``len(bars) < slow + signal - 1`` (signal-EMA hasn't filled),
+        but the cache IS written with ``sig_val=None`` / ``hist_val=None``
+        so same-bar repeat calls during this sub-window hit the fast path.
+        Returns the requested component once history is sufficient.
         Raises: ``ValueError`` when any precondition is violated:
-        ``fast < 2``, ``slow <= fast``, or ``signal < 2``. The raise
-        survives ``python -O`` (stripped ``assert`` cannot — see
-        :func:`macd_components` rationale).
+        ``fast < 2``, ``slow <= fast``, ``signal < 2``, or any of the
+        three is NaN. The raise survives ``python -O`` (stripped
+        ``assert`` cannot — see :func:`macd_components` rationale).
         """
         return self._macd_value(
             bars,

@@ -73,8 +73,16 @@ def rsi(bars: Sequence[Any], period: int = 14) -> float:
 
 
 def macd_signal(bars: Sequence[Any], fast: int, slow: int, signal: int) -> float:
-    """EMA-of-EMA-difference signal line."""
-    if len(bars) < slow + signal:
+    """EMA-of-EMA-difference signal line.
+
+    Warm-up threshold is ``slow + signal - 1`` — the smallest ``len(bars)``
+    at which ``len(macd_line) == signal`` and the signal-EMA fills.
+    Matches :func:`macd_components`, :meth:`IndicatorRegistry.macd`, and
+    both compiler templates so the 'canonical reference implementation'
+    contract documented at :mod:`strategy_lab.indicators` holds at the
+    warm-up boundary.
+    """
+    if len(bars) < slow + signal - 1:
         return NAN
     _, sig, _ = macd_components(bars, fast=fast, slow=slow, signal=signal, source="close")
     return _or_nan(sig)

@@ -419,7 +419,10 @@ _HELPER_BODIES: dict[str, str] = {
             # precondition floor. Returns None (the sandbox can't propagate
             # ValueError cleanly through predicate evaluation) for any
             # malformed parameter that slipped past spec_dsl validation.
-            if fast < 2 or slow <= fast or signal < 2:
+            # Uses ``not (x >= y)`` rather than ``x < y`` so NaN-typed
+            # parameters trip the gate (NaN is unordered with everything
+            # under IEEE 754; ``NaN < 2`` is False).
+            if not (fast >= 2) or not (slow > fast) or not (signal >= 2):
                 return None
             # True warm-up gate: ``slow`` bars are needed before macd_line
             # has its first element. For ``select='signal'``/``'histogram'``
@@ -457,15 +460,22 @@ _HELPER_BODIES: dict[str, str] = {
             new_ts = getattr(last_bar, "timestamp", None)
             new_id = id(last_bar)
             new_len = len(history)
-            raw_close = getattr(last_bar, "close", None)
+            # Defensively read close — wraps @property/computed_field raises.
+            try:
+                raw_close = getattr(last_bar, "close", None)
+            except Exception:
+                raw_close = None
             if raw_close is None or isinstance(raw_close, bool):
                 new_close = None
-            elif type(raw_close).__module__ in ("numpy", "pandas") and "bool" in type(raw_close).__name__.lower():
+            elif (
+                type(raw_close).__module__.split(".")[0] in ("numpy", "pandas", "pyarrow", "polars")
+                and type(raw_close).__name__.lower() in ("bool", "bool_", "booleanscalar", "boolean")
+            ):
                 new_close = None
             else:
                 try:
                     new_close = float(raw_close)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     new_close = None
                 else:
                     if math.isnan(new_close) or math.isinf(new_close):
@@ -487,15 +497,22 @@ _HELPER_BODIES: dict[str, str] = {
                 elif both_have_ts and prev_fp[2] == prev_ts:
                     prev_matches = True
                 elif both_ts_absent:
-                    prev_raw_close = getattr(prev_bar, "close", None)
+                    # Defensively read prev_close — wraps property raises.
+                    try:
+                        prev_raw_close = getattr(prev_bar, "close", None)
+                    except Exception:
+                        prev_raw_close = None
                     if prev_raw_close is None or isinstance(prev_raw_close, bool):
                         prev_close = None
-                    elif type(prev_raw_close).__module__ in ("numpy", "pandas") and "bool" in type(prev_raw_close).__name__.lower():
+                    elif (
+                        type(prev_raw_close).__module__.split(".")[0] in ("numpy", "pandas", "pyarrow", "polars")
+                        and type(prev_raw_close).__name__.lower() in ("bool", "bool_", "booleanscalar", "boolean")
+                    ):
                         prev_close = None
                     else:
                         try:
                             prev_close = float(prev_raw_close)
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, OverflowError):
                             prev_close = None
                         else:
                             if math.isnan(prev_close) or math.isinf(prev_close):

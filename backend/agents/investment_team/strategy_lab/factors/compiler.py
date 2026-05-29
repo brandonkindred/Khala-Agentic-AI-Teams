@@ -98,6 +98,17 @@ def _lookback(node: BaseModel) -> int:
         # and the synthesis compiler's ``_lookback_for`` for ``output='signal'``.
         # The signal-EMA is computable as soon as ``len(macd_line) >= signal``,
         # which occurs at ``len(bars) == slow + signal - 1``.
+        #
+        # BACKWARDS-COMPATIBILITY NOTE: prior revisions returned
+        # ``slow + signal`` (one bar later). Genomes with MACDSignal
+        # compiled against the old code fire signals one bar later than
+        # they do now. Any persisted backtest output (equity curves,
+        # trade records, deflated Sharpe values) pre-dating this fix
+        # will not bit-reproduce against re-runs through the corrected
+        # compiler. The change is INTENTIONAL — it brings factor-DSL
+        # into alignment with the registry, synthesis compiler, and the
+        # reference primitive — but downstream pipelines that hash or
+        # diff stored backtest artefacts may need to re-baseline.
         return node.slow + node.signal - 1
     if isinstance(node, ATR):
         return node.period + 1
@@ -182,7 +193,9 @@ return 100.0 - (100.0 / (1.0 + rs))
     MACDSignal: """\
 # Precondition defense-in-depth: matches IndicatorRegistry._macd_value,
 # but returns NAN (sandbox can't propagate ValueError cleanly).
-if {fast} < 2 or {slow} <= {fast} or {signal} < 2:
+# ``not (x >= y)`` rather than ``x < y`` so NaN parameters trip the gate
+# (NaN is unordered with everything; ``NaN < 2`` is False under IEEE 754).
+if not ({fast} >= 2) or not ({slow} > {fast}) or not ({signal} >= 2):
     return NAN
 # True warm-up: need at least ``slow`` bars to seed the first macd_line
 # entry. The signal-EMA fills at ``len(macd_line) >= signal``, i.e. at
@@ -204,25 +217,46 @@ if len(bars) < {slow}:
 # including warm-up (with val=NAN when len(macd_line) < signal), so
 # same-bar repeat calls during the [slow, slow+signal-1) warm-up window
 # share the cache instead of cold-rebuilding every bar.
+#
+# Reachability note: in the genome's on_bar flow this helper is gated
+# by ``MIN_HISTORY = _lookback(MACDSignal) = slow + signal - 1``, so
+# ``len(bars) < slow + signal - 1`` is unreachable through the normal
+# on_bar dispatch. The warm-up cache write is reachable from:
+#   (a) direct helper invocation (e.g. tests, ad-hoc probes);
+#   (b) cross-helper bar sharing where another indicator with a
+#       smaller lookback drives MIN_HISTORY lower than this helper's
+#       own minimum bar count.
+# Both pathways exist and the defense-in-depth amortisation matters
+# for them; the comment on `same-bar repeat calls during warm-up
+# share the cache` is true within those contexts.
 # Relies on the emitted __init__ initialising self._ind_state;
 # bypassing __init__ via cls.__new__ is not supported.
 _symbol = getattr(bars[-1], 'symbol', None)
 _macd_key = ('macd_signal_{fast}_{slow}_{signal}', _symbol)
 _state = self._ind_state.get(_macd_key)
 _last = bars[-1]
-# Close normalisation: see indicators/streaming.py::_normalise_close for
-# the full taxonomy (None/bool/numpy.bool_/NaN/inf/non-numeric → None).
-# Inlined here because the sandbox import whitelist forbids importing
-# from the host indicators package.
-_raw_close = getattr(_last, 'close', None)
+# Close normalisation: mirrors indicators/streaming.py::_normalise_close
+# verbatim. Inlined because the sandbox import whitelist forbids the
+# host indicators package. Detects third-party bool scalars by
+# top-level module + exact-name allowlist (covers numpy.ma submodules,
+# pyarrow, polars); catches OverflowError for astronomical-magnitude
+# ints; defensively reads .close via try/except to handle @property /
+# Pydantic computed_field raises.
+try:
+    _raw_close = getattr(_last, 'close', None)
+except Exception:
+    _raw_close = None
 if _raw_close is None or isinstance(_raw_close, bool):
     _new_close = None
-elif type(_raw_close).__module__ in ('numpy', 'pandas') and 'bool' in type(_raw_close).__name__.lower():
+elif (
+    type(_raw_close).__module__.split('.')[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
+    and type(_raw_close).__name__.lower() in ('bool', 'bool_', 'booleanscalar', 'boolean')
+):
     _new_close = None
 else:
     try:
         _new_close = float(_raw_close)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         _new_close = None
     else:
         if math.isnan(_new_close) or math.isinf(_new_close):
@@ -244,16 +278,25 @@ if _state is not None and len(bars) >= 2:
     elif _both_ts_absent:
         # Defer close compute to the close-leg branch; avoids wasted
         # float() in the common id/ts-match path AND prevents crashes
-        # when prev_close is non-numeric.
-        _prev_raw_close = getattr(_prev, 'close', None)
+        # when prev_close is non-numeric. See indicators/streaming.py
+        # ::_normalise_close for the full bool/NaN/inf/non-numeric
+        # taxonomy this inlines. Wraps getattr in try/except to handle
+        # @property/Pydantic computed_field raises.
+        try:
+            _prev_raw_close = getattr(_prev, 'close', None)
+        except Exception:
+            _prev_raw_close = None
         if _prev_raw_close is None or isinstance(_prev_raw_close, bool):
             _prev_close = None
-        elif type(_prev_raw_close).__module__ in ('numpy', 'pandas') and 'bool' in type(_prev_raw_close).__name__.lower():
+        elif (
+            type(_prev_raw_close).__module__.split('.')[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
+            and type(_prev_raw_close).__name__.lower() in ('bool', 'bool_', 'booleanscalar', 'boolean')
+        ):
             _prev_close = None
         else:
             try:
                 _prev_close = float(_prev_raw_close)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 _prev_close = None
             else:
                 if math.isnan(_prev_close) or math.isinf(_prev_close):

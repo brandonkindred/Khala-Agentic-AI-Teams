@@ -517,6 +517,112 @@ def test_bar_fingerprint_handles_numpy_and_pandas_pathologies() -> None:
     # numpy.nan / numpy.inf also degrade.
     assert reg._bar_fingerprint([_Bar(close=np.nan)])[3] is None
     assert reg._bar_fingerprint([_Bar(close=np.inf)])[3] is None
+    # numpy.ma.bool_ (submodule numpy.ma.core) — previously slipped past
+    # the namespace gate that hardcoded ``__module__ in ('numpy','pandas')``.
+    # The expanded ``__module__.split('.')[0]`` check catches it.
+    assert reg._bar_fingerprint([_Bar(close=np.ma.bool_(True))])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=np.ma.bool_(False))])[3] is None
+
+
+def test_bar_fingerprint_rejects_overflow_close() -> None:
+    """An astronomical-magnitude int (synthetic upstream that produces
+    ``close = 10**400`` after a bad multiply/divide) raises
+    ``OverflowError`` from ``float()``. The normaliser must catch it
+    alongside ``TypeError``/``ValueError`` and degrade to ``None`` —
+    the docstring promises 'any value float() refuses → None'."""
+
+    @dataclass
+    class _Bar:
+        close: object
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+        timestamp: str = "T"
+
+    reg = IndicatorRegistry()
+    # int too large for float — OverflowError from float().
+    huge = 10**400
+    assert reg._bar_fingerprint([_Bar(close=huge)])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=-huge)])[3] is None
+
+
+def test_bar_fingerprint_handles_property_close_that_raises() -> None:
+    """``getattr(bar, 'close', None)`` only short-circuits when the
+    attribute name doesn't resolve — exceptions raised INSIDE a
+    ``@property`` body bubble up. The new ``_safe_read_close`` wrapper
+    catches them so the cache layer remains exception-safe."""
+
+    class _RaisingBar:
+        timestamp = "T"
+        open = 100.0
+        high = 100.0
+        low = 100.0
+        volume = 1.0
+
+        @property
+        def close(self):
+            raise RuntimeError("close not loaded yet")
+
+    reg = IndicatorRegistry()
+    fp = reg._bar_fingerprint([_RaisingBar()])
+    assert fp[3] is None  # close slot defensively None, no crash.
+
+
+def test_bar_fingerprint_handles_pyarrow_and_polars_boolean_scalars() -> None:
+    """PyArrow and Polars boolean scalars live in modules outside the
+    original (numpy, pandas) hardcoded set. The expanded module gate
+    accepts ``pyarrow`` and ``polars`` top-level packages."""
+    pa = pytest.importorskip("pyarrow")
+
+    @dataclass
+    class _Bar:
+        close: object
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+        timestamp: str = "T"
+
+    reg = IndicatorRegistry()
+    # PyArrow BooleanScalar lives in pyarrow.lib (top-level: pyarrow).
+    assert reg._bar_fingerprint([_Bar(close=pa.scalar(True))])[3] is None
+    assert reg._bar_fingerprint([_Bar(close=pa.scalar(False))])[3] is None
+
+
+def test_bar_fingerprint_substring_match_does_not_overreach() -> None:
+    """The new exact-name allowlist must NOT false-positive on type
+    names that merely contain 'bool' as a substring (e.g. a hypothetical
+    'BoolWrapper' or 'BooleanIndex'). Only canonical boolean scalar
+    type names should be rejected."""
+
+    # Build a synthetic class in module 'numpy' whose name contains
+    # 'bool' but is NOT a real boolean — e.g. a notional dtype wrapper.
+    class BooleanIndex:
+        __module__ = "numpy"
+        __name__ = "BooleanIndex"
+
+        def __float__(self):
+            return 42.0
+
+    # Manually pin __module__ on the class object itself.
+    BooleanIndex.__module__ = "numpy"
+
+    @dataclass
+    class _Bar:
+        close: object
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+        timestamp: str = "T"
+
+    reg = IndicatorRegistry()
+    # Old substring-based check would have rejected anything with 'bool'
+    # in the name; the new exact-name allowlist passes BooleanIndex
+    # through to float() (which returns 42.0 for this synthetic class).
+    fp = reg._bar_fingerprint([_Bar(close=BooleanIndex())])
+    assert fp[3] == 42.0
 
 
 def test_advance_kind_close_leg_does_not_fire_when_ts_asymmetric() -> None:
@@ -546,14 +652,23 @@ def test_advance_kind_close_leg_does_not_fire_when_ts_asymmetric() -> None:
         volume: float = 1.0
 
     reg = IndicatorRegistry()
+    # Hermetic id sentinels — use ``id()`` of throwaway objects so
+    # ``id(fresh_a[-2]) == sentinel`` never accidentally aliases on
+    # any CPython build. Pre-fix: hardcoded magic integers (12345,
+    # 54321) could in principle collide with future allocations.
+    _id_sentinel_a = id(object())
+    _id_sentinel_b = id(object())
+
     # Case A: cached side has ts, current side does NOT — asymmetric.
     cached_state = {
-        "fp": (12345, 10, "T_9", 100.0),
+        "fp": (_id_sentinel_a, 10, "T_9", 100.0),
         "macd_line": deque(),
         "value": {"macd": 0.0, "signal": None, "histogram": None},
     }
     fresh_a = [_NoTSBar(close=99.0 + i * 0.1) for i in range(9)]
     fresh_a.extend([_NoTSBar(close=100.0), _NoTSBar(close=101.0)])  # len=11
+    # Verify the id sentinel doesn't accidentally alias the live bar's id.
+    assert id(fresh_a[-2]) != _id_sentinel_a
     fp_a = reg._bar_fingerprint(fresh_a)
     # bars[-2] has close=100.0 matching cached fp[3], but ts is asymmetric.
     # MUST NOT classify as expand/slide — close-leg is gated on
@@ -562,12 +677,13 @@ def test_advance_kind_close_leg_does_not_fire_when_ts_asymmetric() -> None:
 
     # Case B: cached side has NO ts, current side does — also asymmetric.
     cached_state_no_ts = {
-        "fp": (54321, 10, None, 100.0),
+        "fp": (_id_sentinel_b, 10, None, 100.0),
         "macd_line": deque(),
         "value": {"macd": 0.0, "signal": None, "histogram": None},
     }
     fresh_b = [_TSBar(timestamp=f"U_{i}", close=99.0 + i * 0.1) for i in range(9)]
     fresh_b.extend([_TSBar(timestamp="U_9", close=100.0), _TSBar(timestamp="U_10", close=101.0)])
+    assert id(fresh_b[-2]) != _id_sentinel_b
     fp_b = reg._bar_fingerprint(fresh_b)
     assert reg._advance_kind(cached_state_no_ts, fresh_b, fp_b) == "none"
 
@@ -702,13 +818,22 @@ def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -
     cached_state = next(iter(strat._ind_state.values()))
     assert math.isnan(cached_state["value"])
 
-    # Second same-bar call must hit the same-bar cache fast-path.
-    fp_before = cached_state["fp"]
+    # Second same-bar call must hit the same-bar fast-path. Pin this by
+    # identity of the cached dict — a regression that re-cold-rebuilds
+    # would produce a NEW dict object (cache write replaces it) with
+    # equal contents. The `is` check fails loudly on rebuild even when
+    # contents are structurally identical.
+    macd_line_before = cached_state["macd_line"]
     result_2 = helper(bars)
     assert math.isnan(result_2)
-    # fp slot is the same object after the second call (same-bar return).
     cached_state_after = next(iter(strat._ind_state.values()))
-    assert cached_state_after["fp"] == fp_before
+    assert cached_state_after is cached_state, (
+        "same-bar fast-path must reuse the cached dict object — a rebuild "
+        "would replace it via `self._ind_state[key] = {...}`"
+    )
+    assert cached_state_after["macd_line"] is macd_line_before, (
+        "same-bar fast-path must not allocate a new macd_line deque"
+    )
 
 
 def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select() -> None:
@@ -789,9 +914,17 @@ def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select() -> None:
     assert cached["value"]["histogram"] is None
     assert cached["value"]["macd"] is not None  # macd_val IS computable at slow bars
 
-    # Second same-bar call hits the cache.
+    # Second same-bar call hits the same-bar fast-path. Pin identity
+    # of the cached dict and macd_line deque — a rebuild would replace
+    # them with fresh structurally-equal objects.
+    macd_line_before = cached["macd_line"]
     result_2 = strat.macd(bars, fast=12, slow=26, signal=9, source="close", select="signal")
     assert result_2 is None
+    cached_after = next(iter(strat._ind_state.values()))
+    assert cached_after is cached, "same-bar fast-path must reuse the cached dict (was rebuilt)"
+    assert cached_after["macd_line"] is macd_line_before, (
+        "same-bar fast-path must not allocate a new macd_line deque"
+    )
 
 
 # ---------------------------------------------------------------------------
