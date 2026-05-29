@@ -569,10 +569,10 @@ def test_bar_fingerprint_handles_property_close_that_raises() -> None:
     assert fp[3] is None  # close slot defensively None, no crash.
 
 
-def test_bar_fingerprint_handles_pyarrow_and_polars_boolean_scalars() -> None:
-    """PyArrow and Polars boolean scalars live in modules outside the
-    original (numpy, pandas) hardcoded set. The expanded module gate
-    accepts ``pyarrow`` and ``polars`` top-level packages."""
+def test_bar_fingerprint_handles_pyarrow_boolean_scalars() -> None:
+    """PyArrow boolean scalars live outside the original (numpy, pandas)
+    hardcoded set. The expanded module gate accepts the ``pyarrow``
+    top-level package."""
     pa = pytest.importorskip("pyarrow")
 
     @dataclass
@@ -588,6 +588,43 @@ def test_bar_fingerprint_handles_pyarrow_and_polars_boolean_scalars() -> None:
     # PyArrow BooleanScalar lives in pyarrow.lib (top-level: pyarrow).
     assert reg._bar_fingerprint([_Bar(close=pa.scalar(True))])[3] is None
     assert reg._bar_fingerprint([_Bar(close=pa.scalar(False))])[3] is None
+
+
+def test_bar_fingerprint_handles_polars_boolean_scalars() -> None:
+    """Polars boolean scalars are normally Python ``bool`` (caught by
+    the ``isinstance(raw, bool)`` gate), but synthetic types whose
+    ``__module__`` is ``polars*`` and name is a canonical bool variant
+    must also be rejected via the third-party module gate. Pins
+    coverage of the ``polars`` branch of the allowlist that the
+    pyarrow test does not exercise."""
+
+    class _PolarsBoolean:
+        """Synthetic stand-in for a polars boolean scalar — pinning the
+        allowlist contract without requiring polars as a test dep."""
+
+        __module__ = "polars.internals.scalar"
+        # __name__ is set on the class object; type(_x).__name__ is the
+        # class's __name__ attribute. Default would be '_PolarsBoolean'.
+
+        def __float__(self) -> float:
+            return 1.0  # Without the gate this would silently coerce.
+
+    _PolarsBoolean.__name__ = "Boolean"
+
+    @dataclass
+    class _Bar:
+        close: object
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+        timestamp: str = "T"
+
+    reg = IndicatorRegistry()
+    # The third-party gate matches by (top-level module, exact-name allowlist);
+    # rejected ⇒ close-slot is None rather than the would-be float() value.
+    fp = reg._bar_fingerprint([_Bar(close=_PolarsBoolean())])
+    assert fp[3] is None, "polars-Boolean stand-in must be rejected by the third-party gate"
 
 
 def test_bar_fingerprint_substring_match_does_not_overreach() -> None:
@@ -859,7 +896,21 @@ def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select() -> None:
     class _Strategy:
         pass
 
+    class _OrderSide:
+        LONG = "LONG"
+        SHORT = "SHORT"
+
+    class _OrderType:
+        MARKET = "MARKET"
+
+    # ``OrderSide``/``OrderType`` aren't exercised here but the compiler
+    # unconditionally emits ``from contract import OrderSide, OrderType,
+    # Strategy``. The stub leaks into ``sys.modules`` for the rest of the
+    # test session; without these attributes any downstream test that
+    # calls ``compile_genome``/``compile_strategy`` fails with ImportError.
     fake.Strategy = _Strategy
+    fake.OrderSide = _OrderSide
+    fake.OrderType = _OrderType
     sys.modules["contract"] = fake
 
     from investment_team.models import StrategySpec
@@ -955,6 +1006,201 @@ def test_macd_components_raises_value_error_on_bad_params(
     bars = _series(60)
     with pytest.raises(ValueError):
         macd_components(bars, fast=fast, slow=slow, signal=signal)
+
+
+@pytest.mark.parametrize(
+    "fast, slow, signal",
+    [
+        (float("nan"), 26, 9),
+        (12, float("nan"), 9),
+        (12, 26, float("nan")),
+    ],
+)
+def test_macd_components_rejects_nan_params(fast: float, slow: float, signal: float) -> None:
+    """``NaN`` parameters are unordered with everything under IEEE 754;
+    a strict ``signal < 2`` check evaluates False on NaN and silently
+    admits it, after which ``alpha_g = 2.0 / (NaN + 1.0) = NaN`` poisons
+    the macd_line. The ``not (x >= 2)`` rewrite must catch this so
+    ``macd_components`` and the reference primitive ``macd_signal``
+    behave consistently with ``IndicatorRegistry.macd`` (which raises).
+    """
+    bars = _series(60)
+    with pytest.raises(ValueError):
+        macd_components(bars, fast=fast, slow=slow, signal=signal)
+
+
+def test_macd_value_rejects_non_int_params() -> None:
+    """Float-valued parameters (e.g. ``fast=2.5``) pass the value gate
+    (``2.5 >= 2`` is True) but then break ``bars[-fast:]`` with
+    ``TypeError: slice indices must be integers``. The type gate
+    rejects them upfront so the failure mode is the documented
+    ``ValueError``, not a slicing crash."""
+    bars = _series(60)
+    reg = IndicatorRegistry()
+    with pytest.raises(ValueError, match="integer"):
+        reg.macd(bars, fast=2.5, slow=26, signal=9)
+    with pytest.raises(ValueError, match="integer"):
+        reg.macd(bars, fast=12, slow=26.0, signal=9)
+    with pytest.raises(ValueError, match="integer"):
+        reg.macd(bars, fast=12, slow=26, signal=9.5)
+
+
+def test_normalise_close_survives_none_module() -> None:
+    """``cls.__module__`` is normally a string but can be ``None`` for
+    dynamically-built classes (``type()`` without a module) or exotic
+    C-extension types. The lenient cache layer must NOT crash with
+    ``AttributeError: 'NoneType' has no attribute 'split'`` — it must
+    fall through to the ``float()`` path or degrade to ``None``."""
+
+    class _Sneaky:
+        __module__ = None  # type: ignore[assignment]
+
+        def __float__(self) -> float:
+            return 42.0
+
+    @dataclass
+    class _Bar:
+        close: object
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+        timestamp: str = "T"
+
+    reg = IndicatorRegistry()
+    fp = reg._bar_fingerprint([_Bar(close=_Sneaky())])
+    # Must not crash; close-slot falls through to float() => 42.0.
+    assert fp[3] == 42.0
+
+
+def test_safe_getattr_propagates_programmer_signals() -> None:
+    """The defensive attribute reader catches descriptor-resolution
+    failures (``AttributeError``/``TypeError``/``ValueError``/
+    ``RuntimeError``/``LookupError``) but MUST propagate programmer
+    signals (``NotImplementedError``, ``AssertionError``) and runtime/
+    interpreter signals (``MemoryError``, ``KeyboardInterrupt``). A
+    blanket ``except Exception:`` would mask legitimate bugs."""
+    from investment_team.strategy_lab.indicators.streaming import _safe_getattr
+
+    class _RaiseAttr:
+        @property
+        def close(self) -> float:
+            raise AttributeError("expected — must be caught")
+
+    class _RaiseNotImpl:
+        @property
+        def close(self) -> float:
+            raise NotImplementedError("subclass-override sentinel")
+
+    class _RaiseAssert:
+        @property
+        def close(self) -> float:
+            raise AssertionError("debug invariant")
+
+    # Documented catches → degrade to None.
+    assert _safe_getattr(_RaiseAttr(), "close") is None
+    # Programmer signals → must propagate.
+    with pytest.raises(NotImplementedError):
+        _safe_getattr(_RaiseNotImpl(), "close")
+    with pytest.raises(AssertionError):
+        _safe_getattr(_RaiseAssert(), "close")
+
+
+def test_normalise_close_canonical_helper_and_inlined_mirrors_stay_in_sync() -> None:
+    """``_normalise_close`` lives once in indicators/streaming.py and is
+    inlined twice in synthesis/compiler.py (new/prev close paths) and
+    twice in factors/compiler.py (same). The sandbox import whitelist
+    forbids importing the host helper, so the inlined mirrors MUST be
+    audited against the canonical for drift.
+
+    This meta-test pins the load-bearing token sets — third-party
+    module allowlist, exact-name allowlist, exception tuple — verbatim
+    across every site. A future contributor extending the canonical
+    (e.g. adding ``cudf`` to the module gate, or ``MemoryError`` to the
+    exception tuple) gets a failing test pointing at every mirror that
+    needs the same edit.
+    """
+    import importlib.resources as _res
+    import re
+    from pathlib import Path
+
+    repo_root = Path(
+        _res.files("investment_team").joinpath("..").resolve()  # type: ignore[attr-defined]
+    )
+    sites = {
+        "registry": repo_root / "investment_team/strategy_lab/indicators/streaming.py",
+        "synthesis_compiler": repo_root / "investment_team/strategy_lab/synthesis/compiler.py",
+        "factors_compiler": repo_root / "investment_team/strategy_lab/factors/compiler.py",
+    }
+    # Whitespace-collapse: black/ruff may split a tuple literal across
+    # lines; collapse whitespace runs into a single space so the token
+    # match is invariant under formatting changes. Also normalise
+    # both quoting styles ('x' vs "x") to single-quoted before matching.
+
+    def _normalise(text: str) -> str:
+        # Convert "xyz" → 'xyz' so quoting style doesn't matter.
+        out = re.sub(r'"([^"\\]*)"', r"'\1'", text)
+        # Collapse runs of whitespace to a single space.
+        out = re.sub(r"\s+", " ", out)
+        # Strip whitespace adjacent to parens and remove trailing commas
+        # before a closing paren so multi-line tuple literals (formatted
+        # by ruff/black) normalise to the same shape as inline tuples.
+        out = re.sub(r"\(\s+", "(", out)
+        out = re.sub(r",\s*\)", ")", out)
+        return out
+
+    required_tokens = [
+        # Module allowlist — exact membership.
+        "('numpy', 'pandas', 'pyarrow', 'polars')",
+        # Exact-name allowlist (lower-cased forms accepted by the gate).
+        "('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')",
+        # Exception tuple inside the float() try/except.
+        "(TypeError, ValueError, OverflowError)",
+    ]
+    for name, path in sites.items():
+        src = _normalise(path.read_text(encoding="utf-8"))
+        # Per-site occurrence count must be >= the minimum mirror count.
+        # Registry: 1 (canonical body). Compilers: 2 (new + prev close).
+        min_count = 1 if name == "registry" else 2
+        for tok in required_tokens:
+            count = src.count(tok)
+            assert count >= min_count, (
+                f"site {name!r} missing canonical token {tok!r}; "
+                f"expected >= {min_count}, got {count} — "
+                "did you update the canonical _normalise_close without "
+                "updating every inlined mirror?"
+            )
+        # Structural check: every site must guard ``__module__ is None``
+        # via the ``isinstance(_mod, str)`` shape (matches the canonical).
+        assert "__module__" in src and "isinstance" in src, (
+            f"site {name!r} missing the __module__ None-guard pattern; "
+            "see _normalise_close at indicators/streaming.py"
+        )
+
+
+def test_bar_fingerprint_handles_raising_timestamp_property() -> None:
+    """The asymmetry where only ``.close`` was wrapped meant a raising
+    ``@property timestamp`` crashed ``_bar_fingerprint`` before
+    ``_safe_read_close`` was reached. After generalising the defense
+    via ``_safe_getattr``, a raising timestamp degrades to ``ts=None``
+    just like a raising close degrades to ``close=None``."""
+
+    @dataclass
+    class _Bar:
+        close: float = 100.0
+        open: float = 100.0
+        high: float = 100.0
+        low: float = 100.0
+        volume: float = 1.0
+
+        @property
+        def timestamp(self) -> str:
+            raise RuntimeError("lazy timestamp not loaded")
+
+    reg = IndicatorRegistry()
+    fp = reg._bar_fingerprint([_Bar()])
+    assert fp[2] is None
+    assert fp[3] == 100.0  # close still resolves normally
 
 
 # ---------------------------------------------------------------------------

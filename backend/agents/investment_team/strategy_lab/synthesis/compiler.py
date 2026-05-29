@@ -453,33 +453,61 @@ _HELPER_BODIES: dict[str, str] = {
             # is computed lazily inside the close-leg so non-numeric prev
             # closes cannot crash the helper from inside _advance_kind.
             # Relies on the emitted __init__ initialising self._ind_state.
-            symbol = getattr(history[-1], "symbol", None)
+            # Defensively read all bar attributes — wraps @property /
+            # Pydantic computed_field raises uniformly. The catch is
+            # narrow (AttributeError/TypeError/ValueError/RuntimeError/
+            # LookupError) so KeyboardInterrupt, NotImplementedError,
+            # AssertionError, MemoryError and similar programmer/runtime
+            # signals propagate. Mirrors indicators/streaming.py
+            # ::_safe_getattr verbatim.
+            _safe_exc = (AttributeError, TypeError, ValueError, RuntimeError, LookupError)
+            try:
+                symbol = getattr(history[-1], "symbol", None)
+            except NotImplementedError:
+                raise
+            except _safe_exc:
+                symbol = None
             key = ("macd", symbol, fast, slow, signal, source)
             state = self._ind_state.get(key)
             last_bar = history[-1]
-            new_ts = getattr(last_bar, "timestamp", None)
+            try:
+                new_ts = getattr(last_bar, "timestamp", None)
+            except NotImplementedError:
+                raise
+            except _safe_exc:
+                new_ts = None
             new_id = id(last_bar)
             new_len = len(history)
-            # Defensively read close — wraps @property/computed_field raises.
             try:
                 raw_close = getattr(last_bar, "close", None)
-            except Exception:
+            except NotImplementedError:
+                raise
+            except _safe_exc:
                 raw_close = None
             if raw_close is None or isinstance(raw_close, bool):
                 new_close = None
-            elif (
-                type(raw_close).__module__.split(".")[0] in ("numpy", "pandas", "pyarrow", "polars")
-                and type(raw_close).__name__.lower() in ("bool", "bool_", "booleanscalar", "boolean")
-            ):
-                new_close = None
             else:
-                try:
-                    new_close = float(raw_close)
-                except (TypeError, ValueError, OverflowError):
+                # Guard ``__module__`` against ``None`` (rare but legitimate
+                # for type()-built classes or exotic C-extensions) — mirrors
+                # indicators/streaming.py::_normalise_close verbatim.
+                _cls = type(raw_close)
+                _mod = getattr(_cls, "__module__", None)
+                _nm = getattr(_cls, "__name__", "")
+                if (
+                    isinstance(_mod, str)
+                    and isinstance(_nm, str)
+                    and _mod.split(".", 1)[0] in ("numpy", "pandas", "pyarrow", "polars")
+                    and _nm.lower() in ("bool", "bool_", "boolean", "booleanscalar", "boolscalar", "bool8")
+                ):
                     new_close = None
                 else:
-                    if math.isnan(new_close) or math.isinf(new_close):
+                    try:
+                        new_close = float(raw_close)
+                    except (TypeError, ValueError, OverflowError):
                         new_close = None
+                    else:
+                        if math.isnan(new_close) or math.isinf(new_close):
+                            new_close = None
             new_fp = (new_id, new_len, new_ts, new_close)
             if state is not None and state["fp"] == new_fp:
                 return state["value"].get(select)
@@ -488,7 +516,12 @@ _HELPER_BODIES: dict[str, str] = {
             kind = "none"
             if state is not None and new_len >= 2:
                 prev_bar = history[-2]
-                prev_ts = getattr(prev_bar, "timestamp", None)
+                try:
+                    prev_ts = getattr(prev_bar, "timestamp", None)
+                except NotImplementedError:
+                    raise
+                except _safe_exc:
+                    prev_ts = None
                 prev_fp = state["fp"]
                 both_have_ts = prev_fp[2] is not None and prev_ts is not None
                 both_ts_absent = prev_fp[2] is None and prev_ts is None
@@ -497,26 +530,33 @@ _HELPER_BODIES: dict[str, str] = {
                 elif both_have_ts and prev_fp[2] == prev_ts:
                     prev_matches = True
                 elif both_ts_absent:
-                    # Defensively read prev_close — wraps property raises.
                     try:
                         prev_raw_close = getattr(prev_bar, "close", None)
-                    except Exception:
+                    except NotImplementedError:
+                        raise
+                    except _safe_exc:
                         prev_raw_close = None
                     if prev_raw_close is None or isinstance(prev_raw_close, bool):
                         prev_close = None
-                    elif (
-                        type(prev_raw_close).__module__.split(".")[0] in ("numpy", "pandas", "pyarrow", "polars")
-                        and type(prev_raw_close).__name__.lower() in ("bool", "bool_", "booleanscalar", "boolean")
-                    ):
-                        prev_close = None
                     else:
-                        try:
-                            prev_close = float(prev_raw_close)
-                        except (TypeError, ValueError, OverflowError):
+                        _cls = type(prev_raw_close)
+                        _mod = getattr(_cls, "__module__", None)
+                        _nm = getattr(_cls, "__name__", "")
+                        if (
+                            isinstance(_mod, str)
+                            and isinstance(_nm, str)
+                            and _mod.split(".", 1)[0] in ("numpy", "pandas", "pyarrow", "polars")
+                            and _nm.lower() in ("bool", "bool_", "boolean", "booleanscalar", "boolscalar", "bool8")
+                        ):
                             prev_close = None
                         else:
-                            if math.isnan(prev_close) or math.isinf(prev_close):
+                            try:
+                                prev_close = float(prev_raw_close)
+                            except (TypeError, ValueError, OverflowError):
                                 prev_close = None
+                            else:
+                                if math.isnan(prev_close) or math.isinf(prev_close):
+                                    prev_close = None
                     prev_matches = prev_close is not None and prev_fp[3] == prev_close
                 else:
                     prev_matches = False

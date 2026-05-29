@@ -125,11 +125,15 @@ def macd_components(
     # Validate as raises (not asserts) — preconditions must hold even when
     # the interpreter is started with ``python -O`` and bare ``assert`` is
     # compiled out.
-    if not (fast >= 2 and slow > fast):
+    # ``not (x >= y)`` rather than ``x < y`` so NaN-typed parameters trip the
+    # gate (NaN is unordered with everything under IEEE 754; ``NaN < 2`` is
+    # False — a strict ``<`` check would silently admit NaN and poison the
+    # macd_line recurrence). Matches ``IndicatorRegistry._macd_value``.
+    if not (fast >= 2) or not (slow > fast):
         raise ValueError(
             f"macd_components: require fast >= 2 and slow > fast (got fast={fast}, slow={slow})"
         )
-    if signal < 2:
+    if not (signal >= 2):
         raise ValueError(
             f"macd_components: require signal >= 2 (got signal={signal}); "
             "signal=1 makes the EMA recurrence trivial (signal == macd, histogram ≡ 0)"
@@ -221,13 +225,23 @@ def _normalise_close(raw: Any) -> Optional[float]:
     #     rejected by the exact-name allowlist, which only catches
     #     genuine scalar booleans.
     cls = type(raw)
-    if cls.__module__.split(".")[0] in (
-        "numpy",
-        "pandas",
-        "pyarrow",
-        "polars",
-    ) and cls.__name__.lower() in ("bool", "bool_", "booleanscalar", "boolean"):
-        return None
+    # ``cls.__module__`` is normally a string but can be ``None`` for
+    # dynamically-created classes (``type()``-built without a module) or
+    # exotic C-extension types. Guard explicitly so the lenient-by-design
+    # cache helper doesn't crash on AttributeError before the float() gate.
+    module_name = getattr(cls, "__module__", None)
+    type_name = getattr(cls, "__name__", "")
+    if isinstance(module_name, str) and isinstance(type_name, str):
+        top_level = module_name.split(".", 1)[0]
+        if top_level in ("numpy", "pandas", "pyarrow", "polars") and type_name.lower() in (
+            "bool",
+            "bool_",
+            "boolean",
+            "booleanscalar",
+            "boolscalar",
+            "bool8",
+        ):
+            return None
     try:
         val = float(raw)
     except (TypeError, ValueError, OverflowError):
@@ -237,23 +251,56 @@ def _normalise_close(raw: Any) -> Optional[float]:
     return val
 
 
-def _safe_read_close(bar: Any) -> Any:
-    """Read ``bar.close`` defensively.
+_SAFE_GETATTR_EXC: Tuple[type, ...] = (
+    AttributeError,
+    TypeError,
+    ValueError,
+    RuntimeError,
+    LookupError,
+)
 
-    ``getattr(bar, 'close', None)`` only uses the default when the
-    attribute name doesn't resolve. If ``close`` is a Python
-    ``@property`` or a Pydantic ``computed_field`` whose body raises
-    (lazy DB session, Decimal('NaN') intermediate, AttributeError from
-    deeper in the descriptor), the exception propagates — that crashed
-    the indicator helper from inside ``_advance_kind`` whenever the
-    deferred close-leg ran. This wrapper traps any descriptor-raise and
-    degrades to ``None`` so the cache layer remains exception-safe; the
-    indicator-math layer (windowed_ema) is still strict.
+
+def _safe_getattr(bar: Any, name: str) -> Any:
+    """Read ``getattr(bar, name, None)`` defensively for cache-layer use.
+
+    ``getattr`` only uses the default when the attribute name doesn't
+    resolve. If the attribute is a Python ``@property`` or a Pydantic
+    ``computed_field`` whose body raises (lazy DB session, Decimal('NaN')
+    intermediate, AttributeError from deeper in the descriptor), the
+    exception propagates — that crashed the indicator helpers from
+    inside ``_bar_fingerprint``/``_advance_kind`` whenever the close,
+    timestamp, or symbol descriptor misbehaved. This wrapper traps the
+    documented descriptor-raise classes (``AttributeError`` /
+    ``TypeError`` / ``ValueError`` / ``RuntimeError`` / ``LookupError``)
+    and degrades to ``None`` so the cache layer remains exception-safe;
+    the indicator-math layer (``windowed_ema``) is still strict.
+
+    Programmer/runtime sentinels propagate unchanged:
+    ``KeyboardInterrupt`` and ``SystemExit`` because they inherit from
+    ``BaseException`` rather than ``Exception``; ``AssertionError``,
+    ``MemoryError``, ``RecursionError`` because they are not in the
+    catch tuple; and ``NotImplementedError`` because it is re-raised
+    explicitly below — even though it inherits from ``RuntimeError``
+    (and would otherwise be swallowed), a subclass-override sentinel
+    must reach the caller, not silently degrade to ``close=None``.
     """
     try:
-        return getattr(bar, "close", None)
-    except Exception:
+        return getattr(bar, name, None)
+    except NotImplementedError:
+        # Subclass of RuntimeError; would be swallowed by the tuple below.
+        # NotImplementedError is a deliberate programmer signal — propagate.
+        raise
+    except _SAFE_GETATTR_EXC:
         return None
+
+
+def _safe_read_close(bar: Any) -> Any:
+    """Backwards-compatible alias of ``_safe_getattr(bar, 'close')``.
+
+    Retained because the close-read site is the most frequent caller and
+    callers in this module read more readably as ``_safe_read_close(bar)``.
+    """
+    return _safe_getattr(bar, "close")
 
 
 class IndicatorRegistry:
@@ -303,12 +350,13 @@ class IndicatorRegistry:
         and the registry silently regresses to cold-start every call.
         """
         last = bars[-1]
-        ts = getattr(last, "timestamp", None)
-        # ``_normalise_close`` handles None/bool/numpy.bool_/NaN/inf/non-numeric
-        # uniformly — see its docstring for the full taxonomy. Any pathological
-        # value falls through as ``None`` so the close-leg of prev_matches
-        # degrades cleanly to id/ts and tuple-equality stays well-behaved.
-        close_val = _normalise_close(_safe_read_close(last))
+        # All bar attribute reads route through ``_safe_getattr`` so a
+        # raising ``@property``/Pydantic ``computed_field`` on ANY of
+        # ``timestamp``/``close``/``symbol`` degrades cleanly to ``None``
+        # rather than crashing the cache layer. ``_normalise_close``
+        # handles None/bool/numpy.bool_/NaN/inf/non-numeric uniformly.
+        ts = _safe_getattr(last, "timestamp")
+        close_val = _normalise_close(_safe_getattr(last, "close"))
         return id(last), len(bars), ts, close_val
 
     def _peek(self, key: Tuple) -> Optional[Dict[str, Any]]:
@@ -380,7 +428,7 @@ class IndicatorRegistry:
         if prev_fp == fp:
             return "none"
         prev_bar = bars[-2]
-        prev_ts = getattr(prev_bar, "timestamp", None)
+        prev_ts = _safe_getattr(prev_bar, "timestamp")
         # ts-leg is usable only when BOTH sides have a timestamp; otherwise
         # the leg is meaningless (None == anything is False). The close-leg
         # then activates as a conditional fallback IFF both sides are ts-less
@@ -392,7 +440,7 @@ class IndicatorRegistry:
         elif both_have_ts and prev_fp[2] == prev_ts:
             prev_matches = True
         elif both_ts_absent:
-            prev_close_val = _normalise_close(_safe_read_close(prev_bar))
+            prev_close_val = _normalise_close(_safe_getattr(prev_bar, "close"))
             prev_matches = prev_close_val is not None and prev_fp[3] == prev_close_val
         else:
             prev_matches = False
@@ -666,10 +714,30 @@ class IndicatorRegistry:
         select: str,
     ) -> Optional[float]:
         # Enforce the same precondition floor as ``macd_components``.
-        # Use ``not (x >= y)`` rather than ``x < y`` so NaN-typed
-        # parameters (NaN is unordered with everything under IEEE 754,
-        # so ``NaN < 2`` is False — a strict ``<`` check would silently
-        # admit NaN and poison the macd_line recurrence).
+        # Two-tier defence:
+        #
+        # 1. **Type gate.** All three parameters must be ``int`` instances.
+        #    A float (e.g. ``fast=2.5``) would pass the value comparison
+        #    but blow up downstream on ``bars[-fast:]`` slicing with
+        #    ``TypeError: slice indices must be integers``. ``bool`` is
+        #    a subclass of ``int``; ``True``/``False`` are admitted by
+        #    the type gate and rejected by the value gate (``True >= 2``
+        #    is False).
+        # 2. **Value gate** using ``not (x >= y)`` rather than ``x < y`` so
+        #    NaN-typed parameters trip the gate (NaN is unordered with
+        #    everything under IEEE 754, so ``NaN < 2`` is False — a
+        #    strict ``<`` check would silently admit NaN and poison the
+        #    macd_line recurrence). Note: a float NaN would also pass
+        #    the type gate above and fall through; the value gate
+        #    catches NaN here. The two gates compose so any malformed
+        #    parameter combination — wrong type, NaN, or out-of-range
+        #    int — surfaces as ``ValueError``.
+        if not (isinstance(fast, int) and isinstance(slow, int) and isinstance(signal, int)):
+            raise ValueError(
+                f"macd: require integer fast/slow/signal (got types "
+                f"fast={type(fast).__name__}, slow={type(slow).__name__}, "
+                f"signal={type(signal).__name__})"
+            )
         if not (fast >= 2) or not (slow > fast):
             raise ValueError(
                 f"macd: require fast >= 2 and slow > fast (got fast={fast}, slow={slow})"
@@ -685,8 +753,13 @@ class IndicatorRegistry:
         # ``len(bars) >= slow + signal - 1``) — but we still pass through
         # the body during the warm-up window and write the cache with
         # ``sig_val=None`` so same-bar repeat calls hit the fast path
-        # instead of cold-rebuilding. Matches the synthesis and factors
-        # compiled templates' structure.
+        # instead of cold-rebuilding. ``select='macd'`` returns a finite
+        # value at ``len(bars) == slow`` (matching the synthesis macd
+        # template); the factors compiler's MACDSignal helper is a
+        # signal-only API and returns NAN until ``signal-EMA fills`` —
+        # so the registry and synthesis ``select='macd'`` are MORE
+        # permissive than the factors ``MACDSignal`` helper by design
+        # (different APIs returning different lines).
         if len(bars) < slow:
             return None
 
@@ -694,7 +767,10 @@ class IndicatorRegistry:
         # If two symbols (or two unrelated bar streams) ever share a
         # registry, the cache must not conflate them — include
         # ``bars[-1].symbol`` in the key so the slots are disjoint.
-        symbol = getattr(bars[-1], "symbol", None)
+        # ``_safe_getattr`` traps descriptor raises so a Pydantic
+        # computed_field ``symbol`` that misbehaves degrades to ``None``
+        # (single-stream behaviour) instead of crashing the call.
+        symbol = _safe_getattr(bars[-1], "symbol")
         key = ("macd", symbol, fast, slow, signal, source)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
@@ -776,10 +852,13 @@ class IndicatorRegistry:
     ) -> Optional[float]:
         """MACD ``(line | signal | histogram)`` at ``bars[-1]``.
 
-        Pre: ``2 <= fast < slow``; ``signal >= 2``. Matches the DSL
-        bounds in :mod:`strategy_lab.spec_dsl` and the precondition floor
-        in :func:`macd_components`. NaN-typed parameters are caught
-        (``not (x >= 2)`` rather than ``x < 2`` so NaN trips the gate).
+        Pre: ``fast``/``slow``/``signal`` are all ``int``;
+        ``2 <= fast < slow``; ``signal >= 2``. Matches the DSL bounds in
+        :mod:`strategy_lab.spec_dsl` and the precondition floor in
+        :func:`macd_components`. Non-int (e.g. float ``2.5``) and
+        NaN-typed parameters are both caught — the type gate rejects
+        floats outright, and ``not (x >= 2)`` rather than ``x < 2``
+        catches NaN ints/floats that pass the type gate.
         Post: returns ``None`` during warm-up (``len(bars) < slow``).
         For ``select='signal'`` / ``'histogram'``, returns ``None`` while
         ``len(bars) < slow + signal - 1`` (signal-EMA hasn't filled),
@@ -787,9 +866,9 @@ class IndicatorRegistry:
         so same-bar repeat calls during this sub-window hit the fast path.
         Returns the requested component once history is sufficient.
         Raises: ``ValueError`` when any precondition is violated:
-        ``fast < 2``, ``slow <= fast``, ``signal < 2``, or any of the
-        three is NaN. The raise survives ``python -O`` (stripped
-        ``assert`` cannot — see :func:`macd_components` rationale).
+        non-int param, ``fast < 2``, ``slow <= fast``, ``signal < 2``,
+        or any of the three is NaN. The raise survives ``python -O``
+        (stripped ``assert`` cannot — see :func:`macd_components` rationale).
         """
         return self._macd_value(
             bars,

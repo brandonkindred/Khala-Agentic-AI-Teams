@@ -222,6 +222,61 @@ def test_compiled_macd_genome_imports_collections_for_deque():
     assert _imported_modules(code) == {"collections", "contract", "math"}
 
 
+def test_compiled_macd_genome_cache_key_embeds_source():
+    """The factors MACDSignal helper's cache key must include the
+    ``source`` axis (``_close`` suffix) so any future DSL extension
+    adding a non-close source cannot silently collide on the same
+    ``(fast, slow, signal, symbol)`` tuple. Matches the registry and
+    synthesis key shapes ``(name, symbol, fast, slow, signal, source)``."""
+    from investment_team.strategy_lab.factors.models import MACDSignal
+
+    code = compile_genome(
+        _g(
+            CompareGT(left=MACDSignal(fast=12, slow=26, signal=9), right=Const(value=0.0)),
+            CompareLT(left=MACDSignal(fast=12, slow=26, signal=9), right=Const(value=0.0)),
+        )
+    )
+    assert "macd_signal_12_26_9_close" in code, (
+        "factors cache key must embed the source axis for forward-compat"
+    )
+
+
+def test_compiled_macd_rejects_non_integer_params_at_compile_time():
+    """The factors MACDSignal template interpolates fast/slow/signal as
+    raw literals: ``not ({signal} >= 2)``. A NaN-valued ``signal`` would
+    emit unbound identifier ``nan`` and produce ``NameError`` at module
+    exec time. Reject malformed params loudly at compile time rather
+    than letting the bad source string through.
+
+    Pydantic's ge=2 constraint normally catches malformed params at
+    model construction, so this defence-in-depth path is reachable
+    only via ``model_construct`` (validation bypass) or future schema
+    drift. ``model_construct`` simulates the bypass.
+    """
+    from investment_team.strategy_lab.factors.models import MACDSignal
+
+    # NaN signal — simulates a validation-bypass path that lets a NaN
+    # slip into the genome. The compile-time gate must catch this
+    # before the unbound ``nan`` identifier is emitted.
+    nan_node = MACDSignal.model_construct(fast=12, slow=26, signal=float("nan"))
+    with pytest.raises(TypeError, match="must be an int"):
+        compile_genome(
+            _g(
+                CompareGT(left=nan_node, right=Const(value=0.0)),
+                CompareLT(left=Const(value=0.0), right=Const(value=0.0)),
+            )
+        )
+    # Out-of-range int (Pydantic ge=2 normally rejects this).
+    bad_node = MACDSignal.model_construct(fast=1, slow=26, signal=9)
+    with pytest.raises(ValueError, match=">= 2"):
+        compile_genome(
+            _g(
+                CompareGT(left=bad_node, right=Const(value=0.0)),
+                CompareLT(left=Const(value=0.0), right=Const(value=0.0)),
+            )
+        )
+
+
 # ---------------------------------------------------------------------------
 # Determinism + sub-tree sharing.
 # ---------------------------------------------------------------------------

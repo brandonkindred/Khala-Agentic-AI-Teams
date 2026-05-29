@@ -231,43 +231,75 @@ if len(bars) < {slow}:
 # share the cache` is true within those contexts.
 # Relies on the emitted __init__ initialising self._ind_state;
 # bypassing __init__ via cls.__new__ is not supported.
-_symbol = getattr(bars[-1], 'symbol', None)
-_macd_key = ('macd_signal_{fast}_{slow}_{signal}', _symbol)
+# All bar-attribute reads route through a narrow try/except so a
+# raising @property/Pydantic computed_field on close/timestamp/symbol
+# degrades to None instead of crashing the helper. Mirrors
+# indicators/streaming.py::_safe_getattr verbatim — only descriptor /
+# resolution errors are caught; programmer/runtime sentinels propagate.
+_safe_exc = (AttributeError, TypeError, ValueError, RuntimeError, LookupError)
+try:
+    _symbol = getattr(bars[-1], 'symbol', None)
+except NotImplementedError:
+    raise
+except _safe_exc:
+    _symbol = None
+# Cache key embeds ``source='close'`` (the only source the factor DSL's
+# MACDSignal supports today) so future cross-source extensions cannot
+# silently collide. Matches the registry and synthesis key shapes.
+_macd_key = ('macd_signal_{fast}_{slow}_{signal}_close', _symbol)
 _state = self._ind_state.get(_macd_key)
 _last = bars[-1]
+try:
+    _raw_close = getattr(_last, 'close', None)
+except NotImplementedError:
+    raise
+except _safe_exc:
+    _raw_close = None
 # Close normalisation: mirrors indicators/streaming.py::_normalise_close
 # verbatim. Inlined because the sandbox import whitelist forbids the
 # host indicators package. Detects third-party bool scalars by
 # top-level module + exact-name allowlist (covers numpy.ma submodules,
-# pyarrow, polars); catches OverflowError for astronomical-magnitude
-# ints; defensively reads .close via try/except to handle @property /
-# Pydantic computed_field raises.
-try:
-    _raw_close = getattr(_last, 'close', None)
-except Exception:
-    _raw_close = None
+# pyarrow, polars); guards ``__module__`` against ``None`` (type()-built
+# classes); catches OverflowError for astronomical-magnitude ints.
 if _raw_close is None or isinstance(_raw_close, bool):
     _new_close = None
-elif (
-    type(_raw_close).__module__.split('.')[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
-    and type(_raw_close).__name__.lower() in ('bool', 'bool_', 'booleanscalar', 'boolean')
-):
-    _new_close = None
 else:
-    try:
-        _new_close = float(_raw_close)
-    except (TypeError, ValueError, OverflowError):
+    _cls = type(_raw_close)
+    _mod = getattr(_cls, '__module__', None)
+    _nm = getattr(_cls, '__name__', '')
+    if (
+        isinstance(_mod, str)
+        and isinstance(_nm, str)
+        and _mod.split('.', 1)[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
+        and _nm.lower() in ('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')
+    ):
         _new_close = None
     else:
-        if math.isnan(_new_close) or math.isinf(_new_close):
+        try:
+            _new_close = float(_raw_close)
+        except (TypeError, ValueError, OverflowError):
             _new_close = None
-_new_fp = (id(_last), len(bars), getattr(_last, 'timestamp', None), _new_close)
+        else:
+            if math.isnan(_new_close) or math.isinf(_new_close):
+                _new_close = None
+try:
+    _new_ts = getattr(_last, 'timestamp', None)
+except NotImplementedError:
+    raise
+except _safe_exc:
+    _new_ts = None
+_new_fp = (id(_last), len(bars), _new_ts, _new_close)
 if _state is not None and _state['fp'] == _new_fp:
     return _state['value']
 _kind = 'none'
 if _state is not None and len(bars) >= 2:
     _prev = bars[-2]
-    _prev_ts = getattr(_prev, 'timestamp', None)
+    try:
+        _prev_ts = getattr(_prev, 'timestamp', None)
+    except NotImplementedError:
+        raise
+    except _safe_exc:
+        _prev_ts = None
     _prev_fp = _state['fp']
     _both_have_ts = _prev_fp[2] is not None and _prev_ts is not None
     _both_ts_absent = _prev_fp[2] is None and _prev_ts is None
@@ -280,27 +312,34 @@ if _state is not None and len(bars) >= 2:
         # float() in the common id/ts-match path AND prevents crashes
         # when prev_close is non-numeric. See indicators/streaming.py
         # ::_normalise_close for the full bool/NaN/inf/non-numeric
-        # taxonomy this inlines. Wraps getattr in try/except to handle
-        # @property/Pydantic computed_field raises.
+        # taxonomy this inlines.
         try:
             _prev_raw_close = getattr(_prev, 'close', None)
-        except Exception:
+        except NotImplementedError:
+            raise
+        except _safe_exc:
             _prev_raw_close = None
         if _prev_raw_close is None or isinstance(_prev_raw_close, bool):
             _prev_close = None
-        elif (
-            type(_prev_raw_close).__module__.split('.')[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
-            and type(_prev_raw_close).__name__.lower() in ('bool', 'bool_', 'booleanscalar', 'boolean')
-        ):
-            _prev_close = None
         else:
-            try:
-                _prev_close = float(_prev_raw_close)
-            except (TypeError, ValueError, OverflowError):
+            _prev_cls = type(_prev_raw_close)
+            _prev_mod = getattr(_prev_cls, '__module__', None)
+            _prev_nm = getattr(_prev_cls, '__name__', '')
+            if (
+                isinstance(_prev_mod, str)
+                and isinstance(_prev_nm, str)
+                and _prev_mod.split('.', 1)[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
+                and _prev_nm.lower() in ('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')
+            ):
                 _prev_close = None
             else:
-                if math.isnan(_prev_close) or math.isinf(_prev_close):
+                try:
+                    _prev_close = float(_prev_raw_close)
+                except (TypeError, ValueError, OverflowError):
                     _prev_close = None
+                else:
+                    if math.isnan(_prev_close) or math.isinf(_prev_close):
+                        _prev_close = None
         _prev_matches = _prev_close is not None and _prev_fp[3] == _prev_close
     else:
         _prev_matches = False
@@ -575,6 +614,24 @@ class _Compiler:
             if fname == "type":
                 continue
             params[fname] = getattr(node, fname)
+        # Compile-time precondition for MACDSignal: the template interpolates
+        # ``{fast}``, ``{slow}``, ``{signal}`` directly into the emitted source
+        # (``not ({signal} >= 2)``). If a validation-bypass path lets a
+        # ``float('nan')`` slip into the genome, ``repr(float('nan'))`` is
+        # ``'nan'`` — emitted code would reference unbound identifier ``nan``
+        # and the module would raise ``NameError`` at exec time instead of
+        # the documented runtime gate. Reject malformed params loudly here
+        # before any source string is built. Spec_dsl normally validates
+        # these as ``int`` ge 2 so this is defence-in-depth.
+        if isinstance(node, MACDSignal):
+            for pname in ("fast", "slow", "signal"):
+                val = params[pname]
+                if not isinstance(val, int) or isinstance(val, bool):
+                    raise TypeError(
+                        f"MACDSignal.{pname} must be an int, got {type(val).__name__}={val!r}"
+                    )
+                if val < 2:
+                    raise ValueError(f"MACDSignal.{pname} must be >= 2 at compile time, got {val}")
         return template.format(**params)
 
     @staticmethod
