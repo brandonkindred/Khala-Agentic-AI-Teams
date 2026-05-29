@@ -13,6 +13,7 @@ from investment_team.models import BacktestConfig, StrategySpec
 from investment_team.strategy_lab.quality_gates.spec_readiness import (
     GATE,
     SpecReadinessGate,
+    _canonicalize_ticker,
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -200,6 +201,44 @@ def test_rule1_canonicalizes_multiple_crypto_against_usd_suffix() -> None:
         c for c in _critical(results) if "target_symbols" in c or "Hypothesis names symbol" in c
     ]
     assert not rule1_failures, rule1_failures
+
+
+def test_canonicalize_ticker_single_suffixes() -> None:
+    """Single provider suffixes strip to the bare, upper-cased symbol."""
+    assert _canonicalize_ticker("ES=F") == "ES"
+    assert _canonicalize_ticker("EURUSD=X") == "EURUSD"
+    assert _canonicalize_ticker("BTC-USD") == "BTC"
+    assert _canonicalize_ticker("aapl") == "AAPL"
+    assert _canonicalize_ticker("AAPL") == "AAPL"
+
+
+def test_canonicalize_ticker_compound_suffix_does_not_crash() -> None:
+    """Compound suffixes strip iteratively instead of raising AssertionError.
+
+    A double-quoted crypto ticker like ``BTC-USD-USD`` (LLM hallucination,
+    double-normalization, or operator typo) must reduce to the bare symbol
+    rather than leaving a residual suffix that trips the post-condition.
+    """
+    assert _canonicalize_ticker("BTC-USD-USD") == "BTC"
+    assert _canonicalize_ticker("ETH-USD-USD") == "ETH"
+    # Mixed compound suffixes also fully strip.
+    assert _canonicalize_ticker("EURUSD=X=X") == "EURUSD"
+
+
+def test_rule1_compound_suffix_target_symbol_does_not_crash() -> None:
+    """A compound-suffix target symbol yields gate results, never a crash.
+
+    Before the fix, ``_canonicalize_ticker`` raised an ``AssertionError`` for
+    ``BTC-USD-USD`` that propagated out of ``validate()`` and crashed the entire
+    gate run. The gate must instead produce ordinary results.
+    """
+    spec = _spec(
+        hypothesis="BTC momentum after a volatility-contraction regime.",
+        target_symbols=["BTC-USD-USD"],
+        asset_class="crypto",
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert results, "gate must return results rather than raising"
 
 
 def test_rule1_passes_when_no_symbols_in_hypothesis_and_no_targets() -> None:

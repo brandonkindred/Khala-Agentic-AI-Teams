@@ -175,14 +175,23 @@ def _canonicalize_ticker(symbol: str) -> str:
     # ``-USD`` strip, a hypothesis that names ``BTC`` would false-critical
     # against a correctly populated ``target_symbols=["BTC-USD"]`` in
     # Rule 1's set-membership check.
+    #
+    # Suffixes are stripped iteratively so a compound input like ``BTC-USD-USD``
+    # (an LLM hallucination, double-normalization, or operator typo) reduces to
+    # ``BTC`` rather than leaving a residual suffix. The loop is bounded by the
+    # string length and terminates because every iteration shortens ``s``. This
+    # keeps the post-condition a true invariant — and the canonical form correct
+    # even when assertions are stripped under ``python -O``.
     # Post: returns an upper-cased string with no `=F` / `=X` / `-USD` suffix.
     assert isinstance(symbol, str), "symbol must be a str"
     s = symbol.upper()
-    for suffix in ("=F", "=X", "-USD"):
-        if s.endswith(suffix):
-            s = s[: -len(suffix)]
-            break
-    assert not s.endswith(("=F", "=X", "-USD")), "canonical form must not retain a provider suffix"
+    suffixes = ("=F", "=X", "-USD")
+    while s.endswith(suffixes):
+        for suffix in suffixes:
+            if s.endswith(suffix):
+                s = s[: -len(suffix)]
+                break
+    assert not s.endswith(suffixes), "canonical form must not retain a provider suffix"
     return s
 
 
