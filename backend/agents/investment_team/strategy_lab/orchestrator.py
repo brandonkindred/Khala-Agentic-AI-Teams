@@ -3115,8 +3115,10 @@ class StrategyLabOrchestrator:
             report.issues = findings_to_issues(check_result.findings)
             return report, check_result.gate_results
         except AlignmentAuditError as exc:
-            # The envelope already retried transport/parse faults; an
-            # AlignmentAuditError here means those retries were exhausted.
+            # The envelope already retried transient transport faults; an
+            # AlignmentAuditError here means those retries were exhausted, or
+            # the LLM returned an unparseable response (parse failures run
+            # after the envelope and are not retried — they fail closed).
             logger.error(
                 "Alignment fix-proposer failed after envelope retries; failing closed: %s",
                 exc,

@@ -46,7 +46,10 @@ def _construct_with_optional_timeout(model_cls, timeout: float, **kwargs):
     version (``timeout=`` vs ``client_args={"timeout": ...}`` vs neither). We try
     each shape in turn and fall back to constructing without a timeout so a
     signature mismatch degrades to "envelope wall-clock guard only" rather than
-    breaking agent construction.
+    breaking agent construction. Only a *signature* ``TypeError`` (an unexpected
+    keyword argument) triggers the fallback — a ``TypeError`` raised from inside
+    the constructor for an unrelated reason propagates so the real
+    misconfiguration is not masked.
 
     Preconditions: ``model_cls`` is a strands Model class; ``timeout > 0``.
     Postconditions: returns a constructed model instance.
@@ -57,7 +60,9 @@ def _construct_with_optional_timeout(model_cls, timeout: float, **kwargs):
     ):
         try:
             return model_cls(**attempt_kwargs)
-        except TypeError:
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
             continue
     logger.warning(
         "Strands model %s did not accept a transport timeout; relying on the "

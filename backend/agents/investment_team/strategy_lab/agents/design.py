@@ -220,9 +220,11 @@ class DesignAgent:
         Pre: ``system_prompt`` and ``user_prompt`` are non-empty strings.
         Post: returns ``(parsed, rationale)`` with no ``strategy_code`` key
         and rule fields that pass :func:`validate_structured_rules`. Raises
-        ``ValueError`` on malformed JSON or
+        ``ValueError`` on malformed JSON,
         :class:`StrategySpecParseError` on prose/off-shape rules after the
-        retry budget is exhausted.
+        retry budget is exhausted, or
+        :class:`~..exceptions.StrategyLabLLMError` when the LLM envelope
+        exhausts its transport retries / budget.
 
         On :class:`StrategySpecParseError` the agent re-prompts the LLM
         with the offending field and pydantic error as feedback (the model

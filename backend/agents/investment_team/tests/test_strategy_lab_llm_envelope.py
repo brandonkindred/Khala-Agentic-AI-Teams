@@ -414,3 +414,46 @@ def test_design_invoke_charges_once_despite_transport_retry(
     # envelope must NOT re-charge.
     assert charges["n"] == 1
     assert stub.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# model_factory._construct_with_optional_timeout
+# ---------------------------------------------------------------------------
+
+
+def test_construct_forwards_timeout_when_accepted() -> None:
+    from investment_team.strategy_lab.agents.model_factory import _construct_with_optional_timeout
+
+    class _Model:
+        def __init__(self, host=None, timeout=None) -> None:
+            self.host = host
+            self.timeout = timeout
+
+    model = _construct_with_optional_timeout(_Model, 12.5, host="h")
+    assert model.timeout == 12.5
+    assert model.host == "h"
+
+
+def test_construct_falls_back_on_signature_mismatch() -> None:
+    from investment_team.strategy_lab.agents.model_factory import _construct_with_optional_timeout
+
+    class _Model:
+        def __init__(self, host=None) -> None:  # accepts neither timeout nor client_args
+            self.host = host
+
+    model = _construct_with_optional_timeout(_Model, 12.5, host="h")
+    assert isinstance(model, _Model)
+    assert model.host == "h"
+
+
+def test_construct_propagates_unrelated_type_error() -> None:
+    from investment_team.strategy_lab.agents.model_factory import _construct_with_optional_timeout
+
+    class _Model:
+        def __init__(self, host=None, timeout=None) -> None:
+            # A TypeError unrelated to the call signature must NOT be swallowed
+            # as a "timeout not supported" fallback.
+            raise TypeError("internal: host must be a tuple")
+
+    with pytest.raises(TypeError, match="host must be a tuple"):
+        _construct_with_optional_timeout(_Model, 12.5, host="h")
