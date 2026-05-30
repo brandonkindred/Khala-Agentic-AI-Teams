@@ -12,7 +12,7 @@ import logging
 import math
 import os
 import time
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
@@ -601,29 +601,24 @@ class MarketDataService:
                     logger.warning("No values from Twelve Data for %s", td_symbol)
                     return []
 
-                rows: List[Tuple[str, Optional[OHLCVBar]]] = []
-                repairs = 0
-                for v in values:
-                    bar, repaired = self._normalize_ohlc_bar(
-                        date=v["datetime"][:10],
-                        open=v["open"],
-                        high=v["high"],
-                        low=v["low"],
-                        close=v["close"],
-                        volume=v.get("volume", 0),
+                normalized = [
+                    (
+                        v["datetime"][:10],
+                        self._normalize_ohlc_bar(
+                            date=v["datetime"][:10],
+                            open=v["open"],
+                            high=v["high"],
+                            low=v["low"],
+                            close=v["close"],
+                            volume=v.get("volume", 0),
+                        ),
                     )
-                    repairs += repaired
-                    rows.append((v["datetime"][:10], bar))
-                if repairs > 0:
-                    logger.warning(
-                        "Twelve Data: repaired OHLC invariants on %d bar(s) for %s",
-                        repairs,
-                        td_symbol,
-                    )
-                # Twelve Data returns newest-first; reverse to chronological order
-                # BEFORE forward-filling so carry-forward uses the prior bar.
-                rows.reverse()
-                return self._forward_fill_bars(rows, provider="Twelve Data", symbol=td_symbol)
+                    for v in values
+                ]
+                # Twelve Data returns newest-first; reverse before forward-fill.
+                return self._bars_from_normalized(
+                    normalized, provider="Twelve Data", symbol=td_symbol, reverse=True
+                )
 
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and attempt < max_retries - 1:
