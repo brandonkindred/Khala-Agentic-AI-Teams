@@ -73,7 +73,15 @@ def _max_universe_symbols() -> int:
 
 
 class OHLCVBar(BaseModel):
-    """A single OHLCV price bar."""
+    """A single OHLCV price bar.
+
+    ``is_imputed`` marks a bar synthesized by forward-fill to preserve calendar
+    alignment when a provider returned a non-finite OHLC row. The flag is NOT
+    persisted through the market-data cache — bars read back from a cache hit
+    always report ``is_imputed=False``. The imputed *prices* do round-trip, so
+    positional-indexing correctness downstream is preserved either way; only the
+    provenance flag is lost on a cache hit.
+    """
 
     date: str
     open: float
@@ -81,6 +89,7 @@ class OHLCVBar(BaseModel):
     low: float
     close: float
     volume: float
+    is_imputed: bool = False
 
 
 # Type alias for a fetch function used in the provider chain.
@@ -582,38 +591,31 @@ class MarketDataService:
                     logger.warning("No values from Twelve Data for %s", td_symbol)
                     return []
 
-                bars: List[OHLCVBar] = []
+                rows: List[Tuple[str, Optional[OHLCVBar]]] = []
                 repairs = 0
                 for v in values:
-                    o = round(float(v["open"]), 4)
-                    h = round(float(v["high"]), 4)
-                    ll = round(float(v["low"]), 4)
-                    c = round(float(v["close"]), 4)
-                    # Normalise OHLC invariants — see _df_to_bars for rationale.
-                    h_fixed = max(o, h, ll, c)
-                    l_fixed = min(o, h, ll, c)
-                    if h_fixed != h or l_fixed != ll:
-                        repairs += 1
-                    bars.append(
-                        OHLCVBar(
-                            date=v["datetime"][:10],
-                            open=o,
-                            high=h_fixed,
-                            low=l_fixed,
-                            close=c,
-                            volume=float(v.get("volume", 0)),
-                        )
+                    bar, repaired = self._normalize_ohlc_bar(
+                        date=v["datetime"][:10],
+                        open=v["open"],
+                        high=v["high"],
+                        low=v["low"],
+                        close=v["close"],
+                        volume=v.get("volume", 0),
                     )
+                    repairs += repaired
+                    rows.append((v["datetime"][:10], bar))
                 if repairs > 0:
                     logger.warning(
-                        "Twelve Data: repaired OHLC invariants on %d/%d bars for %s",
+                        "Twelve Data: repaired OHLC invariants on %d bar(s) for %s",
                         repairs,
-                        len(bars),
                         td_symbol,
                     )
                 # Twelve Data returns newest-first; reverse to chronological order
-                bars.reverse()
-                return bars
+                # BEFORE forward-filling so carry-forward uses the prior bar.
+                rows.reverse()
+                return self._forward_fill_bars(
+                    rows, provider="Twelve Data", symbol=td_symbol
+                )
 
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and attempt < max_retries - 1:
@@ -682,20 +684,19 @@ class MarketDataService:
                     if start_date <= bar_date <= end_date:
                         daily.setdefault(bar_date, []).append(float(price))
 
-                bars: List[OHLCVBar] = []
+                rows: List[Tuple[str, Optional[OHLCVBar]]] = []
                 for bar_date in sorted(daily):
                     prices = daily[bar_date]
-                    bars.append(
-                        OHLCVBar(
-                            date=bar_date,
-                            open=round(prices[0], 4),
-                            high=round(max(prices), 4),
-                            low=round(min(prices), 4),
-                            close=round(prices[-1], 4),
-                            volume=0.0,
-                        )
+                    bar, _ = self._normalize_ohlc_bar(
+                        date=bar_date,
+                        open=prices[0],
+                        high=max(prices),
+                        low=min(prices),
+                        close=prices[-1],
+                        volume=0.0,
                     )
-                return bars
+                    rows.append((bar_date, bar))
+                return self._forward_fill_bars(rows, provider="CoinGecko", symbol=symbol)
 
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and attempt < max_retries - 1:
@@ -771,40 +772,30 @@ class MarketDataService:
                 logger.warning("No time series from Alpha Vantage for %s (key=%s)", symbol, ts_key)
                 return []
 
-            bars: List[OHLCVBar] = []
+            rows: List[Tuple[str, Optional[OHLCVBar]]] = []
             repairs = 0
             for bar_date in sorted(ts):
                 if bar_date < start_date or bar_date > end_date:
                     continue
                 entry = ts[bar_date]
                 # Alpha Vantage key names vary by endpoint; try common patterns
-                o = round(float(entry.get("1. open", entry.get("1a. open (USD)", 0))), 4)
-                h = round(float(entry.get("2. high", entry.get("2a. high (USD)", 0))), 4)
-                ll = round(float(entry.get("3. low", entry.get("3a. low (USD)", 0))), 4)
-                c = round(float(entry.get("4. close", entry.get("4a. close (USD)", 0))), 4)
-                # Normalise OHLC invariants — see _df_to_bars for rationale.
-                h_fixed = max(o, h, ll, c)
-                l_fixed = min(o, h, ll, c)
-                if h_fixed != h or l_fixed != ll:
-                    repairs += 1
-                bars.append(
-                    OHLCVBar(
-                        date=bar_date,
-                        open=o,
-                        high=h_fixed,
-                        low=l_fixed,
-                        close=c,
-                        volume=float(entry.get("5. volume", entry.get("5. market cap (USD)", 0))),
-                    )
+                bar, repaired = self._normalize_ohlc_bar(
+                    date=bar_date,
+                    open=entry.get("1. open", entry.get("1a. open (USD)", 0)),
+                    high=entry.get("2. high", entry.get("2a. high (USD)", 0)),
+                    low=entry.get("3. low", entry.get("3a. low (USD)", 0)),
+                    close=entry.get("4. close", entry.get("4a. close (USD)", 0)),
+                    volume=entry.get("5. volume", entry.get("5. market cap (USD)", 0)),
                 )
+                repairs += repaired
+                rows.append((bar_date, bar))
             if repairs > 0:
                 logger.warning(
-                    "Alpha Vantage: repaired OHLC invariants on %d/%d bars for %s",
+                    "Alpha Vantage: repaired OHLC invariants on %d bar(s) for %s",
                     repairs,
-                    len(bars),
                     symbol,
                 )
-            return bars
+            return self._forward_fill_bars(rows, provider="Alpha Vantage", symbol=symbol)
 
         except Exception as exc:
             logger.warning("Alpha Vantage failed for %s: %s", symbol, exc)
@@ -814,62 +805,173 @@ class MarketDataService:
     # Helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _df_to_bars(df: object) -> List[OHLCVBar]:
-        """Convert a yfinance DataFrame to a list of OHLCVBar.
+    # Cap on how many affected dates are named in a single forward-fill /
+    # drop log line, so a badly broken provider can't emit a multi-kilobyte
+    # warning.
+    _FILL_LOG_MAX_DATES = 10
 
-        Yahoo Finance daily FX bars (and occasionally other classes) are
-        aggregated from intraday snapshots taken at different counterparties
-        and timestamps, so the reported H/L is not always a strict envelope
-        over O/C. The preflight integrity gate in
-        :mod:`investment_team.execution.data_quality` would (correctly)
-        reject such bars, but strategies that read H/L for breakout / stop
-        signals can't backtest against them either. Normalise the
-        invariants here — ``H = max(O, H, L, C)``, ``L = min(O, H, L, C)`` —
-        so downstream consumers always see coherent bars.
+    @staticmethod
+    def _normalize_ohlc_bar(
+        *,
+        date: str,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> Tuple[Optional[OHLCVBar], bool]:
+        """Round, finite-check, and H/L-envelope-repair a single OHLC row.
+
+        Vendors round OHLC independently and aggregate FX/crypto bars from
+        intraday snapshots taken at different counterparties, so the reported
+        H/L is not always a strict envelope over O/C. Normalise the invariants
+        here — ``H = max(O, H, L, C)``, ``L = min(O, H, L, C)`` — so downstream
+        consumers always see coherent bars.
+
+        Preconditions:
+            ``open``/``high``/``low``/``close``/``volume`` are already
+            float-coerced by the caller (raw provider extraction owns
+            ``float(...)`` / ``round(...)``); this helper does the rounding to
+            4 dp and the finiteness decision only.
+
+        Postconditions:
+            Returns ``(None, False)`` when any of O/H/L/C is non-finite (the
+            caller forward-fills or drops). Otherwise returns
+            ``(bar, repaired)`` where ``repaired`` is True iff the H/L envelope
+            had to be widened.
+        """
+        o = round(float(open), 4)
+        h = round(float(high), 4)
+        ll = round(float(low), 4)
+        c = round(float(close), 4)
+        if not (
+            math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)
+        ):
+            return (None, False)
+        h_fixed = max(o, h, ll, c)
+        l_fixed = min(o, h, ll, c)
+        repaired = h_fixed != h or l_fixed != ll
+        bar = OHLCVBar(
+            date=date,
+            open=o,
+            high=h_fixed,
+            low=l_fixed,
+            close=c,
+            volume=float(volume),
+        )
+        return (bar, repaired)
+
+    @classmethod
+    def _forward_fill_bars(
+        cls,
+        rows: List[Tuple[str, Optional[OHLCVBar]]],
+        *,
+        provider: str,
+        symbol: str,
+    ) -> List[OHLCVBar]:
+        """Forward-fill non-finite rows to keep the bar series calendar-aligned.
+
+        Indicator primitives index ``bars`` positionally (e.g. ``bars[-period:]``,
+        ``bars[-1 - k]``). Dropping a non-finite row from the *middle* of a
+        series shortens the list while the indexing stays positional, so a
+        "21-bar window" silently spans 22+ calendar days. Instead of dropping,
+        carry the previous valid close into a flat, zero-volume bar that keeps
+        its own date — restoring the one-bar-per-trading-day invariant so
+        positional indexing is correct again.
+
+        Preconditions:
+            ``rows`` is in chronological (oldest→newest) order; each element is
+            ``(date, bar_or_None)`` where ``None`` marks a non-finite row
+            (the first element returned by :meth:`_normalize_ohlc_bar`).
+
+        Postconditions:
+            Returns bars in the same chronological order. Interior non-finite
+            rows become imputed bars (``is_imputed=True``, ``volume=0.0``,
+            ``open==high==low==close`` == the prior valid close). Leading
+            non-finite rows with no prior valid bar are dropped (a price cannot
+            be fabricated from nothing). Calendar length is preserved except for
+            those unfillable leading drops.
         """
         bars: List[OHLCVBar] = []
-        repairs = 0
-        dropped_nan = 0
-        for idx, row in df.iterrows():  # type: ignore[union-attr]
-            bar_date = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
-            o = round(float(row["Open"]), 4)
-            h = round(float(row["High"]), 4)
-            ll = round(float(row["Low"]), 4)
-            c = round(float(row["Close"]), 4)
-            # Drop rows where any OHLC value is non-finite. yfinance
-            # occasionally surfaces NaN rows during data gaps; without this
-            # filter a NaN close propagates straight into the gate's market
-            # sample provider and trips the sizing-realisability critical
-            # with ``got nan``, killing the cycle before any trade can run.
-            if not (
-                math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)
-            ):
-                dropped_nan += 1
+        last_valid: Optional[OHLCVBar] = None
+        imputed_dates: List[str] = []
+        dropped_dates: List[str] = []
+        for bar_date, bar in rows:
+            if bar is not None:
+                bars.append(bar)
+                last_valid = bar
                 continue
-            h_fixed = max(o, h, ll, c)
-            l_fixed = min(o, h, ll, c)
-            if h_fixed != h or l_fixed != ll:
-                repairs += 1
+            if last_valid is None:
+                # No prior bar to carry forward — cannot fabricate a leading price.
+                dropped_dates.append(bar_date)
+                continue
             bars.append(
                 OHLCVBar(
                     date=bar_date,
-                    open=o,
-                    high=h_fixed,
-                    low=l_fixed,
-                    close=c,
-                    volume=float(row.get("Volume", 0)),
+                    open=last_valid.close,
+                    high=last_valid.close,
+                    low=last_valid.close,
+                    close=last_valid.close,
+                    volume=0.0,
+                    is_imputed=True,
                 )
             )
-        if repairs > 0:
+            imputed_dates.append(bar_date)
+
+        if imputed_dates:
             logger.warning(
-                "yfinance: repaired OHLC invariants on %d/%d bars",
-                repairs,
-                len(bars),
+                "%s: forward-filled %d non-finite bar(s) for %s to preserve "
+                "calendar alignment; dates=[%s]",
+                provider,
+                len(imputed_dates),
+                symbol,
+                cls._format_dates(imputed_dates),
             )
-        if dropped_nan > 0:
+        if dropped_dates:
             logger.warning(
-                "yfinance: dropped %d bar(s) with non-finite OHLC values",
-                dropped_nan,
+                "%s: dropped %d leading non-finite bar(s) for %s "
+                "(no prior bar to carry forward); dates=[%s]",
+                provider,
+                len(dropped_dates),
+                symbol,
+                cls._format_dates(dropped_dates),
             )
         return bars
+
+    @classmethod
+    def _format_dates(cls, dates: List[str]) -> str:
+        """Join up to ``_FILL_LOG_MAX_DATES`` dates, appending ``...`` past the cap."""
+        head = ", ".join(dates[: cls._FILL_LOG_MAX_DATES])
+        if len(dates) > cls._FILL_LOG_MAX_DATES:
+            return f"{head} ..."
+        return head
+
+    @classmethod
+    def _df_to_bars(cls, df: object) -> List[OHLCVBar]:
+        """Convert a yfinance DataFrame to a list of OHLCVBar.
+
+        Non-finite rows (yfinance occasionally surfaces NaN rows during data
+        gaps) are forward-filled rather than dropped so positional-indexing
+        indicators keep their calendar alignment — see :meth:`_forward_fill_bars`.
+        H/L invariants are normalised per row — see :meth:`_normalize_ohlc_bar`.
+        """
+        rows: List[Tuple[str, Optional[OHLCVBar]]] = []
+        repairs = 0
+        for idx, row in df.iterrows():  # type: ignore[union-attr]
+            bar_date = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+            bar, repaired = cls._normalize_ohlc_bar(
+                date=bar_date,
+                open=row["Open"],
+                high=row["High"],
+                low=row["Low"],
+                close=row["Close"],
+                volume=row.get("Volume", 0),
+            )
+            repairs += repaired
+            rows.append((bar_date, bar))
+        if repairs > 0:
+            logger.warning(
+                "yfinance: repaired OHLC invariants on %d bar(s)",
+                repairs,
+            )
+        return cls._forward_fill_bars(rows, provider="yfinance", symbol="")

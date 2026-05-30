@@ -780,3 +780,40 @@ def test_ohlc_tolerance_still_catches_material_violation_at_stock_prices() -> No
             mode="strict",
         )
     assert excinfo.value.report.per_symbol["AAPL"].ohlc_violations == 1
+
+
+def test_imputed_bars_pass_gate_as_warn() -> None:
+    """Forward-filled (flat, zero-volume) bars validate as warn, never fail.
+
+    An imputed bar carries the prior close into a flat O==H==L==C row with
+    zero volume. It must not trip the fail-level NaN/negative-price or
+    OHLC-invariant rules; its zero volume is only a soft ``zero_volume_bars``
+    warning for a volume-bearing asset class.
+    """
+    bars = [
+        _bar("2024-01-02", close=100.5),
+        _bar(
+            "2024-01-03",
+            open_=100.5,
+            high=100.5,
+            low=100.5,
+            close=100.5,
+            volume=0.0,
+            is_imputed=True,
+        ),
+        _bar("2024-01-04", close=101.0),
+        _bar("2024-01-05", close=101.5),
+    ]
+
+    report = validate_market_data(
+        bars_by_symbol={"AAA": bars},
+        expected_frequency="1d",
+        asset_class="stocks",
+        mode="warn",
+    )
+
+    assert report.severity == "warn"
+    sym = report.per_symbol["AAA"]
+    assert sym.nan_or_negative_prices == 0
+    assert sym.ohlc_violations == 0
+    assert sym.zero_volume_bars == 1

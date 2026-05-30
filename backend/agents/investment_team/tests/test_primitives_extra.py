@@ -332,3 +332,33 @@ def test_ema_close_to_arithmetic_mean_for_short_window() -> None:
     last_close = bars[-1].close
     first_close = bars[-5].close
     assert first_close <= val <= last_close
+
+
+def test_primitives_stable_across_imputed_bar() -> None:
+    """A flat, zero-return, zero-volume imputed bar keeps primitives finite/sane.
+
+    Forward-fill (market_data_service) inserts a flat O==H==L==C bar carrying
+    the prior close, with zero volume, to preserve calendar alignment. The
+    positional-indexing primitives must stay finite across such a bar.
+    """
+    closes = [100.0 + i for i in range(25)]
+    closes.insert(12, closes[11])  # imputed: repeats the prior close mid-series
+    bars = [_Bar(open=c, high=c, low=c, close=c, volume=1000.0) for c in closes]
+    bars[12] = _Bar(  # the imputed bar carries zero volume
+        open=closes[12], high=closes[12], low=closes[12], close=closes[12], volume=0.0
+    )
+
+    assert math.isfinite(P.momentum_k(bars, 20))
+    assert math.isfinite(P.skew(bars, 20))
+    assert math.isfinite(P.vol_regime_state(bars, 20, 1.5))
+
+
+def test_vwap_ignores_zero_volume_imputed_bar() -> None:
+    """VWAP weights by volume, so a zero-volume imputed bar contributes nothing."""
+    bars = [
+        _Bar(open=10.0, high=10.0, low=10.0, close=10.0, volume=100.0),
+        _Bar(open=20.0, high=20.0, low=20.0, close=20.0, volume=0.0),  # imputed
+        _Bar(open=30.0, high=30.0, low=30.0, close=30.0, volume=100.0),
+    ]
+    # Flat bars -> hlc3 == close; volume-weighted over the two real bars = 20.0.
+    assert P.vwap(bars, 3) == pytest.approx(20.0)

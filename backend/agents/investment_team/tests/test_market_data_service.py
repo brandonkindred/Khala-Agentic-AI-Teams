@@ -928,3 +928,108 @@ def test_fetch_with_providers_normalizes_crypto_symbol_for_every_provider(
     )
     svc._fetch_with_providers("BTC-USD", "crypto", "2024-01-01", "2024-01-31")
     assert seen == ["BTC", "BTC", "BTC"]
+
+
+def test_normalize_ohlc_bar_returns_repaired_flag() -> None:
+    """_normalize_ohlc_bar rounds, repairs the H/L envelope, and finite-checks."""
+    bar, repaired = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-01", open=100.0, high=99.0, low=98.0, close=101.0, volume=10.0
+    )
+    assert bar is not None
+    # High was below close (101) -> widened to 101; low stays the min.
+    assert bar.high == 101.0
+    assert bar.low == 98.0
+    assert repaired is True
+    assert bar.is_imputed is False
+
+
+def test_normalize_ohlc_bar_returns_none_for_nonfinite() -> None:
+    """A non-finite OHLC value yields (None, False) so the caller can fill/drop."""
+    bar, repaired = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-01",
+        open=float("nan"),
+        high=1.0,
+        low=1.0,
+        close=1.0,
+        volume=0.0,
+    )
+    assert bar is None
+    assert repaired is False
+
+
+def test_forward_fill_carries_prev_close() -> None:
+    """An interior non-finite row becomes a flat imputed bar at the prior close."""
+    good = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-01", open=10.0, high=11.0, low=9.0, close=10.5, volume=5.0
+    )[0]
+    later = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-03", open=12.0, high=13.0, low=11.0, close=12.5, volume=7.0
+    )[0]
+    rows = [("2024-01-01", good), ("2024-01-02", None), ("2024-01-03", later)]
+
+    bars = MarketDataService._forward_fill_bars(rows, provider="test", symbol="X")
+
+    assert [b.date for b in bars] == ["2024-01-01", "2024-01-02", "2024-01-03"]
+    imputed = bars[1]
+    assert imputed.is_imputed is True
+    assert imputed.open == imputed.high == imputed.low == imputed.close == 10.5
+    assert imputed.volume == 0.0
+    assert bars[0].is_imputed is False and bars[2].is_imputed is False
+
+
+def test_forward_fill_drops_leading_nonfinite(caplog) -> None:
+    """Leading non-finite rows have no prior bar to carry forward, so they drop."""
+    good = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-02", open=10.0, high=11.0, low=9.0, close=10.5, volume=5.0
+    )[0]
+    rows = [("2024-01-01", None), ("2024-01-02", good)]
+
+    with caplog.at_level("WARNING"):
+        bars = MarketDataService._forward_fill_bars(rows, provider="test", symbol="X")
+
+    assert [b.date for b in bars] == ["2024-01-02"]
+    assert any("dropped 1 leading non-finite" in r.message for r in caplog.records)
+    assert any("2024-01-01" in r.message for r in caplog.records)
+
+
+def test_forward_fill_preserves_calendar_length() -> None:
+    """Output length equals input minus only the unfillable leading drops."""
+    good = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-01", open=10.0, high=11.0, low=9.0, close=10.5, volume=5.0
+    )[0]
+    rows = [
+        ("2024-01-01", good),
+        ("2024-01-02", None),
+        ("2024-01-03", None),
+        ("2024-01-04", good),
+    ]
+    bars = MarketDataService._forward_fill_bars(rows, provider="test", symbol="X")
+    assert len(bars) == 4
+    assert [b.date for b in bars] == [
+        "2024-01-01",
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+    ]
+
+
+def test_forward_fill_logging_names_dates_bounded(caplog) -> None:
+    """The impute warning names affected dates, truncating past the cap with '...'."""
+    good = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-01", open=10.0, high=11.0, low=9.0, close=10.5, volume=5.0
+    )[0]
+    n = MarketDataService._FILL_LOG_MAX_DATES
+    rows = [("2024-01-01", good)]
+    rows += [(f"2024-02-{i:02d}", None) for i in range(1, n + 3)]  # > cap imputed
+
+    with caplog.at_level("WARNING"):
+        MarketDataService._forward_fill_bars(rows, provider="test", symbol="X")
+
+    msg = next(r.message for r in caplog.records if "forward-filled" in r.message)
+    assert "..." in msg
+    assert msg.count("2024-02-") == n  # only the first N dates are listed
+
+
+def test_forward_fill_empty_input_returns_empty() -> None:
+    """An empty row list yields no bars and no log noise."""
+    assert MarketDataService._forward_fill_bars([], provider="test", symbol="X") == []
