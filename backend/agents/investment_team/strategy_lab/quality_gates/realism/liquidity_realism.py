@@ -215,8 +215,12 @@ def _adv_as_of_trade(
         D-day volume isn't known yet, so including it would be a
         look-ahead leak.
       - Returns ``None`` when ``bars`` is ``None``/empty, fewer than
-        ``lookback`` prior bars are available, or every prior bar has
-        zero volume.
+        ``lookback`` *real* prior bars are available, or every prior bar has
+        zero volume. This function only applies the look-ahead cutoff
+        (``date[:10] < entry_date[:10]``); the imputed-bar exclusion and the
+        "enough real bars?" decision are owned by :func:`compute_adv_from_bars`
+        (via :func:`trailing_real_bars`), so the gate and the ADV math count
+        the same real trading days by construction.
     Invariants:
       - Linear scan over ``bars`` (no sort assumption is required, but
         the typical caller passes chronologically-ordered bars from the
@@ -227,8 +231,6 @@ def _adv_as_of_trade(
         return None
     cutoff = entry_date[:10]
     prior_bars = [b for b in bars if b.date[:10] < cutoff]
-    if len(prior_bars) < lookback:
-        return None
     return compute_adv_from_bars(prior_bars, lookback=lookback)
 
 

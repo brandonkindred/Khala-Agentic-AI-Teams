@@ -711,6 +711,7 @@ def test_cache_table_to_bars_repairs_ohlc_invariants() -> None:
             "low": [1.0509, 1.0511],
             "close": [1.0513, 1.0514],
             "volume": [0.0, 0.0],
+            "is_imputed": [False, True],
         },
         schema=_get_parquet_schema(),
     )
@@ -720,9 +721,32 @@ def test_cache_table_to_bars_repairs_ohlc_invariants() -> None:
     assert bars[0].high == 1.0513
     # Row 1 untouched.
     assert bars[1].high == 1.0515
+    # is_imputed round-trips from the persisted column.
+    assert [b.is_imputed for b in bars] == [False, True]
     for b in bars:
         assert b.high >= max(b.open, b.low, b.close)
         assert b.low <= min(b.open, b.high, b.close)
+
+
+def test_cache_table_to_bars_defaults_is_imputed_for_legacy_schema() -> None:
+    """Snapshots written before the ``is_imputed`` column existed read back
+    with the flag defaulted to ``False`` rather than raising KeyError."""
+    pa = pytest.importorskip("pyarrow")
+    from investment_team.market_data_cache.store import _table_to_bars
+
+    legacy = pa.Table.from_pydict(
+        {
+            "date": ["2024-01-02", "2024-01-03"],
+            "open": [1.05, 1.06],
+            "high": [1.06, 1.07],
+            "low": [1.04, 1.05],
+            "close": [1.055, 1.065],
+            "volume": [10.0, 11.0],
+        }
+    )
+    assert "is_imputed" not in legacy.schema.names
+    bars = _table_to_bars(legacy)
+    assert [b.is_imputed for b in bars] == [False, False]
 
 
 def test_forex_materially_broken_bar_still_flags() -> None:
@@ -780,3 +804,40 @@ def test_ohlc_tolerance_still_catches_material_violation_at_stock_prices() -> No
             mode="strict",
         )
     assert excinfo.value.report.per_symbol["AAPL"].ohlc_violations == 1
+
+
+def test_imputed_bars_pass_gate_as_warn() -> None:
+    """Forward-filled (flat, zero-volume) bars validate as warn, never fail.
+
+    An imputed bar carries the prior close into a flat O==H==L==C row with
+    zero volume. It must not trip the fail-level NaN/negative-price or
+    OHLC-invariant rules; its zero volume is only a soft ``zero_volume_bars``
+    warning for a volume-bearing asset class.
+    """
+    bars = [
+        OHLCVBar(date="2024-01-02", open=100.5, high=101.0, low=100.0, close=100.5, volume=1_000.0),
+        OHLCVBar(
+            date="2024-01-03",
+            open=100.5,
+            high=100.5,
+            low=100.5,
+            close=100.5,
+            volume=0.0,
+            is_imputed=True,
+        ),
+        OHLCVBar(date="2024-01-04", open=101.0, high=101.5, low=100.5, close=101.0, volume=1_000.0),
+        OHLCVBar(date="2024-01-05", open=101.5, high=102.0, low=101.0, close=101.5, volume=1_000.0),
+    ]
+
+    report = validate_market_data(
+        bars_by_symbol={"AAA": bars},
+        expected_frequency="1d",
+        asset_class="stocks",
+        mode="warn",
+    )
+
+    assert report.severity == "warn"
+    sym = report.per_symbol["AAA"]
+    assert sym.nan_or_negative_prices == 0
+    assert sym.ohlc_violations == 0
+    assert sym.zero_volume_bars == 1

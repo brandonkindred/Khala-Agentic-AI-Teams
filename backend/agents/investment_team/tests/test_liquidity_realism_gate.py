@@ -299,3 +299,39 @@ def test_constructor_rejects_non_positive_lookback():
 
     with pytest.raises(ValueError, match="adv_lookback"):
         LiquidityRealismGate(adv_lookback=0)
+
+
+def test_adv_as_of_trade_excludes_imputed_bars_consistently() -> None:
+    """The gate's own lookback-count guard must exclude imputed bars exactly as
+    compute_adv_from_bars does — otherwise a window padded out to ``lookback``
+    by synthetic forward-fills clears the length check only for the downstream
+    ADV to come back None, silently flipping the trade to 'unresolvable'.
+    """
+    from investment_team.strategy_lab.quality_gates.realism.liquidity_realism import (
+        _adv_as_of_trade,
+    )
+
+    real = [
+        OHLCVBar(date=f"2024-01-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in range(1, 16)
+    ]
+    imputed = [
+        OHLCVBar(
+            date=f"2024-01-{i:02d}",
+            open=100,
+            high=100,
+            low=100,
+            close=100,
+            volume=0.0,
+            is_imputed=True,
+        )
+        for i in range(16, 21)
+    ]
+    # 15 real + 5 imputed prior bars: only 15 real < lookback=20 -> None.
+    assert _adv_as_of_trade(real + imputed, "2024-02-01", lookback=20) is None
+    # 20 real prior bars compute normally.
+    full = [
+        OHLCVBar(date=f"2024-03-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in range(1, 21)
+    ]
+    assert _adv_as_of_trade(full, "2024-04-01", lookback=20) == 100_000_000.0

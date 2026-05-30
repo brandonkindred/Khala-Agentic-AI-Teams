@@ -29,6 +29,7 @@ from investment_team.market_data_service import (
     OHLCVBar,
     _max_universe_symbols,
     compute_adv_from_bars,
+    trailing_real_bars,
 )
 
 # ---------------------------------------------------------------------------
@@ -292,7 +293,19 @@ def test_df_to_bars_filters_nan_rows() -> None:
         ),
     ]
     bars = MarketDataService._df_to_bars(_DF(rows))
-    assert [b.date for b in bars] == ["2024-01-01", "2024-01-04"]
+    # Interior non-finite rows are forward-filled (not dropped) so positional
+    # indicators keep their calendar alignment.
+    assert [b.date for b in bars] == [
+        "2024-01-01",
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+    ]
+    assert [b.is_imputed for b in bars] == [False, True, True, False]
+    # Imputed bars carry the prior valid close (100) as a flat, zero-volume bar.
+    for b in (bars[1], bars[2]):
+        assert b.open == b.high == b.low == b.close == 100
+        assert b.volume == 0.0
     assert all(
         math.isfinite(b.open)
         and math.isfinite(b.high)
@@ -578,8 +591,11 @@ def test_fetch_twelve_data_repairs_ohlc_invariants(monkeypatch: pytest.MonkeyPat
 
 
 def test_fetch_twelve_data_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A NaN OHLC field from the Twelve Data fallback is dropped, matching
-    yfinance — without this the NaN would reach the gate as ``got nan``."""
+    """A leading NaN OHLC field from the Twelve Data fallback is dropped.
+
+    After the newest-first payload is reversed to chronological order this NaN
+    row is the earliest bar, so there is no prior close to forward-fill from and
+    the row is dropped (the only case forward-fill cannot recover)."""
     payload = {
         "values": [
             {
@@ -590,7 +606,7 @@ def test_fetch_twelve_data_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> No
                 "close": "1.2",
                 "volume": "100",
             },
-            # NaN close (e.g. a gap or a string "nan") → row must be dropped.
+            # NaN close; chronologically first after reverse -> leading drop.
             {
                 "datetime": "2024-01-02",
                 "open": "1.0",
@@ -668,22 +684,26 @@ def test_fetch_coingecko_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all(b.volume == 0.0 for b in bars)
 
 
-def test_fetch_coingecko_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A NaN price in the CoinGecko series drops that day rather than letting
-    max()/min() propagate the NaN into an OHLCVBar."""
+def test_fetch_coingecko_forward_fills_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NaN price in the CoinGecko series is forward-filled (carries the prior
+    close) rather than dropped, so the series stays calendar-aligned."""
     payload = {
         "prices": [
             [1704153600000, 100.0],  # 2024-01-02 — finite, kept
-            [1704240000000, float("nan")],  # 2024-01-03 — NaN, dropped
+            [1704240000000, float("nan")],  # 2024-01-03 — NaN, forward-filled
         ]
     }
     _install_httpx_stub(monkeypatch, {"coingecko": _StubResp(payload)})
     bars = MarketDataService()._fetch_coingecko(
         "BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1
     )
-    assert len(bars) == 1
-    assert bars[0].date == "2024-01-02"
-    assert math.isfinite(bars[0].close)
+    # The trailing NaN day is forward-filled (not dropped), carrying the prior
+    # close so the series stays calendar-aligned.
+    assert [b.date for b in bars] == ["2024-01-02", "2024-01-03"]
+    assert [b.is_imputed for b in bars] == [False, True]
+    assert bars[1].close == 100.0
+    assert bars[1].volume == 0.0
+    assert all(math.isfinite(b.close) for b in bars)
 
 
 def test_fetch_coingecko_returns_empty_on_unexpected_payload(
@@ -787,9 +807,9 @@ def test_fetch_alphavantage_forex_branch(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(bars) == 1
 
 
-def test_fetch_alphavantage_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A NaN OHLC field from the Alpha Vantage fallback is dropped, matching
-    yfinance and Twelve Data."""
+def test_fetch_alphavantage_forward_fills_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NaN OHLC field from the Alpha Vantage fallback is forward-filled
+    (carries the prior close), matching yfinance and Twelve Data."""
     import investment_team.market_data_service as mds
 
     monkeypatch.setattr(
@@ -804,7 +824,7 @@ def test_fetch_alphavantage_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> N
                 "4. close": "100.5",
                 "5. volume": "500000",
             },
-            # NaN close → row must be dropped.
+            # NaN close → row is forward-filled (carries the prior close).
             "2024-01-16": {
                 "1. open": "100",
                 "2. high": "101",
@@ -816,9 +836,13 @@ def test_fetch_alphavantage_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> N
     }
     _install_httpx_stub(monkeypatch, {"alphavantage": _StubResp(payload)})
     bars = MarketDataService()._fetch_alphavantage("AAA", "stocks", "2024-01-01", "2024-01-31")
-    assert len(bars) == 1
-    assert bars[0].date == "2024-01-15"
-    assert math.isfinite(bars[0].close)
+    # The trailing NaN day is forward-filled (not dropped), carrying the prior
+    # close so the series stays calendar-aligned.
+    assert [b.date for b in bars] == ["2024-01-15", "2024-01-16"]
+    assert [b.is_imputed for b in bars] == [False, True]
+    assert bars[1].close == 100.5
+    assert bars[1].volume == 0.0
+    assert all(math.isfinite(b.close) for b in bars)
 
 
 # ---------------------------------------------------------------------------
@@ -1055,3 +1079,227 @@ def test_fetch_with_providers_normalizes_crypto_symbol_for_every_provider(
     )
     svc._fetch_with_providers("BTC-USD", "crypto", "2024-01-01", "2024-01-31")
     assert seen == ["BTC", "BTC", "BTC"]
+
+
+def test_forward_fill_carries_prev_close() -> None:
+    """An interior non-finite row becomes a flat imputed bar at the prior close."""
+    good = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-01", open=10.0, high=11.0, low=9.0, close=10.5, volume=5.0
+    )[0]
+    later = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-03", open=12.0, high=13.0, low=11.0, close=12.5, volume=7.0
+    )[0]
+    rows = [("2024-01-01", good), ("2024-01-02", None), ("2024-01-03", later)]
+
+    bars = MarketDataService._forward_fill_bars(rows, provider="test", symbol="X")
+
+    assert [b.date for b in bars] == ["2024-01-01", "2024-01-02", "2024-01-03"]
+    imputed = bars[1]
+    assert imputed.is_imputed is True
+    assert imputed.open == imputed.high == imputed.low == imputed.close == 10.5
+    assert imputed.volume == 0.0
+    assert bars[0].is_imputed is False and bars[2].is_imputed is False
+
+
+def test_forward_fill_drops_leading_nonfinite(caplog) -> None:
+    """Leading non-finite rows have no prior bar to carry forward, so they drop."""
+    good = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-02", open=10.0, high=11.0, low=9.0, close=10.5, volume=5.0
+    )[0]
+    rows = [("2024-01-01", None), ("2024-01-02", good)]
+
+    with caplog.at_level("WARNING"):
+        bars = MarketDataService._forward_fill_bars(rows, provider="test", symbol="X")
+
+    assert [b.date for b in bars] == ["2024-01-02"]
+    assert any("dropped 1 leading non-finite" in r.message for r in caplog.records)
+    assert any("2024-01-01" in r.message for r in caplog.records)
+
+
+def test_forward_fill_preserves_calendar_length() -> None:
+    """Output length equals input minus only the unfillable leading drops."""
+    first = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-01", open=10.0, high=11.0, low=9.0, close=10.5, volume=5.0
+    )[0]
+    last = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-04", open=12.0, high=13.0, low=11.0, close=12.5, volume=7.0
+    )[0]
+    rows = [
+        ("2024-01-01", first),
+        ("2024-01-02", None),
+        ("2024-01-03", None),
+        ("2024-01-04", last),
+    ]
+    bars = MarketDataService._forward_fill_bars(rows, provider="test", symbol="X")
+    assert len(bars) == 4
+    assert [b.date for b in bars] == [
+        "2024-01-01",
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+    ]
+
+
+def test_forward_fill_logging_names_dates_bounded(caplog) -> None:
+    """The impute warning names affected dates, truncating past the cap with '...'."""
+    good = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-01", open=10.0, high=11.0, low=9.0, close=10.5, volume=5.0
+    )[0]
+    n = MarketDataService._FILL_LOG_MAX_DATES
+    rows = [("2024-01-01", good)]
+    rows += [(f"2024-02-{i:02d}", None) for i in range(1, n + 3)]  # > cap imputed
+
+    with caplog.at_level("WARNING"):
+        MarketDataService._forward_fill_bars(rows, provider="test", symbol="X")
+
+    msg = next(r.message for r in caplog.records if "forward-filled" in r.message)
+    assert "..." in msg
+    assert msg.count("2024-02-") == n  # only the first N dates are listed
+
+
+def test_forward_fill_empty_input_returns_empty() -> None:
+    """An empty row list yields no bars and no log noise."""
+    assert MarketDataService._forward_fill_bars([], provider="test", symbol="X") == []
+
+
+def test_compute_adv_excludes_imputed_bars() -> None:
+    """Imputed (forward-filled, volume=0) bars do not count toward the lookback.
+
+    A window padded out to ``lookback`` by synthetic forward-fills must not
+    satisfy the size requirement — otherwise a symbol with only a handful of
+    real trading days would report an ADV it never actually traded. This
+    restores the pre-forward-fill behaviour where the underlying NaN rows were
+    dropped and thus never counted.
+    """
+    real = [
+        OHLCVBar(date=f"2024-01-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in (1, 2)
+    ]
+    imputed = [
+        OHLCVBar(
+            date=f"2024-02-{i:02d}",
+            open=100,
+            high=100,
+            low=100,
+            close=100,
+            volume=0.0,
+            is_imputed=True,
+        )
+        for i in range(1, 19)
+    ]
+    # 2 real + 18 imputed == 20 rows, but only 2 real bars -> below lookback.
+    assert compute_adv_from_bars(real + imputed, lookback=20) is None
+    # 20 real bars still compute normally.
+    full = [
+        OHLCVBar(date=f"2024-03-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in range(1, 21)
+    ]
+    assert compute_adv_from_bars(full, lookback=20) == 100_000_000.0
+
+
+def test_fetch_coingecko_buckets_ticks_by_utc_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CoinGecko epoch-ms ticks are bucketed by UTC calendar day, host-tz-independent.
+
+    A tick at 2024-01-03T00:30:00Z must land on 2024-01-03 regardless of the
+    process timezone. The naive ``date.fromtimestamp`` previously used local
+    time, shifting near-midnight ticks across day boundaries and making bars
+    non-deterministic across hosts/CI runners.
+    """
+    import time as _time
+    from datetime import datetime, timezone
+
+    ts_ms = int(datetime(2024, 1, 3, 0, 30, tzinfo=timezone.utc).timestamp() * 1000)
+    payload = {"prices": [[ts_ms, 100.0]]}
+
+    # Force a non-UTC local timezone so a naive conversion would bucket to Jan 2.
+    monkeypatch.setenv("TZ", "America/New_York")
+    if hasattr(_time, "tzset"):
+        _time.tzset()
+    try:
+        _install_httpx_stub(monkeypatch, {"coingecko": _StubResp(payload)})
+        bars = MarketDataService()._fetch_coingecko(
+            "BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1
+        )
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        if hasattr(_time, "tzset"):
+            _time.tzset()
+
+    assert [b.date for b in bars] == ["2024-01-03"]
+
+
+def test_trailing_real_bars_skips_imputed_and_preserves_order() -> None:
+    """trailing_real_bars returns the most recent ``lookback`` non-imputed bars
+    in chronological order; imputed bars are skipped and do not count."""
+    real = [
+        OHLCVBar(date=f"2024-01-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in range(1, 6)
+    ]
+    # Interleave an imputed bar that must be skipped, not counted.
+    imputed = OHLCVBar(
+        date="2024-01-06",
+        open=100,
+        high=100,
+        low=100,
+        close=100,
+        volume=0.0,
+        is_imputed=True,
+    )
+    bars = real[:3] + [imputed] + real[3:]
+    window = trailing_real_bars(bars, 3)
+    assert [b.date for b in window] == ["2024-01-03", "2024-01-04", "2024-01-05"]
+    assert all(not b.is_imputed for b in window)
+
+
+def test_trailing_real_bars_empty_when_insufficient_or_nonpositive() -> None:
+    """Returns [] when fewer than ``lookback`` real bars exist or lookback <= 0."""
+    real = [
+        OHLCVBar(date=f"2024-01-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in range(1, 4)
+    ]
+    assert trailing_real_bars(real, 5) == []
+    assert trailing_real_bars(real, 0) == []
+    assert trailing_real_bars([], 1) == []
+
+
+def test_trailing_real_bars_selects_trailing_real_across_imputed_gap() -> None:
+    """The trailing window is the most recent ``lookback`` *real* bars no matter
+    where the imputed bars sit — a block of imputed bars between two runs of real
+    bars must not shift which real bars are selected. This pins the invariant
+    that skipping imputed during the reverse scan is equivalent to filtering
+    them out first, so passing unfiltered bars to compute_adv_from_bars matches
+    pre-filtering them (the liquidity gate relies on this equivalence)."""
+    block1 = [
+        OHLCVBar(date=f"2024-01-{i:02d}", open=100, high=100, low=100, close=100, volume=1.0)
+        for i in range(1, 16)
+    ]  # 15 real
+    gap = [
+        OHLCVBar(
+            date=f"2024-02-{i:02d}",
+            open=100,
+            high=100,
+            low=100,
+            close=100,
+            volume=0.0,
+            is_imputed=True,
+        )
+        for i in range(1, 6)
+    ]  # 5 imputed between the two real runs
+    block2 = [
+        OHLCVBar(date=f"2024-03-{i:02d}", open=100, high=100, low=100, close=100, volume=1000.0)
+        for i in range(1, 11)
+    ]  # 10 real
+    bars = block1 + gap + block2
+
+    window = trailing_real_bars(bars, 20)
+    assert len(window) == 20
+    assert all(not b.is_imputed for b in window)
+    # The most recent 20 real bars: last 10 of block1 + all of block2, in order.
+    expected = [b.date for b in block1[5:]] + [b.date for b in block2]
+    assert [b.date for b in window] == expected
+
+    # Equivalence: passing unfiltered bars equals pre-filtering imputed ones.
+    prefiltered = [b for b in bars if not b.is_imputed]
+    assert compute_adv_from_bars(bars, lookback=20) == compute_adv_from_bars(
+        prefiltered, lookback=20
+    )
