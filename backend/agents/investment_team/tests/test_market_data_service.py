@@ -1117,14 +1117,17 @@ def test_forward_fill_drops_leading_nonfinite(caplog) -> None:
 
 def test_forward_fill_preserves_calendar_length() -> None:
     """Output length equals input minus only the unfillable leading drops."""
-    good = MarketDataService._normalize_ohlc_bar(
+    first = MarketDataService._normalize_ohlc_bar(
         date="2024-01-01", open=10.0, high=11.0, low=9.0, close=10.5, volume=5.0
     )[0]
+    last = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-04", open=12.0, high=13.0, low=11.0, close=12.5, volume=7.0
+    )[0]
     rows = [
-        ("2024-01-01", good),
+        ("2024-01-01", first),
         ("2024-01-02", None),
         ("2024-01-03", None),
-        ("2024-01-04", good),
+        ("2024-01-04", last),
     ]
     bars = MarketDataService._forward_fill_bars(rows, provider="test", symbol="X")
     assert len(bars) == 4
