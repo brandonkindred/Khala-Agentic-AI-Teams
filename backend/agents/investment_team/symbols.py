@@ -220,3 +220,41 @@ def classify_symbol(symbol: str) -> Optional[str]:
     if sym.endswith("-USD"):
         return "crypto"
     return None
+
+
+def canonical_symbol(symbol: str, asset_class: object) -> str:
+    """Return the provider-neutral canonical form of a ticker.
+
+    Crypto tickers travel through the system in two interchangeable spellings:
+    the bare alias (``"BTC"``) and the Yahoo-suffixed form (``"BTC-USD"``). Each
+    market-data provider re-suffixes the bare alias to its own convention
+    (Yahoo → ``BTC-USD``, Twelve Data → ``BTC/USD``, Alpha Vantage → ``BTC``,
+    CoinGecko → coin id), so the bare alias is the canonical internal form. This
+    helper collapses both spellings to that single form so every provider — and
+    the market-data cache key/fingerprint — sees one input per coin.
+
+    Only the ``-USD`` suffix is stripped (it matches Yahoo's convention and the
+    ``YAHOO_CRYPTO_TICKERS`` lookup keys). Other quote suffixes (``-USDT``,
+    ``-USDC``) are intentionally left untouched.
+
+    Preconditions:
+        * ``symbol`` is a non-empty ticker string.
+        * ``asset_class`` is any value accepted by ``normalize_asset_class``.
+
+    Postconditions:
+        * For crypto: returns ``symbol`` uppercased with a single trailing
+          ``-USD`` removed (``"btc-usd" → "BTC"``, ``"BTC" → "BTC"``).
+        * For every other asset class: returns ``symbol`` unchanged.
+        * Idempotent — ``canonical_symbol(canonical_symbol(s, ac), ac) ==
+          canonical_symbol(s, ac)``.
+    """
+    # Local import mirrors ``asset_class_default_universe`` — avoids a circular
+    # dependency at module-import time.
+    from .strategy_lab_context import normalize_asset_class
+
+    if normalize_asset_class(asset_class) != "crypto":
+        return symbol
+    bare = symbol.upper()
+    if bare.endswith("-USD"):
+        bare = bare[: -len("-USD")]
+    return bare
