@@ -18,6 +18,11 @@ from typing import Any, Dict, List
 import pytest
 
 from investment_team.models import StrategySpec
+from investment_team.strategy_lab.agents._llm_budget import (
+    DesignBudgetExhausted,
+    LLMCallBudget,
+    use_budget,
+)
 from investment_team.strategy_lab.agents._parse_helpers import StrategySpecParseError
 from investment_team.strategy_lab.agents.design import DesignAgent
 from investment_team.strategy_lab.agents.design_review import CritiqueIssue, SpecCritique
@@ -732,3 +737,79 @@ def test_self_revision_garbage_response_falls_back_to_original(
     assert any(
         "self-revision failed" in rec.message.lower() for rec in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# LLM-call budget — charging stays wired to real model invocations and the
+# budget signal is NOT swallowed by the best-effort self-review guards.
+# ---------------------------------------------------------------------------
+
+
+def test_run_budget_charged_per_llm_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With self-review enabled, ``run()`` makes two real LLM calls and the
+    active budget is charged exactly twice — counting stays tied to actual
+    model invocations, not method calls."""
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _ready_critique_payload()],
+        enable_self_review=True,
+    )
+    budget = LLMCallBudget(100)
+
+    with use_budget(budget):
+        DesignAgent().run(prior_records=[])
+
+    assert budget.calls_made == len(capture.calls) == 2
+
+
+def test_revise_budget_charged_across_parse_retries_and_self_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every underlying call counts: a generation + self-review verdict +
+    self-revision all charge the active budget."""
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _failing_critique_payload(), _good_payload()],
+        enable_self_review=True,
+    )
+    budget = LLMCallBudget(100)
+
+    critique = SpecCritique(ready=False, rationale="external r", issues=[])
+    with use_budget(budget):
+        DesignAgent().revise(_prior_spec(), critique)
+
+    assert budget.calls_made == len(capture.calls) == 3
+
+
+def test_budget_exhaustion_propagates_through_self_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget trip during the self-review call must raise
+    ``DesignBudgetExhausted`` — the best-effort ``except Exception`` guard
+    in ``_with_self_review`` must not swallow it."""
+    _patch_design(
+        monkeypatch,
+        [_good_payload(), _ready_critique_payload()],
+        enable_self_review=True,
+    )
+    # limit 1: generation charges once (ok), the self-review charge trips.
+    with use_budget(LLMCallBudget(1)):
+        with pytest.raises(DesignBudgetExhausted):
+            DesignAgent().run(prior_records=[])
+
+
+def test_budget_not_charged_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No active budget (no enclosing ``use_budget``) leaves the agents
+    unchanged — ``charge_active_budget`` is a no-op, backward-compatible
+    with every caller outside a design cycle."""
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _ready_critique_payload()],
+        enable_self_review=True,
+    )
+
+    # No budget bound; must behave exactly as before.
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 2
+    assert parsed["asset_class"] == "stocks"

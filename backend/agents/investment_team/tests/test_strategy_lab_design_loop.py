@@ -21,6 +21,7 @@ import pytest
 
 from investment_team.models import BacktestConfig
 from investment_team.strategy_lab import orchestrator as orchestrator_module
+from investment_team.strategy_lab.agents._llm_budget import charge_active_budget
 from investment_team.strategy_lab.agents.design_review import (
     CritiqueIssue,
     SpecCritique,
@@ -380,3 +381,127 @@ def test_design_review_rounds_env_override_floors_to_one(
 
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "7")
     assert _design_review_rounds() == 7
+
+
+def _charging_run(*_a, **_kw) -> Tuple[Dict[str, Any], str]:
+    """Stub ``DesignAgent.run``/``revise`` that consumes one unit of the
+    active budget per call (simulating one real LLM round-trip) before
+    returning a spec — exactly as the real agents charge."""
+    charge_active_budget()
+    return _spec_dict(), "scripted"
+
+
+def test_budget_exhausted_short_circuits_with_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the per-cycle LLM-call budget trips before the round cap, the
+    cycle short-circuits with ``status="failed: budget_exhausted"`` and
+    never enters synthesis. The round cap is set high so the budget — not
+    the rounds — is what stops the loop."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "2")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "10")
+    orch = StrategyLabOrchestrator()
+
+    # Each stub charges the budget exactly as the real agents would: run()=1,
+    # review()=1 → budget (limit 2) is spent; the first revise() trips it.
+    monkeypatch.setattr(orch.design_agent, "run", _charging_run)
+    monkeypatch.setattr(orch.design_agent, "revise", _charging_run)
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        charge_active_budget()
+        return SpecCritique(
+            ready=False,
+            rationale="incoherent",
+            issues=[CritiqueIssue(field="hypothesis", description="vague")],
+        )
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+
+    def _market_must_not_run(self, *_a, **_kw):
+        raise AssertionError("synthesis must not run when the budget is exhausted")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
+
+    def _sandbox_must_not_run(*_a, **_kw):
+        raise AssertionError("sandbox must not run when the budget is exhausted")
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _sandbox_must_not_run)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert record.backtest.status == "failed: budget_exhausted"
+    assert record.is_winning is False
+    ar = record.backtest.result.acceptance_reason or ""
+    assert "publication_disabled" in ar and "budget_exhausted" in ar
+
+
+def test_budget_spans_design_reentries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The budget is per-cycle, not per-attempt: a high round cap plus a
+    budget smaller than one attempt's worth of calls trips inside the first
+    attempt rather than resetting on re-entry."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "3")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "10")
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", _charging_run)
+    monkeypatch.setattr(orch.design_agent, "revise", _charging_run)
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        charge_active_budget()
+        return SpecCritique(ready=False, rationale="nope")
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+    _short_circuit_synthesis(monkeypatch)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    # budget 3: run(1) + review(2) + revise(3) succeed, the round-1 review
+    # trips. No SpecImplementabilityError re-entry can grant a fresh budget.
+    assert record.backtest.status == "failed: budget_exhausted"
+
+
+def test_budget_not_tripped_on_converging_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spec that readies on round 1 under a generous budget proceeds past
+    design — the cap must not fire on the happy path (guards charge()
+    off-by-one)."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "120")
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", _charging_run)
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        charge_active_budget()
+        return SpecCritique(ready=True, rationale="ok")
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+    monkeypatch.setattr(orch.design_agent, "revise", _charging_run)
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert record.backtest.status != "failed: budget_exhausted"
+    assert record.design_rounds == 1
+
+
+def test_design_max_llm_calls_env_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_design_max_llm_calls`` defaults to 120, parses overrides, floors
+    sub-1 to 1, and falls back to 120 on garbage."""
+    from investment_team.strategy_lab.orchestrator import _design_max_llm_calls
+
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", raising=False)
+    assert _design_max_llm_calls() == 120
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "50")
+    assert _design_max_llm_calls() == 50
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "0")
+    assert _design_max_llm_calls() == 1
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "-9")
+    assert _design_max_llm_calls() == 1
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "garbage")
+    assert _design_max_llm_calls() == 120

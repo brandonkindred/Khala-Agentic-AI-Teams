@@ -30,6 +30,7 @@ from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block
 from ...signal_intelligence_models import SignalIntelligenceBriefV1
 from ...strategy_lab_context import asset_class_mix_hint, format_prior_results
+from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._parse_helpers import (
     StrategySpecParseError,
     extract_json_object,
@@ -144,6 +145,11 @@ class DesignAgent:
 
         Returns: ``(strategy_dict, rationale)``. ``strategy_dict`` has no
         ``strategy_code`` key.
+
+        Every underlying LLM call (generation, each parse-retry, and the
+        optional self-review / self-revision) charges the active design-phase
+        budget via :func:`charge_active_budget` and raises
+        :class:`DesignBudgetExhausted` when the per-cycle cap is hit.
         """
         prior_text = (
             format_prior_results(prior_records)
@@ -188,7 +194,8 @@ class DesignAgent:
         """Revise ``prior_spec`` to address every issue raised in ``critique``.
 
         Returns: ``(strategy_dict, rationale)``. ``strategy_dict`` has no
-        ``strategy_code`` key.
+        ``strategy_code`` key. Charges the active budget per underlying LLM
+        call (see :meth:`run`).
         """
         spec_json = prior_spec.model_dump_json(indent=2, exclude={"strategy_code"})
         issues_block = _format_issues(critique)
@@ -232,6 +239,10 @@ class DesignAgent:
 
         prompt = user_prompt
         for attempt in range(retries + 1):
+            # Charge before the call so the cycle stops *before* exceeding
+            # the per-cycle budget. Each parse-retry is a real LLM call and
+            # so counts individually.
+            charge_active_budget()
             result = agent(prompt)
             parsed = extract_json_object(str(result))
 
@@ -289,6 +300,11 @@ class DesignAgent:
 
         try:
             critique = self._self_review(strategy_dict)
+        except DesignBudgetExhausted:
+            # A budget trip is a cycle-level stop, not a self-review hiccup —
+            # it must propagate to ``_run_design_loop`` rather than being
+            # swallowed by the best-effort guard below.
+            raise
         except Exception as exc:
             logger.warning(
                 "DesignAgent self-review failed (%s: %s); returning original spec",
@@ -317,6 +333,9 @@ class DesignAgent:
 
         try:
             return self._invoke_and_parse(_SYSTEM_PROMPT, revision_prompt)
+        except DesignBudgetExhausted:
+            # As above: propagate budget exhaustion rather than falling back.
+            raise
         except Exception as exc:
             # Best-effort contract: any self-revision failure — DSL parse
             # rejection (``StrategySpecParseError``), malformed JSON
@@ -353,6 +372,7 @@ class DesignAgent:
             "verdict, no markdown.\n\n"
             f"```json\n{spec_json}\n```\n"
         )
+        charge_active_budget()
         result = agent(user_prompt)
         parsed = extract_json_object(str(result))
         return _coerce_critique(parsed, readiness_findings=[])
