@@ -552,6 +552,55 @@ def test_revise_also_retries_on_parse_error(monkeypatch: pytest.MonkeyPatch) -> 
     assert parsed["asset_class"] == "stocks"
 
 
+def test_parse_retry_builds_fresh_agent_per_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each parse-retry attempt must use a freshly constructed, history-free
+    agent — never one instance reused across attempts.
+
+    ``strands.Agent`` accumulates conversation history in ``self.messages``;
+    reusing one instance would feed the model its own rejected JSON back as
+    context on the correction re-prompt, biasing it toward defending the
+    malformed shape. We assert (a) the factory is invoked once per LLM call
+    and (b) every constructed agent saw exactly one prompt (no cross-attempt
+    carryover).
+    """
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", raising=False)
+
+    payloads = [_bar_close_as_indicator_ref_payload(), _good_payload()]
+    built: List[_CapturingAgent] = []
+
+    def _factory(**_kwargs: Any) -> _CapturingAgent:
+        # Hand each freshly constructed agent the single payload it is
+        # expected to emit, by construction order, so attempt 1 slips the
+        # DSL and attempt 2 recovers.
+        idx = min(len(built), len(payloads) - 1)
+        agent = _CapturingAgent(payloads[idx])
+        built.append(agent)
+        return agent
+
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.Agent",
+        _factory,
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.get_strands_model",
+        lambda role: object(),
+    )
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert parsed["asset_class"] == "stocks"
+    # One construction per attempt (here: initial slip + one recovery).
+    assert len(built) == 2
+    # No conversation carryover: each agent fielded exactly one prompt.
+    assert all(len(agent.calls) == 1 for agent in built)
+    # The recovery agent — not the slipping one — saw the correction context.
+    assert "bar.close" in built[1].calls[0]
+    assert "entry_rules[0]" in built[1].calls[0]
+
+
 # ---------------------------------------------------------------------------
 # Self-review pass — catch prose↔predicate + risk-math contradictions
 # inside DesignAgent before they reach the external review loop.

@@ -232,16 +232,26 @@ class DesignAgent:
         literal in an IndicatorRef, or naming an indicator in ``source``).
         Budget is set by ``STRATEGY_LAB_DESIGN_PARSE_RETRIES`` (default 2
         retries → 3 attempts total; ``0`` disables retry).
+
+        Each attempt builds a fresh ``Agent``: the correction re-prompt must
+        be read as "reissue the whole object correctly given this guidance",
+        not "fix what you just emitted". ``strands.Agent`` accumulates
+        conversation history in ``self.messages``, so reusing one instance
+        would feed the model its own rejected JSON back as context and bias
+        it toward defending the malformed shape it just produced.
         """
         retries = _design_parse_retries()
-        agent = Agent(
-            model=get_strands_model("strategy_design"),
-            system_prompt=system_prompt,
-            tools=[],
-        )
 
         prompt = user_prompt
         for attempt in range(retries + 1):
+            # A history-free agent per attempt (see method docstring). Strands
+            # Agent construction is cheap — no I/O, just env reads + object
+            # init via get_strands_model — so building one per attempt is safe.
+            agent = Agent(
+                model=get_strands_model("strategy_design"),
+                system_prompt=system_prompt,
+                tools=[],
+            )
             # Charge before the call so the cycle stops *before* exceeding
             # the per-cycle budget. Each parse-retry is a real LLM call and
             # so counts individually.
