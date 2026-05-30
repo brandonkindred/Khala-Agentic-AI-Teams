@@ -683,13 +683,13 @@ def test_fetch_coingecko_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all(b.volume == 0.0 for b in bars)
 
 
-def test_fetch_coingecko_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A NaN price in the CoinGecko series drops that day rather than letting
-    max()/min() propagate the NaN into an OHLCVBar."""
+def test_fetch_coingecko_forward_fills_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NaN price in the CoinGecko series is forward-filled (carries the prior
+    close) rather than dropped, so the series stays calendar-aligned."""
     payload = {
         "prices": [
             [1704153600000, 100.0],  # 2024-01-02 — finite, kept
-            [1704240000000, float("nan")],  # 2024-01-03 — NaN, dropped
+            [1704240000000, float("nan")],  # 2024-01-03 — NaN, forward-filled
         ]
     }
     _install_httpx_stub(monkeypatch, {"coingecko": _StubResp(payload)})
@@ -806,9 +806,9 @@ def test_fetch_alphavantage_forex_branch(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(bars) == 1
 
 
-def test_fetch_alphavantage_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A NaN OHLC field from the Alpha Vantage fallback is dropped, matching
-    yfinance and Twelve Data."""
+def test_fetch_alphavantage_forward_fills_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NaN OHLC field from the Alpha Vantage fallback is forward-filled
+    (carries the prior close), matching yfinance and Twelve Data."""
     import investment_team.market_data_service as mds
 
     monkeypatch.setattr(
@@ -823,7 +823,7 @@ def test_fetch_alphavantage_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> N
                 "4. close": "100.5",
                 "5. volume": "500000",
             },
-            # NaN close → row must be dropped.
+            # NaN close → row is forward-filled (carries the prior close).
             "2024-01-16": {
                 "1. open": "100",
                 "2. high": "101",
