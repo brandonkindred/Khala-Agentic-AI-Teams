@@ -12,7 +12,7 @@ import logging
 import math
 import os
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
@@ -106,11 +106,21 @@ def compute_adv_from_bars(
     Pure helper — kept at module scope so unit tests and the cost-stress
     harness can compute ADV from synthetic fixtures without instantiating
     a ``MarketDataService`` or hitting the network.  Returns ``None`` when
-    the series is shorter than ``lookback`` or every bar has zero volume.
+    fewer than ``lookback`` *real* bars are available or every bar in the
+    window has zero volume.
+
+    Imputed bars (synthetic forward-fills carrying a prior close at
+    ``volume=0`` — see :meth:`MarketDataService._forward_fill_bars`) are
+    excluded before the window is taken. They are not real trading days, so
+    counting them toward ``lookback`` would let a window of mostly-synthetic
+    bars satisfy the size requirement and report an ADV the symbol never
+    actually traded — restoring the pre-forward-fill behaviour where the
+    underlying NaN rows were dropped and thus never counted.
     """
     if not bars or lookback <= 0:
         return None
-    window = list(bars)[-lookback:]
+    real = [b for b in bars if not b.is_imputed]
+    window = real[-lookback:]
     if len(window) < lookback:
         return None
     dollar_volume = [b.close * b.volume for b in window if b.volume > 0 and b.close > 0]
@@ -678,23 +688,35 @@ class MarketDataService:
 
                 daily: Dict[str, List[float]] = {}
                 for ts_ms, price in raw.get("prices", []):
-                    bar_date = date.fromtimestamp(ts_ms / 1000).isoformat()
+                    # CoinGecko timestamps are UTC epoch milliseconds. Bucket
+                    # them by UTC calendar day explicitly — a naive
+                    # ``date.fromtimestamp`` uses the process-local timezone,
+                    # which shifts ticks near midnight across day boundaries and
+                    # makes the resulting bars (and the shared forward-fill
+                    # output) non-deterministic across hosts / CI runners.
+                    bar_date = (
+                        datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date().isoformat()
+                    )
                     if start_date <= bar_date <= end_date:
                         daily.setdefault(bar_date, []).append(float(price))
 
-                rows: List[Tuple[str, Optional[OHLCVBar]]] = []
+                normalized: List[Tuple[str, Tuple[Optional[OHLCVBar], bool]]] = []
                 for bar_date in sorted(daily):
                     prices = daily[bar_date]
-                    bar, _ = self._normalize_ohlc_bar(
-                        date=bar_date,
-                        open=prices[0],
-                        high=max(prices),
-                        low=min(prices),
-                        close=prices[-1],
-                        volume=0.0,
+                    normalized.append(
+                        (
+                            bar_date,
+                            self._normalize_ohlc_bar(
+                                date=bar_date,
+                                open=prices[0],
+                                high=max(prices),
+                                low=min(prices),
+                                close=prices[-1],
+                                volume=0.0,
+                            ),
+                        )
                     )
-                    rows.append((bar_date, bar))
-                return self._forward_fill_bars(rows, provider="CoinGecko", symbol=symbol)
+                return self._bars_from_normalized(normalized, provider="CoinGecko", symbol=symbol)
 
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and attempt < max_retries - 1:
@@ -770,30 +792,26 @@ class MarketDataService:
                 logger.warning("No time series from Alpha Vantage for %s (key=%s)", symbol, ts_key)
                 return []
 
-            rows: List[Tuple[str, Optional[OHLCVBar]]] = []
-            repairs = 0
+            normalized: List[Tuple[str, Tuple[Optional[OHLCVBar], bool]]] = []
             for bar_date in sorted(ts):
                 if bar_date < start_date or bar_date > end_date:
                     continue
                 entry = ts[bar_date]
                 # Alpha Vantage key names vary by endpoint; try common patterns
-                bar, repaired = self._normalize_ohlc_bar(
-                    date=bar_date,
-                    open=entry.get("1. open", entry.get("1a. open (USD)", 0)),
-                    high=entry.get("2. high", entry.get("2a. high (USD)", 0)),
-                    low=entry.get("3. low", entry.get("3a. low (USD)", 0)),
-                    close=entry.get("4. close", entry.get("4a. close (USD)", 0)),
-                    volume=entry.get("5. volume", entry.get("5. market cap (USD)", 0)),
+                normalized.append(
+                    (
+                        bar_date,
+                        self._normalize_ohlc_bar(
+                            date=bar_date,
+                            open=entry.get("1. open", entry.get("1a. open (USD)", 0)),
+                            high=entry.get("2. high", entry.get("2a. high (USD)", 0)),
+                            low=entry.get("3. low", entry.get("3a. low (USD)", 0)),
+                            close=entry.get("4. close", entry.get("4a. close (USD)", 0)),
+                            volume=entry.get("5. volume", entry.get("5. market cap (USD)", 0)),
+                        ),
+                    )
                 )
-                repairs += repaired
-                rows.append((bar_date, bar))
-            if repairs > 0:
-                logger.warning(
-                    "Alpha Vantage: repaired OHLC invariants on %d bar(s) for %s",
-                    repairs,
-                    symbol,
-                )
-            return self._forward_fill_bars(rows, provider="Alpha Vantage", symbol=symbol)
+            return self._bars_from_normalized(normalized, provider="Alpha Vantage", symbol=symbol)
 
         except Exception as exc:
             logger.warning("Alpha Vantage failed for %s: %s", symbol, exc)
@@ -812,11 +830,11 @@ class MarketDataService:
     def _normalize_ohlc_bar(
         *,
         date: str,
-        open: float,
-        high: float,
-        low: float,
-        close: float,
-        volume: float,
+        open: float | str | int,
+        high: float | str | int,
+        low: float | str | int,
+        close: float | str | int,
+        volume: float | str | int,
     ) -> Tuple[Optional[OHLCVBar], bool]:
         """Round, finite-check, and H/L-envelope-repair a single OHLC row.
 
@@ -827,10 +845,13 @@ class MarketDataService:
         consumers always see coherent bars.
 
         Preconditions:
-            ``open``/``high``/``low``/``close``/``volume`` are already
-            float-coerced by the caller (raw provider extraction owns
-            ``float(...)`` / ``round(...)``); this helper does the rounding to
-            4 dp and the finiteness decision only.
+            ``open``/``high``/``low``/``close``/``volume`` are raw provider
+            values coercible by ``float(...)`` — numeric, or numeric strings
+            such as the JSON values Twelve Data and Alpha Vantage return. This
+            helper owns the coercion and rounding to 4 dp; callers pass the
+            extracted values through verbatim. A value that is ``None`` or a
+            non-numeric string is a caller (precondition) bug and surfaces as a
+            ``TypeError``/``ValueError`` rather than being silently coerced.
 
         Postconditions:
             Returns ``(None, False)`` when any of O/H/L/C is non-finite (the
@@ -943,6 +964,42 @@ class MarketDataService:
         return head
 
     @classmethod
+    def _bars_from_normalized(
+        cls,
+        normalized: List[Tuple[str, Tuple[Optional[OHLCVBar], bool]]],
+        *,
+        provider: str,
+        symbol: str,
+        reverse: bool = False,
+    ) -> List[OHLCVBar]:
+        """Tally H/L repairs, log them, then forward-fill a normalized row list.
+
+        Each element is ``(date, (bar_or_None, repaired))`` exactly as returned
+        by :meth:`_normalize_ohlc_bar`. This centralises the post-extraction
+        tail every provider shares — repair tally + warning, optional
+        chronological reverse, and the forward-fill — so a new provider only
+        writes its own extraction loop. Set ``reverse=True`` for providers that
+        return newest-first (Twelve Data); rows are flipped to oldest→newest
+        before filling so carry-forward uses the prior bar.
+
+        Preconditions:
+            ``normalized`` is in provider order (chronological unless
+            ``reverse`` is set). ``symbol`` may be empty (yfinance) — the
+            repair log then omits the ``for <symbol>`` suffix.
+
+        Postconditions:
+            Returns the forward-filled bar list (see :meth:`_forward_fill_bars`).
+        """
+        repairs = sum(1 for _, (_, repaired) in normalized if repaired)
+        if repairs > 0:
+            suffix = f" for {symbol}" if symbol else ""
+            logger.warning("%s: repaired OHLC invariants on %d bar(s)%s", provider, repairs, suffix)
+        rows = [(bar_date, bar) for bar_date, (bar, _) in normalized]
+        if reverse:
+            rows.reverse()
+        return cls._forward_fill_bars(rows, provider=provider, symbol=symbol)
+
+    @classmethod
     def _df_to_bars(cls, df: object) -> List[OHLCVBar]:
         """Convert a yfinance DataFrame to a list of OHLCVBar.
 
@@ -951,23 +1008,20 @@ class MarketDataService:
         indicators keep their calendar alignment — see :meth:`_forward_fill_bars`.
         H/L invariants are normalised per row — see :meth:`_normalize_ohlc_bar`.
         """
-        rows: List[Tuple[str, Optional[OHLCVBar]]] = []
-        repairs = 0
+        normalized: List[Tuple[str, Tuple[Optional[OHLCVBar], bool]]] = []
         for idx, row in df.iterrows():  # type: ignore[union-attr]
             bar_date = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
-            bar, repaired = cls._normalize_ohlc_bar(
-                date=bar_date,
-                open=row["Open"],
-                high=row["High"],
-                low=row["Low"],
-                close=row["Close"],
-                volume=row.get("Volume", 0),
+            normalized.append(
+                (
+                    bar_date,
+                    cls._normalize_ohlc_bar(
+                        date=bar_date,
+                        open=row["Open"],
+                        high=row["High"],
+                        low=row["Low"],
+                        close=row["Close"],
+                        volume=row.get("Volume", 0),
+                    ),
+                )
             )
-            repairs += repaired
-            rows.append((bar_date, bar))
-        if repairs > 0:
-            logger.warning(
-                "yfinance: repaired OHLC invariants on %d bar(s)",
-                repairs,
-            )
-        return cls._forward_fill_bars(rows, provider="yfinance", symbol="")
+        return cls._bars_from_normalized(normalized, provider="yfinance", symbol="")

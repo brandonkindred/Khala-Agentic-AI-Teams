@@ -1159,3 +1159,69 @@ def test_forward_fill_logging_names_dates_bounded(caplog) -> None:
 def test_forward_fill_empty_input_returns_empty() -> None:
     """An empty row list yields no bars and no log noise."""
     assert MarketDataService._forward_fill_bars([], provider="test", symbol="X") == []
+
+
+def test_compute_adv_excludes_imputed_bars() -> None:
+    """Imputed (forward-filled, volume=0) bars do not count toward the lookback.
+
+    A window padded out to ``lookback`` by synthetic forward-fills must not
+    satisfy the size requirement — otherwise a symbol with only a handful of
+    real trading days would report an ADV it never actually traded. This
+    restores the pre-forward-fill behaviour where the underlying NaN rows were
+    dropped and thus never counted.
+    """
+    real = [
+        OHLCVBar(date=f"2024-01-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in (1, 2)
+    ]
+    imputed = [
+        OHLCVBar(
+            date=f"2024-02-{i:02d}",
+            open=100,
+            high=100,
+            low=100,
+            close=100,
+            volume=0.0,
+            is_imputed=True,
+        )
+        for i in range(1, 19)
+    ]
+    # 2 real + 18 imputed == 20 rows, but only 2 real bars -> below lookback.
+    assert compute_adv_from_bars(real + imputed, lookback=20) is None
+    # 20 real bars still compute normally.
+    full = [
+        OHLCVBar(date=f"2024-03-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in range(1, 21)
+    ]
+    assert compute_adv_from_bars(full, lookback=20) == 100_000_000.0
+
+
+def test_fetch_coingecko_buckets_ticks_by_utc_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CoinGecko epoch-ms ticks are bucketed by UTC calendar day, host-tz-independent.
+
+    A tick at 2024-01-03T00:30:00Z must land on 2024-01-03 regardless of the
+    process timezone. The naive ``date.fromtimestamp`` previously used local
+    time, shifting near-midnight ticks across day boundaries and making bars
+    non-deterministic across hosts/CI runners.
+    """
+    import time as _time
+    from datetime import datetime, timezone
+
+    ts_ms = int(datetime(2024, 1, 3, 0, 30, tzinfo=timezone.utc).timestamp() * 1000)
+    payload = {"prices": [[ts_ms, 100.0]]}
+
+    # Force a non-UTC local timezone so a naive conversion would bucket to Jan 2.
+    monkeypatch.setenv("TZ", "America/New_York")
+    if hasattr(_time, "tzset"):
+        _time.tzset()
+    try:
+        _install_httpx_stub(monkeypatch, {"coingecko": _StubResp(payload)})
+        bars = MarketDataService()._fetch_coingecko(
+            "BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1
+        )
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        if hasattr(_time, "tzset"):
+            _time.tzset()
+
+    assert [b.date for b in bars] == ["2024-01-03"]
