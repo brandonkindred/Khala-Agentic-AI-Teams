@@ -29,6 +29,7 @@ from .symbols import (
     COINGECKO_IDS,
     YAHOO_CRYPTO_TICKERS,
     asset_class_default_universe,
+    canonical_symbol,
     classify_symbol,
 )
 
@@ -171,7 +172,15 @@ class MarketDataService:
 
         Used both as the cache miss handler and (indirectly) as the legacy
         fetch path.  Returns ``([], "")`` when every provider is exhausted.
+
+        Normalizes ``symbol`` to its canonical form once here — the single
+        point every provider flows through — so all four providers (Yahoo,
+        Twelve Data, Alpha Vantage, CoinGecko) receive the same input and
+        each re-suffix it to their own convention. Without this, a crypto
+        ``"BTC-USD"`` reaching the Twelve Data / Alpha Vantage fallback would
+        be passed verbatim and resolve to a malformed / not-found ticker.
         """
+        symbol = canonical_symbol(symbol, asset_class)
         for slug, fetch_fn in self._get_named_provider_chain(asset_class):
             try:
                 bars = fetch_fn(symbol, asset_class, start_date, end_date)
@@ -201,8 +210,13 @@ class MarketDataService:
         snapshot.
         """
         ac = normalize_asset_class(asset_class)
+        # Normalize the cache key so the bare alias and the Yahoo-suffixed
+        # form of a crypto coin (``"BTC"`` / ``"BTC-USD"``) share one snapshot
+        # and fingerprint instead of being stored twice. ``provider_used`` is
+        # keyed by the caller's original symbol to preserve the call contract.
+        canonical = canonical_symbol(symbol, ac)
         bars, meta = self.cache.get_or_fetch(
-            symbol=symbol,
+            symbol=canonical,
             asset_class=ac,
             frequency=frequency,
             start=start_date,
@@ -377,8 +391,17 @@ class MarketDataService:
         granularity (CoinGecko today).
         """
         ac = normalize_asset_class(asset_class)
+        # Normalize cache keys so the bare alias and Yahoo-suffixed form of a
+        # crypto coin (``"BTC"`` / ``"BTC-USD"``) resolve to a single snapshot
+        # and a single underlying provider fetch. The result dict and
+        # ``provider_used`` are re-keyed back to the caller's original symbols
+        # — the orchestrator's provenance/coverage logic keys those by the
+        # requested ``target_symbols``, so the input spelling must round-trip.
+        # Two originals that collapse to the same canonical (e.g. both
+        # ``"BTC"`` and ``"BTC-USD"`` requested) both receive the same bars.
+        canonical_by_original = {orig: canonical_symbol(orig, ac) for orig in symbols}
         cache_results = self.cache.get_or_fetch_multi(
-            symbols=symbols,
+            symbols=list(dict.fromkeys(canonical_by_original.values())),
             asset_class=ac,
             frequency=frequency,
             start=start_date,
@@ -387,11 +410,15 @@ class MarketDataService:
             as_of=as_of,
         )
         result: Dict[str, List[OHLCVBar]] = {}
-        for sym, (bars, meta) in cache_results.items():
+        for orig, canonical in canonical_by_original.items():
+            entry = cache_results.get(canonical)
+            if entry is None:
+                continue
+            bars, meta = entry
             if not bars or meta is None:
                 continue
-            result[sym] = bars
-            self.provider_used[sym] = meta.provider
+            result[orig] = bars
+            self.provider_used[orig] = meta.provider
 
         if intraday_mode:
             from .execution.intraday_guard import check_intraday_data_source
@@ -469,15 +496,11 @@ class MarketDataService:
 
         # Map crypto symbols to Yahoo tickers (e.g. BTC → BTC-USD). Callers
         # may pass either the bare alias (``"BTC"``) or the already-suffixed
-        # Yahoo form (``"BTC-USD"``); both must round-trip to the canonical
-        # ``-USD`` form exactly once. The lookup is keyed by the BARE alias,
-        # so strip a trailing ``-USD`` first — otherwise the fallback branch
-        # would double the suffix to ``"BTC-USD-USD"`` and yfinance would
-        # burn three retries before reporting it as delisted.
+        # Yahoo form (``"BTC-USD"``); ``canonical_symbol`` collapses both to
+        # the bare alias the lookup is keyed by, so the fallback branch can't
+        # double the suffix to ``"BTC-USD-USD"``.
         if asset_class == "crypto":
-            bare = symbol.upper()
-            if bare.endswith("-USD"):
-                bare = bare[: -len("-USD")]
+            bare = canonical_symbol(symbol, asset_class)
             yf_symbol = YAHOO_CRYPTO_TICKERS.get(bare, f"{bare}-USD")
         else:
             yf_symbol = symbol
@@ -623,11 +646,10 @@ class MarketDataService:
             return []
 
         # COINGECKO_IDS is keyed by the BARE alias (``"BTC"``, ``"ETH"``).
-        # Callers may pass the Yahoo-suffixed form (``"BTC-USD"``); strip the
-        # suffix before lookup so the fallback provider works for both.
-        bare = symbol.upper()
-        if bare.endswith("-USD"):
-            bare = bare[: -len("-USD")]
+        # Callers may pass the Yahoo-suffixed form (``"BTC-USD"``);
+        # ``canonical_symbol`` collapses both spellings before lookup so the
+        # fallback provider works for either.
+        bare = canonical_symbol(symbol, asset_class)
         coin_id = COINGECKO_IDS.get(bare)
         if not coin_id:
             logger.warning("Unknown crypto symbol %s — no CoinGecko mapping", symbol)

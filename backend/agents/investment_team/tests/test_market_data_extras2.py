@@ -168,3 +168,44 @@ def test_fetch_multi_symbol_range_populates_last_quality_report(
     out = svc.fetch_multi_symbol_range(["AAA"], "stocks", "2024-05-01", "2024-06-01")
     assert "AAA" in out
     assert svc.last_quality_report is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Crypto -USD cache-key normalization (entry points)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_ohlcv_range_normalizes_cache_key_but_keeps_caller_symbol(
+    svc_with_stub_cache,
+) -> None:
+    """``BTC-USD`` keys the cache as canonical ``BTC`` while ``provider_used``
+    still answers to the caller's original spelling."""
+    svc, cache = svc_with_stub_cache
+    cache.set_single([_bar("2024-06-01")], meta=_StubMeta("yahoo"))
+
+    bars = svc.fetch_ohlcv_range("BTC-USD", "crypto", "2024-05-01", "2024-06-01")
+    assert len(bars) == 1
+    # Cache saw the canonical bare alias, not the suffixed form.
+    assert cache.get_or_fetch_calls[-1]["symbol"] == "BTC"
+    # provider_used is keyed by the caller's original symbol.
+    assert svc.provider_used.get("BTC-USD") == "yahoo"
+
+
+def test_fetch_multi_symbol_range_dedups_crypto_aliases_to_single_fetch(
+    svc_with_stub_cache,
+) -> None:
+    """``['BTC', 'BTC-USD']`` collapses to one canonical cache request; both
+    original keys are returned, mapped to the same bars."""
+    svc, cache = svc_with_stub_cache
+    shared_bar = _bar("2024-06-01")
+    cache.set_multi({"BTC": ([shared_bar], _StubMeta("yahoo"))})
+
+    out = svc.fetch_multi_symbol_range(
+        ["BTC", "BTC-USD"], "crypto", "2024-05-01", "2024-06-01"
+    )
+    # Cache requested the single deduped canonical symbol.
+    assert cache.get_or_fetch_multi_calls[-1]["symbols"] == ["BTC"]
+    # Both caller spellings come back, mapped to the same bars.
+    assert set(out) == {"BTC", "BTC-USD"}
+    assert out["BTC"] is out["BTC-USD"] is not None
+    assert svc.provider_used["BTC"] == svc.provider_used["BTC-USD"] == "yahoo"

@@ -850,3 +850,81 @@ def test_resolve_strategy_symbols_truncates_default_universe(
     )
     out = svc.resolve_strategy_symbols(spec)
     assert len(out) == 2
+
+
+# ---------------------------------------------------------------------------
+# canonical_symbol + crypto -USD normalization across the provider chain
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_symbol_strips_usd_suffix_for_crypto() -> None:
+    from investment_team.symbols import canonical_symbol
+
+    assert canonical_symbol("BTC-USD", "crypto") == "BTC"
+    assert canonical_symbol("btc-usd", "crypto") == "BTC"
+
+
+def test_canonical_symbol_is_identity_for_bare_crypto_alias() -> None:
+    from investment_team.symbols import canonical_symbol
+
+    assert canonical_symbol("BTC", "crypto") == "BTC"
+
+
+def test_canonical_symbol_is_idempotent() -> None:
+    from investment_team.symbols import canonical_symbol
+
+    once = canonical_symbol("ETH-USD", "crypto")
+    assert canonical_symbol(once, "crypto") == once == "ETH"
+
+
+def test_canonical_symbol_leaves_non_crypto_untouched() -> None:
+    from investment_team.symbols import canonical_symbol
+
+    # Equities/forex/futures keep their exact spelling (incl. case + suffix).
+    assert canonical_symbol("AAPL", "stocks") == "AAPL"
+    assert canonical_symbol("EURUSD=X", "forex") == "EURUSD=X"
+    assert canonical_symbol("ES=F", "futures") == "ES=F"
+
+
+def test_crypto_usd_suffix_resolves_to_same_provider_tickers_as_bare_alias() -> None:
+    """Acceptance: ``BTC-USD`` and ``BTC`` produce identical provider tickers.
+
+    Twelve Data must see ``BTC/USD`` and Alpha Vantage must see bare ``BTC``
+    regardless of which spelling the spec used.
+    """
+    from investment_team.data_providers.symbol_maps import resolve_twelve_data
+    from investment_team.symbols import canonical_symbol
+
+    suffixed = canonical_symbol("BTC-USD", "crypto")
+    bare = canonical_symbol("BTC", "crypto")
+
+    # Twelve Data ticker (resolver maps the canonical alias).
+    assert (
+        resolve_twelve_data(suffixed, "crypto") == resolve_twelve_data(bare, "crypto") == "BTC/USD"
+    )
+    # Alpha Vantage passes ``symbol.upper()`` verbatim for crypto → bare BTC.
+    assert suffixed.upper() == bare.upper() == "BTC"
+
+
+def test_fetch_with_providers_normalizes_crypto_symbol_for_every_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chokepoint passes the canonical bare alias to every provider.
+
+    Simulates Yahoo falling through (empty) so the symbol the downstream
+    Twelve Data / Alpha Vantage providers receive is observable.
+    """
+    svc = MarketDataService()
+    seen: List[str] = []
+
+    def _record(sym: str, _ac: str, _start: str, _end: str) -> List[OHLCVBar]:
+        seen.append(sym)
+        return []  # force fall-through to the next provider
+
+    monkeypatch.setattr(
+        svc,
+        "_get_named_provider_chain",
+        lambda _: [("yahoo", _record), ("twelve_data", _record), ("coingecko", _record)],
+    )
+    svc._fetch_with_providers("BTC-USD", "crypto", "2024-01-01", "2024-01-31")
+    assert seen == ["BTC", "BTC", "BTC"]
