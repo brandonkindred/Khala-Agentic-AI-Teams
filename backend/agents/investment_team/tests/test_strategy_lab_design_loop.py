@@ -21,6 +21,7 @@ import pytest
 
 from investment_team.models import BacktestConfig
 from investment_team.strategy_lab import orchestrator as orchestrator_module
+from investment_team.strategy_lab.agents._llm_budget import charge_active_budget
 from investment_team.strategy_lab.agents.design_review import (
     CritiqueIssue,
     SpecCritique,
@@ -382,11 +383,11 @@ def test_design_review_rounds_env_override_floors_to_one(
     assert _design_review_rounds() == 7
 
 
-def _charging_run(*_a, budget=None, **_kw) -> Tuple[Dict[str, Any], str]:
-    """Stub ``DesignAgent.run``/``revise`` that consumes one budget unit per
-    call (simulating one real LLM round-trip) before returning a spec."""
-    if budget is not None:
-        budget.charge()
+def _charging_run(*_a, **_kw) -> Tuple[Dict[str, Any], str]:
+    """Stub ``DesignAgent.run``/``revise`` that consumes one unit of the
+    active budget per call (simulating one real LLM round-trip) before
+    returning a spec — exactly as the real agents charge."""
+    charge_active_budget()
     return _spec_dict(), "scripted"
 
 
@@ -406,9 +407,8 @@ def test_budget_exhausted_short_circuits_with_status(
     monkeypatch.setattr(orch.design_agent, "run", _charging_run)
     monkeypatch.setattr(orch.design_agent, "revise", _charging_run)
 
-    def _review(*_a, budget=None, **_kw) -> SpecCritique:
-        if budget is not None:
-            budget.charge()
+    def _review(*_a, **_kw) -> SpecCritique:
+        charge_active_budget()
         return SpecCritique(
             ready=False,
             rationale="incoherent",
@@ -446,9 +446,8 @@ def test_budget_spans_design_reentries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orch.design_agent, "run", _charging_run)
     monkeypatch.setattr(orch.design_agent, "revise", _charging_run)
 
-    def _review(*_a, budget=None, **_kw) -> SpecCritique:
-        if budget is not None:
-            budget.charge()
+    def _review(*_a, **_kw) -> SpecCritique:
+        charge_active_budget()
         return SpecCritique(ready=False, rationale="nope")
 
     monkeypatch.setattr(orch.design_review_agent, "run", _review)
@@ -472,9 +471,8 @@ def test_budget_not_tripped_on_converging_spec(
 
     monkeypatch.setattr(orch.design_agent, "run", _charging_run)
 
-    def _review(*_a, budget=None, **_kw) -> SpecCritique:
-        if budget is not None:
-            budget.charge()
+    def _review(*_a, **_kw) -> SpecCritique:
+        charge_active_budget()
         return SpecCritique(ready=True, rationale="ok")
 
     monkeypatch.setattr(orch.design_review_agent, "run", _review)

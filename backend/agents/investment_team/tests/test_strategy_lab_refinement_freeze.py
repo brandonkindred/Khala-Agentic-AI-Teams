@@ -319,7 +319,6 @@ class _FakeDesignAgent:
         signal_brief: Any = None,
         convergence_directives: Optional[List[str]] = None,
         exclude_asset_classes: Optional[List[str]] = None,
-        budget: Any = None,
     ) -> Tuple[Dict[str, Any], str]:
         self.call_count += 1
         return self._spec_dict(), "test rationale"
@@ -329,7 +328,6 @@ class _FakeDesignAgent:
         prior_spec: Any,
         critique: Any,
         prior_critiques: Optional[List[Any]] = None,
-        budget: Any = None,
     ) -> Tuple[Dict[str, Any], str]:
         return self._spec_dict(), "test rationale"
 

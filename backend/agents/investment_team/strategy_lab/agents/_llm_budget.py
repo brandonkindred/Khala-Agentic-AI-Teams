@@ -17,9 +17,20 @@ a structured ``status="failed: budget_exhausted"`` short-circuit.
 This module imports nothing from ``strategy_lab`` (stdlib only) so it can be
 imported by the orchestrator and both design agents without creating an
 import cycle.
+
+Charging is accessed through a single chokepoint — :func:`charge_active_budget`,
+backed by a context variable the orchestrator binds via :func:`use_budget`
+for the duration of the design phase. Agents call ``charge_active_budget()``
+right before every model invocation; they no longer thread a ``budget``
+argument through their signatures, so a new design-phase LLM call site only
+has to make that one call to be covered by the cap.
 """
 
 from __future__ import annotations
+
+import contextvars
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 
 class DesignBudgetExhausted(Exception):
@@ -90,3 +101,53 @@ class LLMCallBudget:
         if self.calls_made >= self.limit:
             raise DesignBudgetExhausted(self.limit, self.calls_made)
         self.calls_made += 1
+
+
+# The budget in force for the current design phase. Bound by ``use_budget``
+# in ``run_cycle`` and read by ``charge_active_budget`` at each LLM call site.
+# Default ``None`` means "no cap" — agents invoked outside a design cycle
+# (e.g. unit tests calling an agent directly) are unaffected.
+_active_budget: contextvars.ContextVar[Optional[LLMCallBudget]] = contextvars.ContextVar(
+    "strategy_lab_design_budget", default=None
+)
+
+
+@contextmanager
+def use_budget(budget: Optional[LLMCallBudget]) -> Iterator[None]:
+    """Bind ``budget`` as the active design-phase budget for the duration.
+
+    Preconditions:
+      Called once per cycle around the whole design phase (all re-entries).
+    Postconditions:
+      Within the ``with`` block ``charge_active_budget`` charges ``budget``;
+      the prior binding is restored on exit even if the block raises.
+    """
+    token = _active_budget.set(budget)
+    try:
+        yield
+    finally:
+        _active_budget.reset(token)
+
+
+def active_budget() -> Optional[LLMCallBudget]:
+    """Return the budget bound by the enclosing :func:`use_budget`, or ``None``.
+
+    Postconditions: pure read — never raises, never mutates.
+    """
+    return _active_budget.get()
+
+
+def charge_active_budget() -> None:
+    """Charge the active budget for one imminent LLM call, if one is bound.
+
+    Single chokepoint for design-phase charging: every model invocation
+    calls this immediately before the call. A no-op when no budget is bound.
+
+    Postconditions:
+      When a budget is bound, behaves exactly like :meth:`LLMCallBudget.charge`
+      (increments, or raises :class:`DesignBudgetExhausted` when spent). When
+      none is bound, returns without effect.
+    """
+    budget = _active_budget.get()
+    if budget is not None:
+        budget.charge()

@@ -23,7 +23,7 @@ from strands import Agent
 from ...models import StrategySpec
 from ..quality_gates.models import QualityGateResult
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._llm_budget import LLMCallBudget
+from ._llm_budget import charge_active_budget
 from ._parse_helpers import extract_json_object
 from .model_factory import get_strands_model
 
@@ -182,16 +182,15 @@ class DesignReviewAgent:
         spec: StrategySpec,
         readiness_results: Optional[List[QualityGateResult]] = None,
         prior_critiques: Optional[List[SpecCritique]] = None,
-        budget: Optional[LLMCallBudget] = None,
     ) -> SpecCritique:
         """Run one design-review round.
 
         Returns a :class:`SpecCritique`. Never raises for a reviewer/transport
         hiccup — those produce a fail-closed critique so the orchestrator's
         loop never stalls. The one exception is ``DesignBudgetExhausted``
-        from ``budget.charge()``: a per-cycle budget trip is a cycle-level
-        stop and is allowed to propagate (it is charged *before* the
-        fail-closed ``try`` below).
+        from ``charge_active_budget()``: a per-cycle budget trip is a
+        cycle-level stop and is allowed to propagate (it is charged *before*
+        the fail-closed ``try`` below).
         """
         readiness_block, readiness_findings = _format_readiness(readiness_results or [])
         prior_block = format_prior_critiques(prior_critiques)
@@ -222,8 +221,7 @@ class DesignReviewAgent:
         # Charge outside the fail-closed ``try`` so DesignBudgetExhausted
         # propagates to ``_run_design_loop`` instead of being converted into
         # a fail-closed critique that would let the loop continue past budget.
-        if budget is not None:
-            budget.charge()
+        charge_active_budget()
 
         try:
             result = agent(user_prompt)

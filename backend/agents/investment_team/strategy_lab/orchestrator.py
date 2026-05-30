@@ -46,7 +46,12 @@ from ..models import (
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
-from .agents._llm_budget import DesignBudgetExhausted, LLMCallBudget
+from .agents._llm_budget import (
+    DesignBudgetExhausted,
+    LLMCallBudget,
+    active_budget,
+    use_budget,
+)
 from .agents.alignment import (
     AlignmentAuditError,
     AlignmentIssue,
@@ -620,45 +625,47 @@ class StrategyLabOrchestrator:
         phase_back_count: int = 0
         drift_collector = _DriftCollector()
         cumulative_gate_results: List[QualityGateResult] = []
-        # Per-cycle LLM-call budget. Created once here so it spans every
-        # design re-entry below — the cap is a true ceiling on the whole
-        # cycle, not a fresh allowance per attempt.
+        # Per-cycle LLM-call budget. Bound once here via ``use_budget`` so it
+        # spans every design re-entry below — the cap is a true ceiling on
+        # the whole cycle, not a fresh allowance per attempt. The design
+        # agents charge it through ``charge_active_budget`` at each LLM call;
+        # no ``budget`` argument is threaded through the call chain.
         llm_budget = LLMCallBudget(_design_max_llm_calls())
-        for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
-            try:
-                return self._run_design_attempt(
-                    prior_records=prior_records,
-                    config=config,
-                    signal_brief=signal_brief,
-                    emit=emit,
-                    exclude_asset_classes=exclude_asset_classes,
-                    directives=directives,
-                    design_attempt=design_attempt,
-                    phase_back_count=phase_back_count,
-                    drift_collector=drift_collector,
-                    cumulative_gate_results=cumulative_gate_results,
-                    budget=llm_budget,
-                )
-            except SpecImplementabilityError as exc:
-                last_evidence = exc.evidence
-                last_spec = exc.last_spec
-                last_code = exc.last_code
-                last_failure_phase = exc.failure_phase
-                phase_back_count += 1
-                self.convergence_tracker.increment_trials(1)
-                if design_attempt >= MAX_DESIGN_REENTRIES:
-                    break
-                emit(
-                    "designing",
-                    {
-                        "sub_phase": "loopback",
-                        "design_attempt": design_attempt + 1,
-                        "phase_back_count": phase_back_count,
-                        "evidence": exc.evidence,
-                        "failure_phase": exc.failure_phase,
-                    },
-                )
-                directives.append(f"PREVIOUS SPEC UNIMPLEMENTABLE: {exc.evidence}")
+        with use_budget(llm_budget):
+            for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
+                try:
+                    return self._run_design_attempt(
+                        prior_records=prior_records,
+                        config=config,
+                        signal_brief=signal_brief,
+                        emit=emit,
+                        exclude_asset_classes=exclude_asset_classes,
+                        directives=directives,
+                        design_attempt=design_attempt,
+                        phase_back_count=phase_back_count,
+                        drift_collector=drift_collector,
+                        cumulative_gate_results=cumulative_gate_results,
+                    )
+                except SpecImplementabilityError as exc:
+                    last_evidence = exc.evidence
+                    last_spec = exc.last_spec
+                    last_code = exc.last_code
+                    last_failure_phase = exc.failure_phase
+                    phase_back_count += 1
+                    self.convergence_tracker.increment_trials(1)
+                    if design_attempt >= MAX_DESIGN_REENTRIES:
+                        break
+                    emit(
+                        "designing",
+                        {
+                            "sub_phase": "loopback",
+                            "design_attempt": design_attempt + 1,
+                            "phase_back_count": phase_back_count,
+                            "evidence": exc.evidence,
+                            "failure_phase": exc.failure_phase,
+                        },
+                    )
+                    directives.append(f"PREVIOUS SPEC UNIMPLEMENTABLE: {exc.evidence}")
 
         # Re-entry budget exhausted. The exception's ``last_spec`` /
         # ``last_code`` carry the just-pre-mutation state from the most
@@ -704,7 +711,6 @@ class StrategyLabOrchestrator:
         emit: PhaseCallback,
         design_attempt: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
-        budget: Optional[LLMCallBudget] = None,
     ) -> _DesignLoopOutcome:
         """Drive the bounded design ↔ design-review loop.
 
@@ -718,12 +724,12 @@ class StrategyLabOrchestrator:
         type — no further mutation of orchestrator state happens after
         return.
 
-        ``budget``, when supplied, is charged on every design/review LLM
-        call. When it trips, :class:`DesignBudgetExhausted` is caught here
-        and surfaced as a ``ready=False`` outcome with
-        ``budget_exhausted=True`` carrying whatever spec/critique state
-        existed at the trip — the caller maps this to
-        ``status="failed: budget_exhausted"``.
+        The active design-phase budget (bound by ``use_budget`` in
+        ``run_cycle``) is charged on every design/review LLM call. When it
+        trips, :class:`DesignBudgetExhausted` is caught here and surfaced as
+        a ``ready=False`` outcome with ``budget_exhausted=True`` carrying
+        whatever spec/critique state existed at the trip — the caller maps
+        this to ``status="failed: budget_exhausted"``.
         """
         max_rounds = _design_review_rounds()
         assert max_rounds >= 1, "design-review round cap must be ≥ 1"
@@ -752,7 +758,6 @@ class StrategyLabOrchestrator:
                 signal_brief=signal_brief,
                 convergence_directives=directives or None,
                 exclude_asset_classes=exclude_asset_classes,
-                budget=budget,
             )
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
 
@@ -779,9 +784,8 @@ class StrategyLabOrchestrator:
                 critique_history=critique_history,
                 emit=emit,
                 drift_collector=drift_collector,
-                budget=budget,
             )
-        except DesignBudgetExhausted:
+        except DesignBudgetExhausted as exc:
             # Per-cycle LLM-call budget hit mid-design. Surface whatever
             # spec/critique state we reached as a not-ready outcome tagged
             # ``budget_exhausted`` so the caller short-circuits with a
@@ -794,7 +798,7 @@ class StrategyLabOrchestrator:
                 "designing",
                 {
                     "sub_phase": "budget_exhausted",
-                    "calls_made": budget.calls_made if budget is not None else 0,
+                    "calls_made": exc.calls_made,
                     "rounds": len(critique_history),
                 },
             )
@@ -827,7 +831,6 @@ class StrategyLabOrchestrator:
         critique_history: List["SpecCritique"],
         emit: PhaseCallback,
         drift_collector: Optional[_DriftCollector],
-        budget: Optional[LLMCallBudget],
     ) -> Tuple[StrategySpec, str, bool]:
         """Run the bounded readiness → review → revise rounds.
 
@@ -837,19 +840,18 @@ class StrategyLabOrchestrator:
         Post: returns ``(spec, rationale, ready)`` — the final candidate
         spec, its latest rationale, and whether the reviewer marked it
         ready on the most recent round. ``critique_history`` is mutated in
-        place — one entry per round (synthetic readiness critiques count).
+        place — one entry per round (synthetic readiness critiques count),
+        so its length is the authoritative round count.
         May raise :class:`DesignBudgetExhausted`, which the caller handles.
 
         Extracted from :meth:`_run_design_loop` so the budget-exhaustion
-        ``try`` there stays shallow and the per-round body keeps its own
-        local ``rounds_run`` without polluting the outer scope.
+        ``try`` there stays shallow.
         """
         ready = False
         last_readiness_signature: Optional[tuple] = None
         readiness_results: List[QualityGateResult] = []
 
         for review_round in range(max_rounds):
-            rounds_run = review_round + 1
             # Deterministic readiness gate. Skip re-validation when the
             # revised spec's readiness-relevant signature is unchanged
             # since the previous round — the gate would return the same
@@ -874,7 +876,6 @@ class StrategyLabOrchestrator:
                     spec,
                     readiness_results,
                     prior_critiques=critique_history,
-                    budget=budget,
                 )
                 critique.round = review_round
                 critique_history.append(critique)
@@ -891,7 +892,7 @@ class StrategyLabOrchestrator:
                     ready = True
                     emit(
                         "designing",
-                        {"sub_phase": "ready", "rounds": rounds_run},
+                        {"sub_phase": "ready", "rounds": len(critique_history)},
                     )
                     break
             else:
@@ -927,7 +928,7 @@ class StrategyLabOrchestrator:
 
             prev_spec = spec.model_copy(deep=True)
             strategy_dict, rationale = self.design_agent.revise(
-                spec, critique, prior_critiques=critique_history, budget=budget
+                spec, critique, prior_critiques=critique_history
             )
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
             if drift_collector is not None:
@@ -2524,7 +2525,6 @@ class StrategyLabOrchestrator:
         phase_back_count: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
         cumulative_gate_results: Optional[List[QualityGateResult]] = None,
-        budget: Optional[LLMCallBudget] = None,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -2560,7 +2560,6 @@ class StrategyLabOrchestrator:
             emit=emit,
             design_attempt=design_attempt,
             drift_collector=drift_collector,
-            budget=budget,
         )
         spec = design_outcome.spec
         rationale = design_outcome.rationale
@@ -2580,8 +2579,9 @@ class StrategyLabOrchestrator:
             # switch — surface it distinctly from genuine non-convergence.
             if design_outcome.budget_exhausted:
                 short_circuit_status = "failed: budget_exhausted"
-                calls_made = budget.calls_made if budget is not None else 0
-                limit = budget.limit if budget is not None else 0
+                _budget = active_budget()
+                calls_made = _budget.calls_made if _budget is not None else 0
+                limit = _budget.limit if _budget is not None else 0
                 abort_reason = (
                     f"Design phase exhausted its LLM-call budget "
                     f"({calls_made}/{limit} calls) after {design_context.rounds} "
