@@ -584,31 +584,37 @@ class MarketDataService:
 
                 bars: List[OHLCVBar] = []
                 repairs = 0
+                dropped_nan = 0
                 for v in values:
-                    o = round(float(v["open"]), 4)
-                    h = round(float(v["high"]), 4)
-                    ll = round(float(v["low"]), 4)
-                    c = round(float(v["close"]), 4)
-                    # Normalise OHLC invariants — see _df_to_bars for rationale.
-                    h_fixed = max(o, h, ll, c)
-                    l_fixed = min(o, h, ll, c)
-                    if h_fixed != h or l_fixed != ll:
-                        repairs += 1
-                    bars.append(
-                        OHLCVBar(
-                            date=v["datetime"][:10],
-                            open=o,
-                            high=h_fixed,
-                            low=l_fixed,
-                            close=c,
-                            volume=float(v.get("volume", 0)),
-                        )
+                    # Normalise OHLC invariants + drop non-finite rows — see
+                    # _normalize_ohlc_bar. Without the finite check a NaN from
+                    # this fallback would trip the gate's sizing critical with
+                    # ``got nan`` (asymmetric vs yfinance otherwise).
+                    bar, repaired = self._normalize_ohlc_bar(
+                        date=v["datetime"][:10],
+                        open=float(v["open"]),
+                        high=float(v["high"]),
+                        low=float(v["low"]),
+                        close=float(v["close"]),
+                        volume=float(v.get("volume", 0)),
                     )
+                    if bar is None:
+                        dropped_nan += 1
+                        continue
+                    if repaired:
+                        repairs += 1
+                    bars.append(bar)
                 if repairs > 0:
                     logger.warning(
                         "Twelve Data: repaired OHLC invariants on %d/%d bars for %s",
                         repairs,
                         len(bars),
+                        td_symbol,
+                    )
+                if dropped_nan > 0:
+                    logger.warning(
+                        "Twelve Data: dropped %d bar(s) with non-finite OHLC values for %s",
+                        dropped_nan,
                         td_symbol,
                     )
                 # Twelve Data returns newest-first; reverse to chronological order
@@ -683,17 +689,30 @@ class MarketDataService:
                         daily.setdefault(bar_date, []).append(float(price))
 
                 bars: List[OHLCVBar] = []
+                dropped_nan = 0
                 for bar_date in sorted(daily):
                     prices = daily[bar_date]
-                    bars.append(
-                        OHLCVBar(
-                            date=bar_date,
-                            open=round(prices[0], 4),
-                            high=round(max(prices), 4),
-                            low=round(min(prices), 4),
-                            close=round(prices[-1], 4),
-                            volume=0.0,
-                        )
+                    # Route the aggregated O/H/L/C through _normalize_ohlc_bar
+                    # so a NaN in the price list (which max()/min() would
+                    # otherwise propagate) is dropped here, consistent with the
+                    # other providers.
+                    bar, _repaired = self._normalize_ohlc_bar(
+                        date=bar_date,
+                        open=prices[0],
+                        high=max(prices),
+                        low=min(prices),
+                        close=prices[-1],
+                        volume=0.0,
+                    )
+                    if bar is None:
+                        dropped_nan += 1
+                        continue
+                    bars.append(bar)
+                if dropped_nan > 0:
+                    logger.warning(
+                        "CoinGecko: dropped %d bar(s) with non-finite prices for %s",
+                        dropped_nan,
+                        symbol,
                     )
                 return bars
 
@@ -773,35 +792,39 @@ class MarketDataService:
 
             bars: List[OHLCVBar] = []
             repairs = 0
+            dropped_nan = 0
             for bar_date in sorted(ts):
                 if bar_date < start_date or bar_date > end_date:
                     continue
                 entry = ts[bar_date]
-                # Alpha Vantage key names vary by endpoint; try common patterns
-                o = round(float(entry.get("1. open", entry.get("1a. open (USD)", 0))), 4)
-                h = round(float(entry.get("2. high", entry.get("2a. high (USD)", 0))), 4)
-                ll = round(float(entry.get("3. low", entry.get("3a. low (USD)", 0))), 4)
-                c = round(float(entry.get("4. close", entry.get("4a. close (USD)", 0))), 4)
-                # Normalise OHLC invariants — see _df_to_bars for rationale.
-                h_fixed = max(o, h, ll, c)
-                l_fixed = min(o, h, ll, c)
-                if h_fixed != h or l_fixed != ll:
-                    repairs += 1
-                bars.append(
-                    OHLCVBar(
-                        date=bar_date,
-                        open=o,
-                        high=h_fixed,
-                        low=l_fixed,
-                        close=c,
-                        volume=float(entry.get("5. volume", entry.get("5. market cap (USD)", 0))),
-                    )
+                # Alpha Vantage key names vary by endpoint; try common patterns.
+                # Normalise + drop non-finite rows via _normalize_ohlc_bar so a
+                # NaN from this fallback can't reach the gate as ``got nan``.
+                bar, repaired = self._normalize_ohlc_bar(
+                    date=bar_date,
+                    open=float(entry.get("1. open", entry.get("1a. open (USD)", 0))),
+                    high=float(entry.get("2. high", entry.get("2a. high (USD)", 0))),
+                    low=float(entry.get("3. low", entry.get("3a. low (USD)", 0))),
+                    close=float(entry.get("4. close", entry.get("4a. close (USD)", 0))),
+                    volume=float(entry.get("5. volume", entry.get("5. market cap (USD)", 0))),
                 )
+                if bar is None:
+                    dropped_nan += 1
+                    continue
+                if repaired:
+                    repairs += 1
+                bars.append(bar)
             if repairs > 0:
                 logger.warning(
                     "Alpha Vantage: repaired OHLC invariants on %d/%d bars for %s",
                     repairs,
                     len(bars),
+                    symbol,
+                )
+            if dropped_nan > 0:
+                logger.warning(
+                    "Alpha Vantage: dropped %d bar(s) with non-finite OHLC values for %s",
+                    dropped_nan,
                     symbol,
                 )
             return bars
@@ -815,6 +838,61 @@ class MarketDataService:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _normalize_ohlc_bar(
+        *,
+        date: str,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> Tuple[Optional[OHLCVBar], bool]:
+        """Round, finite-check, and repair the OHLC invariants for one bar.
+
+        Centralises the per-bar normalisation shared by every provider
+        ingest path (yfinance, Twelve Data, Alpha Vantage, CoinGecko) so the
+        non-finite defense and the ``H = max(O,H,L,C)`` / ``L = min(O,H,L,C)``
+        repair behave identically regardless of which provider the chain
+        landed on.
+
+        Preconditions:
+            * ``open``/``high``/``low``/``close``/``volume`` are already
+              ``float`` (each provider does its own key extraction +
+              ``float(...)``; ``TypeError`` on ``None``/``pd.NA`` is the
+              caller's concern and is intentionally not caught here).
+
+        Postconditions:
+            * Returns ``(None, False)`` when any of O/H/L/C is non-finite
+              (NaN/inf) — the caller drops the row and counts it. A NaN close
+              would otherwise propagate into the gate's market-sample provider
+              and trip the sizing-realisability critical with ``got nan``.
+            * Otherwise returns ``(bar, repaired)`` where ``bar`` carries the
+              rounded-to-4dp values with ``high``/``low`` corrected to the
+              true envelope, and ``repaired`` is ``True`` iff that correction
+              changed the reported high or low.
+        """
+        o = round(open, 4)
+        h = round(high, 4)
+        ll = round(low, 4)
+        c = round(close, 4)
+        if not (
+            math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)
+        ):
+            return None, False
+        h_fixed = max(o, h, ll, c)
+        l_fixed = min(o, h, ll, c)
+        repaired = h_fixed != h or l_fixed != ll
+        bar = OHLCVBar(
+            date=date,
+            open=o,
+            high=h_fixed,
+            low=l_fixed,
+            close=c,
+            volume=float(volume),
+        )
+        return bar, repaired
+
+    @staticmethod
     def _df_to_bars(df: object) -> List[OHLCVBar]:
         """Convert a yfinance DataFrame to a list of OHLCVBar.
 
@@ -825,42 +903,29 @@ class MarketDataService:
         :mod:`investment_team.execution.data_quality` would (correctly)
         reject such bars, but strategies that read H/L for breakout / stop
         signals can't backtest against them either. Normalise the
-        invariants here — ``H = max(O, H, L, C)``, ``L = min(O, H, L, C)`` —
-        so downstream consumers always see coherent bars.
+        invariants via :meth:`_normalize_ohlc_bar` — ``H = max(O, H, L, C)``,
+        ``L = min(O, H, L, C)`` — so downstream consumers always see coherent
+        bars, and drop rows with non-finite OHLC.
         """
         bars: List[OHLCVBar] = []
         repairs = 0
         dropped_nan = 0
         for idx, row in df.iterrows():  # type: ignore[union-attr]
             bar_date = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
-            o = round(float(row["Open"]), 4)
-            h = round(float(row["High"]), 4)
-            ll = round(float(row["Low"]), 4)
-            c = round(float(row["Close"]), 4)
-            # Drop rows where any OHLC value is non-finite. yfinance
-            # occasionally surfaces NaN rows during data gaps; without this
-            # filter a NaN close propagates straight into the gate's market
-            # sample provider and trips the sizing-realisability critical
-            # with ``got nan``, killing the cycle before any trade can run.
-            if not (
-                math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)
-            ):
+            bar, repaired = MarketDataService._normalize_ohlc_bar(
+                date=bar_date,
+                open=float(row["Open"]),
+                high=float(row["High"]),
+                low=float(row["Low"]),
+                close=float(row["Close"]),
+                volume=float(row.get("Volume", 0)),
+            )
+            if bar is None:
                 dropped_nan += 1
                 continue
-            h_fixed = max(o, h, ll, c)
-            l_fixed = min(o, h, ll, c)
-            if h_fixed != h or l_fixed != ll:
+            if repaired:
                 repairs += 1
-            bars.append(
-                OHLCVBar(
-                    date=bar_date,
-                    open=o,
-                    high=h_fixed,
-                    low=l_fixed,
-                    close=c,
-                    volume=float(row.get("Volume", 0)),
-                )
-            )
+            bars.append(bar)
         if repairs > 0:
             logger.warning(
                 "yfinance: repaired OHLC invariants on %d/%d bars",
