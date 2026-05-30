@@ -1260,3 +1260,46 @@ def test_trailing_real_bars_empty_when_insufficient_or_nonpositive() -> None:
     assert trailing_real_bars(real, 5) == []
     assert trailing_real_bars(real, 0) == []
     assert trailing_real_bars([], 1) == []
+
+
+def test_trailing_real_bars_selects_trailing_real_across_imputed_gap() -> None:
+    """The trailing window is the most recent ``lookback`` *real* bars no matter
+    where the imputed bars sit — a block of imputed bars between two runs of real
+    bars must not shift which real bars are selected. This pins the invariant
+    that skipping imputed during the reverse scan is equivalent to filtering
+    them out first, so passing unfiltered bars to compute_adv_from_bars matches
+    pre-filtering them (the liquidity gate relies on this equivalence)."""
+    block1 = [
+        OHLCVBar(date=f"2024-01-{i:02d}", open=100, high=100, low=100, close=100, volume=1.0)
+        for i in range(1, 16)
+    ]  # 15 real
+    gap = [
+        OHLCVBar(
+            date=f"2024-02-{i:02d}",
+            open=100,
+            high=100,
+            low=100,
+            close=100,
+            volume=0.0,
+            is_imputed=True,
+        )
+        for i in range(1, 6)
+    ]  # 5 imputed between the two real runs
+    block2 = [
+        OHLCVBar(date=f"2024-03-{i:02d}", open=100, high=100, low=100, close=100, volume=1000.0)
+        for i in range(1, 11)
+    ]  # 10 real
+    bars = block1 + gap + block2
+
+    window = trailing_real_bars(bars, 20)
+    assert len(window) == 20
+    assert all(not b.is_imputed for b in window)
+    # The most recent 20 real bars: last 10 of block1 + all of block2, in order.
+    expected = [b.date for b in block1[5:]] + [b.date for b in block2]
+    assert [b.date for b in window] == expected
+
+    # Equivalence: passing unfiltered bars equals pre-filtering imputed ones.
+    prefiltered = [b for b in bars if not b.is_imputed]
+    assert compute_adv_from_bars(bars, lookback=20) == compute_adv_from_bars(
+        prefiltered, lookback=20
+    )
