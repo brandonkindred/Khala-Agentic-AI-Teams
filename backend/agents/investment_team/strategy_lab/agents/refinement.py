@@ -12,6 +12,7 @@ from strands import Agent
 
 from ...models import BacktestResult, StrategySpec
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+from ._llm_envelope import invoke_agent
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -136,8 +137,10 @@ class RefinementAgent:
             tools=[],
         )
 
-        result = agent(user_prompt)
-        parsed = _extract_json(str(result))
+        raw = invoke_agent(
+            agent, user_prompt, agent_key="strategy_ideation", phase="refinement", logger=logger
+        )
+        parsed = _extract_json(raw)
 
         updated_code = parsed.pop("strategy_code", code)
 

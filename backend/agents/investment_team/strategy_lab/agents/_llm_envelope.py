@@ -1,0 +1,435 @@
+"""Unified fault-tolerance envelope for every Strategy Lab LLM call.
+
+The Strategy Lab agents invoke ``strands.Agent`` directly and synchronously
+(``result = agent(prompt)``). Those calls had no consistent timeout, no
+backoff, and no retriable-vs-fatal distinction — a transient transport fault
+looked identical to a clean response, which in a trading-strategy pipeline is
+the failure mode that ships a broken strategy.
+
+:func:`invoke_agent` is the single chokepoint every strategy-lab LLM call now
+routes through. It provides:
+
+  * a per-call wall-clock timeout (a daemon-thread guard; see below),
+  * bounded jittered exponential backoff between attempts,
+  * a distinct retriable-vs-fatal classification of the raised exception,
+  * a bounded total wall-time budget across all attempts,
+  * a structured ``logger.exception`` on every failed attempt carrying
+    ``agent / phase / attempt / latency_ms / error_class``.
+
+It reuses the platform's exception hierarchy (``llm_service.interface``) and
+mirrors the backoff formula used by ``llm_service.util.call_llm_with_retries``.
+It deliberately does NOT delegate to ``call_llm_with_retries`` because that
+helper has neither a per-call timeout nor a total-budget, and its bare
+``except Exception`` clause retries fatal 4xx/auth errors — both of which this
+envelope must not do.
+
+Timeout semantics (layered, by design):
+  The blocking ``agent(prompt)`` call cannot be cancelled from Python without
+  killing its thread. The *primary* timeout that actually frees the socket is
+  configured on the underlying model client in ``model_factory.get_strands_model``.
+  This envelope adds a *secondary* wall-clock guard by running the call on a
+  daemon thread and joining with a timeout. On timeout the worker thread keeps
+  running (a leak) until the primary transport timeout fires — the daemon flag
+  keeps it from blocking interpreter shutdown, and the transport timeout bounds
+  the leak. Relying on the guard alone would leak unboundedly under a hung
+  endpoint, so both layers are required.
+
+This module imports only stdlib + ``llm_service`` (no ``strategy_lab`` imports)
+so it cannot create an import cycle with the agents that consume it.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import random
+import threading
+import time
+from typing import Any, Callable, Optional
+
+import httpx
+
+from llm_service.config import resolve_timeout
+from llm_service.interface import (
+    OLLAMA_WEEKLY_LIMIT_MESSAGE,
+    LLMJsonParseError,
+    LLMPermanentError,
+    LLMRateLimitError,
+    LLMSchemaValidationError,
+    LLMTemporaryError,
+)
+
+from ..exceptions import StrategyLabLLMError
+
+_module_logger = logging.getLogger(__name__)
+
+# Canonical structured-failure message. Every fail-closed site (envelope and
+# the near-miss adjudicator guard) emits these same five fields so operators
+# can grep one schema across the whole lab.
+_FAILURE_FMT = (
+    "strategy_lab LLM call failed: agent=%s phase=%s attempt=%s/%s latency_ms=%d error_class=%s"
+)
+
+
+class _EnvelopeTimeout(Exception):
+    """Raised internally when the per-call wall-clock guard trips.
+
+    Classified RETRIABLE — a stuck call is treated like any other transient
+    transport fault. Never escapes the envelope (it is wrapped in
+    :class:`StrategyLabLLMError` on exhaustion).
+    """
+
+    def __init__(self, timeout_s: float) -> None:
+        super().__init__(f"strategy-lab LLM call exceeded {timeout_s:.1f}s wall-clock guard")
+        self.timeout_s = timeout_s
+
+
+# ---------------------------------------------------------------------------
+# Config resolution
+# ---------------------------------------------------------------------------
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read ``name`` as a float; garbage / empty falls back to ``default``.
+
+    Preconditions: ``name`` is an env var name.
+    Postconditions: returns a float — never raises.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read ``name`` as an int; garbage / empty falls back to ``default``.
+
+    Preconditions: ``name`` is an env var name.
+    Postconditions: returns an int — never raises.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+class _EnvelopeConfig:
+    """Resolved per-call envelope tunables. Pure value object."""
+
+    __slots__ = ("max_attempts", "timeout_s", "total_budget_s", "backoff_base", "backoff_max")
+
+    def __init__(
+        self,
+        *,
+        max_attempts: int,
+        timeout_s: float,
+        total_budget_s: float,
+        backoff_base: float,
+        backoff_max: float,
+    ) -> None:
+        self.max_attempts = max_attempts
+        self.timeout_s = timeout_s
+        self.total_budget_s = total_budget_s
+        self.backoff_base = backoff_base
+        self.backoff_max = backoff_max
+
+
+def _resolve_config(
+    agent_key: str,
+    max_attempts: Optional[int],
+    timeout_s: Optional[float],
+    total_budget_s: Optional[float],
+    backoff_base: Optional[float],
+    backoff_max: Optional[float],
+) -> _EnvelopeConfig:
+    """Resolve envelope tunables from explicit args → ``STRATEGY_LAB_LLM_*`` →
+    generic ``LLM_*`` → defaults.
+
+    Preconditions: ``agent_key`` is a non-empty model key.
+    Postconditions: every field is finite and floored to a safe minimum
+    (``max_attempts >= 1``, timeouts/budget ``> 0``). Never raises.
+    """
+    if max_attempts is None:
+        retries = _env_int("STRATEGY_LAB_LLM_MAX_RETRIES", _env_int("LLM_MAX_RETRIES", 2))
+        attempts = retries + 1
+    else:
+        attempts = max_attempts
+    attempts = max(1, attempts)
+
+    if timeout_s is None:
+        # resolve_timeout already honours LLM_TIMEOUT; the STRATEGY_LAB_*
+        # override takes precedence over it when set.
+        timeout_s = _env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(agent_key))
+    timeout_s = max(0.001, float(timeout_s))
+
+    if backoff_base is None:
+        backoff_base = _env_float(
+            "STRATEGY_LAB_LLM_BACKOFF_BASE", _env_float("LLM_BACKOFF_BASE", 2.0)
+        )
+    backoff_base = max(1.0, float(backoff_base))
+
+    if backoff_max is None:
+        backoff_max = _env_float(
+            "STRATEGY_LAB_LLM_BACKOFF_MAX", _env_float("LLM_BACKOFF_MAX", 60.0)
+        )
+    backoff_max = max(0.0, float(backoff_max))
+
+    if total_budget_s is None:
+        total_budget_s = _env_float("STRATEGY_LAB_LLM_TOTAL_BUDGET", attempts * timeout_s * 1.5)
+    total_budget_s = max(0.001, float(total_budget_s))
+
+    return _EnvelopeConfig(
+        max_attempts=attempts,
+        timeout_s=timeout_s,
+        total_budget_s=total_budget_s,
+        backoff_base=backoff_base,
+        backoff_max=backoff_max,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Classification + backoff
+# ---------------------------------------------------------------------------
+
+
+_FATAL_MARKERS = (
+    "unauthorized",
+    "forbidden",
+    "notfound",
+    "not found",
+    "badrequest",
+    "bad request",
+    "invalid",
+    "validation",
+    "401",
+    "403",
+    "404",
+    "422",
+)
+_RETRIABLE_MARKERS = (
+    "timeout",
+    "timedout",
+    "connection",
+    "serviceunavailable",
+    "service unavailable",
+    "throttl",
+    "ratelimit",
+    "rate limit",
+    "overloaded",
+    "unavailable",
+    "502",
+    "503",
+    "504",
+)
+
+
+def classify_strands_exception(exc: BaseException) -> bool:
+    """Classify ``exc`` as retriable (``True``) or fatal (``False``).
+
+    Conservative policy: retry transient faults (5xx / connection / timeout /
+    throttle); do NOT retry obvious client/auth/malformed errors. Unknown
+    exceptions default to retriable (bounded by ``max_attempts`` + budget).
+
+    Preconditions: ``exc`` is any raised exception.
+    Postconditions: returns a bool — pure, no I/O, never raises.
+    """
+    # 1. Known permanent / parse / schema failures — re-calling with the same
+    #    prompt cannot help.
+    if isinstance(exc, (LLMPermanentError, LLMJsonParseError, LLMSchemaValidationError)):
+        return False
+    # 2. Rate limit — retry with backoff, except a hard weekly cap.
+    if isinstance(exc, LLMRateLimitError):
+        return OLLAMA_WEEKLY_LIMIT_MESSAGE not in str(exc)
+    # 3. Known transient transport types.
+    if isinstance(
+        exc,
+        (
+            LLMTemporaryError,
+            httpx.ConnectError,
+            httpx.TimeoutException,
+            httpx.ReadTimeout,
+            ConnectionError,
+            TimeoutError,
+            _EnvelopeTimeout,
+        ),
+    ):
+        return True
+    # 4. HTTP status code carried on the exception, if any.
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        if status in (408, 429) or 500 <= status <= 599:
+            return True
+        if 400 <= status <= 499:
+            return False
+    # 5. Heuristics on type name / message for raw provider exceptions we
+    #    cannot import. Retriable markers win over fatal markers so a
+    #    "ConnectionTimeout"-style name is never misread as fatal.
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if any(m in name or m in msg for m in _RETRIABLE_MARKERS):
+        return True
+    if any(m in name or m in msg for m in _FATAL_MARKERS):
+        return False
+    # 6. Unknown — assume transient, bounded by attempts + budget.
+    return True
+
+
+def _backoff_delay(attempt: int, base: float, max_: float) -> float:
+    """Jittered exponential backoff seconds for a 0-based ``attempt`` index.
+
+    Mirrors ``llm_service.util.call_llm_with_retries``:
+    ``min(base**attempt + uniform(0, 1), max_)``.
+
+    Preconditions: ``attempt >= 0``, ``base >= 1``, ``max_ >= 0``.
+    Postconditions: returns a value in ``[0, max_]``.
+    """
+    return min(base**attempt + random.uniform(0, 1), max_)
+
+
+# ---------------------------------------------------------------------------
+# Timeout guard
+# ---------------------------------------------------------------------------
+
+
+def _call_with_timeout(fn: Callable[[], Any], timeout_s: float) -> Any:
+    """Run ``fn`` on a daemon thread, joining with ``timeout_s``.
+
+    Preconditions: ``fn`` is a zero-arg callable; ``timeout_s > 0``.
+    Postconditions: returns ``fn()`` on success; re-raises any exception ``fn``
+    raised; raises :class:`_EnvelopeTimeout` if ``fn`` did not finish within
+    ``timeout_s`` (the worker thread is left running as a daemon — bounded by
+    the transport-level timeout configured in the model factory).
+    """
+    box: dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 — propagate to caller thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True, name="strategy-lab-llm")
+    thread.start()
+    thread.join(timeout_s)
+    if thread.is_alive():
+        raise _EnvelopeTimeout(timeout_s)
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+def invoke_agent(
+    agent_callable: Callable[[str], Any],
+    prompt: str,
+    *,
+    agent_key: str,
+    phase: str,
+    max_attempts: Optional[int] = None,
+    timeout_s: Optional[float] = None,
+    total_budget_s: Optional[float] = None,
+    backoff_base: Optional[float] = None,
+    backoff_max: Optional[float] = None,
+    retriable_classifier: Optional[Callable[[BaseException], bool]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> str:
+    """Invoke a synchronous strands ``Agent`` under the fault-tolerance envelope.
+
+    Preconditions:
+      * ``agent_callable`` is the constructed ``strands.Agent`` (called as
+        ``agent_callable(prompt)``); the caller is responsible for budget
+        charging (``charge_active_budget``) BEFORE calling this — transport
+        retries here intentionally do not re-charge.
+      * ``agent_key`` / ``phase`` are non-empty diagnostic labels.
+
+    Postconditions:
+      * Returns ``str(result)`` on the first successful attempt.
+      * Raises :class:`StrategyLabLLMError` (an ``LLMTemporaryError`` subclass,
+        so existing broad ``except`` clauses keep their fail-closed contract)
+        when attempts are exhausted, the total budget is spent, or the
+        exception classifies as fatal.
+      * Emits one structured ``logger.exception`` per failed attempt and one
+        summary ``logger.error`` on terminal failure.
+    """
+    log = logger or _module_logger
+    classify = retriable_classifier or classify_strands_exception
+    cfg = _resolve_config(
+        agent_key, max_attempts, timeout_s, total_budget_s, backoff_base, backoff_max
+    )
+
+    deadline = time.monotonic() + cfg.total_budget_s
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(cfg.max_attempts):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        effective_ts = min(cfg.timeout_s, remaining)
+        t0 = time.monotonic()
+        try:
+            result = _call_with_timeout(lambda: agent_callable(prompt), effective_ts)
+            return str(result)
+        except Exception as exc:  # noqa: BLE001 — classify + log every failure
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            last_exc = exc
+            log.exception(
+                _FAILURE_FMT,
+                agent_key,
+                phase,
+                attempt + 1,
+                cfg.max_attempts,
+                latency_ms,
+                type(exc).__name__,
+            )
+            if not classify(exc):
+                raise StrategyLabLLMError(
+                    f"strategy-lab LLM call failed (fatal): {type(exc).__name__}: {exc}",
+                    agent_key=agent_key,
+                    phase=phase,
+                    attempts=attempt + 1,
+                    last_error_class=type(exc).__name__,
+                    outcome="fatal",
+                    cause=exc,
+                ) from exc
+            # Retriable: back off before the next attempt, clamped to budget.
+            if attempt < cfg.max_attempts - 1:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                delay = min(_backoff_delay(attempt, cfg.backoff_base, cfg.backoff_max), remaining)
+                if delay > 0:
+                    time.sleep(delay)
+
+    outcome = "budget_exhausted" if (deadline - time.monotonic()) <= 0 else "exhausted"
+    last_class = type(last_exc).__name__ if last_exc else None
+    log.error(
+        "strategy_lab LLM call terminal: agent=%s phase=%s attempts=%s outcome=%s error_class=%s",
+        agent_key,
+        phase,
+        cfg.max_attempts,
+        outcome,
+        last_class or "None",
+    )
+    raise StrategyLabLLMError(
+        f"strategy-lab LLM call unreachable after {cfg.max_attempts} attempt(s) "
+        f"({outcome}; last_error={last_class}): {last_exc}",
+        agent_key=agent_key,
+        phase=phase,
+        attempts=cfg.max_attempts,
+        last_error_class=last_class,
+        outcome=outcome,
+        cause=last_exc if isinstance(last_exc, Exception) else None,
+    )
+
+
+__all__ = ["invoke_agent", "classify_strands_exception"]

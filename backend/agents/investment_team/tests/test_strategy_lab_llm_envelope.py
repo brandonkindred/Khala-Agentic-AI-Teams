@@ -1,0 +1,416 @@
+"""Tests for the Strategy Lab unified LLM fault-tolerance envelope.
+
+The envelope is exercised directly with plain callables (no strands needed):
+backoff/retry, fatal-vs-retriable classification, per-call wall-clock timeout,
+total wall-time budget, structured five-field logging, and env-var resolution.
+Plus fail-closed regressions for the two safety-critical surfaces (the
+near-miss adjudicator guard and the alignment fix-proposer) and a design-budget
+wiring check that transport retries do not double-charge the per-cycle budget.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any, List
+
+import httpx
+import pytest
+
+from investment_team.strategy_lab.agents import _llm_envelope as env
+from investment_team.strategy_lab.agents._llm_envelope import (
+    _backoff_delay,
+    _call_with_timeout,
+    _EnvelopeTimeout,
+    _resolve_config,
+    classify_strands_exception,
+    invoke_agent,
+)
+from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+from llm_service.interface import (
+    OLLAMA_WEEKLY_LIMIT_MESSAGE,
+    LLMError,
+    LLMJsonParseError,
+    LLMPermanentError,
+    LLMRateLimitError,
+    LLMTemporaryError,
+)
+
+
+@pytest.fixture
+def no_sleep(monkeypatch: pytest.MonkeyPatch) -> List[float]:
+    """Patch the envelope's ``time.sleep`` to record (and skip) backoff waits."""
+    waits: List[float] = []
+    monkeypatch.setattr(env.time, "sleep", lambda s: waits.append(s))
+    return waits
+
+
+class _Stub:
+    """Callable that scripts a sequence of raises/returns per invocation."""
+
+    def __init__(self, *outcomes: Any) -> None:
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def __call__(self, prompt: str) -> Any:
+        self.calls += 1
+        outcome = self._outcomes[min(self.calls - 1, len(self._outcomes) - 1)]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+# ---------------------------------------------------------------------------
+# invoke_agent — happy paths and retries
+# ---------------------------------------------------------------------------
+
+
+def test_returns_on_first_success() -> None:
+    stub = _Stub("hello")
+    out = invoke_agent(stub, "p", agent_key="strategy_design", phase="x")
+    assert out == "hello"
+    assert stub.calls == 1
+
+
+def test_flaky_then_success_retries_with_backoff(no_sleep: List[float]) -> None:
+    stub = _Stub(httpx.ConnectError("boom"), "ok")
+    out = invoke_agent(
+        stub, "p", agent_key="strategy_design", phase="design_generate", max_attempts=3
+    )
+    assert out == "ok"
+    assert stub.calls == 2
+    # Exactly one backoff sleep between the two attempts.
+    assert len(no_sleep) == 1
+    assert no_sleep[0] >= 0
+
+
+def test_str_coercion_of_non_string_result() -> None:
+    stub = _Stub(12345)
+    assert invoke_agent(stub, "p", agent_key="k", phase="x") == "12345"
+
+
+def test_exhaustion_raises_after_max_attempts(
+    no_sleep: List[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    stub = _Stub(httpx.ConnectError("down"))
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(StrategyLabLLMError) as ei:
+            invoke_agent(
+                stub, "p", agent_key="strategy_ideation", phase="refinement", max_attempts=3
+            )
+    assert stub.calls == 3
+    assert ei.value.outcome == "exhausted"
+    assert ei.value.attempts == 3
+    assert ei.value.last_error_class == "ConnectError"
+    # One structured five-field line per failed attempt.
+    failure_lines = [r for r in caplog.records if "strategy_lab LLM call failed" in r.message]
+    assert len(failure_lines) == 3
+    text = caplog.text
+    for field in ("agent=", "phase=", "attempt=", "latency_ms=", "error_class=ConnectError"):
+        assert field in text
+
+
+def test_fatal_classification_raises_immediately(
+    no_sleep: List[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    stub = _Stub(LLMPermanentError("nope"))
+    with pytest.raises(StrategyLabLLMError) as ei:
+        invoke_agent(stub, "p", agent_key="k", phase="x", max_attempts=5)
+    assert stub.calls == 1
+    assert ei.value.outcome == "fatal"
+    assert no_sleep == []  # never backed off
+
+
+def test_custom_classifier_is_used(no_sleep: List[float]) -> None:
+    stub = _Stub(RuntimeError("weird"))
+    with pytest.raises(StrategyLabLLMError) as ei:
+        invoke_agent(
+            stub,
+            "p",
+            agent_key="k",
+            phase="x",
+            max_attempts=4,
+            retriable_classifier=lambda _exc: False,
+        )
+    assert stub.calls == 1
+    assert ei.value.outcome == "fatal"
+
+
+# ---------------------------------------------------------------------------
+# Timeout + budget
+# ---------------------------------------------------------------------------
+
+
+def test_wall_clock_timeout_guard_fires() -> None:
+    def _slow(_prompt: str) -> str:
+        time.sleep(1.0)
+        return "never"
+
+    with pytest.raises(StrategyLabLLMError) as ei:
+        invoke_agent(_slow, "p", agent_key="k", phase="x", max_attempts=1, timeout_s=0.05)
+    assert ei.value.last_error_class == "_EnvelopeTimeout"
+
+
+def test_total_budget_stops_before_attempts_exhausted() -> None:
+    stub = _Stub(httpx.ConnectError("down"))
+    with pytest.raises(StrategyLabLLMError) as ei:
+        invoke_agent(
+            stub,
+            "p",
+            agent_key="k",
+            phase="x",
+            max_attempts=1000,
+            timeout_s=10.0,
+            total_budget_s=0.05,
+            backoff_base=1.0,
+            backoff_max=0.02,
+        )
+    assert ei.value.outcome == "budget_exhausted"
+    assert stub.calls < 1000
+
+
+# ---------------------------------------------------------------------------
+# _call_with_timeout
+# ---------------------------------------------------------------------------
+
+
+def test_call_with_timeout_returns_value() -> None:
+    assert _call_with_timeout(lambda: 7, 1.0) == 7
+
+
+def test_call_with_timeout_propagates_error() -> None:
+    def _boom() -> Any:
+        raise ValueError("x")
+
+    with pytest.raises(ValueError):
+        _call_with_timeout(_boom, 1.0)
+
+
+def test_call_with_timeout_raises_envelope_timeout() -> None:
+    with pytest.raises(_EnvelopeTimeout):
+        _call_with_timeout(lambda: time.sleep(1.0), 0.05)
+
+
+# ---------------------------------------------------------------------------
+# _backoff_delay
+# ---------------------------------------------------------------------------
+
+
+def test_backoff_delay_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(env.random, "uniform", lambda _a, _b: 0.0)
+    assert _backoff_delay(0, 2.0, 60.0) == 1.0
+    assert _backoff_delay(3, 2.0, 60.0) == 8.0
+    monkeypatch.setattr(env.random, "uniform", lambda _a, _b: 1.0)
+    assert _backoff_delay(0, 2.0, 60.0) == 2.0
+    # Cap applies.
+    assert _backoff_delay(10, 2.0, 5.0) == 5.0
+
+
+# ---------------------------------------------------------------------------
+# classify_strands_exception
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (LLMTemporaryError("5xx"), True),
+        (LLMPermanentError("4xx"), False),
+        (LLMJsonParseError("bad"), False),
+        (httpx.ConnectError("c"), True),
+        (httpx.ReadTimeout("t"), True),
+        (ConnectionError("net"), True),
+        (TimeoutError("slow"), True),
+        (_EnvelopeTimeout(1.0), True),
+        (LLMRateLimitError("429 slow down"), True),
+        (LLMRateLimitError(OLLAMA_WEEKLY_LIMIT_MESSAGE), False),
+        (LLMError("server", status_code=503), True),
+        (LLMError("teapot", status_code=418), False),
+        (LLMError("missing", status_code=404), False),
+        (LLMError("rate", status_code=429), True),
+        (type("FooAuthError", (Exception,), {})("unauthorized token"), False),
+        (type("FooTimeout", (Exception,), {})("read timed out"), True),
+        (RuntimeError("totally unknown"), True),
+    ],
+)
+def test_classify_strands_exception(exc: BaseException, expected: bool) -> None:
+    assert classify_strands_exception(exc) is expected
+
+
+# ---------------------------------------------------------------------------
+# Config resolution
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for k in (
+        "STRATEGY_LAB_LLM_MAX_RETRIES",
+        "LLM_MAX_RETRIES",
+        "STRATEGY_LAB_LLM_TIMEOUT",
+        "LLM_TIMEOUT",
+        "STRATEGY_LAB_LLM_BACKOFF_BASE",
+        "LLM_BACKOFF_BASE",
+        "STRATEGY_LAB_LLM_BACKOFF_MAX",
+        "LLM_BACKOFF_MAX",
+        "STRATEGY_LAB_LLM_TOTAL_BUDGET",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    cfg = _resolve_config("strategy_ideation", None, None, None, None, None)
+    assert cfg.max_attempts == 3  # 2 retries + 1
+    assert cfg.timeout_s == 900.0
+    assert cfg.backoff_base == 2.0
+    assert cfg.backoff_max == 60.0
+    assert cfg.total_budget_s == pytest.approx(3 * 900.0 * 1.5)
+
+
+def test_resolve_config_garbage_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRATEGY_LAB_LLM_MAX_RETRIES", "garbage")
+    monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)
+    monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", "")
+    monkeypatch.setenv("STRATEGY_LAB_LLM_BACKOFF_BASE", "not-a-number")
+    cfg = _resolve_config("strategy_ideation", None, None, None, None, None)
+    assert cfg.max_attempts == 3
+    assert cfg.backoff_base == 2.0
+
+
+def test_resolve_config_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRATEGY_LAB_LLM_MAX_RETRIES", "5")
+    monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", "12.5")
+    cfg = _resolve_config("strategy_ideation", None, None, None, None, None)
+    assert cfg.max_attempts == 6
+    assert cfg.timeout_s == 12.5
+    # Explicit args win over env.
+    cfg2 = _resolve_config("strategy_ideation", 2, 3.0, 9.0, 1.5, 4.0)
+    assert cfg2.max_attempts == 2
+    assert cfg2.timeout_s == 3.0
+    assert cfg2.total_budget_s == 9.0
+
+
+def test_resolve_config_floors_sub_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _resolve_config("k", 0, 0.0, 0.0, 0.0, -5.0)
+    assert cfg.max_attempts == 1
+    assert cfg.timeout_s >= 0.001
+    assert cfg.total_budget_s >= 0.001
+    assert cfg.backoff_base >= 1.0
+    assert cfg.backoff_max >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed regressions on the safety-critical surfaces
+# ---------------------------------------------------------------------------
+
+
+def _fake_agent_class(stub: _Stub) -> type:
+    """Build a stand-in for ``strands.Agent`` that delegates to ``stub``."""
+
+    class _FakeAgent:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> Any:
+            return stub(prompt)
+
+    return _FakeAgent
+
+
+def test_near_miss_consult_fails_closed_and_logs(caplog: pytest.LogCaptureFixture) -> None:
+    from investment_team.strategy_lab.alignment_findings import NearMissVerdict
+    from investment_team.strategy_lab.quality_gates.alignment_checks import (
+        DeterministicAlignmentChecker,
+    )
+
+    gate = DeterministicAlignmentChecker()
+
+    def _raising_adjudicator(**_kwargs: Any) -> NearMissVerdict:
+        raise httpx.ConnectError("adjudicator unreachable")
+
+    evaluation = {"rule_id": "r1", "predicate_repr": "rsi < 30", "lhs": 30.1, "rhs": 30.0}
+    trade = type("T", (), {"symbol": "AAPL", "entry_date": "2023-01-03"})()
+
+    with caplog.at_level(logging.WARNING):
+        verdict = gate._consult_near_miss(_raising_adjudicator, evaluation, trade)
+
+    assert verdict.legitimate is False
+    text = caplog.text
+    assert "fail-closed near-miss" in text
+    assert "phase=alignment_near_miss" in text
+    assert "error_class=ConnectError" in text
+
+
+def test_propose_code_fix_fails_closed_after_envelope_retries(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: List[float]
+) -> None:
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab.agents import alignment as alignment_mod
+    from investment_team.strategy_lab.agents.alignment import (
+        AlignmentAuditError,
+        TradeAlignmentAgent,
+    )
+    from investment_team.strategy_lab.alignment_findings import AlignmentFinding
+    from investment_team.strategy_lab.spec_dsl import (
+        DEFAULT_SIZING_PAYLOAD,
+        EntryRule,
+        IndicatorRef,
+        Predicate,
+    )
+
+    stub = _Stub(httpx.ConnectError("alignment LLM down"))
+    monkeypatch.setattr(alignment_mod, "Agent", _fake_agent_class(stub))
+    monkeypatch.setattr(alignment_mod, "get_strands_model", lambda *_a, **_k: None)
+    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")
+
+    spec = StrategySpec(
+        strategy_id="t-1",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="rsi(14) < 30",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0
+                ),
+            )
+        ],
+        exit_rules=[],
+        sizing=DEFAULT_SIZING_PAYLOAD,
+        target_symbols=["AAPL"],
+    )
+    findings = [
+        AlignmentFinding(trade_num=1, check_name="entry_signal", passed=False, severity="critical")
+    ]
+
+    with pytest.raises(AlignmentAuditError):
+        TradeAlignmentAgent().propose_code_fix(spec=spec, code="code", findings=findings)
+    # STRATEGY_LAB_ALIGNMENT_RETRIES=2 → 3 envelope attempts.
+    assert stub.calls == 3
+
+
+def test_design_invoke_charges_once_despite_transport_retry(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: List[float]
+) -> None:
+    from investment_team.strategy_lab.agents import design as design_mod
+
+    # The test session's conftest pins LLM_MAX_RETRIES=0; enable one transport
+    # retry so the flaky-then-success path is exercised.
+    monkeypatch.setenv("STRATEGY_LAB_LLM_MAX_RETRIES", "2")
+    stub = _Stub(httpx.ConnectError("flaky"), '{"asset_class": "stocks", "rationale": "r"}')
+    charges = {"n": 0}
+    monkeypatch.setattr(design_mod, "Agent", _fake_agent_class(stub))
+    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(design_mod, "validate_structured_rules", lambda _parsed: None)
+    monkeypatch.setattr(
+        design_mod, "charge_active_budget", lambda: charges.__setitem__("n", charges["n"] + 1)
+    )
+
+    agent = design_mod.DesignAgent()
+    parsed, rationale = agent._invoke_and_parse("system", "user")
+
+    assert parsed == {"asset_class": "stocks"}
+    assert rationale == "r"
+    # Budget charged once (one parse iteration); the transport retry inside the
+    # envelope must NOT re-charge.
+    assert charges["n"] == 1
+    assert stub.calls == 2

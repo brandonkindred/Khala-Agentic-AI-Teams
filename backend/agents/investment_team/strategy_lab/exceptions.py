@@ -9,8 +9,47 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
+from llm_service.interface import LLMTemporaryError
+
 if TYPE_CHECKING:
     from ..models import StrategySpec
+
+
+class StrategyLabLLMError(LLMTemporaryError):
+    """Raised by the strategy-lab LLM envelope when a call cannot be completed.
+
+    Produced by :func:`agents._llm_envelope.invoke_agent` after retries or the
+    total wall-time budget are exhausted, or immediately when the underlying
+    exception classifies as fatal (4xx / auth / malformed). Subclasses
+    :class:`LLMTemporaryError` so existing broad ``except Exception`` handlers
+    keep their fail-closed contract, and so any future job-pause logic keyed on
+    ``LLMTemporaryError`` treats an unreachable lab LLM the same way.
+
+    Preconditions:
+      Raised only by the envelope; ``attempts >= 1`` when set.
+    Postconditions:
+      ``agent_key`` / ``phase`` / ``attempts`` / ``last_error_class`` /
+      ``outcome`` expose the failure context; ``outcome`` is one of
+      ``"fatal"`` | ``"exhausted"`` | ``"budget_exhausted"``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        agent_key: Optional[str] = None,
+        phase: Optional[str] = None,
+        attempts: Optional[int] = None,
+        last_error_class: Optional[str] = None,
+        outcome: Optional[str] = None,
+        cause: Optional[Exception] = None,
+    ) -> None:
+        super().__init__(message, cause=cause)
+        self.agent_key = agent_key
+        self.phase = phase
+        self.attempts = attempts
+        self.last_error_class = last_error_class
+        self.outcome = outcome
 
 
 class SpecImplementabilityError(Exception):

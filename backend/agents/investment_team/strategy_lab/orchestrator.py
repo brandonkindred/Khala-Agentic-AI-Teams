@@ -1140,7 +1140,9 @@ class StrategyLabOrchestrator:
                 round_gate_results.extend(probe_gates)
             if not any(not g.passed and g.severity == "critical" for g in round_gate_results):
                 pred_conf_gates = self.predicate_conformance_gate.check(
-                    code, spec, attempt=predicate_conformance_attempts,
+                    code,
+                    spec,
+                    attempt=predicate_conformance_attempts,
                 )
                 round_gate_results.extend(pred_conf_gates)
                 if any(not g.passed and g.severity == "critical" for g in pred_conf_gates):
@@ -2469,9 +2471,7 @@ class StrategyLabOrchestrator:
             )
             for g in all_gate_results
         ]
-        rule_impl_map = _build_rule_implementation_map(
-            spec, list(alignment_findings or []), code
-        )
+        rule_impl_map = _build_rule_implementation_map(spec, list(alignment_findings or []), code)
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
         record = StrategyLabRecord(
             lab_record_id=lab_record_id,
@@ -2543,7 +2543,9 @@ class StrategyLabOrchestrator:
         # Reset per-attempt counters so a re-entry starts fresh.
         self._consecutive_spec_mutation_rounds = {}
 
-        all_gate_results: List[QualityGateResult] = cumulative_gate_results if cumulative_gate_results is not None else []
+        all_gate_results: List[QualityGateResult] = (
+            cumulative_gate_results if cumulative_gate_results is not None else []
+        )
         refinement_attempts: List[str] = []
         zero_trade_attempts: List[str] = []
         if drift_collector is None:
@@ -3080,77 +3082,54 @@ class StrategyLabOrchestrator:
             return report, check_result.gate_results
 
         # Misaligned: ask the LLM for a code patch grounded in the
-        # structured findings. Retries cover transient LLM transport /
-        # parse failures only; non-AlignmentAuditError exceptions fall
-        # closed immediately so a bug in the agent does not silently
-        # produce a green audit.
+        # structured findings. ``propose_code_fix`` routes through the LLM
+        # envelope, which owns the bounded jittered-backoff retry loop
+        # (``STRATEGY_LAB_ALIGNMENT_RETRIES``) and raises
+        # ``AlignmentAuditError`` only after transport/parse retries are
+        # exhausted. Any failure falls closed (``aligned=False``,
+        # ``proposed_code=None``) so a transient outage or an agent bug can
+        # never silently produce a green audit.
         try:
-            retries = max(int(os.environ.get("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")), 0)
-        except ValueError:
-            retries = 2
+            report = self.alignment_agent.propose_code_fix(
+                spec=spec,
+                code=code,
+                findings=check_result.findings,
+                prior_attempts=prior_attempts,
+            )
+            # The LLM might echo ``aligned=True`` on this path (the
+            # fix-proposer parse keeps ``proposed_code`` via
+            # ``preserve_proposed_code=True`` so an over-claim doesn't strip
+            # a usable patch). The deterministic gate's verdict is
+            # authoritative — clamp ``aligned`` to ``False`` so the loop
+            # keeps driving.
+            if report.aligned:
+                report.aligned = False
+            report.alignment_findings = list(check_result.findings)
+            # The deterministic findings are the authoritative description of
+            # what went wrong. The LLM's narrative ``issues`` may omit,
+            # under-specify, or rephrase them, which would leave downstream
+            # analysis prompts (``analysis.py``'s alignment-status section)
+            # with nothing concrete to cite. Always re-derive ``issues`` from
+            # the structured findings so the deterministic-first contract
+            # holds end-to-end.
+            report.issues = findings_to_issues(check_result.findings)
+            return report, check_result.gate_results
+        except AlignmentAuditError as exc:
+            # The envelope already retried transport/parse faults; an
+            # AlignmentAuditError here means those retries were exhausted.
+            logger.error(
+                "Alignment fix-proposer failed after envelope retries; failing closed: %s",
+                exc,
+            )
+            exc_repr = f"{type(exc).__name__}: {exc}"
+        except Exception as exc:  # noqa: BLE001 — fail closed on any unexpected fault
+            logger.exception("Alignment agent raised unexpected error; failing closed")
+            exc_repr = f"{type(exc).__name__}: {exc}"
 
-        last_exc: Optional[Exception] = None
-        for attempt in range(retries + 1):
-            try:
-                report = self.alignment_agent.propose_code_fix(
-                    spec=spec,
-                    code=code,
-                    findings=check_result.findings,
-                    prior_attempts=prior_attempts,
-                )
-                # The LLM might echo ``aligned=True`` on this path
-                # (the fix-proposer parse keeps ``proposed_code`` via
-                # ``preserve_proposed_code=True`` so an over-claim
-                # doesn't strip a usable patch). The deterministic
-                # gate's verdict is authoritative — clamp ``aligned``
-                # to ``False`` so the loop keeps driving.
-                if report.aligned:
-                    report.aligned = False
-                report.alignment_findings = list(check_result.findings)
-                # The deterministic findings are the authoritative
-                # description of what went wrong. The LLM's narrative
-                # ``issues`` may omit, under-specify, or rephrase them,
-                # which would leave downstream analysis prompts
-                # (``analysis.py``'s alignment-status section) with
-                # nothing concrete to cite. Always re-derive ``issues``
-                # from the structured findings so the deterministic-
-                # first contract holds end-to-end.
-                report.issues = findings_to_issues(check_result.findings)
-                return report, check_result.gate_results
-            except AlignmentAuditError as exc:
-                last_exc = exc
-                logger.warning(
-                    "Alignment fix-proposer attempt %d/%d failed: %s",
-                    attempt + 1,
-                    retries + 1,
-                    exc,
-                )
-            except Exception as exc:
-                logger.exception("Alignment agent raised unexpected error; failing closed")
-                fail_closed = TradeAlignmentReport(
-                    aligned=False,
-                    proposed_code=None,
-                    rationale=(
-                        f"Alignment fix-proposer error (fail-closed): {type(exc).__name__}: {exc}"
-                    ),
-                    issues=findings_to_issues(check_result.findings),
-                    alignment_findings=list(check_result.findings),
-                )
-                return fail_closed, check_result.gate_results
-
-        assert last_exc is not None, "loop ran at least once; last_exc must be set"
-        logger.error(
-            "Alignment fix-proposer error after %d attempts; failing closed: %s",
-            retries + 1,
-            last_exc,
-        )
         fail_closed = TradeAlignmentReport(
             aligned=False,
             proposed_code=None,
-            rationale=(
-                f"Alignment fix-proposer error after {retries + 1} attempts (fail-closed): "
-                f"{type(last_exc).__name__}: {last_exc}"
-            ),
+            rationale=f"Alignment fix-proposer error (fail-closed): {exc_repr}",
             issues=findings_to_issues(check_result.findings),
             alignment_findings=list(check_result.findings),
         )

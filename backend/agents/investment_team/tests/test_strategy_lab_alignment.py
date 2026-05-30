@@ -638,21 +638,18 @@ def test_audit_fails_closed_on_unexpected_agent_exception(monkeypatch) -> None:
     assert agent.calls == 1
 
 
-def test_audit_retries_then_succeeds(monkeypatch) -> None:
-    """A transient ``AlignmentAuditError`` is retried; a later attempt
-    that returns a valid report is what the orchestrator sees."""
-    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")
+def test_audit_uses_proposed_fix(monkeypatch) -> None:
+    """The orchestrator calls ``propose_code_fix`` exactly once and passes its
+    report through. Transport/parse retries now live inside the LLM envelope
+    (within ``propose_code_fix``), not in the orchestrator's audit loop."""
+    success_report = _proposed_fix("proposed fix")
 
-    success_report = _proposed_fix("recovered on retry")
-
-    class _FlakyAgent:
+    class _Agent:
         def __init__(self) -> None:
             self.calls = 0
 
         def propose_code_fix(self, **_kwargs: Any) -> TradeAlignmentReport:
             self.calls += 1
-            if self.calls == 1:
-                raise AlignmentAuditError("ValueError: malformed JSON")
             return success_report
 
         def adjudicate_near_miss(self, **_kwargs: Any) -> NearMissVerdict:  # pragma: no cover
@@ -662,7 +659,7 @@ def test_audit_retries_then_succeeds(monkeypatch) -> None:
     orch.deterministic_alignment_checker = _StubChecker(  # type: ignore[assignment]
         [_misaligned_check_result()]
     )
-    agent = _FlakyAgent()
+    agent = _Agent()
     orch.alignment_agent = agent  # type: ignore[assignment]
 
     report, _gates = orch._run_alignment_audit(
@@ -675,13 +672,14 @@ def test_audit_retries_then_succeeds(monkeypatch) -> None:
         config=_config(),
     )
     assert report.proposed_code == success_report.proposed_code
-    assert agent.calls == 2
+    assert agent.calls == 1
 
 
-def test_audit_retries_exhausted_fails_closed(monkeypatch) -> None:
-    """When every retry raises ``AlignmentAuditError``, the audit returns
-    ``aligned=False`` with the underlying error recorded in the rationale."""
-    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")
+def test_audit_fails_closed_on_alignment_audit_error(monkeypatch) -> None:
+    """When ``propose_code_fix`` raises ``AlignmentAuditError`` (its envelope
+    retries already exhausted), the audit returns ``aligned=False`` with the
+    underlying error recorded in the rationale, after a single orchestrator
+    call (retries are owned by the envelope, not this loop)."""
 
     class _AlwaysBoomAgent:
         def __init__(self) -> None:
@@ -715,8 +713,9 @@ def test_audit_retries_exhausted_fails_closed(monkeypatch) -> None:
     assert "fail-closed" in report.rationale.lower()
     assert "AlignmentAuditError" in report.rationale
     assert "malformed JSON" in report.rationale
-    # default(2) retries → 3 total attempts
-    assert agent.calls == 3
+    # The orchestrator calls the fix-proposer once; retry/backoff lives in
+    # the envelope inside propose_code_fix.
+    assert agent.calls == 1
     # Findings still preserved on the fail-closed report so the
     # downstream record reflects what the gate detected.
     assert report.alignment_findings
