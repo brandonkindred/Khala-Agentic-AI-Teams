@@ -89,6 +89,27 @@ def test_empty_input_is_a_stable_value() -> None:
     assert fp1 == fp2
 
 
+def test_fingerprint_ignores_is_imputed_flag() -> None:
+    """The is_imputed provenance flag is deliberately excluded from the
+    canonical fingerprint so existing snapshots keep their cache key when the
+    flag is later persisted — only OHLCV prices identify a dataset."""
+    from investment_team.market_data_cache.store import _hash_bars
+
+    base = [OHLCVBar(date="2024-01-01", open=100, high=101, low=99, close=100, volume=1_000_000)]
+    flagged = [
+        OHLCVBar(
+            date="2024-01-01",
+            open=100,
+            high=101,
+            low=99,
+            close=100,
+            volume=1_000_000,
+            is_imputed=True,
+        )
+    ]
+    assert _hash_bars(base) == _hash_bars(flagged)
+
+
 # ---------------------------------------------------------------------------
 # BacktestResult.dataset_fingerprint via the legacy pre-fetched path
 # ---------------------------------------------------------------------------

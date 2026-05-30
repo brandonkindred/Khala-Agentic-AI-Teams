@@ -66,6 +66,14 @@ def _get_parquet_schema() -> Any:
                 ("low", pa.float64()),
                 ("close", pa.float64()),
                 ("volume", pa.float64()),
+                # Provenance flag for forward-filled (synthetic) bars. Persisted
+                # so cache reads can exclude imputed bars from ADV / liquidity
+                # math exactly as a live fetch does — without it,
+                # ``compute_adv_from_bars`` would see ``is_imputed=False`` on
+                # every cached bar and silently count synthetic days. Snapshots
+                # written before this column existed read back with the flag
+                # defaulted to ``False`` (see ``_table_to_bars``).
+                ("is_imputed", pa.bool_()),
             ]
         )
     return _PARQUET_SCHEMA
@@ -160,6 +168,7 @@ def _bars_to_table(bars: Sequence[OHLCVBar]) -> "pa.Table":
             "low": [float(b.low) for b in bars],
             "close": [float(b.close) for b in bars],
             "volume": [float(b.volume) for b in bars],
+            "is_imputed": [bool(b.is_imputed) for b in bars],
         },
         schema=_get_parquet_schema(),
     )
@@ -169,6 +178,14 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
     cols = {
         name: table[name].to_pylist() for name in ("date", "open", "high", "low", "close", "volume")
     }
+    # ``is_imputed`` is a newer column; snapshots written before it existed
+    # lack it entirely, so default the whole series to False rather than
+    # KeyError on the older schema.
+    imputed = (
+        table["is_imputed"].to_pylist()
+        if "is_imputed" in table.schema.names
+        else [False] * table.num_rows
+    )
     # Normalise OHLC invariants on cache read. Parquet snapshots persisted
     # before market_data_service started repairing invariants at fetch
     # time still contain inconsistent bars (Yahoo / Alpha Vantage / Twelve
@@ -194,6 +211,7 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
                 low=l_fixed,
                 close=c,
                 volume=cols["volume"][i],
+                is_imputed=bool(imputed[i]),
             )
         )
     if repairs > 0:

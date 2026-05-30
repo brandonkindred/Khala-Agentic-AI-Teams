@@ -215,8 +215,13 @@ def _adv_as_of_trade(
         D-day volume isn't known yet, so including it would be a
         look-ahead leak.
       - Returns ``None`` when ``bars`` is ``None``/empty, fewer than
-        ``lookback`` prior bars are available, or every prior bar has
-        zero volume.
+        ``lookback`` *real* prior bars are available, or every prior bar has
+        zero volume. Imputed (synthetic forward-fill) bars are excluded so
+        this guard counts the same real trading days that
+        :func:`compute_adv_from_bars` averages — otherwise a window padded out
+        to ``lookback`` by synthetic bars would clear this length check only
+        for ``compute_adv_from_bars`` to return ``None``, silently marking the
+        trade unresolvable.
     Invariants:
       - Linear scan over ``bars`` (no sort assumption is required, but
         the typical caller passes chronologically-ordered bars from the
@@ -226,7 +231,7 @@ def _adv_as_of_trade(
     if not bars or lookback <= 0 or not entry_date:
         return None
     cutoff = entry_date[:10]
-    prior_bars = [b for b in bars if b.date[:10] < cutoff]
+    prior_bars = [b for b in bars if b.date[:10] < cutoff and not b.is_imputed]
     if len(prior_bars) < lookback:
         return None
     return compute_adv_from_bars(prior_bars, lookback=lookback)

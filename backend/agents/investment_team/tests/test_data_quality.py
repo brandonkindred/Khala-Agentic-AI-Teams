@@ -711,6 +711,7 @@ def test_cache_table_to_bars_repairs_ohlc_invariants() -> None:
             "low": [1.0509, 1.0511],
             "close": [1.0513, 1.0514],
             "volume": [0.0, 0.0],
+            "is_imputed": [False, True],
         },
         schema=_get_parquet_schema(),
     )
@@ -720,9 +721,32 @@ def test_cache_table_to_bars_repairs_ohlc_invariants() -> None:
     assert bars[0].high == 1.0513
     # Row 1 untouched.
     assert bars[1].high == 1.0515
+    # is_imputed round-trips from the persisted column.
+    assert [b.is_imputed for b in bars] == [False, True]
     for b in bars:
         assert b.high >= max(b.open, b.low, b.close)
         assert b.low <= min(b.open, b.high, b.close)
+
+
+def test_cache_table_to_bars_defaults_is_imputed_for_legacy_schema() -> None:
+    """Snapshots written before the ``is_imputed`` column existed read back
+    with the flag defaulted to ``False`` rather than raising KeyError."""
+    pa = pytest.importorskip("pyarrow")
+    from investment_team.market_data_cache.store import _table_to_bars
+
+    legacy = pa.Table.from_pydict(
+        {
+            "date": ["2024-01-02", "2024-01-03"],
+            "open": [1.05, 1.06],
+            "high": [1.06, 1.07],
+            "low": [1.04, 1.05],
+            "close": [1.055, 1.065],
+            "volume": [10.0, 11.0],
+        }
+    )
+    assert "is_imputed" not in legacy.schema.names
+    bars = _table_to_bars(legacy)
+    assert [b.is_imputed for b in bars] == [False, False]
 
 
 def test_forex_materially_broken_bar_still_flags() -> None:
