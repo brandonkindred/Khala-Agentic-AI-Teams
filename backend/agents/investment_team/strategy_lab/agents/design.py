@@ -31,6 +31,7 @@ from ...signal_intelligence_agent import brief_to_prompt_block
 from ...signal_intelligence_models import SignalIntelligenceBriefV1
 from ...strategy_lab_context import asset_class_mix_hint, format_prior_results
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
+from ._llm_envelope import invoke_agent
 from ._parse_helpers import (
     StrategySpecParseError,
     extract_json_object,
@@ -219,9 +220,11 @@ class DesignAgent:
         Pre: ``system_prompt`` and ``user_prompt`` are non-empty strings.
         Post: returns ``(parsed, rationale)`` with no ``strategy_code`` key
         and rule fields that pass :func:`validate_structured_rules`. Raises
-        ``ValueError`` on malformed JSON or
+        ``ValueError`` on malformed JSON,
         :class:`StrategySpecParseError` on prose/off-shape rules after the
-        retry budget is exhausted.
+        retry budget is exhausted, or
+        :class:`~..exceptions.StrategyLabLLMError` when the LLM envelope
+        exhausts its transport retries / budget.
 
         On :class:`StrategySpecParseError` the agent re-prompts the LLM
         with the offending field and pydantic error as feedback (the model
@@ -243,8 +246,10 @@ class DesignAgent:
             # the per-cycle budget. Each parse-retry is a real LLM call and
             # so counts individually.
             charge_active_budget()
-            result = agent(prompt)
-            parsed = extract_json_object(str(result))
+            raw = invoke_agent(
+                agent, prompt, agent_key="strategy_design", phase="design_generate", logger=logger
+            )
+            parsed = extract_json_object(raw)
 
             # Logged-and-dropped (not raised): a stray ``strategy_code`` is
             # prompt drift, not a usable-spec failure.
@@ -373,8 +378,14 @@ class DesignAgent:
             f"```json\n{spec_json}\n```\n"
         )
         charge_active_budget()
-        result = agent(user_prompt)
-        parsed = extract_json_object(str(result))
+        raw = invoke_agent(
+            agent,
+            user_prompt,
+            agent_key="strategy_design",
+            phase="design_self_review",
+            logger=logger,
+        )
+        parsed = extract_json_object(raw)
         return _coerce_critique(parsed, readiness_findings=[])
 
 

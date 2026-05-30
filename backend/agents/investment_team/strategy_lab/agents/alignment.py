@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -37,11 +38,29 @@ from strands import Agent
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+from ._llm_envelope import invoke_agent
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+
+def _alignment_max_attempts() -> int:
+    """Resolve the envelope attempt count for the alignment fix-proposer.
+
+    Driven by ``STRATEGY_LAB_ALIGNMENT_RETRIES`` (default ``2`` → 3 attempts
+    total), preserving the historical alignment retry semantics now that the
+    retry+backoff loop lives inside the LLM envelope rather than the
+    orchestrator. Garbage / sub-zero values fall back to the default.
+
+    Postconditions: returns an int ``>= 1``.
+    """
+    try:
+        retries = max(int(os.environ.get("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")), 0)
+    except ValueError:
+        retries = 2
+    return retries + 1
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +306,14 @@ class TradeAlignmentAgent:
             tools=[],
         )
         try:
-            result = agent(user_prompt)
-            parsed = _extract_json(str(result))
+            raw = invoke_agent(
+                agent,
+                user_prompt,
+                agent_key="strategy_ideation",
+                phase="alignment_near_miss",
+                logger=logger,
+            )
+            parsed = _extract_json(raw)
         except Exception as exc:
             logger.debug(
                 "Near-miss adjudicator failed to produce parseable JSON: %s",
@@ -362,8 +387,15 @@ class TradeAlignmentAgent:
             tools=[],
         )
         try:
-            result = agent(user_prompt)
-            parsed = _extract_json(str(result))
+            raw = invoke_agent(
+                agent,
+                user_prompt,
+                agent_key="strategy_ideation",
+                phase="alignment_propose_fix",
+                max_attempts=_alignment_max_attempts(),
+                logger=logger,
+            )
+            parsed = _extract_json(raw)
         except Exception as exc:
             logger.debug(
                 "Alignment fix proposer failed to produce parseable JSON: %s",

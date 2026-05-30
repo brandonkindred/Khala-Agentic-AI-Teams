@@ -12,6 +12,7 @@ from strands import Agent
 
 from ...models import BacktestResult, StrategySpec, TradeRecord
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+from ._llm_envelope import invoke_agent
 from .alignment import TradeAlignmentReport
 from .model_factory import get_strands_model
 
@@ -124,8 +125,14 @@ class AnalysisAgent:
         )
 
         try:
-            draft_result = agent(draft_prompt)
-            draft_parsed = _extract_json(str(draft_result))
+            draft_raw = invoke_agent(
+                agent,
+                draft_prompt,
+                agent_key="strategy_ideation",
+                phase="analysis_draft",
+                logger=logger,
+            )
+            draft_parsed = _extract_json(draft_raw)
             draft_narrative = draft_parsed.get("draft_narrative", "")
         except Exception:
             logger.exception("Draft analysis failed")
@@ -167,8 +174,14 @@ class AnalysisAgent:
         )
 
         try:
-            review_result = review_agent(review_prompt)
-            review_parsed = _extract_json(str(review_result))
+            review_raw = invoke_agent(
+                review_agent,
+                review_prompt,
+                agent_key="strategy_ideation",
+                phase="analysis_review",
+                logger=logger,
+            )
+            review_parsed = _extract_json(review_raw)
             revised = review_parsed.get("revised_narrative", "")
             if revised:
                 return _ensure_misalignment_disclaimer(revised, alignment_report)

@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from typing import Any, ClassVar, Dict, List, Optional, Protocol
 
 import numpy as np
@@ -1318,6 +1319,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         is then free to treat the trade as misaligned and rebuild via
         ``propose_code_fix`` on the next iteration.
         """
+        t0 = time.monotonic()
         try:
             return adjudicator(
                 rule_id=evaluation["rule_id"],
@@ -1327,8 +1329,21 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 symbol=trade.symbol,
                 entry_date=trade.entry_date,
             )
-        except Exception as exc:  # pragma: no cover — fail-closed safety net
-            logger.warning("Near-miss adjudicator raised; failing closed: %s", exc)
+        except Exception as exc:
+            # Safety-critical fail-closed: a stuck or erroring adjudicator must
+            # never legitimise a missed predicate. Emit the same structured
+            # five-field schema the LLM envelope uses so on-call can tell a
+            # transport outage apart from a genuine miss.
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            logger.warning(
+                "strategy_lab LLM call failed (fail-closed near-miss): agent=%s phase=%s "
+                "attempt=%s latency_ms=%d error_class=%s",
+                "alignment",
+                "alignment_near_miss",
+                "final",
+                latency_ms,
+                type(exc).__name__,
+            )
             return NearMissVerdict(
                 legitimate=False,
                 rationale=f"adjudicator error: {type(exc).__name__}",

@@ -25,6 +25,7 @@ from strands import Agent
 from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from ..coverage_probe import format_coverage_report
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+from ._llm_envelope import invoke_agent
 from ._parse_helpers import StrategySpecParseError, validate_structured_rules
 from .model_factory import get_strands_model
 
@@ -200,8 +201,14 @@ class ZeroTradeRepairAgent:
         )
 
         try:
-            result = agent(user_prompt)
-            parsed = _extract_json(str(result))
+            raw = invoke_agent(
+                agent,
+                user_prompt,
+                agent_key="strategy_ideation",
+                phase="zero_trade_repair",
+                logger=logger,
+            )
+            parsed = _extract_json(raw)
         except Exception as exc:
             logger.exception("Zero-trade repair agent failed to produce parseable JSON")
             return ZeroTradeRepairReport(
