@@ -613,9 +613,7 @@ class MarketDataService:
                 # Twelve Data returns newest-first; reverse to chronological order
                 # BEFORE forward-filling so carry-forward uses the prior bar.
                 rows.reverse()
-                return self._forward_fill_bars(
-                    rows, provider="Twelve Data", symbol=td_symbol
-                )
+                return self._forward_fill_bars(rows, provider="Twelve Data", symbol=td_symbol)
 
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and attempt < max_retries - 1:
@@ -844,9 +842,7 @@ class MarketDataService:
         h = round(float(high), 4)
         ll = round(float(low), 4)
         c = round(float(close), 4)
-        if not (
-            math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)
-        ):
+        if not (math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)):
             return (None, False)
         h_fixed = max(o, h, ll, c)
         l_fixed = min(o, h, ll, c)

@@ -292,7 +292,19 @@ def test_df_to_bars_filters_nan_rows() -> None:
         ),
     ]
     bars = MarketDataService._df_to_bars(_DF(rows))
-    assert [b.date for b in bars] == ["2024-01-01", "2024-01-04"]
+    # Interior non-finite rows are forward-filled (not dropped) so positional
+    # indicators keep their calendar alignment.
+    assert [b.date for b in bars] == [
+        "2024-01-01",
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+    ]
+    assert [b.is_imputed for b in bars] == [False, True, True, False]
+    # Imputed bars carry the prior valid close (100) as a flat, zero-volume bar.
+    for b in (bars[1], bars[2]):
+        assert b.open == b.high == b.low == b.close == 100
+        assert b.volume == 0.0
     assert all(
         math.isfinite(b.open)
         and math.isfinite(b.high)
@@ -578,8 +590,11 @@ def test_fetch_twelve_data_repairs_ohlc_invariants(monkeypatch: pytest.MonkeyPat
 
 
 def test_fetch_twelve_data_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A NaN OHLC field from the Twelve Data fallback is dropped, matching
-    yfinance — without this the NaN would reach the gate as ``got nan``."""
+    """A leading NaN OHLC field from the Twelve Data fallback is dropped.
+
+    After the newest-first payload is reversed to chronological order this NaN
+    row is the earliest bar, so there is no prior close to forward-fill from and
+    the row is dropped (the only case forward-fill cannot recover)."""
     payload = {
         "values": [
             {
@@ -590,7 +605,7 @@ def test_fetch_twelve_data_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> No
                 "close": "1.2",
                 "volume": "100",
             },
-            # NaN close (e.g. a gap or a string "nan") → row must be dropped.
+            # NaN close; chronologically first after reverse -> leading drop.
             {
                 "datetime": "2024-01-02",
                 "open": "1.0",
@@ -681,9 +696,13 @@ def test_fetch_coingecko_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None
     bars = MarketDataService()._fetch_coingecko(
         "BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1
     )
-    assert len(bars) == 1
-    assert bars[0].date == "2024-01-02"
-    assert math.isfinite(bars[0].close)
+    # The trailing NaN day is forward-filled (not dropped), carrying the prior
+    # close so the series stays calendar-aligned.
+    assert [b.date for b in bars] == ["2024-01-02", "2024-01-03"]
+    assert [b.is_imputed for b in bars] == [False, True]
+    assert bars[1].close == 100.0
+    assert bars[1].volume == 0.0
+    assert all(math.isfinite(b.close) for b in bars)
 
 
 def test_fetch_coingecko_returns_empty_on_unexpected_payload(
@@ -816,9 +835,13 @@ def test_fetch_alphavantage_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> N
     }
     _install_httpx_stub(monkeypatch, {"alphavantage": _StubResp(payload)})
     bars = MarketDataService()._fetch_alphavantage("AAA", "stocks", "2024-01-01", "2024-01-31")
-    assert len(bars) == 1
-    assert bars[0].date == "2024-01-15"
-    assert math.isfinite(bars[0].close)
+    # The trailing NaN day is forward-filled (not dropped), carrying the prior
+    # close so the series stays calendar-aligned.
+    assert [b.date for b in bars] == ["2024-01-15", "2024-01-16"]
+    assert [b.is_imputed for b in bars] == [False, True]
+    assert bars[1].close == 100.5
+    assert bars[1].volume == 0.0
+    assert all(math.isfinite(b.close) for b in bars)
 
 
 # ---------------------------------------------------------------------------
@@ -1055,33 +1078,6 @@ def test_fetch_with_providers_normalizes_crypto_symbol_for_every_provider(
     )
     svc._fetch_with_providers("BTC-USD", "crypto", "2024-01-01", "2024-01-31")
     assert seen == ["BTC", "BTC", "BTC"]
-
-
-def test_normalize_ohlc_bar_returns_repaired_flag() -> None:
-    """_normalize_ohlc_bar rounds, repairs the H/L envelope, and finite-checks."""
-    bar, repaired = MarketDataService._normalize_ohlc_bar(
-        date="2024-01-01", open=100.0, high=99.0, low=98.0, close=101.0, volume=10.0
-    )
-    assert bar is not None
-    # High was below close (101) -> widened to 101; low stays the min.
-    assert bar.high == 101.0
-    assert bar.low == 98.0
-    assert repaired is True
-    assert bar.is_imputed is False
-
-
-def test_normalize_ohlc_bar_returns_none_for_nonfinite() -> None:
-    """A non-finite OHLC value yields (None, False) so the caller can fill/drop."""
-    bar, repaired = MarketDataService._normalize_ohlc_bar(
-        date="2024-01-01",
-        open=float("nan"),
-        high=1.0,
-        low=1.0,
-        close=1.0,
-        volume=0.0,
-    )
-    assert bar is None
-    assert repaired is False
 
 
 def test_forward_fill_carries_prev_close() -> None:

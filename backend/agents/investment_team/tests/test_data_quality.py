@@ -791,18 +791,18 @@ def test_imputed_bars_pass_gate_as_warn() -> None:
     warning for a volume-bearing asset class.
     """
     bars = [
-        _bar("2024-01-02", close=100.5),
-        _bar(
-            "2024-01-03",
-            open_=100.5,
+        OHLCVBar(date="2024-01-02", open=100.5, high=101.0, low=100.0, close=100.5, volume=1_000.0),
+        OHLCVBar(
+            date="2024-01-03",
+            open=100.5,
             high=100.5,
             low=100.5,
             close=100.5,
             volume=0.0,
             is_imputed=True,
         ),
-        _bar("2024-01-04", close=101.0),
-        _bar("2024-01-05", close=101.5),
+        OHLCVBar(date="2024-01-04", open=101.0, high=101.5, low=100.5, close=101.0, volume=1_000.0),
+        OHLCVBar(date="2024-01-05", open=101.5, high=102.0, low=101.0, close=101.5, volume=1_000.0),
     ]
 
     report = validate_market_data(

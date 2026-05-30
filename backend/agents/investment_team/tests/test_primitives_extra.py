@@ -17,6 +17,8 @@ import math
 from dataclasses import dataclass
 from typing import List
 
+import pytest
+
 from investment_team.strategy_lab.factors import primitives as P
 
 
