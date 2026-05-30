@@ -127,6 +127,14 @@ def _hash_bars(bars: Sequence[OHLCVBar]) -> str:
     them in any order; floats use ``repr()`` so the round-trip is
     bit-exact.  Empty input is hashed to the empty digest of an empty
     string.
+
+    Only OHLCV identifies a dataset — ``is_imputed`` is deliberately excluded
+    so snapshots written before that column existed keep the same fingerprint
+    (and thus the same derived-ADV cache key) once the flag is persisted. This
+    is safe because forward-fill is deterministic on its input: identical OHLCV
+    implies the same imputed layout, so two series can collide on this hash yet
+    differ in ``is_imputed`` only in degenerate equal-price / zero-volume data,
+    which the volume>0 filter in ``compute_adv_from_bars`` already discards.
     """
     h = hashlib.sha256()
     for bar in sorted(bars, key=lambda b: b.date):

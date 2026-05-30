@@ -29,6 +29,7 @@ from investment_team.market_data_service import (
     OHLCVBar,
     _max_universe_symbols,
     compute_adv_from_bars,
+    trailing_real_bars,
 )
 
 # ---------------------------------------------------------------------------
@@ -1225,3 +1226,37 @@ def test_fetch_coingecko_buckets_ticks_by_utc_day(monkeypatch: pytest.MonkeyPatc
             _time.tzset()
 
     assert [b.date for b in bars] == ["2024-01-03"]
+
+
+def test_trailing_real_bars_skips_imputed_and_preserves_order() -> None:
+    """trailing_real_bars returns the most recent ``lookback`` non-imputed bars
+    in chronological order; imputed bars are skipped and do not count."""
+    real = [
+        OHLCVBar(date=f"2024-01-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in range(1, 6)
+    ]
+    # Interleave an imputed bar that must be skipped, not counted.
+    imputed = OHLCVBar(
+        date="2024-01-06",
+        open=100,
+        high=100,
+        low=100,
+        close=100,
+        volume=0.0,
+        is_imputed=True,
+    )
+    bars = real[:3] + [imputed] + real[3:]
+    window = trailing_real_bars(bars, 3)
+    assert [b.date for b in window] == ["2024-01-03", "2024-01-04", "2024-01-05"]
+    assert all(not b.is_imputed for b in window)
+
+
+def test_trailing_real_bars_empty_when_insufficient_or_nonpositive() -> None:
+    """Returns [] when fewer than ``lookback`` real bars exist or lookback <= 0."""
+    real = [
+        OHLCVBar(date=f"2024-01-{i:02d}", open=100, high=100, low=100, close=100, volume=1_000_000)
+        for i in range(1, 4)
+    ]
+    assert trailing_real_bars(real, 5) == []
+    assert trailing_real_bars(real, 0) == []
+    assert trailing_real_bars([], 1) == []

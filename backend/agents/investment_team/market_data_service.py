@@ -97,6 +97,40 @@ class OHLCVBar(BaseModel):
 _FetchFn = Callable[[str, str, str, str], List[OHLCVBar]]
 
 
+def trailing_real_bars(bars: Sequence[OHLCVBar], lookback: int) -> List[OHLCVBar]:
+    """Return the most recent ``lookback`` *real* (non-imputed) bars.
+
+    Single source of truth for "the trailing window of genuine trading days"
+    shared by every volume / liquidity consumer. Imputed bars (synthetic
+    forward-fills carrying a prior close at ``volume=0`` — see
+    :meth:`MarketDataService._forward_fill_bars`) are skipped: they are not
+    real trading days, so counting them toward ``lookback`` would let a
+    mostly-synthetic window report metrics the symbol never actually traded.
+
+    Scans from the newest end and stops as soon as enough real bars are
+    gathered — O(bars scanned) rather than materialising every real bar in a
+    long history just to slice the last few.
+
+    Postconditions:
+        Returns up to ``lookback`` bars in chronological (oldest→newest) order.
+        Returns an empty list when ``lookback <= 0`` or fewer than ``lookback``
+        real bars exist — callers treat that as "insufficient history".
+    """
+    if lookback <= 0:
+        return []
+    window: List[OHLCVBar] = []
+    for bar in reversed(bars):
+        if bar.is_imputed:
+            continue
+        window.append(bar)
+        if len(window) >= lookback:
+            break
+    if len(window) < lookback:
+        return []
+    window.reverse()  # restore chronological order
+    return window
+
+
 def compute_adv_from_bars(
     bars: Sequence[OHLCVBar],
     *,
@@ -107,33 +141,12 @@ def compute_adv_from_bars(
     Pure helper — kept at module scope so unit tests and the cost-stress
     harness can compute ADV from synthetic fixtures without instantiating
     a ``MarketDataService`` or hitting the network.  Returns ``None`` when
-    fewer than ``lookback`` *real* bars are available or every bar in the
-    window has zero volume.
-
-    Imputed bars (synthetic forward-fills carrying a prior close at
-    ``volume=0`` — see :meth:`MarketDataService._forward_fill_bars`) are
-    excluded before the window is taken. They are not real trading days, so
-    counting them toward ``lookback`` would let a window of mostly-synthetic
-    bars satisfy the size requirement and report an ADV the symbol never
-    actually traded — restoring the pre-forward-fill behaviour where the
-    underlying NaN rows were dropped and thus never counted.
+    fewer than ``lookback`` *real* bars are available (imputed bars are
+    excluded via :func:`trailing_real_bars`) or every bar in the window has
+    zero volume.
     """
-    if not bars or lookback <= 0:
-        return None
-    # Collect the trailing ``lookback`` *real* (non-imputed) bars by scanning
-    # from the newest end and stopping as soon as enough are gathered — O(bars
-    # scanned) rather than materialising every real bar in a long history just
-    # to slice the last few. Imputed bars (synthetic forward-fills) are skipped:
-    # they are not real trading days, so counting them toward ``lookback`` would
-    # let a mostly-synthetic window report an ADV the symbol never traded.
-    window: List[OHLCVBar] = []
-    for bar in reversed(bars):
-        if bar.is_imputed:
-            continue
-        window.append(bar)
-        if len(window) >= lookback:
-            break
-    if len(window) < lookback:
+    window = trailing_real_bars(bars, lookback)
+    if not window:
         return None
     dollar_volume = [b.close * b.volume for b in window if b.volume > 0 and b.close > 0]
     if not dollar_volume:
