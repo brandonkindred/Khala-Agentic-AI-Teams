@@ -46,6 +46,7 @@ from ..models import (
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
+from .agents._llm_budget import DesignBudgetExhausted, LLMCallBudget
 from .agents.alignment import (
     AlignmentAuditError,
     AlignmentIssue,
@@ -175,6 +176,25 @@ def _design_review_rounds() -> int:
         return max(int(raw), 1)
     except ValueError:
         return 20
+
+
+def _design_max_llm_calls() -> int:
+    """Resolve the per-cycle design-phase LLM-call budget.
+
+    Pre: env value, when set, parses to ``int``.
+    Post: returns a positive integer cap on the total number of LLM calls
+    the design phase may make within a single ``run_cycle`` (spanning all
+    ``MAX_DESIGN_REENTRIES`` re-entries). Reads
+    ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`` (default 120, sub-1 values floored
+    to 1, garbage values fall back to 120). Exhaustion short-circuits the
+    cycle with ``status="failed: budget_exhausted"`` before runaway cloud
+    spend rather than burning the full multiplicative worst case.
+    """
+    raw = os.environ.get("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "120")
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        return 120
 
 
 def _orchestrator_runner(code, market_data, config, *, strategy=None, **kwargs):
@@ -600,6 +620,10 @@ class StrategyLabOrchestrator:
         phase_back_count: int = 0
         drift_collector = _DriftCollector()
         cumulative_gate_results: List[QualityGateResult] = []
+        # Per-cycle LLM-call budget. Created once here so it spans every
+        # design re-entry below — the cap is a true ceiling on the whole
+        # cycle, not a fresh allowance per attempt.
+        llm_budget = LLMCallBudget(_design_max_llm_calls())
         for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
             try:
                 return self._run_design_attempt(
@@ -613,6 +637,7 @@ class StrategyLabOrchestrator:
                     phase_back_count=phase_back_count,
                     drift_collector=drift_collector,
                     cumulative_gate_results=cumulative_gate_results,
+                    budget=llm_budget,
                 )
             except SpecImplementabilityError as exc:
                 last_evidence = exc.evidence
@@ -679,6 +704,7 @@ class StrategyLabOrchestrator:
         emit: PhaseCallback,
         design_attempt: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
+        budget: Optional[LLMCallBudget] = None,
     ) -> _DesignLoopOutcome:
         """Drive the bounded design ↔ design-review loop.
 
@@ -691,6 +717,13 @@ class StrategyLabOrchestrator:
         the caller MUST short-circuit the cycle. The outcome is a value
         type — no further mutation of orchestrator state happens after
         return.
+
+        ``budget``, when supplied, is charged on every design/review LLM
+        call. When it trips, :class:`DesignBudgetExhausted` is caught here
+        and surfaced as a ``ready=False`` outcome with
+        ``budget_exhausted=True`` carrying whatever spec/critique state
+        existed at the trip — the caller maps this to
+        ``status="failed: budget_exhausted"``.
         """
         max_rounds = _design_review_rounds()
         assert max_rounds >= 1, "design-review round cap must be ≥ 1"
@@ -702,30 +735,116 @@ class StrategyLabOrchestrator:
         # backtest record all refer to the same ``strategy_id``.
         strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
 
-        strategy_dict, rationale = self.design_agent.run(
-            prior_records=prior_records,
-            signal_brief=signal_brief,
-            convergence_directives=directives or None,
-            exclude_asset_classes=exclude_asset_classes,
-        )
-        spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
-
-        # ═══ Phase 1 → 2 transition: DESIGN → DESIGN_REVIEW ═══════════
-        # The initial DesignAgent invocation has produced a spec draft;
-        # the bounded design ↔ review loop is about to start. No code
-        # exists yet, so code_hash is the empty-string SHA-256.
-        _emit_phase_transition(
-            emit,
-            from_phase=Phase.DESIGN,
-            to_phase=Phase.DESIGN_REVIEW,
-            spec=spec,
-            code="",
-            attempt=design_attempt,
-        )
-
+        # State referenced by the budget-exhaustion handler is initialised
+        # before the LLM work so a trip on the very first ``run()`` call —
+        # before ``spec`` exists — still yields a well-formed outcome. The
+        # round count is derived from ``len(critique_history)`` (one critique
+        # appended per round, including synthetic readiness critiques), so
+        # both the success and budget-trip paths report the same number.
+        spec: Optional[StrategySpec] = None
+        rationale = ""
         critique_history: List[SpecCritique] = []
         ready = False
-        rounds_run = 0
+
+        try:
+            strategy_dict, rationale = self.design_agent.run(
+                prior_records=prior_records,
+                signal_brief=signal_brief,
+                convergence_directives=directives or None,
+                exclude_asset_classes=exclude_asset_classes,
+                budget=budget,
+            )
+            spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+
+            # ═══ Phase 1 → 2 transition: DESIGN → DESIGN_REVIEW ═══════════
+            # The initial DesignAgent invocation has produced a spec draft;
+            # the bounded design ↔ review loop is about to start. No code
+            # exists yet, so code_hash is the empty-string SHA-256.
+            _emit_phase_transition(
+                emit,
+                from_phase=Phase.DESIGN,
+                to_phase=Phase.DESIGN_REVIEW,
+                spec=spec,
+                code="",
+                attempt=design_attempt,
+            )
+
+            spec, rationale, ready = self._run_design_review_rounds(
+                spec=spec,
+                rationale=rationale,
+                strategy_id=strategy_id,
+                max_rounds=max_rounds,
+                config=config,
+                all_gate_results=all_gate_results,
+                critique_history=critique_history,
+                emit=emit,
+                drift_collector=drift_collector,
+                budget=budget,
+            )
+        except DesignBudgetExhausted:
+            # Per-cycle LLM-call budget hit mid-design. Surface whatever
+            # spec/critique state we reached as a not-ready outcome tagged
+            # ``budget_exhausted`` so the caller short-circuits with a
+            # distinct status. ``spec`` is None only if the very first
+            # ``run()`` tripped — fall back to a defaults spec so the audit
+            # record is still well-formed.
+            if spec is None:
+                spec = self._build_spec_from_dict({}, strategy_id=strategy_id)
+            emit(
+                "designing",
+                {
+                    "sub_phase": "budget_exhausted",
+                    "calls_made": budget.calls_made if budget is not None else 0,
+                    "rounds": len(critique_history),
+                },
+            )
+            return _DesignLoopOutcome(
+                spec=spec,
+                rationale=rationale,
+                ready=False,
+                rounds=len(critique_history),
+                critique_history=critique_history,
+                budget_exhausted=True,
+            )
+
+        return _DesignLoopOutcome(
+            spec=spec,
+            rationale=rationale,
+            ready=ready,
+            rounds=len(critique_history),
+            critique_history=critique_history,
+        )
+
+    def _run_design_review_rounds(
+        self,
+        *,
+        spec: StrategySpec,
+        rationale: str,
+        strategy_id: str,
+        max_rounds: int,
+        config: BacktestConfig,
+        all_gate_results: List[QualityGateResult],
+        critique_history: List["SpecCritique"],
+        emit: PhaseCallback,
+        drift_collector: Optional[_DriftCollector],
+        budget: Optional[LLMCallBudget],
+    ) -> Tuple[StrategySpec, str, bool]:
+        """Run the bounded readiness → review → revise rounds.
+
+        Pre: ``spec`` / ``rationale`` are the initial design draft and its
+        rationale; ``critique_history`` is the (empty) running list the
+        caller reads back after return.
+        Post: returns ``(spec, rationale, ready)`` — the final candidate
+        spec, its latest rationale, and whether the reviewer marked it
+        ready on the most recent round. ``critique_history`` is mutated in
+        place — one entry per round (synthetic readiness critiques count).
+        May raise :class:`DesignBudgetExhausted`, which the caller handles.
+
+        Extracted from :meth:`_run_design_loop` so the budget-exhaustion
+        ``try`` there stays shallow and the per-round body keeps its own
+        local ``rounds_run`` without polluting the outer scope.
+        """
+        ready = False
         last_readiness_signature: Optional[tuple] = None
         readiness_results: List[QualityGateResult] = []
 
@@ -755,6 +874,7 @@ class StrategyLabOrchestrator:
                     spec,
                     readiness_results,
                     prior_critiques=critique_history,
+                    budget=budget,
                 )
                 critique.round = review_round
                 critique_history.append(critique)
@@ -807,7 +927,7 @@ class StrategyLabOrchestrator:
 
             prev_spec = spec.model_copy(deep=True)
             strategy_dict, rationale = self.design_agent.revise(
-                spec, critique, prior_critiques=critique_history
+                spec, critique, prior_critiques=critique_history, budget=budget
             )
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
             if drift_collector is not None:
@@ -819,13 +939,7 @@ class StrategyLabOrchestrator:
                     reason=critique.rationale if hasattr(critique, "rationale") else str(critique),
                 )
 
-        return _DesignLoopOutcome(
-            spec=spec,
-            rationale=rationale,
-            ready=ready,
-            rounds=rounds_run,
-            critique_history=critique_history,
-        )
+        return spec, rationale, ready
 
     def _build_spec_from_dict(
         self, strategy_dict: Dict[str, Any], *, strategy_id: str
@@ -2410,6 +2524,7 @@ class StrategyLabOrchestrator:
         phase_back_count: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
         cumulative_gate_results: Optional[List[QualityGateResult]] = None,
+        budget: Optional[LLMCallBudget] = None,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -2445,6 +2560,7 @@ class StrategyLabOrchestrator:
             emit=emit,
             design_attempt=design_attempt,
             drift_collector=drift_collector,
+            budget=budget,
         )
         spec = design_outcome.spec
         rationale = design_outcome.rationale
@@ -2459,10 +2575,24 @@ class StrategyLabOrchestrator:
                 if design_outcome.critique_history
                 else "(none)"
             )
-            abort_reason = (
-                f"Design did not reach readiness after {design_context.rounds} "
-                f"round(s); last critique: {last_rationale}"
-            )
+            # A not-ready outcome has two causes; pick the status the
+            # operator needs to see. Budget exhaustion is the cost kill
+            # switch — surface it distinctly from genuine non-convergence.
+            if design_outcome.budget_exhausted:
+                short_circuit_status = "failed: budget_exhausted"
+                calls_made = budget.calls_made if budget is not None else 0
+                limit = budget.limit if budget is not None else 0
+                abort_reason = (
+                    f"Design phase exhausted its LLM-call budget "
+                    f"({calls_made}/{limit} calls) after {design_context.rounds} "
+                    f"round(s); last critique: {last_rationale}"
+                )
+            else:
+                short_circuit_status = "failed: design_not_ready"
+                abort_reason = (
+                    f"Design did not reach readiness after {design_context.rounds} "
+                    f"round(s); last critique: {last_rationale}"
+                )
             emit("designing", {"sub_phase": "aborted", "reason": abort_reason})
             return self._build_short_circuit_record(
                 spec=spec,
@@ -2473,7 +2603,7 @@ class StrategyLabOrchestrator:
                 rationale=rationale,
                 all_gate_results=all_gate_results,
                 refinement_attempts=[],
-                short_circuit_status="failed: design_not_ready",
+                short_circuit_status=short_circuit_status,
                 short_circuit_reason=abort_reason,
                 emit=emit,
                 design_context=design_context,

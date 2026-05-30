@@ -479,6 +479,13 @@ class _DesignLoopOutcome:
     - ``spec`` is the final candidate the loop produced (whether ready
       or not), so the audit trail always carries the spec the cycle
       stopped on.
+    - ``budget_exhausted=True`` ⇒ ``ready=False`` and the per-cycle
+      LLM-call budget was hit mid-loop; ``spec`` / ``critique_history``
+      carry whatever state existed at the trip. It disambiguates the two
+      reasons a ``ready=False`` outcome can arise: round-budget exhaustion
+      (``False``) versus LLM-call-budget exhaustion (``True``), which the
+      orchestrator maps to ``failed: design_not_ready`` and
+      ``failed: budget_exhausted`` respectively.
     """
 
     spec: StrategySpec
@@ -488,6 +495,7 @@ class _DesignLoopOutcome:
     # NB: typed as ``Any`` to avoid a cycle with ``agents/design_review``.
     # The orchestrator passes a ``List[SpecCritique]`` through.
     critique_history: List[Any]
+    budget_exhausted: bool = False
 
 
 @dataclass

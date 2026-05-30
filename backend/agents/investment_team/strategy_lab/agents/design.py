@@ -30,6 +30,7 @@ from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block
 from ...signal_intelligence_models import SignalIntelligenceBriefV1
 from ...strategy_lab_context import asset_class_mix_hint, format_prior_results
+from ._llm_budget import DesignBudgetExhausted, LLMCallBudget
 from ._parse_helpers import (
     StrategySpecParseError,
     extract_json_object,
@@ -139,11 +140,17 @@ class DesignAgent:
         signal_brief: Optional[SignalIntelligenceBriefV1] = None,
         convergence_directives: Optional[List[str]] = None,
         exclude_asset_classes: Optional[List[str]] = None,
+        budget: Optional[LLMCallBudget] = None,
     ) -> Tuple[Dict[str, Any], str]:
         """Design a fresh strategy spec from priors + brief.
 
         Returns: ``(strategy_dict, rationale)``. ``strategy_dict`` has no
         ``strategy_code`` key.
+
+        ``budget``, when supplied, is charged once per underlying LLM call
+        (generation, each parse-retry, and the optional self-review /
+        self-revision) and raises :class:`DesignBudgetExhausted` when the
+        per-cycle cap is hit.
         """
         prior_text = (
             format_prior_results(prior_records)
@@ -176,19 +183,25 @@ class DesignAgent:
             convergence_directives=directives_text,
         )
 
-        strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
-        return self._with_self_review(strategy_dict, rationale)
+        strategy_dict, rationale = self._invoke_and_parse(
+            _SYSTEM_PROMPT, user_prompt, budget=budget
+        )
+        return self._with_self_review(strategy_dict, rationale, budget=budget)
 
     def revise(
         self,
         prior_spec: "StrategySpec",
         critique: "SpecCritique",
         prior_critiques: Optional[List["SpecCritique"]] = None,
+        budget: Optional[LLMCallBudget] = None,
     ) -> Tuple[Dict[str, Any], str]:
         """Revise ``prior_spec`` to address every issue raised in ``critique``.
 
         Returns: ``(strategy_dict, rationale)``. ``strategy_dict`` has no
         ``strategy_code`` key.
+
+        ``budget``, when supplied, is charged once per underlying LLM call
+        (see :meth:`run`).
         """
         spec_json = prior_spec.model_dump_json(indent=2, exclude={"strategy_code"})
         issues_block = _format_issues(critique)
@@ -203,10 +216,17 @@ class DesignAgent:
             prior_critiques_block=prior_critiques_block,
         )
 
-        strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
-        return self._with_self_review(strategy_dict, rationale)
+        strategy_dict, rationale = self._invoke_and_parse(
+            _SYSTEM_PROMPT, user_prompt, budget=budget
+        )
+        return self._with_self_review(strategy_dict, rationale, budget=budget)
 
-    def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
+    def _invoke_and_parse(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        budget: Optional[LLMCallBudget] = None,
+    ) -> Tuple[Dict[str, Any], str]:
         """Call the LLM, parse JSON, strip any stray ``strategy_code``, validate rules.
 
         Pre: ``system_prompt`` and ``user_prompt`` are non-empty strings.
@@ -232,6 +252,11 @@ class DesignAgent:
 
         prompt = user_prompt
         for attempt in range(retries + 1):
+            # Charge before the call so the cycle stops *before* exceeding
+            # the per-cycle budget. Each parse-retry is a real LLM call and
+            # so counts individually.
+            if budget is not None:
+                budget.charge()
             result = agent(prompt)
             parsed = extract_json_object(str(result))
 
@@ -265,7 +290,10 @@ class DesignAgent:
         raise AssertionError("unreachable: _invoke_and_parse loop exited without return")
 
     def _with_self_review(
-        self, strategy_dict: Dict[str, Any], rationale: str
+        self,
+        strategy_dict: Dict[str, Any],
+        rationale: str,
+        budget: Optional[LLMCallBudget] = None,
     ) -> Tuple[Dict[str, Any], str]:
         """Audit a freshly emitted spec and self-revise once if needed.
 
@@ -288,7 +316,12 @@ class DesignAgent:
             return strategy_dict, rationale
 
         try:
-            critique = self._self_review(strategy_dict)
+            critique = self._self_review(strategy_dict, budget=budget)
+        except DesignBudgetExhausted:
+            # A budget trip is a cycle-level stop, not a self-review hiccup —
+            # it must propagate to ``_run_design_loop`` rather than being
+            # swallowed by the best-effort guard below.
+            raise
         except Exception as exc:
             logger.warning(
                 "DesignAgent self-review failed (%s: %s); returning original spec",
@@ -316,7 +349,10 @@ class DesignAgent:
         )
 
         try:
-            return self._invoke_and_parse(_SYSTEM_PROMPT, revision_prompt)
+            return self._invoke_and_parse(_SYSTEM_PROMPT, revision_prompt, budget=budget)
+        except DesignBudgetExhausted:
+            # As above: propagate budget exhaustion rather than falling back.
+            raise
         except Exception as exc:
             # Best-effort contract: any self-revision failure — DSL parse
             # rejection (``StrategySpecParseError``), malformed JSON
@@ -332,7 +368,9 @@ class DesignAgent:
             )
             return strategy_dict, rationale
 
-    def _self_review(self, strategy_dict: Dict[str, Any]) -> "SpecCritique":
+    def _self_review(
+        self, strategy_dict: Dict[str, Any], budget: Optional[LLMCallBudget] = None
+    ) -> "SpecCritique":
         """Audit ``strategy_dict`` for prose↔predicate + risk-math contradictions.
 
         Pre: ``strategy_dict`` is a parsed, DSL-valid spec dict (no
@@ -353,6 +391,8 @@ class DesignAgent:
             "verdict, no markdown.\n\n"
             f"```json\n{spec_json}\n```\n"
         )
+        if budget is not None:
+            budget.charge()
         result = agent(user_prompt)
         parsed = extract_json_object(str(result))
         return _coerce_critique(parsed, readiness_findings=[])
