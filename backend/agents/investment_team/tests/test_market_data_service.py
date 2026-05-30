@@ -17,6 +17,7 @@ no network traffic fires.
 
 from __future__ import annotations
 
+import math
 import sys
 import types
 from typing import Any, Dict, List, Optional, Tuple
@@ -576,6 +577,45 @@ def test_fetch_twelve_data_repairs_ohlc_invariants(monkeypatch: pytest.MonkeyPat
     assert bars[0].low == 0.5
 
 
+def test_fetch_twelve_data_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NaN OHLC field from the Twelve Data fallback is dropped, matching
+    yfinance — without this the NaN would reach the gate as ``got nan``."""
+    payload = {
+        "values": [
+            {
+                "datetime": "2024-01-03",
+                "open": "1.0",
+                "high": "1.5",
+                "low": "0.5",
+                "close": "1.2",
+                "volume": "100",
+            },
+            # NaN close (e.g. a gap or a string "nan") → row must be dropped.
+            {
+                "datetime": "2024-01-02",
+                "open": "1.0",
+                "high": "1.5",
+                "low": "0.5",
+                "close": "nan",
+                "volume": "100",
+            },
+        ]
+    }
+    _install_httpx_stub(monkeypatch, {"twelvedata": _StubResp(payload)})
+    bars = MarketDataService()._fetch_twelve_data(
+        "AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1
+    )
+    assert len(bars) == 1
+    assert bars[0].date == "2024-01-03"
+    assert all(
+        math.isfinite(b.open)
+        and math.isfinite(b.high)
+        and math.isfinite(b.low)
+        and math.isfinite(b.close)
+        for b in bars
+    )
+
+
 def test_fetch_twelve_data_swallows_generic_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_httpx_stub(monkeypatch, RuntimeError("boom"))
     bars = MarketDataService()._fetch_twelve_data(
@@ -626,6 +666,24 @@ def test_fetch_coingecko_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(bars) >= 1
     # Volume defaults to 0.0 for the synthesised OHLCV.
     assert all(b.volume == 0.0 for b in bars)
+
+
+def test_fetch_coingecko_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NaN price in the CoinGecko series drops that day rather than letting
+    max()/min() propagate the NaN into an OHLCVBar."""
+    payload = {
+        "prices": [
+            [1704153600000, 100.0],  # 2024-01-02 — finite, kept
+            [1704240000000, float("nan")],  # 2024-01-03 — NaN, dropped
+        ]
+    }
+    _install_httpx_stub(monkeypatch, {"coingecko": _StubResp(payload)})
+    bars = MarketDataService()._fetch_coingecko(
+        "BTC", "crypto", "2024-01-02", "2024-01-04", max_retries=1
+    )
+    assert len(bars) == 1
+    assert bars[0].date == "2024-01-02"
+    assert math.isfinite(bars[0].close)
 
 
 def test_fetch_coingecko_returns_empty_on_unexpected_payload(
@@ -727,6 +785,75 @@ def test_fetch_alphavantage_forex_branch(monkeypatch: pytest.MonkeyPatch) -> Non
     _install_httpx_stub(monkeypatch, {"alphavantage": _StubResp(payload)})
     bars = MarketDataService()._fetch_alphavantage("EURUSD", "forex", "2024-01-01", "2024-01-31")
     assert len(bars) == 1
+
+
+def test_fetch_alphavantage_drops_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NaN OHLC field from the Alpha Vantage fallback is dropped, matching
+    yfinance and Twelve Data."""
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(
+        mds, "_ALPHA_VANTAGE_API_KEY", "fixture-placeholder-not-a-secret", raising=False
+    )
+    payload = {
+        "Time Series (Daily)": {
+            "2024-01-15": {
+                "1. open": "100",
+                "2. high": "101",
+                "3. low": "99",
+                "4. close": "100.5",
+                "5. volume": "500000",
+            },
+            # NaN close → row must be dropped.
+            "2024-01-16": {
+                "1. open": "100",
+                "2. high": "101",
+                "3. low": "99",
+                "4. close": "nan",
+                "5. volume": "500000",
+            },
+        }
+    }
+    _install_httpx_stub(monkeypatch, {"alphavantage": _StubResp(payload)})
+    bars = MarketDataService()._fetch_alphavantage("AAA", "stocks", "2024-01-01", "2024-01-31")
+    assert len(bars) == 1
+    assert bars[0].date == "2024-01-15"
+    assert math.isfinite(bars[0].close)
+
+
+# ---------------------------------------------------------------------------
+# _normalize_ohlc_bar (shared across all provider paths)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_ohlc_bar_returns_none_for_non_finite() -> None:
+    bar, repaired = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-02", open=1.0, high=1.5, low=0.5, close=float("nan"), volume=10.0
+    )
+    assert bar is None
+    assert repaired is False
+
+
+def test_normalize_ohlc_bar_repairs_envelope() -> None:
+    # high reported below the true max and low above the true min → repaired.
+    bar, repaired = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-02", open=1.0, high=0.5, low=1.5, close=1.0, volume=10.0
+    )
+    assert bar is not None
+    assert repaired is True
+    assert bar.high == 1.5
+    assert bar.low == 0.5
+
+
+def test_normalize_ohlc_bar_clean_row_not_flagged_repaired() -> None:
+    bar, repaired = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-02", open=1.0, high=1.5, low=0.5, close=1.2, volume=10.0
+    )
+    assert bar is not None
+    assert repaired is False
+    assert bar.high == 1.5
+    assert bar.low == 0.5
+    assert bar.volume == 10.0
 
 
 def test_fetch_alphavantage_crypto_branch(monkeypatch: pytest.MonkeyPatch) -> None:

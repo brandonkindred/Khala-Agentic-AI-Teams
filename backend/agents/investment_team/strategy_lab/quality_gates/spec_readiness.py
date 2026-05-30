@@ -489,37 +489,73 @@ class SpecReadinessGate(GateResultsMixin):
             # defensive: nothing further to evaluate.
             return ()
 
-        # The per-symbol price loop only adds value when whole-lot
-        # realisability matters (qty >= 1 for stocks/futures/commodities).
-        # Forex and crypto accept fractional quantities, so any positive
-        # price would pass the qty check — and a transient provider gap
-        # (weekend, holiday, yfinance miss) producing NaN would otherwise
-        # critical-fail an otherwise-runnable spec. Skip the loop for
-        # fractional asset classes; the symbol-independent notional check
-        # above is the only realisability signal that applies to them.
-        if not enforce_whole_lot:
-            return ()
-
+        # Per-symbol price defense. The qty>=1 lot-size check below only
+        # matters for whole-lot classes (stocks/futures/commodities); forex
+        # and crypto accept fractional quantities, so for them threshold==0
+        # and the qty check never fires. But the price *sample* still carries
+        # two signals that apply to every asset class, so the loop runs for
+        # all of them rather than short-circuiting fractional classes:
+        #   * a finite price <= 0 means a broken provider (a 0.0 parsed from a
+        #     rate-limit body, a negative sentinel), not a market gap — fail
+        #     closed regardless of asset class;
+        #   * a non-finite (NaN/inf) price is unfillable for whole-lot classes
+        #     (qty<1) → critical, but for fractional classes it is treated as a
+        #     possibly-transient gap: tolerated when any symbol still has a
+        #     finite sample, and downgraded to a warning (never a hard fail)
+        #     when it affects every symbol.
+        saw_finite_price = False
+        nan_symbols: list[str] = []
         for sym in symbols:
             try:
                 price = float(self._market_sample_provider(sym, ctx.spec.asset_class))
             except Exception:
                 price = float("nan")
-            if not math.isfinite(price) or price <= 0:
+
+            if math.isfinite(price):
+                if price <= 0:
+                    return (
+                        self._critical(
+                            f"Sizing realisability: non-positive price sample for '{sym}' "
+                            f"(got {price!r}); this signals a broken market-data provider, "
+                            "not a market gap."
+                        ),
+                    )
+                saw_finite_price = True
+                qty = notional / price
+                if qty < threshold:
+                    return (
+                        self._critical(
+                            f"Sizing yields qty={qty:.4f} (threshold {threshold}) "
+                            f"for symbol '{sym}' at sample price ${price:.2f} "
+                            f"with capital ${capital:.0f}."
+                        ),
+                    )
+            elif enforce_whole_lot:
+                # Whole-lot classes genuinely need a price to size a fillable
+                # order; a missing sample is unfillable → fail closed.
                 return (
                     self._critical(
                         f"Sizing realisability: no usable price sample for '{sym}' (got {price!r})."
                     ),
                 )
-            qty = notional / price
-            if qty < threshold:
-                return (
-                    self._critical(
-                        f"Sizing yields qty={qty:.4f} (threshold {threshold}) "
-                        f"for symbol '{sym}' at sample price ${price:.2f} "
-                        f"with capital ${capital:.0f}."
-                    ),
-                )
+            else:
+                # Fractional class with a non-finite sample — defer the verdict
+                # until we know whether any symbol resolved to a finite price.
+                nan_symbols.append(sym)
+
+        # Only fractional asset classes reach here with unresolved NaN samples.
+        # A NaN that affected *every* symbol (no finite sample anywhere) is a
+        # persistently broken provider, but fractional sizing stays
+        # implementable once data returns, so warn rather than fail closed. A
+        # NaN alongside a finite sample is a transient gap and is ignored.
+        if nan_symbols and not saw_finite_price:
+            return (
+                self._warning(
+                    f"Sizing realisability: no usable price sample for any of {nan_symbols} "
+                    f"({ctx.spec.asset_class}); market-data provider may be down. Proceeding "
+                    "since fractional sizing stays implementable once data returns."
+                ),
+            )
         return ()
 
     # ------------------------------------------------------------------

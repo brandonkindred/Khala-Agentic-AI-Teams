@@ -492,16 +492,16 @@ def test_rule5_passes_with_realistic_sizing() -> None:
     assert not sizing_failures, sizing_failures
 
 
-def test_rule5_skips_price_fetch_when_fractional_forex() -> None:
-    """Forex (fractional sizing) must NOT critical-fail on a missing price.
+def test_rule5_warns_on_persistent_nan_for_fractional_forex() -> None:
+    """Forex (fractional sizing) must NOT critical-fail on a missing price,
+    but a provider returning NaN for *every* symbol is downgraded to a
+    warning rather than skipped silently.
 
-    The per-symbol price loop only validates whole-lot realisability —
-    qty >= 1 for stocks/futures/commodities. Forex and crypto accept
-    fractional quantities, so the price sample contributes nothing, and a
-    transient provider gap (weekend, holiday, yfinance miss) must not
-    block the cycle. Without this skip, a forex spec on a Saturday dies
-    on Rule 5 before ever producing a trade — the system loses its
-    learning signal.
+    Fractional classes accept sub-lot sizing, so a transient provider gap
+    (weekend, holiday, yfinance miss) must not block the cycle — otherwise a
+    forex spec on a Saturday dies on Rule 5 before producing a trade and the
+    system loses its learning signal. But a persistently broken provider is
+    worth surfacing, so we warn (non-blocking) instead of returning nothing.
     """
     spec = _spec(
         asset_class="forex",
@@ -514,10 +514,17 @@ def test_rule5_skips_price_fetch_when_fractional_forex() -> None:
     results = gate.validate(spec, backtest_config=_config())
     sizing_failures = [c for c in _critical(results) if "Sizing realisability" in c]
     assert not sizing_failures, sizing_failures
+    warnings = [
+        r.details
+        for r in results
+        if r.severity == "warning" and not r.passed and "no usable price sample" in r.details
+    ]
+    assert warnings, "expected a non-blocking warning for persistent NaN on forex"
 
 
-def test_rule5_skips_price_fetch_when_fractional_crypto() -> None:
-    """Crypto (fractional sizing) inherits the same NaN-tolerance contract."""
+def test_rule5_warns_on_persistent_nan_for_fractional_crypto() -> None:
+    """Crypto (fractional sizing) inherits the same NaN-tolerance contract:
+    persistent NaN warns, never criticals."""
     spec = _spec(
         asset_class="crypto",
         target_symbols=["BTC-USD"],
@@ -528,6 +535,52 @@ def test_rule5_skips_price_fetch_when_fractional_crypto() -> None:
     results = gate.validate(spec, backtest_config=_config())
     sizing_failures = [c for c in _critical(results) if "Sizing realisability" in c]
     assert not sizing_failures, sizing_failures
+    warnings = [
+        r.details
+        for r in results
+        if r.severity == "warning" and not r.passed and "no usable price sample" in r.details
+    ]
+    assert warnings, "expected a non-blocking warning for persistent NaN on crypto"
+
+
+def test_rule5_persistent_zero_price_is_critical_for_forex() -> None:
+    """A finite but non-positive price (e.g. 0.0 parsed from a rate-limit
+    body) signals a broken provider, not a market gap — critical for every
+    asset class, including fractional forex/crypto."""
+    spec = _spec(
+        asset_class="forex",
+        target_symbols=["USDJPY=X"],
+        sizing=FixedFractionSizing(fraction=0.02),
+        hypothesis="USDJPY=X mean reversion via RSI(14).",
+        timeframe="1h",
+    )
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: 0.0)
+    results = gate.validate(spec, backtest_config=_config())
+    criticals = [c for c in _critical(results) if "Sizing realisability" in c]
+    assert criticals, "expected a critical for a non-positive (broken-provider) price"
+
+
+def test_rule5_transient_nan_with_finite_samples_does_not_fail() -> None:
+    """A NaN for one symbol alongside a finite sample for another is a
+    transient gap on a fractional class — neither critical nor warning."""
+    spec = _spec(
+        asset_class="crypto",
+        target_symbols=["BTC-USD", "ETH-USD"],
+        sizing=FixedFractionSizing(fraction=0.02),
+        hypothesis="crypto momentum via RSI(14).",
+    )
+    # First symbol resolves to a finite price; second is a transient gap.
+    provider = lambda sym, ac: 100.0 if sym == "BTC-USD" else float("nan")  # noqa: E731
+    gate = SpecReadinessGate(market_sample_provider=provider)
+    results = gate.validate(spec, backtest_config=_config())
+    sizing_failures = [c for c in _critical(results) if "Sizing realisability" in c]
+    assert not sizing_failures, sizing_failures
+    sizing_warnings = [
+        r.details
+        for r in results
+        if r.severity == "warning" and not r.passed and "Sizing realisability" in r.details
+    ]
+    assert not sizing_warnings, sizing_warnings
 
 
 def test_rule5_still_fails_closed_on_whole_lot_class_with_nan_price() -> None:
