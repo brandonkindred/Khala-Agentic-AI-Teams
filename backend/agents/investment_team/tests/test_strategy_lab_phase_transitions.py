@@ -468,7 +468,7 @@ def test_build_spec_from_dict_coerces_off_vocabulary_asset_class() -> None:
     normalizer before the strict ``StrategySpec`` boundary, so an unknown class
     falls back to ``stocks`` and an accepted alias canonicalizes instead of
     raising ``ValidationError`` and aborting the cycle."""
-    orch = _make_orchestrator()
+    orch = StrategyLabOrchestrator()
 
     payload = _spec_dict()
     payload["asset_class"] = "bonds"

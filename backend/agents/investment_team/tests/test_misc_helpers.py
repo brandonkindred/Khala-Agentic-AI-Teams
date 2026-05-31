@@ -83,18 +83,28 @@ def test_orchestrator_check_proposal_passes_and_fails() -> None:
 
     # Pass: small allocation.
     ok_proposal = PortfolioProposal(
-        proposal_id="p-ok", prepared_by="x", ips_version="1.0",
-        data_snapshot_id="snap", objective="balanced",
-        positions=[PortfolioPosition(symbol="VTI", asset_class="equities", weight_pct=5.0, rationale="r")],
+        proposal_id="p-ok",
+        prepared_by="x",
+        ips_version="1.0",
+        data_snapshot_id="snap",
+        objective="balanced",
+        positions=[
+            PortfolioPosition(symbol="VTI", asset_class="equities", weight_pct=5.0, rationale="r")
+        ],
     )
     assert orch.check_proposal(state, ips, ok_proposal) == []
     assert state.audit_log[-1].startswith("proposal_passed:")
 
     # Fail: oversized single position.
     bad_proposal = PortfolioProposal(
-        proposal_id="p-bad", prepared_by="x", ips_version="1.0",
-        data_snapshot_id="snap", objective="balanced",
-        positions=[PortfolioPosition(symbol="VTI", asset_class="equities", weight_pct=60.0, rationale="r")],
+        proposal_id="p-bad",
+        prepared_by="x",
+        ips_version="1.0",
+        data_snapshot_id="snap",
+        objective="balanced",
+        positions=[
+            PortfolioPosition(symbol="VTI", asset_class="equities", weight_pct=60.0, rationale="r")
+        ],
     )
     violations = orch.check_proposal(state, ips, bad_proposal)
     assert violations  # populated
@@ -114,7 +124,9 @@ def test_orchestrator_run_web_action_delegates_to_coordinator() -> None:
             self.calls: list[Dict[str, Any]] = []
 
         def execute_action(self, action, payload=None, workspace_name=None):
-            self.calls.append({"action": action, "payload": payload, "workspace_name": workspace_name})
+            self.calls.append(
+                {"action": action, "payload": payload, "workspace_name": workspace_name}
+            )
             return {"status": "ok"}
 
     coord = _Coord()
@@ -135,8 +147,12 @@ def test_orchestrator_promotion_decision_enqueues_escalation_on_reject() -> None
     from investment_team.models import StrategySpec
 
     strategy = StrategySpec(
-        strategy_id="s-r", authored_by="alice", asset_class="equities",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="s-r",
+        authored_by="alice",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
     )
     decision = orch.promotion_decision(
         state=state,
@@ -144,7 +160,9 @@ def test_orchestrator_promotion_decision_enqueues_escalation_on_reject() -> None
         validation=_sample_validation().model_copy(update={"strategy_id": "s-r"}),
         ips=_sample_ips(),
         proposer_agent_id="alice",
-        approver=AgentIdentity(agent_id="alice", role="approver", version="1.0"),  # self-approval → REJECT
+        approver=AgentIdentity(
+            agent_id="alice", role="approver", version="1.0"
+        ),  # self-approval → REJECT
         risk_veto=False,
     )
     assert decision.outcome.value == "reject"
@@ -300,23 +318,45 @@ def test_format_prior_results_truncates_long_text() -> None:
     )
 
     strat = StrategySpec(
-        strategy_id="s", authored_by="x", asset_class="stocks",
-        hypothesis="x" * 200, signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class="stocks",
+        hypothesis="x" * 200,
+        signal_definition="s",
+        timeframe="1d",
     )
     res = BacktestResult(
-        total_return_pct=1.0, annualized_return_pct=2.0, volatility_pct=10.0,
-        sharpe_ratio=0.1, max_drawdown_pct=1.0, win_rate_pct=50.0, profit_factor=1.0,
-        calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+        total_return_pct=1.0,
+        annualized_return_pct=2.0,
+        volatility_pct=10.0,
+        sharpe_ratio=0.1,
+        max_drawdown_pct=1.0,
+        win_rate_pct=50.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     bt = BacktestRecord(
-        backtest_id="bt", strategy_id="s", strategy=strat,
-        config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0),
-        submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
-        completed_at="2024-01-01T01:00:00Z", result=res, trades=[],
+        backtest_id="bt",
+        strategy_id="s",
+        strategy=strat,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=res,
+        trades=[],
     )
     rec = StrategyLabRecord(
-        lab_record_id="l1", strategy=strat, backtest=bt, is_winning=True,
-        strategy_rationale="r" * 300, analysis_narrative="n" * 500,
+        lab_record_id="l1",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r" * 300,
+        analysis_narrative="n" * 500,
         created_at="2024-01-01T01:00:00Z",
     )
     out = format_prior_results([rec])
@@ -337,23 +377,45 @@ def test_format_prior_results_truncates_to_tail() -> None:
 
     def _record(i: int):
         strat = StrategySpec(
-            strategy_id=f"s-{i}", authored_by="x", asset_class="stocks",
-            hypothesis=f"h-{i}", signal_definition="s", timeframe="1d",
+            strategy_id=f"s-{i}",
+            authored_by="x",
+            asset_class="stocks",
+            hypothesis=f"h-{i}",
+            signal_definition="s",
+            timeframe="1d",
         )
         res = BacktestResult(
-            total_return_pct=1.0, annualized_return_pct=2.0, volatility_pct=10.0,
-            sharpe_ratio=0.1, max_drawdown_pct=1.0, win_rate_pct=50.0, profit_factor=1.0,
-            calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+            total_return_pct=1.0,
+            annualized_return_pct=2.0,
+            volatility_pct=10.0,
+            sharpe_ratio=0.1,
+            max_drawdown_pct=1.0,
+            win_rate_pct=50.0,
+            profit_factor=1.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
         )
         bt = BacktestRecord(
-            backtest_id=f"bt-{i}", strategy_id=f"s-{i}", strategy=strat,
-            config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0),
-            submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
-            completed_at="2024-01-01T01:00:00Z", result=res, trades=[],
+            backtest_id=f"bt-{i}",
+            strategy_id=f"s-{i}",
+            strategy=strat,
+            config=BacktestConfig(
+                start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+            ),
+            submitted_by="x",
+            submitted_at="2024-01-01T00:00:00Z",
+            completed_at="2024-01-01T01:00:00Z",
+            result=res,
+            trades=[],
         )
         return StrategyLabRecord(
-            lab_record_id=f"l-{i}", strategy=strat, backtest=bt, is_winning=False,
-            strategy_rationale="r", analysis_narrative="n",
+            lab_record_id=f"l-{i}",
+            strategy=strat,
+            backtest=bt,
+            is_winning=False,
+            strategy_rationale="r",
+            analysis_narrative="n",
             created_at=f"2024-01-{i + 1:02d}T00:00:00Z",
         )
 
@@ -380,23 +442,45 @@ def test_asset_class_mix_hint_warns_when_stocks_overrepresented() -> None:
 
     def _record(i: int, asset_class: str):
         strat = StrategySpec(
-            strategy_id=f"s-{i}", authored_by="x", asset_class=asset_class,
-            hypothesis=f"h-{i}", signal_definition="s", timeframe="1d",
+            strategy_id=f"s-{i}",
+            authored_by="x",
+            asset_class=asset_class,
+            hypothesis=f"h-{i}",
+            signal_definition="s",
+            timeframe="1d",
         )
         res = BacktestResult(
-            total_return_pct=1.0, annualized_return_pct=2.0, volatility_pct=10.0,
-            sharpe_ratio=0.1, max_drawdown_pct=1.0, win_rate_pct=50.0, profit_factor=1.0,
-            calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+            total_return_pct=1.0,
+            annualized_return_pct=2.0,
+            volatility_pct=10.0,
+            sharpe_ratio=0.1,
+            max_drawdown_pct=1.0,
+            win_rate_pct=50.0,
+            profit_factor=1.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
         )
         bt = BacktestRecord(
-            backtest_id=f"bt-{i}", strategy_id=f"s-{i}", strategy=strat,
-            config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0),
-            submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
-            completed_at="2024-01-01T01:00:00Z", result=res, trades=[],
+            backtest_id=f"bt-{i}",
+            strategy_id=f"s-{i}",
+            strategy=strat,
+            config=BacktestConfig(
+                start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+            ),
+            submitted_by="x",
+            submitted_at="2024-01-01T00:00:00Z",
+            completed_at="2024-01-01T01:00:00Z",
+            result=res,
+            trades=[],
         )
         return StrategyLabRecord(
-            lab_record_id=f"l-{i}", strategy=strat, backtest=bt, is_winning=False,
-            strategy_rationale="r", analysis_narrative="n",
+            lab_record_id=f"l-{i}",
+            strategy=strat,
+            backtest=bt,
+            is_winning=False,
+            strategy_rationale="r",
+            analysis_narrative="n",
             created_at=f"2024-01-{i + 1:02d}T00:00:00Z",
         )
 
@@ -416,23 +500,45 @@ def test_asset_class_mix_hint_falls_back_to_stocks_for_unknown_class() -> None:
     )
 
     strat = StrategySpec(
-        strategy_id="s", authored_by="x", asset_class="crypto",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class="crypto",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
     )
     res = BacktestResult(
-        total_return_pct=1.0, annualized_return_pct=2.0, volatility_pct=10.0,
-        sharpe_ratio=0.1, max_drawdown_pct=1.0, win_rate_pct=50.0, profit_factor=1.0,
-        calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+        total_return_pct=1.0,
+        annualized_return_pct=2.0,
+        volatility_pct=10.0,
+        sharpe_ratio=0.1,
+        max_drawdown_pct=1.0,
+        win_rate_pct=50.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     bt = BacktestRecord(
-        backtest_id="bt", strategy_id="s", strategy=strat,
-        config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0),
-        submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
-        completed_at="2024-01-01T01:00:00Z", result=res, trades=[],
+        backtest_id="bt",
+        strategy_id="s",
+        strategy=strat,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=res,
+        trades=[],
     )
     rec = StrategyLabRecord(
-        lab_record_id="l", strategy=strat, backtest=bt, is_winning=False,
-        strategy_rationale="r", analysis_narrative="n",
+        lab_record_id="l",
+        strategy=strat,
+        backtest=bt,
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="n",
         created_at="2024-01-01T01:00:00Z",
     )
     out = asset_class_mix_hint([rec])
@@ -448,8 +554,12 @@ def _spec(asset_class: str = "stocks"):
     from investment_team.models import StrategySpec
 
     return StrategySpec(
-        strategy_id="s", authored_by="x", asset_class=asset_class,
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class=asset_class,
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
     )
 
 
@@ -567,7 +677,9 @@ def test_get_strands_model_bedrock_branch(monkeypatch: pytest.MonkeyPatch) -> No
     from investment_team.strategy_lab.agents import model_factory
 
     monkeypatch.setattr(model_factory, "resolve_provider", lambda: "bedrock")
-    monkeypatch.setattr(model_factory, "resolve_model", lambda key: "anthropic.claude-3-haiku-20240307-v1:0")
+    monkeypatch.setattr(
+        model_factory, "resolve_model", lambda key: "anthropic.claude-3-haiku-20240307-v1:0"
+    )
     monkeypatch.setattr(model_factory, "resolve_base_url", lambda: "")
 
     class _StubBedrock:

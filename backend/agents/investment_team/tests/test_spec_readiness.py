@@ -376,13 +376,20 @@ def test_default_universe_for_raises_on_unknown_asset_class() -> None:
 
 
 def test_rule5_unknown_asset_class_is_critical() -> None:
-    """A typo'd asset_class with empty target_symbols emits a Rule 5 critical."""
+    """A non-canonical asset_class reaching the gate with empty target_symbols
+    emits a Rule 5 critical.
+
+    The ``StrategySpec`` boundary now rejects an off-vocabulary class on live
+    construction, so build a valid spec and mutate the field afterwards
+    (assignment skips validation) to simulate a class arriving at the gate
+    without going through construction."""
     spec = _spec(
-        asset_class="bonds",
+        asset_class="stocks",
         target_symbols=[],
         timeframe="1d",
         hypothesis="generic mean reversion",
     )
+    spec.asset_class = "bonds"
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert any("unknown asset_class" in c for c in _critical(results))
 
@@ -418,11 +425,12 @@ def test_check_sizing_realisable_directly_catches_unknown_asset_class_value_erro
     )
 
     spec = _spec(
-        asset_class="bonds",
+        asset_class="stocks",
         target_symbols=[],
         timeframe="1d",
         hypothesis="generic mean reversion",
     )
+    spec.asset_class = "bonds"
     gate = SpecReadinessGate()
     ctx = SpecReadinessCtx(spec=spec, config=_config())
     with gate._using_phase("design"):

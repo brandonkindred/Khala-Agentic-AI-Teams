@@ -89,9 +89,7 @@ class StrategySpecValidator(GateResultsMixin):
             max_pos = risk.max_position_pct
             if max_pos < 1 or max_pos > 25:
                 results.append(
-                    self._critical(
-                        f"max_position_pct={max_pos}% is outside safe range [1%, 25%]."
-                    )
+                    self._critical(f"max_position_pct={max_pos}% is outside safe range [1%, 25%].")
                 )
 
             if risk.max_drawdown_pct < 5 or risk.max_drawdown_pct > 50:
