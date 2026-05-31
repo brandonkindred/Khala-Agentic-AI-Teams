@@ -44,7 +44,7 @@ from ..models import (
     get_fee_defaults,
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
-from ..strategy_lab_context import normalize_asset_class
+from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
 from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
 from .agents._llm_budget import (
@@ -964,12 +964,28 @@ class StrategyLabOrchestrator:
         than raising ``ValidationError`` and crashing the cycle. Accepted
         aliases canonicalize and a genuinely-unknown class falls back to
         ``stocks`` (the same default this method already applies for a missing
-        ``asset_class``).
+        ``asset_class``). A genuinely-unknown class — one the strict normalizer
+        would reject rather than an accepted alias — is logged at WARNING so the
+        coercion is observable rather than silent.
         """
+        raw_asset_class = strategy_dict.get("asset_class", "stocks")
+        asset_class = normalize_asset_class(raw_asset_class)
+        try:
+            normalize_asset_class_strict(raw_asset_class)
+        except ValueError:
+            # Permissive coercion repaired an off-vocabulary class the LLM
+            # emitted (strict would reject it). Keep the cycle alive but make
+            # the silent fallback visible.
+            logger.warning(
+                "DesignAgent emitted unknown asset_class %r; coercing to %r "
+                "to keep the cycle alive (strict construction would reject it).",
+                raw_asset_class,
+                asset_class,
+            )
         return StrategySpec(
             strategy_id=strategy_id,
             authored_by="strategy_lab_v2",
-            asset_class=normalize_asset_class(strategy_dict.get("asset_class", "stocks")),
+            asset_class=asset_class,
             hypothesis=strategy_dict.get("hypothesis", ""),
             signal_definition=strategy_dict.get("signal_definition", ""),
             timeframe=strategy_dict.get("timeframe") or "1d",
