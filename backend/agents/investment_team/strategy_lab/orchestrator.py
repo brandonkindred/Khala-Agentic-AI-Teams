@@ -44,6 +44,7 @@ from ..models import (
     get_fee_defaults,
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
+from ..strategy_lab_context import normalize_asset_class
 from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
 from .agents._llm_budget import (
@@ -955,11 +956,20 @@ class StrategyLabOrchestrator:
         Post: returns a freshly constructed ``StrategySpec`` carrying the
         supplied ``strategy_id``. The caller is responsible for any
         subsequent mutation (compile, fee defaults).
+
+        ``asset_class`` is coerced with the permissive normalizer *before*
+        construction: ``StrategySpec`` strictly rejects an off-vocabulary class
+        at its boundary, but on the LLM design path a model slip (e.g. an
+        unmapped class name) must be repaired to a usable canonical label rather
+        than raising ``ValidationError`` and crashing the cycle. Accepted
+        aliases canonicalize and a genuinely-unknown class falls back to
+        ``stocks`` (the same default this method already applies for a missing
+        ``asset_class``).
         """
         return StrategySpec(
             strategy_id=strategy_id,
             authored_by="strategy_lab_v2",
-            asset_class=strategy_dict.get("asset_class", "stocks"),
+            asset_class=normalize_asset_class(strategy_dict.get("asset_class", "stocks")),
             hypothesis=strategy_dict.get("hypothesis", ""),
             signal_definition=strategy_dict.get("signal_definition", ""),
             timeframe=strategy_dict.get("timeframe") or "1d",

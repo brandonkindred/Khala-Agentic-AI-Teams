@@ -34,12 +34,14 @@ def normalize_asset_class(ac: object) -> str:
     Accepts ``object`` so callers can pass raw LLM output without casting.
     """
     x = str(ac or "stocks").lower().strip()
-    if x in ("equities", "equity", "stock"):
+    if x in ("equities", "equity", "stock", "etf", "etfs"):
         return "stocks"
     if x in ("fx",):
         return "forex"
     if x in ("commodity", "metal", "energy"):
         return "commodities"
+    if x in ("cryptocurrency", "cryptocurrencies"):
+        return "crypto"
     if x in _CANONICAL_ASSET_CLASSES:
         return x
     return "stocks"
@@ -48,11 +50,12 @@ def normalize_asset_class(ac: object) -> str:
 def normalize_asset_class_strict(ac: object) -> str:
     """Strict variant of :func:`normalize_asset_class`.
 
-    Applies the same alias map (``equity``/``equities``/``stock`` → ``stocks``,
-    ``fx`` → ``forex``, ``commodity``/``metal``/``energy`` → ``commodities``)
-    so callers see the same canonical class the runtime fetch path does, but
-    raises :class:`ValueError` for truly unknown classes instead of silently
-    falling back to ``"stocks"``.
+    Applies the same alias map (``equity``/``equities``/``stock``/``etf``/``etfs``
+    → ``stocks``, ``fx`` → ``forex``, ``commodity``/``metal``/``energy`` →
+    ``commodities``, ``cryptocurrency``/``cryptocurrencies`` → ``crypto``) so
+    callers see the same canonical class the runtime fetch path does, but raises
+    :class:`ValueError` for truly unknown classes instead of silently falling
+    back to ``"stocks"``.
 
     Use this in gates and other fail-closed paths where a typo'd
     ``asset_class`` (``"bonds"``, ``"crpto"``) must surface as an error.
@@ -60,17 +63,20 @@ def normalize_asset_class_strict(ac: object) -> str:
     :func:`normalize_asset_class`.
     """
     x = str(ac or "").lower().strip()
-    if x in ("equities", "equity", "stock"):
+    if x in ("equities", "equity", "stock", "etf", "etfs"):
         return "stocks"
     if x in ("fx",):
         return "forex"
     if x in ("commodity", "metal", "energy"):
         return "commodities"
+    if x in ("cryptocurrency", "cryptocurrencies"):
+        return "crypto"
     if x in _CANONICAL_ASSET_CLASSES:
         return x
     raise ValueError(
         f"unknown asset_class {ac!r}; expected one of {sorted(_CANONICAL_ASSET_CLASSES)} "
-        "or a known alias (equity/equities/stock, fx, commodity/metal/energy)"
+        "or a known alias (equity/equities/stock/etf/etfs, fx, "
+        "commodity/metal/energy, cryptocurrency/cryptocurrencies)"
     )
 
 

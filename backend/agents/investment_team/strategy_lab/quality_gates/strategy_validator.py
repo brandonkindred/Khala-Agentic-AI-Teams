@@ -113,7 +113,7 @@ class StrategySpecValidator(GateResultsMixin):
                     " ".join(spec.unparsed_rules),
                 ]
             )
-            pattern = _ASSET_MISMATCH.get(spec.asset_class.lower())
+            pattern = _ASSET_MISMATCH.get(normalize_asset_class(spec.asset_class))
             if pattern and pattern.search(all_rules_text):
                 results.append(
                     self._warning(

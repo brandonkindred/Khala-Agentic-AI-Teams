@@ -18,7 +18,7 @@ from typing import Callable, ClassVar, Iterable, Iterator, List, Optional
 
 from ...market_data_service import _max_universe_symbols
 from ...models import BacktestConfig, StrategySpec
-from ...strategy_lab_context import normalize_asset_class_strict
+from ...strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
 from ...symbols import (
     COMMODITY_SYMBOLS,
     CRYPTO_SYMBOLS,
@@ -463,7 +463,7 @@ class SpecReadinessGate(GateResultsMixin):
             return ()
         capital = config.initial_capital
         assert capital > 0, "initial_capital must be strictly positive"
-        enforce_whole_lot = ctx.spec.asset_class.lower() in _WHOLE_LOT_ASSET_CLASSES
+        enforce_whole_lot = normalize_asset_class(ctx.spec.asset_class) in _WHOLE_LOT_ASSET_CLASSES
         threshold = 1.0 if enforce_whole_lot else 0.0
 
         # Notional is symbol-independent for both supported kinds, so resolve
@@ -600,7 +600,7 @@ class SpecReadinessGate(GateResultsMixin):
         assert isinstance(ctx.spec, StrategySpec)
         if (
             ctx.spec.timeframe == "1d"
-            or ctx.spec.asset_class.lower() in _FULL_TIMEFRAME_ASSET_CLASSES
+            or normalize_asset_class(ctx.spec.asset_class) in _FULL_TIMEFRAME_ASSET_CLASSES
         ):
             return ()
         return (

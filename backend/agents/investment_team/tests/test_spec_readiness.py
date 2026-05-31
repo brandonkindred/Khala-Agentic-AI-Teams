@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from typing import List
 
+import pytest
+from pydantic import ValidationError
+
 from investment_team.models import BacktestConfig, StrategySpec
 from investment_team.strategy_lab.quality_gates.spec_readiness import (
     GATE,
@@ -703,6 +706,62 @@ def test_rule1_accepts_asset_class_aliases_via_strict_normalize() -> None:
         c for c in _critical(results) if "target_symbols" in c or "Hypothesis names symbol" in c
     ]
     assert not rule1_failures, rule1_failures
+
+
+# ---------------------------------------------------------------------------
+# asset_class canonicalization + enforcement at the StrategySpec boundary
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_spec_canonicalizes_asset_class_aliases() -> None:
+    """Accepted aliases are canonicalized at construction so every downstream
+    asset_class-keyed gate sees a canonical label without re-encoding aliases."""
+    cases = {
+        "equity": "stocks",
+        "equities": "stocks",
+        "stock": "stocks",
+        "etf": "stocks",
+        "etfs": "stocks",
+        "fx": "forex",
+        "commodity": "commodities",
+        "cryptocurrency": "crypto",
+        "CRYPTO ": "crypto",
+    }
+    for raw, canonical in cases.items():
+        assert _spec(asset_class=raw).asset_class == canonical, raw
+
+
+def test_strategy_spec_rejects_unknown_asset_class_on_live_construction() -> None:
+    """A typo'd / off-vocabulary asset_class is rejected at the spec boundary so
+    it surfaces as a defect rather than silently bypassing the gates."""
+    with pytest.raises(ValidationError):
+        _spec(asset_class="bonds")
+
+
+def test_strategy_spec_legacy_context_tolerates_unknown_asset_class() -> None:
+    """Legacy deserialization must never fail to load a persisted row with an
+    off-vocabulary asset_class — it falls back to the permissive mapping."""
+    payload = _spec(asset_class="stocks").model_dump()
+    payload["asset_class"] = "bonds"
+    loaded = StrategySpec.model_validate(payload, context={"legacy_spec": True})
+    assert loaded.asset_class == "stocks"
+
+
+def test_rule5_enforces_whole_lot_for_equity_alias_end_to_end() -> None:
+    """The reported bug: a spec authored with the ``equity`` alias must get the
+    same whole-lot enforcement as ``stocks``. The alias canonicalizes at
+    construction, so Rule 5 fires the sub-share critical instead of silently
+    passing an unfillable equity spec to backtest."""
+    spec = _spec(
+        asset_class="equity",
+        target_symbols=["AAPL"],
+        sizing=FixedNotionalSizing(notional_usd=10.0),
+        hypothesis="AAPL momentum on the 1d timeframe.",
+    )
+    assert spec.asset_class == "stocks"
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: 1000.0)
+    results = gate.validate(spec, backtest_config=_config())
+    assert [c for c in _critical(results) if "qty=" in c], "expected sub-share qty critical"
 
 
 def test_rule5_respects_universe_cap_when_default_is_truncated(monkeypatch) -> None:

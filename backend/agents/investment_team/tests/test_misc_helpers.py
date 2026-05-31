@@ -263,17 +263,22 @@ def test_fetch_fred_dgs3mo_swallows_http_error(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_normalize_asset_class_aliases() -> None:
-    for alias in ("equity", "equities", "stock"):
+    for alias in ("equity", "equities", "stock", "etf", "etfs", "ETF", " ETFs "):
         assert normalize_asset_class(alias) == "stocks"
     assert normalize_asset_class("fx") == "forex"
     for alias in ("commodity", "metal", "energy"):
         assert normalize_asset_class(alias) == "commodities"
-    assert normalize_asset_class("CRYPTO ") == "crypto"
+    for alias in ("crypto", "CRYPTO ", "cryptocurrency", "cryptocurrencies"):
+        assert normalize_asset_class(alias) == "crypto"
     assert normalize_asset_class(None) == "stocks"
     assert normalize_asset_class("unknown") == "stocks"
 
 
 def test_normalize_asset_class_strict_raises_on_unknown() -> None:
+    assert normalize_asset_class_strict("etf") == "stocks"
+    assert normalize_asset_class_strict("etfs") == "stocks"
+    assert normalize_asset_class_strict("cryptocurrency") == "crypto"
+    assert normalize_asset_class_strict("cryptocurrencies") == "crypto"
     for alias in ("equities", "fx", "commodity"):
         normalize_asset_class_strict(alias)
     with pytest.raises(ValueError) as exc:

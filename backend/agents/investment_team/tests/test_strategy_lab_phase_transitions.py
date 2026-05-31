@@ -460,3 +460,24 @@ def test_hash_spec_deterministic_across_calls() -> None:
     # Mutating a field changes the hash.
     spec_c = orch._build_spec_from_dict(_spec_dict(), strategy_id="strat-DIFFERENT")
     assert hash_spec(spec_a) != hash_spec(spec_c)
+
+
+def test_build_spec_from_dict_coerces_off_vocabulary_asset_class() -> None:
+    """The orchestrator's LLM design path must not crash on an off-vocabulary
+    asset_class. ``_build_spec_from_dict`` coerces with the permissive
+    normalizer before the strict ``StrategySpec`` boundary, so an unknown class
+    falls back to ``stocks`` and an accepted alias canonicalizes instead of
+    raising ``ValidationError`` and aborting the cycle."""
+    orch = _make_orchestrator()
+
+    payload = _spec_dict()
+    payload["asset_class"] = "bonds"
+    assert orch._build_spec_from_dict(payload, strategy_id="strat-coerce").asset_class == "stocks"
+
+    payload = _spec_dict()
+    payload["asset_class"] = "equity"
+    assert orch._build_spec_from_dict(payload, strategy_id="strat-coerce").asset_class == "stocks"
+
+    payload = _spec_dict()
+    payload["asset_class"] = "cryptocurrency"
+    assert orch._build_spec_from_dict(payload, strategy_id="strat-coerce").asset_class == "crypto"
