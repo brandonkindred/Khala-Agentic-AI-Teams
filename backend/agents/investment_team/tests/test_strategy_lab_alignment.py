@@ -775,7 +775,7 @@ def test_propose_code_fix_raises_on_unparseable_response(monkeypatch) -> None:
     monkeypatch.setattr(
         alignment_module,
         "get_strands_model",
-        lambda _role: None,
+        lambda *_a, **_k: None,
     )
 
     agent = alignment_module.TradeAlignmentAgent()

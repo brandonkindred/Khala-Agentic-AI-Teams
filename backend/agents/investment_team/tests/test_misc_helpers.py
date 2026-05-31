@@ -613,3 +613,98 @@ def test_get_strands_model_ollama_local_succeeds(monkeypatch: pytest.MonkeyPatch
     assert isinstance(result, _StubOllama)
     assert result.host == "http://localhost:11434"
     assert result.model_id == "llama3"
+
+
+def _patch_ollama_local(monkeypatch: pytest.MonkeyPatch):
+    """Wire model_factory to the Ollama-local branch and capture kwargs.
+
+    Returns the recording stub class so tests can assert which kwargs
+    ``get_strands_model`` forwarded to ``OllamaModel``.
+    """
+    from investment_team.strategy_lab.agents import model_factory
+
+    monkeypatch.setattr(model_factory, "resolve_provider", lambda: "ollama")
+    monkeypatch.setattr(model_factory, "resolve_model", lambda key: "llama3")
+    monkeypatch.setattr(model_factory, "resolve_base_url", lambda: "http://localhost:11434")
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+
+    class _RecordingOllama:
+        # Accept timeout so the factory's first construction attempt wins and
+        # we observe the real (timeout-carrying) kwargs the schema path emits.
+        def __init__(self, host=None, model_id=None, timeout=None, additional_args=None):
+            self.host = host
+            self.model_id = model_id
+            self.timeout = timeout
+            self.additional_args = additional_args
+
+    import strands.models as strands_models
+
+    monkeypatch.setattr(strands_models, "OllamaModel", _RecordingOllama)
+    return model_factory, _RecordingOllama
+
+
+def test_structured_output_enabled_default_and_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab.agents import model_factory
+
+    monkeypatch.delenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", raising=False)
+    assert model_factory.structured_output_enabled() is True
+    for truthy in ("true", "1", "YES", "Yes"):
+        monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", truthy)
+        assert model_factory.structured_output_enabled() is True
+    for falsy in ("false", "0", "no", "off", ""):
+        monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", falsy)
+        assert model_factory.structured_output_enabled() is False
+
+
+def test_get_strands_model_applies_schema_as_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A response_schema is forwarded to Ollama via ``additional_args.format``."""
+    model_factory, _ = _patch_ollama_local(monkeypatch)
+    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
+
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    result = model_factory.get_strands_model("strategy_design", response_schema=schema)
+
+    assert result.additional_args == {"format": schema}
+
+
+def test_get_strands_model_no_schema_leaves_format_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    model_factory, _ = _patch_ollama_local(monkeypatch)
+    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
+
+    result = model_factory.get_strands_model("strategy_design")
+
+    assert result.additional_args is None
+
+
+def test_get_strands_model_toggle_off_ignores_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the toggle off, a supplied schema must NOT be applied."""
+    model_factory, _ = _patch_ollama_local(monkeypatch)
+    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "false")
+
+    schema = {"type": "object"}
+    result = model_factory.get_strands_model("strategy_design", response_schema=schema)
+
+    assert result.additional_args is None
+
+
+def test_get_strands_model_bedrock_ignores_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Bedrock branch never carries a ``format`` constraint."""
+    from investment_team.strategy_lab.agents import model_factory
+
+    monkeypatch.setattr(model_factory, "resolve_provider", lambda: "bedrock")
+    monkeypatch.setattr(model_factory, "resolve_model", lambda key: "anthropic.claude-3-haiku")
+    monkeypatch.setattr(model_factory, "resolve_base_url", lambda: "")
+    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
+
+    class _StubBedrock:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    import strands.models as strands_models
+
+    monkeypatch.setattr(strands_models, "BedrockModel", _StubBedrock)
+    result = model_factory.get_strands_model(response_schema={"type": "object"})
+
+    assert "additional_args" not in result.kwargs

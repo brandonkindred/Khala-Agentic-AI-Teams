@@ -130,7 +130,7 @@ def test_refinement_agent_filters_and_warns_on_spec_keys(
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.refinement.get_strands_model",
-        lambda role: object(),
+        lambda *_a, **_k: object(),
     )
 
     agent = RefinementAgent()
@@ -172,7 +172,7 @@ def test_refinement_agent_passes_risk_limits_through(
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.refinement.get_strands_model",
-        lambda role: object(),
+        lambda *_a, **_k: object(),
     )
 
     agent = RefinementAgent()

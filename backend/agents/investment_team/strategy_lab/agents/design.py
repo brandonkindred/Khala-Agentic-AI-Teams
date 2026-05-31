@@ -37,6 +37,7 @@ from ._parse_helpers import (
     extract_json_object,
     validate_structured_rules,
 )
+from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
 from .design_review import _coerce_critique, format_prior_critiques
 from .model_factory import get_strands_model
 
@@ -248,7 +249,7 @@ class DesignAgent:
             # Agent construction is cheap — no I/O, just env reads + object
             # init via get_strands_model — so building one per attempt is safe.
             agent = Agent(
-                model=get_strands_model("strategy_design"),
+                model=get_strands_model("strategy_design", response_schema=DESIGN_SPEC_SCHEMA),
                 system_prompt=system_prompt,
                 tools=[],
             )
@@ -259,7 +260,25 @@ class DesignAgent:
             raw = invoke_agent(
                 agent, prompt, agent_key="strategy_design", phase="design_generate", logger=logger
             )
-            parsed = extract_json_object(raw)
+            # Malformed JSON is a retriable parse failure, not a fatal cycle
+            # abort: with schema-constrained decoding it should be rare, but
+            # when the decoder is unconstrained (toggle off / Bedrock / a
+            # model that ignores ``format``) a stray ``ValueError`` here would
+            # otherwise burn the whole cycle. Re-prompt with the same budget
+            # as a structured-DSL slip so the model gets a clean retry.
+            try:
+                parsed = extract_json_object(raw)
+            except ValueError as exc:
+                logger.warning(
+                    "DesignAgent emitted unparseable JSON (attempt %d/%d): %s",
+                    attempt + 1,
+                    retries + 1,
+                    exc,
+                )
+                if attempt >= retries:
+                    raise
+                prompt = _build_json_correction_prompt(user_prompt, exc)
+                continue
 
             # Logged-and-dropped (not raised): a stray ``strategy_code`` is
             # prompt drift, not a usable-spec failure.
@@ -376,7 +395,7 @@ class DesignAgent:
         to the original spec.
         """
         agent = Agent(
-            model=get_strands_model("strategy_design"),
+            model=get_strands_model("strategy_design", response_schema=CRITIQUE_SCHEMA),
             system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
             tools=[],
         )
@@ -462,6 +481,32 @@ match what you just emitted:
 --- ORIGINAL TASK BELOW ---
 {original_prompt}
 """
+
+
+_JSON_CORRECTION_PREAMBLE = """\
+Your previous response could not be parsed as a single JSON object
+({error}). Return ONLY one JSON object with no surrounding prose, no
+markdown fences, and no trailing commentary. Every brace must balance.
+
+--- ORIGINAL TASK BELOW ---
+{original_prompt}
+"""
+
+
+def _build_json_correction_prompt(user_prompt: str, exc: ValueError) -> str:
+    """Render a re-prompt for a malformed-JSON (unparseable) response.
+
+    Pre: ``exc`` is the ``ValueError`` raised by
+    :func:`extract_json_object` when no balanced JSON object is found.
+    Post: returns a string instructing the model to re-emit a single,
+    fence-free JSON object. Distinct from
+    :func:`_build_correction_prompt`, which handles structurally-valid
+    JSON that fails DSL validation.
+    """
+    return _JSON_CORRECTION_PREAMBLE.format(
+        error=_truncate(str(exc), limit=400),
+        original_prompt=user_prompt,
+    )
 
 
 def _build_correction_prompt(user_prompt: str, exc: "StrategySpecParseError") -> str:

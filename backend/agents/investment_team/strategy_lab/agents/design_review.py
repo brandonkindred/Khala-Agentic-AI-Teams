@@ -26,6 +26,7 @@ from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_budget import charge_active_budget
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import extract_json_object
+from ._response_schemas import CRITIQUE_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -214,7 +215,7 @@ class DesignReviewAgent:
         )
 
         agent = Agent(
-            model=get_strands_model("strategy_design_review"),
+            model=get_strands_model("strategy_design_review", response_schema=CRITIQUE_SCHEMA),
             system_prompt=_SYSTEM_PROMPT,
             tools=[],
         )
