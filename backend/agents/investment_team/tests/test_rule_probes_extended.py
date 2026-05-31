@@ -1633,3 +1633,79 @@ def test_priceref_to_field_covers_all_bar_fields():
         "bar.low",
         "bar.volume",
     }
+
+
+# ---------------------------------------------------------------------------
+# Threshold-aware indicator-vs-number coverage (review feedback on PR #708)
+# ---------------------------------------------------------------------------
+#
+# Earlier the catalogue used a fixed ``base_close ≈ 100`` and ``slope ≈ 0.5``
+# regardless of ``rhs``, so only thresholds the canned price paths happened
+# to straddle (e.g. ``macd cross_above 0``, ``rsi cross_above 30``) were
+# probeable. ``macd cross_above 50``, ``bollinger upper cross_below 100``,
+# and similar all returned ``cross_not_found_in_window`` despite the
+# synthesizer advertising support. These regressions pin coverage across
+# a magnitude spectrum so future re-tunings of the slope formula or anchor
+# logic can't silently re-shrink the supported threshold range.
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        # MACD thresholds across the magnitude spectrum
+        (IndicatorRef(name="macd", params={"output": "macd"}), "cross_above", 5.0),
+        (IndicatorRef(name="macd", params={"output": "macd"}), "cross_above", 50.0),
+        (IndicatorRef(name="macd", params={"output": "macd"}), "cross_below", -10.0),
+        (
+            IndicatorRef(name="macd", params={"output": "histogram"}),
+            "cross_above",
+            5.0,
+        ),
+        (
+            IndicatorRef(name="macd", params={"output": "histogram"}),
+            "cross_above",
+            0.5,
+        ),
+        (IndicatorRef(name="macd", params={"output": "signal"}), "cross_above", 5.0),
+        # Bollinger band thresholds in both directions, both bands, across
+        # magnitudes
+        (
+            IndicatorRef(name="bollinger", params={"band": "upper"}),
+            "cross_below",
+            100.0,
+        ),
+        (
+            IndicatorRef(name="bollinger", params={"band": "upper"}),
+            "cross_below",
+            50.0,
+        ),
+        (
+            IndicatorRef(name="bollinger", params={"band": "upper"}),
+            "cross_above",
+            150.0,
+        ),
+        (
+            IndicatorRef(name="bollinger", params={"band": "lower"}),
+            "cross_above",
+            90.0,
+        ),
+        (
+            IndicatorRef(name="bollinger", params={"band": "lower"}),
+            "cross_below",
+            95.0,
+        ),
+        # VWAP at non-trivial thresholds
+        (IndicatorRef(name="vwap"), "cross_above", 200.0),
+        (IndicatorRef(name="vwap"), "cross_below", 50.0),
+    ],
+)
+def test_cross_indicator_number_is_threshold_aware(lhs, op, rhs):
+    """The catalogue scales slope (MACD) or anchors ``base_close``
+    (Bollinger, VWAP) to ``rhs`` so arbitrary thresholds reach the cross
+    window. Regression for PR #708 review feedback."""
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"threshold {rhs} not crossed: {reason}"
+    )
+    _assert_cross_fires(pred, bars, trigger)

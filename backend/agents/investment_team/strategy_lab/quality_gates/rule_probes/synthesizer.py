@@ -1210,6 +1210,37 @@ def _quiet_then_breakout(n: int, base_close: float, direction: str) -> List[OHLC
     ]
 
 
+def _high_vol_then_quiet(
+    n: int, base_close: float, *, vol_frac: float = 0.5, amplitude: float = 5.0
+) -> List[OHLCVBar]:
+    """High-volatility alternating bars followed by a flat phase.
+
+    Drives Bollinger bands wide during the volatile phase (upper band ≈
+    base_close + 2σ) then collapses them when prices flatten (σ → 0, upper
+    → middle ≈ base_close). The natural shape for ``cross_below`` of an
+    upper band against a threshold near ``base_close`` — the band drops
+    through the threshold as σ shrinks.
+    """
+    vol_len = max(1, int(n * vol_frac))
+    closes: List[float] = []
+    for i in range(vol_len):
+        sign = 1 if i % 2 == 0 else -1
+        closes.append(max(_MIN_PRICE, base_close + sign * amplitude))
+    for _ in range(n - vol_len):
+        closes.append(base_close)
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=c,
+            high=c + 1.0,
+            low=max(_MIN_PRICE, c - 1.0),
+            close=c,
+            volume=1_000_000.0,
+        )
+        for c in closes
+    ]
+
+
 def _quiet_then_trend_bars(
     n: int,
     base_close: float,
@@ -1738,6 +1769,105 @@ def _warmup_for_indicator(ref: IndicatorRef) -> int:
     return 1
 
 
+def _builders_for_indicator_number(
+    lhs: IndicatorRef, op: str, rhs: float, base_close: float, min_bars: int
+) -> List[Callable[[], List[OHLCVBar]]]:
+    """Threshold-aware forcing-sequence catalogue for ``indicator cross_* N``.
+
+    The priceref-vs-indicator catalogue uses a fixed ``base_close`` (≈100)
+    and slope (≈0.5), which produces indicator values in a fixed magnitude
+    range — RSI ∈ [0, 100], MACD ∈ ~[-2, +2], Bollinger upper ∈ ~[base±10].
+    That suffices for bounded oscillators against any in-range threshold, but
+    fails for unbounded indicators (MACD, VWAP) and band indicators against
+    thresholds outside the canned range (e.g. ``macd cross_above 50``,
+    ``bollinger upper cross_below 100``). Scale the builders so the
+    indicator's value range straddles ``rhs``.
+    """
+    name = lhs.name
+    if name in ("rsi", "adx", "stochastic"):
+        # Bounded 0-100; the price-space builders already produce the full
+        # range. Threshold scaling not needed.
+        return _builders_for_priceref_cross(lhs, op, base_close, min_bars)
+    if name == "vwap":
+        anchored = max(_MIN_PRICE, abs(rhs) if rhs != 0 else base_close)
+        return _builders_for_priceref_cross(lhs, op, anchored, min_bars)
+    if name == "bollinger":
+        # Bollinger band magnitude depends on both the rolling middle (close
+        # SMA) and σ. Different cross shapes need different band dynamics:
+        # quiet → breakout widens the band; high-vol → quiet collapses it.
+        # The middle can be anchored above or below ``rhs`` to position the
+        # cross in either direction. Try all four combinations — the search
+        # returns on the first hit.
+        period = int(lhs.param("period"))
+        n = max(min_bars, period * 4 + 30)
+        anchor_above = max(_MIN_PRICE, abs(rhs) + 5.0 if rhs > 0 else base_close + 5.0)
+        anchor_below = max(_MIN_PRICE, abs(rhs) - 5.0 if rhs > 0 else base_close - 5.0)
+        return [
+            # Anchor near the threshold from below + widen the band.
+            lambda: _quiet_then_breakout(n, anchor_below, "up"),
+            lambda: _quiet_then_breakout(n, anchor_below, "down"),
+            # Anchor above + collapse the band.
+            lambda: _high_vol_then_quiet(n, anchor_above, vol_frac=0.6, amplitude=8.0),
+            lambda: _high_vol_then_quiet(n, anchor_below, vol_frac=0.6, amplitude=8.0),
+            # Larger amplitudes for further-out thresholds.
+            lambda: _high_vol_then_quiet(n, anchor_above, vol_frac=0.4, amplitude=12.0),
+            lambda: _quiet_then_breakout(n, anchor_above, "up"),
+            lambda: _quiet_then_breakout(n, anchor_above, "down"),
+        ]
+    if name == "macd":
+        # MACD line / signal / histogram magnitude scales with the EMA
+        # spread, which scales with slope × (slow - fast) / 2 at steady
+        # state. To make MACD cross ``rhs`` strictly (not asymptote to it),
+        # overshoot by a factor of 4 — steady-state MACD ≈ 2|rhs|.
+        #
+        # Critical: prefix the trending phase with a flat segment longer
+        # than the MACD warmup so MACD enters the visible window at zero
+        # and the cross fires *after* warmup, not during it. Without the
+        # prefix, low-magnitude thresholds (|rhs| ≤ ~5) are crossed during
+        # warmup and the search sees only post-cross values.
+        slow = int(lhs.param("slow"))
+        fast = int(lhs.param("fast"))
+        signal_ = int(lhs.param("signal"))
+        warmup = slow + signal_ + 5
+        n = max(min_bars, warmup + 90)
+        spread_period = max(1, slow - fast)
+        # Steady-state MACD line ≈ slope × spread_period / 2. Histogram's
+        # transient peak (MACD − signal during the rising EMA spread) is
+        # roughly ``slope`` itself — much smaller than the line. To clear
+        # any threshold for any output we take the larger of the two
+        # required slopes and overshoot by 2×.
+        line_slope = max(0.5, 4.0 * abs(rhs) / spread_period)
+        histogram_slope = max(0.5, 2.0 * abs(rhs))
+        target_slope = max(line_slope, histogram_slope)
+        direction = 1.0 if op == "cross_above" else -1.0
+
+        def _flat_then_trend(slope: float) -> List[OHLCVBar]:
+            flat = [base_close] * warmup
+            trend = [max(_MIN_PRICE, base_close + slope * (i + 1)) for i in range(n - warmup)]
+            closes = flat + trend
+            return [
+                OHLCVBar(
+                    date="placeholder",
+                    open=c,
+                    high=c + 0.5,
+                    low=max(_MIN_PRICE, c - 0.5),
+                    close=c,
+                    volume=1_000_000.0,
+                )
+                for c in closes
+            ]
+
+        return [
+            lambda: _flat_then_trend(direction * target_slope),
+            lambda: _flat_then_trend(-direction * target_slope),
+            lambda: _monotonic_trend_bars(n, base_close, direction * target_slope),
+            lambda: _regime_change_bars(n, base_close, drop_rate=0.98, rise_rate=1.02),
+            lambda: _regime_change_bars(n, base_close, drop_rate=1.02, rise_rate=0.98),
+        ]
+    # Unknown indicator: fall through to the priceref catalogue.
+    return _builders_for_priceref_cross(lhs, op, base_close, min_bars)
+
+
 def _synth_cross_indicator_indicator(
     lhs: IndicatorRef, op: str, rhs: IndicatorRef, base_close: float, min_bars: int
 ) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
@@ -1814,9 +1944,12 @@ def _synth_cross_indicator_number(
         return None, 0, "indicator_number_cross_not_found"
 
     # Non-MA indicators (RSI, MACD, ADX, Stochastic, Bollinger, VWAP) cross a
-    # numeric threshold under the same forcing-sequence catalogue used for
-    # ``priceref cross indicator``.
-    builders = _builders_for_priceref_cross(lhs, op, base_close, min_bars)
+    # numeric threshold. Scale the forcing-sequence magnitude by ``rhs`` so
+    # arbitrary thresholds reach the cross window (a fixed ``base_close``
+    # catalogue only covers thresholds the canned price paths happen to
+    # straddle — e.g. ``macd cross_above 50`` needs a much steeper slope
+    # than ``macd cross_above 0``).
+    builders = _builders_for_indicator_number(lhs, op, rhs, base_close, min_bars)
     warmup = _warmup_for_indicator(lhs)
     return _search_cross(lhs, op, rhs, base_close, min_bars, builders, warmup=warmup)
 
