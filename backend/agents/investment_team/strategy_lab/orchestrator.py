@@ -971,6 +971,7 @@ class StrategyLabOrchestrator:
         config: BacktestConfig,
         all_gate_results: List[QualityGateResult],
         critique_history: List["SpecCritique"],
+        ledger: CritiqueLedger,
         emit: PhaseCallback,
         drift_collector: Optional[_DriftCollector],
     ) -> Tuple[StrategySpec, str, bool, str, Dict[str, Any]]:
@@ -978,7 +979,10 @@ class StrategyLabOrchestrator:
 
         Pre: ``spec`` / ``rationale`` are the initial design draft and its
         rationale; ``critique_history`` is the (empty) running list the
-        caller reads back after return.
+        caller reads back after return; ``ledger`` is the (empty)
+        :class:`CritiqueLedger` the caller owns, so the budget-exhaustion
+        handler in :meth:`_run_design_loop` can still read the counters
+        accumulated for the rounds completed before a charge failed.
         Post: returns ``(spec, rationale, ready, stop_reason, loop_telemetry)``
         — the final candidate spec, its latest rationale, whether the
         reviewer marked it ready on the most recent round, the reason the
