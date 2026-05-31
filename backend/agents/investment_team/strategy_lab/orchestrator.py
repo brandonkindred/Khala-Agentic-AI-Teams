@@ -754,6 +754,7 @@ class StrategyLabOrchestrator:
         last_spec: Optional[StrategySpec] = None
         last_code: str = ""
         last_failure_phase: Optional[str] = None
+        last_design_context: Optional[_DesignPersistContext] = None
         # Counts every ``SpecImplementabilityError`` raised within this
         # ``run_cycle``, including the final raise that exhausts the
         # re-entry budget. Threaded into ``_run_design_attempt`` so the
@@ -791,6 +792,7 @@ class StrategyLabOrchestrator:
                     last_spec = exc.last_spec
                     last_code = exc.last_code
                     last_failure_phase = exc.failure_phase
+                    last_design_context = exc.design_context
                     phase_back_count += 1
                     self.convergence_tracker.increment_trials(1)
                     if design_attempt >= MAX_DESIGN_REENTRIES:
@@ -835,6 +837,7 @@ class StrategyLabOrchestrator:
                 f"(last failure_phase={last_failure_phase}): {last_evidence}"
             ),
             emit=emit,
+            design_context=last_design_context,
             phase_back_count=phase_back_count,
             drift_collector=drift_collector,
         )
@@ -1261,6 +1264,7 @@ class StrategyLabOrchestrator:
         emit: PhaseCallback,
         phase_back_count: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
+        design_context: Optional[_DesignPersistContext] = None,
     ) -> Optional[StrategyLabRecord]:
         """Run spec validation before the refinement loop.
 
@@ -1322,6 +1326,7 @@ class StrategyLabOrchestrator:
                 + "; ".join(g.details for g in criticals)
             ),
             emit=emit,
+            design_context=design_context,
             phase_back_count=phase_back_count,
             drift_collector=drift_collector,
         )
@@ -3025,6 +3030,7 @@ class StrategyLabOrchestrator:
             emit=emit,
             phase_back_count=phase_back_count,
             drift_collector=drift_collector,
+            design_context=design_context,
         )
         if pre_synthesis is not None:
             return pre_synthesis
@@ -3037,16 +3043,27 @@ class StrategyLabOrchestrator:
         # The loop appends to ``all_gate_results``, ``refinement_attempts``,
         # and ``zero_trade_attempts`` in-place; the returned outcome carries
         # the final spec/code/trades/metrics + universe audit.
-        synthesis = self._run_synthesis_loop(
-            spec=spec,
-            code=code,
-            config=config,
-            all_gate_results=all_gate_results,
-            refinement_attempts=refinement_attempts,
-            zero_trade_attempts=zero_trade_attempts,
-            emit=emit,
-            drift_collector=drift_collector,
-        )
+        try:
+            synthesis = self._run_synthesis_loop(
+                spec=spec,
+                code=code,
+                config=config,
+                all_gate_results=all_gate_results,
+                refinement_attempts=refinement_attempts,
+                zero_trade_attempts=zero_trade_attempts,
+                emit=emit,
+                drift_collector=drift_collector,
+            )
+        except SpecImplementabilityError as exc:
+            # The synthesis refinement loop tripped re-design. Attach this
+            # attempt's design-loop telemetry to the exception (mirroring the
+            # ``drift_collector`` hand-off) so the outer re-entry-exhaustion
+            # short-circuit in ``run_cycle`` persists the generation-funnel
+            # telemetry of the design loop that actually ran, rather than an
+            # empty default. Only set when a raiser didn't already supply one.
+            if exc.design_context is None:
+                exc.design_context = design_context
+            raise
         spec = synthesis.spec
         code = synthesis.code
         trades = synthesis.trades
