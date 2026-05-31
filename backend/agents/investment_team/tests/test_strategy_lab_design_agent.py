@@ -129,7 +129,7 @@ def _patch_design(
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.design.get_strands_model",
-        lambda role: object(),
+        lambda *_a, **_k: object(),
     )
     monkeypatch.setenv(
         "STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED",
@@ -585,7 +585,7 @@ def test_parse_retry_builds_fresh_agent_per_attempt(
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.design.get_strands_model",
-        lambda role: object(),
+        lambda *_a, **_k: object(),
     )
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
 
@@ -774,6 +774,12 @@ def test_self_revision_garbage_response_falls_back_to_original(
         ],
         enable_self_review=True,
     )
+    # Pin parse-retries to 0 so the malformed self-revision is attempted
+    # exactly once: this test pins the *fallback*, not the retry budget
+    # (malformed-JSON retries are covered separately). Without this the
+    # revision call would be re-prompted up to the default retry budget
+    # before falling back.
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "0")
 
     with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
         parsed, _ = DesignAgent().run(prior_records=[])

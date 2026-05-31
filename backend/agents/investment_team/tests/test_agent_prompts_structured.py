@@ -115,7 +115,7 @@ def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.design.get_strands_model",
-        lambda role: object(),
+        lambda *_a, **_k: object(),
     )
 
 
@@ -126,7 +126,7 @@ def _patch_refinement(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.refinement.get_strands_model",
-        lambda role: object(),
+        lambda *_a, **_k: object(),
     )
 
 
@@ -137,7 +137,7 @@ def _patch_zero_trade_repair(monkeypatch: pytest.MonkeyPatch, payload: str) -> N
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.zero_trade_repair.get_strands_model",
-        lambda role: object(),
+        lambda *_a, **_k: object(),
     )
 
 

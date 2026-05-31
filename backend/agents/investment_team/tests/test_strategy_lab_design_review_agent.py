@@ -105,7 +105,7 @@ def _patch_review(
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.design_review.get_strands_model",
-        lambda role: object(),
+        lambda *_a, **_k: object(),
     )
     return agent
 

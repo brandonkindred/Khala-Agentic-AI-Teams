@@ -27,6 +27,7 @@ from ..coverage_probe import format_coverage_report
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import StrategySpecParseError, validate_structured_rules
+from ._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -195,7 +196,7 @@ class ZeroTradeRepairAgent:
         )
 
         agent = Agent(
-            model=get_strands_model("strategy_ideation"),
+            model=get_strands_model("strategy_ideation", response_schema=ZERO_TRADE_REPAIR_SCHEMA),
             system_prompt=system_prompt,
             tools=[],
         )

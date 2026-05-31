@@ -13,6 +13,7 @@ from strands import Agent
 from ...models import BacktestResult, StrategySpec
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
+from ._response_schemas import REFINEMENT_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,7 @@ class RefinementAgent:
         )
 
         agent = Agent(
-            model=get_strands_model("strategy_ideation"),
+            model=get_strands_model("strategy_ideation", response_schema=REFINEMENT_SCHEMA),
             system_prompt=system_prompt,
             tools=[],
         )

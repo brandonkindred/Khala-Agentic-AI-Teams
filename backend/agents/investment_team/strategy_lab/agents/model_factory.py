@@ -14,11 +14,27 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from llm_service.config import resolve_base_url, resolve_model, resolve_provider, resolve_timeout
 
 logger = logging.getLogger(__name__)
+
+
+def structured_output_enabled() -> bool:
+    """Resolve the master toggle for schema-constrained LLM decoding.
+
+    Reads ``STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED`` (default ``true``;
+    accepted truthy values are ``"true"`` / ``"1"`` / ``"yes"``, case-
+    insensitive; anything else disables). When disabled, ``get_strands_model``
+    ignores any ``response_schema`` and the agents fall back to their prior
+    prompt-only JSON behaviour (still validated by pydantic downstream).
+
+    Preconditions: none.
+    Postconditions: returns a ``bool``; never raises.
+    """
+    raw = os.environ.get("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
+    return raw.strip().lower() in {"true", "1", "yes"}
 
 
 def _resolve_strands_timeout(agent_key: str) -> float:
@@ -72,7 +88,12 @@ def _construct_with_optional_timeout(model_cls, timeout: float, **kwargs):
     return model_cls(**kwargs)
 
 
-def get_strands_model(agent_key: str = "strategy_ideation", *, timeout: Optional[float] = None):
+def get_strands_model(
+    agent_key: str = "strategy_ideation",
+    *,
+    timeout: Optional[float] = None,
+    response_schema: Optional[Dict[str, Any]] = None,
+):
     """Return a Strands ``Model`` instance for the given agent key.
 
     The Strands SDK defaults to BedrockModel when ``model`` is a string.
@@ -83,12 +104,28 @@ def get_strands_model(agent_key: str = "strategy_ideation", *, timeout: Optional
     underlying client — the only mechanism that actually cancels a hung HTTP
     call. Defaults to ``STRATEGY_LAB_LLM_TIMEOUT`` / ``resolve_timeout``. The
     Strategy Lab LLM envelope adds a secondary wall-clock guard on top.
+
+    ``response_schema`` is an optional JSON Schema (``dict``) for
+    schema-constrained decoding. When supplied *and* structured output is
+    enabled (:func:`structured_output_enabled`) *and* the provider is Ollama,
+    it is passed to the model via the ``format`` request field so the decoder
+    can only emit conforming JSON. It is a no-op for Bedrock (which keeps
+    prompt-only JSON) and when the toggle is off, so callers can pass a schema
+    unconditionally.
+
+    Preconditions: ``agent_key`` is a non-empty model key; ``response_schema``,
+    if given, is a JSON-serializable schema dict.
+    Postconditions: returns a constructed strands model. Adding a schema never
+    changes which provider/model is selected — only whether the Ollama request
+    carries a ``format`` constraint.
     """
     provider = resolve_provider()
     model_id = resolve_model(agent_key)
     base_url = resolve_base_url()
     if timeout is None:
         timeout = _resolve_strands_timeout(agent_key)
+
+    use_schema = response_schema is not None and structured_output_enabled()
 
     if provider == "bedrock":
         from strands.models import BedrockModel
@@ -121,10 +158,21 @@ def get_strands_model(agent_key: str = "strategy_ideation", *, timeout: Optional
         )
 
     logger.info(
-        "Strands model: Ollama model_id=%s host=%s cloud=%s timeout=%.0fs",
+        "Strands model: Ollama model_id=%s host=%s cloud=%s timeout=%.0fs schema=%s",
         model_id,
         host,
         bool(api_key),
         timeout,
+        use_schema,
     )
-    return _construct_with_optional_timeout(OllamaModel, timeout, host=host, model_id=model_id)
+    extra: Dict[str, Any] = {}
+    if use_schema:
+        # strands' OllamaModel merges ``additional_args`` straight into the
+        # ``ollama`` client request, and the client accepts a JSON-Schema dict
+        # for ``format`` (the same field strands' own ``structured_output``
+        # uses). Unknown config keys only warn — they never raise — so this is
+        # safe across the supported strands range.
+        extra["additional_args"] = {"format": response_schema}
+    return _construct_with_optional_timeout(
+        OllamaModel, timeout, host=host, model_id=model_id, **extra
+    )
