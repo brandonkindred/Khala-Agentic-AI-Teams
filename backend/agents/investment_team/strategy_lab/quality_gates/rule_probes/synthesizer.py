@@ -1185,6 +1185,92 @@ def _monotonic_trend_bars(n: int, base_close: float, slope: float) -> List[OHLCV
     ]
 
 
+def _two_phase_trend_bars(
+    n: int,
+    base_close: float,
+    phase1_slope: float,
+    phase2_slope: float,
+    phase1_frac: float = 0.5,
+) -> List[OHLCVBar]:
+    """Trend in one direction for ``phase1_frac`` of the bars, then trend in
+    the opposite direction for the rest.
+
+    Used to seed indicators on the far side of a signed threshold. For
+    example, ``MACD cross_above -50`` needs MACD to start *below* -50
+    before rising through it — a single-phase up-trend starts MACD at 0
+    (already above -50). Phase 1 with steep negative slope drives MACD to
+    below -50; phase 2 with positive slope brings it back through any
+    threshold up to ~ phase2_slope × spread / 2.
+    """
+    p1 = max(1, int(n * phase1_frac))
+    closes: List[float] = [max(_MIN_PRICE, base_close + phase1_slope * i) for i in range(p1)]
+    phase1_end = closes[-1] if closes else base_close
+    for i in range(n - p1):
+        closes.append(max(_MIN_PRICE, phase1_end + phase2_slope * (i + 1)))
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=c,
+            high=c + 0.5,
+            low=max(_MIN_PRICE, c - 0.5),
+            close=c,
+            volume=1_000_000.0,
+        )
+        for c in closes
+    ]
+
+
+def _volume_trend_bars(
+    n: int, base_close: float, base_volume: float, volume_slope: float
+) -> List[OHLCVBar]:
+    """Vary the volume series while holding close flat.
+
+    For indicators with ``source="volume"`` — ``_compute_indicator_series``
+    reads from the volume column, so price-varying builders produce a flat
+    indicator. This builder is symmetric: it drives the volume series
+    monotonically while keeping prices steady at ``base_close``.
+    """
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=base_close,
+            high=base_close + 0.5,
+            low=max(_MIN_PRICE, base_close - 0.5),
+            close=base_close,
+            volume=max(1.0, base_volume + volume_slope * i),
+        )
+        for i in range(n)
+    ]
+
+
+def _step_bars(
+    n: int, low_level: float, high_level: float, step_frac: float = 0.5
+) -> List[OHLCVBar]:
+    """Two flat regimes joined at ``step_frac``. The SMA / Bollinger middle
+    band ramps linearly between ``low_level`` and ``high_level`` over the
+    window, crossing any threshold in between.
+
+    Mirrors the inline shape already used by ``_synth_cross_indicator_number``
+    for SMA/EMA so the Bollinger middle band (which is also an SMA) can
+    delegate to it for threshold-aware crosses.
+    """
+    step_idx = max(1, int(n * step_frac))
+    closes = [max(_MIN_PRICE, low_level)] * step_idx + [max(_MIN_PRICE, high_level)] * (
+        n - step_idx
+    )
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=c,
+            high=c + 0.5,
+            low=max(_MIN_PRICE, c - 0.5),
+            close=c,
+            volume=1_000_000.0,
+        )
+        for c in closes
+    ]
+
+
 def _quiet_then_breakout(n: int, base_close: float, direction: str) -> List[OHLCVBar]:
     """Long quiet history at ``base_close`` then a 5-bar breakout. Drives
     Bollinger bands wide and pushes price across the upper / lower band.
@@ -1784,6 +1870,63 @@ def _builders_for_indicator_number(
     indicator's value range straddles ``rhs``.
     """
     name = lhs.name
+
+    # source=volume — the indicator reads from the volume column, so
+    # price-varying builders produce a flat indicator. Drive volume
+    # monotonically with a flat warmup prefix (so the cross fires after
+    # the indicator's warmup, not during it).
+    if lhs.source == "volume":
+        warmup = _warmup_for_indicator(lhs)
+        n = max(min_bars, warmup + 60)
+        base_vol = max(1.0, abs(rhs) if rhs != 0 else 1_000_000.0)
+        direction = 1.0 if op == "cross_above" else -1.0
+        # Slope floor scales with the absolute magnitudes involved; for
+        # rhs=0 we still need a non-trivial slope so MACD differentiates.
+        if name == "macd":
+            slow = int(lhs.param("slow"))
+            fast = int(lhs.param("fast"))
+            spread_period = max(1, slow - fast)
+            output = lhs.param("output")
+            if output == "histogram":
+                # Histogram transient peak ≈ slope, much smaller than
+                # the line — needs a steeper slope to clear |rhs|.
+                target_slope = max(base_vol * 0.01, 2.0 * abs(rhs))
+            else:
+                target_slope = max(base_vol * 0.01, 4.0 * abs(rhs) / spread_period)
+        else:
+            target_slope = max(base_vol * 0.01, abs(rhs) * 0.1)
+
+        def _flat_then_volume(slope: float, start_vol: float) -> List[OHLCVBar]:
+            flat = [
+                OHLCVBar(
+                    date="placeholder",
+                    open=base_close,
+                    high=base_close + 0.5,
+                    low=max(_MIN_PRICE, base_close - 0.5),
+                    close=base_close,
+                    volume=start_vol,
+                )
+                for _ in range(warmup)
+            ]
+            trend = [
+                OHLCVBar(
+                    date="placeholder",
+                    open=base_close,
+                    high=base_close + 0.5,
+                    low=max(_MIN_PRICE, base_close - 0.5),
+                    close=base_close,
+                    volume=max(1.0, start_vol + slope * (i + 1)),
+                )
+                for i in range(n - warmup)
+            ]
+            return flat + trend
+
+        return [
+            lambda: _flat_then_volume(direction * target_slope, base_vol * 0.5),
+            lambda: _flat_then_volume(-direction * target_slope, base_vol * 1.5),
+            lambda: _volume_trend_bars(n, base_close, base_vol * 0.5, direction * target_slope),
+        ]
+
     if name in ("rsi", "adx", "stochastic"):
         # Bounded 0-100; the price-space builders already produce the full
         # range. Threshold scaling not needed.
@@ -1791,6 +1934,21 @@ def _builders_for_indicator_number(
     if name == "vwap":
         anchored = max(_MIN_PRICE, abs(rhs) if rhs != 0 else base_close)
         return _builders_for_priceref_cross(lhs, op, anchored, min_bars)
+    if name == "bollinger" and lhs.param("band") == "middle":
+        # The middle band is just SMA(close, period). Delegate to the same
+        # step-regime shape ``_synth_cross_indicator_number`` uses for SMA
+        # so any in-price-range threshold works.
+        period = int(lhs.param("period"))
+        n = max(min_bars, period * 3 + 30)
+        if op == "cross_above":
+            low = rhs - 10.0
+            high = rhs + max(20.0, abs(rhs))
+        else:
+            low = max(_MIN_PRICE, rhs - max(20.0, abs(rhs)))
+            high = rhs + 10.0
+            # For cross_below, step DOWN: start above the threshold, end below.
+            low, high = high, low
+        return [lambda: _step_bars(n, low, high, step_frac=0.5)]
     if name == "bollinger":
         # Bollinger band magnitude depends on both the rolling middle (close
         # SMA) and σ. Different cross shapes need different band dynamics:
@@ -1831,14 +1989,18 @@ def _builders_for_indicator_number(
         warmup = slow + signal_ + 5
         n = max(min_bars, warmup + 90)
         spread_period = max(1, slow - fast)
-        # Steady-state MACD line ≈ slope × spread_period / 2. Histogram's
-        # transient peak (MACD − signal during the rising EMA spread) is
-        # roughly ``slope`` itself — much smaller than the line. To clear
-        # any threshold for any output we take the larger of the two
-        # required slopes and overshoot by 2×.
-        line_slope = max(0.5, 4.0 * abs(rhs) / spread_period)
-        histogram_slope = max(0.5, 2.0 * abs(rhs))
-        target_slope = max(line_slope, histogram_slope)
+        # Steady-state MACD line ≈ slope × spread_period / 2; histogram's
+        # transient peak ≈ slope (much smaller than the line). Use the
+        # output-specific formula so we don't overshoot — overshooting
+        # forces base_close to clamp at MIN_PRICE in the two-phase builder,
+        # which kills the negative MACD seeding signed-threshold crosses
+        # depend on.
+        output = lhs.param("output")
+        if output == "histogram":
+            target_slope = max(0.5, 2.0 * abs(rhs))
+        else:
+            # line / signal both scale with the EMA spread.
+            target_slope = max(0.5, 4.0 * abs(rhs) / spread_period)
         direction = 1.0 if op == "cross_above" else -1.0
 
         def _flat_then_trend(slope: float) -> List[OHLCVBar]:
@@ -1857,9 +2019,33 @@ def _builders_for_indicator_number(
                 for c in closes
             ]
 
+        # Two-phase trend for signed thresholds: when ``rhs`` sits on the
+        # opposite side of zero from ``direction``, a single-phase trend
+        # can't seed MACD on the far side of ``rhs``. E.g. ``cross_above -50``
+        # needs MACD < -50 before rising through it; a flat warmup pins it
+        # at 0 (already above -50). Phase 1 pushes MACD past ``rhs`` in
+        # the opposite direction; phase 2 brings it back through ``rhs``.
+        #
+        # Phase 1 must be longer than the MACD warmup so MACD enters the
+        # visible window already converged to the phase-1 steady state;
+        # otherwise phase 1's MACD is NaN throughout and phase 2 starts
+        # with MACD = 0 instead of the desired far-side value.
+        two_phase_phase1_bars = warmup + 25
+        two_phase_n = two_phase_phase1_bars + warmup + 30
+        two_phase_phase1_frac = two_phase_phase1_bars / two_phase_n
+        two_phase_base = max(base_close, target_slope * two_phase_phase1_bars + 100.0)
+        phase1_slope = -direction * target_slope
+        phase2_slope = direction * target_slope
         return [
             lambda: _flat_then_trend(direction * target_slope),
             lambda: _flat_then_trend(-direction * target_slope),
+            lambda: _two_phase_trend_bars(
+                two_phase_n,
+                two_phase_base,
+                phase1_slope,
+                phase2_slope,
+                phase1_frac=two_phase_phase1_frac,
+            ),
             lambda: _monotonic_trend_bars(n, base_close, direction * target_slope),
             lambda: _regime_change_bars(n, base_close, drop_rate=0.98, rise_rate=1.02),
             lambda: _regime_change_bars(n, base_close, drop_rate=1.02, rise_rate=0.98),
@@ -1912,7 +2098,12 @@ def _synth_cross_indicator_number(
     indicator to settle, then a sustained burst at a wider distance so
     the moving average pulls past ``rhs`` over several bars.
     """
-    if lhs.name in ("sma", "ema"):
+    # SMA/EMA on close: use the original deterministic step-regime shape
+    # so the trigger index stays stable for existing tests. Other sources
+    # (volume, hl2, ohlc4) fall through to the source-aware catalogue at
+    # the bottom of this function — the close-only shape would otherwise
+    # produce a flat indicator for non-close sources.
+    if lhs.name in ("sma", "ema") and lhs.source == "close":
         period = int(lhs.param("period"))
         n = max(min_bars, period * 3 + 30)
         # Quiet regime + spike regime; spike magnitude needs to be large

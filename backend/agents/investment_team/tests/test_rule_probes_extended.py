@@ -1709,3 +1709,108 @@ def test_cross_indicator_number_is_threshold_aware(lhs, op, rhs):
         f"threshold {rhs} not crossed: {reason}"
     )
     _assert_cross_fires(pred, bars, trigger)
+
+
+# ---------------------------------------------------------------------------
+# Signed-threshold + alternate-source coverage (PR #708 follow-up review)
+# ---------------------------------------------------------------------------
+#
+# Three additional gaps surfaced after the threshold-aware catalogue
+# landed: signed MACD thresholds whose sign opposes the cross direction
+# (``cross_above -50``, ``cross_below 50``), indicators with
+# ``source="volume"`` whose forcing sequences only varied price, and the
+# Bollinger middle band (which is just SMA) against thresholds outside
+# the volatility-builder range. These regressions pin coverage for each.
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        # cross_above with negative threshold — needs MACD < N before rising
+        (IndicatorRef(name="macd", params={"output": "macd"}), "cross_above", -50.0),
+        (IndicatorRef(name="macd", params={"output": "signal"}), "cross_above", -25.0),
+        (
+            IndicatorRef(name="macd", params={"output": "histogram"}),
+            "cross_above",
+            -3.0,
+        ),
+        # cross_below with positive threshold — needs MACD > N before falling
+        (IndicatorRef(name="macd", params={"output": "macd"}), "cross_below", 50.0),
+        (IndicatorRef(name="macd", params={"output": "signal"}), "cross_below", 30.0),
+        (
+            IndicatorRef(name="macd", params={"output": "histogram"}),
+            "cross_below",
+            3.0,
+        ),
+    ],
+)
+def test_macd_signed_thresholds_seed_on_far_side(lhs, op, rhs):
+    """When ``rhs``'s sign opposes the cross direction, the catalogue must
+    drive MACD to the far side of ``rhs`` before reversing. Otherwise the
+    search starts with MACD ≈ 0 (already on the wrong side of ``rhs``) and
+    reports ``cross_not_found_in_window`` for legitimate falling/rising
+    MACD entries and exits."""
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"signed threshold {rhs} not crossed: {reason}"
+    )
+    _assert_cross_fires(pred, bars, trigger)
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        (IndicatorRef(name="macd", source="volume"), "cross_above", 0.0),
+        (IndicatorRef(name="macd", source="volume"), "cross_below", 0.0),
+        (
+            IndicatorRef(name="macd", params={"output": "histogram"}, source="volume"),
+            "cross_above",
+            5000.0,
+        ),
+        (
+            IndicatorRef(name="ema", params={"period": 20}, source="volume"),
+            "cross_above",
+            1_500_000.0,
+        ),
+        (
+            IndicatorRef(name="sma", params={"period": 20}, source="volume"),
+            "cross_above",
+            500_000.0,
+        ),
+    ],
+)
+def test_cross_indicator_with_volume_source(lhs, op, rhs):
+    """The forcing sequence must vary the volume column when
+    ``ref.source == "volume"``; otherwise indicators computed over a
+    constant volume series stay flat and are reported unprobeable."""
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"volume-source predicate not crossed: {reason}"
+    )
+    _assert_cross_fires(pred, bars, trigger)
+
+
+@pytest.mark.parametrize(
+    "op,rhs",
+    [
+        ("cross_below", 10.0),
+        ("cross_above", 50.0),
+        ("cross_below", 200.0),
+        ("cross_above", 5.0),
+        ("cross_below", 1000.0),
+    ],
+)
+def test_bollinger_middle_band_is_sma_threshold_aware(op, rhs):
+    """The Bollinger middle band is just SMA(close, period). The
+    volatility builders that work for upper / lower can't drive the
+    middle band to arbitrary thresholds — middle delegates to the SMA
+    step-regime shape instead."""
+    lhs = IndicatorRef(name="bollinger", params={"band": "middle"})
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"middle-band threshold {rhs} not crossed: {reason}"
+    )
+    _assert_cross_fires(pred, bars, trigger)
