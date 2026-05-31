@@ -20,6 +20,7 @@ from investment_team.models import StrategySpec
 from investment_team.strategy_lab.agents.design_review import (
     DesignReviewAgent,
     SpecCritique,
+    _coerce_critique,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab.spec_dsl import (
@@ -451,3 +452,73 @@ def test_ready_true_with_info_only_issues_is_preserved(
     assert len(critique.issues) == 1
     assert critique.issues[0].severity == "info"
     assert "thesis aligns with prior winner" in critique.issues[0].description
+
+
+# ---------------------------------------------------------------------------
+# _coerce_critique demotion threshold — the self-review path passes
+# demote_min_severity="critical" so advisory warnings on a ready=true verdict
+# are accepted instead of burning a self-revision round.
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_critique_critical_threshold_keeps_ready_true_with_warning() -> None:
+    """With ``demote_min_severity="critical"`` a ready=true + warning verdict is
+    accepted verbatim — no demotion, no synthetic audit issue appended."""
+    parsed = {
+        "ready": True,
+        "rationale": "fine, minor note",
+        "issues": [{"field": "sizing", "severity": "warning", "description": "tight"}],
+    }
+
+    critique = _coerce_critique(parsed, [], demote_min_severity="critical")
+
+    assert critique.ready is True
+    assert len(critique.issues) == 1
+    assert critique.issues[0].severity == "warning"
+
+
+def test_coerce_critique_critical_threshold_keeps_ready_true_with_info() -> None:
+    """Info-only issues never demote at any threshold."""
+    parsed = {
+        "ready": True,
+        "rationale": "fine",
+        "issues": [{"field": "hypothesis", "severity": "info", "description": "fyi"}],
+    }
+
+    critique = _coerce_critique(parsed, [], demote_min_severity="critical")
+
+    assert critique.ready is True
+    assert len(critique.issues) == 1
+    assert critique.issues[0].severity == "info"
+
+
+def test_coerce_critique_critical_threshold_still_demotes_critical() -> None:
+    """A ready=true + critical verdict is a real contradiction and is demoted
+    even under the lenient self-review threshold, with an audit issue appended."""
+    parsed = {
+        "ready": True,
+        "rationale": "claims ready",
+        "issues": [
+            {"field": "entry_rules", "severity": "critical", "description": "no adx predicate"}
+        ],
+    }
+
+    critique = _coerce_critique(parsed, [], demote_min_severity="critical")
+
+    assert critique.ready is False
+    assert len(critique.issues) == 2
+    assert critique.issues[0].severity == "critical"
+    assert any("demoting" in i.description for i in critique.issues)
+
+
+def test_coerce_critique_default_threshold_demotes_warning() -> None:
+    """The default threshold (external reviewer path) still demotes on warning."""
+    parsed = {
+        "ready": True,
+        "rationale": "passing with concerns",
+        "issues": [{"field": "sizing", "severity": "warning", "description": "tight"}],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False

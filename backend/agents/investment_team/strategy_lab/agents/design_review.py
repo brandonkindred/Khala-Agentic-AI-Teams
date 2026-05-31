@@ -287,7 +287,15 @@ def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
     return "\n".join(lines)
 
 
-def _coerce_critique(parsed: Dict[str, Any], readiness_findings: List[str]) -> SpecCritique:
+_SEVERITY_ORDER: Dict[str, int] = {"info": 0, "warning": 1, "critical": 2}
+
+
+def _coerce_critique(
+    parsed: Dict[str, Any],
+    readiness_findings: List[str],
+    *,
+    demote_min_severity: Literal["warning", "critical"] = "warning",
+) -> SpecCritique:
     """Convert a parsed LLM JSON dict into a :class:`SpecCritique`.
 
     Tolerant of mild schema drift so a single off-spec issue doesn't
@@ -302,10 +310,23 @@ def _coerce_critique(parsed: Dict[str, Any], readiness_findings: List[str]) -> S
       strings ``"true"`` / ``"false"`` (case-insensitive) are honoured.
       Anything else (including ``"yes"``, ``""``, an int) defaults to
       ``False``.
-    * ``ready=True`` alongside any non-info issue is treated as
-      reviewer self-contradiction and demoted to ``ready=False``. The
-      loop then keeps iterating rather than promoting an unreviewed
-      spec on the strength of a flag that contradicts its own findings.
+    * ``ready=True`` alongside an issue at or above ``demote_min_severity``
+      is treated as reviewer self-contradiction and demoted to
+      ``ready=False``. The loop then keeps iterating rather than promoting
+      an unreviewed spec on the strength of a flag that contradicts its
+      own findings.
+
+    ``demote_min_severity`` selects which severities count as blocking for
+    that demotion. The default ``"warning"`` keeps the external
+    ``DesignReviewAgent`` semantics (any non-info issue demotes). The
+    internal self-review path passes ``"critical"`` so advisory warnings
+    on an otherwise-ready verdict are accepted verbatim instead of burning
+    a self-revision round.
+
+    Preconditions: ``parsed`` is a dict from a parsed LLM JSON payload;
+    ``demote_min_severity`` is one of ``"warning"`` / ``"critical"``.
+    Postconditions: returns a :class:`SpecCritique` whose ``ready`` is
+    ``False`` whenever a blocking issue (per the threshold) is present.
     """
     ready = _coerce_strict_bool(parsed.get("ready"))
     rationale = str(parsed.get("rationale", "")).strip()
@@ -335,10 +356,12 @@ def _coerce_critique(parsed: Dict[str, Any], readiness_findings: List[str]) -> S
             # Best-effort: one bad item shouldn't bin the rest.
             continue
 
-    # Contract: ready=True with any non-info issue is incoherent. Demote
-    # the verdict and append a synthetic issue so the lineage records
-    # *why* we overrode the reviewer, not just that we did.
-    blocking_issues = [i for i in issues if i.severity != "info"]
+    # Contract: ready=True alongside an issue at or above the demotion
+    # threshold is incoherent. Demote the verdict and append a synthetic
+    # issue so the lineage records *why* we overrode the reviewer, not
+    # just that we did.
+    threshold = _SEVERITY_ORDER[demote_min_severity]
+    blocking_issues = [i for i in issues if _SEVERITY_ORDER[i.severity] >= threshold]
     if ready and blocking_issues:
         ready = False
         issues.append(
@@ -347,13 +370,14 @@ def _coerce_critique(parsed: Dict[str, Any], readiness_findings: List[str]) -> S
                 severity="critical",
                 description=(
                     "Reviewer returned ready=true alongside "
-                    f"{len(blocking_issues)} non-info issue(s); demoting "
-                    "to ready=false so the contradicted verdict cannot "
-                    "promote an unreviewed spec."
+                    f"{len(blocking_issues)} blocking issue(s) at or above "
+                    f"'{demote_min_severity}'; demoting to ready=false so the "
+                    "contradicted verdict cannot promote an unreviewed spec."
                 ),
                 suggested_fix=(
-                    "Resolve the listed issues; the reviewer must only "
-                    "set ready=true when no critical or warning remains."
+                    f"Resolve the listed issues; the reviewer must only set "
+                    f"ready=true when no issue at or above '{demote_min_severity}' "
+                    "remains."
                 ),
             )
         )

@@ -378,8 +378,7 @@ class DesignAgent:
             # spec. The external ``DesignReviewAgent`` loop remains
             # authoritative; this pre-flight never aborts the cycle.
             logger.warning(
-                "DesignAgent self-revision failed (%s: %s); "
-                "returning pre-revision spec",
+                "DesignAgent self-revision failed (%s: %s); returning pre-revision spec",
                 type(exc).__name__,
                 exc,
             )
@@ -415,7 +414,14 @@ class DesignAgent:
             logger=logger,
         )
         parsed = extract_json_object(raw)
-        return _coerce_critique(parsed, readiness_findings=[])
+        # Self-review tolerates advisory warnings on an otherwise-ready
+        # verdict: the self-review LLM routinely flags minor notes as
+        # warnings while still satisfied with the spec. Only a *critical*
+        # finding is a real prose↔predicate contradiction worth a
+        # self-revision round, so demote only on critical here. (The
+        # external DesignReviewAgent keeps the stricter default, where any
+        # non-info issue demotes.)
+        return _coerce_critique(parsed, readiness_findings=[], demote_min_severity="critical")
 
 
 def _design_parse_retries() -> int:
