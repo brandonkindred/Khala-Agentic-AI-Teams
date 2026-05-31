@@ -957,32 +957,35 @@ class StrategyLabOrchestrator:
         supplied ``strategy_id``. The caller is responsible for any
         subsequent mutation (compile, fee defaults).
 
-        ``asset_class`` is coerced with the permissive normalizer *before*
-        construction: ``StrategySpec`` strictly rejects an off-vocabulary class
-        at its boundary, but on the LLM design path a model slip (e.g. an
-        unmapped class name) must be repaired to a usable canonical label rather
-        than raising ``ValidationError`` and crashing the cycle. Accepted
-        aliases canonicalize and a genuinely-unknown class falls back to
-        ``stocks`` (the same default this method already applies for a missing
-        ``asset_class``). A genuinely-unknown class — one the strict normalizer
-        would reject rather than an accepted alias — is logged at WARNING so the
-        coercion is observable rather than silent.
+        Accepted ``asset_class`` aliases (equity/equities/stock/etf/etfs, fx,
+        commodity/metal/energy, cryptocurrency/cryptocurrencies) are
+        canonicalized before construction so a clean mapping never trips the
+        strict ``StrategySpec`` validator.
+
+        A *genuinely unsupported* class the strict normalizer rejects (e.g.
+        ``bonds``) is NOT silently coerced to ``stocks`` — doing so would run
+        the original (bonds) hypothesis against the stock universe and stock
+        gates and record it as a valid stock backtest. Instead this raises
+        :class:`SpecImplementabilityError`, which ``run_cycle`` catches to
+        re-enter the design phase with the defect as evidence (bounded by
+        ``MAX_DESIGN_REENTRIES``); on exhaustion the cycle short-circuits with
+        ``status="failed: spec_unimplementable"`` rather than a misleading
+        record. This keeps the cycle alive (no unhandled ``ValidationError``
+        crash) while refusing to mislabel the experiment.
+
+        Raises:
+            SpecImplementabilityError: the payload names an unsupported
+                ``asset_class`` that no alias maps to a tradeable class.
         """
         raw_asset_class = strategy_dict.get("asset_class", "stocks")
         asset_class = normalize_asset_class(raw_asset_class)
+        unsupported_class = False
         try:
             normalize_asset_class_strict(raw_asset_class)
         except ValueError:
-            # Permissive coercion repaired an off-vocabulary class the LLM
-            # emitted (strict would reject it). Keep the cycle alive but make
-            # the silent fallback visible.
-            logger.warning(
-                "DesignAgent emitted unknown asset_class %r; coercing to %r "
-                "to keep the cycle alive (strict construction would reject it).",
-                raw_asset_class,
-                asset_class,
-            )
-        return StrategySpec(
+            unsupported_class = True
+
+        spec = StrategySpec(
             strategy_id=strategy_id,
             authored_by="strategy_lab_v2",
             asset_class=asset_class,
@@ -1000,6 +1003,26 @@ class StrategyLabOrchestrator:
             ),
             strategy_code=None,
         )
+        if unsupported_class:
+            # ``spec`` (coerced to ``stocks``) is passed as ``last_spec`` only so
+            # the short-circuit record is well-formed; the cycle will redesign
+            # rather than backtest it. The evidence names the rejected class so
+            # the re-entry directive steers the LLM to a supported one.
+            logger.warning(
+                "DesignAgent emitted unsupported asset_class %r; routing to "
+                "redesign instead of coercing to %r and backtesting as stocks.",
+                raw_asset_class,
+                asset_class,
+            )
+            raise SpecImplementabilityError(
+                f"Unsupported asset_class {raw_asset_class!r}: not a tradeable "
+                "class and not a known alias. Re-author the strategy for one of "
+                "stocks/crypto/forex/futures/commodities.",
+                failure_phase="design",
+                last_spec=spec,
+                last_code="",
+            )
+        return spec
 
     def _run_pre_synthesis_phase(
         self,
