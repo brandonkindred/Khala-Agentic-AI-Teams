@@ -334,7 +334,47 @@ def _truncate_title(title: str, issue_num: int, limit: int = 256) -> str:
     return f"{head}{suffix}" if head else f"Issue #{issue_num}{suffix}"
 
 
-def _git(repo_path: str, *args: str, timeout: float = 120.0) -> Tuple[int, str]:
+def _git_auth_env(token: str) -> Dict[str, str]:
+    """Build an env dict that injects a Bearer token via ``GIT_CONFIG_*`` vars.
+
+    Mirrors the unified API's clone-time auth (``_git_auth_env`` in
+    ``unified_api/routes/integrations.py``): the credential is passed
+    transiently through the environment and never written to ``.git/config``.
+    That matters because the checkout lives on the shared ``agents_data``
+    volume — a persisted token would outlive the job and leak across runs.
+
+    Preconditions:
+        - ``token`` is a non-empty GitHub credential authorizing the operation.
+    Postconditions:
+        - Returns a copy of ``os.environ`` augmented with a single transient
+          ``http.extraHeader`` git-config entry (Authorization: Bearer) and
+          ``GIT_TERMINAL_PROMPT=0`` so a missing/invalid credential fails fast
+          instead of blocking on an interactive prompt until the git timeout.
+    """
+    return {
+        **os.environ,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def _git(
+    repo_path: str,
+    *args: str,
+    timeout: float = 120.0,
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[int, str]:
+    """Run a git subcommand in ``repo_path``.
+
+    Postconditions:
+        - Returns ``(returncode, scrubbed_message)``; the message has any token
+          redacted via ``scrub_token_from_text``.
+        - ``env=None`` (default) inherits the parent environment, preserving the
+          prior behaviour for local-only operations. Pass an auth env (see
+          ``_git_auth_env``) for network operations against a private remote.
+    """
     try:
         r = subprocess.run(
             ["git", "-C", repo_path, *args],
@@ -342,6 +382,7 @@ def _git(repo_path: str, *args: str, timeout: float = 120.0) -> Tuple[int, str]:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
         msg = (r.stderr or r.stdout).strip()[:500]
         return r.returncode, scrub_token_from_text(msg)
@@ -365,7 +406,11 @@ def _working_tree_dirty(repo_path: str) -> Tuple[bool, Optional[str]]:
 
 
 def _prepare_issue_branch(
-    repo_path: str, remote: str, default_branch: str, integration_branch: str
+    repo_path: str,
+    remote: str,
+    default_branch: str,
+    integration_branch: str,
+    token: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     # Refuse to overwrite the operator's in-flight work. Without this check,
     # `git checkout -B` happily carries unrelated dirty files across the
@@ -380,7 +425,11 @@ def _prepare_issue_branch(
     if not _is_safe_ref(integration_branch):
         return False, f"unsafe integration_branch ref: {integration_branch!r}"
 
-    rc, msg = _git(repo_path, "fetch", "--", remote, default_branch)
+    # `fetch` is the only network op here (the checkouts below are local), so it
+    # needs the credential. The clone was authenticated transiently by the
+    # unified API; that auth is not persisted, so we re-supply it per fetch.
+    auth_env = _git_auth_env(token) if token else None
+    rc, msg = _git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
     if rc != 0:
         return False, msg
     rc, msg = _git(
@@ -406,9 +455,15 @@ def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, O
     return (rc == 0), (None if rc == 0 else msg)
 
 
-def _push_branch(repo_path: str, remote: str, branch: str) -> Tuple[bool, Optional[str]]:
+def _push_branch(
+    repo_path: str, remote: str, branch: str, token: Optional[str] = None
+) -> Tuple[bool, Optional[str]]:
     if not _is_safe_ref(branch):
         return False, f"unsafe branch name: {branch!r}"
+    # Push is a network op against the (HTTPS) origin; supply the transient
+    # credential so the PR branch actually lands instead of hanging on an auth
+    # prompt until the timeout (GIT_TERMINAL_PROMPT=0 turns that into a fast
+    # failure for public repos too).
     rc, msg = _git(
         repo_path,
         "push",
@@ -417,6 +472,7 @@ def _push_branch(repo_path: str, remote: str, branch: str) -> Tuple[bool, Option
         remote,
         branch,
         timeout=180,
+        env=_git_auth_env(token) if token else None,
     )
     return (rc == 0), (None if rc == 0 else msg)
 
@@ -446,7 +502,7 @@ def _run_with_github_hooks(
         _safe_comment(client, owner, repo, num, f"Coding team started job `{job_id}`.")
 
         prep_ok, prep_err = _prepare_issue_branch(
-            request.repo_path, request.remote, base, integration_branch
+            request.repo_path, request.remote, base, integration_branch, token
         )
         if not prep_ok:
             _record_failure(client, owner, repo, num, job_id, f"branch prep failed: {prep_err}")
@@ -486,7 +542,9 @@ def _run_with_github_hooks(
             _record_failure(client, owner, repo, num, job_id, f"fast-forward failed: {ff_err}")
             return
 
-        push_ok, push_err = _push_branch(request.repo_path, request.remote, integration_branch)
+        push_ok, push_err = _push_branch(
+            request.repo_path, request.remote, integration_branch, token
+        )
         if not push_ok:
             _record_failure(client, owner, repo, num, job_id, f"git push failed: {push_err}")
             return

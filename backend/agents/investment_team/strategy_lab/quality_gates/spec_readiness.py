@@ -18,7 +18,7 @@ from typing import Callable, ClassVar, Iterable, Iterator, List, Optional
 
 from ...market_data_service import _max_universe_symbols
 from ...models import BacktestConfig, StrategySpec
-from ...strategy_lab_context import normalize_asset_class_strict
+from ...strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
 from ...symbols import (
     COMMODITY_SYMBOLS,
     CRYPTO_SYMBOLS,
@@ -419,6 +419,26 @@ class SpecReadinessGate(GateResultsMixin):
         if config is None:
             return ()
 
+        # Fail closed on an unsupported asset_class before any sizing logic.
+        # ``StrategySpec`` rejects off-vocabulary classes at construction, but a
+        # spec can reach this gate without that validation (post-construction
+        # assignment / model-copy mutation, which the tests exercise). With
+        # explicit ``target_symbols`` the ``_default_universe_for`` strict check
+        # below is skipped, and the permissive ``normalize_asset_class`` used
+        # for the whole-lot decision would map e.g. ``bonds`` → ``stocks`` and
+        # let it pass as a stock-like whole-lot strategy. Resolve strictly here
+        # so an unknown class surfaces as a critical regardless of the
+        # target_symbols / timeframe path.
+        try:
+            normalize_asset_class_strict(ctx.spec.asset_class)
+        except ValueError as exc:
+            return (
+                self._critical(
+                    f"Sizing realisability: {exc}. Pick a supported asset_class "
+                    "(stocks/crypto/forex/futures/commodities)."
+                ),
+            )
+
         kind = getattr(ctx.spec.sizing, "kind", None)
 
         # Volatility-target sizing depends on realised volatility, which we
@@ -463,7 +483,7 @@ class SpecReadinessGate(GateResultsMixin):
             return ()
         capital = config.initial_capital
         assert capital > 0, "initial_capital must be strictly positive"
-        enforce_whole_lot = ctx.spec.asset_class.lower() in _WHOLE_LOT_ASSET_CLASSES
+        enforce_whole_lot = normalize_asset_class(ctx.spec.asset_class) in _WHOLE_LOT_ASSET_CLASSES
         threshold = 1.0 if enforce_whole_lot else 0.0
 
         # Notional is symbol-independent for both supported kinds, so resolve
@@ -598,10 +618,18 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     def _check_timeframe_availability(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         assert isinstance(ctx.spec, StrategySpec)
-        if (
-            ctx.spec.timeframe == "1d"
-            or ctx.spec.asset_class.lower() in _FULL_TIMEFRAME_ASSET_CLASSES
-        ):
+        if ctx.spec.timeframe == "1d":
+            return ()
+        # Resolve via the strict normalizer so an off-vocabulary class that
+        # reached the gate without going through ``StrategySpec`` construction
+        # (e.g. post-construction assignment / model-copy mutation) fails
+        # closed on an intraday timeframe instead of permissively mapping to
+        # ``stocks`` and passing as if reliable intraday data existed.
+        try:
+            canonical = normalize_asset_class_strict(ctx.spec.asset_class)
+        except ValueError:
+            canonical = None
+        if canonical in _FULL_TIMEFRAME_ASSET_CLASSES:
             return ()
         return (
             self._critical(

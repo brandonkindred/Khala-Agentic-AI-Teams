@@ -6,8 +6,9 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 
-# For healthcheck in docker-compose
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+# curl: container healthcheck. git: the GitHub issue-to-PR workflow clones/fetches
+# repositories via the `git` binary from this image (unified_api integrations route).
+RUN apt-get update && apt-get install -y --no-install-recommends curl git \
     && rm -rf /var/lib/apt/lists/*
 ENV PYTHONPATH=/app:/app/agents
 

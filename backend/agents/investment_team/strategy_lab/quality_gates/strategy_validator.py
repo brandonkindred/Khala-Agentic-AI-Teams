@@ -89,9 +89,7 @@ class StrategySpecValidator(GateResultsMixin):
             max_pos = risk.max_position_pct
             if max_pos < 1 or max_pos > 25:
                 results.append(
-                    self._critical(
-                        f"max_position_pct={max_pos}% is outside safe range [1%, 25%]."
-                    )
+                    self._critical(f"max_position_pct={max_pos}% is outside safe range [1%, 25%].")
                 )
 
             if risk.max_drawdown_pct < 5 or risk.max_drawdown_pct > 50:
@@ -113,7 +111,7 @@ class StrategySpecValidator(GateResultsMixin):
                     " ".join(spec.unparsed_rules),
                 ]
             )
-            pattern = _ASSET_MISMATCH.get(spec.asset_class.lower())
+            pattern = _ASSET_MISMATCH.get(normalize_asset_class(spec.asset_class))
             if pattern and pattern.search(all_rules_text):
                 results.append(
                     self._warning(

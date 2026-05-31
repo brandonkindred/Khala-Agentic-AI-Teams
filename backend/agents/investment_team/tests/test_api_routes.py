@@ -278,7 +278,9 @@ def test_create_strategy_returns_id_and_persists(api_client) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["strategy_id"].startswith("strat-")
-    assert body["strategy"]["asset_class"] == "equities"
+    # ``equities`` is an accepted alias; StrategySpec canonicalizes it to the
+    # canonical ``stocks`` label at the spec boundary.
+    assert body["strategy"]["asset_class"] == "stocks"
 
 
 def test_create_strategy_rejects_unknown_field(api_client) -> None:
@@ -287,6 +289,17 @@ def test_create_strategy_rejects_unknown_field(api_client) -> None:
     payload["sizing_rules"] = []  # legacy field — rejected
     resp = api_client.post("/strategies", json=payload)
     assert resp.status_code == 422
+
+
+def test_create_strategy_unsupported_asset_class_returns_422(api_client) -> None:
+    """An off-vocabulary asset_class trips StrategySpec's validator at
+    construction inside the handler; that must surface as a 422 client error,
+    not an unhandled 500."""
+    payload = _strategy_body()
+    payload["asset_class"] = "bonds"
+    resp = api_client.post("/strategies", json=payload)
+    assert resp.status_code == 422
+    assert "asset_class" in str(resp.json()).lower()
 
 
 def test_validate_strategy_404_when_missing(api_client) -> None:
