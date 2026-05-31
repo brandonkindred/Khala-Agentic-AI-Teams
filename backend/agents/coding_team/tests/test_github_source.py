@@ -991,6 +991,106 @@ class TestPrepareIssueBranch:
         assert "unsafe" in (msg or "")
 
 
+class TestGitCredentialThreading:
+    """The token must reach the network git ops (fetch/push) transiently.
+
+    The unified API clones with a credential that is never persisted to
+    ``.git/config``; the coding-team service runs later on the same shared
+    checkout, so it must re-supply the token on every fetch/push or a default
+    checkout has no auth — private repos (and the final push for public repos)
+    would otherwise fail or hang until the git timeout after the job started.
+    """
+
+    @pytest.fixture
+    def api(self):
+        """Import the api module fresh, without the patched_app fixture's stubs."""
+        _stub_heavy_modules()
+        from coding_team.api import main as api_main
+
+        return api_main
+
+    def test_git_auth_env_injects_transient_bearer_header(self, api) -> None:
+        env = api._git_auth_env("secret-tok")
+        assert env["GIT_CONFIG_COUNT"] == "1"
+        assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
+        assert env["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer secret-tok"
+        # Disable interactive prompts so a bad credential fails fast.
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        # Inherits the parent environment (PATH etc. survive).
+        assert "PATH" in env
+
+    def test_prepare_issue_branch_passes_auth_env_to_fetch(self, api, monkeypatch) -> None:
+        calls = []
+
+        def fake_git(repo_path, *args, timeout=120.0, env=None):
+            calls.append((args, env))
+            return 0, ""
+
+        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (False, None))
+        monkeypatch.setattr(api, "_git", fake_git)
+        ok, msg = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1", "tok-123")
+        assert ok is True, msg
+        # First git op is the fetch — it must carry the auth env.
+        fetch_args, fetch_env = calls[0]
+        assert fetch_args[0] == "fetch"
+        assert fetch_env is not None
+        assert fetch_env["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer tok-123"
+        # The local checkouts that follow run without an auth env.
+        assert all(env is None for _, env in calls[1:])
+
+    def test_prepare_issue_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
+        calls = []
+
+        def fake_git(repo_path, *args, timeout=120.0, env=None):
+            calls.append((args, env))
+            return 0, ""
+
+        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (False, None))
+        monkeypatch.setattr(api, "_git", fake_git)
+        ok, _ = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1")
+        assert ok is True
+        assert all(env is None for _, env in calls)
+
+    def test_push_branch_passes_auth_env(self, api, monkeypatch) -> None:
+        captured = {}
+
+        def fake_git(repo_path, *args, timeout=120.0, env=None):
+            captured["args"] = args
+            captured["env"] = env
+            return 0, ""
+
+        monkeypatch.setattr(api, "_git", fake_git)
+        ok, msg = api._push_branch("/repo", "origin", "khala/issue-1", "tok-xyz")
+        assert ok is True, msg
+        assert captured["args"][0] == "push"
+        assert captured["env"]["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer tok-xyz"
+
+    def test_push_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
+        captured = {}
+
+        def fake_git(repo_path, *args, timeout=120.0, env=None):
+            captured["env"] = env
+            return 0, ""
+
+        monkeypatch.setattr(api, "_git", fake_git)
+        ok, _ = api._push_branch("/repo", "origin", "khala/issue-1")
+        assert ok is True
+        assert captured["env"] is None
+
+    def test_push_branch_rejects_unsafe_branch_before_running_git(self, api, monkeypatch) -> None:
+        called = {"ran": False}
+
+        def fake_git(*a, **kw):
+            called["ran"] = True
+            return 0, ""
+
+        monkeypatch.setattr(api, "_git", fake_git)
+        ok, msg = api._push_branch("/repo", "origin", "-evil", "tok")
+        assert ok is False
+        assert "unsafe" in (msg or "")
+        assert called["ran"] is False
+
+
 class TestStatusResponseSurfacing:
     def test_status_returns_github_fields(self, patched_app) -> None:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
