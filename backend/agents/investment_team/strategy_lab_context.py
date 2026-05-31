@@ -27,6 +27,22 @@ _PROMPT_ASSET_CLASSES: tuple[str, ...] = tuple(
     c for c in _CANONICAL_ASSET_CLASSES if c != "options"
 )
 
+# Backtest statuses for cycles that short-circuited *before* running a backtest.
+# Their persisted ``strategy.asset_class`` may be a coerced placeholder (an
+# unsupported class like ``bonds`` is canonicalized to ``stocks`` for schema
+# validity before the redesign route), so they must not feed the asset-class
+# diversity steering. Distinct from executed-but-losing statuses (``failed`` /
+# ``failed: max_refinement_rounds``), which ran a real backtest with a genuine
+# canonical class and SHOULD count — hence an explicit set rather than a blanket
+# ``startswith("failed")`` filter.
+_NON_EXECUTED_BACKTEST_STATUSES: frozenset[str] = frozenset(
+    {
+        "failed: spec_unimplementable",
+        "failed: spec_validation",
+        "failed: code_synthesis",
+    }
+)
+
 
 def normalize_asset_class(ac: object) -> str:
     """Map any asset-class string variant to one of the canonical labels.
@@ -119,24 +135,26 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
         )
 
     ordered = sorted(records, key=lambda x: x.created_at)
-    # Count only records that actually reached a completed backtest. A
-    # short-circuited cycle (status ``failed: …`` — e.g. an unsupported
-    # asset_class routed to redesign, a spec-validation or synthesis failure)
-    # never ran, and its ``strategy.asset_class`` may be a coerced placeholder
-    # (an unsupported class like ``bonds`` is canonicalized to ``stocks`` for
-    # schema validity before the redesign route). Counting those would let a
-    # rejected, never-backtested design pollute the stock history and skew the
-    # diversity steering. Records persisted before this field carried a status
-    # default to ``"completed"``, so legacy rows are unaffected.
+    # Exclude only cycles that short-circuited *before* running a backtest
+    # (``_NON_EXECUTED_BACKTEST_STATUSES``): their ``strategy.asset_class`` may
+    # be a coerced placeholder (an unsupported class like ``bonds`` mapped to
+    # ``stocks`` for schema validity before the redesign route), so counting
+    # them would let a rejected, never-backtested design pollute the stock
+    # history and skew the diversity steering. Executed-but-losing cycles
+    # (status ``failed`` / ``failed: max_refinement_rounds``) DID run a backtest
+    # with a genuine canonical class and must keep counting — otherwise
+    # repeated failed futures/forex/etc. runs would be omitted from steering.
+    # Records persisted before ``BacktestRecord.status`` existed default to
+    # ``"completed"``, so legacy rows are unaffected.
     executed = [
         r
         for r in ordered
-        if not str(getattr(r.backtest, "status", "completed")).startswith("failed")
+        if str(getattr(r.backtest, "status", "completed")) not in _NON_EXECUTED_BACKTEST_STATUSES
     ]
     sample = executed[-tail:] if len(executed) > tail else executed
     if not sample:
         return (
-            "No completed lab backtests yet. Choose **asset_class** from "
+            "No executed lab backtests yet. Choose **asset_class** from "
             "stocks, crypto, forex, futures, or commodities with similar frequency over time — "
             "do **not** default to stocks; pick the class that best fits your multi-signal story."
         )

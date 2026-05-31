@@ -124,9 +124,24 @@ def test_hint_excludes_failed_short_circuit_records_from_counts() -> None:
 
 
 def test_hint_all_failed_records_falls_back_to_neutral_menu() -> None:
-    """When every record is a failed short-circuit, there is no executed
+    """When every record is a short-circuit (never executed), there is no
     history to steer from — emit the neutral no-history menu rather than a
     misleading all-zero count derived from coerced placeholders."""
     records = [_record("stocks", backtest_status="failed: spec_unimplementable") for _ in range(3)]
     out = asset_class_mix_hint(records)
-    assert "No completed lab backtests yet" in out, out
+    assert "No executed lab backtests yet" in out, out
+
+
+def test_hint_counts_executed_but_losing_failed_backtests() -> None:
+    """Executed-but-losing cycles use ``failed`` / ``failed: max_refinement_rounds``
+    but DID run a backtest with a genuine canonical class — they must keep
+    counting, or repeated failed futures/forex runs would vanish from the
+    diversity steering. Only never-executed short-circuits are excluded."""
+    records = [
+        _record("futures", backtest_status="failed") for _ in range(3)
+    ] + [_record("forex", backtest_status="failed: max_refinement_rounds") for _ in range(2)]
+    out = asset_class_mix_hint(records)
+    # All five executed-but-losing records count toward the diversity history.
+    assert "futures=3" in out, out
+    assert "forex=2" in out, out
+    assert "stocks=0" in out, out
