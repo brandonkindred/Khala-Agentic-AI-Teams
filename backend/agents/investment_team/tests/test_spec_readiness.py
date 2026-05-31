@@ -861,6 +861,22 @@ def test_rule7_daily_timeframe_on_commodities_passes() -> None:
     assert not tf_failures, tf_failures
 
 
+def test_rule7_unknown_asset_class_on_intraday_fails_closed() -> None:
+    """An off-vocabulary asset_class reaching the gate (via post-construction
+    mutation, since the StrategySpec boundary rejects it on construction) must
+    fail closed on an intraday timeframe via the strict normalizer, not
+    permissively map to ``stocks`` and pass as if intraday data existed."""
+    spec = _spec(
+        asset_class="stocks",
+        timeframe="5m",
+        target_symbols=["AAPL"],
+        hypothesis="AAPL intraday momentum.",
+    )
+    spec.asset_class = "bonds"
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("intraday" in c and "bonds" in c for c in _critical(results))
+
+
 # ---------------------------------------------------------------------------
 # Rule 8: Risk-limit coherence
 # ---------------------------------------------------------------------------

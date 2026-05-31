@@ -598,10 +598,18 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     def _check_timeframe_availability(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         assert isinstance(ctx.spec, StrategySpec)
-        if (
-            ctx.spec.timeframe == "1d"
-            or normalize_asset_class(ctx.spec.asset_class) in _FULL_TIMEFRAME_ASSET_CLASSES
-        ):
+        if ctx.spec.timeframe == "1d":
+            return ()
+        # Resolve via the strict normalizer so an off-vocabulary class that
+        # reached the gate without going through ``StrategySpec`` construction
+        # (e.g. post-construction assignment / model-copy mutation) fails
+        # closed on an intraday timeframe instead of permissively mapping to
+        # ``stocks`` and passing as if reliable intraday data existed.
+        try:
+            canonical = normalize_asset_class_strict(ctx.spec.asset_class)
+        except ValueError:
+            canonical = None
+        if canonical in _FULL_TIMEFRAME_ASSET_CLASSES:
             return ()
         return (
             self._critical(
