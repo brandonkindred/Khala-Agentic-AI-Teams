@@ -3349,7 +3349,14 @@ class StrategyLabOrchestrator:
             gate_timeline=gate_timeline,
         )
 
-        self.convergence_tracker.record(spec, all_gate_results)
+        # Short-circuited cycles never reached a backtest, and ``spec`` may
+        # carry a coerced placeholder asset_class (an unsupported class like
+        # ``bonds`` is canonicalized to ``stocks`` for schema validity before
+        # the redesign route). Record the signature/failure modes for stall and
+        # failure-frequency detection, but keep the placeholder out of the
+        # diversity history so it can't emit a false "heavily stocks" steering
+        # directive on the next cycle.
+        self.convergence_tracker.record(spec, all_gate_results, count_asset_class=False)
 
         emit(
             "complete",

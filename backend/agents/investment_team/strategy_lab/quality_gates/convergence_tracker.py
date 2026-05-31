@@ -48,8 +48,14 @@ class ConvergenceTracker:
     # Recording
     # ------------------------------------------------------------------
 
-    def record(self, spec: StrategySpec, gate_results: List[QualityGateResult]) -> None:
-        """Record one completed cycle's strategy and gate outcomes.
+    def record(
+        self,
+        spec: StrategySpec,
+        gate_results: List[QualityGateResult],
+        *,
+        count_asset_class: bool = True,
+    ) -> None:
+        """Record one cycle's strategy and gate outcomes.
 
         Failure modes count each cycle that failed a gate, not each
         failed row. Gates like ``DeterministicAlignmentChecker`` emit
@@ -60,10 +66,21 @@ class ConvergenceTracker:
         cycle. Deduping by ``gate_name`` per call gives each cycle at
         most one count per distinct failing gate — the right semantic
         for cross-cycle failure frequency.
+
+        ``count_asset_class`` (default ``True``) controls whether the
+        spec's asset class feeds the diversity-steering history. Set it
+        ``False`` for short-circuited cycles that never reached a
+        backtest: an unsupported class (e.g. ``bonds``) is coerced to a
+        schema-valid placeholder (``stocks``) before the redesign route,
+        so counting it would skew ``get_diversity_directive`` toward a
+        false "heavily stocks" signal even though no stock strategy ran.
+        Signatures and failure modes are still recorded so stall and
+        failure-frequency detection see the failed attempt.
         """
         sig = self._strategy_signature(spec)
         self._signatures.append(sig)
-        self._asset_class_history.append(spec.asset_class.lower())
+        if count_asset_class:
+            self._asset_class_history.append(spec.asset_class.lower())
 
         # Iterate sorted so insertion order into ``_failure_modes`` is
         # deterministic across interpreter runs. ``Counter.most_common``
