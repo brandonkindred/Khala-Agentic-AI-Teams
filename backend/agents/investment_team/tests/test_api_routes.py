@@ -278,7 +278,9 @@ def test_create_strategy_returns_id_and_persists(api_client) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["strategy_id"].startswith("strat-")
-    assert body["strategy"]["asset_class"] == "equities"
+    # ``equities`` is an accepted alias; StrategySpec canonicalizes it to the
+    # canonical ``stocks`` label at the spec boundary.
+    assert body["strategy"]["asset_class"] == "stocks"
 
 
 def test_create_strategy_rejects_unknown_field(api_client) -> None:
