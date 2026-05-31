@@ -460,3 +460,35 @@ def test_hash_spec_deterministic_across_calls() -> None:
     # Mutating a field changes the hash.
     spec_c = orch._build_spec_from_dict(_spec_dict(), strategy_id="strat-DIFFERENT")
     assert hash_spec(spec_a) != hash_spec(spec_c)
+
+
+def test_build_spec_from_dict_canonicalizes_accepted_aliases() -> None:
+    """Accepted aliases canonicalize before the strict ``StrategySpec`` boundary
+    so a clean mapping never trips the validator or aborts the cycle."""
+    orch = StrategyLabOrchestrator()
+
+    payload = _spec_dict()
+    payload["asset_class"] = "equity"
+    assert orch._build_spec_from_dict(payload, strategy_id="strat-coerce").asset_class == "stocks"
+
+    payload = _spec_dict()
+    payload["asset_class"] = "cryptocurrency"
+    assert orch._build_spec_from_dict(payload, strategy_id="strat-coerce").asset_class == "crypto"
+
+
+def test_build_spec_from_dict_routes_unsupported_class_to_redesign() -> None:
+    """A genuinely-unsupported class (e.g. ``bonds``) must NOT be silently
+    coerced to ``stocks`` and backtested as a stock strategy. It raises
+    ``SpecImplementabilityError`` so ``run_cycle`` re-enters design with the
+    defect as evidence rather than recording a misleading stock backtest. The
+    evidence names the rejected class so the re-entry directive can steer the
+    LLM, and ``last_spec`` is well-formed for the short-circuit record."""
+    orch = StrategyLabOrchestrator()
+
+    payload = _spec_dict()
+    payload["asset_class"] = "bonds"
+    with pytest.raises(SpecImplementabilityError) as exc:
+        orch._build_spec_from_dict(payload, strategy_id="strat-unsupported")
+    assert "bonds" in exc.value.evidence
+    assert exc.value.failure_phase == "design"
+    assert exc.value.last_spec is not None

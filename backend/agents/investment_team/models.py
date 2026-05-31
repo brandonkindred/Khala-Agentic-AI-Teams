@@ -240,6 +240,12 @@ class PortfolioProposal(BaseModel):
 class StrategySpec(BaseModel):
     strategy_id: str
     authored_by: str
+    # Canonicalized at construction by ``_canonicalize_asset_class`` to one of
+    # the canonical labels (stocks/crypto/forex/options/futures/commodities).
+    # Accepted aliases (equity/equities/stock/etf/etfs, fx, commodity/metal/
+    # energy) are mapped to their canonical form; unknown classes are rejected
+    # on live construction so every downstream asset_class-keyed gate can
+    # compare against the canonical set without re-encoding the alias table.
     asset_class: str
     hypothesis: str
     signal_definition: str
@@ -325,6 +331,39 @@ class StrategySpec(BaseModel):
             seen.add(sym)
             out.append(sym)
         return out
+
+    @field_validator("asset_class", mode="after")
+    @classmethod
+    def _canonicalize_asset_class(cls, v: str, info: ValidationInfo) -> str:
+        """Canonicalize and enforce the ``asset_class`` vocabulary at the boundary.
+
+        Preconditions: ``v`` is the raw asset_class string (already validated as
+        a ``str`` by pydantic).
+        Postconditions: returns one of the canonical labels
+        (stocks/crypto/forex/options/futures/commodities). Accepted aliases
+        (equity/equities/stock/etf/etfs, fx, commodity/metal/energy,
+        cryptocurrency/cryptocurrencies) map to their canonical form.
+
+        Live construction (no validation context) **rejects** an unrecognised
+        class — raising ``ValueError`` → ``ValidationError`` — so a typo'd or
+        unsupported class surfaces as a defect at the boundary rather than
+        silently bypassing the asset_class-keyed quality gates. Legacy
+        deserialization (context ``legacy_spec=True``) instead falls back to the
+        permissive mapping (unknown → ``stocks``) so pre-existing persisted rows
+        authored before this enforcement still load cleanly.
+
+        The orchestrator's LLM design path coerces an off-vocabulary class with
+        the permissive normalizer *before* construction (see
+        ``_build_spec_from_dict``) so a model slip is repaired rather than
+        crashing the cycle; this strict path governs direct/API construction.
+        """
+        # Local import: ``strategy_lab_context`` imports from this module at
+        # module load, so a top-level import here would be circular.
+        from .strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
+
+        if info.context and info.context.get("legacy_spec"):
+            return normalize_asset_class(v)
+        return normalize_asset_class_strict(v)
 
 
 class ValidationCheck(BaseModel):

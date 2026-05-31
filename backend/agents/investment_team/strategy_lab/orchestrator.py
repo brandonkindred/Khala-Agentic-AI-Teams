@@ -44,6 +44,7 @@ from ..models import (
     get_fee_defaults,
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
+from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
 from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
 from .agents._llm_budget import (
@@ -955,11 +956,39 @@ class StrategyLabOrchestrator:
         Post: returns a freshly constructed ``StrategySpec`` carrying the
         supplied ``strategy_id``. The caller is responsible for any
         subsequent mutation (compile, fee defaults).
+
+        Accepted ``asset_class`` aliases (equity/equities/stock/etf/etfs, fx,
+        commodity/metal/energy, cryptocurrency/cryptocurrencies) are
+        canonicalized before construction so a clean mapping never trips the
+        strict ``StrategySpec`` validator.
+
+        A *genuinely unsupported* class the strict normalizer rejects (e.g.
+        ``bonds``) is NOT silently coerced to ``stocks`` — doing so would run
+        the original (bonds) hypothesis against the stock universe and stock
+        gates and record it as a valid stock backtest. Instead this raises
+        :class:`SpecImplementabilityError`, which ``run_cycle`` catches to
+        re-enter the design phase with the defect as evidence (bounded by
+        ``MAX_DESIGN_REENTRIES``); on exhaustion the cycle short-circuits with
+        ``status="failed: spec_unimplementable"`` rather than a misleading
+        record. This keeps the cycle alive (no unhandled ``ValidationError``
+        crash) while refusing to mislabel the experiment.
+
+        Raises:
+            SpecImplementabilityError: the payload names an unsupported
+                ``asset_class`` that no alias maps to a tradeable class.
         """
-        return StrategySpec(
+        raw_asset_class = strategy_dict.get("asset_class", "stocks")
+        asset_class = normalize_asset_class(raw_asset_class)
+        unsupported_class = False
+        try:
+            normalize_asset_class_strict(raw_asset_class)
+        except ValueError:
+            unsupported_class = True
+
+        spec = StrategySpec(
             strategy_id=strategy_id,
             authored_by="strategy_lab_v2",
-            asset_class=strategy_dict.get("asset_class", "stocks"),
+            asset_class=asset_class,
             hypothesis=strategy_dict.get("hypothesis", ""),
             signal_definition=strategy_dict.get("signal_definition", ""),
             timeframe=strategy_dict.get("timeframe") or "1d",
@@ -974,6 +1003,26 @@ class StrategyLabOrchestrator:
             ),
             strategy_code=None,
         )
+        if unsupported_class:
+            # ``spec`` (coerced to ``stocks``) is passed as ``last_spec`` only so
+            # the short-circuit record is well-formed; the cycle will redesign
+            # rather than backtest it. The evidence names the rejected class so
+            # the re-entry directive steers the LLM to a supported one.
+            logger.warning(
+                "DesignAgent emitted unsupported asset_class %r; routing to "
+                "redesign instead of coercing to %r and backtesting as stocks.",
+                raw_asset_class,
+                asset_class,
+            )
+            raise SpecImplementabilityError(
+                f"Unsupported asset_class {raw_asset_class!r}: not a tradeable "
+                "class and not a known alias. Re-author the strategy for one of "
+                "stocks/crypto/forex/futures/commodities.",
+                failure_phase="design",
+                last_spec=spec,
+                last_code="",
+            )
+        return spec
 
     def _run_pre_synthesis_phase(
         self,
@@ -3300,7 +3349,14 @@ class StrategyLabOrchestrator:
             gate_timeline=gate_timeline,
         )
 
-        self.convergence_tracker.record(spec, all_gate_results)
+        # Short-circuited cycles never reached a backtest, and ``spec`` may
+        # carry a coerced placeholder asset_class (an unsupported class like
+        # ``bonds`` is canonicalized to ``stocks`` for schema validity before
+        # the redesign route). Record the signature/failure modes for stall and
+        # failure-frequency detection, but keep the placeholder out of the
+        # diversity history so it can't emit a false "heavily stocks" steering
+        # directive on the next cycle.
+        self.convergence_tracker.record(spec, all_gate_results, count_asset_class=False)
 
         emit(
             "complete",

@@ -385,6 +385,32 @@ def test_record_dedupes_failures_by_gate_name_per_cycle():
     assert t._failure_modes["alignment_finding"] == 2
 
 
+def test_record_count_asset_class_false_skips_diversity_but_keeps_failure_tracking():
+    """Short-circuited cycles (e.g. an unsupported asset_class routed to
+    redesign) pass ``count_asset_class=False`` so a coerced ``stocks``
+    placeholder can't skew ``get_diversity_directive`` toward a false "heavily
+    stocks" signal — while signatures and failure modes are still recorded so
+    stall and failure-frequency detection see the failed attempt."""
+    t = ConvergenceTracker()
+    # Five short-circuited "stocks"-coerced cycles must NOT trip the diversity
+    # directive, because none of them count toward the asset-class history.
+    for _ in range(5):
+        t.record(_mk_spec("stocks"), [_failing_gate("spec_readiness")], count_asset_class=False)
+    assert t._asset_class_history == []
+    assert t.get_diversity_directive() is None
+    # Signatures and failure modes are still tracked.
+    assert len(t._signatures) == 5
+    assert t._failure_modes["spec_readiness"] == 5
+
+    # A subsequent real stocks cycle does count, and on its own three+ counts
+    # would steer diversity — proving the skip only suppressed the placeholders.
+    for _ in range(3):
+        t.record(_mk_spec("stocks"), [_passing_gate()])
+    assert t._asset_class_history == ["stocks", "stocks", "stocks"]
+    directive = t.get_diversity_directive()
+    assert directive is not None and "stocks" in directive
+
+
 def test_record_counts_distinct_gate_names_separately_in_one_cycle():
     """Distinct gate names in the same cycle each count once."""
     t = ConvergenceTracker()

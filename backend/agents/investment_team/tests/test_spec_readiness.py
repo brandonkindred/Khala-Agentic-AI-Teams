@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from typing import List
 
+import pytest
+from pydantic import ValidationError
+
 from investment_team.models import BacktestConfig, StrategySpec
 from investment_team.strategy_lab.quality_gates.spec_readiness import (
     GATE,
@@ -373,13 +376,38 @@ def test_default_universe_for_raises_on_unknown_asset_class() -> None:
 
 
 def test_rule5_unknown_asset_class_is_critical() -> None:
-    """A typo'd asset_class with empty target_symbols emits a Rule 5 critical."""
+    """A non-canonical asset_class reaching the gate with empty target_symbols
+    emits a Rule 5 critical.
+
+    The ``StrategySpec`` boundary now rejects an off-vocabulary class on live
+    construction, so build a valid spec and mutate the field afterwards
+    (assignment skips validation) to simulate a class arriving at the gate
+    without going through construction."""
     spec = _spec(
-        asset_class="bonds",
+        asset_class="stocks",
         target_symbols=[],
         timeframe="1d",
         hypothesis="generic mean reversion",
     )
+    spec.asset_class = "bonds"
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("unknown asset_class" in c for c in _critical(results))
+
+
+def test_rule5_unknown_asset_class_with_target_symbols_fails_closed() -> None:
+    """An unknown class mutated onto a spec that ALSO has explicit
+    ``target_symbols`` must still fail closed. With ``target_symbols`` set, Rule
+    5 skips the ``_default_universe_for`` strict check, and on a ``1d`` timeframe
+    Rule 7 returns early too — so without a dedicated guard a ``bonds`` spec
+    would pass readiness as a stock-like whole-lot strategy. The strict
+    normalization at the top of Rule 5 surfaces it as a critical."""
+    spec = _spec(
+        asset_class="stocks",
+        target_symbols=["TLT"],
+        timeframe="1d",
+        hypothesis="generic mean reversion",
+    )
+    spec.asset_class = "bonds"
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert any("unknown asset_class" in c for c in _critical(results))
 
@@ -415,11 +443,12 @@ def test_check_sizing_realisable_directly_catches_unknown_asset_class_value_erro
     )
 
     spec = _spec(
-        asset_class="bonds",
+        asset_class="stocks",
         target_symbols=[],
         timeframe="1d",
         hypothesis="generic mean reversion",
     )
+    spec.asset_class = "bonds"
     gate = SpecReadinessGate()
     ctx = SpecReadinessCtx(spec=spec, config=_config())
     with gate._using_phase("design"):
@@ -705,6 +734,62 @@ def test_rule1_accepts_asset_class_aliases_via_strict_normalize() -> None:
     assert not rule1_failures, rule1_failures
 
 
+# ---------------------------------------------------------------------------
+# asset_class canonicalization + enforcement at the StrategySpec boundary
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_spec_canonicalizes_asset_class_aliases() -> None:
+    """Accepted aliases are canonicalized at construction so every downstream
+    asset_class-keyed gate sees a canonical label without re-encoding aliases."""
+    cases = {
+        "equity": "stocks",
+        "equities": "stocks",
+        "stock": "stocks",
+        "etf": "stocks",
+        "etfs": "stocks",
+        "fx": "forex",
+        "commodity": "commodities",
+        "cryptocurrency": "crypto",
+        "CRYPTO ": "crypto",
+    }
+    for raw, canonical in cases.items():
+        assert _spec(asset_class=raw).asset_class == canonical, raw
+
+
+def test_strategy_spec_rejects_unknown_asset_class_on_live_construction() -> None:
+    """A typo'd / off-vocabulary asset_class is rejected at the spec boundary so
+    it surfaces as a defect rather than silently bypassing the gates."""
+    with pytest.raises(ValidationError):
+        _spec(asset_class="bonds")
+
+
+def test_strategy_spec_legacy_context_tolerates_unknown_asset_class() -> None:
+    """Legacy deserialization must never fail to load a persisted row with an
+    off-vocabulary asset_class — it falls back to the permissive mapping."""
+    payload = _spec(asset_class="stocks").model_dump()
+    payload["asset_class"] = "bonds"
+    loaded = StrategySpec.model_validate(payload, context={"legacy_spec": True})
+    assert loaded.asset_class == "stocks"
+
+
+def test_rule5_enforces_whole_lot_for_equity_alias_end_to_end() -> None:
+    """The reported bug: a spec authored with the ``equity`` alias must get the
+    same whole-lot enforcement as ``stocks``. The alias canonicalizes at
+    construction, so Rule 5 fires the sub-share critical instead of silently
+    passing an unfillable equity spec to backtest."""
+    spec = _spec(
+        asset_class="equity",
+        target_symbols=["AAPL"],
+        sizing=FixedNotionalSizing(notional_usd=10.0),
+        hypothesis="AAPL momentum on the 1d timeframe.",
+    )
+    assert spec.asset_class == "stocks"
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: 1000.0)
+    results = gate.validate(spec, backtest_config=_config())
+    assert [c for c in _critical(results) if "qty=" in c], "expected sub-share qty critical"
+
+
 def test_rule5_respects_universe_cap_when_default_is_truncated(monkeypatch) -> None:
     """Rule 5 sizes against the same capped universe ``resolve_strategy_symbols``
     will request — a tail symbol with a missing price sample beyond the cap
@@ -792,6 +877,22 @@ def test_rule7_daily_timeframe_on_commodities_passes() -> None:
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     tf_failures = [c for c in _critical(results) if "intraday" in c]
     assert not tf_failures, tf_failures
+
+
+def test_rule7_unknown_asset_class_on_intraday_fails_closed() -> None:
+    """An off-vocabulary asset_class reaching the gate (via post-construction
+    mutation, since the StrategySpec boundary rejects it on construction) must
+    fail closed on an intraday timeframe via the strict normalizer, not
+    permissively map to ``stocks`` and pass as if intraday data existed."""
+    spec = _spec(
+        asset_class="stocks",
+        timeframe="5m",
+        target_symbols=["AAPL"],
+        hypothesis="AAPL intraday momentum.",
+    )
+    spec.asset_class = "bonds"
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("intraday" in c and "bonds" in c for c in _critical(results))
 
 
 # ---------------------------------------------------------------------------

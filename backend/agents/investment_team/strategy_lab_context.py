@@ -27,6 +27,32 @@ _PROMPT_ASSET_CLASSES: tuple[str, ...] = tuple(
     c for c in _CANONICAL_ASSET_CLASSES if c != "options"
 )
 
+# Backtest statuses for cycles that short-circuited *before* running a backtest.
+# Their persisted ``strategy.asset_class`` may be a coerced placeholder (an
+# unsupported class like ``bonds`` is canonicalized to ``stocks`` for schema
+# validity before the redesign route), so they must not feed the asset-class
+# diversity steering. Distinct from executed-but-losing statuses (``failed`` /
+# ``failed: max_refinement_rounds``), which ran a real backtest with a genuine
+# canonical class and SHOULD count — hence an explicit set rather than a blanket
+# ``startswith("failed")`` filter.
+#
+# This must enumerate EVERY status the orchestrator passes to
+# ``_build_short_circuit_record`` (the pre-backtest exit path). Keep it in sync
+# with the ``short_circuit_status`` values in ``strategy_lab/orchestrator.py``:
+# spec_unimplementable, spec_validation, code_synthesis, design_not_ready,
+# budget_exhausted. The in-memory ``ConvergenceTracker`` skips all of these via
+# ``count_asset_class=False`` at the call site; this set is the persisted-record
+# equivalent for ``prior_records`` rebuilt after a restart.
+_NON_EXECUTED_BACKTEST_STATUSES: frozenset[str] = frozenset(
+    {
+        "failed: spec_unimplementable",
+        "failed: spec_validation",
+        "failed: code_synthesis",
+        "failed: design_not_ready",
+        "failed: budget_exhausted",
+    }
+)
+
 
 def normalize_asset_class(ac: object) -> str:
     """Map any asset-class string variant to one of the canonical labels.
@@ -34,12 +60,14 @@ def normalize_asset_class(ac: object) -> str:
     Accepts ``object`` so callers can pass raw LLM output without casting.
     """
     x = str(ac or "stocks").lower().strip()
-    if x in ("equities", "equity", "stock"):
+    if x in ("equities", "equity", "stock", "etf", "etfs"):
         return "stocks"
     if x in ("fx",):
         return "forex"
     if x in ("commodity", "metal", "energy"):
         return "commodities"
+    if x in ("cryptocurrency", "cryptocurrencies"):
+        return "crypto"
     if x in _CANONICAL_ASSET_CLASSES:
         return x
     return "stocks"
@@ -48,11 +76,12 @@ def normalize_asset_class(ac: object) -> str:
 def normalize_asset_class_strict(ac: object) -> str:
     """Strict variant of :func:`normalize_asset_class`.
 
-    Applies the same alias map (``equity``/``equities``/``stock`` → ``stocks``,
-    ``fx`` → ``forex``, ``commodity``/``metal``/``energy`` → ``commodities``)
-    so callers see the same canonical class the runtime fetch path does, but
-    raises :class:`ValueError` for truly unknown classes instead of silently
-    falling back to ``"stocks"``.
+    Applies the same alias map (``equity``/``equities``/``stock``/``etf``/``etfs``
+    → ``stocks``, ``fx`` → ``forex``, ``commodity``/``metal``/``energy`` →
+    ``commodities``, ``cryptocurrency``/``cryptocurrencies`` → ``crypto``) so
+    callers see the same canonical class the runtime fetch path does, but raises
+    :class:`ValueError` for truly unknown classes instead of silently falling
+    back to ``"stocks"``.
 
     Use this in gates and other fail-closed paths where a typo'd
     ``asset_class`` (``"bonds"``, ``"crpto"``) must surface as an error.
@@ -60,17 +89,20 @@ def normalize_asset_class_strict(ac: object) -> str:
     :func:`normalize_asset_class`.
     """
     x = str(ac or "").lower().strip()
-    if x in ("equities", "equity", "stock"):
+    if x in ("equities", "equity", "stock", "etf", "etfs"):
         return "stocks"
     if x in ("fx",):
         return "forex"
     if x in ("commodity", "metal", "energy"):
         return "commodities"
+    if x in ("cryptocurrency", "cryptocurrencies"):
+        return "crypto"
     if x in _CANONICAL_ASSET_CLASSES:
         return x
     raise ValueError(
         f"unknown asset_class {ac!r}; expected one of {sorted(_CANONICAL_ASSET_CLASSES)} "
-        "or a known alias (equity/equities/stock, fx, commodity/metal/energy)"
+        "or a known alias (equity/equities/stock/etf/etfs, fx, "
+        "commodity/metal/energy, cryptocurrency/cryptocurrencies)"
     )
 
 
@@ -113,7 +145,29 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
         )
 
     ordered = sorted(records, key=lambda x: x.created_at)
-    sample = ordered[-tail:] if len(ordered) > tail else ordered
+    # Exclude only cycles that short-circuited *before* running a backtest
+    # (``_NON_EXECUTED_BACKTEST_STATUSES``): their ``strategy.asset_class`` may
+    # be a coerced placeholder (an unsupported class like ``bonds`` mapped to
+    # ``stocks`` for schema validity before the redesign route), so counting
+    # them would let a rejected, never-backtested design pollute the stock
+    # history and skew the diversity steering. Executed-but-losing cycles
+    # (status ``failed`` / ``failed: max_refinement_rounds``) DID run a backtest
+    # with a genuine canonical class and must keep counting — otherwise
+    # repeated failed futures/forex/etc. runs would be omitted from steering.
+    # Records persisted before ``BacktestRecord.status`` existed default to
+    # ``"completed"``, so legacy rows are unaffected.
+    executed = [
+        r
+        for r in ordered
+        if str(getattr(r.backtest, "status", "completed")) not in _NON_EXECUTED_BACKTEST_STATUSES
+    ]
+    sample = executed[-tail:] if len(executed) > tail else executed
+    if not sample:
+        return (
+            "No executed lab backtests yet. Choose **asset_class** from "
+            "stocks, crypto, forex, futures, or commodities with similar frequency over time — "
+            "do **not** default to stocks; pick the class that best fits your multi-signal story."
+        )
     # #535: count only asset classes the LLM may still target. 'options' is
     # rejected by StrategySpecValidator, so leaving it in the count dict
     # would push it into ``underrep`` whenever no options strategies have
