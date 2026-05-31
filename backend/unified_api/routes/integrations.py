@@ -1051,50 +1051,88 @@ def _git_auth_env(token: str) -> dict[str, str]:
 
 
 def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str | None:
-    """Clone or fetch the repository. Returns error string on failure, None on success.
+    """Clone or fetch the repository.
 
     Auth is passed via ``GIT_CONFIG_*`` environment variables so the token
     is transient and never persisted in ``.git/config``.
+
+    Preconditions:
+        - ``owner`` and ``repo`` are non-empty; ``token`` authorizes read access.
+    Postconditions:
+        - On success the repository is present at ``repo_path`` and ``None`` is
+          returned.
+        - Every failure is returned as a human-readable, token-scrubbed string:
+          a missing ``git`` binary, a clone/fetch timeout, a non-zero git exit,
+          or an existing checkout that points at a different remote. This function
+          never lets a ``subprocess`` exception escape, so the caller can surface
+          a clean error rather than an unhandled 500.
     """
     env = _git_auth_env(token)
     expected_suffix = f"{owner}/{repo}"
     path = Path(repo_path)
 
-    if path.is_dir() and (path / ".git").is_dir():
-        url_check = subprocess.run(
-            ["git", "-C", repo_path, "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=10,
-        )
-        url_out = url_check.stdout.strip()
-        if url_check.returncode != 0 or expected_suffix not in url_out:
-            return (
-                f"existing checkout at {repo_path} does not match "
-                f"{owner}/{repo} (remote origin: {url_out[:120]})"
+    try:
+        if path.is_dir() and (path / ".git").is_dir():
+            url_check = subprocess.run(
+                ["git", "-C", repo_path, "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
+            url_out = url_check.stdout.strip()
+            if url_check.returncode != 0 or expected_suffix not in url_out:
+                return (
+                    f"existing checkout at {repo_path} does not match {owner}/{repo} (remote origin: {url_out[:120]})"
+                )
 
+            result = subprocess.run(
+                ["git", "-C", repo_path, "fetch", "--all"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=env,
+            )
+            if result.returncode != 0:
+                return f"git fetch failed: {result.stderr.replace(token, '***')[:300]}"
+            return None
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        clone_url = f"https://github.com/{owner}/{repo}.git"
         result = subprocess.run(
-            ["git", "-C", repo_path, "fetch", "--all"],
-            capture_output=True, text=True, timeout=120, env=env,
+            ["git", "clone", clone_url, repo_path],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
         )
         if result.returncode != 0:
-            return f"git fetch failed: {result.stderr[:300]}"
+            safe_err = result.stderr.replace(token, "***")[:300]
+            return f"git clone failed: {safe_err}"
         return None
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    clone_url = f"https://github.com/{owner}/{repo}.git"
-    result = subprocess.run(
-        ["git", "clone", clone_url, repo_path],
-        capture_output=True, text=True, timeout=300, env=env,
-    )
-    if result.returncode != 0:
-        safe_err = result.stderr.replace(token, "***")[:300]
-        return f"git clone failed: {safe_err}"
-    return None
+    except FileNotFoundError:
+        # `git` is not on PATH in this image — surfaces as a clear message
+        # instead of a FileNotFoundError bubbling up to an opaque 500.
+        return "git executable not found on the server; install git in the API image."
+    except subprocess.TimeoutExpired as e:
+        return f"git operation timed out after {e.timeout:.0f}s while preparing {owner}/{repo}."
 
 
 @router.post("/github/run-issue", response_model=RunGitHubIssueResponse)
 async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueResponse:
-    """Start the coding team on a specific GitHub issue."""
+    """Start the coding team on a specific GitHub issue.
+
+    Preconditions:
+        - GitHub integration is enabled with a stored PAT and a configured owner/repo.
+        - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+    Postconditions:
+        - On success returns a ``RunGitHubIssueResponse`` describing the started job.
+        - Every failure path raises ``HTTPException`` with an explanatory ``detail``;
+          no ``subprocess`` or ``httpx`` error is allowed to escape as an unhandled
+          exception. An unhandled exception becomes a 500 generated *outside* the CORS
+          middleware, so the browser receives it without an ``Access-Control-Allow-Origin``
+          header, drops the response, and the UI can only report an opaque
+          "0 Unknown Error" — useless for diagnosis.
+    """
     cfg = get_github_config()
     if not cfg["enabled"]:
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
@@ -1106,18 +1144,21 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     if not owner or not repo:
         raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
 
+    # Validate the downstream is configured before the (slow) clone, so a
+    # misconfiguration fails fast instead of after a multi-second checkout.
+    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
+    if not coding_team_url:
+        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+
     repo_path = _resolve_repo_path(cfg)
 
     loop = asyncio.get_running_loop()
     clone_err = await loop.run_in_executor(None, _ensure_repo_clone, repo_path, owner, repo, token)
     if clone_err:
+        logger.warning("github run-issue: repository preparation failed: %s", clone_err)
         raise HTTPException(status_code=502, detail=clone_err)
 
-    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
-    if not coding_team_url:
-        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
-
-    payload = {
+    payload: dict[str, Any] = {
         "owner": owner,
         "repo": repo,
         "repo_path": repo_path,
@@ -1127,8 +1168,24 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     if body.base_branch:
         payload["base_branch"] = body.base_branch
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(f"{coding_team_url.rstrip('/')}/run-from-github", json=payload)
+    target = f"{coding_team_url.rstrip('/')}/run-from-github"
+    # connect fast-fails an unreachable service; the longer read budget covers the
+    # coding team's synchronous GitHub API round-trips inside /run-from-github.
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+            resp = await client.post(target, json=payload)
+    except httpx.TimeoutException as e:
+        logger.warning("github run-issue: coding team service timed out: %s", e)
+        raise HTTPException(
+            status_code=504,
+            detail="Coding team service timed out while starting the job.",
+        ) from e
+    except httpx.HTTPError as e:
+        logger.warning("github run-issue: cannot reach coding team service at %s: %s", coding_team_url, e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach coding team service: {e}",
+        ) from e
 
     if resp.status_code != 200:
         try:
@@ -1137,11 +1194,17 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
             detail = resp.text[:300]
         raise HTTPException(status_code=resp.status_code, detail=detail)
 
-    data = resp.json()
-    return RunGitHubIssueResponse(
-        job_id=data["job_id"],
-        issue_number=data["issue_number"],
-        issue_url=data["issue_url"],
-        status=data.get("status", "pending"),
-        message=data.get("message", ""),
-    )
+    try:
+        data = resp.json()
+        return RunGitHubIssueResponse(
+            job_id=data["job_id"],
+            issue_number=data["issue_number"],
+            issue_url=data["issue_url"],
+            status=data.get("status", "pending"),
+            message=data.get("message", ""),
+        )
+    except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Coding team service returned an unexpected response: {e}",
+        ) from e
