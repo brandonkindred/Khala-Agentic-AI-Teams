@@ -873,6 +873,10 @@ class StrategyLabOrchestrator:
         rationale = ""
         critique_history: List[SpecCritique] = []
         ready = False
+        # Owned here (not inside the review-rounds helper) so the budget-trip
+        # handler below can still read the critique-ledger counters that were
+        # accumulated for the rounds completed before the charge failed.
+        ledger = CritiqueLedger()
         # Defaults cover the budget-trip path below (where the review-rounds
         # helper never returns its own values); the success path overwrites
         # both from the helper's return.
@@ -909,6 +913,7 @@ class StrategyLabOrchestrator:
                 config=config,
                 all_gate_results=all_gate_results,
                 critique_history=critique_history,
+                ledger=ledger,
                 emit=emit,
                 drift_collector=drift_collector,
             )
@@ -937,10 +942,13 @@ class StrategyLabOrchestrator:
                 critique_history=critique_history,
                 budget_exhausted=True,
                 stop_reason="budget_exhausted",
-                loop_telemetry={
-                    "design_review_rounds": len(critique_history),
-                    "stop_reason": "budget_exhausted",
-                },
+                # Carry forward the critique-ledger counters accumulated for the
+                # rounds completed before the budget tripped, so a budget exit
+                # after real review is distinguishable from one that never
+                # reached a review round.
+                loop_telemetry=_design_loop_telemetry_summary(
+                    ledger, len(critique_history), "budget_exhausted"
+                ),
             )
 
         return _DesignLoopOutcome(
@@ -993,7 +1001,6 @@ class StrategyLabOrchestrator:
         ready = False
         last_readiness_signature: Optional[tuple] = None
         readiness_results: List[QualityGateResult] = []
-        ledger = CritiqueLedger()
         stall_rounds = _design_review_stall_rounds()
         stop_reason = "round_cap"
 
@@ -1079,7 +1086,14 @@ class StrategyLabOrchestrator:
             # early rather than churn to the hard round cap on a spec that
             # is oscillating instead of converging. Distinct from honest
             # round-cap exhaustion so the operator can tell them apart.
-            if ledger.is_stalled(stall_rounds):
+            #
+            # Only treat this as a stall when there are still rounds left to
+            # skip (``review_round < max_rounds - 1``). When the stall
+            # threshold equals the round cap, the final allowed round trips
+            # ``is_stalled`` without the loop having aborted *early* — it
+            # consumed the full configured budget — so it must fall through to
+            # the round-cap branch and report ``round_cap`` / ``design_not_ready``.
+            if review_round < max_rounds - 1 and ledger.is_stalled(stall_rounds):
                 stop_reason = "stalled"
                 emit(
                     "design_review",

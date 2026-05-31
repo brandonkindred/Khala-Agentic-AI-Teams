@@ -583,6 +583,43 @@ def test_stall_short_circuits_before_round_cap(monkeypatch: pytest.MonkeyPatch) 
     assert "design_stalled" in ar
 
 
+def test_stall_threshold_equal_to_round_cap_reports_round_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the stall threshold equals the round cap and the same issue stays
+    open, the final allowed round consumes the full configured budget rather
+    than aborting early — so it must report ``design_not_ready`` / ``round_cap``,
+    not ``design_stalled``."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "3")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "3")
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+    monkeypatch.setattr(
+        orch.design_review_agent,
+        "run",
+        lambda *a, **kw: SpecCritique(
+            ready=False,
+            rationale="same issue every round",
+            issues=[CritiqueIssue(field="hypothesis", description="thesis is vague")],
+        ),
+    )
+    monkeypatch.setattr(orch.design_agent, "revise", lambda *_a, **_kw: (_spec_dict(), "revised"))
+
+    def _market_must_not_run(self, *_a, **_kw):
+        raise AssertionError("synthesis loop must not be entered")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    # The loop ran the full cap (no rounds were saved), so this is honest
+    # round-cap exhaustion, not an early stall abort.
+    assert record.backtest.status == "failed: design_not_ready"
+    assert record.design_rounds == 3
+    assert record.loop_telemetry["stop_reason"] == "round_cap"
+
+
 def test_regression_notice_passed_to_revise(monkeypatch: pytest.MonkeyPatch) -> None:
     """An issue resolved on an earlier round that reappears later is surfaced to
     ``DesignAgent.revise`` via a non-empty ``regression_notice`` naming it."""
