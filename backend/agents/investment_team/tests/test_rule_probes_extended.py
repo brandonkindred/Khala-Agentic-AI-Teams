@@ -1814,3 +1814,100 @@ def test_bollinger_middle_band_is_sma_threshold_aware(op, rhs):
         f"middle-band threshold {rhs} not crossed: {reason}"
     )
     _assert_cross_fires(pred, bars, trigger)
+
+
+# ---------------------------------------------------------------------------
+# Volume-source indicator pairs, ATR coverage, MACD histogram negative
+# thresholds (PR #708 further review iteration)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        (
+            IndicatorRef(name="sma", params={"period": 5}, source="volume"),
+            "cross_above",
+            IndicatorRef(name="sma", params={"period": 20}, source="volume"),
+        ),
+        (
+            IndicatorRef(name="ema", params={"period": 12}, source="volume"),
+            "cross_above",
+            IndicatorRef(name="ema", params={"period": 26}, source="volume"),
+        ),
+        (
+            IndicatorRef(name="sma", params={"period": 5}, source="volume"),
+            "cross_below",
+            IndicatorRef(name="sma", params={"period": 20}, source="volume"),
+        ),
+    ],
+)
+def test_cross_indicator_pair_with_volume_source(lhs, op, rhs):
+    """Both indicators read the volume column — the default OHLC-varying
+    builders leave volume pinned and both series stay flat. The
+    indicator-pair path detects the volume-source case and uses
+    volume-driven regime-change builders instead."""
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"volume-pair predicate not crossed: {reason}"
+    )
+    _assert_cross_fires(pred, bars, trigger)
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        # ATR vs threshold — the most common shape
+        (IndicatorRef(name="atr", params={"period": 14}), "cross_above", 5.0),
+        (IndicatorRef(name="atr", params={"period": 14}), "cross_above", 1.0),
+        (IndicatorRef(name="atr", params={"period": 14}), "cross_above", 15.0),
+        (IndicatorRef(name="atr", params={"period": 14}), "cross_below", 3.0),
+        (IndicatorRef(name="atr", params={"period": 7}), "cross_above", 2.0),
+        # priceref vs ATR — corner case but still supported
+        ("bar.close", "cross_above", IndicatorRef(name="atr", params={"period": 14})),
+        ("bar.close", "cross_below", IndicatorRef(name="atr", params={"period": 14})),
+    ],
+)
+def test_atr_cross_coverage(lhs, op, rhs):
+    """ATR is a supported DSL indicator — previously its cross predicates
+    fell through to the generic price-ref catalogue which only emitted
+    `_high_volatility_bars`, where ATR settles at a constant value and
+    never crosses anything. The new ATR catalogue uses widening /
+    tightening high-low ranges to drive ATR through the threshold."""
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"ATR predicate not crossed: {reason}"
+    )
+    _assert_cross_fires(pred, bars, trigger)
+
+
+@pytest.mark.parametrize(
+    "op,rhs",
+    [
+        # Large negative thresholds — previously the histogram transient
+        # peak formed inside MACD warmup, so the visible window saw only
+        # post-transient values and no later crossing was found.
+        ("cross_above", -25.0),
+        ("cross_above", -50.0),
+        ("cross_above", -10.0),
+        # Mirror case for cross_below large positive thresholds
+        ("cross_below", 25.0),
+        ("cross_below", 50.0),
+        ("cross_below", 10.0),
+    ],
+)
+def test_macd_histogram_signed_thresholds_after_warmup(op, rhs):
+    """MACD histogram with thresholds on the opposite side of zero — the
+    forcing-sequence base_close must be lifted high enough that the steep
+    target slope doesn't clamp prices at MIN_PRICE inside the histogram's
+    transient window. Without the lift, the transient peak doesn't reach
+    |rhs| and the cross never fires."""
+    lhs = IndicatorRef(name="macd", params={"output": "histogram"})
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"MACD histogram signed threshold not crossed: {reason}"
+    )
+    _assert_cross_fires(pred, bars, trigger)

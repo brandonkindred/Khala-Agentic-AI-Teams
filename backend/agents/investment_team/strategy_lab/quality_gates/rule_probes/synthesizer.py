@@ -1185,6 +1185,107 @@ def _monotonic_trend_bars(n: int, base_close: float, slope: float) -> List[OHLCV
     ]
 
 
+def _volume_regime_change_bars(
+    n: int,
+    base_close: float,
+    base_volume: float,
+    volume_slope: float,
+    reverse: bool = False,
+) -> List[OHLCVBar]:
+    """Volume ramps down for the first half then up for the second (or vice
+    versa with ``reverse=True``). Mirrors `_regime_change_bars` but operates
+    on the volume column, holding close steady.
+
+    Used when both crossed indicators read from ``source="volume"`` — the
+    shorter-period volume SMA/EMA crosses the longer-period one at the
+    regime transition.
+    """
+    midpoint = n // 2
+    volumes: List[float] = []
+    for i in range(n):
+        if (i < midpoint) != reverse:
+            volumes.append(max(1.0, base_volume - volume_slope * i))
+        else:
+            offset = max(1.0, volume_slope * (i - midpoint + 1))
+            prev = volumes[-1] if volumes else base_volume
+            volumes.append(max(1.0, prev + offset))
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=base_close,
+            high=base_close + 0.5,
+            low=max(_MIN_PRICE, base_close - 0.5),
+            close=base_close,
+            volume=v,
+        )
+        for v in volumes
+    ]
+
+
+def _close_and_range_ramp_bars(
+    n: int,
+    max_amplitude: float,
+    direction: str = "up",
+    reverse: bool = False,
+) -> List[OHLCVBar]:
+    """Bars where both close and high-low range ramp from ε to ``max_amplitude``.
+
+    Used for ``priceref cross ATR`` — the close must vary in the ATR
+    magnitude (typically much smaller than typical close prices) for the
+    cross to actually fire. With ``direction="up"`` close rises from ε to
+    ``max_amplitude * 1.5``; with ``"down"`` it falls. ``reverse=True``
+    inverts the ramp time-direction.
+    """
+    sign = 1.0 if direction == "up" else -1.0
+    base = max_amplitude * 0.75
+    bars: List[OHLCVBar] = []
+    for i in range(n):
+        frac = i / max(1, n - 1)
+        if reverse:
+            frac = 1.0 - frac
+        amp = max(0.1, max_amplitude * frac)
+        close = max(_MIN_PRICE, base + sign * (max_amplitude * (frac - 0.5)))
+        bars.append(
+            OHLCVBar(
+                date="placeholder",
+                open=close,
+                high=close + amp,
+                low=max(_MIN_PRICE, close - amp),
+                close=close,
+                volume=1_000_000.0,
+            )
+        )
+    return bars
+
+
+def _widening_range_bars(
+    n: int, base_close: float, max_amplitude: float, reverse: bool = False
+) -> List[OHLCVBar]:
+    """Bars whose high-low range widens linearly from ε to ``max_amplitude``.
+
+    Drives ATR from a low baseline up through any threshold (or down, with
+    ``reverse=True``). Close is held flat at ``base_close``; only the per-bar
+    high/low spread changes.
+    """
+    bars: List[OHLCVBar] = []
+    for i in range(n):
+        frac = i / max(1, n - 1)
+        if reverse:
+            frac = 1.0 - frac
+        amp = max(0.1, max_amplitude * frac)
+        bars.append(
+            OHLCVBar(
+                date="placeholder",
+                open=base_close,
+                high=base_close + amp,
+                low=max(_MIN_PRICE, base_close - amp),
+                close=base_close,
+                volume=1_000_000.0,
+            )
+        )
+    return bars
+
+
 def _two_phase_trend_bars(
     n: int,
     base_close: float,
@@ -1802,6 +1903,33 @@ def _builders_for_priceref_cross(
             lambda: _quiet_then_trend_bars(n, base_close, direction="down", trend_first=True),
             lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER),
         ]
+    if name == "atr":
+        # ATR averages true range; the forcing sequence must widen
+        # (cross_above) or tighten (cross_below) bar high-low ranges over
+        # the ATR period. For ``priceref cross ATR`` the close must also
+        # vary in the ATR magnitude — typical ATR is much smaller than
+        # typical close (~5% of price), so the priceref builder also
+        # ramps close.
+        period = int(rhs.param("period"))
+        n = max(min_bars, period * 4 + 30)
+        amplitude = 10.0
+        if op == "cross_above":
+            # Range widens over time; for priceref-vs-ATR the close ramp
+            # needs reverse=True so the close ends ABOVE the rising ATR.
+            return [
+                lambda: _widening_range_bars(n, base_close, amplitude),
+                lambda: _widening_range_bars(n, base_close, amplitude * 2),
+                lambda: _close_and_range_ramp_bars(n, amplitude, direction="up", reverse=True),
+                lambda: _close_and_range_ramp_bars(n, amplitude, direction="down", reverse=True),
+            ]
+        # cross_below: ATR shrinks (reverse=True) or close drops below
+        # falling ATR (direction without reverse).
+        return [
+            lambda: _widening_range_bars(n, base_close, amplitude, reverse=True),
+            lambda: _widening_range_bars(n, base_close, amplitude * 2, reverse=True),
+            lambda: _close_and_range_ramp_bars(n, amplitude, direction="up"),
+            lambda: _close_and_range_ramp_bars(n, amplitude, direction="down"),
+        ]
     if name in ("stochastic", "vwap"):
         n = max(min_bars, _MIN_TOTAL_BARS * 2)
         if op == "cross_above":
@@ -1931,6 +2059,22 @@ def _builders_for_indicator_number(
         # Bounded 0-100; the price-space builders already produce the full
         # range. Threshold scaling not needed.
         return _builders_for_priceref_cross(lhs, op, base_close, min_bars)
+    if name == "atr":
+        # ATR scales with high-low range, not close magnitude. Scale the
+        # widening amplitude to overshoot ``rhs`` by 2× so the cross is
+        # interior to the visible window rather than at the edge.
+        period = int(lhs.param("period"))
+        n = max(min_bars, period * 4 + 30)
+        max_amp = max(2.0, abs(rhs) * 2.0)
+        if op == "cross_above":
+            return [
+                lambda: _widening_range_bars(n, base_close, max_amp),
+                lambda: _widening_range_bars(n, base_close, max_amp * 2),
+            ]
+        return [
+            lambda: _widening_range_bars(n, base_close, max_amp, reverse=True),
+            lambda: _widening_range_bars(n, base_close, max_amp * 2, reverse=True),
+        ]
     if name == "vwap":
         anchored = max(_MIN_PRICE, abs(rhs) if rhs != 0 else base_close)
         return _builders_for_priceref_cross(lhs, op, anchored, min_bars)
@@ -2003,9 +2147,19 @@ def _builders_for_indicator_number(
             target_slope = max(0.5, 4.0 * abs(rhs) / spread_period)
         direction = 1.0 if op == "cross_above" else -1.0
 
+        # Lift base_close so the steep target_slope doesn't clamp the
+        # trend at _MIN_PRICE. Histogram's transient peak forms over
+        # ~signal_period bars; if the close clamps before then, the
+        # MACD line stops differentiating from signal and the histogram
+        # transient (which is what carries large-magnitude crossings)
+        # never reaches |rhs|.
+        flat_then_trend_base = max(base_close, target_slope * (n - warmup) + 100.0)
+
         def _flat_then_trend(slope: float) -> List[OHLCVBar]:
-            flat = [base_close] * warmup
-            trend = [max(_MIN_PRICE, base_close + slope * (i + 1)) for i in range(n - warmup)]
+            flat = [flat_then_trend_base] * warmup
+            trend = [
+                max(_MIN_PRICE, flat_then_trend_base + slope * (i + 1)) for i in range(n - warmup)
+            ]
             closes = flat + trend
             return [
                 OHLCVBar(
@@ -2064,7 +2218,29 @@ def _synth_cross_indicator_indicator(
     longest_period = max(_warmup_for_indicator(lhs), _warmup_for_indicator(rhs))
     n = max(min_bars, longest_period * 4 + 30)
     warmup = longest_period
-    builders: List[Callable[[], List[OHLCVBar]]] = [
+
+    # Volume-source pair: both indicators read the volume column. The
+    # default OHLC-varying builders leave volume pinned to 1_000_000.0,
+    # so both series stay flat. Drive volume monotonically with
+    # different polarities so the shorter-period indicator crosses the
+    # longer-period one (mirror of the close regime-change shape).
+    if lhs.source == "volume" or rhs.source == "volume":
+        base_vol = 1_000_000.0
+        volume_slope = base_vol * 0.02
+        builders: List[Callable[[], List[OHLCVBar]]] = [
+            lambda: _volume_regime_change_bars(n, base_close, base_vol, volume_slope),
+            lambda: _volume_regime_change_bars(n, base_close, base_vol, volume_slope, reverse=True),
+            lambda: _volume_trend_bars(n, base_close, base_vol * 0.5, volume_slope),
+            lambda: _volume_trend_bars(n, base_close, base_vol * 1.5, -volume_slope),
+        ]
+        bars, trigger, reason = _search_cross(
+            lhs, op, rhs, base_close, min_bars, builders, warmup=warmup
+        )
+        if bars is not None:
+            return bars, trigger, None
+        return None, 0, reason or "indicator_indicator_cross_not_found_in_window"
+
+    builders = [
         lambda: _regime_change_bars(n, base_close),
         lambda: _regime_change_bars(n, base_close, drop_rate=1.02, rise_rate=0.97),
         lambda: _regime_change_bars(n, base_close, midpoint_frac=0.3),
