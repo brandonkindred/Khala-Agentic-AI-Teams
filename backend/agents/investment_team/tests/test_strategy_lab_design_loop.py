@@ -202,22 +202,29 @@ def test_n_rounds_then_pass_records_round_count(
 def test_never_ready_short_circuits_with_design_not_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reviewer always returns ``ready=False`` → cycle short-circuits with
-    ``status="failed: design_not_ready"`` and never enters the synthesis
+    """Reviewer never readies but raises a *different* issue each round (no
+    stall) → cycle exhausts the round cap and short-circuits with
+    ``status="failed: design_not_ready"``, never entering the synthesis
     loop (market data is never fetched)."""
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "3")
     orch = StrategyLabOrchestrator()
 
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
-    monkeypatch.setattr(
-        orch.design_review_agent,
-        "run",
-        lambda *a, **kw: SpecCritique(
+
+    # A distinct issue per round keeps the open-issue set changing so the
+    # within-loop stall guard does NOT trip — this exercises the honest
+    # round-cap exhaustion path, distinct from the stall path below.
+    review_round = {"n": 0}
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        review_round["n"] += 1
+        return SpecCritique(
             ready=False,
             rationale="incoherent",
-            issues=[CritiqueIssue(field="hypothesis", description="vague")],
-        ),
-    )
+            issues=[CritiqueIssue(field="hypothesis", description=f"vague-{review_round['n']}")],
+        )
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
     monkeypatch.setattr(orch.design_agent, "revise", lambda *_a, **_kw: (_spec_dict(), "revised"))
 
     def _market_must_not_run(self, *_a, **_kw):
@@ -505,3 +512,275 @@ def test_design_max_llm_calls_env_parsing(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "garbage")
     assert _design_max_llm_calls() == 120
+
+
+# ---------------------------------------------------------------------------
+# Stall detection + regression guard + telemetry (critique-ledger work)
+# ---------------------------------------------------------------------------
+
+
+def test_design_review_stall_rounds_env_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_design_review_stall_rounds`` defaults to 3, parses overrides, floors
+    sub-1 to 1, and falls back to 3 on garbage."""
+    from investment_team.strategy_lab.orchestrator import _design_review_stall_rounds
+
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", raising=False)
+    assert _design_review_stall_rounds() == 3
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "5")
+    assert _design_review_stall_rounds() == 5
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "0")
+    assert _design_review_stall_rounds() == 1
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "garbage")
+    assert _design_review_stall_rounds() == 3
+
+
+def test_stall_short_circuits_before_round_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reviewer returns the SAME blocking issue every round → the within-loop
+    stall guard short-circuits with ``status="failed: design_stalled"`` before
+    the (much larger) round cap, and ``revise`` is called fewer than cap-1
+    times."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "20")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "3")
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+    monkeypatch.setattr(
+        orch.design_review_agent,
+        "run",
+        lambda *a, **kw: SpecCritique(
+            ready=False,
+            rationale="same issue every round",
+            issues=[CritiqueIssue(field="hypothesis", description="thesis is vague")],
+        ),
+    )
+
+    revise_counter = {"n": 0}
+
+    def _revise(*_a, **_kw):
+        revise_counter["n"] += 1
+        return _spec_dict(), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+
+    def _market_must_not_run(self, *_a, **_kw):
+        raise AssertionError("synthesis loop must not be entered on a stall")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert record.backtest.status == "failed: design_stalled"
+    assert record.is_winning is False
+    # Stall trips at the 3rd identical round (0-indexed round 2) → 3 critiques,
+    # well below the cap of 20, and revise ran only on the two pre-stall rounds.
+    assert record.design_rounds == 3
+    assert revise_counter["n"] == 2
+    assert record.loop_telemetry["stop_reason"] == "stalled"
+    ar = record.backtest.result.acceptance_reason or ""
+    assert "design_stalled" in ar
+
+
+def test_regression_notice_passed_to_revise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An issue resolved on an earlier round that reappears later is surfaced to
+    ``DesignAgent.revise`` via a non-empty ``regression_notice`` naming it."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "5")
+    # Keep stall detection out of the way for this 3-round scenario.
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "10")
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+
+    issue_x = CritiqueIssue(field="exit_rules", description="missing take-profit")
+    issue_y = CritiqueIssue(field="sizing", description="position too large")
+    review_calls = iter(
+        [
+            # round 0: raise X
+            SpecCritique(ready=False, rationale="r0", issues=[issue_x]),
+            # round 1: X resolved, raise Y instead
+            SpecCritique(ready=False, rationale="r1", issues=[issue_y]),
+            # round 2: X reappears → regression
+            SpecCritique(ready=False, rationale="r2", issues=[issue_x]),
+            # round 3: ready (so the loop ends cleanly)
+            SpecCritique(ready=True, rationale="r3 ok"),
+        ]
+    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: next(review_calls))
+
+    notices: list = []
+
+    def _revise(_spec, _critique, *, prior_critiques=None, regression_notice="", **_kw):
+        notices.append(regression_notice)
+        return _spec_dict(), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    # revise is called after rounds 0, 1, 2 (round 3 readies → no revise).
+    assert len(notices) == 3
+    # Rounds 0 and 1 had no regression; round 2 reintroduced X.
+    assert notices[0] == ""
+    assert notices[1] == ""
+    assert "missing take-profit" in notices[2]
+    assert record.loop_telemetry["critique_ledger"]["total_regressed"] == 1
+
+
+def test_loop_telemetry_persisted_on_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A normal N-rounds-then-pass cycle persists a ``loop_telemetry`` summary
+    with the round count, a ``ready`` stop reason, gate histograms, and the
+    compiled-vs-custom flag."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+    review_calls = iter(
+        [
+            SpecCritique(
+                ready=False,
+                rationale="r0",
+                issues=[CritiqueIssue(field="exit_rules", description="add tp")],
+            ),
+            SpecCritique(ready=True, rationale="r1 ok"),
+        ]
+    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: next(review_calls))
+    monkeypatch.setattr(orch.design_agent, "revise", lambda *a, **kw: (_spec_dict(), "revised"))
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    telemetry = record.loop_telemetry
+    assert telemetry["design_review_rounds"] == 2
+    assert telemetry["stop_reason"] == "ready"
+    assert telemetry["critique_ledger"]["total_resolved"] == 1
+    assert telemetry["requires_custom_code"] is False
+    # Gate histograms are present (readiness gate ran at least once).
+    assert isinstance(telemetry["gate_pass_counts"], dict)
+    assert isinstance(telemetry["gate_fail_counts"], dict)
+
+
+def test_telemetry_events_emitted_on_phase_callback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop emits ``telemetry`` events on the ``on_phase`` callback: one per
+    design-review round plus a design-loop summary at exit."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+    review_calls = iter(
+        [
+            SpecCritique(
+                ready=False,
+                rationale="r0",
+                issues=[CritiqueIssue(field="exit_rules", description="add tp")],
+            ),
+            SpecCritique(ready=True, rationale="r1 ok"),
+        ]
+    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: next(review_calls))
+    monkeypatch.setattr(orch.design_agent, "revise", lambda *a, **kw: (_spec_dict(), "revised"))
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    events: list = []
+
+    def _on_phase(phase: str, data: dict) -> None:
+        if phase == "telemetry":
+            events.append(data)
+
+    orch.run_cycle(prior_records=[], config=_config(), on_phase=_on_phase)
+
+    scopes = [e.get("scope") for e in events]
+    assert scopes.count("design_review_round") == 2
+    assert "design_loop" in scopes
+    summary = next(e for e in events if e.get("scope") == "design_loop")
+    assert summary["design_review_rounds"] == 2
+    assert summary["stop_reason"] == "ready"
+
+
+# ---------------------------------------------------------------------------
+# Pure-helper unit coverage (regression notice + telemetry assembly)
+# ---------------------------------------------------------------------------
+
+
+def test_format_regression_notice_empty_when_no_regression() -> None:
+    from investment_team.strategy_lab.orchestrator import _format_regression_notice
+
+    critique = SpecCritique(
+        ready=False, issues=[CritiqueIssue(field="sizing", description="too big")]
+    )
+    assert _format_regression_notice(critique, set()) == ""
+
+
+def test_format_regression_notice_lists_matching_issue() -> None:
+    from investment_team.strategy_lab.agents.design_review import compute_issue_id
+    from investment_team.strategy_lab.orchestrator import _format_regression_notice
+
+    issue = CritiqueIssue(field="exit_rules", description="missing take-profit")
+    critique = SpecCritique(ready=False, issues=[issue])
+    notice = _format_regression_notice(critique, {issue.issue_id})
+    assert "missing take-profit" in notice
+    assert issue.issue_id in notice
+    # Sanity: the id is the deterministic one.
+    assert issue.issue_id == compute_issue_id("exit_rules", "missing take-profit")
+
+
+def test_format_regression_notice_defensive_bare_id_branch() -> None:
+    """A regressed id with no matching issue object still surfaces as a bare id."""
+    from investment_team.strategy_lab.orchestrator import _format_regression_notice
+
+    critique = SpecCritique(
+        ready=False, issues=[CritiqueIssue(field="sizing", description="too big")]
+    )
+    notice = _format_regression_notice(critique, {"exit_rules:deadbeef00"})
+    assert "exit_rules:deadbeef00" in notice
+
+
+def test_design_loop_telemetry_summary_shape() -> None:
+    from investment_team.strategy_lab.agents.design_review import CritiqueLedger
+    from investment_team.strategy_lab.orchestrator import _design_loop_telemetry_summary
+
+    led = CritiqueLedger()
+    led.record_round(
+        SpecCritique(ready=False, issues=[CritiqueIssue(field="sizing", description="too big")])
+    )
+    summary = _design_loop_telemetry_summary(led, rounds=1, stop_reason="round_cap")
+    assert summary["design_review_rounds"] == 1
+    assert summary["stop_reason"] == "round_cap"
+    assert summary["critique_ledger"]["final_open_count"] == 1
+
+
+def test_finalize_loop_telemetry_merges_gate_counts() -> None:
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+
+    ctx = _DesignPersistContext(
+        rounds=2,
+        critiques=[],
+        stop_reason="ready",
+        loop_telemetry={"design_review_rounds": 2, "stop_reason": "ready"},
+    )
+    gates = [
+        QualityGateResult(
+            gate_name="spec_readiness", passed=True, severity="info", phase="design", details="ok"
+        ),
+        QualityGateResult(
+            gate_name="spec_readiness",
+            passed=False,
+            severity="critical",
+            phase="design",
+            details="bad",
+        ),
+    ]
+
+    class _Spec:
+        requires_custom_code = True
+
+    telemetry = _finalize_loop_telemetry(ctx, gates, _Spec())
+    assert telemetry["design_review_rounds"] == 2
+    assert telemetry["gate_pass_counts"] == {"spec_readiness": 1}
+    assert telemetry["gate_fail_counts"] == {"spec_readiness": 1}
+    assert telemetry["requires_custom_code"] is True

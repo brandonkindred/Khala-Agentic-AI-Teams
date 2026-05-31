@@ -79,8 +79,10 @@ def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.Monke
 
     The split design pipeline moves the readiness check into the design ↔
     review loop, so a spec with no entry rules now fails ``design_not_ready``
-    rather than the post-design ``spec_validation`` short-circuit. Either
-    way the contract is the same: no code execution, no market-data fetch.
+    (or ``design_stalled`` — the identical readiness critical repeats every
+    round, which the within-loop stall guard detects) rather than the
+    post-design ``spec_validation`` short-circuit. Either way the contract is
+    the same: no code execution, no market-data fetch.
     """
     bad_spec_dict = {
         "asset_class": "stocks",
@@ -107,10 +109,14 @@ def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.Monke
 
     record = orch.run_cycle(prior_records=[], config=_config())
 
-    # Either "design_not_ready" (caught in the new design loop) or
-    # "spec_validation" (caught by the legacy pre-synthesis gate) is a
-    # valid short-circuit outcome — both prove the sandbox was not touched.
-    assert record.backtest.status in {"failed: design_not_ready", "failed: spec_validation"}
+    # "design_not_ready" / "design_stalled" (caught in the new design loop)
+    # or "spec_validation" (caught by the legacy pre-synthesis gate) are all
+    # valid short-circuit outcomes — each proves the sandbox was not touched.
+    assert record.backtest.status in {
+        "failed: design_not_ready",
+        "failed: design_stalled",
+        "failed: spec_validation",
+    }
     assert record.is_winning is False
     assert record.refinement_rounds == 0
     # The design loop persists readiness findings with refinement_round=-1

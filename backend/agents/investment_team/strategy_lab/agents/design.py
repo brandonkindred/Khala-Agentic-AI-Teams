@@ -113,11 +113,15 @@ Issues:
 ## Prior Critiques on this lineage ({n_prior_critiques} so far)
 {prior_critiques_block}
 
+## Regressions — issues you previously resolved that have reappeared
+{regression_notice_block}
+
 ## Instructions
 
 1. For every issue above, apply the `suggested_fix` (or a tighter equivalent if the suggested fix conflicts with a critical rule of the DSL).
 2. Preserve every aspect of the spec that was NOT criticised — do not redesign what the reviewer accepted.
-3. Return ONLY a JSON object with no markdown, matching the same shape as the original spec (structured DSL rules, timeframe, target_symbols, risk_limits, etc.). DO NOT emit a `strategy_code` field.
+3. If any regressions are listed above, you MUST NOT reintroduce those defects — they were already fixed on an earlier round; keep them fixed while addressing the current issues.
+4. Return ONLY a JSON object with no markdown, matching the same shape as the original spec (structured DSL rules, timeframe, target_symbols, risk_limits, etc.). DO NOT emit a `strategy_code` field.
 """
 
 
@@ -192,12 +196,20 @@ class DesignAgent:
         prior_spec: "StrategySpec",
         critique: "SpecCritique",
         prior_critiques: Optional[List["SpecCritique"]] = None,
+        regression_notice: str = "",
     ) -> Tuple[Dict[str, Any], str]:
         """Revise ``prior_spec`` to address every issue raised in ``critique``.
 
         Returns: ``(strategy_dict, rationale)``. ``strategy_dict`` has no
         ``strategy_code`` key. Charges the active budget per underlying LLM
         call (see :meth:`run`).
+
+        ``regression_notice`` (optional) is a pre-rendered block naming
+        issues the designer had previously resolved and has now reintroduced.
+        When non-empty it is surfaced to the model with an explicit
+        "do not reintroduce these" instruction so the loop escalates a
+        regression rather than silently oscillating on it. Empty by default
+        so existing callers are unaffected.
         """
         spec_json = prior_spec.model_dump_json(indent=2, exclude={"strategy_code"})
         issues_block = _format_issues(critique)
@@ -210,6 +222,7 @@ class DesignAgent:
             issues_block=issues_block,
             n_prior_critiques=len(prior_critiques) if prior_critiques else 0,
             prior_critiques_block=prior_critiques_block,
+            regression_notice_block=regression_notice or "None.",
         )
 
         strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
@@ -363,6 +376,9 @@ class DesignAgent:
             issues_block=issues_block,
             n_prior_critiques=0,
             prior_critiques_block=format_prior_critiques(None),
+            # Self-review is a fresh internal pre-flight with no cross-round
+            # lineage, so there is never a regression to surface here.
+            regression_notice_block="None.",
         )
 
         try:

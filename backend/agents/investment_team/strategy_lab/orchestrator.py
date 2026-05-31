@@ -15,7 +15,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
 
 from ..execution.benchmarks import benchmark_for_strategy, build_60_40_equity
 from ..execution.metrics import (
@@ -66,7 +66,9 @@ from .agents.code_synthesis import CodeSynthesisAgent, CodeSynthesisError
 from .agents.design import DesignAgent
 from .agents.design_review import (
     CritiqueIssue,
+    CritiqueLedger,
     DesignReviewAgent,
+    LedgerDelta,
     SpecCritique,
 )
 from .agents.refinement import RefinementAgent
@@ -182,6 +184,25 @@ def _design_review_rounds() -> int:
         return max(int(raw), 1)
     except ValueError:
         return 20
+
+
+def _design_review_stall_rounds() -> int:
+    """Resolve the within-loop stall threshold (consecutive unchanged rounds).
+
+    Pre: env value, when set, parses to ``int``.
+    Post: returns a positive integer ``n`` such that the design ↔ review loop
+    short-circuits once the blocking open-issue set is non-empty and unchanged
+    for ``n`` consecutive rounds. Reads ``STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS``
+    (default 3; sub-1 values floored to 1; garbage values fall back to 3). The
+    stall break is distinct from honest round-cap exhaustion — it surfaces as
+    ``status="failed: design_stalled"`` so oscillation aborts are observable
+    apart from specs that simply ran out of rounds.
+    """
+    raw = os.environ.get("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "3")
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        return 3
 
 
 def _design_max_llm_calls() -> int:
@@ -348,6 +369,106 @@ def _critique_from_readiness(
         issues=issues,
         readiness_findings=readiness_findings,
     )
+
+
+def _format_regression_notice(critique: "SpecCritique", regressed_ids: Set[str]) -> str:
+    """Render the regression block handed to ``DesignAgent.revise``.
+
+    Pre: ``critique`` is the round whose issues are about to be revised;
+    ``regressed_ids`` is the ``LedgerDelta.regressed`` set for that round.
+    Post: returns ``""`` when nothing regressed; otherwise one bullet per
+    regressed issue (id, field, description) drawn from the current
+    critique. The regressed ids are, by construction, present in the
+    current critique's issues, so the listing is complete.
+    """
+    if not regressed_ids:
+        return ""
+    lines: List[str] = []
+    for issue in critique.issues:
+        if issue.issue_id in regressed_ids:
+            lines.append(f"  - [{issue.issue_id}] {issue.field}: {issue.description}")
+    if not lines:
+        # Defensive: a regressed id with no matching issue object. List the
+        # bare ids so the designer still sees the regression signal.
+        lines = [f"  - {rid}" for rid in sorted(regressed_ids)]
+    return "\n".join(lines)
+
+
+def _emit_design_review_telemetry(
+    emit: "PhaseCallback",
+    review_round: int,
+    ledger: CritiqueLedger,
+    delta: LedgerDelta,
+) -> None:
+    """Emit a live per-round telemetry event on the existing callback surface.
+
+    Pre: ``emit`` is the cycle's phase callback; ``delta`` is the ledger
+    delta just produced for ``review_round``.
+    Post: a single ``"telemetry"`` event is emitted carrying the running
+    open-issue count and this round's resolved / regressed / new counts.
+    """
+    emit(
+        "telemetry",
+        {
+            "scope": "design_review_round",
+            "round": review_round,
+            "open_issue_count": len(ledger.current_open),
+            "resolved_count": len(delta.resolved),
+            "regressed_count": len(delta.regressed),
+            "new_count": len(delta.new),
+        },
+    )
+
+
+def _design_loop_telemetry_summary(
+    ledger: CritiqueLedger, rounds: int, stop_reason: str
+) -> Dict[str, Any]:
+    """Build the design-loop slice of the persisted telemetry summary.
+
+    Pre: ``ledger`` has recorded every round of the loop; ``rounds`` is the
+    authoritative round count (``len(critique_history)``); ``stop_reason`` is
+    one of ``"ready" | "round_cap" | "stalled" | "budget_exhausted"``.
+    Post: returns the design-loop counters; gate counts and the
+    compiled-vs-custom flag are merged in later by
+    :meth:`StrategyLabOrchestrator._finalize_loop_telemetry`.
+    """
+    return {
+        "design_review_rounds": rounds,
+        "stop_reason": stop_reason,
+        "critique_ledger": {
+            "total_resolved": len(ledger.ever_resolved),
+            "total_regressed": ledger.total_regressed,
+            "final_open_count": len(ledger.current_open),
+        },
+    }
+
+
+def _finalize_loop_telemetry(
+    design_context: "_DesignPersistContext",
+    all_gate_results: List[QualityGateResult],
+    spec: StrategySpec,
+) -> Dict[str, Any]:
+    """Merge the design-loop telemetry with whole-funnel gate counters.
+
+    Pre: ``design_context`` carries the design-loop telemetry slice;
+    ``all_gate_results`` is the cycle's full gate timeline; ``spec`` is the
+    settled spec.
+    Post: returns the persisted ``loop_telemetry`` summary — the design-loop
+    slice plus per-gate pass/fail histograms (keyed on ``gate_name``) and the
+    ``requires_custom_code`` flag (the compiled-vs-custom share signal other
+    reliability work depends on). Counts are computed once over the gate list;
+    each result contributes to exactly one of pass/fail by ``passed``.
+    """
+    telemetry: Dict[str, Any] = dict(design_context.loop_telemetry)
+    pass_counts: Dict[str, int] = {}
+    fail_counts: Dict[str, int] = {}
+    for g in all_gate_results:
+        bucket = pass_counts if g.passed else fail_counts
+        bucket[g.gate_name] = bucket.get(g.gate_name, 0) + 1
+    telemetry["gate_pass_counts"] = pass_counts
+    telemetry["gate_fail_counts"] = fail_counts
+    telemetry["requires_custom_code"] = bool(getattr(spec, "requires_custom_code", False))
+    return telemetry
 
 
 def _resolve_alignment_report_for_analysis(
@@ -752,6 +873,11 @@ class StrategyLabOrchestrator:
         rationale = ""
         critique_history: List[SpecCritique] = []
         ready = False
+        # Defaults cover the budget-trip path below (where the review-rounds
+        # helper never returns its own values); the success path overwrites
+        # both from the helper's return.
+        stop_reason = "budget_exhausted"
+        loop_telemetry: Dict[str, Any] = {}
 
         try:
             strategy_dict, rationale = self.design_agent.run(
@@ -775,7 +901,7 @@ class StrategyLabOrchestrator:
                 attempt=design_attempt,
             )
 
-            spec, rationale, ready = self._run_design_review_rounds(
+            spec, rationale, ready, stop_reason, loop_telemetry = self._run_design_review_rounds(
                 spec=spec,
                 rationale=rationale,
                 strategy_id=strategy_id,
@@ -810,6 +936,11 @@ class StrategyLabOrchestrator:
                 rounds=len(critique_history),
                 critique_history=critique_history,
                 budget_exhausted=True,
+                stop_reason="budget_exhausted",
+                loop_telemetry={
+                    "design_review_rounds": len(critique_history),
+                    "stop_reason": "budget_exhausted",
+                },
             )
 
         return _DesignLoopOutcome(
@@ -818,6 +949,8 @@ class StrategyLabOrchestrator:
             ready=ready,
             rounds=len(critique_history),
             critique_history=critique_history,
+            stop_reason=stop_reason,
+            loop_telemetry=loop_telemetry,
         )
 
     def _run_design_review_rounds(
@@ -832,18 +965,27 @@ class StrategyLabOrchestrator:
         critique_history: List["SpecCritique"],
         emit: PhaseCallback,
         drift_collector: Optional[_DriftCollector],
-    ) -> Tuple[StrategySpec, str, bool]:
+    ) -> Tuple[StrategySpec, str, bool, str, Dict[str, Any]]:
         """Run the bounded readiness → review → revise rounds.
 
         Pre: ``spec`` / ``rationale`` are the initial design draft and its
         rationale; ``critique_history`` is the (empty) running list the
         caller reads back after return.
-        Post: returns ``(spec, rationale, ready)`` — the final candidate
-        spec, its latest rationale, and whether the reviewer marked it
-        ready on the most recent round. ``critique_history`` is mutated in
+        Post: returns ``(spec, rationale, ready, stop_reason, loop_telemetry)``
+        — the final candidate spec, its latest rationale, whether the
+        reviewer marked it ready on the most recent round, the reason the
+        loop stopped (``"ready" | "stalled" | "round_cap"``), and the
+        design-loop telemetry summary. ``critique_history`` is mutated in
         place — one entry per round (synthetic readiness critiques count),
         so its length is the authoritative round count.
         May raise :class:`DesignBudgetExhausted`, which the caller handles.
+
+        A :class:`CritiqueLedger` tracks the blocking open-issue set across
+        rounds: a regressed issue (one resolved earlier that reappears) is
+        surfaced to ``DesignAgent.revise`` as an explicit "do not reintroduce"
+        notice, and the loop short-circuits early with ``stop_reason="stalled"``
+        when the open set is unchanged for ``STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS``
+        consecutive rounds rather than churning to the hard round cap.
 
         Extracted from :meth:`_run_design_loop` so the budget-exhaustion
         ``try`` there stays shallow.
@@ -851,6 +993,9 @@ class StrategyLabOrchestrator:
         ready = False
         last_readiness_signature: Optional[tuple] = None
         readiness_results: List[QualityGateResult] = []
+        ledger = CritiqueLedger()
+        stall_rounds = _design_review_stall_rounds()
+        stop_reason = "round_cap"
 
         for review_round in range(max_rounds):
             # Deterministic readiness gate. Skip re-validation when the
@@ -880,6 +1025,7 @@ class StrategyLabOrchestrator:
                 )
                 critique.round = review_round
                 critique_history.append(critique)
+                delta = ledger.record_round(critique)
                 emit(
                     "design_review",
                     {
@@ -887,10 +1033,13 @@ class StrategyLabOrchestrator:
                         "round": review_round,
                         "ready": critique.ready,
                         "issue_count": len(critique.issues),
+                        "regressed_count": len(delta.regressed),
                     },
                 )
+                _emit_design_review_telemetry(emit, review_round, ledger, delta)
                 if critique.ready:
                     ready = True
+                    stop_reason = "ready"
                     emit(
                         "designing",
                         {"sub_phase": "ready", "rounds": len(critique_history)},
@@ -904,14 +1053,17 @@ class StrategyLabOrchestrator:
                 critique = _critique_from_readiness(readiness_results)
                 critique.round = review_round
                 critique_history.append(critique)
+                delta = ledger.record_round(critique)
                 emit(
                     "design_review",
                     {
                         "sub_phase": "skipped",
                         "round": review_round,
                         "reason": "readiness_critical",
+                        "regressed_count": len(delta.regressed),
                     },
                 )
+                _emit_design_review_telemetry(emit, review_round, ledger, delta)
 
             emit(
                 "designing",
@@ -922,14 +1074,41 @@ class StrategyLabOrchestrator:
                 },
             )
 
+            # Within-loop stall: the blocking open-issue set has been
+            # non-empty and unchanged for ``stall_rounds`` rounds. Abort
+            # early rather than churn to the hard round cap on a spec that
+            # is oscillating instead of converging. Distinct from honest
+            # round-cap exhaustion so the operator can tell them apart.
+            if ledger.is_stalled(stall_rounds):
+                stop_reason = "stalled"
+                emit(
+                    "design_review",
+                    {
+                        "sub_phase": "stalled",
+                        "round": review_round,
+                        "stall_rounds": stall_rounds,
+                        "open_issue_ids": sorted(ledger.current_open),
+                    },
+                )
+                break
+
             if review_round >= max_rounds - 1:
                 # Don't revise on the final iteration — the outer caller
                 # will short-circuit using the existing critique history.
+                stop_reason = "round_cap"
                 break
 
+            # Flag + escalate any regression: an issue resolved on an earlier
+            # round that has reappeared is fed back to the designer with an
+            # explicit "do not reintroduce" instruction (we do not hard-block
+            # the round — that risks deadlock if the model cannot avoid it).
+            regression_notice = _format_regression_notice(critique, delta.regressed)
             prev_spec = spec.model_copy(deep=True)
             strategy_dict, rationale = self.design_agent.revise(
-                spec, critique, prior_critiques=critique_history
+                spec,
+                critique,
+                prior_critiques=critique_history,
+                regression_notice=regression_notice,
             )
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
             if drift_collector is not None:
@@ -941,7 +1120,9 @@ class StrategyLabOrchestrator:
                     reason=critique.rationale if hasattr(critique, "rationale") else str(critique),
                 )
 
-        return spec, rationale, ready
+        loop_telemetry = _design_loop_telemetry_summary(ledger, len(critique_history), stop_reason)
+        emit("telemetry", {"scope": "design_loop", **loop_telemetry})
+        return spec, rationale, ready, stop_reason, loop_telemetry
 
     def _build_spec_from_dict(
         self, strategy_dict: Dict[str, Any], *, strategy_id: str
@@ -2542,6 +2723,7 @@ class StrategyLabOrchestrator:
             code_history=list(dc.code_history),
             gate_timeline=gate_timeline,
             rule_implementation_map=rule_impl_map,
+            loop_telemetry=_finalize_loop_telemetry(design_context, all_gate_results, spec),
         )
 
         self.convergence_tracker.record(spec, all_gate_results)
@@ -2617,6 +2799,8 @@ class StrategyLabOrchestrator:
         design_context = _DesignPersistContext(
             rounds=design_outcome.rounds,
             critiques=list(design_outcome.critique_history),
+            stop_reason=design_outcome.stop_reason,
+            loop_telemetry=dict(design_outcome.loop_telemetry),
         )
 
         if not design_outcome.ready:
@@ -2637,6 +2821,16 @@ class StrategyLabOrchestrator:
                     f"Design phase exhausted its LLM-call budget "
                     f"({calls_made}/{limit} calls) after {design_context.rounds} "
                     f"round(s); last critique: {last_rationale}"
+                )
+            elif design_outcome.stop_reason == "stalled":
+                # Open-issue set stopped shrinking — the loop oscillated rather
+                # than converged. Surface distinctly from honest round-cap
+                # exhaustion so operators and audits can tell them apart.
+                short_circuit_status = "failed: design_stalled"
+                abort_reason = (
+                    f"Design loop stalled — the open-issue set was unchanged for "
+                    f"{_design_review_stall_rounds()} consecutive round(s) after "
+                    f"{design_context.rounds} round(s); last critique: {last_rationale}"
                 )
             else:
                 short_circuit_status = "failed: design_not_ready"
@@ -3347,6 +3541,7 @@ class StrategyLabOrchestrator:
             spec_history=list(dc.spec_history),
             code_history=list(dc.code_history),
             gate_timeline=gate_timeline,
+            loop_telemetry=_finalize_loop_telemetry(design_context, all_gate_results, spec),
         )
 
         # Short-circuited cycles never reached a backtest, and ``spec`` may
