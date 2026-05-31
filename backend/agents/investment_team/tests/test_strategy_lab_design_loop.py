@@ -434,12 +434,28 @@ def test_budget_exhausted_short_circuits_with_status(
 
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", _sandbox_must_not_run)
 
-    record = orch.run_cycle(prior_records=[], config=_config())
+    telemetry_events: list = []
+
+    def _on_phase(phase: str, data: dict) -> None:
+        if phase == "telemetry":
+            telemetry_events.append(data)
+
+    record = orch.run_cycle(prior_records=[], config=_config(), on_phase=_on_phase)
 
     assert record.backtest.status == "failed: budget_exhausted"
     assert record.is_winning is False
     ar = record.backtest.result.acceptance_reason or ""
     assert "publication_disabled" in ar and "budget_exhausted" in ar
+    # The budget-exhaustion path must carry forward the critique-ledger
+    # counters (so a budget exit after real review is distinguishable from one
+    # that never reached review) AND emit the per-cycle design_loop summary on
+    # the callback, mirroring the normal-exit path.
+    telemetry = record.loop_telemetry
+    assert telemetry["stop_reason"] == "budget_exhausted"
+    assert "critique_ledger" in telemetry
+    loop_summaries = [e for e in telemetry_events if e.get("scope") == "design_loop"]
+    assert len(loop_summaries) == 1
+    assert loop_summaries[0]["stop_reason"] == "budget_exhausted"
 
 
 def test_budget_spans_design_reentries(monkeypatch: pytest.MonkeyPatch) -> None:
