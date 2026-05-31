@@ -638,6 +638,45 @@ def _failing_critique_payload() -> str:
     )
 
 
+def _ready_with_warning_critique_payload() -> str:
+    """Self-review verdict that is ready=true but carries an advisory warning.
+
+    This is the common LLM shape the over-demotion bug fired on: the model
+    is satisfied with the spec yet flags a minor non-blocking note.
+    """
+    return json.dumps(
+        {
+            "ready": True,
+            "rationale": "Internally coherent; one minor advisory note.",
+            "issues": [
+                {
+                    "field": "sizing",
+                    "severity": "warning",
+                    "description": "note: fraction param 26 is unusual but valid.",
+                }
+            ],
+        }
+    )
+
+
+def _ready_with_critical_critique_payload() -> str:
+    """Self-review verdict that is ready=true but contradicts itself with a critical."""
+    return json.dumps(
+        {
+            "ready": True,
+            "rationale": "Looks ready.",
+            "issues": [
+                {
+                    "field": "entry_rules",
+                    "severity": "critical",
+                    "description": "Hypothesis mentions ADX > 25 but no predicate uses adx.",
+                    "suggested_fix": "Add an entry predicate {lhs: adx(14), op: >, rhs: 25}.",
+                }
+            ],
+        }
+    )
+
+
 def test_run_self_review_passes_no_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     """When self-review marks the candidate ready, no self-revision fires.
 
@@ -678,6 +717,69 @@ def test_run_self_review_flags_then_self_revises(monkeypatch: pytest.MonkeyPatch
     revision_prompt = capture.calls[2]
     assert "entry_rules" in revision_prompt
     assert "ADX" in revision_prompt or "adx" in revision_prompt
+
+
+def test_run_self_review_ready_with_warning_no_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A self-review verdict of ready=true + advisory warning is accepted.
+
+    Two LLM calls total: generation + self-review. The warning must NOT be
+    demoted to ready=false (which would fire a wasted self-revision on
+    content-free meta-commentary).
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _ready_with_warning_critique_payload()],
+        enable_self_review=True,
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 2
+    assert parsed["asset_class"] == "stocks"
+
+
+def test_run_self_review_ready_with_critical_self_revises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A self-review verdict of ready=true + critical is a real contradiction.
+
+    The critical still demotes to ready=false, so exactly one self-revision
+    fires (three LLM calls total).
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [
+            _good_payload(),
+            _ready_with_critical_critique_payload(),
+            _good_payload(),
+        ],
+        enable_self_review=True,
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 3
+    assert parsed["asset_class"] == "stocks"
+
+
+def test_revise_self_review_ready_with_warning_no_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``revise()`` likewise accepts a ready=true + warning self-review verdict
+    without firing a self-revision (two LLM calls total)."""
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _ready_with_warning_critique_payload()],
+        enable_self_review=True,
+    )
+
+    critique = SpecCritique(ready=False, rationale="external r", issues=[])
+    parsed, _ = DesignAgent().revise(_prior_spec(), critique)
+
+    assert len(capture.calls) == 2
+    assert parsed["asset_class"] == "stocks"
 
 
 def test_revise_self_review_passes_no_extra_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -789,9 +891,7 @@ def test_self_revision_garbage_response_falls_back_to_original(
     # returned unchanged.
     assert len(capture.calls) == 3
     assert parsed["asset_class"] == "stocks"
-    assert any(
-        "self-revision failed" in rec.message.lower() for rec in caplog.records
-    )
+    assert any("self-revision failed" in rec.message.lower() for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------
