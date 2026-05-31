@@ -119,7 +119,27 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
         )
 
     ordered = sorted(records, key=lambda x: x.created_at)
-    sample = ordered[-tail:] if len(ordered) > tail else ordered
+    # Count only records that actually reached a completed backtest. A
+    # short-circuited cycle (status ``failed: …`` — e.g. an unsupported
+    # asset_class routed to redesign, a spec-validation or synthesis failure)
+    # never ran, and its ``strategy.asset_class`` may be a coerced placeholder
+    # (an unsupported class like ``bonds`` is canonicalized to ``stocks`` for
+    # schema validity before the redesign route). Counting those would let a
+    # rejected, never-backtested design pollute the stock history and skew the
+    # diversity steering. Records persisted before this field carried a status
+    # default to ``"completed"``, so legacy rows are unaffected.
+    executed = [
+        r
+        for r in ordered
+        if not str(getattr(r.backtest, "status", "completed")).startswith("failed")
+    ]
+    sample = executed[-tail:] if len(executed) > tail else executed
+    if not sample:
+        return (
+            "No completed lab backtests yet. Choose **asset_class** from "
+            "stocks, crypto, forex, futures, or commodities with similar frequency over time — "
+            "do **not** default to stocks; pick the class that best fits your multi-signal story."
+        )
     # #535: count only asset classes the LLM may still target. 'options' is
     # rejected by StrategySpecValidator, so leaving it in the count dict
     # would push it into ``underrep`` whenever no options strategies have

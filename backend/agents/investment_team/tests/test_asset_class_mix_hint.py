@@ -40,7 +40,7 @@ def _stub_backtest_result() -> BacktestResult:
     )
 
 
-def _record(asset_class: str) -> StrategyLabRecord:
+def _record(asset_class: str, *, backtest_status: str = "completed") -> StrategyLabRecord:
     suffix = uuid.uuid4().hex[:6]
     strategy = StrategySpec(
         strategy_id=f"s-{suffix}",
@@ -63,6 +63,7 @@ def _record(asset_class: str) -> StrategyLabRecord:
         submitted_by="test",
         submitted_at=now,
         completed_at=now,
+        status=backtest_status,
         result=_stub_backtest_result(),
         notes=[],
         trades=[],
@@ -104,3 +105,28 @@ def test_hint_count_includes_supported_classes() -> None:
     out = asset_class_mix_hint(records)
     for ac in ("stocks", "crypto", "forex", "futures", "commodities"):
         assert f"{ac}=" in out, f"expected '{ac}=' in counts, got: {out}"
+
+
+def test_hint_excludes_failed_short_circuit_records_from_counts() -> None:
+    """A short-circuited cycle (status ``failed: …``) never ran a backtest and
+    its recorded asset_class may be a coerced placeholder (an unsupported class
+    like ``bonds`` is canonicalized to ``stocks`` for schema validity before
+    being routed to redesign). Such records must not be counted, or a rejected,
+    never-backtested design would pollute the stock history and skew steering."""
+    completed = [_record("crypto") for _ in range(2)]
+    failed = [_record("stocks", backtest_status="failed: spec_unimplementable") for _ in range(5)]
+    out = asset_class_mix_hint(completed + failed)
+    # Only the two completed crypto runs count; the coerced-stocks failures
+    # must not register as a stocks-heavy window.
+    assert "stocks=0" in out, out
+    assert "crypto=2" in out, out
+    assert "Equities are relatively heavy" not in out, out
+
+
+def test_hint_all_failed_records_falls_back_to_neutral_menu() -> None:
+    """When every record is a failed short-circuit, there is no executed
+    history to steer from — emit the neutral no-history menu rather than a
+    misleading all-zero count derived from coerced placeholders."""
+    records = [_record("stocks", backtest_status="failed: spec_unimplementable") for _ in range(3)]
+    out = asset_class_mix_hint(records)
+    assert "No completed lab backtests yet" in out, out
