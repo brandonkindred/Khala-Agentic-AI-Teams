@@ -633,10 +633,10 @@ def _print_loop_telemetry(records: List[dict]) -> None:
 
     Pre: ``records`` is the list of persisted lab-record dicts.
     Post: prints a stop-reason histogram, average design-review rounds,
-    cumulative critique regressions, the compiled-vs-custom share, and the
-    top failing gates across all records carrying a ``loop_telemetry`` block.
-    Records without the block (legacy rows / design-loop-bypass paths) are
-    skipped. Read-only — no record is mutated.
+    cumulative critique regressions, the code-path share (compiled / custom /
+    not-synthesized), and the top failing gates across all records carrying a
+    ``loop_telemetry`` block. Records without the block (legacy rows /
+    design-loop-bypass paths) are skipped. Read-only — no record is mutated.
     """
     telemetries = [t for t in (r.get("loop_telemetry") or {} for r in records) if t]
     if not telemetries:
@@ -645,10 +645,10 @@ def _print_loop_telemetry(records: List[dict]) -> None:
 
     stop_reasons: Counter[str] = Counter()
     fail_gates: Counter[str] = Counter()
+    code_paths: Counter[str] = Counter()
     rounds_total = 0
     rounds_n = 0
     regressed_total = 0
-    custom_n = 0
     for t in telemetries:
         stop_reasons[str(t.get("stop_reason", "unknown"))] += 1
         rounds = t.get("design_review_rounds")
@@ -657,8 +657,14 @@ def _print_loop_telemetry(records: List[dict]) -> None:
             rounds_n += 1
         ledger = t.get("critique_ledger") or {}
         regressed_total += int(ledger.get("total_regressed", 0) or 0)
-        if t.get("requires_custom_code"):
-            custom_n += 1
+        # Prefer the three-state ``code_path``; fall back to the legacy
+        # boolean for records persisted before it was added (those never
+        # short-circuit before synthesis with a populated telemetry block,
+        # so the compiled/custom split is still accurate for them).
+        code_path = t.get("code_path")
+        if code_path is None:
+            code_path = "custom" if t.get("requires_custom_code") else "compiled"
+        code_paths[str(code_path)] += 1
         for gate, count in (t.get("gate_fail_counts") or {}).items():
             fail_gates[gate] += int(count or 0)
 
@@ -667,7 +673,13 @@ def _print_loop_telemetry(records: List[dict]) -> None:
     print(f"Avg design-review rounds: {avg_rounds}")
     print("Stop reasons: " + ", ".join(f"{reason}={n}" for reason, n in stop_reasons.most_common()))
     print(f"Critique regressions (cumulative): {regressed_total}")
-    print(f"Compiled vs custom: {len(telemetries) - custom_n} compiled / {custom_n} custom-code")
+    print(
+        "Code path: "
+        + ", ".join(
+            f"{path}={code_paths.get(path, 0)}"
+            for path in ("compiled", "custom", "not_synthesized")
+        )
+    )
     if fail_gates:
         top = ", ".join(f"{gate}={n}" for gate, n in fail_gates.most_common(5))
         print(f"Top failing gates: {top}")

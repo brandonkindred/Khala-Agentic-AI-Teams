@@ -447,17 +447,30 @@ def _finalize_loop_telemetry(
     design_context: "_DesignPersistContext",
     all_gate_results: List[QualityGateResult],
     spec: StrategySpec,
+    code: str,
 ) -> Dict[str, Any]:
     """Merge the design-loop telemetry with whole-funnel gate counters.
 
     Pre: ``design_context`` carries the design-loop telemetry slice;
     ``all_gate_results`` is the cycle's full gate timeline; ``spec`` is the
-    settled spec.
+    settled spec; ``code`` is the synthesized strategy code (empty string when
+    the cycle short-circuited before code synthesis was attempted).
     Post: returns the persisted ``loop_telemetry`` summary — the design-loop
-    slice plus per-gate pass/fail histograms (keyed on ``gate_name``) and the
-    ``requires_custom_code`` flag (the compiled-vs-custom share signal other
+    slice plus per-gate pass/fail histograms (keyed on ``gate_name``) and a
+    three-state ``code_path`` (the compiled-vs-custom share signal other
     reliability work depends on). Counts are computed once over the gate list;
     each result contributes to exactly one of pass/fail by ``passed``.
+
+    ``code_path`` is ``"not_synthesized"`` whenever no code was produced (a
+    design-phase short-circuit such as ``design_not_ready`` /
+    ``design_stalled`` or an early budget exit), otherwise ``"compiled"`` /
+    ``"custom"`` from ``spec.requires_custom_code``. This keeps unsynthesized
+    failure records out of the compiled bucket — they have not attempted any
+    compiler path, so counting the default ``requires_custom_code=False`` as
+    "compiled" would corrupt the funnel metric for exactly the failures the
+    telemetry exists to explain. ``requires_custom_code`` is also retained
+    verbatim for backward compatibility, but it is only meaningful when
+    ``code_path != "not_synthesized"``.
     """
     telemetry: Dict[str, Any] = dict(design_context.loop_telemetry)
     pass_counts: Dict[str, int] = {}
@@ -467,7 +480,12 @@ def _finalize_loop_telemetry(
         bucket[g.gate_name] = bucket.get(g.gate_name, 0) + 1
     telemetry["gate_pass_counts"] = pass_counts
     telemetry["gate_fail_counts"] = fail_counts
-    telemetry["requires_custom_code"] = bool(getattr(spec, "requires_custom_code", False))
+    requires_custom = bool(getattr(spec, "requires_custom_code", False))
+    if not (code or "").strip():
+        telemetry["code_path"] = "not_synthesized"
+    else:
+        telemetry["code_path"] = "custom" if requires_custom else "compiled"
+    telemetry["requires_custom_code"] = requires_custom
     return telemetry
 
 
@@ -934,6 +952,18 @@ class StrategyLabOrchestrator:
                     "rounds": len(critique_history),
                 },
             )
+            # Carry forward the critique-ledger counters accumulated for the
+            # rounds completed before the budget tripped, so a budget exit
+            # after real review is distinguishable from one that never
+            # reached a review round.
+            budget_telemetry = _design_loop_telemetry_summary(
+                ledger, len(critique_history), "budget_exhausted"
+            )
+            # Mirror the normal-exit path: emit the per-cycle ``design_loop``
+            # summary so live ``on_phase`` consumers see the stop reason and
+            # ledger totals on budget-exhausted cycles too, not just per-round
+            # events plus the bare ``budget_exhausted`` phase event.
+            emit("telemetry", {"scope": "design_loop", **budget_telemetry})
             return _DesignLoopOutcome(
                 spec=spec,
                 rationale=rationale,
@@ -942,13 +972,7 @@ class StrategyLabOrchestrator:
                 critique_history=critique_history,
                 budget_exhausted=True,
                 stop_reason="budget_exhausted",
-                # Carry forward the critique-ledger counters accumulated for the
-                # rounds completed before the budget tripped, so a budget exit
-                # after real review is distinguishable from one that never
-                # reached a review round.
-                loop_telemetry=_design_loop_telemetry_summary(
-                    ledger, len(critique_history), "budget_exhausted"
-                ),
+                loop_telemetry=budget_telemetry,
             )
 
         return _DesignLoopOutcome(
@@ -2741,7 +2765,7 @@ class StrategyLabOrchestrator:
             code_history=list(dc.code_history),
             gate_timeline=gate_timeline,
             rule_implementation_map=rule_impl_map,
-            loop_telemetry=_finalize_loop_telemetry(design_context, all_gate_results, spec),
+            loop_telemetry=_finalize_loop_telemetry(design_context, all_gate_results, spec, code),
         )
 
         self.convergence_tracker.record(spec, all_gate_results)
@@ -3559,7 +3583,7 @@ class StrategyLabOrchestrator:
             spec_history=list(dc.spec_history),
             code_history=list(dc.code_history),
             gate_timeline=gate_timeline,
-            loop_telemetry=_finalize_loop_telemetry(design_context, all_gate_results, spec),
+            loop_telemetry=_finalize_loop_telemetry(design_context, all_gate_results, spec, code),
         )
 
         # Short-circuited cycles never reached a backtest, and ``spec`` may

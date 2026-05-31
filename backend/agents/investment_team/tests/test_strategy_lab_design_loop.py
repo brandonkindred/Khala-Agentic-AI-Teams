@@ -696,6 +696,9 @@ def test_loop_telemetry_persisted_on_record(monkeypatch: pytest.MonkeyPatch) -> 
     assert telemetry["stop_reason"] == "ready"
     assert telemetry["critique_ledger"]["total_resolved"] == 1
     assert telemetry["requires_custom_code"] is False
+    # Code was synthesized (compiled path), so code_path reflects that — not
+    # the "not_synthesized" state reserved for pre-synthesis short-circuits.
+    assert telemetry["code_path"] == "compiled"
     # Gate histograms are present (readiness gate ran at least once).
     assert isinstance(telemetry["gate_pass_counts"], dict)
     assert isinstance(telemetry["gate_fail_counts"], dict)
@@ -816,8 +819,35 @@ def test_finalize_loop_telemetry_merges_gate_counts() -> None:
     class _Spec:
         requires_custom_code = True
 
-    telemetry = _finalize_loop_telemetry(ctx, gates, _Spec())
+    # With synthesized code, code_path follows requires_custom_code.
+    telemetry = _finalize_loop_telemetry(ctx, gates, _Spec(), code="def on_bar(): ...")
     assert telemetry["design_review_rounds"] == 2
     assert telemetry["gate_pass_counts"] == {"spec_readiness": 1}
     assert telemetry["gate_fail_counts"] == {"spec_readiness": 1}
     assert telemetry["requires_custom_code"] is True
+    assert telemetry["code_path"] == "custom"
+
+
+def test_finalize_loop_telemetry_marks_unsynthesized_failures() -> None:
+    """A pre-synthesis short-circuit (no code) is code_path='not_synthesized',
+    not 'compiled' — even though requires_custom_code defaults to False — so the
+    funnel metric does not miscount design failures as compiled."""
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+
+    ctx = _DesignPersistContext(
+        rounds=3,
+        critiques=[],
+        stop_reason="design_not_ready",
+        loop_telemetry={"design_review_rounds": 3, "stop_reason": "round_cap"},
+    )
+
+    class _Spec:
+        requires_custom_code = False
+
+    telemetry = _finalize_loop_telemetry(ctx, [], _Spec(), code="")
+    assert telemetry["code_path"] == "not_synthesized"
+    # Empty/whitespace code is also treated as not synthesized.
+    assert _finalize_loop_telemetry(ctx, [], _Spec(), code="   \n")["code_path"] == (
+        "not_synthesized"
+    )
