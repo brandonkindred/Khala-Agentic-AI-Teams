@@ -35,11 +35,21 @@ _PROMPT_ASSET_CLASSES: tuple[str, ...] = tuple(
 # ``failed: max_refinement_rounds``), which ran a real backtest with a genuine
 # canonical class and SHOULD count — hence an explicit set rather than a blanket
 # ``startswith("failed")`` filter.
+#
+# This must enumerate EVERY status the orchestrator passes to
+# ``_build_short_circuit_record`` (the pre-backtest exit path). Keep it in sync
+# with the ``short_circuit_status`` values in ``strategy_lab/orchestrator.py``:
+# spec_unimplementable, spec_validation, code_synthesis, design_not_ready,
+# budget_exhausted. The in-memory ``ConvergenceTracker`` skips all of these via
+# ``count_asset_class=False`` at the call site; this set is the persisted-record
+# equivalent for ``prior_records`` rebuilt after a restart.
 _NON_EXECUTED_BACKTEST_STATUSES: frozenset[str] = frozenset(
     {
         "failed: spec_unimplementable",
         "failed: spec_validation",
         "failed: code_synthesis",
+        "failed: design_not_ready",
+        "failed: budget_exhausted",
     }
 )
 

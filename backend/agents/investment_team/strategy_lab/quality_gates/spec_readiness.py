@@ -419,6 +419,26 @@ class SpecReadinessGate(GateResultsMixin):
         if config is None:
             return ()
 
+        # Fail closed on an unsupported asset_class before any sizing logic.
+        # ``StrategySpec`` rejects off-vocabulary classes at construction, but a
+        # spec can reach this gate without that validation (post-construction
+        # assignment / model-copy mutation, which the tests exercise). With
+        # explicit ``target_symbols`` the ``_default_universe_for`` strict check
+        # below is skipped, and the permissive ``normalize_asset_class`` used
+        # for the whole-lot decision would map e.g. ``bonds`` → ``stocks`` and
+        # let it pass as a stock-like whole-lot strategy. Resolve strictly here
+        # so an unknown class surfaces as a critical regardless of the
+        # target_symbols / timeframe path.
+        try:
+            normalize_asset_class_strict(ctx.spec.asset_class)
+        except ValueError as exc:
+            return (
+                self._critical(
+                    f"Sizing realisability: {exc}. Pick a supported asset_class "
+                    "(stocks/crypto/forex/futures/commodities)."
+                ),
+            )
+
         kind = getattr(ctx.spec.sizing, "kind", None)
 
         # Volatility-target sizing depends on realised volatility, which we

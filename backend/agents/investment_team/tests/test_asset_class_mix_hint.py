@@ -132,6 +132,28 @@ def test_hint_all_failed_records_falls_back_to_neutral_menu() -> None:
     assert "No executed lab backtests yet" in out, out
 
 
+def test_hint_excludes_all_pre_backtest_short_circuit_statuses() -> None:
+    """Every status the orchestrator passes to ``_build_short_circuit_record``
+    (none of which ran a backtest) must be excluded — including
+    ``design_not_ready`` and ``budget_exhausted``, which are persisted before
+    code synthesis just like the spec/synthesis failures. Otherwise a restart
+    that rebuilds the hint from persisted ``prior_records`` would count these
+    never-executed designs as real asset-class history."""
+    for status in (
+        "failed: spec_unimplementable",
+        "failed: spec_validation",
+        "failed: code_synthesis",
+        "failed: design_not_ready",
+        "failed: budget_exhausted",
+    ):
+        records = [_record("crypto")] + [
+            _record("stocks", backtest_status=status) for _ in range(5)
+        ]
+        out = asset_class_mix_hint(records)
+        assert "stocks=0" in out, f"{status}: {out}"
+        assert "crypto=1" in out, f"{status}: {out}"
+
+
 def test_hint_counts_executed_but_losing_failed_backtests() -> None:
     """Executed-but-losing cycles use ``failed`` / ``failed: max_refinement_rounds``
     but DID run a backtest with a genuine canonical class — they must keep

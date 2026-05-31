@@ -394,6 +394,24 @@ def test_rule5_unknown_asset_class_is_critical() -> None:
     assert any("unknown asset_class" in c for c in _critical(results))
 
 
+def test_rule5_unknown_asset_class_with_target_symbols_fails_closed() -> None:
+    """An unknown class mutated onto a spec that ALSO has explicit
+    ``target_symbols`` must still fail closed. With ``target_symbols`` set, Rule
+    5 skips the ``_default_universe_for`` strict check, and on a ``1d`` timeframe
+    Rule 7 returns early too — so without a dedicated guard a ``bonds`` spec
+    would pass readiness as a stock-like whole-lot strategy. The strict
+    normalization at the top of Rule 5 surfaces it as a critical."""
+    spec = _spec(
+        asset_class="stocks",
+        target_symbols=["TLT"],
+        timeframe="1d",
+        hypothesis="generic mean reversion",
+    )
+    spec.asset_class = "bonds"
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("unknown asset_class" in c for c in _critical(results))
+
+
 def test_rule5_volatility_target_emits_warning() -> None:
     """Vol-target sizing cannot be evaluated statically — surface as warning."""
     from investment_team.strategy_lab.spec_dsl import VolatilityTargetSizing
