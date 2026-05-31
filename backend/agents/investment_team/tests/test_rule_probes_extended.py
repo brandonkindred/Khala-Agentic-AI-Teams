@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+import pytest
+
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import StrategySpec, TradeRecord
 from investment_team.strategy_lab.executor.indicators import (
@@ -28,14 +30,17 @@ from investment_team.strategy_lab.quality_gates.rule_probes.asserter import (
 )
 from investment_team.strategy_lab.quality_gates.rule_probes.gate import _SkippedResult
 from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+    _PRICEREF_TO_FIELD,
     ProbeRun,
     _bars_to_df,
     _compute_indicator_at,
     _extract_universe_literal,
     _normalise_ohlc,
     _resolve_probe_symbol,
+    _resolve_side_series,
     _series_for_source,
     _synthesise_for_predicate,
+    _verify_cross,
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -174,12 +179,15 @@ def test_indicator_cross_below_number_recipe():
     assert reason is None and bars is not None
 
 
-def test_cross_with_unsupported_indicator_pair_marks_unprobeable():
+def test_cross_with_indicator_pair_finds_forcing_sequence():
+    """RSI(14) cross_above RSI(21) — the synthesizer now finds a regime
+    change where the shorter-period RSI rises through the longer-period RSI.
+    Previously returned ``cross_against_unsupported_indicator``."""
     lhs = IndicatorRef(name="rsi", params={"period": 14})
     rhs = IndicatorRef(name="rsi", params={"period": 21})
     pred = Predicate(lhs=lhs, op="cross_above", rhs=rhs)
-    bars, _trigger, reason = _synthesise_for_predicate(pred)
-    assert bars is None and reason is not None
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0
 
 
 # ===========================================================================
@@ -199,10 +207,7 @@ def test_extract_universe_literal_handles_annotated_assignment():
 
 
 def test_extract_universe_literal_handles_class_level_annotated_assignment():
-    code = (
-        "class S:\n"
-        "    UNIVERSE: frozenset[str] = frozenset({'NVDA'})\n"
-    )
+    code = "class S:\n    UNIVERSE: frozenset[str] = frozenset({'NVDA'})\n"
     parsed = _extract_universe_literal(code)
     assert parsed == frozenset({"NVDA"})
 
@@ -263,9 +268,7 @@ def test_stop_loss_short_position_targets_ceiling():
         when=Predicate(lhs="bar.close", op="<", rhs=200.0),
     )
     stop = StopLossRule(pct=0.05)
-    [_e, exit_probe] = generate_rule_probe_runs(
-        _spec_with(entry_rules=[entry], exit_rules=[stop])
-    )
+    [_e, exit_probe] = generate_rule_probe_runs(_spec_with(entry_rules=[entry], exit_rules=[stop]))
     assert exit_probe.synthesizable
     # For shorts the recipe sets a high above entry_close * (1 + pct).
     trigger_bar = exit_probe.market_data[exit_probe.trigger_bar_index]
@@ -278,9 +281,7 @@ def test_take_profit_short_position_targets_floor():
         when=Predicate(lhs="bar.close", op="<", rhs=200.0),
     )
     tp = TakeProfitRule(pct=0.05)
-    [_e, exit_probe] = generate_rule_probe_runs(
-        _spec_with(entry_rules=[entry], exit_rules=[tp])
-    )
+    [_e, exit_probe] = generate_rule_probe_runs(_spec_with(entry_rules=[entry], exit_rules=[tp]))
     assert exit_probe.synthesizable
     trigger_bar = exit_probe.market_data[exit_probe.trigger_bar_index]
     assert trigger_bar.low < trigger_bar.high
@@ -294,9 +295,7 @@ def test_stop_loss_trailing_low_on_long_is_unprobeable():
         when=Predicate(lhs="bar.close", op=">", rhs=50.0),
     )
     stop = StopLossRule(pct=0.05, basis="trailing_low")
-    [_e, exit_probe] = generate_rule_probe_runs(
-        _spec_with(entry_rules=[entry], exit_rules=[stop])
-    )
+    [_e, exit_probe] = generate_rule_probe_runs(_spec_with(entry_rules=[entry], exit_rules=[stop]))
     assert not exit_probe.synthesizable
 
 
@@ -306,9 +305,7 @@ def test_stop_loss_trailing_high_on_short_is_unprobeable():
         when=Predicate(lhs="bar.close", op="<", rhs=200.0),
     )
     stop = StopLossRule(pct=0.05, basis="trailing_high")
-    [_e, exit_probe] = generate_rule_probe_runs(
-        _spec_with(entry_rules=[entry], exit_rules=[stop])
-    )
+    [_e, exit_probe] = generate_rule_probe_runs(_spec_with(entry_rules=[entry], exit_rules=[stop]))
     assert not exit_probe.synthesizable
 
 
@@ -402,9 +399,7 @@ def test_assess_probe_with_no_expected_is_critical():
         rule_id="entry[0]",
         rule_kind="entry",
         symbol="PROBE",
-        market_data=[
-            OHLCVBar(date="2024-01-01", open=1, high=1.1, low=0.9, close=1, volume=1)
-        ],
+        market_data=[OHLCVBar(date="2024-01-01", open=1, high=1.1, low=0.9, close=1, volume=1)],
         expected=None,
     )
     g = RuleProbesGate(runner=lambda *a, **k: _Stub())
@@ -424,9 +419,7 @@ def test_assess_probe_exit_without_exit_reason_substring_is_critical():
         rule_id="exit[0]:stop_loss",
         rule_kind="stop_loss",
         symbol="PROBE",
-        market_data=[
-            OHLCVBar(date="2024-01-01", open=1, high=1.1, low=0.9, close=1, volume=1)
-        ],
+        market_data=[OHLCVBar(date="2024-01-01", open=1, high=1.1, low=0.9, close=1, volume=1)],
         expected=ExpectedOutcome(kind="exit", exit_reason_contains=None),
     )
     g = RuleProbesGate(runner=lambda *a, **k: _Stub())
@@ -445,9 +438,7 @@ def test_assess_probe_exit_with_no_trades_is_critical():
         rule_id="exit[0]:stop_loss",
         rule_kind="stop_loss",
         symbol="PROBE",
-        market_data=[
-            OHLCVBar(date="2024-01-01", open=1, high=1.1, low=0.9, close=1, volume=1)
-        ],
+        market_data=[OHLCVBar(date="2024-01-01", open=1, high=1.1, low=0.9, close=1, volume=1)],
         expected=ExpectedOutcome(kind="exit", exit_reason_contains="stop_loss"),
     )
     g = RuleProbesGate(runner=lambda *a, **k: _Stub())
@@ -733,37 +724,43 @@ def test_unsupported_indicator_vs_priceref_marks_unprobeable():
 # ===========================================================================
 
 
-def test_cross_with_priceref_against_non_sma_indicator_unprobeable():
-    """``bar.close cross_above RSI(14)`` isn't supported — only SMA/EMA crosses."""
+def test_cross_priceref_against_rsi_finds_forcing_sequence():
+    """``bar.close cross_above RSI(14)`` — the synthesizer now finds a
+    regime change where close drops below the RSI value and then rises
+    through it. Previously returned ``cross_against_unsupported_indicator``."""
     pred = Predicate(
         lhs="bar.close",
         op="cross_above",
         rhs=IndicatorRef(name="rsi", params={"period": 14}),
     )
-    bars, _trigger, reason = _synthesise_for_predicate(pred)
-    assert bars is None and reason is not None
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0
 
 
-def test_cross_against_non_close_priceref_unprobeable():
-    """``bar.high cross_above SMA(20)`` — the supported lhs is bar.close."""
+def test_cross_non_close_priceref_against_sma_finds_forcing_sequence():
+    """``bar.high cross_above SMA(20)`` — regime change drives bar.high
+    from below the lagged SMA to above it. Previously rejected because the
+    helper only handled ``bar.close``."""
     pred = Predicate(
         lhs="bar.high",
         op="cross_above",
         rhs=IndicatorRef(name="sma", params={"period": 20}),
     )
-    bars, _trigger, reason = _synthesise_for_predicate(pred)
-    assert bars is None and reason is not None
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0
 
 
-def test_cross_indicator_number_with_unsupported_indicator_unprobeable():
+def test_cross_indicator_number_with_rsi_finds_forcing_sequence():
+    """``RSI(14) cross_above 50`` — extended _synth_cross_indicator_number
+    now uses the same forcing-sequence catalogue as priceref-vs-indicator.
+    Previously rejected because the helper only handled SMA/EMA."""
     pred = Predicate(
         lhs=IndicatorRef(name="rsi", params={"period": 14}),
         op="cross_above",
         rhs=50.0,
     )
-    bars, _trigger, reason = _synthesise_for_predicate(pred)
-    # rsi cross above number isn't supported by the SMA/EMA-only recipe.
-    assert bars is None and reason is not None
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0
 
 
 # ===========================================================================
@@ -773,6 +770,7 @@ def test_cross_indicator_number_with_unsupported_indicator_unprobeable():
 
 def test_compute_indicator_at_returns_none_for_unsupported_name():
     """Defensive: a malformed IndicatorRef.name should return None."""
+
     # IndicatorRef enforces ``name`` is one of the known literals, so we
     # construct a mock-shaped object that bypasses validation.
     class _FakeRef:
@@ -782,7 +780,6 @@ def test_compute_indicator_at_returns_none_for_unsupported_name():
 
         def param(self, key, default=None):  # pragma: no cover - defensive
             return default
-
 
     bars = [
         OHLCVBar(date=f"2024-01-{i:02d}", open=1, high=1.1, low=0.9, close=1, volume=1)
@@ -809,9 +806,7 @@ def test_assess_probe_entry_rejects_trade_opened_before_trigger():
         rule_id="entry[0]",
         rule_kind="entry",
         symbol="PROBE",
-        market_data=[
-            OHLCVBar(date="2024-06-01", open=1, high=1.1, low=0.9, close=1, volume=1)
-        ],
+        market_data=[OHLCVBar(date="2024-06-01", open=1, high=1.1, low=0.9, close=1, volume=1)],
         expected=ExpectedOutcome(kind="entry", side="long"),
         trigger_bar_index=0,
     )
@@ -1071,11 +1066,21 @@ def test_take_profit_verifier_long_and_short():
 
     rule = TakeProfitRule(pct=0.05)
     verify_long = _take_profit_verifier(rule, entry_close=100.0, entry_side="long")
-    assert verify_long([OHLCVBar(date="d", open=104, high=106, low=103, close=105, volume=1)], 0) is True
-    assert verify_long([OHLCVBar(date="d", open=104, high=104.5, low=103, close=104, volume=1)], 0) is False
+    assert (
+        verify_long([OHLCVBar(date="d", open=104, high=106, low=103, close=105, volume=1)], 0)
+        is True
+    )
+    assert (
+        verify_long([OHLCVBar(date="d", open=104, high=104.5, low=103, close=104, volume=1)], 0)
+        is False
+    )
     verify_short = _take_profit_verifier(rule, entry_close=100.0, entry_side="short")
-    assert verify_short([OHLCVBar(date="d", open=96, high=97, low=94, close=95, volume=1)], 0) is True
-    assert verify_short([OHLCVBar(date="d", open=96, high=97, low=96, close=96, volume=1)], 0) is False
+    assert (
+        verify_short([OHLCVBar(date="d", open=96, high=97, low=94, close=95, volume=1)], 0) is True
+    )
+    assert (
+        verify_short([OHLCVBar(date="d", open=96, high=97, low=96, close=96, volume=1)], 0) is False
+    )
 
 
 def test_exit_verifiers_return_false_on_out_of_range_index():
@@ -1272,9 +1277,7 @@ def test_post_clamp_verifier_raising_marks_unprobeable_not_crash():
         rule_id="entry[0]",
         rule_kind="entry",
         symbol="PROBE",
-        market_data=[
-            OHLCVBar(date="placeholder", open=1, high=1.1, low=0.9, close=1, volume=1)
-        ],
+        market_data=[OHLCVBar(date="placeholder", open=1, high=1.1, low=0.9, close=1, volume=1)],
         trigger_bar_index=0,
         synthesizable=True,
         post_clamp_verifier=_explode,
@@ -1297,9 +1300,7 @@ def test_assess_probe_exit_rejects_trade_closed_before_trigger():
         rule_id="exit[0]:stop_loss",
         rule_kind="stop_loss",
         symbol="PROBE",
-        market_data=[
-            OHLCVBar(date="2024-06-01", open=1, high=1.1, low=0.9, close=1, volume=1)
-        ],
+        market_data=[OHLCVBar(date="2024-06-01", open=1, high=1.1, low=0.9, close=1, volume=1)],
         expected=ExpectedOutcome(kind="exit", exit_reason_contains="stop_loss"),
         trigger_bar_index=0,
     )
@@ -1375,7 +1376,8 @@ def test_indicator_trigger_idx_points_at_first_satisfying_bar():
     # The earliest SMA-finite bar that satisfies the predicate.
     sma_series = sma(series, 5)
     earliest = next(
-        i for i, v in enumerate(sma_series.tolist())
+        i
+        for i, v in enumerate(sma_series.tolist())
         if isinstance(v, float) and v == v and v > 50.0  # not-NaN, satisfies
     )
     assert trigger == earliest
@@ -1393,9 +1395,7 @@ def test_assess_probe_entry_with_wrong_side_then_right_side_still_passes():
         rule_id="entry[0]",
         rule_kind="entry",
         symbol="PROBE",
-        market_data=[
-            OHLCVBar(date="2024-01-01", open=1, high=1.1, low=0.9, close=1, volume=1)
-        ],
+        market_data=[OHLCVBar(date="2024-01-01", open=1, high=1.1, low=0.9, close=1, volume=1)],
         expected=ExpectedOutcome(kind="entry", side="long"),
         trigger_bar_index=0,
     )
@@ -1424,3 +1424,212 @@ def test_assess_probe_entry_with_wrong_side_then_right_side_still_passes():
     with g._using_phase("synthesis"):
         result = assess_probe(probe, _Stub(success=True, trades=trades), emitter=g)
     assert result.passed is True
+
+
+# ===========================================================================
+# Cross coverage — issue #701
+# ===========================================================================
+#
+# These tests pin the per-indicator forcing-sequence coverage of the cross
+# synthesizer. Each case picks a realistic predicate the LLM emits and
+# asserts the synthesizer produces a bar sequence where the predicate
+# actually fires at the returned ``trigger_idx``. Verification recomputes
+# both sides of the predicate from the synthetic bars and runs the same
+# ``_verify_cross`` check the engine uses at runtime, so a regression in
+# either the forcing sequence OR the indicator math is caught here.
+
+
+def _assert_cross_fires(pred, bars, trigger):
+    """Recompute both predicate sides from ``bars`` and verify the cross
+    actually holds at ``trigger`` using the same semantics as the engine."""
+    df = _bars_to_df(bars)
+    lhs_series = _resolve_side_series(pred.lhs, bars, df)
+    rhs_series = _resolve_side_series(pred.rhs, bars, df)
+    assert lhs_series is not None and rhs_series is not None
+    assert _verify_cross(
+        lhs_series.iloc[trigger - 1],
+        lhs_series.iloc[trigger],
+        rhs_series.iloc[trigger - 1],
+        rhs_series.iloc[trigger],
+        pred.op,
+    )
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        # priceref vs indicator — every supported indicator
+        (
+            "bar.close",
+            "cross_above",
+            IndicatorRef(name="bollinger", params={"band": "upper", "period": 20, "num_std": 2.0}),
+        ),
+        (
+            "bar.close",
+            "cross_below",
+            IndicatorRef(name="bollinger", params={"band": "lower", "period": 20, "num_std": 2.0}),
+        ),
+        ("bar.close", "cross_above", IndicatorRef(name="vwap")),
+        # priceref where lhs is not bar.close (regression for the old
+        # cross_against_unsupported_priceref reject)
+        ("bar.high", "cross_above", IndicatorRef(name="sma", params={"period": 20})),
+    ],
+)
+def test_cross_priceref_indicator_covers_all_supported_indicators(lhs, op, rhs):
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0
+    _assert_cross_fires(pred, bars, trigger)
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        # indicator vs numeric threshold — the realistic per-oscillator shape
+        (IndicatorRef(name="rsi", params={"period": 14}), "cross_above", 30.0),
+        (IndicatorRef(name="rsi", params={"period": 14}), "cross_below", 70.0),
+        (IndicatorRef(name="adx", params={"period": 14}), "cross_above", 25.0),
+        (IndicatorRef(name="adx", params={"period": 14}), "cross_below", 25.0),
+        (
+            IndicatorRef(name="stochastic", params={"k_period": 14, "d_period": 3, "output": "k"}),
+            "cross_above",
+            20.0,
+        ),
+        (
+            IndicatorRef(name="stochastic", params={"k_period": 14, "d_period": 3, "output": "d"}),
+            "cross_below",
+            80.0,
+        ),
+        (IndicatorRef(name="macd", params={"output": "histogram"}), "cross_above", 0.0),
+        (IndicatorRef(name="macd", params={"output": "histogram"}), "cross_below", 0.0),
+        (IndicatorRef(name="macd", params={"output": "macd"}), "cross_above", 0.0),
+    ],
+)
+def test_cross_indicator_number_covers_oscillator_thresholds(lhs, op, rhs):
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0
+    _assert_cross_fires(pred, bars, trigger)
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        # indicator vs indicator — pair crosses that were previously refused
+        (
+            IndicatorRef(name="macd", params={"output": "macd"}),
+            "cross_above",
+            IndicatorRef(name="macd", params={"output": "signal"}),
+        ),
+        (
+            IndicatorRef(name="stochastic", params={"k_period": 14, "d_period": 3, "output": "k"}),
+            "cross_above",
+            IndicatorRef(name="stochastic", params={"k_period": 14, "d_period": 3, "output": "d"}),
+        ),
+        (
+            IndicatorRef(name="rsi", params={"period": 14}),
+            "cross_above",
+            IndicatorRef(name="rsi", params={"period": 21}),
+        ),
+        (
+            IndicatorRef(name="rsi", params={"period": 14}),
+            "cross_above",
+            IndicatorRef(name="sma", params={"period": 20}),
+        ),
+        # adjacent-period MAs — previously hit "indicator_indicator_cross_not_found_in_window"
+        (
+            IndicatorRef(name="ema", params={"period": 18}),
+            "cross_above",
+            IndicatorRef(name="ema", params={"period": 20}),
+        ),
+        (
+            IndicatorRef(name="ema", params={"period": 18}),
+            "cross_below",
+            IndicatorRef(name="ema", params={"period": 20}),
+        ),
+    ],
+)
+def test_cross_indicator_indicator_covers_pair_crosses(lhs, op, rhs):
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0
+    _assert_cross_fires(pred, bars, trigger)
+
+
+def test_cross_synthesizer_returns_within_1s_for_every_supported_cross():
+    """Performance guard: each supported-cross case completes in <1s on
+    cold cache. Catches an accidental regression where the search loops
+    too aggressively across forcing-sequence builders.
+    """
+    import time
+
+    cases = [
+        Predicate(
+            lhs="bar.close",
+            op="cross_above",
+            rhs=IndicatorRef(name="bollinger", params={"band": "upper"}),
+        ),
+        Predicate(
+            lhs=IndicatorRef(name="rsi", params={"period": 14}),
+            op="cross_above",
+            rhs=30.0,
+        ),
+        Predicate(
+            lhs=IndicatorRef(name="macd", params={"output": "macd"}),
+            op="cross_above",
+            rhs=IndicatorRef(name="macd", params={"output": "signal"}),
+        ),
+        Predicate(
+            lhs=IndicatorRef(name="ema", params={"period": 18}),
+            op="cross_above",
+            rhs=IndicatorRef(name="ema", params={"period": 20}),
+        ),
+    ]
+    for pred in cases:
+        start = time.perf_counter()
+        bars, _trigger, reason = _synthesise_for_predicate(pred)
+        elapsed = time.perf_counter() - start
+        assert reason is None and bars is not None, f"synthesizer failed on {pred}: {reason}"
+        assert elapsed < 1.0, f"synthesizer too slow on {pred}: {elapsed:.2f}s"
+
+
+# ---------------------------------------------------------------------------
+# Direct tests for the new shared helpers — exercises them outside the
+# dispatcher so coverage is anchored independently of the wrappers.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_side_series_handles_indicator_priceref_and_constant():
+    bars = _bars_to_df  # type: ignore[unused-ignore]
+    # use real bars via a constructed sequence
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _monotonic_trend_bars,
+    )
+
+    bars = _monotonic_trend_bars(50, 100.0, 0.5)
+    df = _bars_to_df(bars)
+    # IndicatorRef
+    ref = IndicatorRef(name="sma", params={"period": 10})
+    s = _resolve_side_series(ref, bars, df)
+    assert s is not None and len(s) == 50
+    # bar-field string
+    s2 = _resolve_side_series("bar.close", bars, df)
+    assert s2 is not None and len(s2) == 50
+    # float / int constant
+    s3 = _resolve_side_series(42.0, bars, df)
+    assert s3 is not None and (s3 == 42.0).all()
+    # unknown
+    assert _resolve_side_series("bar.invalid", bars, df) is None
+    # bool ignored (not a numeric)
+    assert _resolve_side_series(True, bars, df) is None
+
+
+def test_priceref_to_field_covers_all_bar_fields():
+    """The bar-field mapping must mirror every priceref literal the DSL accepts."""
+    assert set(_PRICEREF_TO_FIELD.keys()) >= {
+        "bar.close",
+        "bar.open",
+        "bar.high",
+        "bar.low",
+        "bar.volume",
+    }

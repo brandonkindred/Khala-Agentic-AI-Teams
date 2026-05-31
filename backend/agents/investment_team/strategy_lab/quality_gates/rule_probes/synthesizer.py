@@ -234,7 +234,11 @@ def _normalise_ohlc(bar: OHLCVBar) -> OHLCVBar:
     # Enforce the OHLC invariants the preflight checks.
     h = max(h, o, c, low)
     low = min(low, o, c, h)
-    vol = bar.volume if bar.volume is not None and math.isfinite(bar.volume) and bar.volume >= 0 else 1.0
+    vol = (
+        bar.volume
+        if bar.volume is not None and math.isfinite(bar.volume) and bar.volume >= 0
+        else 1.0
+    )
     return OHLCVBar(
         date=bar.date,
         open=o,
@@ -312,7 +316,11 @@ def _extract_universe_literal(code: str) -> frozenset:
             target_name = target.attr
         if target_name != "UNIVERSE":
             continue
-        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "frozenset":
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "frozenset"
+        ):
             if not value.args:
                 return frozenset()
             arg = value.args[0]
@@ -449,9 +457,7 @@ def _build_exit_probe(
     # cases would hide real exit-rule regressions.
     last_failure = "no_compatible_entry_rule"
     for entry_rule in entry_rules:
-        entry_bars, entry_trigger_idx, entry_reason = _synthesise_for_predicate(
-            entry_rule.when
-        )
+        entry_bars, entry_trigger_idx, entry_reason = _synthesise_for_predicate(entry_rule.when)
         if entry_bars is None:
             last_failure = f"entry_prefix_not_synthesizable: {entry_reason}"
             continue
@@ -759,7 +765,11 @@ def _synthesise_for_predicate(
         return _synth_priceref_vs_priceref(lhs, op, rhs, base_close, min_bars)
 
     # Indicator on the lhs against a number.
-    if isinstance(lhs, IndicatorRef) and isinstance(rhs, (int, float)) and not isinstance(rhs, bool):
+    if (
+        isinstance(lhs, IndicatorRef)
+        and isinstance(rhs, (int, float))
+        and not isinstance(rhs, bool)
+    ):
         return _synth_indicator_vs_number(lhs, op, float(rhs), base_close, min_bars)
 
     # Indicator vs Indicator (e.g. SMA(10) > SMA(50)).
@@ -843,7 +853,9 @@ def _bar_with_field(field_name: str, value: float) -> OHLCVBar:
         high = close + 0.5
     elif field_name == "volume":
         open_ = close = high = low = 100.0
-        return OHLCVBar(date="placeholder", open=100.0, high=100.5, low=99.5, close=100.0, volume=value)
+        return OHLCVBar(
+            date="placeholder", open=100.0, high=100.5, low=99.5, close=100.0, volume=value
+        )
     return OHLCVBar(
         date="placeholder",
         open=open_,
@@ -1148,6 +1160,138 @@ def _high_volatility_bars(n: int, base_close: float, trigger_idx: int) -> List[O
     return bars
 
 
+# ---------------------------------------------------------------------------
+# Forcing-sequence builders used by the unified cross search.
+# Each builder returns ``List[OHLCVBar]`` of length ``n`` with ``_MIN_PRICE``
+# clamping. Builders are intentionally indicator-agnostic — the cross search
+# scans the resulting bars and lets the indicator math decide where the cross
+# fires.
+# ---------------------------------------------------------------------------
+
+
+def _monotonic_trend_bars(n: int, base_close: float, slope: float) -> List[OHLCVBar]:
+    """Steady price drift at ``slope`` per bar — drives MACD spreads, EMA divergence."""
+    closes = [max(_MIN_PRICE, base_close + slope * i) for i in range(n)]
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=c,
+            high=c + 0.5,
+            low=max(_MIN_PRICE, c - 0.5),
+            close=c,
+            volume=1_000_000.0,
+        )
+        for c in closes
+    ]
+
+
+def _quiet_then_breakout(n: int, base_close: float, direction: str) -> List[OHLCVBar]:
+    """Long quiet history at ``base_close`` then a 5-bar breakout. Drives
+    Bollinger bands wide and pushes price across the upper / lower band.
+
+    ``direction`` is ``"up"`` (price spikes above ``base_close``) or
+    ``"down"`` (price drops below it).
+    """
+    sign = 1.0 if direction == "up" else -1.0
+    quiet_len = max(1, n - 5)
+    closes = [base_close] * quiet_len + [
+        max(_MIN_PRICE, base_close + sign * 10.0 * i) for i in range(1, n - quiet_len + 1)
+    ]
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=c,
+            high=c + 0.5,
+            low=max(_MIN_PRICE, c - 0.5),
+            close=c,
+            volume=1_000_000.0,
+        )
+        for c in closes
+    ]
+
+
+def _quiet_then_trend_bars(
+    n: int,
+    base_close: float,
+    *,
+    direction: str = "up",
+    quiet_frac: float = 0.5,
+    trend_first: bool = False,
+) -> List[OHLCVBar]:
+    """Low-volatility flat history followed by a sustained directional trend.
+
+    Drives indicators that measure trend strength (ADX) or directional
+    momentum (Stochastic) from a low baseline through any threshold. Plain
+    monotonic-trend bars pin ADX to 100 from the start because there is no
+    flat baseline; pure regime change disrupts the trend repeatedly and ADX
+    stays high. This builder produces the only sequence where ADX crosses
+    25 from below.
+
+    When ``trend_first=True`` the order is reversed (trend phase first, then
+    quiet phase) so a trend-strength indicator climbs to a high value and
+    then decays — needed for ``cross_below`` style predicates.
+    """
+    sign = 1.0 if direction == "up" else -1.0
+    if trend_first:
+        trend_len = max(1, int(n * (1.0 - quiet_frac)))
+        closes = [max(_MIN_PRICE, base_close + sign * (i + 1) * 1.0) for i in range(trend_len)]
+        trend_end = closes[-1] if closes else base_close
+        for i in range(n - trend_len):
+            closes.append(max(_MIN_PRICE, trend_end + (i % 2 - 0.5) * 0.2))
+    else:
+        quiet_len = max(1, int(n * quiet_frac))
+        closes = [max(_MIN_PRICE, base_close + (i % 2 - 0.5) * 0.2) for i in range(quiet_len)]
+        for i in range(n - quiet_len):
+            closes.append(max(_MIN_PRICE, base_close + sign * (i + 1) * 1.0))
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=c,
+            high=c + 1.0,
+            low=max(_MIN_PRICE, c - 1.0),
+            close=c,
+            volume=1_000_000.0,
+        )
+        for c in closes
+    ]
+
+
+def _regime_change_bars(
+    n: int,
+    base_close: float,
+    *,
+    drop_rate: float = 0.98,
+    rise_rate: float = 1.03,
+    midpoint_frac: float = 0.5,
+) -> List[OHLCVBar]:
+    """Declining regime then a rising regime. Causes adjacent-period moving
+    averages and other smoothed indicators to cross at the regime change.
+
+    Extracted from the inline construction previously in
+    ``_synth_cross_indicator_indicator``. Parameters allow the search to try
+    different midpoints / decay rates when the default doesn't produce a cross.
+    """
+    midpoint = int(n * midpoint_frac)
+    closes: List[float] = []
+    for i in range(n):
+        if i < midpoint:
+            closes.append(base_close * (drop_rate**i))
+        else:
+            closes.append(closes[-1] * rise_rate)
+    closes = [max(_MIN_PRICE, c) for c in closes]
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=c,
+            high=c + 0.5,
+            low=max(_MIN_PRICE, c - 0.5),
+            close=c,
+            volume=1_000_000.0,
+        )
+        for c in closes
+    ]
+
+
 def _verify_indicator_vs_number(
     bars: List[OHLCVBar], ref: IndicatorRef, op: str, rhs: float, idx: int
 ) -> bool:
@@ -1174,6 +1318,123 @@ def _earliest_indicator_satisfying_index(
         if _compare(value, op, rhs):
             return i
     return None
+
+
+def _compute_indicator_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> Optional[pd.Series]:
+    """Compute ``ref`` over the synthetic bar series as a full ``pd.Series``.
+
+    The cross-search engine calls this once per (bars, ref) pair instead of
+    invoking :func:`_compute_indicator_at` per bar, which would re-build the
+    DataFrame and recompute the indicator on every iteration. Returns ``None``
+    for unrecognised indicator names.
+    """
+    df = _bars_to_df(bars)
+    series = _series_for_source(df, ref.source)
+    if ref.name == "sma":
+        return sma(series, int(ref.param("period")))
+    if ref.name == "ema":
+        return ema(series, int(ref.param("period")))
+    if ref.name == "rsi":
+        return rsi(series, int(ref.param("period")))
+    if ref.name == "macd":
+        line, signal_, hist = macd(
+            series,
+            int(ref.param("fast")),
+            int(ref.param("slow")),
+            int(ref.param("signal")),
+        )
+        output = ref.param("output")
+        return {"macd": line, "signal": signal_, "histogram": hist}[output]
+    if ref.name == "bollinger":
+        upper, middle, lower = bollinger_bands(
+            series, int(ref.param("period")), float(ref.param("num_std"))
+        )
+        band = ref.param("band")
+        return {"upper": upper, "middle": middle, "lower": lower}[band]
+    if ref.name == "atr":
+        return atr(df["high"], df["low"], df["close"], int(ref.param("period")))
+    if ref.name == "adx":
+        return adx(df["high"], df["low"], df["close"], int(ref.param("period")))
+    if ref.name == "stochastic":
+        k, d = stochastic(
+            df["high"],
+            df["low"],
+            df["close"],
+            int(ref.param("k_period")),
+            int(ref.param("d_period")),
+        )
+        output = ref.param("output")
+        return {"k": k, "d": d}[output]
+    if ref.name == "vwap":
+        return vwap(df["high"], df["low"], df["close"], df["volume"])
+    return None
+
+
+_PRICEREF_TO_FIELD = {
+    "bar.close": "close",
+    "bar.open": "open",
+    "bar.high": "high",
+    "bar.low": "low",
+    "bar.volume": "volume",
+}
+
+
+def _resolve_side_series(side: Any, bars: List[OHLCVBar], df: pd.DataFrame) -> Optional[pd.Series]:
+    """Resolve a predicate side (``IndicatorRef`` / bar-field string / float)
+    to a full ``pd.Series`` aligned with ``bars``.
+
+    Returns ``None`` when the side references an unknown indicator or
+    bar-field literal — the search treats that builder as failed and moves on.
+    """
+    if isinstance(side, IndicatorRef):
+        return _compute_indicator_series(side, bars)
+    if isinstance(side, str):
+        field_name = _PRICEREF_TO_FIELD.get(side)
+        if field_name is None:
+            return None
+        return df[field_name]
+    if isinstance(side, (int, float)) and not isinstance(side, bool):
+        return pd.Series([float(side)] * len(bars))
+    return None
+
+
+def _search_cross(
+    lhs: Any,
+    op: str,
+    rhs: Any,
+    base_close: float,
+    min_bars: int,
+    builders: List[Callable[[], List[OHLCVBar]]],
+    warmup: int = 1,
+) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
+    """Try each forcing-sequence ``builder`` and scan the resulting bars for
+    the first index where ``lhs op rhs`` crosses according to :func:`_verify_cross`.
+
+    Returns ``(bars, trigger_idx, None)`` on the first hit. If no builder
+    produces a cross, returns ``(None, 0, "cross_not_found_in_window:...")``
+    so the gate emits a deterministic ``unprobeable`` reason instead of
+    silently failing.
+    """
+    last_reason = "cross_not_found_in_window"
+    for builder in builders:
+        bars = builder()
+        df = _bars_to_df(bars)
+        lhs_series = _resolve_side_series(lhs, bars, df)
+        rhs_series = _resolve_side_series(rhs, bars, df)
+        if lhs_series is None or rhs_series is None:
+            last_reason = "cross_side_unresolved"
+            continue
+        n = min(len(lhs_series), len(rhs_series))
+        for idx in range(max(warmup, 1), n):
+            if _verify_cross(
+                lhs_series.iloc[idx - 1],
+                lhs_series.iloc[idx],
+                rhs_series.iloc[idx - 1],
+                rhs_series.iloc[idx],
+                op,
+            ):
+                return bars, idx, None
+    return None, 0, last_reason
 
 
 def _compute_indicator_at(ref: IndicatorRef, bars: List[OHLCVBar], idx: int) -> Optional[float]:
@@ -1207,7 +1468,11 @@ def _compute_indicator_at(ref: IndicatorRef, bars: List[OHLCVBar], idx: int) -> 
         v = adx(df["high"], df["low"], df["close"], int(ref.param("period"))).iloc[idx]
     elif ref.name == "stochastic":
         k, d = stochastic(
-            df["high"], df["low"], df["close"], int(ref.param("k_period")), int(ref.param("d_period"))
+            df["high"],
+            df["low"],
+            df["close"],
+            int(ref.param("k_period")),
+            int(ref.param("d_period")),
         )
         output = ref.param("output")
         v = {"k": k, "d": d}[output].iloc[idx]
@@ -1252,7 +1517,11 @@ def _bars_to_df(bars: List[OHLCVBar]) -> pd.DataFrame:
 
 def _required_bars_for_indicator(ref: IndicatorRef) -> int:
     if ref.name in ("sma", "ema", "rsi", "atr", "adx"):
-        period = int(ref.param("period")) if "period" in ref.params or ref.name in ("rsi", "atr", "adx") else 20
+        period = (
+            int(ref.param("period"))
+            if "period" in ref.params or ref.name in ("rsi", "atr", "adx")
+            else 20
+        )
         return max(_MIN_TOTAL_BARS, period + 30)
     if ref.name == "macd":
         slow = int(ref.param("slow"))
@@ -1287,7 +1556,11 @@ def _synth_cross(
     if isinstance(lhs, IndicatorRef) and isinstance(rhs, str):
         return _synth_cross_indicator_priceref(lhs, op, rhs, base_close, min_bars)
     # IndicatorRef cross float.
-    if isinstance(lhs, IndicatorRef) and isinstance(rhs, (int, float)) and not isinstance(rhs, bool):
+    if (
+        isinstance(lhs, IndicatorRef)
+        and isinstance(rhs, (int, float))
+        and not isinstance(rhs, bool)
+    ):
         return _synth_cross_indicator_number(lhs, op, float(rhs), base_close, min_bars)
     return None, 0, f"unsupported_cross_shape:{type(lhs).__name__}_{type(rhs).__name__}"
 
@@ -1295,82 +1568,201 @@ def _synth_cross(
 def _synth_cross_priceref_indicator(
     lhs: str, op: str, rhs: IndicatorRef, base_close: float, min_bars: int
 ) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
-    """Long flat history at ``base_close`` (so MA == base_close), then a single
-    bar with close above/below that level."""
-    if rhs.name not in ("sma", "ema"):
-        return None, 0, f"cross_against_unsupported_indicator:{rhs.name}"
-    if lhs != "bar.close":
+    """Construct a bar sequence where ``lhs op rhs`` fires for the indicator
+    named on ``rhs``.
+
+    SMA / EMA: keep the historical flat-history + single-trigger-bar shape so
+    the trigger index lands deterministically near the end of the window.
+    Other indicators delegate to the unified :func:`_search_cross` engine with
+    an indicator-specific catalogue of forcing-sequence builders.
+    """
+    if lhs not in _PRICEREF_TO_FIELD:
         return None, 0, f"cross_against_unsupported_priceref:{lhs}"
-    n = max(min_bars, int(rhs.param("period")) + 30)
-    trigger_idx = n - _BARS_AFTER_TRIGGER - 1
-    bars = _flat_bars(base_close, n)
-    delta = 5.0 if op == "cross_above" else -5.0
-    triggered_close = base_close + delta
-    bars[trigger_idx] = OHLCVBar(
-        date="placeholder",
-        open=base_close,
-        high=max(base_close, triggered_close) + 0.5,
-        low=min(base_close, triggered_close) - 0.5,
-        close=triggered_close,
-        volume=1_000_000.0,
-    )
-    # Verify the cross actually evaluates true with the (prev, curr) pair.
-    df = _bars_to_df(bars)
-    ma_series = (sma if rhs.name == "sma" else ema)(df["close"], int(rhs.param("period")))
-    prev_close = df["close"].iloc[trigger_idx - 1]
-    cur_close = df["close"].iloc[trigger_idx]
-    prev_ma = ma_series.iloc[trigger_idx - 1]
-    cur_ma = ma_series.iloc[trigger_idx]
-    if not _verify_cross(prev_close, cur_close, prev_ma, cur_ma, op):
-        return None, 0, "cross_priceref_indicator_verification_failed"
-    return bars, trigger_idx, None
+
+    if rhs.name in ("sma", "ema") and lhs == "bar.close":
+        # Preserved exactly: long flat history + one trigger bar that pushes
+        # the close above / below the moving average.
+        n = max(min_bars, int(rhs.param("period")) + 30)
+        trigger_idx = n - _BARS_AFTER_TRIGGER - 1
+        bars = _flat_bars(base_close, n)
+        delta = 5.0 if op == "cross_above" else -5.0
+        triggered_close = base_close + delta
+        bars[trigger_idx] = OHLCVBar(
+            date="placeholder",
+            open=base_close,
+            high=max(base_close, triggered_close) + 0.5,
+            low=min(base_close, triggered_close) - 0.5,
+            close=triggered_close,
+            volume=1_000_000.0,
+        )
+        df = _bars_to_df(bars)
+        ma_series = (sma if rhs.name == "sma" else ema)(df["close"], int(rhs.param("period")))
+        prev_close = df["close"].iloc[trigger_idx - 1]
+        cur_close = df["close"].iloc[trigger_idx]
+        prev_ma = ma_series.iloc[trigger_idx - 1]
+        cur_ma = ma_series.iloc[trigger_idx]
+        if not _verify_cross(prev_close, cur_close, prev_ma, cur_ma, op):
+            return None, 0, "cross_priceref_indicator_verification_failed"
+        return bars, trigger_idx, None
+
+    # Generic path: choose a builder catalogue per indicator and let the
+    # search find the first bar where the cross actually fires.
+    builders = _builders_for_priceref_cross(rhs, op, base_close, min_bars)
+    warmup = _warmup_for_indicator(rhs)
+    return _search_cross(lhs, op, rhs, base_close, min_bars, builders, warmup=warmup)
+
+
+def _builders_for_priceref_cross(
+    rhs: IndicatorRef, op: str, base_close: float, min_bars: int
+) -> List[Callable[[], List[OHLCVBar]]]:
+    """Per-indicator forcing-sequence catalogue for ``priceref cross indicator``.
+
+    Catalogues are ordered most-likely-to-fire first; the search returns on
+    the first hit so later builders only run if earlier ones miss.
+    """
+    name = rhs.name
+    if name == "bollinger":
+        n = max(min_bars, int(rhs.param("period")) + 30)
+        # Quiet history then breakout opens the bands wide; the close pierces
+        # the upper / lower band on the spike side.
+        direction_primary = "up" if op == "cross_above" else "down"
+        direction_secondary = "down" if op == "cross_above" else "up"
+        return [
+            lambda: _quiet_then_breakout(n, base_close, direction_primary),
+            lambda: _quiet_then_breakout(n, base_close, direction_secondary),
+            lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER),
+        ]
+    if name == "rsi":
+        period = int(rhs.param("period"))
+        n = max(min_bars, period * 4 + 30)
+        # RSI under pure monotonic drift saturates at 0 or 100. A regime
+        # change is what actually sweeps it across an intermediate level.
+        if op == "cross_above":
+            return [
+                lambda: _regime_change_bars(n, base_close, drop_rate=0.97, rise_rate=1.03),
+                lambda: _regime_change_bars(
+                    n, base_close, drop_rate=0.97, rise_rate=1.03, midpoint_frac=0.3
+                ),
+                lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER),
+            ]
+        return [
+            lambda: _regime_change_bars(n, base_close, drop_rate=1.03, rise_rate=0.97),
+            lambda: _regime_change_bars(
+                n, base_close, drop_rate=1.03, rise_rate=0.97, midpoint_frac=0.3
+            ),
+            lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER),
+        ]
+    if name == "macd":
+        slow = int(rhs.param("slow"))
+        signal_ = int(rhs.param("signal"))
+        n = max(min_bars, slow + signal_ + 60)
+        # Slower decay/rise lets the histogram cross zero AFTER MACD warmup.
+        # Aggressive 0.97/1.03 rates push the cross into warmup-NaN range.
+        if op == "cross_above":
+            return [
+                lambda: _regime_change_bars(n, base_close, drop_rate=0.98, rise_rate=1.02),
+                lambda: _regime_change_bars(n, base_close, drop_rate=0.99, rise_rate=1.005),
+                lambda: _monotonic_trend_bars(n, base_close, 0.5),
+            ]
+        return [
+            lambda: _regime_change_bars(n, base_close, drop_rate=1.02, rise_rate=0.98),
+            lambda: _regime_change_bars(n, base_close, drop_rate=1.005, rise_rate=0.99),
+            lambda: _monotonic_trend_bars(n, base_close, -0.5),
+        ]
+    if name == "adx":
+        period = int(rhs.param("period"))
+        n = max(min_bars, period * 4 + 60)
+        # ADX needs a flat baseline followed by a sustained trend to climb
+        # from low → high (for cross_above), or trend → quiet for cross_below.
+        if op == "cross_above":
+            return [
+                lambda: _quiet_then_trend_bars(n, base_close, direction="up"),
+                lambda: _quiet_then_trend_bars(n, base_close, direction="down"),
+                lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER),
+            ]
+        return [
+            lambda: _quiet_then_trend_bars(n, base_close, direction="up", trend_first=True),
+            lambda: _quiet_then_trend_bars(n, base_close, direction="down", trend_first=True),
+            lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER),
+        ]
+    if name in ("stochastic", "vwap"):
+        n = max(min_bars, _MIN_TOTAL_BARS * 2)
+        if op == "cross_above":
+            return [
+                lambda: _regime_change_bars(n, base_close, drop_rate=0.97, rise_rate=1.03),
+                lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER),
+                lambda: _monotonic_trend_bars(n, base_close, 0.5),
+            ]
+        return [
+            lambda: _regime_change_bars(n, base_close, drop_rate=1.03, rise_rate=0.97),
+            lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER),
+            lambda: _monotonic_trend_bars(n, base_close, -0.5),
+        ]
+    if name in ("sma", "ema"):
+        # Fallback when lhs isn't bar.close (e.g. bar.high vs SMA). The SMA
+        # is computed over closes (default source); a regime change makes
+        # close drift below then above the lagged SMA so bar-derived fields
+        # (high / low / open) cross too.
+        n = max(min_bars, int(rhs.param("period")) + 30)
+        if op == "cross_above":
+            return [
+                lambda: _regime_change_bars(n, base_close, drop_rate=0.97, rise_rate=1.03),
+                lambda: _monotonic_trend_bars(n, base_close, 0.5),
+            ]
+        return [
+            lambda: _regime_change_bars(n, base_close, drop_rate=1.03, rise_rate=0.97),
+            lambda: _monotonic_trend_bars(n, base_close, -0.5),
+        ]
+    n = max(min_bars, _MIN_TOTAL_BARS)
+    return [lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER)]
+
+
+def _warmup_for_indicator(ref: IndicatorRef) -> int:
+    """Minimum bar index at which ``ref`` has produced a finite value.
+
+    The cross search starts scanning from this index + 1 (it needs the
+    previous bar too). Conservative — over-estimating warmup just delays the
+    first match by a few bars, which is harmless.
+    """
+    name = ref.name
+    if name in ("sma", "ema", "rsi", "atr"):
+        return int(ref.param("period")) + 1
+    if name == "adx":
+        return int(ref.param("period")) * 2 + 1
+    if name == "macd":
+        return int(ref.param("slow")) + int(ref.param("signal")) + 1
+    if name == "bollinger":
+        return int(ref.param("period")) + 1
+    if name == "stochastic":
+        return int(ref.param("k_period")) + int(ref.param("d_period")) + 1
+    return 1
 
 
 def _synth_cross_indicator_indicator(
     lhs: IndicatorRef, op: str, rhs: IndicatorRef, base_close: float, min_bars: int
 ) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
-    """Two SMAs / EMAs cross when the underlying series changes regime."""
-    if lhs.name not in ("sma", "ema") or rhs.name not in ("sma", "ema"):
-        return None, 0, f"indicator_cross_unsupported:{lhs.name}_{rhs.name}"
-    lhs_period = int(lhs.param("period"))
-    rhs_period = int(rhs.param("period"))
-    longest = max(lhs_period, rhs_period)
-    n = max(min_bars, longest * 2 + 30)
-    # Regime 1: declining; regime 2: rising. Fast MA crosses slow MA at the
-    # regime change.
-    midpoint = n // 2
-    closes: List[float] = []
-    for i in range(n):
-        if i < midpoint:
-            closes.append(base_close * (0.98 ** (i)))
-        else:
-            closes.append(closes[-1] * 1.03)
-    closes = [max(c, 1.0) for c in closes]
-    bars = [
-        OHLCVBar(
-            date="placeholder",
-            open=c,
-            high=c + 0.5,
-            low=c - 0.5,
-            close=c,
-            volume=1_000_000.0,
-        )
-        for c in closes
+    """Indicator-vs-indicator cross. Tries multiple forcing sequences via
+    :func:`_search_cross`; finds the first bar where both indicators
+    transition across each other.
+    """
+    longest_period = max(_warmup_for_indicator(lhs), _warmup_for_indicator(rhs))
+    n = max(min_bars, longest_period * 4 + 30)
+    warmup = longest_period
+    builders: List[Callable[[], List[OHLCVBar]]] = [
+        lambda: _regime_change_bars(n, base_close),
+        lambda: _regime_change_bars(n, base_close, drop_rate=1.02, rise_rate=0.97),
+        lambda: _regime_change_bars(n, base_close, midpoint_frac=0.3),
+        lambda: _regime_change_bars(n, base_close, midpoint_frac=0.7),
+        lambda: _monotonic_trend_bars(n, base_close, 0.5),
+        lambda: _monotonic_trend_bars(n, base_close, -0.5),
+        lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER),
     ]
-    df = _bars_to_df(bars)
-    lhs_series = (sma if lhs.name == "sma" else ema)(df["close"], lhs_period)
-    rhs_series = (sma if rhs.name == "sma" else ema)(df["close"], rhs_period)
-    # Scan for a bar where the cross occurs.
-    for idx in range(longest + 1, n):
-        if _verify_cross(
-            lhs_series.iloc[idx - 1],
-            lhs_series.iloc[idx],
-            rhs_series.iloc[idx - 1],
-            rhs_series.iloc[idx],
-            op,
-        ):
-            return bars, idx, None
-    return None, 0, "indicator_indicator_cross_not_found_in_window"
+    bars, trigger, reason = _search_cross(
+        lhs, op, rhs, base_close, min_bars, builders, warmup=warmup
+    )
+    if bars is not None:
+        return bars, trigger, None
+    return None, 0, reason or "indicator_indicator_cross_not_found_in_window"
 
 
 def _synth_cross_indicator_priceref(
@@ -1417,12 +1809,16 @@ def _synth_cross_indicator_number(
         df = _bars_to_df(bars)
         ma_series = (sma if lhs.name == "sma" else ema)(df["close"], int(lhs.param("period")))
         for idx in range(int(lhs.param("period")) + 1, n):
-            if _verify_cross(
-                ma_series.iloc[idx - 1], ma_series.iloc[idx], rhs, rhs, op
-            ):
+            if _verify_cross(ma_series.iloc[idx - 1], ma_series.iloc[idx], rhs, rhs, op):
                 return bars, idx, None
         return None, 0, "indicator_number_cross_not_found"
-    return None, 0, f"cross_indicator_number_unsupported:{lhs.name}"
+
+    # Non-MA indicators (RSI, MACD, ADX, Stochastic, Bollinger, VWAP) cross a
+    # numeric threshold under the same forcing-sequence catalogue used for
+    # ``priceref cross indicator``.
+    builders = _builders_for_priceref_cross(lhs, op, base_close, min_bars)
+    warmup = _warmup_for_indicator(lhs)
+    return _search_cross(lhs, op, rhs, base_close, min_bars, builders, warmup=warmup)
 
 
 def _verify_cross(prev_l: Any, cur_l: Any, prev_r: Any, cur_r: Any, op: str) -> bool:
