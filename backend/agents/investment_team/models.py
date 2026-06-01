@@ -1115,6 +1115,16 @@ class StrategyLabRecord(BaseModel):
     code_history: List[CodeRevision] = Field(default_factory=list)
     gate_timeline: List[GateEvent] = Field(default_factory=list)
     rule_implementation_map: List[RuleImplementationMap] = Field(default_factory=list)
+    loop_telemetry: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Per-cycle generation-funnel telemetry: design-review round count "
+            "and stop reason, critique-ledger totals (resolved / regressed / "
+            "final open), per-gate pass/fail histograms, and the "
+            "compiled-vs-custom (requires_custom_code) flag. Empty {} on legacy "
+            "rows and on paths that bypass the design loop."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

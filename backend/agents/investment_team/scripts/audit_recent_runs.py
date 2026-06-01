@@ -19,6 +19,7 @@ import argparse
 import logging
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -627,6 +628,63 @@ _SHORT_NAMES = {
 # ---------------------------------------------------------------------------
 
 
+def _print_loop_telemetry(records: List[dict]) -> None:
+    """Aggregate and print the per-cycle generation-funnel telemetry.
+
+    Pre: ``records`` is the list of persisted lab-record dicts.
+    Post: prints a stop-reason histogram, average design-review rounds,
+    cumulative critique regressions, the code-path share (compiled / custom /
+    not-synthesized), and the top failing gates across all records carrying a
+    ``loop_telemetry`` block. Records without the block (legacy rows /
+    design-loop-bypass paths) are skipped. Read-only — no record is mutated.
+    """
+    telemetries = [t for t in (r.get("loop_telemetry") or {} for r in records) if t]
+    if not telemetries:
+        print("\n--- Generation funnel ---\n(no loop_telemetry on sampled records)")
+        return
+
+    stop_reasons: Counter[str] = Counter()
+    fail_gates: Counter[str] = Counter()
+    code_paths: Counter[str] = Counter()
+    rounds_total = 0
+    rounds_n = 0
+    regressed_total = 0
+    for t in telemetries:
+        stop_reasons[str(t.get("stop_reason", "unknown"))] += 1
+        rounds = t.get("design_review_rounds")
+        if isinstance(rounds, int):
+            rounds_total += rounds
+            rounds_n += 1
+        ledger = t.get("critique_ledger") or {}
+        regressed_total += int(ledger.get("total_regressed", 0) or 0)
+        # Prefer the three-state ``code_path``; fall back to the legacy
+        # boolean for records persisted before it was added (those never
+        # short-circuit before synthesis with a populated telemetry block,
+        # so the compiled/custom split is still accurate for them).
+        code_path = t.get("code_path")
+        if code_path is None:
+            code_path = "custom" if t.get("requires_custom_code") else "compiled"
+        code_paths[str(code_path)] += 1
+        for gate, count in (t.get("gate_fail_counts") or {}).items():
+            fail_gates[gate] += int(count or 0)
+
+    print(f"\n--- Generation funnel ({len(telemetries)} record(s) with telemetry) ---")
+    avg_rounds = f"{rounds_total / rounds_n:.1f}" if rounds_n else "n/a"
+    print(f"Avg design-review rounds: {avg_rounds}")
+    print("Stop reasons: " + ", ".join(f"{reason}={n}" for reason, n in stop_reasons.most_common()))
+    print(f"Critique regressions (cumulative): {regressed_total}")
+    print(
+        "Code path: "
+        + ", ".join(
+            f"{path}={code_paths.get(path, 0)}"
+            for path in ("compiled", "custom", "not_synthesized")
+        )
+    )
+    if fail_gates:
+        top = ", ".join(f"{gate}={n}" for gate, n in fail_gates.most_common(5))
+        print(f"Top failing gates: {top}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -706,6 +764,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n--- Failures ({len(failures)}) ---")
         for f in failures:
             print(f)
+
+    # --- Generation-funnel telemetry (read-only) ---
+    _print_loop_telemetry(records)
 
     # --- Summary ---
     if total_evaluated == 0:

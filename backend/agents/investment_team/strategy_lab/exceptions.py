@@ -70,6 +70,12 @@ class SpecImplementabilityError(Exception):
     ``drift_collector`` (optional) carries the accumulated spec/code
     revision history so the short-circuit record preserves drift
     observability even on failure paths.
+
+    ``design_context`` (optional) carries the design-loop audit bundle
+    (round count, stop reason, critique-ledger telemetry) for the attempt
+    that raised, so the re-entry-exhaustion short-circuit record preserves
+    the generation-funnel telemetry of the design loop that actually ran
+    rather than persisting an empty default.
     """
 
     def __init__(
@@ -80,6 +86,7 @@ class SpecImplementabilityError(Exception):
         last_spec: "StrategySpec",
         last_code: str,
         drift_collector: Optional[Any] = None,
+        design_context: Optional[Any] = None,
     ) -> None:
         super().__init__(evidence)
         self.evidence = evidence
@@ -87,3 +94,4 @@ class SpecImplementabilityError(Exception):
         self.last_spec = last_spec
         self.last_code = last_code
         self.drift_collector = drift_collector
+        self.design_context = design_context

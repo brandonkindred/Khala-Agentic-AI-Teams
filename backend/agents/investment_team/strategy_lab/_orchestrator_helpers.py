@@ -182,6 +182,12 @@ class _DesignPersistContext:
     # ``Any`` to avoid a cycle with ``agents/design_review``; the orchestrator
     # passes a ``List[SpecCritique]`` through.
     critiques: List[Any] = field(default_factory=list)
+    # Why the design loop stopped ("ready" | "round_cap" | "stalled" |
+    # "budget_exhausted"); empty on legacy paths that bypass the loop.
+    stop_reason: str = ""
+    # Design-loop telemetry slice carried from ``_DesignLoopOutcome``; merged
+    # with gate counts at record-build time. Empty on legacy paths.
+    loop_telemetry: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -496,6 +502,14 @@ class _DesignLoopOutcome:
     # The orchestrator passes a ``List[SpecCritique]`` through.
     critique_history: List[Any]
     budget_exhausted: bool = False
+    # Why the loop stopped: "ready" | "round_cap" | "stalled" |
+    # "budget_exhausted". Disambiguates the not-ready short-circuit status
+    # (stall vs honest round-cap exhaustion).
+    stop_reason: str = ""
+    # Design-loop slice of the persisted telemetry summary (round count,
+    # stop reason, critique-ledger totals). Gate counts + the
+    # compiled-vs-custom flag are merged in at record-build time.
+    loop_telemetry: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

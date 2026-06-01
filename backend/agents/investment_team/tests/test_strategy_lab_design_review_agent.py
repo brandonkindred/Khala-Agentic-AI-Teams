@@ -522,3 +522,60 @@ def test_coerce_critique_default_threshold_demotes_warning() -> None:
     critique = _coerce_critique(parsed, [])
 
     assert critique.ready is False
+
+
+# ---------------------------------------------------------------------------
+# not-ready critiques must always carry a blocking open issue, so the
+# CritiqueLedger / stall detector and telemetry stay consistent with the
+# loop's ready=False revise behaviour.
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_critique_not_ready_info_only_gets_blocking_placeholder() -> None:
+    """A ``ready=false`` verdict carrying only ``info`` issues would present an
+    empty open set (the loop keeps revising on ready=false, but the ledger /
+    stall detector track only blocking issues). Coercion must synthesise a
+    blocking placeholder so ``open_issue_ids`` is non-empty, while keeping the
+    advisory info note."""
+    parsed = {
+        "ready": False,
+        "rationale": "not ready, minor note only",
+        "issues": [{"field": "sizing", "severity": "info", "description": "fyi"}],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False
+    # Open set (warnings + criticals) must be non-empty so stall detection and
+    # telemetry reflect that the loop has blocking work to do.
+    assert critique.open_issue_ids, critique.issues
+    # The original info note is preserved (advisory, not in the open set).
+    severities = sorted(i.severity for i in critique.issues)
+    assert "info" in severities
+    assert "warning" in severities
+
+
+def test_coerce_critique_not_ready_with_warning_unchanged() -> None:
+    """A ``ready=false`` verdict that already names a blocking issue is left
+    alone — no extra synthetic placeholder is appended."""
+    parsed = {
+        "ready": False,
+        "rationale": "needs work",
+        "issues": [{"field": "exit_rules", "severity": "warning", "description": "add tp"}],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False
+    assert len(critique.issues) == 1
+    assert critique.open_issue_ids == {critique.issues[0].issue_id}
+
+
+def test_coerce_critique_not_ready_no_issues_still_gets_placeholder() -> None:
+    """The pre-existing zero-issue not-ready contract still holds."""
+    parsed = {"ready": False, "rationale": "vague", "issues": []}
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False
+    assert len(critique.open_issue_ids) == 1
