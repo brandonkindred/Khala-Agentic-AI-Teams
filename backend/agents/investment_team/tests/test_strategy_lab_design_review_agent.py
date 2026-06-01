@@ -18,9 +18,11 @@ import pytest
 
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.agents.design_review import (
+    CritiqueIssue,
     DesignReviewAgent,
     SpecCritique,
     _coerce_critique,
+    format_prior_critiques,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab.spec_dsl import (
@@ -200,6 +202,44 @@ def test_prior_critiques_appear_in_prompt(monkeypatch: pytest.MonkeyPatch) -> No
     prompt = capture.calls[0]
     assert "Round 0" in prompt
     assert "Round-0 concern" in prompt
+
+
+def test_format_prior_critiques_empty_is_none_yet() -> None:
+    """Empty / ``None`` lineage renders the sentinel, not a blank block."""
+    assert format_prior_critiques(None) == "None yet."
+    assert format_prior_critiques([]) == "None yet."
+
+
+def test_format_prior_critiques_renders_per_issue_detail() -> None:
+    """Each prior critique renders a header line plus one indented line per
+    issue carrying severity, field, description, and suggested_fix — so a
+    later revision can see *what* an earlier round fixed (terse rationale and
+    all) and avoid regressing it."""
+    prior = [
+        SpecCritique(
+            ready=False,
+            rationale="terse",
+            round=0,
+            issues=[
+                CritiqueIssue(
+                    field="sizing",
+                    severity="critical",
+                    description="position too large",
+                    suggested_fix="cap fixed_fraction at 0.01",
+                ),
+                # An issue with no suggested_fix omits the "(fix: ...)" suffix.
+                CritiqueIssue(field="exit_rules", severity="warning", description="no stop"),
+            ],
+        )
+    ]
+
+    rendered = format_prior_critiques(prior)
+
+    assert "Round 0: ready=False (2 issues) — terse" in rendered
+    assert "- [critical] sizing: position too large (fix: cap fixed_fraction at 0.01)" in rendered
+    assert "- [warning] exit_rules: no stop" in rendered
+    # The fix-less issue must not render an empty "(fix: )" suffix.
+    assert "no stop (fix:" not in rendered
 
 
 # ---------------------------------------------------------------------------

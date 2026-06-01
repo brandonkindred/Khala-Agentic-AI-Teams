@@ -994,7 +994,13 @@ def test_revise_threads_external_lineage_into_self_revision(
         ready=False,
         rationale="ROUND1-EXIT-FIX",
         round=1,
-        issues=[CritiqueIssue(field="sizing", description="too big")],
+        issues=[
+            CritiqueIssue(
+                field="sizing",
+                description="position too large",
+                suggested_fix="cap fixed_fraction at 0.01",
+            )
+        ],
     )
 
     DesignAgent().revise(_prior_spec(), c1, prior_critiques=[c0, c1])
@@ -1005,6 +1011,11 @@ def test_revise_threads_external_lineage_into_self_revision(
     assert "(2 so far)" in self_revision_prompt
     assert "ROUND0-SIZING-FIX" in self_revision_prompt
     assert "ROUND1-EXIT-FIX" in self_revision_prompt
+    # Per-issue detail (not just the truncated rationale) must reach the
+    # self-revision so it can see *what* the earlier round fixed and avoid
+    # silently regressing it.
+    assert "position too large" in self_revision_prompt
+    assert "cap fixed_fraction at 0.01" in self_revision_prompt
 
 
 def test_revise_threads_regression_notice_into_self_revision(
