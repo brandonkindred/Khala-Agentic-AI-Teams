@@ -86,13 +86,22 @@ def test_cse_emits_single_atr_helper() -> None:
 def test_compile_throughput_with_shared_subtrees() -> None:
     g = _shared_subtree_genome()
     t0 = time.perf_counter()
+    code = ""
     for _ in range(_ITERATIONS):
-        compile_genome(g)
+        code = compile_genome(g)
     elapsed = time.perf_counter() - t0
 
     if os.environ.get("BENCH_FACTOR_COMPILER_VERBOSE"):
         print(f"\ncompile ×{_ITERATIONS} (shared sub-trees): {elapsed:.4f}s")
 
-    # Smoke bound — compilation must complete; the memoisation win is a
-    # constant-factor reduction in hashing, not a behavioural change.
-    assert elapsed >= 0.0
+    # Meaningful guard (unlike a bare timing bound): repeated compilation with
+    # the node-id memo must keep producing valid, deterministic output, and the
+    # SMA(20) sub-tree referenced five times must still collapse to a single
+    # helper via the _methods dedup. The memoisation win itself is a
+    # constant-factor hashing reduction, not a behavioural change.
+    ast.parse(code)
+    assert code == compile_genome(g)  # deterministic across compiles
+    helper_defs = [ln for ln in code.splitlines() if ln.lstrip().startswith("def _n_")]
+    # 1 SMA(20) + 4 distinct Const + 4 entry compares + 1 BoolAnd + 1 exit
+    # compare = 11 helpers; would exceed this if SMA(20) were emitted per-ref.
+    assert len(helper_defs) == 11, helper_defs

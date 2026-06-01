@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, ClassVar, Iterable, List, Optional
 
 from ..spec_dsl import (
@@ -403,24 +404,36 @@ def _is_engine_managed(spec: Any) -> bool:
 
 @dataclass(frozen=True)
 class _ConformanceCtx:
-    """Per-``check`` derived state, computed once and shared by every check.
+    """Per-``check`` derived state, computed lazily and shared by every check.
 
     Several conformance checks need the same structural views of the Strategy
     class — the set of methods reachable from ``on_bar`` and the list of
-    ``if`` branches that submit orders. Computing them once here removes the
-    duplicate ``_methods_reachable_from_on_bar`` (was 3×) and
-    ``_find_if_branches_with_submit_order`` (was 2×) walks per ``check``.
+    ``if`` branches that submit orders. Exposing them as memoised properties
+    means each view is computed **at most once** per ``check`` (removing the
+    duplicate ``_methods_reachable_from_on_bar`` / ``_find_if_branches_with_submit_order``
+    walks) while still being skipped entirely when no check needs them — e.g.
+    an engine-managed spec early-returns from entry/exit coverage before ever
+    touching ``submit_branches``, matching the old per-check laziness.
 
     Invariants: ``reachable`` and ``submit_branches`` are derived purely from
     ``cls`` (read-only); ``submit_branches`` is filtered to ``reachable``
     methods, matching the previous per-check call ``_find_if_branches_with_submit_order(cls,
-    reachable_method_names=reachable)``.
+    reachable_method_names=reachable)``. ``cached_property`` writes into the
+    instance ``__dict__`` — frozen-dataclass ``__setattr__`` is bypassed.
     """
 
     cls: ast.ClassDef
     spec: Any
-    reachable: frozenset[str]
-    submit_branches: List[tuple[ast.If, List[ast.Call]]]
+
+    @cached_property
+    def reachable(self) -> frozenset[str]:
+        return _methods_reachable_from_on_bar(self.cls)
+
+    @cached_property
+    def submit_branches(self) -> List[tuple[ast.If, List[ast.Call]]]:
+        return _find_if_branches_with_submit_order(
+            self.cls, reachable_method_names=self.reachable
+        )
 
 
 class CodeConformanceGate(GateResultsMixin):
@@ -467,16 +480,10 @@ class CodeConformanceGate(GateResultsMixin):
                 ]
             cls = strategy_classes[0]
 
-            # Derive the shared structural views once. Both entry- and
-            # signal-exit coverage filter the same submit-order branch list,
-            # and indicator presence reuses the same reachable-method set.
-            reachable = _methods_reachable_from_on_bar(cls)
-            submit_branches = _find_if_branches_with_submit_order(
-                cls, reachable_method_names=reachable
-            )
-            cctx = _ConformanceCtx(
-                cls=cls, spec=spec, reachable=reachable, submit_branches=submit_branches
-            )
+            # Shared structural views (reachable methods, submit-order branches)
+            # are memoised on the context: computed at most once across all
+            # checks, and only when a check actually reads them.
+            cctx = _ConformanceCtx(cls=cls, spec=spec)
 
             results: List[QualityGateResult] = []
             results.extend(self._check_indicator_presence(cctx))
