@@ -26,6 +26,7 @@ Reused building blocks:
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -39,34 +40,42 @@ from .phases import hash_code, hash_spec
 # correct here.
 _NO_SPEC = "no-spec"
 
-# Wall-clock entry points that make a backtest nondeterministic across runs
-# with identical (code, data, config). ``datetime``/``time`` are in the strategy
-# code-safety allowlist and the engine does not freeze the clock, so code that
-# branches on these can yield a different ledger each run. Memoizing the first
-# result would freeze that outcome, so such code bypasses the cache entirely.
-# A substring scan is intentionally conservative: a false positive only forgoes
-# a cache hit (always safe); generated strategy code does not obfuscate calls.
-_WALL_CLOCK_TOKENS: tuple[str, ...] = (
-    ".now(",
-    ".today(",
-    ".utcnow(",
-    "time.time(",
-    "time.time_ns(",
-    "time.monotonic",
-    "time.perf_counter",
-    "time.process_time",
-    "time.localtime(",
-    "time.gmtime(",
-)
+# Modules whose use makes a backtest nondeterministic across runs with
+# identical (code, data, config). ``datetime`` is on the strategy code-safety
+# allowlist; ``random``/``time``/``secrets``/``uuid`` are warning-only (not
+# blocked) and ``os`` is included defensively — all are reachable enough that
+# code importing them can yield a different ledger each run. (pandas/numpy are
+# excluded from the sandbox, so ``numpy.random`` is not a concern.) Code that
+# imports any of these bypasses the cache entirely: memoizing the first result
+# would freeze a nondeterministic outcome.
+_NONDETERMINISTIC_MODULES = frozenset({"random", "time", "datetime", "secrets", "uuid", "os"})
 
 
-def _is_wall_clock_dependent(code: str) -> bool:
-    """True if ``code`` references a wall-clock API (see ``_WALL_CLOCK_TOKENS``).
+def _is_nondeterministic(code: str) -> bool:
+    """True if ``code`` imports a nondeterministic module (AST-based).
 
-    Postconditions: pure; conservative — may return ``True`` for a benign
-    occurrence (e.g. in a string/comment), which only forgoes a cache hit.
+    Uses the parse tree rather than a substring scan so every import form is
+    caught regardless of aliasing — ``import random``, ``from time import
+    time``, ``from datetime import datetime as dt``, etc.
+
+    Postconditions: pure; conservative — unparseable code returns ``True`` (do
+    not cache), and importing a nondeterministic module for an incidental
+    deterministic use also returns ``True``. Both only forgo a cache hit, which
+    is always safe.
     """
-    return any(token in code for token in _WALL_CLOCK_TOKENS)
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(a.name.split(".")[0] in _NONDETERMINISTIC_MODULES for a in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            # ``node.module`` is None for ``from . import x`` (relative).
+            if node.module and node.module.split(".")[0] in _NONDETERMINISTIC_MODULES:
+                return True
+    return False
 
 
 def _spec_hash(strategy: Any) -> str:
@@ -192,17 +201,18 @@ class BacktestCache:
             ``runner`` was invoked exactly once and its result stored. For
             deterministic ``runner`` (the contract of ``run_strategy_code``) a
             hit is observationally identical to a fresh run.
-          - Wall-clock-dependent ``code`` (see ``_is_wall_clock_dependent``)
-            is never stored or served from cache — it always re-executes and
-            counts as a miss — so nondeterministic strategies are not frozen
-            to their first ledger.
+          - Nondeterministic ``code`` (see ``_is_nondeterministic``) is never
+            stored or served from cache — it always re-executes and counts as
+            a miss — so nondeterministic strategies are not frozen to their
+            first ledger.
           - ``hits``/``misses`` are incremented to reflect the outcome.
         """
         assert isinstance(code, str) and code, "code must be a non-empty string"
         run = runner if runner is not None else run_strategy_code
-        # Wall-clock-dependent code is nondeterministic across runs, so never
-        # memoize it — always re-execute (counted as a miss, never stored).
-        if _is_wall_clock_dependent(code):
+        # Nondeterministic code (random/time/datetime/... imports) can produce
+        # a different ledger per run, so never memoize it — always re-execute
+        # (counted as a miss, never stored).
+        if _is_nondeterministic(code):
             self.misses += 1
             return run(code, market_data, config, strategy=strategy), False
         key = self._key(code, market_data, config, strategy)

@@ -159,20 +159,28 @@ def test_different_strategy_spec_is_a_miss() -> None:
     assert len(calls) == 2
 
 
-def test_wall_clock_dependent_code_is_never_cached() -> None:
-    """Code that branches on wall-clock state (datetime.now/today, time.*) is
-    nondeterministic across runs, so it must re-execute every time rather than
-    freezing the first ledger."""
+@pytest.mark.parametrize(
+    "code",
+    [
+        # datetime on the allowlist, used via attribute call
+        "import datetime\nclass S:\n    def on_bar(self, ctx, bar):\n        datetime.datetime.now()\n",
+        # `from X import name` form — a bare-name call a substring scan misses
+        "from time import time\nclass S:\n    def on_bar(self, ctx, bar):\n        time()\n",
+        # warning-only import; aliased
+        "import random as r\nclass S:\n    def on_bar(self, ctx, bar):\n        r.random()\n",
+        # `from random import random`
+        "from random import random\nclass S:\n    def on_bar(self, ctx, bar):\n        random()\n",
+        # aliased datetime import
+        "from datetime import datetime as dt\nclass S:\n    def on_bar(self, ctx, bar):\n        dt.now()\n",
+    ],
+)
+def test_nondeterministic_code_is_never_cached(code) -> None:
+    """Code importing a nondeterministic module (random/time/datetime/...) in
+    any import form must re-execute every time rather than freezing the first
+    ledger. AST-based detection catches forms a substring scan misses."""
     cache = BacktestCache()
     calls, runner = _counting_runner()
     md, cfg = _market_data(), _config()
-    code = (
-        "import datetime\n"
-        "class S:\n"
-        "    def on_bar(self, ctx, bar):\n"
-        "        if datetime.datetime.now().hour > 12:\n"
-        "            pass\n"
-    )
 
     _, hit1 = cache.get_or_run(code, md, cfg, strategy=None, runner=runner)
     _, hit2 = cache.get_or_run(code, md, cfg, strategy=None, runner=runner)
@@ -180,6 +188,35 @@ def test_wall_clock_dependent_code_is_never_cached() -> None:
     assert hit1 is False and hit2 is False  # never served from cache
     assert len(calls) == 2  # re-executed each time
     assert cache.misses == 2 and cache.hits == 0
+
+
+def test_deterministic_import_still_caches() -> None:
+    """A benign deterministic import (math) does not trip the nondeterminism
+    bypass, so identical code still hits the cache."""
+    cache = BacktestCache()
+    calls, runner = _counting_runner()
+    md, cfg = _market_data(), _config()
+    code = "import math\nclass S:\n    def on_bar(self, ctx, bar):\n        math.sqrt(2)\n"
+
+    cache.get_or_run(code, md, cfg, strategy=None, runner=runner)
+    _, hit = cache.get_or_run(code, md, cfg, strategy=None, runner=runner)
+
+    assert hit is True
+    assert len(calls) == 1
+
+
+def test_unparseable_code_bypasses_cache() -> None:
+    """Code that does not parse can't be analyzed, so it is never cached."""
+    cache = BacktestCache()
+    calls, runner = _counting_runner()
+    md, cfg = _market_data(), _config()
+    code = "def broken(:\n"  # SyntaxError
+
+    _, hit1 = cache.get_or_run(code, md, cfg, strategy=None, runner=runner)
+    _, hit2 = cache.get_or_run(code, md, cfg, strategy=None, runner=runner)
+
+    assert hit1 is False and hit2 is False
+    assert len(calls) == 2
 
 
 def test_default_runner_is_module_run_strategy_code(monkeypatch) -> None:
