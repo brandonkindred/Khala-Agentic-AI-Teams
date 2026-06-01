@@ -1806,12 +1806,72 @@ def _compiler_indicator_at(
     return None
 
 
+def _compiler_macd_full_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> pd.Series:
+    """Optimized MACD-output series builder.
+
+    The per-bar dispatch through :func:`_compiler_macd_at` is O(n²) per call
+    (each call re-runs the cold rebuild over the full history-so-far), so the
+    naive series wrapper is O(n³). This helper builds the macd_line / signal
+    once in O(n × slow) and returns the requested ``output`` column. Matches
+    ``synthesis/compiler.py:_compiler_macd_at`` value-for-value (verified by
+    the cross trigger tests).
+    """
+    fast = int(ref.param("fast"))
+    slow = int(ref.param("slow"))
+    signal = int(ref.param("signal"))
+    source = ref.source
+    output = str(ref.param("output"))
+    n = len(bars)
+    macd_line: List[Optional[float]] = [None] * n
+    signal_line: List[Optional[float]] = [None] * n
+    hist_line: List[Optional[float]] = [None] * n
+    if not (fast >= 2) or not (slow > fast) or not (signal >= 2):
+        col = {"macd": macd_line, "signal": signal_line, "histogram": hist_line}.get(
+            output, macd_line
+        )
+        return pd.Series(col, dtype=float)
+    alpha_f = 2.0 / (fast + 1.0)
+    alpha_s = 2.0 / (slow + 1.0)
+    alpha_g = 2.0 / (signal + 1.0)
+    closes = [_compiler_src(b, source) for b in bars]
+    macd_values: List[float] = []
+    for end_idx in range(slow - 1, n):
+        # Windowed EMA over the last fast / slow closes — matches the cold
+        # rebuild in compiler.py:587-593 exactly.
+        ef = closes[end_idx - fast + 1]
+        for i in range(end_idx - fast + 2, end_idx + 1):
+            ef = alpha_f * closes[i] + (1.0 - alpha_f) * ef
+        es = closes[end_idx - slow + 1]
+        for i in range(end_idx - slow + 2, end_idx + 1):
+            es = alpha_s * closes[i] + (1.0 - alpha_s) * es
+        m = ef - es
+        macd_line[end_idx] = m
+        macd_values.append(m)
+        if len(macd_values) >= signal:
+            # Signal is EWM(macd_line[0..k]) — recompute from scratch to
+            # mirror compiler.py:601-605 (which also walks macd_line each
+            # call, since the deque can be sliced/expanded).
+            sig = macd_values[0]
+            for v in macd_values[1:]:
+                sig = alpha_g * v + (1.0 - alpha_g) * sig
+            signal_line[end_idx] = sig
+            hist_line[end_idx] = m - sig
+    col = {"macd": macd_line, "signal": signal_line, "histogram": hist_line}.get(output, macd_line)
+    return pd.Series(col, dtype=float)
+
+
 def _compiler_indicator_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> Optional[pd.Series]:
     """Run :func:`_compiler_indicator_at` at every bar index and wrap as a
     pandas Series so the existing cross-search code can iterate it with
-    ``.iloc[]``. Slower than the pandas batch helpers (O(n²) for some
-    indicators) but matches the values the compiled strategy produces.
+    ``.iloc[]``. Slower than the pandas batch helpers but matches the values
+    the compiled strategy produces.
+
+    MACD is special-cased to an optimized full-series builder because the
+    naive O(n³) per-bar dispatch (each call re-runs the cold rebuild) made
+    indicator-pair MACD probes time out the synthesis perf guard.
     """
+    if ref.name == "macd":
+        return _compiler_macd_full_series(ref, bars)
     values: List[Optional[float]] = [None] * len(bars)
     for i in range(len(bars)):
         v = _compiler_indicator_at(ref, bars, i)
