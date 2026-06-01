@@ -2,10 +2,13 @@
 
 Available in the strategy sandbox via: from indicators import <function_name>
 
-Every function takes pd.Series (or multiple Series) and returns pd.Series
-or a tuple of pd.Series.  NaN values propagate naturally through pandas
-rolling/ewm windows — callers should skip warmup rows where indicators
-are NaN.
+Every function accepts either a ``pd.Series`` or a sequence the strategy
+already has on hand — a ``list[float]`` or the ``list[Bar]`` that
+``ctx.history(symbol, n)`` returns — and returns ``pd.Series`` or a tuple of
+``pd.Series``.  Inputs are coerced at the boundary (see ``_coerce_series``),
+so callers do not need to wrap price data in ``pd.Series`` themselves.  NaN
+values propagate naturally through pandas rolling/ewm windows — callers should
+skip warmup rows where indicators are NaN.
 """
 
 from __future__ import annotations
@@ -18,18 +21,61 @@ import numpy as np
 import pandas as pd
 
 
+def _coerce_series(series, field: str = "close") -> pd.Series:
+    """Coerce a caller-supplied price/volume sequence into a ``pd.Series``.
+
+    Accepts a ``pd.Series`` (returned unchanged), a ``list``/``tuple`` of
+    numbers, a ``list``/``tuple`` of bar objects exposing ``field`` (e.g. the
+    ``Bar`` records returned by ``ctx.history``), or a ``list``/``tuple`` of
+    dicts containing ``field``.  This is the single boundary at which the
+    indicator API absorbs the variety of shapes strategy code may pass.
+
+    Preconditions:
+        ``series`` is a ``pd.Series`` or a ``list``/``tuple`` whose elements
+        are numbers, objects exposing the ``field`` attribute, or dicts
+        containing the ``field`` key.
+    Postconditions:
+        Returns a float ``pd.Series``; an empty list/tuple yields an empty
+        float Series.  A ``pd.Series`` argument is returned as-is (no copy).
+        Contract violations raise ``TypeError`` — never ``AttributeError`` —
+        so the sandbox classifies bad input as a strategy-code error rather
+        than a look-ahead violation.
+    """
+    if isinstance(series, pd.Series):
+        return series
+    if not isinstance(series, (list, tuple)):
+        raise TypeError(f"indicator input must be pd.Series or list, got {type(series).__name__}")
+    if not series:
+        return pd.Series([], dtype=float)
+    first = series[0]
+    if isinstance(first, bool):
+        # bool is a subclass of int; reject it explicitly rather than coercing
+        # True/False to 1.0/0.0, which is never a meaningful price series.
+        raise TypeError("indicator input must be numeric, got bool")
+    if isinstance(first, (int, float)):
+        return pd.Series([float(x) for x in series], dtype=float)
+    if hasattr(first, field):
+        return pd.Series([float(getattr(b, field)) for b in series], dtype=float)
+    if isinstance(first, dict) and field in first:
+        return pd.Series([float(b[field]) for b in series], dtype=float)
+    raise TypeError(f"cannot extract {field!r} from {type(first).__name__}")
+
+
 def sma(series: pd.Series, period: int) -> pd.Series:
     """Simple Moving Average."""
+    series = _coerce_series(series)
     return series.rolling(window=period).mean()
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
     """Exponential Moving Average."""
+    series = _coerce_series(series)
     return series.ewm(span=period, adjust=False).mean()
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """Relative Strength Index (0–100)."""
+    series = _coerce_series(series)
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = (-delta).clip(lower=0)
@@ -54,6 +100,7 @@ def macd(
     signal: int = 9,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """MACD line, signal line, histogram."""
+    series = _coerce_series(series)
     fast_ema = ema(series, fast)
     slow_ema = ema(series, slow)
     macd_line = fast_ema - slow_ema
@@ -68,6 +115,7 @@ def bollinger_bands(
     num_std: float = 2.0,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Upper band, middle band (SMA), lower band."""
+    series = _coerce_series(series)
     middle = sma(series, period)
     std = series.rolling(window=period).std()
     upper = middle + num_std * std
@@ -82,6 +130,9 @@ def atr(
     period: int = 14,
 ) -> pd.Series:
     """Average True Range."""
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
     prev_close = close.shift(1)
     tr = pd.concat(
         [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
@@ -100,6 +151,9 @@ def adx(
 
     Uses Wilder's smoothing (alpha = 1/period) for directional indicators.
     """
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
     prev_high = high.shift(1)
     prev_low = low.shift(1)
 
@@ -141,6 +195,9 @@ def stochastic(
     d_period: int = 3,
 ) -> tuple[pd.Series, pd.Series]:
     """Stochastic Oscillator (%K, %D)."""
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
     lowest_low = low.rolling(window=k_period).min()
     highest_high = high.rolling(window=k_period).max()
     denom = (highest_high - lowest_low).replace(0, np.nan)
@@ -160,6 +217,10 @@ def vwap(
     Note: this is a cumulative VWAP with no intraday reset, appropriate
     for daily OHLCV bars.
     """
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
+    volume = _coerce_series(volume, "volume")
     typical_price = (high + low + close) / 3
     cum_tp_vol = (typical_price * volume).cumsum()
     cum_vol = volume.cumsum().replace(0, np.nan)

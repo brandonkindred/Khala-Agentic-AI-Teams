@@ -651,10 +651,15 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
                            "message": f"unknown kind: {kind!r}"})
                     sys.exit(1)
             except AttributeError as exc:
-                # Most likely a look-ahead attempt that hit a non-existent
-                # attribute on Bar/StrategyContext.
+                # An AttributeError raised from inside the indicators module is
+                # a strategy-code type bug (e.g. passing a list where a Series
+                # is expected), not a look-ahead attempt — surface it as a
+                # generic runtime_error so the failure class is honest. A bare
+                # AttributeError elsewhere is most likely a look-ahead attempt
+                # that hit a non-existent attribute on Bar/StrategyContext.
                 tb = "".join(traceback.format_exception(*sys.exc_info()))
-                _emit({"kind": "error", "etype": "lookahead_violation",
+                etype = "runtime_error" if "indicators.py" in tb else "lookahead_violation"
+                _emit({"kind": "error", "etype": etype,
                        "message": f"{exc!s}\\n{tb}"})
                 sys.exit(1)
             except contract.UnsupportedOrderFeatureError as exc:

@@ -125,7 +125,7 @@ ctx.submit_order(
 from indicators import sma, ema, rsi, macd, bollinger_bands, atr, adx, stochastic, vwap
 ```
 
-These helpers accept a list/sequence of numbers (typically `[b.close for b in history]`) and return either a single float (for most scalar indicators) or a small named tuple.
+These helpers accept a list/sequence of numbers (typically `[b.close for b in history]`) **or the `list[Bar]` returned by `ctx.history` directly** (the close/high/low/volume field is extracted for you) and return either a single float (for most scalar indicators) or a small named tuple. You do not need to wrap inputs in `pd.Series`.
 
 ## Allowed imports
 
