@@ -8,8 +8,12 @@ audit/recovery re-backtest all replay identical inputs. Backtests are
 deterministic in their inputs, so replaying them is wasted wall time.
 
 :class:`BacktestCache` keys finished :class:`StrategyRunResult` objects on
-``(code_hash, market_data_fingerprint, config_hash)`` and returns the stored
-result on a hit. It is scoped to a *single* design attempt: the orchestrator
+``(code_hash, market_data_fingerprint, config_hash, spec_hash)`` and returns
+the stored result on a hit. The spec is keyed too because
+``run_strategy_code(..., strategy=spec)`` feeds risk_limits / rules / sizing /
+target_symbols into the engine, so a risk-only refinement that leaves the
+source unchanged must still re-execute. It is scoped to a *single* design
+attempt: the orchestrator
 constructs a fresh cache per ``_run_design_attempt`` and discards it when the
 attempt ends, so a cached entry can never cross a market-data snapshot.
 
@@ -28,7 +32,36 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..market_data_cache.store import compute_dataset_fingerprint
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
-from .phases import hash_code
+from .phases import hash_code, hash_spec
+
+# Marker for "no strategy supplied" — ``run_strategy_code`` then derives a
+# minimal spec purely from ``code`` (already in the key), so a constant is
+# correct here.
+_NO_SPEC = "no-spec"
+
+
+def _spec_hash(strategy: Any) -> str:
+    """Hash the parts of ``strategy`` that steer the backtest.
+
+    ``run_strategy_code(..., strategy=spec)`` feeds ``risk_limits``, the
+    structured entry/exit rules, sizing, and target symbols into the engine,
+    so two runs with identical *code* but a different spec (e.g. a refinement
+    that tightens ``risk_limits`` without touching the source) must not alias.
+    Delegates to :func:`hash_spec`, which canonicalises the whole spec
+    *excluding* ``strategy_code`` (the code is keyed independently).
+
+    Preconditions:
+      - ``strategy`` is ``None``, a ``StrategySpec`` (exposes ``model_dump``),
+        or any object (best-effort ``repr`` fallback for non-spec inputs).
+    Postconditions:
+      - Returns a stable string component for the cache key.
+    """
+    if strategy is None:
+        return _NO_SPEC
+    if hasattr(strategy, "model_dump"):
+        return hash_spec(strategy)
+    # Defensive: non-spec object (not expected on the orchestrator path).
+    return hashlib.sha256(repr(strategy).encode("utf-8")).hexdigest()
 
 
 def _config_hash(config: Any) -> str:
@@ -90,13 +123,18 @@ class BacktestCache:
             self._fingerprinted_refs.append(market_data)
         return fingerprint
 
-    def _key(self, code: str, market_data: Dict[str, List[Any]], config: Any) -> str:
+    def _key(self, code: str, market_data: Dict[str, List[Any]], config: Any, strategy: Any) -> str:
         digest = hashlib.sha256()
         digest.update(hash_code(code).encode("utf-8"))
         digest.update(b"\x00")
         digest.update(self._market_data_fingerprint(market_data).encode("utf-8"))
         digest.update(b"\x00")
         digest.update(_config_hash(config).encode("utf-8"))
+        digest.update(b"\x00")
+        # The spec (minus its code, hashed above) also steers the backtest —
+        # e.g. a refinement that tightens risk_limits without changing the
+        # source must invalidate the entry.
+        digest.update(_spec_hash(strategy).encode("utf-8"))
         return digest.hexdigest()
 
     def get_or_run(
@@ -120,16 +158,16 @@ class BacktestCache:
             attempt; ``config`` is the attempt's ``BacktestConfig``.
         Postconditions:
           - Returns ``(result, hit)``. On a hit, ``result`` is the object
-            stored by the first run with the same key and no execution
-            happened. On a miss, ``runner`` was invoked exactly once and its
-            result stored. For deterministic ``runner`` (the contract of
-            ``run_strategy_code``) a hit is observationally identical to a
-            fresh run.
+            stored by the first run with the same ``(code, market_data,
+            config, strategy)`` key and no execution happened. On a miss,
+            ``runner`` was invoked exactly once and its result stored. For
+            deterministic ``runner`` (the contract of ``run_strategy_code``) a
+            hit is observationally identical to a fresh run.
           - ``hits``/``misses`` are incremented to reflect the outcome.
         """
         assert isinstance(code, str) and code, "code must be a non-empty string"
         run = runner if runner is not None else run_strategy_code
-        key = self._key(code, market_data, config)
+        key = self._key(code, market_data, config, strategy)
         cached = self._results.get(key)
         if cached is not None:
             self.hits += 1

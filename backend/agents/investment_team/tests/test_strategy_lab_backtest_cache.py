@@ -17,6 +17,7 @@ import pytest
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import BacktestConfig
 from investment_team.strategy_lab.backtest_cache import BacktestCache
+from investment_team.tests.test_alignment_checks import _spec
 from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 
 _CODE = "class S:\n    pass\n"
@@ -134,6 +135,28 @@ def test_runner_receives_strategy_argument() -> None:
     cache.get_or_run(_CODE, _market_data(), _config(), strategy=sentinel, runner=runner)
 
     assert calls[0]["strategy"] is sentinel
+
+
+def test_different_strategy_spec_is_a_miss() -> None:
+    """Same code + market data + config but a different spec must NOT alias:
+    ``run_strategy_code(..., strategy=spec)`` feeds risk_limits / rules /
+    sizing / target_symbols into the engine, so a spec change (e.g. a
+    risk-only refinement that leaves the source unchanged) has to re-execute.
+    """
+    cache = BacktestCache()
+    calls, runner = _counting_runner()
+    md, cfg = _market_data(), _config()
+    spec_a = _spec(target_symbols=["AAPL"])
+    spec_b = _spec(target_symbols=["MSFT"])
+
+    _, hit_a = cache.get_or_run(_CODE, md, cfg, strategy=spec_a, runner=runner)
+    _, hit_a_again = cache.get_or_run(_CODE, md, cfg, strategy=spec_a, runner=runner)
+    _, hit_b = cache.get_or_run(_CODE, md, cfg, strategy=spec_b, runner=runner)
+
+    assert hit_a is False  # first run for spec_a
+    assert hit_a_again is True  # identical spec -> hit
+    assert hit_b is False  # different spec -> miss, re-executed
+    assert len(calls) == 2
 
 
 def test_default_runner_is_module_run_strategy_code(monkeypatch) -> None:
