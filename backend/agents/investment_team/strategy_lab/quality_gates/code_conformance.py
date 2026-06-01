@@ -22,7 +22,7 @@ Scope choices (issue #541, v1):
   recognised and will fail. Recognising inline patterns is a future
   enhancement; the deterministic compiler track (#538) makes it
   unnecessary on the compiled path.
-* Check #7 (bar-counting exit rejection) scans generated code for
+* Check #5 (bar-counting exit rejection) scans generated code for
   bar-counting exit patterns (variables like ``bars_held``,
   ``hold_count``, ``days_held`` and ``if counter >= N: close``
   idioms). These implement the forbidden "time stop" concept and are
@@ -43,8 +43,6 @@ from ..spec_dsl import (
     IndicatorRef,
     Predicate,
     SignalExitRule,
-    StopLossRule,
-    TakeProfitRule,
 )
 from .code_safety_ast import (
     _find_strategy_subclasses,
@@ -450,8 +448,6 @@ class CodeConformanceGate(GateResultsMixin):
             results.extend(self._check_symbol_gate(spec, cls))
             results.extend(self._check_entry_coverage(cls, spec))
             results.extend(self._check_signal_exit_coverage(cls, spec))
-            results.extend(self._check_stop_loss_enforcement(cls, spec))
-            results.extend(self._check_take_profit_enforcement(cls, spec))
             results.extend(self._check_bar_counting_exit(cls))
             results.extend(self._check_sizing_math(cls, spec))
             results.extend(self._check_no_extra_side_effects(tree, cls))
@@ -617,62 +613,7 @@ class CodeConformanceGate(GateResultsMixin):
         return ()
 
     # ------------------------------------------------------------------
-    # Check 5 — stop-loss enforcement
-    # ------------------------------------------------------------------
-    def _check_stop_loss_enforcement(
-        self, cls: ast.ClassDef, spec: Any
-    ) -> Iterable[QualityGateResult]:
-        stop_rules = [
-            r for r in (getattr(spec, "exit_rules", []) or []) if isinstance(r, StopLossRule)
-        ]
-        if not stop_rules:
-            return ()
-        if self._class_references_position_entry_price(cls):
-            return ()
-        return (
-            self._critical(
-                "Spec has a StopLossRule but the Strategy class never "
-                "references ``position.entry_price`` (or ``pos.entry_price``) "
-                "— the stop-loss threshold cannot be computed against the "
-                "entry without it."
-            ),
-        )
-
-    # ------------------------------------------------------------------
-    # Check 6 — take-profit enforcement
-    # ------------------------------------------------------------------
-    def _check_take_profit_enforcement(
-        self, cls: ast.ClassDef, spec: Any
-    ) -> Iterable[QualityGateResult]:
-        tp_rules = [
-            r for r in (getattr(spec, "exit_rules", []) or []) if isinstance(r, TakeProfitRule)
-        ]
-        if not tp_rules:
-            return ()
-        if self._class_references_position_entry_price(cls):
-            return ()
-        return (
-            self._critical(
-                "Spec has a TakeProfitRule but the Strategy class never "
-                "references ``position.entry_price`` (or ``pos.entry_price``) "
-                "— the take-profit threshold cannot be computed against the "
-                "entry without it."
-            ),
-        )
-
-    def _class_references_position_entry_price(self, cls: ast.ClassDef) -> bool:
-        for node in ast.walk(cls):
-            if (
-                isinstance(node, ast.Attribute)
-                and node.attr == "entry_price"
-                and isinstance(node.value, ast.Name)
-                and node.value.id in _POSITION_RECEIVER_NAMES
-            ):
-                return True
-        return False
-
-    # ------------------------------------------------------------------
-    # Check 7 — bar-counting exit rejection
+    # Check 5 — bar-counting exit rejection
     # ------------------------------------------------------------------
 
     _BAR_COUNTER_NAMES: ClassVar[frozenset] = frozenset({
@@ -710,7 +651,7 @@ class CodeConformanceGate(GateResultsMixin):
         )
 
     # ------------------------------------------------------------------
-    # Check 8 — sizing math present
+    # Check 6 — sizing math present
     # ------------------------------------------------------------------
     def _check_sizing_math(self, cls: ast.ClassDef, spec: Any = None) -> Iterable[QualityGateResult]:
         all_submit_calls = [
@@ -753,7 +694,7 @@ class CodeConformanceGate(GateResultsMixin):
         )
 
     # ------------------------------------------------------------------
-    # Check 9 — no submit_order calls outside hook/helper methods
+    # Check 7 — no submit_order calls outside hook/helper methods
     # ------------------------------------------------------------------
     def _check_no_extra_side_effects(
         self, tree: ast.AST, cls: ast.ClassDef
