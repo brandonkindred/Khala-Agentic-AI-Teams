@@ -79,8 +79,10 @@ def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.Monke
 
     The split design pipeline moves the readiness check into the design ↔
     review loop, so a spec with no entry rules now fails ``design_not_ready``
-    rather than the post-design ``spec_validation`` short-circuit. Either
-    way the contract is the same: no code execution, no market-data fetch.
+    (or ``design_stalled`` — the identical readiness critical repeats every
+    round, which the within-loop stall guard detects) rather than the
+    post-design ``spec_validation`` short-circuit. Either way the contract is
+    the same: no code execution, no market-data fetch.
     """
     bad_spec_dict = {
         "asset_class": "stocks",
@@ -107,10 +109,14 @@ def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.Monke
 
     record = orch.run_cycle(prior_records=[], config=_config())
 
-    # Either "design_not_ready" (caught in the new design loop) or
-    # "spec_validation" (caught by the legacy pre-synthesis gate) is a
-    # valid short-circuit outcome — both prove the sandbox was not touched.
-    assert record.backtest.status in {"failed: design_not_ready", "failed: spec_validation"}
+    # "design_not_ready" / "design_stalled" (caught in the new design loop)
+    # or "spec_validation" (caught by the legacy pre-synthesis gate) are all
+    # valid short-circuit outcomes — each proves the sandbox was not touched.
+    assert record.backtest.status in {
+        "failed: design_not_ready",
+        "failed: design_stalled",
+        "failed: spec_validation",
+    }
     assert record.is_winning is False
     assert record.refinement_rounds == 0
     # The design loop persists readiness findings with refinement_round=-1
@@ -216,3 +222,52 @@ def test_missing_strategy_code_does_not_short_circuit(monkeypatch: pytest.Monkey
         and g.get("details", "").startswith("strategy_code is missing")
         for g in pre_synth_gates
     ), pre_synth_gates
+
+
+def test_spec_unimplementable_exhaustion_preserves_design_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cycle that converges design but trips ``SpecImplementabilityError`` in
+    the refinement loop on every re-entry short-circuits with
+    ``failed: spec_unimplementable`` — and the persisted ``loop_telemetry``
+    must carry the design-loop fields (round count + stop reason) of the
+    attempt that ran, not the empty default the bypass path would record.
+    """
+    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
+
+    valid_spec_dict = {
+        "asset_class": "stocks",
+        "hypothesis": "RSI signal strategy",
+        "signal_definition": "sig",
+        "entry_rules": [_rsi_entry_dict()],
+        "exit_rules": [_rsi_exit_dict(), _stop_loss_exit_dict()],
+        "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
+        "target_symbols": ["QQQ"],
+        "speculative": False,
+    }
+
+    orch = StrategyLabOrchestrator()
+    stub_design_loop(monkeypatch, orch, valid_spec_dict, _VALID_CODE)
+
+    # The refinement loop trips re-design on every attempt. The orchestrator
+    # exhausts MAX_DESIGN_REENTRIES and short-circuits spec_unimplementable.
+    def _always_unimplementable(*_a, **kwargs):
+        spec = kwargs["spec"]
+        raise SpecImplementabilityError(
+            "forced unimplementable for test",
+            failure_phase="execution",
+            last_spec=spec,
+            last_code=kwargs.get("code", ""),
+        )
+
+    monkeypatch.setattr(orch, "_run_synthesis_loop", _always_unimplementable)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert record.backtest.status == "failed: spec_unimplementable"
+    # The design loop converged each attempt (review ready on round 1), so the
+    # telemetry must reflect that — not an unknown/missing stop reason.
+    telemetry = record.loop_telemetry
+    assert telemetry.get("stop_reason") == "ready"
+    assert telemetry.get("design_review_rounds", 0) >= 1
+    assert "critique_ledger" in telemetry
