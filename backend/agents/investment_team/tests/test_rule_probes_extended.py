@@ -1441,18 +1441,12 @@ def test_assess_probe_entry_with_wrong_side_then_right_side_still_passes():
 
 def _assert_cross_fires(pred, bars, trigger):
     """Recompute both predicate sides from ``bars`` and verify the cross
-    actually holds at ``trigger`` using the same semantics as the engine —
-    history depth bounded to match the runtime ``ctx.history`` window so
-    MACD signal/histogram and VWAP values agree with what the compiled
-    strategy sees."""
-    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
-        _predicate_history_depth,
-    )
-
+    actually holds at ``trigger`` using the same pandas helpers the engine
+    consults at runtime (``predicate_evaluator.compute_indicator_series``
+    via ``executor.indicators``)."""
     df = _bars_to_df(bars)
-    depth = _predicate_history_depth(pred.lhs, pred.rhs)
-    lhs_series = _resolve_side_series(pred.lhs, bars, df, depth=depth)
-    rhs_series = _resolve_side_series(pred.rhs, bars, df, depth=depth)
+    lhs_series = _resolve_side_series(pred.lhs, bars, df)
+    rhs_series = _resolve_side_series(pred.rhs, bars, df)
     assert lhs_series is not None and rhs_series is not None
     assert _verify_cross(
         lhs_series.iloc[trigger - 1],
@@ -1922,73 +1916,41 @@ def test_macd_histogram_signed_thresholds_after_warmup(op, rhs):
 
 
 # ---------------------------------------------------------------------------
-# Compiler-matching cross verification (PR #708 further review iteration)
+# Runtime alignment regression (PR #708 review iteration 6)
 # ---------------------------------------------------------------------------
 #
-# The synthesizer's cross verification must use the same trailing-window
-# indicator helpers ``synthesis/compiler.py`` emits into the compiled
-# strategy — not the pandas batch helpers in ``executor/indicators.py``.
-# RSI is the canonical case: pandas uses Wilder/EWM smoothing over the full
-# series; the compiler uses a simple average over the last ``period`` bars.
-# The two formulas can disagree by 10+ RSI points at the same bar, so a
-# trigger that pandas accepts may not fire at runtime, and the asserter
-# rejects the synthesized run.
-
-
-from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (  # noqa: E402
-    _compiler_indicator_at,
-)
-
-
-def _assert_cross_fires_under_compiler_math(pred, bars, trigger):
-    """Verify the cross actually fires under the compiler's trailing-window
-    indicator math at the synthesizer-reported trigger. Mirrors the
-    behaviour of the runtime + asserter — if this holds, the asserter won't
-    reject the synthesized run as an early / unrelated trade."""
-
-    def _side_at(side, idx):
-        if isinstance(side, IndicatorRef):
-            return _compiler_indicator_at(side, bars, idx)
-        if isinstance(side, str):
-            field = side.replace("bar.", "")
-            return float(getattr(bars[idx], field))
-        return float(side)
-
-    prev_l = _side_at(pred.lhs, trigger - 1)
-    cur_l = _side_at(pred.lhs, trigger)
-    prev_r = _side_at(pred.rhs, trigger - 1)
-    cur_r = _side_at(pred.rhs, trigger)
-    assert None not in (prev_l, cur_l, prev_r, cur_r), (
-        f"compiler eval returned None at trigger={trigger}: "
-        f"prev_l={prev_l}, cur_l={cur_l}, prev_r={prev_r}, cur_r={cur_r}"
-    )
-    if pred.op == "cross_above":
-        assert prev_l <= prev_r and cur_l > cur_r, (
-            f"compiler-math cross_above not satisfied at trigger={trigger}: "
-            f"prev_l={prev_l}, prev_r={prev_r}, cur_l={cur_l}, cur_r={cur_r}"
-        )
-    else:
-        assert prev_l >= prev_r and cur_l < cur_r, (
-            f"compiler-math cross_below not satisfied at trigger={trigger}: "
-            f"prev_l={prev_l}, prev_r={prev_r}, cur_l={cur_l}, cur_r={cur_r}"
-        )
+# The rule-probes gate executes synthesized bars through
+# ``trading_service``, which evaluates entry rules via
+# ``predicate_evaluator.evaluate_entry_rules`` against a
+# ``StreamingHistoryView``. That view computes indicator values through
+# ``compute_indicator_series`` in ``predicate_evaluator.py``, which calls
+# the pandas batch helpers from ``executor/indicators.py`` (Wilder/EWM RSI,
+# rolling Bollinger with ``ddof=1``, etc.). The post-clamp verifier
+# ``_eval_predicate_at`` also uses the pandas helpers via
+# ``_compute_indicator_at``.
+#
+# Earlier review iterations (3-5) chased a compiler-matching path under
+# the assumption that ``synthesis/compiler.py`` defined runtime semantics
+# — but the engine bypasses the compiled strategy's inline indicator
+# helpers and evaluates predicates itself via the pandas path. The
+# synthesizer must therefore agree with the pandas helpers, which is the
+# original (pre-iteration-3) behaviour.
 
 
 @pytest.mark.parametrize(
     "lhs,op,rhs",
     [
-        # RSI — Codex's named example; pandas Wilder vs compiler simple-avg
-        # diverge by ~10 RSI points, so this would fail with pandas math.
+        # The canonical case Codex named: RSI(14) cross_above 30 with the
+        # pandas Wilder-EWM helper. If the synthesizer reports a trigger
+        # the post-clamp verifier rejects, the rule is marked
+        # ``post_clamp_predicate_violation`` and skipped — exactly the
+        # regression we now guard against.
         (IndicatorRef(name="rsi", params={"period": 14}), "cross_above", 30.0),
         (IndicatorRef(name="rsi", params={"period": 14}), "cross_below", 70.0),
         (IndicatorRef(name="rsi", params={"period": 14}), "cross_above", 50.0),
-        # MACD — windowed-EMA spread vs pandas full-series EWM
+        (IndicatorRef(name="adx", params={"period": 14}), "cross_above", 25.0),
         (IndicatorRef(name="macd", params={"output": "macd"}), "cross_above", 0.0),
         (IndicatorRef(name="macd", params={"output": "macd"}), "cross_above", 50.0),
-        (IndicatorRef(name="macd", params={"output": "histogram"}), "cross_above", 0.0),
-        # ADX — Wilder smoothing vs compiler simple sum
-        (IndicatorRef(name="adx", params={"period": 14}), "cross_above", 25.0),
-        # Bollinger — population std (ddof=0) vs pandas sample std (ddof=1)
         (
             IndicatorRef(name="bollinger", params={"band": "upper"}),
             "cross_below",
@@ -1999,9 +1961,7 @@ def _assert_cross_fires_under_compiler_math(pred, bars, trigger):
             "cross_below",
             10.0,
         ),
-        # ATR — both algorithms agree, but verify the trigger still aligns
         (IndicatorRef(name="atr", params={"period": 14}), "cross_above", 5.0),
-        # Stochastic — both windowed; sanity check
         (
             IndicatorRef(
                 name="stochastic",
@@ -2010,133 +1970,26 @@ def _assert_cross_fires_under_compiler_math(pred, bars, trigger):
             "cross_above",
             20.0,
         ),
+        (IndicatorRef(name="vwap"), "cross_above", 200.0),
     ],
 )
-def test_cross_trigger_matches_compiler_math(lhs, op, rhs):
-    """The synthesizer-reported trigger must satisfy the cross under the
-    compiler's trailing-window helpers. Regression for the divergence
-    between pandas batch RSI (Wilder/EWM) and compiler simple-average RSI
-    — the synthesizer was reporting triggers where pandas RSI transitioned
-    but compiler RSI never did, and the asserter rejected the runs."""
+def test_trigger_accepted_by_post_clamp_verifier(lhs, op, rhs):
+    """The synthesizer trigger must satisfy the post-clamp verifier
+    ``_eval_predicate_at`` — which uses the same pandas helpers the engine
+    consults — otherwise the rule probe is marked
+    ``post_clamp_predicate_violation`` and the rule is skipped instead of
+    tested. Catches any drift between ``_search_cross`` and the runtime
+    predicate evaluator."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
     pred = Predicate(lhs=lhs, op=op, rhs=rhs)
     bars, trigger, reason = _synthesise_for_predicate(pred)
     assert reason is None and bars is not None and trigger > 0, (
         f"synthesizer failed on {lhs.name}: {reason}"
     )
-    _assert_cross_fires_under_compiler_math(pred, bars, trigger)
-
-
-# ---------------------------------------------------------------------------
-# Compiler-runtime gate alignment (PR #708 review iteration 5)
-# ---------------------------------------------------------------------------
-#
-# The compiled strategy's on_bar gate doesn't evaluate predicates until
-# ``len(history) >= max(per_indicator_lookback, _MIN_WINDOW=20)``, and
-# ctx.history is bounded to that same depth. Two consequences for the
-# synthesizer:
-#
-# 1. Triggers must be >= the gate floor — otherwise the cross fires
-#    before the runtime even looks at the predicate, and the asserter
-#    never sees a trade. VWAP previously reported trigger=1 because
-#    _warmup_for_indicator(vwap) returned 1.
-# 2. MACD signal/histogram and VWAP evaluations depend on the *entire*
-#    history slice. Unbounded computation diverges from the runtime's
-#    bounded-deque computation; for MACD signal cross_above -0.5 this
-#    flipped the cross verdict at the synthesizer-reported trigger.
-
-
-from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (  # noqa: E402
-    _COMPILER_MIN_WINDOW,
-    _predicate_history_depth,
-)
-
-
-@pytest.mark.parametrize(
-    "lhs,op,rhs",
-    [
-        # VWAP triggers must respect the _COMPILER_MIN_WINDOW gate
-        (IndicatorRef(name="vwap"), "cross_above", 200.0),
-        (IndicatorRef(name="vwap"), "cross_below", 50.0),
-        (IndicatorRef(name="vwap"), "cross_above", 100.0),
-        # Any sub-20-period indicator also respects the global floor
-        (IndicatorRef(name="sma", params={"period": 5}), "cross_above", 110.0),
-        (IndicatorRef(name="ema", params={"period": 5}), "cross_above", 110.0),
-    ],
-)
-def test_trigger_respects_compiler_min_window_gate(lhs, op, rhs):
-    """The synthesizer trigger must satisfy ``trigger >= _COMPILER_MIN_WINDOW``
-    so it falls inside the compiled strategy's ``on_bar`` evaluation window.
-    Earlier triggers (e.g. VWAP at bar 1) fired before the runtime gate
-    opened, so the asserter never saw a corresponding trade."""
-    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
-    bars, trigger, reason = _synthesise_for_predicate(pred)
-    assert reason is None and bars is not None, f"synthesizer failed: {reason}"
-    assert trigger >= _COMPILER_MIN_WINDOW, (
-        f"trigger={trigger} fires before _COMPILER_MIN_WINDOW={_COMPILER_MIN_WINDOW} "
-        f"— the compiled strategy would not evaluate the predicate yet"
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"post-clamp verifier (pandas helpers) rejected the synthesized "
+        f"trigger={trigger} for {lhs.name} {op} {rhs}"
     )
-
-
-@pytest.mark.parametrize(
-    "lhs,op,rhs",
-    [
-        # MACD signal/histogram with bounded ctx.history depth — the
-        # synthesizer's unbounded macd_values list previously walked the
-        # full series for the signal EWM, while the runtime walks only
-        # the last `depth - slow + 1` entries. The two diverged at the
-        # synthesizer-reported trigger.
-        (
-            IndicatorRef(name="macd", params={"output": "signal"}),
-            "cross_above",
-            -0.5,
-        ),
-        (
-            IndicatorRef(name="macd", params={"output": "signal"}),
-            "cross_below",
-            0.0,
-        ),
-        (
-            IndicatorRef(name="macd", params={"output": "histogram"}),
-            "cross_above",
-            0.0,
-        ),
-        (
-            IndicatorRef(name="macd", params={"output": "histogram"}),
-            "cross_below",
-            5.0,
-        ),
-    ],
-)
-def test_macd_signal_histogram_match_runtime_bounded_history(lhs, op, rhs):
-    """At the synthesizer-reported trigger, the depth-bounded compiler
-    evaluation must transition across the threshold. Regression for the
-    case where the synthesizer's unbounded macd_values diverged from the
-    runtime's deque bounded to ``depth - slow + 1``."""
-    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
-    bars, trigger, reason = _synthesise_for_predicate(pred)
-    assert reason is None and bars is not None and trigger > 0, (
-        f"synthesizer failed on {lhs.name} {op} {rhs}: {reason}"
-    )
-    # Evaluate both sides with the exact depth the runtime uses.
-    depth = _predicate_history_depth(pred.lhs, pred.rhs)
-    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
-        _compiler_indicator_at,
-    )
-
-    prev_l = _compiler_indicator_at(pred.lhs, bars, trigger - 1, depth=depth)
-    cur_l = _compiler_indicator_at(pred.lhs, bars, trigger, depth=depth)
-    if isinstance(pred.rhs, IndicatorRef):
-        prev_r = _compiler_indicator_at(pred.rhs, bars, trigger - 1, depth=depth)
-        cur_r = _compiler_indicator_at(pred.rhs, bars, trigger, depth=depth)
-    else:
-        prev_r = cur_r = float(pred.rhs)
-    if op == "cross_above":
-        assert prev_l <= prev_r and cur_l > cur_r, (
-            f"depth-bounded cross_above not satisfied at trigger={trigger}: "
-            f"prev_l={prev_l}, prev_r={prev_r}, cur_l={cur_l}, cur_r={cur_r}"
-        )
-    else:
-        assert prev_l >= prev_r and cur_l < cur_r, (
-            f"depth-bounded cross_below not satisfied at trigger={trigger}: "
-            f"prev_l={prev_l}, prev_r={prev_r}, cur_l={cur_l}, cur_r={cur_r}"
-        )

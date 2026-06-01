@@ -61,18 +61,11 @@ _MIN_TOTAL_BARS = 80
 _BARS_AFTER_TRIGGER = 5
 _DECAY_SEARCH_ITERS = 12
 _PROBE_SYMBOL_FALLBACK = "PROBE"
-# Mirror ``synthesis/compiler.py:_MIN_WINDOW``. The compiled strategy
-# gates ``on_bar`` until ``len(history) >= warmup_min``, where
-# ``warmup_min = max(per_indicator_lookback, _MIN_WINDOW)``. The
-# synthesizer must therefore floor every cross trigger at the same value
-# — otherwise a trigger fires at bar 1 (e.g. VWAP) while the compiled
-# strategy waits until bar 20 and the one-shot cross has already passed.
+# Defensive trigger floor — most pandas indicators have natural NaN
+# warmup (RSI period bars, etc.) but VWAP and other unbounded
+# close-driven sequences can fire at bar 1. Floor all triggers at this
+# value so probe runs land inside a realistic post-warmup window.
 _COMPILER_MIN_WINDOW = 20
-# Mirror ``synthesis/compiler.py:_VWAP_HISTORY``. The cumulative-style
-# VWAP helper sees the deepest history the harness retains. Used in
-# ``_history_depth_for_synth`` so a VWAP probe doesn't slice history more
-# aggressively than the runtime.
-_COMPILER_VWAP_HISTORY = 500
 
 
 @dataclass(frozen=True)
@@ -1550,374 +1543,6 @@ def _earliest_indicator_satisfying_index(
     return None
 
 
-# ---------------------------------------------------------------------------
-# Compiler-matching indicator evaluators
-#
-# The compiled strategy uses trailing-window helpers in ``synthesis/compiler.py``
-# (e.g. simple-average RSI over the last ``period`` bars) that diverge from the
-# pandas batch helpers in ``executor/indicators.py`` (e.g. Wilder/EWM RSI over
-# the full series). When the synthesizer verifies a cross with pandas math the
-# reported ``trigger_idx`` can disagree with where the compiled strategy will
-# actually fire, and the asserter later rejects the synthesized run.
-#
-# These helpers mirror ``synthesis/compiler.py`` algorithm-for-algorithm so
-# :func:`_search_cross` and :func:`_assert_cross_fires` see the same values
-# the runtime will produce. Verbatim copies of the compiler logic — keep them
-# in sync if either side changes.
-# ---------------------------------------------------------------------------
-
-
-def _compiler_src(bar: OHLCVBar, source: str) -> float:
-    if source == "hl2":
-        return (bar.high + bar.low) / 2.0
-    if source == "ohlc4":
-        return (bar.open + bar.high + bar.low + bar.close) / 4.0
-    return float(getattr(bar, source))
-
-
-def _compiler_sma_at(
-    history: List[OHLCVBar], period: int, source: str = "close"
-) -> Optional[float]:
-    if len(history) < period:
-        return None
-    vals = [_compiler_src(b, source) for b in history[-period:]]
-    return sum(vals) / period
-
-
-def _compiler_ema_at(
-    history: List[OHLCVBar], period: int, source: str = "close"
-) -> Optional[float]:
-    if len(history) < period:
-        return None
-    alpha = 2.0 / (period + 1.0)
-    vals = [_compiler_src(b, source) for b in history[-period:]]
-    val = vals[0]
-    for v in vals[1:]:
-        val = alpha * v + (1.0 - alpha) * val
-    return val
-
-
-def _compiler_rsi_at(
-    history: List[OHLCVBar], period: int = 14, source: str = "close"
-) -> Optional[float]:
-    if len(history) < period + 1:
-        return None
-    gains = 0.0
-    losses = 0.0
-    for i in range(len(history) - period, len(history)):
-        cur = _compiler_src(history[i], source)
-        prev = _compiler_src(history[i - 1], source)
-        delta = cur - prev
-        if delta > 0:
-            gains += delta
-        else:
-            losses += -delta
-    avg_gain = gains / period
-    avg_loss = losses / period
-    if avg_loss == 0:
-        return 100.0 if avg_gain > 0 else 50.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
-def _compiler_bollinger_at(
-    history: List[OHLCVBar],
-    period: int = 20,
-    num_std: float = 2.0,
-    source: str = "close",
-    select: str = "middle",
-) -> Optional[float]:
-    if len(history) < period:
-        return None
-    vals = [_compiler_src(b, source) for b in history[-period:]]
-    mean = sum(vals) / period
-    var = sum((v - mean) ** 2 for v in vals) / period
-    std = math.sqrt(var) if var > 0 else 0.0
-    if select == "middle":
-        return mean
-    if select == "upper":
-        return mean + num_std * std
-    if select == "lower":
-        return mean - num_std * std
-    return None
-
-
-def _compiler_atr_at(history: List[OHLCVBar], period: int = 14) -> Optional[float]:
-    if len(history) < period + 1:
-        return None
-    trs = []
-    for i in range(len(history) - period, len(history)):
-        h = history[i].high
-        low = history[i].low
-        prev_close = history[i - 1].close
-        trs.append(max(h - low, abs(h - prev_close), abs(low - prev_close)))
-    return sum(trs) / period
-
-
-def _compiler_adx_at(history: List[OHLCVBar], period: int = 14) -> Optional[float]:
-    if len(history) < 2 * period + 1:
-        return None
-    plus_dms = []
-    minus_dms = []
-    trs = []
-    for i in range(1, len(history)):
-        up = history[i].high - history[i - 1].high
-        down = history[i - 1].low - history[i].low
-        plus_dm = up if (up > down and up > 0) else 0.0
-        minus_dm = down if (down > up and down > 0) else 0.0
-        prev_close = history[i - 1].close
-        tr = max(
-            history[i].high - history[i].low,
-            abs(history[i].high - prev_close),
-            abs(history[i].low - prev_close),
-        )
-        plus_dms.append(plus_dm)
-        minus_dms.append(minus_dm)
-        trs.append(tr)
-    tr_sum = sum(trs[-period:])
-    if tr_sum == 0:
-        return 0.0
-    plus_di = 100.0 * sum(plus_dms[-period:]) / tr_sum
-    minus_di = 100.0 * sum(minus_dms[-period:]) / tr_sum
-    denom = plus_di + minus_di
-    if denom == 0:
-        return 0.0
-    return 100.0 * abs(plus_di - minus_di) / denom
-
-
-def _compiler_stochastic_at(
-    history: List[OHLCVBar],
-    k_period: int = 14,
-    d_period: int = 3,
-    select: str = "k",
-) -> Optional[float]:
-    if len(history) < k_period:
-        return None
-
-    def _k_at(end: int) -> float:
-        w = history[end - k_period : end]
-        lowest = min(b.low for b in w)
-        highest = max(b.high for b in w)
-        rng = highest - lowest
-        if rng == 0:
-            return 50.0
-        return 100.0 * (history[end - 1].close - lowest) / rng
-
-    k_val = _k_at(len(history))
-    if select == "k":
-        return k_val
-    if len(history) < k_period + d_period - 1:
-        return None
-    k_vals = [_k_at(end) for end in range(k_period, len(history) + 1)]
-    return sum(k_vals[-d_period:]) / d_period
-
-
-def _compiler_vwap_at(history: List[OHLCVBar]) -> Optional[float]:
-    if not history:
-        return None
-    num = sum(((b.high + b.low + b.close) / 3.0) * b.volume for b in history)
-    den = sum(b.volume for b in history)
-    if den == 0:
-        return sum(b.close for b in history) / len(history)
-    return num / den
-
-
-def _compiler_macd_at(
-    history: List[OHLCVBar],
-    fast: int = 12,
-    slow: int = 26,
-    signal: int = 9,
-    source: str = "close",
-    select: str = "macd",
-) -> Optional[float]:
-    if not (fast >= 2) or not (slow > fast) or not (signal >= 2):
-        return None
-    if len(history) < slow:
-        return None
-    alpha_f = 2.0 / (fast + 1.0)
-    alpha_s = 2.0 / (slow + 1.0)
-    # Cold rebuild: every end position in [slow, len(history)] produces one
-    # macd_line element. Mirrors compiler.py:585-593 (cold path).
-    macd_line: List[float] = []
-    for end in range(slow, len(history) + 1):
-        sub = history[:end]
-        ef = _compiler_src(sub[-fast], source)
-        for b in sub[-fast + 1 :]:
-            ef = alpha_f * _compiler_src(b, source) + (1.0 - alpha_f) * ef
-        es = _compiler_src(sub[-slow], source)
-        for b in sub[-slow + 1 :]:
-            es = alpha_s * _compiler_src(b, source) + (1.0 - alpha_s) * es
-        macd_line.append(ef - es)
-    macd_val = macd_line[-1]
-    if select == "macd":
-        return macd_val
-    if len(macd_line) < signal:
-        return None
-    alpha_g = 2.0 / (signal + 1.0)
-    sig = macd_line[0]
-    for v in macd_line[1:]:
-        sig = alpha_g * v + (1.0 - alpha_g) * sig
-    if select == "signal":
-        return sig
-    if select == "histogram":
-        return macd_val - sig
-    return None
-
-
-def _compiler_indicator_at(
-    ref: IndicatorRef,
-    bars: List[OHLCVBar],
-    end_idx: int,
-    depth: Optional[int] = None,
-) -> Optional[float]:
-    """Evaluate ``ref`` at bar ``end_idx`` using compiler-matching math.
-
-    The history slice mirrors what ``ctx.history(symbol, depth)`` returns
-    at runtime: bounded to the last ``depth`` bars when ``depth`` is
-    supplied, otherwise the full ``bars[: end_idx + 1]``. This matters for
-    MACD (signal/histogram walk an unbounded macd_line otherwise) and
-    VWAP (cumulative across the bounded window only). Pass-through for
-    all other indicators since they only look at the last few bars.
-    """
-    if depth is None:
-        history = bars[: end_idx + 1]
-    else:
-        history = bars[max(0, end_idx + 1 - depth) : end_idx + 1]
-    if not history:
-        return None
-    name = ref.name
-    source = ref.source
-    if name == "sma":
-        return _compiler_sma_at(history, int(ref.param("period")), source)
-    if name == "ema":
-        return _compiler_ema_at(history, int(ref.param("period")), source)
-    if name == "rsi":
-        return _compiler_rsi_at(history, int(ref.param("period")), source)
-    if name == "macd":
-        return _compiler_macd_at(
-            history,
-            int(ref.param("fast")),
-            int(ref.param("slow")),
-            int(ref.param("signal")),
-            source,
-            str(ref.param("output")),
-        )
-    if name == "bollinger":
-        return _compiler_bollinger_at(
-            history,
-            int(ref.param("period")),
-            float(ref.param("num_std")),
-            source,
-            str(ref.param("band")),
-        )
-    if name == "atr":
-        return _compiler_atr_at(history, int(ref.param("period")))
-    if name == "adx":
-        return _compiler_adx_at(history, int(ref.param("period")))
-    if name == "stochastic":
-        return _compiler_stochastic_at(
-            history,
-            int(ref.param("k_period")),
-            int(ref.param("d_period")),
-            str(ref.param("output")),
-        )
-    if name == "vwap":
-        return _compiler_vwap_at(history)
-    return None
-
-
-def _compiler_macd_full_series(
-    ref: IndicatorRef, bars: List[OHLCVBar], depth: Optional[int] = None
-) -> pd.Series:
-    """Optimized MACD-output series builder.
-
-    The per-bar dispatch through :func:`_compiler_macd_at` is O(n²) per call
-    (each call re-runs the cold rebuild over the full history-so-far), so the
-    naive series wrapper is O(n³). This helper builds the macd_line / signal
-    once in O(n × slow) and returns the requested ``output`` column.
-
-    When ``depth`` is supplied, the macd_values deque is bounded to
-    ``depth - slow + 1`` (mirroring the compiler's ``ctx.history`` slide):
-    runtime walks the signal EWM only over that bounded subset, so the
-    synthesizer must do the same or the signal/histogram values diverge.
-    """
-    fast = int(ref.param("fast"))
-    slow = int(ref.param("slow"))
-    signal = int(ref.param("signal"))
-    source = ref.source
-    output = str(ref.param("output"))
-    n = len(bars)
-    macd_line: List[Optional[float]] = [None] * n
-    signal_line: List[Optional[float]] = [None] * n
-    hist_line: List[Optional[float]] = [None] * n
-    if not (fast >= 2) or not (slow > fast) or not (signal >= 2):
-        col = {"macd": macd_line, "signal": signal_line, "histogram": hist_line}.get(
-            output, macd_line
-        )
-        return pd.Series(col, dtype=float)
-    alpha_f = 2.0 / (fast + 1.0)
-    alpha_s = 2.0 / (slow + 1.0)
-    alpha_g = 2.0 / (signal + 1.0)
-    # macd_values deque bound: when depth is set, the runtime keeps at most
-    # ``depth - slow + 1`` entries in the macd_line deque after the sliding
-    # steady state is reached. Floor at ``signal`` so we still have enough
-    # for the EWM. Unbounded when depth is None (back-compat).
-    if depth is None:
-        macd_bound = n
-    else:
-        macd_bound = max(signal, depth - slow + 1)
-    closes = [_compiler_src(b, source) for b in bars]
-    macd_values: List[float] = []
-    for end_idx in range(slow - 1, n):
-        # Windowed EMA over the last fast / slow closes — matches the cold
-        # rebuild in compiler.py:587-593 exactly.
-        ef = closes[end_idx - fast + 1]
-        for i in range(end_idx - fast + 2, end_idx + 1):
-            ef = alpha_f * closes[i] + (1.0 - alpha_f) * ef
-        es = closes[end_idx - slow + 1]
-        for i in range(end_idx - slow + 2, end_idx + 1):
-            es = alpha_s * closes[i] + (1.0 - alpha_s) * es
-        m = ef - es
-        macd_line[end_idx] = m
-        macd_values.append(m)
-        if len(macd_values) > macd_bound:
-            macd_values.pop(0)
-        if len(macd_values) >= signal:
-            # Signal is EWM(macd_line[0..k]) — recompute from scratch to
-            # mirror compiler.py:601-605 (which also walks macd_line each
-            # call, since the deque can be sliced/expanded).
-            sig = macd_values[0]
-            for v in macd_values[1:]:
-                sig = alpha_g * v + (1.0 - alpha_g) * sig
-            signal_line[end_idx] = sig
-            hist_line[end_idx] = m - sig
-    col = {"macd": macd_line, "signal": signal_line, "histogram": hist_line}.get(output, macd_line)
-    return pd.Series(col, dtype=float)
-
-
-def _compiler_indicator_series(
-    ref: IndicatorRef, bars: List[OHLCVBar], depth: Optional[int] = None
-) -> Optional[pd.Series]:
-    """Run :func:`_compiler_indicator_at` at every bar index and wrap as a
-    pandas Series so the existing cross-search code can iterate it with
-    ``.iloc[]``. Slower than the pandas batch helpers but matches the values
-    the compiled strategy produces.
-
-    ``depth`` matches ``ctx.history``'s window — passed through to the
-    indicators whose values depend on the full history slice (MACD's
-    signal/histogram, VWAP). Other indicators only look at the last few
-    bars and are unaffected.
-    """
-    if ref.name == "macd":
-        return _compiler_macd_full_series(ref, bars, depth=depth)
-    values: List[Optional[float]] = [None] * len(bars)
-    for i in range(len(bars)):
-        v = _compiler_indicator_at(ref, bars, i, depth=depth)
-        if v is not None and math.isfinite(v):
-            values[i] = v
-    return pd.Series(values, dtype=float)
-
-
 def _compute_indicator_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> Optional[pd.Series]:
     """Compute ``ref`` over the synthetic bar series as a full ``pd.Series``.
 
@@ -1981,7 +1606,7 @@ def _resolve_side_series(
     side: Any,
     bars: List[OHLCVBar],
     df: pd.DataFrame,
-    depth: Optional[int] = None,
+    depth: Optional[int] = None,  # kept for backward-compat with callers
 ) -> Optional[pd.Series]:
     """Resolve a predicate side (``IndicatorRef`` / bar-field string / float)
     to a full ``pd.Series`` aligned with ``bars``.
@@ -1989,14 +1614,26 @@ def _resolve_side_series(
     Returns ``None`` when the side references an unknown indicator or
     bar-field literal — the search treats that builder as failed and moves on.
 
-    Uses :func:`_compiler_indicator_series` (not the pandas batch helpers) so
-    the cross trigger the search reports matches the bar the compiled strategy
-    will actually fire on. ``depth`` mirrors ``ctx.history``'s window for the
-    underlying compiled strategy so MACD signal/histogram and VWAP don't
-    diverge from the runtime due to unbounded history accumulation.
+    Uses :func:`_compute_indicator_series` (pandas batch helpers from
+    ``executor/indicators.py``) — this is what the engine itself uses at
+    runtime: ``trading_service/service.py:_evaluate_entry_rules_pred`` calls
+    into ``predicate_evaluator.evaluate_entry_rules`` which materialises
+    indicator values through :class:`StreamingHistoryView.indicator`, which
+    in turn delegates to ``compute_indicator_series`` in
+    ``predicate_evaluator.py`` (the pandas helpers). The post-clamp verifier
+    at :func:`_eval_predicate_at` also resolves indicator values via
+    :func:`_compute_indicator_at` (pandas). Aligning the synthesizer to the
+    same path keeps the reported trigger consistent with both the engine and
+    the post-clamp verifier.
+
+    ``depth`` is kept on the signature for backward compatibility but is
+    unused — the pandas helpers compute against the full ``bars`` series and
+    the runtime's ``StreamingHistoryView`` is bounded at 500 bars, well
+    above any synthesized forcing sequence.
     """
+    del depth  # noqa — preserved as keyword arg for callers
     if isinstance(side, IndicatorRef):
-        return _compiler_indicator_series(side, bars, depth=depth)
+        return _compute_indicator_series(side, bars)
     if isinstance(side, str):
         field_name = _PRICEREF_TO_FIELD.get(side)
         if field_name is None:
@@ -2005,21 +1642,6 @@ def _resolve_side_series(
     if isinstance(side, (int, float)) and not isinstance(side, bool):
         return pd.Series([float(side)] * len(bars))
     return None
-
-
-def _predicate_history_depth(lhs: Any, rhs: Any) -> int:
-    """Compute the ``ctx.history`` depth the compiled strategy would request
-    for a single-predicate probe of ``lhs op rhs``.
-
-    Mirrors ``synthesis/compiler.py:_history_depth_for`` aggregated across
-    both sides of the predicate, floored at ``_COMPILER_MIN_WINDOW``.
-    """
-    candidates = [_COMPILER_MIN_WINDOW]
-    if isinstance(lhs, IndicatorRef):
-        candidates.append(_history_depth_for_synth(lhs))
-    if isinstance(rhs, IndicatorRef):
-        candidates.append(_history_depth_for_synth(rhs))
-    return max(candidates)
 
 
 def _search_cross(
@@ -2039,19 +1661,21 @@ def _search_cross(
     so the gate emits a deterministic ``unprobeable`` reason instead of
     silently failing.
 
-    The scan is floored at ``_COMPILER_MIN_WINDOW`` (and at each indicator's
-    lookback) to mirror the compiled strategy's ``on_bar`` gate, and each
-    indicator series is computed against a history slice bounded to the
-    same ``depth`` the compiler emits for ``ctx.history``.
+    Indicator values are resolved through :func:`_resolve_side_series` which
+    uses the same pandas helpers ``predicate_evaluator.evaluate_entry_rules``
+    consults at runtime — keeping the synthesizer's trigger consistent with
+    the post-clamp verifier and the engine. The scan is floored at
+    ``_COMPILER_MIN_WINDOW`` (defensive — most pandas indicators have
+    natural NaN warmup, but VWAP / unbounded close-driven sequences could
+    otherwise fire at bar 1).
     """
-    depth = _predicate_history_depth(lhs, rhs)
     runtime_warmup = max(warmup, _COMPILER_MIN_WINDOW)
     last_reason = "cross_not_found_in_window"
     for builder in builders:
         bars = builder()
         df = _bars_to_df(bars)
-        lhs_series = _resolve_side_series(lhs, bars, df, depth=depth)
-        rhs_series = _resolve_side_series(rhs, bars, df, depth=depth)
+        lhs_series = _resolve_side_series(lhs, bars, df)
+        rhs_series = _resolve_side_series(rhs, bars, df)
         if lhs_series is None or rhs_series is None:
             last_reason = "cross_side_unresolved"
             continue
@@ -2431,17 +2055,6 @@ def _lookback_for_synth(ref: IndicatorRef) -> int:
     if name == "vwap":
         return _COMPILER_MIN_WINDOW
     return 1
-
-
-def _history_depth_for_synth(ref: IndicatorRef) -> int:
-    """Mirror ``synthesis/compiler.py:_history_depth_for``. Equals
-    :func:`_lookback_for_synth` for non-VWAP indicators; for VWAP returns
-    ``_COMPILER_VWAP_HISTORY`` so the cumulative-style helper sees the
-    deepest history the harness retains.
-    """
-    if ref.name == "vwap":
-        return _COMPILER_VWAP_HISTORY
-    return _lookback_for_synth(ref)
 
 
 def _warmup_for_indicator(ref: IndicatorRef) -> int:
