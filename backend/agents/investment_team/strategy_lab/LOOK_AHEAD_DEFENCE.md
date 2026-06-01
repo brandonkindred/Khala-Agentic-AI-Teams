@@ -85,3 +85,7 @@ Locked in by: `backend/agents/investment_team/tests/test_backtest_anomaly_realis
 | Static regex + AST | `strategy_lab/quality_gates/code_safety.py`, `strategy_lab/quality_gates/code_safety_ast.py` | `tests/test_code_safety.py` |
 | Post-hoc heuristic | `strategy_lab/quality_gates/backtest_anomaly.py` | `tests/test_backtest_anomaly_realism.py` |
 | Walk-forward fold purity | `execution/walk_forward.py` | `tests/test_walk_forward.py` |
+
+> Retry state isolation across the design / synthesis / alignment / repair loops
+> (copy-on-entry, commit-on-completion) is documented separately in
+> [`RETRY_STATE_ISOLATION.md`](RETRY_STATE_ISOLATION.md).

@@ -402,6 +402,44 @@ def test_zero_trade_repair_failed_proposal_preserves_state(
     assert all(g.gate_name.startswith("zero_trade_repair_") for g in critical_gates)
 
 
+def test_zero_trade_repair_failed_proposal_is_pure_wrt_input_code_and_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected repair leaves the caller's input ``code`` and ``spec``
+    untouched — ``try_repair`` is pure with respect to its inputs, so the
+    fallback ``RefinementAgent`` runs against the original known-good blob
+    rather than a half-mutated one."""
+    orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="NO_ORDERS_EMITTED",
+                evidence="orders_emitted=0",
+                proposed_code=_REPAIRED_CODE,
+                changes_made="attempted RSI loosen",
+            ),
+        ],
+        sandbox_results=[
+            _code_exec(success=True, raw_trades=[]),  # zero trades again → reject
+        ],
+    )
+
+    input_spec = _spec()
+    input_code = "INPUT-CODE-BLOB"
+    spec_before = input_spec.model_dump()
+
+    outcome, _events, _attempts = _drive_repair(orch, spec=input_spec, code=input_code)
+
+    assert outcome.committed is False
+    # The input objects the caller still holds are unchanged.
+    assert input_code == "INPUT-CODE-BLOB"
+    assert input_spec.model_dump() == spec_before
+    # The repairer signals "no commit" via empty/None outcome fields rather
+    # than handing back a mutated blob.
+    assert outcome.new_code == ""
+    assert outcome.new_spec is None
+
+
 def test_zero_trade_repair_unsafe_code_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

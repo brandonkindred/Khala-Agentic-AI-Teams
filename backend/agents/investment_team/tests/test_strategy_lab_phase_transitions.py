@@ -440,6 +440,106 @@ def test_phase_transition_attempt_increments_on_design_reentry(
     ]
 
 
+def _record_attempt_drift(orch: StrategyLabOrchestrator, collector: Any, attempt: int) -> None:
+    """Record one spec revision into ``collector`` tagged for ``attempt``.
+
+    Uses two specs with distinct ``strategy_id`` so the hashes differ and
+    ``record_spec_change`` actually appends (it is a no-op on equal hashes).
+    """
+    collector.record_spec_change(
+        phase="design",
+        agent="DesignAgent",
+        before_spec=orch._build_spec_from_dict(_spec_dict(), strategy_id=f"s-{attempt}-a"),
+        after_spec=orch._build_spec_from_dict(_spec_dict(), strategy_id=f"s-{attempt}-b"),
+        reason=f"attempt-{attempt} drift",
+    )
+
+
+def test_failed_design_attempt_does_not_poison_next_attempt_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each design attempt gets a clean, isolated ``_DriftCollector``.
+
+    Attempts 0 and 1 record drift then raise ``SpecImplementabilityError``;
+    attempt 2 succeeds. Every attempt must enter with an empty collector (a
+    distinct object), and the record produced by the successful attempt must
+    NOT contain the failed attempts' drift entries.
+    """
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+
+    real_run_design_attempt = orch._run_design_attempt
+    # (attempt_index, collector_id, spec_history_len_on_entry)
+    entries: List[Tuple[int, int, int]] = []
+
+    def _flaky_run_design_attempt(**kwargs: Any) -> Any:
+        collector = kwargs["drift_collector"]
+        attempt = kwargs["design_attempt"]
+        entries.append((attempt, id(collector), len(collector.spec_history)))
+        if attempt < 2:
+            _record_attempt_drift(orch, collector, attempt)
+            raise SpecImplementabilityError(
+                f"forced fail attempt {attempt}",
+                failure_phase="refinement",
+                last_spec=orch._build_spec_from_dict(_spec_dict(), strategy_id=f"s-{attempt}"),
+                last_code="",
+            )
+        return real_run_design_attempt(**kwargs)
+
+    monkeypatch.setattr(orch, "_run_design_attempt", _flaky_run_design_attempt)
+
+    _events, _transitions, record = _drive_cycle_capturing_transitions(orch)
+
+    # Three attempts ran, each with a distinct collector object that was
+    # empty on entry (copy-on-entry isolation).
+    assert [a for a, _id, _n in entries] == [0, 1, 2]
+    assert len({_id for _a, _id, _n in entries}) == 3
+    assert all(n == 0 for _a, _id, n in entries)
+
+    # The successful attempt's record carries none of the failed attempts'
+    # drift — no cross-attempt contamination.
+    reasons = [r.reason for r in record.spec_history]
+    assert "attempt-0 drift" not in reasons
+    assert "attempt-1 drift" not in reasons
+
+
+def test_short_circuit_record_preserves_failed_attempt_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every design attempt fails, the short-circuit record still
+    contains the drift each failed attempt produced.
+
+    The parent commit log accumulates each attempt's child collector on
+    failure (commit-on-completion), so diagnostics survive even though no
+    attempt poisoned its successor's working collector.
+    """
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+
+    def _always_fail(**kwargs: Any) -> Any:
+        collector = kwargs["drift_collector"]
+        attempt = kwargs["design_attempt"]
+        # Each attempt entered clean.
+        assert collector.spec_history == []
+        _record_attempt_drift(orch, collector, attempt)
+        raise SpecImplementabilityError(
+            f"forced fail attempt {attempt}",
+            failure_phase="refinement",
+            last_spec=orch._build_spec_from_dict(_spec_dict(), strategy_id=f"s-{attempt}"),
+            last_code="",
+        )
+
+    monkeypatch.setattr(orch, "_run_design_attempt", _always_fail)
+
+    _events, _transitions, record = _drive_cycle_capturing_transitions(orch)
+
+    assert record.backtest.status == "failed: spec_unimplementable"
+    # All three failed attempts' drift is merged into the diagnostic record,
+    # in attempt order.
+    reasons = [r.reason for r in record.spec_history]
+    assert reasons == ["attempt-0 drift", "attempt-1 drift", "attempt-2 drift"]
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers (no orchestrator wiring — small unit tests for phases.py)
 # ---------------------------------------------------------------------------

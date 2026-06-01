@@ -765,6 +765,13 @@ class StrategyLabOrchestrator:
         # work on the same evaluation window and so contributes to the
         # multiple-testing burden that DSR deflation corrects for.
         phase_back_count: int = 0
+        # Parent commit log for drift across attempts. Each design attempt
+        # works on its own clean child collector (copy-on-entry); the child is
+        # merged back here only once the attempt's fate is known
+        # (commit-on-completion). This keeps a failed attempt's spec/code
+        # revisions out of the next attempt's working state while still
+        # preserving them for the short-circuit diagnostic record. See
+        # ``RETRY_STATE_ISOLATION.md``.
         drift_collector = _DriftCollector()
         cumulative_gate_results: List[QualityGateResult] = []
         # Per-cycle LLM-call budget. Bound once here via ``use_budget`` so it
@@ -775,6 +782,9 @@ class StrategyLabOrchestrator:
         llm_budget = LLMCallBudget(_design_max_llm_calls())
         with use_budget(llm_budget):
             for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
+                # Copy-on-entry: hand this attempt a clean child collector so
+                # drift from a prior failed attempt cannot poison it.
+                attempt_drift = drift_collector.snapshot()
                 try:
                     return self._run_design_attempt(
                         prior_records=prior_records,
@@ -785,7 +795,7 @@ class StrategyLabOrchestrator:
                         directives=directives,
                         design_attempt=design_attempt,
                         phase_back_count=phase_back_count,
-                        drift_collector=drift_collector,
+                        drift_collector=attempt_drift,
                         cumulative_gate_results=cumulative_gate_results,
                     )
                 except SpecImplementabilityError as exc:
@@ -796,6 +806,11 @@ class StrategyLabOrchestrator:
                     last_design_context = exc.design_context
                     phase_back_count += 1
                     self.convergence_tracker.increment_trials(1)
+                    # Commit-on-completion: fold the failed attempt's drift into
+                    # the parent commit log so the short-circuit record retains
+                    # its diagnostics. The next attempt's ``snapshot`` is still a
+                    # fresh empty child, so this does not contaminate it.
+                    drift_collector.merge(attempt_drift)
                     if design_attempt >= MAX_DESIGN_REENTRIES:
                         break
                     emit(
