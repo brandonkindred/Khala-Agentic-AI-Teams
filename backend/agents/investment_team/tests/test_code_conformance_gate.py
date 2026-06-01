@@ -383,57 +383,40 @@ def test_signal_exit_coverage_fails_when_no_position_qty_close() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check 5: stop-loss enforcement
+# Engine-delegated exits: the gate must NOT require the strategy to reference
+# ``entry_price``. Stop-loss / take-profit thresholds are enforced
+# deterministically by ``executor/rule_compiler.py`` against the engine-owned
+# ``PositionState.entry_price``; conformant strategies delegate to the engine
+# and never compute the threshold themselves.
 # ---------------------------------------------------------------------------
 
+# ``_HAPPY_CODE`` with its only ``pos.entry_price`` reference removed — the
+# canonical shape of an engine-delegated strategy.
+_NO_ENTRY_PRICE_CODE = _HAPPY_CODE.replace("pos.entry_price * 0.95", "0.0")
 
-def test_stop_loss_passes_when_entry_price_referenced() -> None:
-    results = CodeConformanceGate().check(_HAPPY_CODE, _happy_spec())
-    assert not any("StopLossRule" in d for d in _critical_details(results))
 
-
-def test_stop_loss_fails_when_entry_price_never_referenced() -> None:
-    # Strip both `pos.entry_price` references → check #5 fires.
-    code = _HAPPY_CODE.replace("pos.entry_price * 0.95", "0.0")
+def test_stop_loss_passes_without_entry_price_reference() -> None:
     spec = _spec(
         entry_rules=[_sma_cross_entry()],
         exit_rules=[StopLossRule(pct=0.05)],
         target_symbols=["QQQ"],
     )
-    results = CodeConformanceGate().check(code, spec)
-    crits = _critical_details(results)
-    assert any("StopLossRule" in c and "entry_price" in c for c in crits), crits
+    results = CodeConformanceGate().check(_NO_ENTRY_PRICE_CODE, spec)
+    assert not any("StopLossRule" in d for d in _critical_details(results))
 
 
-# ---------------------------------------------------------------------------
-# Check 6: take-profit enforcement
-# ---------------------------------------------------------------------------
-
-
-def test_take_profit_passes_when_entry_price_referenced() -> None:
+def test_take_profit_passes_without_entry_price_reference() -> None:
     spec = _spec(
         entry_rules=[_sma_cross_entry()],
         exit_rules=[TakeProfitRule(pct=0.10)],
         target_symbols=["QQQ"],
     )
-    results = CodeConformanceGate().check(_HAPPY_CODE, spec)
+    results = CodeConformanceGate().check(_NO_ENTRY_PRICE_CODE, spec)
     assert not any("TakeProfitRule" in d for d in _critical_details(results))
 
 
-def test_take_profit_fails_when_entry_price_never_referenced() -> None:
-    code = _HAPPY_CODE.replace("pos.entry_price * 0.95", "0.0")
-    spec = _spec(
-        entry_rules=[_sma_cross_entry()],
-        exit_rules=[TakeProfitRule(pct=0.10)],
-        target_symbols=["QQQ"],
-    )
-    results = CodeConformanceGate().check(code, spec)
-    crits = _critical_details(results)
-    assert any("TakeProfitRule" in c and "entry_price" in c for c in crits), crits
-
-
 # ---------------------------------------------------------------------------
-# Check 7: bar-counting exit rejection
+# Check 5: bar-counting exit rejection
 # ---------------------------------------------------------------------------
 
 
@@ -557,7 +540,7 @@ def test_no_bar_counting_false_positive_on_local_variable() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check 8: sizing math
+# Check 6: sizing math
 # ---------------------------------------------------------------------------
 
 
@@ -593,7 +576,7 @@ def test_sizing_fails_when_qty_is_inline_literal_int() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check 9: no side-effects outside hooks/helpers
+# Check 7: no side-effects outside hooks/helpers
 # ---------------------------------------------------------------------------
 
 
