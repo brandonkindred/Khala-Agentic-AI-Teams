@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 # Issue #537: comparison ops are the literal symbols, not name aliases.
 ComparisonOp = Literal["<", ">", "<=", ">=", "==", "cross_above", "cross_below"]
@@ -184,14 +184,6 @@ class IndicatorRef(_SpecNode):
     params: dict[str, Union[int, float, str]] = Field(default_factory=dict)
     source: Source = "close"
 
-    # Stable, cheap cache key computed once at construction time (after
-    # optional-param defaults are filled in). Replaces ``model_dump_json()``
-    # on the indicator-cache hot path — the JSON encoder walked the whole
-    # model on every lookup; this is a single ``str`` built from the already
-    # validated fields. Stored in a private attr so it never appears in
-    # ``model_dump`` output or serialised specs.
-    _sig_id: str = PrivateAttr(default="")
-
     @model_validator(mode="after")
     def _validate_params(self):
         spec = _INDICATOR_PARAM_SPECS[self.name]
@@ -227,26 +219,30 @@ class IndicatorRef(_SpecNode):
         for key, (default, _check) in optional.items():
             self.params.setdefault(key, default)
 
-        # Compute the cache signature once, after defaults are filled, so two
-        # refs with the same effective configuration share one ``sig_id``
-        # (and therefore one cached series) regardless of whether the caller
-        # passed defaults explicitly. ``repr`` on each value keeps int 14,
-        # float 14.0 and str "14" distinct keys — matching the type fidelity
-        # the previous ``model_dump_json()`` key provided.
-        self._sig_id = "|".join(
-            [self.name, self.source, *(f"{k}={v!r}" for k, v in sorted(self.params.items()))]
-        )
-
         return self
 
     @property
     def sig_id(self) -> str:
-        """Stable per-configuration cache key (see ``_sig_id``).
+        """Cheap, current-configuration cache key for the indicator cache.
 
-        Postconditions: returns a non-empty string for any validated
-        ``IndicatorRef``; equal-configuration refs return equal ``sig_id``.
+        Replaces ``model_dump_json()`` on the indicator-cache hot path: the
+        JSON encoder walked the whole model on every lookup, whereas this is a
+        single ``str`` built from the live fields. ``repr`` on each value keeps
+        int 14, float 14.0 and str "14" distinct keys — matching the type
+        fidelity the previous key provided.
+
+        Derived from the **current** ``name`` / ``source`` / ``params`` on
+        every access (these models are mutable), so a ref whose ``params`` or
+        ``source`` is changed after construction keys a different cache entry —
+        matching the old per-call ``model_dump_json()`` semantics. Not cached
+        on the instance for that reason.
+
+        Postconditions: returns a non-empty string; equal current
+        configurations return equal ``sig_id``.
         """
-        return self._sig_id
+        return "|".join(
+            [self.name, self.source, *(f"{k}={v!r}" for k, v in sorted(self.params.items()))]
+        )
 
     def param(self, key: str, default: Any = None) -> Any:
         """Return ``params[key]`` if set, else the registry default, else ``default``."""

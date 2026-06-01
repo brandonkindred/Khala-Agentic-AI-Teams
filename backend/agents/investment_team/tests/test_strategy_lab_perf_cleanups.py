@@ -62,7 +62,33 @@ def test_sig_id_distinguishes_name_params_and_source() -> None:
 def test_sig_id_is_excluded_from_model_dump() -> None:
     ref = IndicatorRef(name="sma", params={"period": 20})
     assert "sig_id" not in ref.model_dump()
-    assert "_sig_id" not in ref.model_dump_json()
+    assert "sig_id" not in ref.model_dump_json()
+
+
+def test_sig_id_reflects_post_construction_mutation() -> None:
+    # IndicatorRef is mutable; the cache key must track the *current* config so
+    # a mutated-then-reused ref doesn't collide with the pre-mutation cache
+    # entry (matching the old per-call model_dump_json semantics).
+    ref = IndicatorRef(name="sma", params={"period": 5})
+    before = ref.sig_id
+    ref.params["period"] = 10
+    assert ref.sig_id != before
+    assert ref.sig_id == IndicatorRef(name="sma", params={"period": 10}).sig_id
+    ref.source = "high"
+    assert ref.sig_id != IndicatorRef(name="sma", params={"period": 10}).sig_id
+
+
+def test_cache_distinguishes_series_after_param_mutation() -> None:
+    # The history-view cache keyed on sig_id must compute a fresh series when a
+    # reused ref's period changes, not return the stale shorter-window series.
+    df = _ohlcv()
+    view = PandasHistoryView(df, {})
+    ref = IndicatorRef(name="sma", params={"period": 5})
+    sma5 = view.indicator(ref, 30)
+    ref.params["period"] = 20
+    sma20 = view.indicator(ref, 30)
+    assert sma5 != sma20
+    assert sma20 == view.indicator(IndicatorRef(name="sma", params={"period": 20}), 30)
 
 
 # ---------------------------------------------------------------------------
