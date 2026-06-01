@@ -61,6 +61,18 @@ _MIN_TOTAL_BARS = 80
 _BARS_AFTER_TRIGGER = 5
 _DECAY_SEARCH_ITERS = 12
 _PROBE_SYMBOL_FALLBACK = "PROBE"
+# Mirror ``synthesis/compiler.py:_MIN_WINDOW``. The compiled strategy
+# gates ``on_bar`` until ``len(history) >= warmup_min``, where
+# ``warmup_min = max(per_indicator_lookback, _MIN_WINDOW)``. The
+# synthesizer must therefore floor every cross trigger at the same value
+# — otherwise a trigger fires at bar 1 (e.g. VWAP) while the compiled
+# strategy waits until bar 20 and the one-shot cross has already passed.
+_COMPILER_MIN_WINDOW = 20
+# Mirror ``synthesis/compiler.py:_VWAP_HISTORY``. The cumulative-style
+# VWAP helper sees the deepest history the harness retains. Used in
+# ``_history_depth_for_synth`` so a VWAP probe doesn't slice history more
+# aggressively than the runtime.
+_COMPILER_VWAP_HISTORY = 500
 
 
 @dataclass(frozen=True)
@@ -1753,16 +1765,24 @@ def _compiler_macd_at(
 
 
 def _compiler_indicator_at(
-    ref: IndicatorRef, bars: List[OHLCVBar], end_idx: int
+    ref: IndicatorRef,
+    bars: List[OHLCVBar],
+    end_idx: int,
+    depth: Optional[int] = None,
 ) -> Optional[float]:
     """Evaluate ``ref`` at bar ``end_idx`` using compiler-matching math.
 
-    ``history = bars[: end_idx + 1]`` matches the slice the compiled
-    strategy's helpers see at runtime when on_bar is invoked for the bar
-    at index ``end_idx``. Returns ``None`` during warmup or for unknown
-    indicator names.
+    The history slice mirrors what ``ctx.history(symbol, depth)`` returns
+    at runtime: bounded to the last ``depth`` bars when ``depth`` is
+    supplied, otherwise the full ``bars[: end_idx + 1]``. This matters for
+    MACD (signal/histogram walk an unbounded macd_line otherwise) and
+    VWAP (cumulative across the bounded window only). Pass-through for
+    all other indicators since they only look at the last few bars.
     """
-    history = bars[: end_idx + 1]
+    if depth is None:
+        history = bars[: end_idx + 1]
+    else:
+        history = bars[max(0, end_idx + 1 - depth) : end_idx + 1]
     if not history:
         return None
     name = ref.name
@@ -1806,15 +1826,20 @@ def _compiler_indicator_at(
     return None
 
 
-def _compiler_macd_full_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> pd.Series:
+def _compiler_macd_full_series(
+    ref: IndicatorRef, bars: List[OHLCVBar], depth: Optional[int] = None
+) -> pd.Series:
     """Optimized MACD-output series builder.
 
     The per-bar dispatch through :func:`_compiler_macd_at` is O(n²) per call
     (each call re-runs the cold rebuild over the full history-so-far), so the
     naive series wrapper is O(n³). This helper builds the macd_line / signal
-    once in O(n × slow) and returns the requested ``output`` column. Matches
-    ``synthesis/compiler.py:_compiler_macd_at`` value-for-value (verified by
-    the cross trigger tests).
+    once in O(n × slow) and returns the requested ``output`` column.
+
+    When ``depth`` is supplied, the macd_values deque is bounded to
+    ``depth - slow + 1`` (mirroring the compiler's ``ctx.history`` slide):
+    runtime walks the signal EWM only over that bounded subset, so the
+    synthesizer must do the same or the signal/histogram values diverge.
     """
     fast = int(ref.param("fast"))
     slow = int(ref.param("slow"))
@@ -1833,6 +1858,14 @@ def _compiler_macd_full_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> pd.Se
     alpha_f = 2.0 / (fast + 1.0)
     alpha_s = 2.0 / (slow + 1.0)
     alpha_g = 2.0 / (signal + 1.0)
+    # macd_values deque bound: when depth is set, the runtime keeps at most
+    # ``depth - slow + 1`` entries in the macd_line deque after the sliding
+    # steady state is reached. Floor at ``signal`` so we still have enough
+    # for the EWM. Unbounded when depth is None (back-compat).
+    if depth is None:
+        macd_bound = n
+    else:
+        macd_bound = max(signal, depth - slow + 1)
     closes = [_compiler_src(b, source) for b in bars]
     macd_values: List[float] = []
     for end_idx in range(slow - 1, n):
@@ -1847,6 +1880,8 @@ def _compiler_macd_full_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> pd.Se
         m = ef - es
         macd_line[end_idx] = m
         macd_values.append(m)
+        if len(macd_values) > macd_bound:
+            macd_values.pop(0)
         if len(macd_values) >= signal:
             # Signal is EWM(macd_line[0..k]) — recompute from scratch to
             # mirror compiler.py:601-605 (which also walks macd_line each
@@ -1860,21 +1895,24 @@ def _compiler_macd_full_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> pd.Se
     return pd.Series(col, dtype=float)
 
 
-def _compiler_indicator_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> Optional[pd.Series]:
+def _compiler_indicator_series(
+    ref: IndicatorRef, bars: List[OHLCVBar], depth: Optional[int] = None
+) -> Optional[pd.Series]:
     """Run :func:`_compiler_indicator_at` at every bar index and wrap as a
     pandas Series so the existing cross-search code can iterate it with
     ``.iloc[]``. Slower than the pandas batch helpers but matches the values
     the compiled strategy produces.
 
-    MACD is special-cased to an optimized full-series builder because the
-    naive O(n³) per-bar dispatch (each call re-runs the cold rebuild) made
-    indicator-pair MACD probes time out the synthesis perf guard.
+    ``depth`` matches ``ctx.history``'s window — passed through to the
+    indicators whose values depend on the full history slice (MACD's
+    signal/histogram, VWAP). Other indicators only look at the last few
+    bars and are unaffected.
     """
     if ref.name == "macd":
-        return _compiler_macd_full_series(ref, bars)
+        return _compiler_macd_full_series(ref, bars, depth=depth)
     values: List[Optional[float]] = [None] * len(bars)
     for i in range(len(bars)):
-        v = _compiler_indicator_at(ref, bars, i)
+        v = _compiler_indicator_at(ref, bars, i, depth=depth)
         if v is not None and math.isfinite(v):
             values[i] = v
     return pd.Series(values, dtype=float)
@@ -1939,7 +1977,12 @@ _PRICEREF_TO_FIELD = {
 }
 
 
-def _resolve_side_series(side: Any, bars: List[OHLCVBar], df: pd.DataFrame) -> Optional[pd.Series]:
+def _resolve_side_series(
+    side: Any,
+    bars: List[OHLCVBar],
+    df: pd.DataFrame,
+    depth: Optional[int] = None,
+) -> Optional[pd.Series]:
     """Resolve a predicate side (``IndicatorRef`` / bar-field string / float)
     to a full ``pd.Series`` aligned with ``bars``.
 
@@ -1948,11 +1991,12 @@ def _resolve_side_series(side: Any, bars: List[OHLCVBar], df: pd.DataFrame) -> O
 
     Uses :func:`_compiler_indicator_series` (not the pandas batch helpers) so
     the cross trigger the search reports matches the bar the compiled strategy
-    will actually fire on. The asserter then accepts the synthesized run
-    instead of rejecting it as an early/unrelated trade.
+    will actually fire on. ``depth`` mirrors ``ctx.history``'s window for the
+    underlying compiled strategy so MACD signal/histogram and VWAP don't
+    diverge from the runtime due to unbounded history accumulation.
     """
     if isinstance(side, IndicatorRef):
-        return _compiler_indicator_series(side, bars)
+        return _compiler_indicator_series(side, bars, depth=depth)
     if isinstance(side, str):
         field_name = _PRICEREF_TO_FIELD.get(side)
         if field_name is None:
@@ -1961,6 +2005,21 @@ def _resolve_side_series(side: Any, bars: List[OHLCVBar], df: pd.DataFrame) -> O
     if isinstance(side, (int, float)) and not isinstance(side, bool):
         return pd.Series([float(side)] * len(bars))
     return None
+
+
+def _predicate_history_depth(lhs: Any, rhs: Any) -> int:
+    """Compute the ``ctx.history`` depth the compiled strategy would request
+    for a single-predicate probe of ``lhs op rhs``.
+
+    Mirrors ``synthesis/compiler.py:_history_depth_for`` aggregated across
+    both sides of the predicate, floored at ``_COMPILER_MIN_WINDOW``.
+    """
+    candidates = [_COMPILER_MIN_WINDOW]
+    if isinstance(lhs, IndicatorRef):
+        candidates.append(_history_depth_for_synth(lhs))
+    if isinstance(rhs, IndicatorRef):
+        candidates.append(_history_depth_for_synth(rhs))
+    return max(candidates)
 
 
 def _search_cross(
@@ -1979,18 +2038,25 @@ def _search_cross(
     produces a cross, returns ``(None, 0, "cross_not_found_in_window:...")``
     so the gate emits a deterministic ``unprobeable`` reason instead of
     silently failing.
+
+    The scan is floored at ``_COMPILER_MIN_WINDOW`` (and at each indicator's
+    lookback) to mirror the compiled strategy's ``on_bar`` gate, and each
+    indicator series is computed against a history slice bounded to the
+    same ``depth`` the compiler emits for ``ctx.history``.
     """
+    depth = _predicate_history_depth(lhs, rhs)
+    runtime_warmup = max(warmup, _COMPILER_MIN_WINDOW)
     last_reason = "cross_not_found_in_window"
     for builder in builders:
         bars = builder()
         df = _bars_to_df(bars)
-        lhs_series = _resolve_side_series(lhs, bars, df)
-        rhs_series = _resolve_side_series(rhs, bars, df)
+        lhs_series = _resolve_side_series(lhs, bars, df, depth=depth)
+        rhs_series = _resolve_side_series(rhs, bars, df, depth=depth)
         if lhs_series is None or rhs_series is None:
             last_reason = "cross_side_unresolved"
             continue
         n = min(len(lhs_series), len(rhs_series))
-        for idx in range(max(warmup, 1), n):
+        for idx in range(max(runtime_warmup, 1), n):
             if _verify_cross(
                 lhs_series.iloc[idx - 1],
                 lhs_series.iloc[idx],
@@ -2277,7 +2343,32 @@ def _builders_for_priceref_cross(
             lambda: _close_and_range_ramp_bars(n, amplitude, direction="up"),
             lambda: _close_and_range_ramp_bars(n, amplitude, direction="down"),
         ]
-    if name in ("stochastic", "vwap"):
+    if name == "vwap":
+        # VWAP is a cumulative volume-weighted average — under any sustained
+        # forcing the late-bar VWAP "lags" the close monotonically. The
+        # compiled strategy doesn't evaluate VWAP until ``len(history) >=
+        # _COMPILER_MIN_WINDOW`` (=20), so the cross must fire AFTER bar
+        # 20. Step-regime is the only shape that reliably drives VWAP
+        # across an arbitrary threshold inside the visible window: flat at
+        # low_level long enough for VWAP to settle there, then flat at
+        # high_level long enough to drag VWAP through the threshold.
+        n = max(min_bars, _MIN_TOTAL_BARS * 2)
+        if op == "cross_above":
+            low_level = max(_MIN_PRICE, base_close * 0.5)
+            high_level = base_close * 2.0
+            return [
+                lambda: _step_bars(n, low_level, high_level, step_frac=0.3),
+                lambda: _step_bars(n, low_level, high_level, step_frac=0.5),
+                lambda: _monotonic_trend_bars(n, base_close, base_close * 0.01),
+            ]
+        low_level = base_close * 2.0
+        high_level = max(_MIN_PRICE, base_close * 0.5)
+        return [
+            lambda: _step_bars(n, low_level, high_level, step_frac=0.3),
+            lambda: _step_bars(n, low_level, high_level, step_frac=0.5),
+            lambda: _monotonic_trend_bars(n, base_close, -base_close * 0.01),
+        ]
+    if name == "stochastic":
         n = max(min_bars, _MIN_TOTAL_BARS * 2)
         if op == "cross_above":
             return [
@@ -2309,25 +2400,60 @@ def _builders_for_priceref_cross(
     return [lambda: _high_volatility_bars(n, base_close, _BARS_AFTER_TRIGGER)]
 
 
+def _lookback_for_synth(ref: IndicatorRef) -> int:
+    """Mirror ``synthesis/compiler.py:_lookback_for`` — minimum ``len(history)``
+    before ``ref`` yields a non-``None`` value.
+
+    Used to compute the runtime warmup floor (compiler gates ``on_bar`` at
+    ``len(history) >= max(per_ref_lookback, _MIN_WINDOW)``) and the
+    bounded history depth (``_history_depth_for_synth``).
+    """
+    name = ref.name
+    if name in ("sma", "ema"):
+        return int(ref.param("period"))
+    if name == "rsi":
+        return int(ref.param("period")) + 1
+    if name == "macd":
+        slow = int(ref.param("slow"))
+        signal = int(ref.param("signal"))
+        select = str(ref.param("output"))
+        if select == "macd":
+            return slow
+        return slow + signal - 1
+    if name == "bollinger":
+        return int(ref.param("period"))
+    if name == "atr":
+        return int(ref.param("period")) + 1
+    if name == "adx":
+        return 2 * int(ref.param("period")) + 1
+    if name == "stochastic":
+        return int(ref.param("k_period")) + int(ref.param("d_period")) - 1
+    if name == "vwap":
+        return _COMPILER_MIN_WINDOW
+    return 1
+
+
+def _history_depth_for_synth(ref: IndicatorRef) -> int:
+    """Mirror ``synthesis/compiler.py:_history_depth_for``. Equals
+    :func:`_lookback_for_synth` for non-VWAP indicators; for VWAP returns
+    ``_COMPILER_VWAP_HISTORY`` so the cumulative-style helper sees the
+    deepest history the harness retains.
+    """
+    if ref.name == "vwap":
+        return _COMPILER_VWAP_HISTORY
+    return _lookback_for_synth(ref)
+
+
 def _warmup_for_indicator(ref: IndicatorRef) -> int:
-    """Minimum bar index at which ``ref`` has produced a finite value.
+    """Minimum bar index at which ``ref`` has produced a finite value AND
+    the compiled strategy would evaluate it (i.e. past the
+    ``_COMPILER_MIN_WINDOW`` global gate).
 
     The cross search starts scanning from this index + 1 (it needs the
     previous bar too). Conservative — over-estimating warmup just delays the
     first match by a few bars, which is harmless.
     """
-    name = ref.name
-    if name in ("sma", "ema", "rsi", "atr"):
-        return int(ref.param("period")) + 1
-    if name == "adx":
-        return int(ref.param("period")) * 2 + 1
-    if name == "macd":
-        return int(ref.param("slow")) + int(ref.param("signal")) + 1
-    if name == "bollinger":
-        return int(ref.param("period")) + 1
-    if name == "stochastic":
-        return int(ref.param("k_period")) + int(ref.param("d_period")) + 1
-    return 1
+    return max(_lookback_for_synth(ref) + 1, _COMPILER_MIN_WINDOW)
 
 
 def _builders_for_indicator_number(
