@@ -246,6 +246,7 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `LLM_PROVIDER` | LLM provider selection |
 | `LLM_BASE_URL` | LLM server URL |
 | `LLM_MODEL` | Model name |
+| `LLM_NUM_CTX_FALLBACK_TTL_S` | TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's context size is not in `KNOWN_MODEL_CONTEXT` / `LLM_CONTEXT_SIZE` and `/api/show` fails, the client degrades to a 16384-token context but only caches it for this window before re-attempting — a transient `/api/show` outage can no longer poison the process into silently truncating large prompts for its whole lifetime. A successfully-resolved (or known/env) context size is still cached permanently. Garbage values fall back to the default; negative floors to `0` (retry on next call). |
 | `TEMPORAL_ADDRESS` | Enables Temporal mode when set |
 | `TEMPORAL_NAMESPACE` | Temporal namespace |
 | `TEMPORAL_TASK_QUEUE` | Temporal task queue name |
