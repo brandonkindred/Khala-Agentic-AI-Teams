@@ -182,6 +182,68 @@ class TestDriftCollector:
         assert h1 == h2
         assert len(h1) == 64
 
+    def test_snapshot_returns_empty_isolated_collector(self):
+        parent = _DriftCollector()
+        parent.record_code_change(
+            phase="synthesis",
+            agent="RefinementAgent",
+            before_code="x = 1",
+            after_code="x = 2",
+            reason="seed parent",
+        )
+        child = parent.snapshot()
+        # Fresh and empty regardless of parent contents.
+        assert child.spec_history == []
+        assert child.code_history == []
+        assert child.gate_timeline == []
+        # Shares no list object with the parent — mutating one never touches
+        # the other.
+        assert child.spec_history is not parent.spec_history
+        assert child.code_history is not parent.code_history
+        assert child.gate_timeline is not parent.gate_timeline
+        child.record_code_change(
+            phase="synthesis",
+            agent="RefinementAgent",
+            before_code="a = 1",
+            after_code="a = 2",
+            reason="child only",
+        )
+        assert len(parent.code_history) == 1  # parent untouched by child
+
+    def test_merge_appends_child_in_order_and_leaves_child_intact(self):
+        parent = _DriftCollector()
+        parent.record_spec_change(
+            phase="design",
+            agent="DesignAgent",
+            before_spec=_minimal_spec(hypothesis="p0"),
+            after_spec=_minimal_spec(hypothesis="p1"),
+            reason="parent rev",
+        )
+        child = parent.snapshot()
+        child.record_spec_change(
+            phase="design_review",
+            agent="DesignAgent",
+            before_spec=_minimal_spec(hypothesis="c0"),
+            after_spec=_minimal_spec(hypothesis="c1"),
+            reason="child rev",
+        )
+        child.record_gate(
+            phase="design_review",
+            gate_name="spec_readiness",
+            passed=False,
+            severity="critical",
+            details="not ready",
+        )
+
+        parent.merge(child)
+
+        # Parent now holds its own entry followed by the child's, in order.
+        assert [r.reason for r in parent.spec_history] == ["parent rev", "child rev"]
+        assert len(parent.gate_timeline) == 1
+        # Child is left unmodified by the merge.
+        assert len(child.spec_history) == 1
+        assert len(child.gate_timeline) == 1
+
 
 # ---------------------------------------------------------------------------
 # Gate timeline conversion

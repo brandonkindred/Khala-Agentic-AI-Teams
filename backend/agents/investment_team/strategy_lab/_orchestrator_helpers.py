@@ -202,11 +202,55 @@ class _DriftCollector:
     Invariants:
       - ``record_spec_change`` is a no-op when before/after hashes match
         (no-op mutation). Same for ``record_code_change``.
+
+    Retry isolation:
+      The records are append-only and immutable, so isolating one retry
+      attempt does not require deep-copying history — it means handing the
+      attempt its own empty collector (``snapshot``) and folding it back into
+      the parent commit log (``merge``) once the attempt's fate is known. A
+      failed attempt's drift can then be preserved for the diagnostic record
+      without poisoning the next attempt's working collector. See
+      ``RETRY_STATE_ISOLATION.md``.
     """
 
     spec_history: list = field(default_factory=list)
     code_history: list = field(default_factory=list)
     gate_timeline: list = field(default_factory=list)
+
+    def snapshot(self) -> "_DriftCollector":
+        """Return a fresh, empty collector for an isolated retry attempt.
+
+        Records are append-only and immutable, so a clean working copy is an
+        empty collector rather than a deep copy of this one's history. The
+        attempt records into the returned child; the caller folds it back in
+        with ``merge`` once the attempt succeeds or fails.
+
+        Postconditions:
+          - The returned collector's three lists are empty.
+          - It shares no list object with ``self`` (mutating the child never
+            mutates the parent, and vice versa).
+        """
+        return _DriftCollector()
+
+    def merge(self, child: "_DriftCollector") -> None:
+        """Fold a child collector's records into this one, in order.
+
+        Used at a retry boundary to commit an attempt's drift into the parent
+        commit log (on success, so the record reflects the converged attempt;
+        or on failure, so the short-circuit diagnostic record still shows what
+        every failed attempt tried).
+
+        Preconditions:
+          - ``child`` is a ``_DriftCollector``.
+        Postconditions:
+          - ``self``'s histories contain their prior entries followed by all
+            of ``child``'s, preserving order.
+          - ``child`` is left unmodified.
+        """
+        assert isinstance(child, _DriftCollector), "merge() requires a _DriftCollector"
+        self.spec_history.extend(child.spec_history)
+        self.code_history.extend(child.code_history)
+        self.gate_timeline.extend(child.gate_timeline)
 
     def record_spec_change(
         self,
