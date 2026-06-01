@@ -1007,6 +1007,41 @@ def test_revise_threads_external_lineage_into_self_revision(
     assert "ROUND1-EXIT-FIX" in self_revision_prompt
 
 
+def test_revise_threads_regression_notice_into_self_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``revise()`` threads the external ``regression_notice`` into the internal
+    self-revision prompt.
+
+    When the external loop escalates a regression ("do not reintroduce X") and
+    the revised spec then fails self-review, the self-revision must still see
+    that warning — otherwise the internal fix can undo the very prior-round
+    defect the regression machinery is keeping fixed.
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            _good_payload(),
+            _ready_critique_payload(),
+        ],
+        enable_self_review=True,
+    )
+
+    critique = SpecCritique(ready=False, rationale="external r", issues=[])
+    DesignAgent().revise(
+        _prior_spec(),
+        critique,
+        regression_notice="DO-NOT-REINTRODUCE: exit_rules take-profit removed",
+    )
+
+    # The self-revision (third call) must carry the regression notice, not the
+    # hardcoded "None." the pre-fix code rendered.
+    self_revision_prompt = capture.calls[2]
+    assert "DO-NOT-REINTRODUCE: exit_rules take-profit removed" in self_revision_prompt
+
+
 def test_run_self_revision_has_no_external_lineage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

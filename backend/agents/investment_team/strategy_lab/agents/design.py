@@ -231,12 +231,19 @@ class DesignAgent:
         )
 
         strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
-        # Thread the external critique lineage into the internal self-review so a
-        # self-revision cannot regress a fix an earlier external round extracted.
-        # ``prior_critiques`` already includes the current critique (the
-        # orchestrator appends it to the history before calling ``revise``), so it
-        # is forwarded verbatim — appending ``critique`` again would double-count it.
-        return self._with_self_review(strategy_dict, rationale, prior_critiques=prior_critiques)
+        # Thread the external critique lineage AND the regression notice into the
+        # internal self-review so a self-revision cannot regress a fix (or undo a
+        # prior-round defect the ledger is keeping fixed) that an earlier external
+        # round extracted. ``prior_critiques`` already includes the current
+        # critique (the orchestrator appends it to the history before calling
+        # ``revise``), so it is forwarded verbatim — appending ``critique`` again
+        # would double-count it.
+        return self._with_self_review(
+            strategy_dict,
+            rationale,
+            prior_critiques=prior_critiques,
+            regression_notice=regression_notice,
+        )
 
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
         """Call the LLM, parse JSON, strip any stray ``strategy_code``, validate rules.
@@ -338,6 +345,7 @@ class DesignAgent:
         rationale: str,
         *,
         prior_critiques: Optional[List["SpecCritique"]] = None,
+        regression_notice: str = "",
     ) -> Tuple[Dict[str, Any], str]:
         """Audit a freshly emitted spec and self-revise (then re-audit) if needed.
 
@@ -348,7 +356,10 @@ class DesignAgent:
         (``None`` on initial generation, where no external round has run
         yet); callers must not append the current critique themselves — the
         orchestrator already appends it to the history before :meth:`revise`
-        receives it.
+        receives it. ``regression_notice`` is the external loop's
+        "do not reintroduce" block (empty on the :meth:`run` path); it is
+        threaded into the self-revision prompt so a self-revision cannot undo
+        a prior-round defect the regression machinery is keeping fixed.
         Post: returns ``(strategy_dict, rationale)`` — either the input
         unchanged (self-review disabled, the spec is already ready, or a
         best-effort failure) or a self-revised spec. Whenever a self-revision
@@ -422,9 +433,10 @@ class DesignAgent:
                 issues_block=issues_block,
                 n_prior_critiques=len(prior_critiques) if prior_critiques else 0,
                 prior_critiques_block=format_prior_critiques(prior_critiques),
-                # Self-review carries no per-round regression set of its own; the
-                # lineage block above conveys the external history.
-                regression_notice_block="None.",
+                # Thread the external regression notice (empty on the run() path)
+                # so a self-revision cannot undo a prior-round defect the external
+                # loop is keeping fixed.
+                regression_notice_block=regression_notice or "None.",
             )
 
             try:
