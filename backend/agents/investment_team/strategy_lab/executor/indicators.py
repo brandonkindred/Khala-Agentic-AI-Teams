@@ -36,35 +36,57 @@ def _coerce_series(series, field: str = "close") -> pd.Series:
         containing the ``field`` key.
     Postconditions:
         Returns a float ``pd.Series``; an empty list/tuple yields an empty
-        float Series.  A ``pd.Series`` argument is returned as-is (no copy).
-        Contract violations raise ``TypeError`` — never ``AttributeError`` —
-        so the sandbox classifies bad input as a strategy-code error rather
-        than a look-ahead violation.
+        float Series.  A numeric ``pd.Series`` is returned as-is (no copy);
+        an object-dtype Series is rebuilt with float values but keeps the
+        caller's index so downstream alignment is preserved.  Every element is
+        validated (not just the first), and any contract violation raises
+        ``TypeError`` — never ``AttributeError``/``KeyError`` — so the sandbox
+        classifies bad input as a strategy-code error rather than a look-ahead
+        violation.
     """
     if isinstance(series, pd.Series):
         # A numeric Series passes straight through (preserving its index). An
         # object-dtype Series may still hold Bar/dict/number elements — e.g. a
         # caller wrapped list[Bar] with pd.Series(...) before reaching here —
-        # so route those through the list path to extract ``field``.
+        # so coerce its values while keeping the caller's (possibly datetime)
+        # index rather than rebuilding a fresh RangeIndex.
         if series.dtype != object:
             return series
-        return _coerce_series(list(series), field)
+        return _coerce_series(list(series), field).set_axis(series.index)
     if not isinstance(series, (list, tuple)):
         raise TypeError(f"indicator input must be pd.Series or list, got {type(series).__name__}")
     if not series:
         return pd.Series([], dtype=float)
     first = series[0]
-    if isinstance(first, bool):
-        # bool is a subclass of int; reject it explicitly rather than coercing
-        # True/False to 1.0/0.0, which is never a meaningful price series.
-        raise TypeError("indicator input must be numeric, got bool")
-    if isinstance(first, (int, float)):
-        return pd.Series([float(x) for x in series], dtype=float)
+    if isinstance(first, (bool, int, float)):
+        # bool is a subclass of int; reject it (in any position) rather than
+        # coercing True/False to 1.0/0.0, which is never a meaningful price.
+        return _floats(series, _as_price_float, field)
     if hasattr(first, field):
-        return pd.Series([float(getattr(b, field)) for b in series], dtype=float)
+        return _floats(series, lambda b: getattr(b, field), field)
     if isinstance(first, dict) and field in first:
-        return pd.Series([float(b[field]) for b in series], dtype=float)
+        return _floats(series, lambda b: b[field], field)
     raise TypeError(f"cannot extract {field!r} from {type(first).__name__}")
+
+
+def _as_price_float(value) -> float:
+    """Convert a single price element to ``float``, rejecting bool."""
+    if isinstance(value, bool):
+        raise TypeError("indicator input must be numeric, got bool")
+    return float(value)
+
+
+def _floats(series, getter: Callable, field: str) -> pd.Series:
+    """Apply ``getter`` to every element and build a float Series.
+
+    Any per-element failure (a malformed element after the first, a missing
+    attribute/key, a non-numeric value) is normalised to ``TypeError`` so the
+    whole indicator API only ever raises ``TypeError`` for bad input.
+    """
+    try:
+        return pd.Series([float(getter(b)) for b in series], dtype=float)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise TypeError(f"indicator input element is not a valid {field!r} value: {exc}") from exc
 
 
 def sma(series: pd.Series, period: int) -> pd.Series:

@@ -194,6 +194,22 @@ def test_coerce_series_object_dtype_series_of_floats_becomes_float() -> None:
     assert out.dtype == float
 
 
+def test_coerce_series_object_dtype_preserves_caller_index() -> None:
+    # A datetime-indexed, object-dtype numeric Series must keep its index so
+    # downstream code that aligns indicator output back to bars stays correct.
+    idx = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])
+    out = ind._coerce_series(pd.Series([10.0, 11.0, 12.0], index=idx, dtype=object))
+    assert out.dtype == float
+    assert list(out.index) == list(idx)
+
+
+def test_coerce_series_object_dtype_of_bars_preserves_index() -> None:
+    idx = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])
+    out = ind._coerce_series(pd.Series(_bars(3), index=idx), "close")
+    assert out.tolist() == [100.0, 101.0, 102.0]
+    assert list(out.index) == list(idx)
+
+
 def test_coerce_series_empty_object_dtype_series() -> None:
     out = ind._coerce_series(pd.Series([], dtype=object))
     assert len(out) == 0
@@ -222,6 +238,32 @@ def test_coerce_series_rejects_unextractable_elements_with_typeerror() -> None:
 def test_coerce_series_rejects_bools() -> None:
     with pytest.raises(TypeError):
         ind._coerce_series([True, False])
+
+
+def test_coerce_series_rejects_bool_after_numeric_first_element() -> None:
+    # Validation covers every element, not just series[0]: a bool sneaking in
+    # behind a numeric first element must still raise, not coerce to 1.0.
+    with pytest.raises(TypeError):
+        ind._coerce_series([100.0, True, 102.0])
+
+
+def test_coerce_series_non_numeric_after_numeric_first_element() -> None:
+    with pytest.raises(TypeError):
+        ind._coerce_series([100.0, "oops", 102.0])
+
+
+def test_coerce_series_malformed_bar_after_first_raises_typeerror() -> None:
+    # A malformed later element (here a dict lacking the field, after a Bar)
+    # must surface as TypeError, not the AttributeError getattr would raise —
+    # preserving the strategy-code-vs-lookahead classification this change adds.
+    bars = _bars(2)
+    with pytest.raises(TypeError):
+        ind._coerce_series([bars[0], {}], "close")
+
+
+def test_coerce_series_malformed_dict_after_first_raises_typeerror() -> None:
+    with pytest.raises(TypeError):
+        ind._coerce_series([{"close": 1.0}, {}], "close")
 
 
 # ---------------------------------------------------------------------------
