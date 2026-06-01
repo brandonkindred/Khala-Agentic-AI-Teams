@@ -696,22 +696,28 @@ def test_run_self_review_passes_no_revision(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_run_self_review_flags_then_self_revises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When self-review flags issues, the designer self-revises exactly once.
+    """When self-review flags issues, the designer self-revises then re-audits.
 
-    Three LLM calls total: initial generation + self-review verdict +
-    self-revision. The retry prompt for the third call must carry the
-    self-critique's field+description so the LLM has something concrete
-    to act on (otherwise the revision is a blind re-roll).
+    Four LLM calls total: initial generation + self-review verdict +
+    self-revision + re-audit of the revised spec. The retry prompt for the
+    third call must carry the self-critique's field+description so the LLM has
+    something concrete to act on (otherwise the revision is a blind re-roll);
+    the fourth call re-audits the revised spec and readies it.
     """
     capture = _patch_design(
         monkeypatch,
-        [_good_payload(), _failing_critique_payload(), _good_payload()],
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            _good_payload(),
+            _ready_critique_payload(),
+        ],
         enable_self_review=True,
     )
 
     parsed, _ = DesignAgent().run(prior_records=[])
 
-    assert len(capture.calls) == 3
+    assert len(capture.calls) == 4
     assert parsed["asset_class"] == "stocks"
     # The third call (self-revision) must include the self-critique payload.
     revision_prompt = capture.calls[2]
@@ -746,7 +752,7 @@ def test_run_self_review_ready_with_critical_self_revises(
     """A self-review verdict of ready=true + critical is a real contradiction.
 
     The critical still demotes to ready=false, so exactly one self-revision
-    fires (three LLM calls total).
+    fires, followed by a re-audit of the revised spec (four LLM calls total).
     """
     capture = _patch_design(
         monkeypatch,
@@ -754,13 +760,14 @@ def test_run_self_review_ready_with_critical_self_revises(
             _good_payload(),
             _ready_with_critical_critique_payload(),
             _good_payload(),
+            _ready_critique_payload(),
         ],
         enable_self_review=True,
     )
 
     parsed, _ = DesignAgent().run(prior_records=[])
 
-    assert len(capture.calls) == 3
+    assert len(capture.calls) == 4
     assert parsed["asset_class"] == "stocks"
 
 
@@ -800,22 +807,28 @@ def test_revise_self_review_passes_no_extra_call(monkeypatch: pytest.MonkeyPatch
 
 
 def test_revise_self_review_flags_then_self_revises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A revision that fails self-review triggers exactly one self-revision.
+    """A revision that fails self-review triggers one self-revision + re-audit.
 
     The external-loop revision was the failure mode named in the user's
     example feedback ("defects persist after 9 prior rounds") — this test
-    pins that revise() inherits the same self-review contract as run().
+    pins that revise() inherits the same self-review + re-audit contract as
+    run() (four LLM calls total).
     """
     capture = _patch_design(
         monkeypatch,
-        [_good_payload(), _failing_critique_payload(), _good_payload()],
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            _good_payload(),
+            _ready_critique_payload(),
+        ],
         enable_self_review=True,
     )
 
     critique = SpecCritique(ready=False, rationale="external r", issues=[])
     parsed, _ = DesignAgent().revise(_prior_spec(), critique)
 
-    assert len(capture.calls) == 3
+    assert len(capture.calls) == 4
     assert parsed["asset_class"] == "stocks"
 
 
@@ -894,6 +907,211 @@ def test_self_revision_garbage_response_falls_back_to_original(
     assert any("self-revision failed" in rec.message.lower() for rec in caplog.records)
 
 
+def test_self_revision_result_is_reaudited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The self-revised spec is re-audited through self-review.
+
+    Four LLM calls: generation + audit (flags) + self-revision + RE-AUDIT.
+    The fourth call is a fresh self-review *audit* of the revised spec — it
+    carries the self-review user-prompt marker, distinguishing it from a
+    revision prompt. This closes the gap where a self-revision could introduce
+    a new contradiction that reached the external reviewer unchecked.
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            _good_payload(),
+            _ready_critique_payload(),
+        ],
+        enable_self_review=True,
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 4
+    # The 4th call audits the revised spec (self-review user prompt), not a
+    # revision (which would carry the "Revise the following ..." template).
+    assert "Audit the following candidate StrategySpec" in capture.calls[3]
+    assert "Revise the following strategy specification" not in capture.calls[3]
+    assert parsed["asset_class"] == "stocks"
+
+
+def test_self_review_depth_bound_stops_second_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the default round cap of 1, a re-audit that still flags issues does
+    NOT trigger a second self-revision — the loop is bounded and defers to the
+    authoritative external review loop.
+
+    Four LLM calls: generation + audit + self-revision + re-audit (still not
+    ready). No fifth call. ``_CapturingAgent`` repeats its last payload, so an
+    unbounded loop would over-count — the exact ``== 4`` is the bound guard.
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            _good_payload(),
+            _failing_critique_payload(),
+        ],
+        enable_self_review=True,
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 4
+    # The once-revised spec is returned despite the re-audit still flagging.
+    assert parsed["asset_class"] == "stocks"
+
+
+def test_revise_threads_external_lineage_into_self_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``revise()`` threads the external critique lineage into the internal
+    self-revision prompt.
+
+    The orchestrator passes ``prior_critiques`` already including the current
+    critique, so the self-revision prompt must render the full lineage — not
+    ``"None yet."`` / ``"(0 so far)"`` as the pre-change code did. This is what
+    stops a self-revision from regressing a fix an earlier external round
+    extracted.
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            _good_payload(),
+            _ready_critique_payload(),
+        ],
+        enable_self_review=True,
+    )
+
+    c0 = SpecCritique(ready=False, rationale="ROUND0-SIZING-FIX", round=0, issues=[])
+    c1 = SpecCritique(
+        ready=False,
+        rationale="ROUND1-EXIT-FIX",
+        round=1,
+        issues=[
+            CritiqueIssue(
+                field="sizing",
+                description="position too large",
+                suggested_fix="cap fixed_fraction at 0.01",
+            )
+        ],
+    )
+
+    DesignAgent().revise(_prior_spec(), c1, prior_critiques=[c0, c1])
+
+    # The third call is the self-revision; it must carry the full external
+    # lineage (both prior rounds), not the empty "(0 so far)" / "None yet.".
+    self_revision_prompt = capture.calls[2]
+    assert "(2 so far)" in self_revision_prompt
+    assert "ROUND0-SIZING-FIX" in self_revision_prompt
+    assert "ROUND1-EXIT-FIX" in self_revision_prompt
+    # Per-issue detail (not just the truncated rationale) must reach the
+    # self-revision so it can see *what* the earlier round fixed and avoid
+    # silently regressing it.
+    assert "position too large" in self_revision_prompt
+    assert "cap fixed_fraction at 0.01" in self_revision_prompt
+
+
+def test_revise_threads_regression_notice_into_self_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``revise()`` threads the external ``regression_notice`` into the internal
+    self-revision prompt.
+
+    When the external loop escalates a regression ("do not reintroduce X") and
+    the revised spec then fails self-review, the self-revision must still see
+    that warning — otherwise the internal fix can undo the very prior-round
+    defect the regression machinery is keeping fixed.
+    """
+    capture = _patch_design(
+        monkeypatch,
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            _good_payload(),
+            _ready_critique_payload(),
+        ],
+        enable_self_review=True,
+    )
+
+    critique = SpecCritique(ready=False, rationale="external r", issues=[])
+    DesignAgent().revise(
+        _prior_spec(),
+        critique,
+        regression_notice="DO-NOT-REINTRODUCE: exit_rules take-profit removed",
+    )
+
+    # The self-revision (third call) must carry the regression notice, not the
+    # hardcoded "None." the pre-fix code rendered.
+    self_revision_prompt = capture.calls[2]
+    assert "DO-NOT-REINTRODUCE: exit_rules take-profit removed" in self_revision_prompt
+
+
+def test_run_self_revision_has_no_external_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Contrast to the ``revise()`` lineage test: ``run()`` is initial
+    generation with no external rounds, so its self-revision prompt shows no
+    lineage (``"None yet."`` / ``"(0 so far)"``)."""
+    capture = _patch_design(
+        monkeypatch,
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            _good_payload(),
+            _ready_critique_payload(),
+        ],
+        enable_self_review=True,
+    )
+
+    DesignAgent().run(prior_records=[])
+
+    self_revision_prompt = capture.calls[2]
+    assert "(0 so far)" in self_revision_prompt
+    assert "None yet." in self_revision_prompt
+
+
+def test_self_revision_rounds_zero_disables_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS=0`` makes self-review
+    audit-only: a not-ready verdict yields NO self-revision (two LLM calls,
+    the original spec returned unchanged)."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", "0")
+    capture = _patch_design(
+        monkeypatch,
+        [_good_payload(), _failing_critique_payload()],
+        enable_self_review=True,
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 2  # generation + audit only; no self-revision
+    assert parsed["asset_class"] == "stocks"
+
+
+def test_design_self_revision_rounds_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The round-cap resolver: default 1, floor 0, garbage falls back to 1."""
+    from investment_team.strategy_lab.agents.design import _design_self_revision_rounds
+
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", raising=False)
+    assert _design_self_revision_rounds() == 1
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", "0")
+    assert _design_self_revision_rounds() == 0
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", "3")
+    assert _design_self_revision_rounds() == 3
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", "-5")
+    assert _design_self_revision_rounds() == 0
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", "garbage")
+    assert _design_self_revision_rounds() == 1
+
+
 # ---------------------------------------------------------------------------
 # LLM-call budget — charging stays wired to real model invocations and the
 # budget signal is NOT swallowed by the best-effort self-review guards.
@@ -921,10 +1139,15 @@ def test_revise_budget_charged_across_parse_retries_and_self_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every underlying call counts: a generation + self-review verdict +
-    self-revision all charge the active budget."""
+    self-revision + re-audit verdict all charge the active budget."""
     capture = _patch_design(
         monkeypatch,
-        [_good_payload(), _failing_critique_payload(), _good_payload()],
+        [
+            _good_payload(),
+            _failing_critique_payload(),
+            _good_payload(),
+            _ready_critique_payload(),
+        ],
         enable_self_review=True,
     )
     budget = LLMCallBudget(100)
@@ -933,7 +1156,7 @@ def test_revise_budget_charged_across_parse_retries_and_self_review(
     with use_budget(budget):
         DesignAgent().revise(_prior_spec(), critique)
 
-    assert budget.calls_made == len(capture.calls) == 3
+    assert budget.calls_made == len(capture.calls) == 4
 
 
 def test_budget_exhaustion_propagates_through_self_review(
@@ -949,6 +1172,24 @@ def test_budget_exhaustion_propagates_through_self_review(
     )
     # limit 1: generation charges once (ok), the self-review charge trips.
     with use_budget(LLMCallBudget(1)):
+        with pytest.raises(DesignBudgetExhausted):
+            DesignAgent().run(prior_records=[])
+
+
+def test_budget_exhaustion_propagates_through_self_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget trip during the self-revision call (not just the audit) must
+    raise ``DesignBudgetExhausted`` — the best-effort ``except Exception`` guard
+    around the self-revision must not swallow it."""
+    _patch_design(
+        monkeypatch,
+        [_good_payload(), _failing_critique_payload(), _good_payload()],
+        enable_self_review=True,
+    )
+    # limit 2: generation (ok) + self-review audit (ok); the self-revision
+    # charge is the third and trips.
+    with use_budget(LLMCallBudget(2)):
         with pytest.raises(DesignBudgetExhausted):
             DesignAgent().run(prior_records=[])
 

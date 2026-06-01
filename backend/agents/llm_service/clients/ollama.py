@@ -50,6 +50,33 @@ def _caller_tag() -> str:
 # Default cap for max_tokens
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
+# Provisional context size used only when num_ctx cannot be resolved from the
+# known-model table, env, or a successful /api/show call. Cached for at most
+# _FALLBACK_NUM_CTX_TTL_S seconds (never permanently) so a transient /api/show
+# outage cannot poison the process into silently truncating large prompts for
+# the rest of its lifetime.
+_FALLBACK_NUM_CTX = 16384
+_ENV_NUM_CTX_FALLBACK_TTL = "LLM_NUM_CTX_FALLBACK_TTL_S"
+_DEFAULT_NUM_CTX_FALLBACK_TTL_S = 300.0
+
+
+def _fallback_num_ctx_ttl_s() -> float:
+    """Return the provisional-fallback TTL in seconds (env override, defensive parse).
+
+    Preconditions: none.
+    Postconditions: returns a non-negative float; a missing or unparseable
+        ``LLM_NUM_CTX_FALLBACK_TTL_S`` yields ``_DEFAULT_NUM_CTX_FALLBACK_TTL_S``;
+        a negative value is floored to ``0.0`` (immediate retry on next call).
+    """
+    raw = os.environ.get(_ENV_NUM_CTX_FALLBACK_TTL)
+    if not raw:
+        return _DEFAULT_NUM_CTX_FALLBACK_TTL_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _DEFAULT_NUM_CTX_FALLBACK_TTL_S
+
+
 # Continuation on truncation (same behavior as software_engineering_team)
 MAX_CONTINUATION_CYCLES = 10
 CONTINUATION_CONTEXT_CHARS = 150
@@ -146,6 +173,10 @@ class OllamaLLMClient(LLMClient):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._model_num_ctx: Optional[int] = None
+        # Provisional num_ctx fallback (set only when /api/show cannot be resolved),
+        # with the wall-clock time it was recorded. Never written to _model_num_ctx.
+        self._fallback_num_ctx: Optional[int] = None
+        self._fallback_num_ctx_ts: float = 0.0
         # Token usage from the last successful LLM call (populated by _ollama_post)
         self._last_usage: Optional[Dict[str, Any]] = None
         self._last_latency_ms: int = 0
@@ -193,7 +224,23 @@ class OllamaLLMClient(LLMClient):
         return {"Authorization": f"Bearer {key}"}
 
     def _fetch_model_num_ctx(self) -> int:
-        """Fetch model's num_ctx from config known table, env, or Ollama /api/show. Cached. Fallback 16384."""
+        """Resolve the model's num_ctx from the known-model table, env, or Ollama /api/show.
+
+        An authoritatively-resolved value (known table, env override, or a
+        successful /api/show parse) is cached for the process lifetime. When
+        /api/show cannot be resolved we degrade to ``_FALLBACK_NUM_CTX`` but cache
+        it only provisionally — for at most ``_fallback_num_ctx_ttl_s()`` — so a
+        transient outage is retried on a later call instead of poisoning the
+        process into silently truncating large prompts forever.
+
+        Preconditions: none.
+        Postconditions: returns ``>= 2048``; an authoritative result is cached in
+            ``self._model_num_ctx`` permanently; a fallback result is returned
+            without writing ``self._model_num_ctx`` and is reused (skipping
+            /api/show) only until its TTL elapses.
+        Invariants: ``self._model_num_ctx``, once set, is only ever set to an
+            authoritatively-resolved value — never ``_FALLBACK_NUM_CTX``.
+        """
         if self._model_num_ctx is not None:
             return self._model_num_ctx
         ctx = llm_config.resolve_context_size_for_model(self.model)
@@ -203,6 +250,12 @@ class OllamaLLMClient(LLMClient):
                 "LLM model %s: using known/context size %s", self.model, self._model_num_ctx
             )
             return self._model_num_ctx
+        # Reuse a recent provisional fallback instead of hammering a down /api/show.
+        if (
+            self._fallback_num_ctx is not None
+            and time.time() - self._fallback_num_ctx_ts < _fallback_num_ctx_ttl_s()
+        ):
+            return self._fallback_num_ctx
         try:
             url = f"{self.base_url}/api/show"
             headers = self._ollama_auth_headers()
@@ -210,12 +263,13 @@ class OllamaLLMClient(LLMClient):
                 resp = client.post(url, json={"model": self.model}, headers=headers)
             if resp.status_code != 200:
                 logger.warning(
-                    "Ollama /api/show returned %s for model %s; using 16384",
+                    "Ollama /api/show returned %s for model %s; using %s (retry after %ss)",
                     resp.status_code,
                     self.model,
+                    _FALLBACK_NUM_CTX,
+                    _fallback_num_ctx_ttl_s(),
                 )
-                self._model_num_ctx = 16384
-                return self._model_num_ctx
+                return self._record_fallback_num_ctx()
             data = resp.json()
             params_str = data.get("parameters") or ""
             match = re.search(r"num_ctx\s+(\d+)", params_str, re.IGNORECASE)
@@ -232,10 +286,24 @@ class OllamaLLMClient(LLMClient):
                         return self._model_num_ctx
         except (httpx.HTTPError, KeyError, ValueError, TypeError) as e:
             logger.warning(
-                "Could not fetch Ollama model info for %s: %s; using 16384", self.model, e
+                "Could not fetch Ollama model info for %s: %s; using %s (retry after %ss)",
+                self.model,
+                e,
+                _FALLBACK_NUM_CTX,
+                _fallback_num_ctx_ttl_s(),
             )
-        self._model_num_ctx = 16384
-        return self._model_num_ctx
+        return self._record_fallback_num_ctx()
+
+    def _record_fallback_num_ctx(self) -> int:
+        """Record the provisional num_ctx fallback with the current time and return it.
+
+        Postconditions: ``self._fallback_num_ctx == _FALLBACK_NUM_CTX``,
+            ``self._fallback_num_ctx_ts`` is the current wall-clock time, and
+            ``self._model_num_ctx`` is left untouched (still ``None``).
+        """
+        self._fallback_num_ctx = _FALLBACK_NUM_CTX
+        self._fallback_num_ctx_ts = time.time()
+        return _FALLBACK_NUM_CTX
 
     def get_max_context_tokens(self) -> int:
         """Return model's num_ctx (cached)."""
@@ -1261,9 +1329,7 @@ class OllamaLLMClient(LLMClient):
         both modes.
         """
         if response_format not in ("json", "text"):
-            raise ValueError(
-                f"response_format must be 'json' or 'text', got {response_format!r}"
-            )
+            raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
         self._current_caller = _caller_tag()

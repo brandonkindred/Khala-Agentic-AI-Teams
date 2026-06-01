@@ -1078,6 +1078,64 @@ def test_run_alignment_round_rejects_unsafe_proposed_code(monkeypatch) -> None:
     )
 
 
+def test_run_alignment_round_rejected_proposal_preserves_known_good_state(monkeypatch) -> None:
+    """A rejected alignment proposal must leave the pre-iteration spec/code
+    intact: the outcome carries the same baseline objects (``terminate=True``)
+    and the input spec is not mutated in place. This is the snapshot/commit
+    contract for the alignment loop — known-good state survives a failed
+    attempt untouched."""
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+
+    unsafe_report = TradeAlignmentReport(
+        aligned=False,
+        rationale="off-spec",
+        issues=[AlignmentIssue(rule_type="entry_rules", description="x", severity="critical")],
+        proposed_code=(
+            "import os\n\n"
+            "from contract import Strategy\n\n"
+            "class S(Strategy):\n"
+            "    def on_bar(self, ctx, bar):\n"
+            "        os.system('rm -rf /')\n"
+        ),
+        predicted_aligned_after_fix=True,
+        changes_made="unsafe rewrite",
+    )
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_misaligned_check_result()],
+        propose_results=[unsafe_report],
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "run_strategy_code",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must not re-execute")),
+    )
+
+    baseline_spec = _spec()
+    baseline_code = "baseline-code-v0"
+    spec_dump_before = baseline_spec.model_dump()
+    _events, emit = _collect_emit()
+
+    outcome = orch._run_alignment_round(
+        spec=baseline_spec,
+        code=baseline_code,
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        align_round=0,
+        all_gate_results=[],
+        alignment_attempts=[],
+        alignment_reports=[],
+        emit=emit,
+    )
+
+    assert outcome.terminate is True
+    # Same baseline objects flow back out — nothing was swapped or mutated.
+    assert outcome.spec is baseline_spec
+    assert outcome.code is baseline_code
+    assert baseline_spec.model_dump() == spec_dump_before
+
+
 def test_run_alignment_round_handles_re_execution_failure(monkeypatch) -> None:
     """Sandbox returns ``success=False`` on the post-fix re-execution →
     round emits ``re_execution_failed``, terminates, and appends a

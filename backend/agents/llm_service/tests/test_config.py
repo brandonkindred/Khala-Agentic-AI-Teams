@@ -48,6 +48,12 @@ def test_resolve_context_size_for_model_known(monkeypatch: pytest.MonkeyPatch) -
     assert config.resolve_context_size_for_model("qwen3.5:397b-cloud") == 262144
 
 
+def test_resolve_context_size_for_default_deepseek_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default agent model resolves deterministically (no /api/show dependency)."""
+    monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
+    assert config.resolve_context_size_for_model("deepseek-v4-pro:cloud") == 262144
+
+
 def test_resolve_context_size_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_CONTEXT_SIZE", "100000")
     assert config.resolve_context_size_for_model("unknown-model") == 100000

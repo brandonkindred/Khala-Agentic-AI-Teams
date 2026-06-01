@@ -453,14 +453,19 @@ def _format_readiness(results: List[QualityGateResult]) -> tuple[str, List[str]]
 
 
 def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
-    """Render past critiques so the reviewer / designer does not re-raise resolved issues.
+    """Render past critiques so the reviewer / designer does not re-raise or regress resolved issues.
 
     Pre: ``prior`` is ``None``, ``[]``, or a list of ``SpecCritique``.
-    Post: returns ``"None yet."`` when empty; otherwise one line per
-    critique (round, ready flag, issue count, truncated rationale).
-    Shared between :class:`DesignReviewAgent` (showing past rounds to
-    the reviewer) and :class:`DesignAgent.revise` (showing them to the
-    designer) so both see the same lineage view.
+    Post: returns ``"None yet."`` when empty; otherwise one block per
+    critique — a header line (round, ready flag, issue count, truncated
+    rationale) followed by one indented line per issue carrying its
+    severity, field, truncated description, and truncated ``suggested_fix``
+    (when present). Surfacing the per-issue detail — not just the rationale —
+    lets a later revision see *what* an earlier round fixed so it does not
+    silently regress it when the rationale was terse. Shared between
+    :class:`DesignReviewAgent` (showing past rounds to the reviewer) and
+    :meth:`DesignAgent.revise` / :meth:`DesignAgent._with_self_review`
+    (showing them to the designer) so all three see the same lineage view.
     """
     if not prior:
         return "None yet."
@@ -469,6 +474,11 @@ def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
         lines.append(
             f"  Round {c.round}: ready={c.ready} ({len(c.issues)} issues) — {c.rationale[:160]}"
         )
+        for issue in c.issues:
+            detail = f"      - [{issue.severity}] {issue.field}: {issue.description[:160]}"
+            if issue.suggested_fix:
+                detail += f" (fix: {issue.suggested_fix[:160]})"
+            lines.append(detail)
     return "\n".join(lines)
 
 
