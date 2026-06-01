@@ -1911,3 +1911,108 @@ def test_macd_histogram_signed_thresholds_after_warmup(op, rhs):
         f"MACD histogram signed threshold not crossed: {reason}"
     )
     _assert_cross_fires(pred, bars, trigger)
+
+
+# ---------------------------------------------------------------------------
+# Compiler-matching cross verification (PR #708 further review iteration)
+# ---------------------------------------------------------------------------
+#
+# The synthesizer's cross verification must use the same trailing-window
+# indicator helpers ``synthesis/compiler.py`` emits into the compiled
+# strategy — not the pandas batch helpers in ``executor/indicators.py``.
+# RSI is the canonical case: pandas uses Wilder/EWM smoothing over the full
+# series; the compiler uses a simple average over the last ``period`` bars.
+# The two formulas can disagree by 10+ RSI points at the same bar, so a
+# trigger that pandas accepts may not fire at runtime, and the asserter
+# rejects the synthesized run.
+
+
+from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (  # noqa: E402
+    _compiler_indicator_at,
+)
+
+
+def _assert_cross_fires_under_compiler_math(pred, bars, trigger):
+    """Verify the cross actually fires under the compiler's trailing-window
+    indicator math at the synthesizer-reported trigger. Mirrors the
+    behaviour of the runtime + asserter — if this holds, the asserter won't
+    reject the synthesized run as an early / unrelated trade."""
+
+    def _side_at(side, idx):
+        if isinstance(side, IndicatorRef):
+            return _compiler_indicator_at(side, bars, idx)
+        if isinstance(side, str):
+            field = side.replace("bar.", "")
+            return float(getattr(bars[idx], field))
+        return float(side)
+
+    prev_l = _side_at(pred.lhs, trigger - 1)
+    cur_l = _side_at(pred.lhs, trigger)
+    prev_r = _side_at(pred.rhs, trigger - 1)
+    cur_r = _side_at(pred.rhs, trigger)
+    assert None not in (prev_l, cur_l, prev_r, cur_r), (
+        f"compiler eval returned None at trigger={trigger}: "
+        f"prev_l={prev_l}, cur_l={cur_l}, prev_r={prev_r}, cur_r={cur_r}"
+    )
+    if pred.op == "cross_above":
+        assert prev_l <= prev_r and cur_l > cur_r, (
+            f"compiler-math cross_above not satisfied at trigger={trigger}: "
+            f"prev_l={prev_l}, prev_r={prev_r}, cur_l={cur_l}, cur_r={cur_r}"
+        )
+    else:
+        assert prev_l >= prev_r and cur_l < cur_r, (
+            f"compiler-math cross_below not satisfied at trigger={trigger}: "
+            f"prev_l={prev_l}, prev_r={prev_r}, cur_l={cur_l}, cur_r={cur_r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        # RSI — Codex's named example; pandas Wilder vs compiler simple-avg
+        # diverge by ~10 RSI points, so this would fail with pandas math.
+        (IndicatorRef(name="rsi", params={"period": 14}), "cross_above", 30.0),
+        (IndicatorRef(name="rsi", params={"period": 14}), "cross_below", 70.0),
+        (IndicatorRef(name="rsi", params={"period": 14}), "cross_above", 50.0),
+        # MACD — windowed-EMA spread vs pandas full-series EWM
+        (IndicatorRef(name="macd", params={"output": "macd"}), "cross_above", 0.0),
+        (IndicatorRef(name="macd", params={"output": "macd"}), "cross_above", 50.0),
+        (IndicatorRef(name="macd", params={"output": "histogram"}), "cross_above", 0.0),
+        # ADX — Wilder smoothing vs compiler simple sum
+        (IndicatorRef(name="adx", params={"period": 14}), "cross_above", 25.0),
+        # Bollinger — population std (ddof=0) vs pandas sample std (ddof=1)
+        (
+            IndicatorRef(name="bollinger", params={"band": "upper"}),
+            "cross_below",
+            100.0,
+        ),
+        (
+            IndicatorRef(name="bollinger", params={"band": "middle"}),
+            "cross_below",
+            10.0,
+        ),
+        # ATR — both algorithms agree, but verify the trigger still aligns
+        (IndicatorRef(name="atr", params={"period": 14}), "cross_above", 5.0),
+        # Stochastic — both windowed; sanity check
+        (
+            IndicatorRef(
+                name="stochastic",
+                params={"k_period": 14, "d_period": 3, "output": "k"},
+            ),
+            "cross_above",
+            20.0,
+        ),
+    ],
+)
+def test_cross_trigger_matches_compiler_math(lhs, op, rhs):
+    """The synthesizer-reported trigger must satisfy the cross under the
+    compiler's trailing-window helpers. Regression for the divergence
+    between pandas batch RSI (Wilder/EWM) and compiler simple-average RSI
+    — the synthesizer was reporting triggers where pandas RSI transitioned
+    but compiler RSI never did, and the asserter rejected the runs."""
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"synthesizer failed on {lhs.name}: {reason}"
+    )
+    _assert_cross_fires_under_compiler_math(pred, bars, trigger)

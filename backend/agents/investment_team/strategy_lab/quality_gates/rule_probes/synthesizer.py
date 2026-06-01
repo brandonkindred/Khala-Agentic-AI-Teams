@@ -1538,6 +1538,288 @@ def _earliest_indicator_satisfying_index(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Compiler-matching indicator evaluators
+#
+# The compiled strategy uses trailing-window helpers in ``synthesis/compiler.py``
+# (e.g. simple-average RSI over the last ``period`` bars) that diverge from the
+# pandas batch helpers in ``executor/indicators.py`` (e.g. Wilder/EWM RSI over
+# the full series). When the synthesizer verifies a cross with pandas math the
+# reported ``trigger_idx`` can disagree with where the compiled strategy will
+# actually fire, and the asserter later rejects the synthesized run.
+#
+# These helpers mirror ``synthesis/compiler.py`` algorithm-for-algorithm so
+# :func:`_search_cross` and :func:`_assert_cross_fires` see the same values
+# the runtime will produce. Verbatim copies of the compiler logic — keep them
+# in sync if either side changes.
+# ---------------------------------------------------------------------------
+
+
+def _compiler_src(bar: OHLCVBar, source: str) -> float:
+    if source == "hl2":
+        return (bar.high + bar.low) / 2.0
+    if source == "ohlc4":
+        return (bar.open + bar.high + bar.low + bar.close) / 4.0
+    return float(getattr(bar, source))
+
+
+def _compiler_sma_at(
+    history: List[OHLCVBar], period: int, source: str = "close"
+) -> Optional[float]:
+    if len(history) < period:
+        return None
+    vals = [_compiler_src(b, source) for b in history[-period:]]
+    return sum(vals) / period
+
+
+def _compiler_ema_at(
+    history: List[OHLCVBar], period: int, source: str = "close"
+) -> Optional[float]:
+    if len(history) < period:
+        return None
+    alpha = 2.0 / (period + 1.0)
+    vals = [_compiler_src(b, source) for b in history[-period:]]
+    val = vals[0]
+    for v in vals[1:]:
+        val = alpha * v + (1.0 - alpha) * val
+    return val
+
+
+def _compiler_rsi_at(
+    history: List[OHLCVBar], period: int = 14, source: str = "close"
+) -> Optional[float]:
+    if len(history) < period + 1:
+        return None
+    gains = 0.0
+    losses = 0.0
+    for i in range(len(history) - period, len(history)):
+        cur = _compiler_src(history[i], source)
+        prev = _compiler_src(history[i - 1], source)
+        delta = cur - prev
+        if delta > 0:
+            gains += delta
+        else:
+            losses += -delta
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _compiler_bollinger_at(
+    history: List[OHLCVBar],
+    period: int = 20,
+    num_std: float = 2.0,
+    source: str = "close",
+    select: str = "middle",
+) -> Optional[float]:
+    if len(history) < period:
+        return None
+    vals = [_compiler_src(b, source) for b in history[-period:]]
+    mean = sum(vals) / period
+    var = sum((v - mean) ** 2 for v in vals) / period
+    std = math.sqrt(var) if var > 0 else 0.0
+    if select == "middle":
+        return mean
+    if select == "upper":
+        return mean + num_std * std
+    if select == "lower":
+        return mean - num_std * std
+    return None
+
+
+def _compiler_atr_at(history: List[OHLCVBar], period: int = 14) -> Optional[float]:
+    if len(history) < period + 1:
+        return None
+    trs = []
+    for i in range(len(history) - period, len(history)):
+        h = history[i].high
+        low = history[i].low
+        prev_close = history[i - 1].close
+        trs.append(max(h - low, abs(h - prev_close), abs(low - prev_close)))
+    return sum(trs) / period
+
+
+def _compiler_adx_at(history: List[OHLCVBar], period: int = 14) -> Optional[float]:
+    if len(history) < 2 * period + 1:
+        return None
+    plus_dms = []
+    minus_dms = []
+    trs = []
+    for i in range(1, len(history)):
+        up = history[i].high - history[i - 1].high
+        down = history[i - 1].low - history[i].low
+        plus_dm = up if (up > down and up > 0) else 0.0
+        minus_dm = down if (down > up and down > 0) else 0.0
+        prev_close = history[i - 1].close
+        tr = max(
+            history[i].high - history[i].low,
+            abs(history[i].high - prev_close),
+            abs(history[i].low - prev_close),
+        )
+        plus_dms.append(plus_dm)
+        minus_dms.append(minus_dm)
+        trs.append(tr)
+    tr_sum = sum(trs[-period:])
+    if tr_sum == 0:
+        return 0.0
+    plus_di = 100.0 * sum(plus_dms[-period:]) / tr_sum
+    minus_di = 100.0 * sum(minus_dms[-period:]) / tr_sum
+    denom = plus_di + minus_di
+    if denom == 0:
+        return 0.0
+    return 100.0 * abs(plus_di - minus_di) / denom
+
+
+def _compiler_stochastic_at(
+    history: List[OHLCVBar],
+    k_period: int = 14,
+    d_period: int = 3,
+    select: str = "k",
+) -> Optional[float]:
+    if len(history) < k_period:
+        return None
+
+    def _k_at(end: int) -> float:
+        w = history[end - k_period : end]
+        lowest = min(b.low for b in w)
+        highest = max(b.high for b in w)
+        rng = highest - lowest
+        if rng == 0:
+            return 50.0
+        return 100.0 * (history[end - 1].close - lowest) / rng
+
+    k_val = _k_at(len(history))
+    if select == "k":
+        return k_val
+    if len(history) < k_period + d_period - 1:
+        return None
+    k_vals = [_k_at(end) for end in range(k_period, len(history) + 1)]
+    return sum(k_vals[-d_period:]) / d_period
+
+
+def _compiler_vwap_at(history: List[OHLCVBar]) -> Optional[float]:
+    if not history:
+        return None
+    num = sum(((b.high + b.low + b.close) / 3.0) * b.volume for b in history)
+    den = sum(b.volume for b in history)
+    if den == 0:
+        return sum(b.close for b in history) / len(history)
+    return num / den
+
+
+def _compiler_macd_at(
+    history: List[OHLCVBar],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+    source: str = "close",
+    select: str = "macd",
+) -> Optional[float]:
+    if not (fast >= 2) or not (slow > fast) or not (signal >= 2):
+        return None
+    if len(history) < slow:
+        return None
+    alpha_f = 2.0 / (fast + 1.0)
+    alpha_s = 2.0 / (slow + 1.0)
+    # Cold rebuild: every end position in [slow, len(history)] produces one
+    # macd_line element. Mirrors compiler.py:585-593 (cold path).
+    macd_line: List[float] = []
+    for end in range(slow, len(history) + 1):
+        sub = history[:end]
+        ef = _compiler_src(sub[-fast], source)
+        for b in sub[-fast + 1 :]:
+            ef = alpha_f * _compiler_src(b, source) + (1.0 - alpha_f) * ef
+        es = _compiler_src(sub[-slow], source)
+        for b in sub[-slow + 1 :]:
+            es = alpha_s * _compiler_src(b, source) + (1.0 - alpha_s) * es
+        macd_line.append(ef - es)
+    macd_val = macd_line[-1]
+    if select == "macd":
+        return macd_val
+    if len(macd_line) < signal:
+        return None
+    alpha_g = 2.0 / (signal + 1.0)
+    sig = macd_line[0]
+    for v in macd_line[1:]:
+        sig = alpha_g * v + (1.0 - alpha_g) * sig
+    if select == "signal":
+        return sig
+    if select == "histogram":
+        return macd_val - sig
+    return None
+
+
+def _compiler_indicator_at(
+    ref: IndicatorRef, bars: List[OHLCVBar], end_idx: int
+) -> Optional[float]:
+    """Evaluate ``ref`` at bar ``end_idx`` using compiler-matching math.
+
+    ``history = bars[: end_idx + 1]`` matches the slice the compiled
+    strategy's helpers see at runtime when on_bar is invoked for the bar
+    at index ``end_idx``. Returns ``None`` during warmup or for unknown
+    indicator names.
+    """
+    history = bars[: end_idx + 1]
+    if not history:
+        return None
+    name = ref.name
+    source = ref.source
+    if name == "sma":
+        return _compiler_sma_at(history, int(ref.param("period")), source)
+    if name == "ema":
+        return _compiler_ema_at(history, int(ref.param("period")), source)
+    if name == "rsi":
+        return _compiler_rsi_at(history, int(ref.param("period")), source)
+    if name == "macd":
+        return _compiler_macd_at(
+            history,
+            int(ref.param("fast")),
+            int(ref.param("slow")),
+            int(ref.param("signal")),
+            source,
+            str(ref.param("output")),
+        )
+    if name == "bollinger":
+        return _compiler_bollinger_at(
+            history,
+            int(ref.param("period")),
+            float(ref.param("num_std")),
+            source,
+            str(ref.param("band")),
+        )
+    if name == "atr":
+        return _compiler_atr_at(history, int(ref.param("period")))
+    if name == "adx":
+        return _compiler_adx_at(history, int(ref.param("period")))
+    if name == "stochastic":
+        return _compiler_stochastic_at(
+            history,
+            int(ref.param("k_period")),
+            int(ref.param("d_period")),
+            str(ref.param("output")),
+        )
+    if name == "vwap":
+        return _compiler_vwap_at(history)
+    return None
+
+
+def _compiler_indicator_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> Optional[pd.Series]:
+    """Run :func:`_compiler_indicator_at` at every bar index and wrap as a
+    pandas Series so the existing cross-search code can iterate it with
+    ``.iloc[]``. Slower than the pandas batch helpers (O(n²) for some
+    indicators) but matches the values the compiled strategy produces.
+    """
+    values: List[Optional[float]] = [None] * len(bars)
+    for i in range(len(bars)):
+        v = _compiler_indicator_at(ref, bars, i)
+        if v is not None and math.isfinite(v):
+            values[i] = v
+    return pd.Series(values, dtype=float)
+
+
 def _compute_indicator_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> Optional[pd.Series]:
     """Compute ``ref`` over the synthetic bar series as a full ``pd.Series``.
 
@@ -1603,9 +1885,14 @@ def _resolve_side_series(side: Any, bars: List[OHLCVBar], df: pd.DataFrame) -> O
 
     Returns ``None`` when the side references an unknown indicator or
     bar-field literal — the search treats that builder as failed and moves on.
+
+    Uses :func:`_compiler_indicator_series` (not the pandas batch helpers) so
+    the cross trigger the search reports matches the bar the compiled strategy
+    will actually fire on. The asserter then accepts the synthesized run
+    instead of rejecting it as an early/unrelated trade.
     """
     if isinstance(side, IndicatorRef):
-        return _compute_indicator_series(side, bars)
+        return _compiler_indicator_series(side, bars)
     if isinstance(side, str):
         field_name = _PRICEREF_TO_FIELD.get(side)
         if field_name is None:
