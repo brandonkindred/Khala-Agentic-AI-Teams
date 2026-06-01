@@ -125,21 +125,27 @@ ctx.submit_order(
 from indicators import sma, ema, rsi, macd, bollinger_bands, atr, adx, stochastic, vwap
 ```
 
-These helpers accept a list/sequence of numbers (typically `[b.close for b in history]`) **or the `list[Bar]` returned by `ctx.history` directly** — the needed field is extracted for you, so you do not need to wrap inputs in `pd.Series`. They return either a single float (for most scalar indicators) or a small named tuple.
+These helpers accept a list/sequence of numbers (typically `[b.close for b in history]`) **or the `list[Bar]` returned by `ctx.history` directly** — the needed field is extracted for you, so you do not need to wrap inputs in `pd.Series`.
+
+**Each helper returns a scalar — the latest value.** Single-output indicators return one `float`; `macd`, `bollinger_bands`, and `stochastic` return a tuple of floats. Use the value directly in comparisons; do **not** index it (there is no `.iloc` — the result is already the most recent value, and `0.0` during warm-up).
 
 **Single-series helpers** — `sma`, `ema`, `rsi`, `macd`, `bollinger_bands` — take one price sequence (close by default):
 
 ```python
-ema(history, 20)                       # list[Bar] → close extracted
-rsi([b.close for b in history], 14)    # or pass an explicit close list
+if ema(history, 20) > bar.close:       # ema(...) is the latest float
+    ...
+macd_line, signal, hist = macd(history)        # tuple of floats
+upper, middle, lower = bollinger_bands(history, 20)
+rsi_now = rsi([b.close for b in history], 14)  # or pass an explicit close list
 ```
 
 **Multi-series helpers** — `atr`, `adx`, `stochastic` need `(high, low, close)` and `vwap` needs `(high, low, close, volume)` as **separate positional arguments**. Do NOT call `atr(history, ...)`; pass `history` once per slot (each slot extracts its own field) or pass explicit per-field lists:
 
 ```python
-atr(history, history, history, period=14)              # high/low/close each extracted
-vwap(history, history, history, history)               # + volume
-adx([b.high for b in history], [b.low for b in history], [b.close for b in history], 14)
+atr_now = atr(history, history, history, period=14)    # latest float; high/low/close each extracted
+vwap_now = vwap(history, history, history, history)     # + volume
+k, d = stochastic(history, history, history)            # tuple of floats
+adx_now = adx([b.high for b in history], [b.low for b in history], [b.close for b in history], 14)
 ```
 
 ## Allowed imports

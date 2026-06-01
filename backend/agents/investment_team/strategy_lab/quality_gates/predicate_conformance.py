@@ -591,84 +591,26 @@ def _build_contract_stub():
 def _build_indicators_stub():
     """Build a shadow ``indicators`` module with real computations.
 
-    Strategy code calls ``from indicators import sma, ema, ...`` with
-    list inputs (``[b.close for b in history]``) and expects scalar
-    returns. These wrappers convert to pandas, call the real executor
-    indicators, and return the last value — matching the engine's
-    predicate evaluator so branch conditions evaluate identically.
+    Strategy code calls ``from indicators import sma, ema, ...`` and expects
+    scalar returns (the latest value), used directly in branch conditions. The
+    wrappers live in ``executor.strategy_indicators`` — the same scalar API the
+    streaming sandbox exposes — so the conformance shadow and the live sandbox
+    evaluate identical indicator values. Input coercion (``list[Bar]``,
+    ``deque``, …) is handled by the underlying ``executor.indicators`` helpers,
+    so no pre-wrapping is needed here.
+
+    Postconditions:
+        Returns a module object whose ``sma``/``ema``/``rsi``/``macd``/
+        ``bollinger_bands``/``atr``/``adx``/``stochastic``/``vwap`` attributes
+        are the scalar-returning helpers from ``executor.strategy_indicators``.
     """
     import types
 
-    import numpy as np
-    import pandas as pd
-
-    from ..executor import indicators as _real
+    from ..executor import strategy_indicators as _scalar
 
     mod = types.ModuleType("indicators")
-
-    def _last(series: pd.Series) -> float:
-        if series.empty:
-            return 0.0
-        val = series.iloc[-1]
-        if val is None or (isinstance(val, float) and np.isnan(val)):
-            return 0.0
-        return float(val)
-
-    def sma(data, period):
-        return _last(_real.sma(pd.Series(data), int(period)))
-
-    def ema(data, period):
-        return _last(_real.ema(pd.Series(data), int(period)))
-
-    def rsi(data, period=14):
-        return _last(_real.rsi(pd.Series(data), int(period)))
-
-    def macd(data, fast=12, slow=26, signal=9):
-        ml, sl, hist = _real.macd(
-            pd.Series(data), fast=int(fast), slow=int(slow), signal=int(signal)
-        )
-        return _last(ml), _last(sl), _last(hist)
-
-    def bollinger_bands(data, period=20, num_std=2.0):
-        upper, middle, lower = _real.bollinger_bands(
-            pd.Series(data), period=int(period), num_std=float(num_std)
-        )
-        return _last(upper), _last(middle), _last(lower)
-
-    def atr(high, low, close, period=14):
-        return _last(
-            _real.atr(pd.Series(high), pd.Series(low), pd.Series(close), period=int(period))
-        )
-
-    def adx(high, low, close, period=14):
-        return _last(
-            _real.adx(pd.Series(high), pd.Series(low), pd.Series(close), period=int(period))
-        )
-
-    def stochastic(high, low, close, k_period=14, d_period=3):
-        k, d = _real.stochastic(
-            pd.Series(high),
-            pd.Series(low),
-            pd.Series(close),
-            k_period=int(k_period),
-            d_period=int(d_period),
-        )
-        return _last(k), _last(d)
-
-    def vwap(high, low, close, volume):
-        return _last(
-            _real.vwap(pd.Series(high), pd.Series(low), pd.Series(close), pd.Series(volume))
-        )
-
-    mod.sma = sma
-    mod.ema = ema
-    mod.rsi = rsi
-    mod.macd = macd
-    mod.bollinger_bands = bollinger_bands
-    mod.atr = atr
-    mod.adx = adx
-    mod.stochastic = stochastic
-    mod.vwap = vwap
+    for _name in ("sma", "ema", "rsi", "macd", "bollinger_bands", "atr", "adx", "stochastic", "vwap"):
+        setattr(mod, _name, getattr(_scalar, _name))
     return mod
 
 

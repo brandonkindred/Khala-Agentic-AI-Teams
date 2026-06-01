@@ -132,15 +132,27 @@ class StreamingHarness:
         here = os.path.dirname(__file__)
         shutil.copy2(os.path.join(here, "contract.py"), os.path.join(tmp, "contract.py"))
 
-        # Copy indicators library for parity with existing code-gen output.
-        indicators_src = os.path.join(
+        # Expose indicators to strategy code as a scalar-returning API (the
+        # same contract the predicate-conformance gate uses): each helper
+        # returns the latest value, not a pd.Series. The Series-returning
+        # implementation is copied alongside as ``_indicators_impl.py`` and the
+        # scalar wrapper (``strategy_indicators.py``) imports it under that name
+        # in the flat sandbox layout.
+        executor_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             "strategy_lab",
             "executor",
-            "indicators.py",
         )
-        if os.path.exists(indicators_src):
-            shutil.copy2(indicators_src, os.path.join(tmp, "indicators.py"))
+        indicators_impl_src = os.path.join(executor_dir, "indicators.py")
+        scalar_api_src = os.path.join(executor_dir, "strategy_indicators.py")
+        if os.path.exists(indicators_impl_src) and os.path.exists(scalar_api_src):
+            shutil.copy2(indicators_impl_src, os.path.join(tmp, "_indicators_impl.py"))
+            shutil.copy2(scalar_api_src, os.path.join(tmp, "indicators.py"))
+        elif os.path.exists(indicators_impl_src):
+            # Defensive fallback: if the scalar wrapper is somehow missing, keep
+            # the previous behaviour rather than leaving the sandbox without an
+            # ``indicators`` module at all.
+            shutil.copy2(indicators_impl_src, os.path.join(tmp, "indicators.py"))
 
         with open(os.path.join(tmp, "strategy.py"), "w", encoding="utf-8") as f:
             f.write(self._strategy_code)
