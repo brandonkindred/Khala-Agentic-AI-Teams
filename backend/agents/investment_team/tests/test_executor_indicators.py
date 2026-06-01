@@ -177,6 +177,29 @@ def test_coerce_series_from_list_of_dicts() -> None:
     assert ind._coerce_series(rows, "close").tolist() == [10.0, 11.0]
 
 
+def test_coerce_series_extracts_from_object_dtype_series_of_bars() -> None:
+    # Mirrors the predicate-conformance shadow stub, which wraps strategy
+    # inputs with pd.Series(...) before calling the real indicators: a
+    # list[Bar] becomes an object-dtype Series whose elements still need
+    # field extraction.
+    wrapped = pd.Series(_bars(3))
+    assert wrapped.dtype == object
+    assert ind._coerce_series(wrapped, "close").tolist() == [100.0, 101.0, 102.0]
+    assert ind._coerce_series(wrapped, "high").tolist() == [101.0, 102.0, 103.0]
+
+
+def test_coerce_series_object_dtype_series_of_floats_becomes_float() -> None:
+    out = ind._coerce_series(pd.Series([1.0, 2.0, 3.0], dtype=object))
+    assert out.tolist() == [1.0, 2.0, 3.0]
+    assert out.dtype == float
+
+
+def test_coerce_series_empty_object_dtype_series() -> None:
+    out = ind._coerce_series(pd.Series([], dtype=object))
+    assert len(out) == 0
+    assert out.dtype == float
+
+
 def test_coerce_series_empty_list_yields_empty_float_series() -> None:
     out = ind._coerce_series([])
     assert isinstance(out, pd.Series)
@@ -223,6 +246,16 @@ def test_ema_accepts_list_of_bars_via_close() -> None:
 def test_ema_rejects_bad_list_with_typeerror_not_attributeerror() -> None:
     with pytest.raises(TypeError):
         ind.ema(["string"], 5)
+
+
+def test_ema_accepts_pd_series_wrapping_bars_like_shadow_stub() -> None:
+    # The predicate-conformance stub calls _real.ema(pd.Series(data), ...);
+    # when data is a list[Bar] that yields an object-dtype Series, which must
+    # still resolve to the close-derived result rather than DataError.
+    bars = _bars(20)
+    from_wrapped = ind.ema(pd.Series(bars), 5)
+    from_series = ind.ema(pd.Series([b.close for b in bars]), 5)
+    pd.testing.assert_series_equal(from_wrapped, from_series)
 
 
 def test_sma_accepts_list_of_bars() -> None:

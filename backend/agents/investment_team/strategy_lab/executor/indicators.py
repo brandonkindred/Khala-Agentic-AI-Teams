@@ -42,7 +42,13 @@ def _coerce_series(series, field: str = "close") -> pd.Series:
         than a look-ahead violation.
     """
     if isinstance(series, pd.Series):
-        return series
+        # A numeric Series passes straight through (preserving its index). An
+        # object-dtype Series may still hold Bar/dict/number elements — e.g. a
+        # caller wrapped list[Bar] with pd.Series(...) before reaching here —
+        # so route those through the list path to extract ``field``.
+        if series.dtype != object:
+            return series
+        return _coerce_series(list(series), field)
     if not isinstance(series, (list, tuple)):
         raise TypeError(f"indicator input must be pd.Series or list, got {type(series).__name__}")
     if not series:
