@@ -20,6 +20,7 @@ from .code_safety_ast import (
     _has_universe_guard_in_on_bar,
     _strip_comments_and_strings,
     _validate_on_bar,
+    parse_strategy_source,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
@@ -528,9 +529,10 @@ class CodeSafetyChecker(GateResultsMixin):
         """
         with self._using_phase(phase):
             # Parse first — a syntax error is a hard short-circuit because
-            # every AST rule below requires a tree.
+            # every AST rule below requires a tree. Routed through the shared
+            # memoised parser so the same source isn't re-parsed by each gate.
             try:
-                tree = ast.parse(code)
+                tree = parse_strategy_source(code)
             except SyntaxError as e:
                 return [self._critical(f"Code has a syntax error: {e}")]
 

@@ -7,7 +7,7 @@ TradeSimulationEngine._close_position() in trade_simulator.py.
 from __future__ import annotations
 
 from datetime import date as date_cls
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from ...models import BacktestConfig, TradeRecord
 
@@ -32,11 +32,14 @@ def build_trade_records(
     slippage_mult = config.slippage_bps / 10_000
     cost_mult = config.transaction_cost_bps / 10_000
 
-    # Sort chronologically so cumulative PnL / equity curve are correct
-    sorted_trades = sorted(
-        raw_trades,
-        key=lambda t: (str(t.get("exit_date", ""))[:10], str(t.get("entry_date", ""))[:10]),
-    )
+    # Sort chronologically so cumulative PnL / equity curve are correct.
+    # ``sorted(key=...)`` already evaluates the key once per element (it is not
+    # re-derived per comparison), so this is a readability factoring of the
+    # date-slice key rather than a complexity change.
+    def _chrono_key(t: Dict[str, Any]) -> Tuple[str, str]:
+        return (str(t.get("exit_date", ""))[:10], str(t.get("entry_date", ""))[:10])
+
+    sorted_trades = sorted(raw_trades, key=_chrono_key)
 
     records: List[TradeRecord] = []
     cumulative_pnl = 0.0

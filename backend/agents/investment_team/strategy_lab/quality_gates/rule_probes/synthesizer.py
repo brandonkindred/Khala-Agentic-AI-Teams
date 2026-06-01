@@ -53,6 +53,7 @@ from ...spec_dsl import (
     StopLossRule,
     TakeProfitRule,
 )
+from ..code_safety_ast import parse_strategy_source
 
 # Bars/recipe knobs. Indicators with the largest lookback need the most
 # bars; ``min_total_bars`` keeps short-lookback recipes well above the
@@ -285,7 +286,7 @@ def _extract_universe_literal(code: str) -> frozenset:
     if not code:
         return frozenset()
     try:
-        tree = ast.parse(code)
+        tree = parse_strategy_source(code)
     except SyntaxError:
         return frozenset()
     for node in ast.walk(tree):
