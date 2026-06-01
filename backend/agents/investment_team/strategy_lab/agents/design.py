@@ -210,6 +210,11 @@ class DesignAgent:
         "do not reintroduce these" instruction so the loop escalates a
         regression rather than silently oscillating on it. Empty by default
         so existing callers are unaffected.
+
+        The accumulated external lineage (``prior_critiques``, which already
+        includes the current ``critique``) is forwarded into the internal
+        self-review pre-flight so a self-revision cannot regress a fix an
+        earlier external round extracted.
         """
         spec_json = prior_spec.model_dump_json(indent=2, exclude={"strategy_code"})
         issues_block = _format_issues(critique)
@@ -226,7 +231,19 @@ class DesignAgent:
         )
 
         strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
-        return self._with_self_review(strategy_dict, rationale)
+        # Thread the external critique lineage AND the regression notice into the
+        # internal self-review so a self-revision cannot regress a fix (or undo a
+        # prior-round defect the ledger is keeping fixed) that an earlier external
+        # round extracted. ``prior_critiques`` already includes the current
+        # critique (the orchestrator appends it to the history before calling
+        # ``revise``), so it is forwarded verbatim — appending ``critique`` again
+        # would double-count it.
+        return self._with_self_review(
+            strategy_dict,
+            rationale,
+            prior_critiques=prior_critiques,
+            regression_notice=regression_notice,
+        )
 
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
         """Call the LLM, parse JSON, strip any stray ``strategy_code``, validate rules.
@@ -323,82 +340,130 @@ class DesignAgent:
         raise AssertionError("unreachable: _invoke_and_parse loop exited without return")
 
     def _with_self_review(
-        self, strategy_dict: Dict[str, Any], rationale: str
+        self,
+        strategy_dict: Dict[str, Any],
+        rationale: str,
+        *,
+        prior_critiques: Optional[List["SpecCritique"]] = None,
+        regression_notice: str = "",
     ) -> Tuple[Dict[str, Any], str]:
-        """Audit a freshly emitted spec and self-revise once if needed.
+        """Audit a freshly emitted spec and self-revise (then re-audit) if needed.
 
         Pre: ``strategy_dict`` is a validated spec dict and ``rationale``
         is its accompanying rationale (the tuple returned by
-        :meth:`_invoke_and_parse`).
-        Post: returns either the original ``(strategy_dict, rationale)``
-        unchanged (when self-review is disabled, marks the spec ready, or
-        fails best-effort) or a self-revised ``(strategy_dict, rationale)``
-        tuple. Never raises — the external review loop is still
-        authoritative; this is purely an internal pre-flight.
+        :meth:`_invoke_and_parse`). ``prior_critiques`` is the external
+        design-review lineage threaded into the self-revision prompt
+        (``None`` on initial generation, where no external round has run
+        yet); callers must not append the current critique themselves — the
+        orchestrator already appends it to the history before :meth:`revise`
+        receives it. ``regression_notice`` is the external loop's
+        "do not reintroduce" block (empty on the :meth:`run` path); it is
+        threaded into the self-revision prompt so a self-revision cannot undo
+        a prior-round defect the regression machinery is keeping fixed.
+        Post: returns ``(strategy_dict, rationale)`` — either the input
+        unchanged (self-review disabled, the spec is already ready, or a
+        best-effort failure) or a self-revised spec. Whenever a self-revision
+        fires, the revised spec has been re-audited through self-review at
+        least once. Never raises except :class:`DesignBudgetExhausted`, which
+        propagates so the cycle can stop; the external review loop is still
+        authoritative — this is purely an internal pre-flight.
+        Invariant: at most ``_design_self_revision_rounds()`` self-revisions
+        fire per call, each followed by a re-audit; the loop cannot run
+        unbounded.
 
         The self-review fires on every spec the designer emits — both
         initial generation from :meth:`run` and each external-loop
         revision from :meth:`revise` — because the recurring failure
         mode is the designer slipping the same prose ↔ predicate or
-        risk-math contradiction on round after round of revisions.
+        risk-math contradiction on round after round of revisions. Re-
+        auditing the self-revised spec closes the gap where a self-revision
+        introduced a *new* contradiction that then reached the external
+        reviewer unchecked.
         """
         if not _design_self_review_enabled():
             return strategy_dict, rationale
 
-        try:
-            critique = self._self_review(strategy_dict)
-        except DesignBudgetExhausted:
-            # A budget trip is a cycle-level stop, not a self-review hiccup —
-            # it must propagate to ``_run_design_loop`` rather than being
-            # swallowed by the best-effort guard below.
-            raise
-        except Exception as exc:
-            logger.warning(
-                "DesignAgent self-review failed (%s: %s); returning original spec",
-                type(exc).__name__,
-                exc,
+        max_revisions = _design_self_revision_rounds()
+        revisions_done = 0
+        # audits == revisions + 1; ``range`` is a hard ceiling on top of the
+        # explicit ``revisions_done`` guard below.
+        for _ in range(max_revisions + 1):
+            try:
+                critique = self._self_review(strategy_dict)
+            except DesignBudgetExhausted:
+                # A budget trip is a cycle-level stop, not a self-review hiccup —
+                # it must propagate to ``_run_design_loop`` rather than being
+                # swallowed by the best-effort guard below.
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "DesignAgent self-review failed (%s: %s); returning current spec",
+                    type(exc).__name__,
+                    exc,
+                )
+                return strategy_dict, rationale
+
+            if critique.ready:
+                return strategy_dict, rationale
+
+            if revisions_done >= max_revisions:
+                # Bounded: the (re-)audit still flags issues but we have spent
+                # the self-revision budget. Defer the residual to the
+                # authoritative external ``DesignReviewAgent`` loop rather than
+                # churning here.
+                logger.warning(
+                    "DesignAgent self-review still flags issues after %d self-revision(s); "
+                    "deferring to the external review loop",
+                    revisions_done,
+                )
+                return strategy_dict, rationale
+
+            # Self-revision: reuse the same revision template the external loop
+            # uses so the LLM sees a familiar prompt shape, and thread the
+            # external critique lineage so the self-revision cannot regress a
+            # fix an earlier external round already extracted. Build the
+            # ``prior_spec_json`` directly from the dict (no need to round-trip
+            # through ``StrategySpec`` construction).
+            spec_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
+            issues_block = _format_issues(critique)
+            revision_prompt = _REVISION_USER_TEMPLATE.format(
+                prior_spec_json=spec_json,
+                ready="false",
+                rationale=critique.rationale or "(self-review flagged issues)",
+                issues_block=issues_block,
+                n_prior_critiques=len(prior_critiques) if prior_critiques else 0,
+                prior_critiques_block=format_prior_critiques(prior_critiques),
+                # Thread the external regression notice (empty on the run() path)
+                # so a self-revision cannot undo a prior-round defect the external
+                # loop is keeping fixed.
+                regression_notice_block=regression_notice or "None.",
             )
-            return strategy_dict, rationale
 
-        if critique.ready:
-            return strategy_dict, rationale
+            try:
+                strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, revision_prompt)
+            except DesignBudgetExhausted:
+                # As above: propagate budget exhaustion rather than falling back.
+                raise
+            except Exception as exc:
+                # Best-effort contract: any self-revision failure — DSL parse
+                # rejection (``StrategySpecParseError``), malformed JSON
+                # (``ValueError`` from ``extract_json_object``), or LLM
+                # transport error — must fall back to the last valid spec. We
+                # return here rather than re-auditing, so a failed revision
+                # never triggers a re-audit on an unrevised spec.
+                logger.warning(
+                    "DesignAgent self-revision failed (%s: %s); returning pre-revision spec",
+                    type(exc).__name__,
+                    exc,
+                )
+                return strategy_dict, rationale
 
-        # Self-revision: reuse the same revision template the external
-        # loop uses so the LLM sees a familiar prompt shape. Build the
-        # ``prior_spec_json`` directly from the dict (no need to round-
-        # trip through ``StrategySpec`` construction).
-        spec_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
-        issues_block = _format_issues(critique)
-        revision_prompt = _REVISION_USER_TEMPLATE.format(
-            prior_spec_json=spec_json,
-            ready="false",
-            rationale=critique.rationale or "(self-review flagged issues)",
-            issues_block=issues_block,
-            n_prior_critiques=0,
-            prior_critiques_block=format_prior_critiques(None),
-            # Self-review is a fresh internal pre-flight with no cross-round
-            # lineage, so there is never a regression to surface here.
-            regression_notice_block="None.",
-        )
+            revisions_done += 1
 
-        try:
-            return self._invoke_and_parse(_SYSTEM_PROMPT, revision_prompt)
-        except DesignBudgetExhausted:
-            # As above: propagate budget exhaustion rather than falling back.
-            raise
-        except Exception as exc:
-            # Best-effort contract: any self-revision failure — DSL parse
-            # rejection (``StrategySpecParseError``), malformed JSON
-            # (``ValueError`` from ``extract_json_object``), or LLM
-            # transport error — must fall back to the original valid
-            # spec. The external ``DesignReviewAgent`` loop remains
-            # authoritative; this pre-flight never aborts the cycle.
-            logger.warning(
-                "DesignAgent self-revision failed (%s: %s); returning pre-revision spec",
-                type(exc).__name__,
-                exc,
-            )
-            return strategy_dict, rationale
+        # Unreachable in practice: the ``revisions_done >= max_revisions`` guard
+        # returns before the ``range`` ceiling is exhausted. Kept so a
+        # type-checker sees a definite return.
+        return strategy_dict, rationale  # pragma: no cover
 
     def _self_review(self, strategy_dict: Dict[str, Any]) -> "SpecCritique":
         """Audit ``strategy_dict`` for prose↔predicate + risk-math contradictions.
@@ -467,6 +532,24 @@ def _design_self_review_enabled() -> bool:
     """
     raw = os.environ.get("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
     return raw.strip().lower() in {"true", "1", "yes"}
+
+
+def _design_self_revision_rounds() -> int:
+    """Resolve the cap on internal self-revision rounds in ``_with_self_review``.
+
+    Reads ``STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS`` (default ``1``,
+    sub-zero values floored to ``0``). One round is one self-revision LLM
+    call followed by a re-audit through self-review; ``0`` disables
+    self-revision entirely (audit-only). Garbage values fall back to the
+    default rather than raising — the surrounding cycle is best-effort.
+
+    Pre: none.
+    Post: returns an ``int >= 0``.
+    """
+    try:
+        return max(int(os.environ.get("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", "1")), 0)
+    except ValueError:
+        return 1
 
 
 _CORRECTION_PREAMBLE = """\
