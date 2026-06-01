@@ -511,7 +511,10 @@ def _coerce_critique(
     Preconditions: ``parsed`` is a dict from a parsed LLM JSON payload;
     ``demote_min_severity`` is one of ``"warning"`` / ``"critical"``.
     Postconditions: returns a :class:`SpecCritique` whose ``ready`` is
-    ``False`` whenever a blocking issue (per the threshold) is present.
+    ``False`` whenever a blocking issue (per the threshold) is present, and
+    whose ``open_issue_ids`` is non-empty whenever ``ready`` is ``False`` (a
+    not-ready verdict always carries at least one blocking issue, synthesised
+    if the reviewer named none or only ``info`` notes).
     """
     ready = _coerce_strict_bool(parsed.get("ready"))
     rationale = str(parsed.get("rationale", "")).strip()
@@ -567,10 +570,18 @@ def _coerce_critique(
             )
         )
 
-    # Contract: ready=False but no issues is incoherent. Synthesise a
-    # placeholder so the designer's `revise()` call has something to
-    # act on, rather than looping with an empty critique.
-    if not ready and not issues:
+    # Contract: a ``ready=False`` verdict must carry at least one *blocking*
+    # (warning/critical) issue. The reviewer keeps the loop revising whenever
+    # ``ready`` is false, but ``SpecCritique.open_issue_ids`` — the unit the
+    # CritiqueLedger and stall detector track — counts only blocking issues.
+    # A not-ready critique with no issues at all, or with only ``info`` issues,
+    # would otherwise present an empty open set: the loop would churn to the
+    # hard round cap with telemetry claiming zero open issues and stall
+    # detection unable to fire. Synthesise a blocking placeholder (preserving
+    # any info notes) so the not-ready signal is always backed by a tracked
+    # open issue. ``info`` issues remain advisory and never block on their own.
+    has_blocking = any(_SEVERITY_ORDER[i.severity] >= _SEVERITY_ORDER["warning"] for i in issues)
+    if not ready and not has_blocking:
         issues.append(
             CritiqueIssue(
                 field="hypothesis",
