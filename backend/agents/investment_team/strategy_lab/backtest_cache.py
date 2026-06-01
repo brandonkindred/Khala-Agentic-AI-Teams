@@ -39,6 +39,35 @@ from .phases import hash_code, hash_spec
 # correct here.
 _NO_SPEC = "no-spec"
 
+# Wall-clock entry points that make a backtest nondeterministic across runs
+# with identical (code, data, config). ``datetime``/``time`` are in the strategy
+# code-safety allowlist and the engine does not freeze the clock, so code that
+# branches on these can yield a different ledger each run. Memoizing the first
+# result would freeze that outcome, so such code bypasses the cache entirely.
+# A substring scan is intentionally conservative: a false positive only forgoes
+# a cache hit (always safe); generated strategy code does not obfuscate calls.
+_WALL_CLOCK_TOKENS: tuple[str, ...] = (
+    ".now(",
+    ".today(",
+    ".utcnow(",
+    "time.time(",
+    "time.time_ns(",
+    "time.monotonic",
+    "time.perf_counter",
+    "time.process_time",
+    "time.localtime(",
+    "time.gmtime(",
+)
+
+
+def _is_wall_clock_dependent(code: str) -> bool:
+    """True if ``code`` references a wall-clock API (see ``_WALL_CLOCK_TOKENS``).
+
+    Postconditions: pure; conservative — may return ``True`` for a benign
+    occurrence (e.g. in a string/comment), which only forgoes a cache hit.
+    """
+    return any(token in code for token in _WALL_CLOCK_TOKENS)
+
 
 def _spec_hash(strategy: Any) -> str:
     """Hash the parts of ``strategy`` that steer the backtest.
@@ -163,10 +192,19 @@ class BacktestCache:
             ``runner`` was invoked exactly once and its result stored. For
             deterministic ``runner`` (the contract of ``run_strategy_code``) a
             hit is observationally identical to a fresh run.
+          - Wall-clock-dependent ``code`` (see ``_is_wall_clock_dependent``)
+            is never stored or served from cache — it always re-executes and
+            counts as a miss — so nondeterministic strategies are not frozen
+            to their first ledger.
           - ``hits``/``misses`` are incremented to reflect the outcome.
         """
         assert isinstance(code, str) and code, "code must be a non-empty string"
         run = runner if runner is not None else run_strategy_code
+        # Wall-clock-dependent code is nondeterministic across runs, so never
+        # memoize it — always re-execute (counted as a miss, never stored).
+        if _is_wall_clock_dependent(code):
+            self.misses += 1
+            return run(code, market_data, config, strategy=strategy), False
         key = self._key(code, market_data, config, strategy)
         cached = self._results.get(key)
         if cached is not None:

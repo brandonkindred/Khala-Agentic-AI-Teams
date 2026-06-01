@@ -159,6 +159,29 @@ def test_different_strategy_spec_is_a_miss() -> None:
     assert len(calls) == 2
 
 
+def test_wall_clock_dependent_code_is_never_cached() -> None:
+    """Code that branches on wall-clock state (datetime.now/today, time.*) is
+    nondeterministic across runs, so it must re-execute every time rather than
+    freezing the first ledger."""
+    cache = BacktestCache()
+    calls, runner = _counting_runner()
+    md, cfg = _market_data(), _config()
+    code = (
+        "import datetime\n"
+        "class S:\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        if datetime.datetime.now().hour > 12:\n"
+        "            pass\n"
+    )
+
+    _, hit1 = cache.get_or_run(code, md, cfg, strategy=None, runner=runner)
+    _, hit2 = cache.get_or_run(code, md, cfg, strategy=None, runner=runner)
+
+    assert hit1 is False and hit2 is False  # never served from cache
+    assert len(calls) == 2  # re-executed each time
+    assert cache.misses == 2 and cache.hits == 0
+
+
 def test_default_runner_is_module_run_strategy_code(monkeypatch) -> None:
     """When ``runner`` is omitted, the cache falls back to the module-level
     ``run_strategy_code`` import."""
