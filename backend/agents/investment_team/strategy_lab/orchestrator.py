@@ -74,6 +74,7 @@ from .agents.design_review import (
 from .agents.refinement import RefinementAgent
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .alignment_findings import AlignmentFinding
+from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
 from .phases import (
@@ -1331,6 +1332,35 @@ class StrategyLabOrchestrator:
             drift_collector=drift_collector,
         )
 
+    def _cached_run_strategy_code(
+        self,
+        code: str,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+        *,
+        strategy: StrategySpec,
+    ) -> StrategyRunResult:
+        """Run ``code`` through the attempt-scoped :class:`BacktestCache`.
+
+        Routes the module-level ``run_strategy_code`` (so test monkeypatches
+        of ``orchestrator.run_strategy_code`` still apply) and memoizes on
+        ``(code, market_data, config)``. The cache is created lazily so a
+        sub-loop invoked directly in a test — outside ``_run_design_attempt``
+        — still works (with a degenerate one-entry cache).
+
+        Pre: ``code`` is non-empty; ``market_data`` is the hoisted per-symbol
+        OHLCV dict for the attempt.
+        Post: returns the ``StrategyRunResult`` for ``code`` — a fresh run on
+        the first call with a given key, the stored result on subsequent ones.
+        """
+        cache = getattr(self, "_backtest_cache", None)
+        if cache is None:
+            cache = self._backtest_cache = BacktestCache()
+        result, _hit = cache.get_or_run(
+            code, market_data, config, strategy=strategy, runner=run_strategy_code
+        )
+        return result
+
     def _run_synthesis_loop(
         self,
         *,
@@ -1512,7 +1542,7 @@ class StrategyLabOrchestrator:
 
             # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
             emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
-            exec_result = run_strategy_code(code, market_data, config, strategy=spec)
+            exec_result = self._cached_run_strategy_code(code, market_data, config, strategy=spec)
             runtime_lookahead_violation = exec_result.error_type == "lookahead_violation"
 
             if not exec_result.success:
@@ -2099,7 +2129,9 @@ class StrategyLabOrchestrator:
                 "trigger": "trade_alignment_fix",
             },
         )
-        align_exec = run_strategy_code(proposed_code, market_data, config, strategy=spec)
+        align_exec = self._cached_run_strategy_code(
+            proposed_code, market_data, config, strategy=spec
+        )
         if not align_exec.success:
             all_gate_results.append(
                 self.build_orchestrator_gate(
@@ -2820,6 +2852,12 @@ class StrategyLabOrchestrator:
         """
         # Reset per-attempt counters so a re-entry starts fresh.
         self._consecutive_spec_mutation_rounds = {}
+        # Fresh, attempt-scoped backtest memo. Discarding it per attempt keeps
+        # a cached result from ever crossing a market-data snapshot: the same
+        # code re-run against the same hoisted ``market_data`` + ``config``
+        # (alignment re-checks, determinism re-checks, audit re-backtests)
+        # short-circuits to the stored ``StrategyRunResult``.
+        self._backtest_cache = BacktestCache()
 
         all_gate_results: List[QualityGateResult] = (
             cumulative_gate_results if cumulative_gate_results is not None else []
@@ -3122,6 +3160,25 @@ class StrategyLabOrchestrator:
                 alignment_rejection_reason,
             )
         alignment_reports = alignment_outcome.alignment_reports
+
+        # Backtest-cache effectiveness for this attempt — emitted so the
+        # synthesis/alignment re-execution savings are observable post hoc.
+        _bt_cache = getattr(self, "_backtest_cache", None)
+        if _bt_cache is not None:
+            emit(
+                "telemetry",
+                {
+                    "kind": "backtest_cache",
+                    "hits": _bt_cache.hits,
+                    "misses": _bt_cache.misses,
+                },
+            )
+            logger.info(
+                "backtest_cache for %s: hits=%d misses=%d",
+                spec.strategy_id,
+                _bt_cache.hits,
+                _bt_cache.misses,
+            )
 
         # ── Phase 2.6: TRIAL COUNTING (issue #247) ────────────────────
         # Every refinement round on the same window contributes to the
