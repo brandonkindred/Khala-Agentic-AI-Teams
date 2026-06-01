@@ -35,6 +35,8 @@ Scope choices (issue #541, v1):
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, ClassVar, Iterable, List, Optional
 
 from ..spec_dsl import (
@@ -50,6 +52,7 @@ from .code_safety_ast import (
     _has_universe_constant,
     _has_universe_guard_in_on_bar,
     _iter_method_body_nodes,
+    parse_strategy_source,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
@@ -399,6 +402,40 @@ def _is_engine_managed(spec: Any) -> bool:
     return bool(entry_rules)
 
 
+@dataclass(frozen=True)
+class _ConformanceCtx:
+    """Per-``check`` derived state, computed lazily and shared by every check.
+
+    Several conformance checks need the same structural views of the Strategy
+    class — the set of methods reachable from ``on_bar`` and the list of
+    ``if`` branches that submit orders. Exposing them as memoised properties
+    means each view is computed **at most once** per ``check`` (removing the
+    duplicate ``_methods_reachable_from_on_bar`` / ``_find_if_branches_with_submit_order``
+    walks) while still being skipped entirely when no check needs them — e.g.
+    an engine-managed spec early-returns from entry/exit coverage before ever
+    touching ``submit_branches``, matching the old per-check laziness.
+
+    Invariants: ``reachable`` and ``submit_branches`` are derived purely from
+    ``cls`` (read-only); ``submit_branches`` is filtered to ``reachable``
+    methods, matching the previous per-check call ``_find_if_branches_with_submit_order(cls,
+    reachable_method_names=reachable)``. ``cached_property`` writes into the
+    instance ``__dict__`` — frozen-dataclass ``__setattr__`` is bypassed.
+    """
+
+    cls: ast.ClassDef
+    spec: Any
+
+    @cached_property
+    def reachable(self) -> frozenset[str]:
+        return _methods_reachable_from_on_bar(self.cls)
+
+    @cached_property
+    def submit_branches(self) -> List[tuple[ast.If, List[ast.Call]]]:
+        return _find_if_branches_with_submit_order(
+            self.cls, reachable_method_names=self.reachable
+        )
+
+
 class CodeConformanceGate(GateResultsMixin):
     """Deterministic gate that checks generated code implements ``spec``.
 
@@ -425,7 +462,7 @@ class CodeConformanceGate(GateResultsMixin):
         """
         with self._using_phase(phase):
             try:
-                tree = ast.parse(code)
+                tree = parse_strategy_source(code)
             except SyntaxError as e:
                 return [self._critical(f"Code has a syntax error: {e}")]
 
@@ -443,30 +480,32 @@ class CodeConformanceGate(GateResultsMixin):
                 ]
             cls = strategy_classes[0]
 
+            # Shared structural views (reachable methods, submit-order branches)
+            # are memoised on the context: computed at most once across all
+            # checks, and only when a check actually reads them.
+            cctx = _ConformanceCtx(cls=cls, spec=spec)
+
             results: List[QualityGateResult] = []
-            results.extend(self._check_indicator_presence(cls, spec))
-            results.extend(self._check_symbol_gate(spec, cls))
-            results.extend(self._check_entry_coverage(cls, spec))
-            results.extend(self._check_signal_exit_coverage(cls, spec))
-            results.extend(self._check_bar_counting_exit(cls))
-            results.extend(self._check_sizing_math(cls, spec))
-            results.extend(self._check_no_extra_side_effects(tree, cls))
+            results.extend(self._check_indicator_presence(cctx))
+            results.extend(self._check_symbol_gate(cctx))
+            results.extend(self._check_entry_coverage(cctx))
+            results.extend(self._check_signal_exit_coverage(cctx))
+            results.extend(self._check_bar_counting_exit(cctx))
+            results.extend(self._check_sizing_math(cctx))
+            results.extend(self._check_no_extra_side_effects(tree, cctx))
 
             return results or [self._info("Code conforms to spec across all conformance checks.")]
 
     # ------------------------------------------------------------------
     # Check 1 — indicator presence
     # ------------------------------------------------------------------
-    def _check_indicator_presence(
-        self, cls: ast.ClassDef, spec: Any
-    ) -> Iterable[QualityGateResult]:
-        required = _collect_required_indicators(spec)
+    def _check_indicator_presence(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        required = _collect_required_indicators(cctx.spec)
         if not required:
             return ()
         # Indicator calls only count when they are actually executed at
         # runtime: walk methods reachable from on_bar (Codex PR #588 P1).
-        reachable = _methods_reachable_from_on_bar(cls)
-        called = _collect_called_names_in_methods(cls, reachable)
+        called = _collect_called_names_in_methods(cctx.cls, cctx.reachable)
         missing: List[str] = []
         for name in sorted(required):
             allowed = _INDICATOR_ALLOWED_CALL_NAMES.get(name, frozenset({name}))
@@ -487,7 +526,9 @@ class CodeConformanceGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Check 2 — symbol/universe gate (defense-in-depth with code_safety)
     # ------------------------------------------------------------------
-    def _check_symbol_gate(self, spec: Any, cls: ast.ClassDef) -> Iterable[QualityGateResult]:
+    def _check_symbol_gate(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        spec = cctx.spec
+        cls = cctx.cls
         if not getattr(spec, "target_symbols", None):
             return ()
         if not _has_universe_constant(cls):
@@ -513,7 +554,8 @@ class CodeConformanceGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Check 3 — entry predicate coverage
     # ------------------------------------------------------------------
-    def _check_entry_coverage(self, cls: ast.ClassDef, spec: Any) -> Iterable[QualityGateResult]:
+    def _check_entry_coverage(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        spec = cctx.spec
         entry_rules = [
             r for r in (getattr(spec, "entry_rules", []) or []) if isinstance(r, EntryRule)
         ]
@@ -529,10 +571,8 @@ class CodeConformanceGate(GateResultsMixin):
                 ),
             )
 
-        reachable = _methods_reachable_from_on_bar(cls)
-        branches = _find_if_branches_with_submit_order(cls, reachable_method_names=reachable)
         entry_branches: List[tuple[ast.If, List[ast.Call]]] = []
-        for if_node, calls in branches:
+        for if_node, calls in cctx.submit_branches:
             if any(
                 _submit_order_is_kwargs_spread(c)
                 or (_submit_order_has_side_literal(c) and not _submit_order_closes_position(c))
@@ -566,9 +606,8 @@ class CodeConformanceGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Check 4 — signal-exit predicate coverage
     # ------------------------------------------------------------------
-    def _check_signal_exit_coverage(
-        self, cls: ast.ClassDef, spec: Any
-    ) -> Iterable[QualityGateResult]:
+    def _check_signal_exit_coverage(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        spec = cctx.spec
         signal_exits = [
             r for r in (getattr(spec, "exit_rules", []) or []) if isinstance(r, SignalExitRule)
         ]
@@ -584,11 +623,9 @@ class CodeConformanceGate(GateResultsMixin):
                 ),
             )
 
-        reachable = _methods_reachable_from_on_bar(cls)
-        branches = _find_if_branches_with_submit_order(cls, reachable_method_names=reachable)
         exit_branches = [
             (if_node, calls)
-            for if_node, calls in branches
+            for if_node, calls in cctx.submit_branches
             if any(
                 _submit_order_closes_position(c) or _submit_order_is_kwargs_spread(c) for c in calls
             )
@@ -623,9 +660,9 @@ class CodeConformanceGate(GateResultsMixin):
         "holding_period", "exit_countdown", "bar_counter",
     })
 
-    def _check_bar_counting_exit(self, cls: ast.ClassDef) -> Iterable[QualityGateResult]:
+    def _check_bar_counting_exit(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
         violations: list[str] = []
-        for method in _iter_strategy_methods(cls):
+        for method in _iter_strategy_methods(cctx.cls):
             for node in ast.walk(method):
                 # Only flag self.<counter> instance attributes — these persist
                 # across bars and are the pattern LLMs use for holding-period
@@ -653,7 +690,8 @@ class CodeConformanceGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Check 6 — sizing math present
     # ------------------------------------------------------------------
-    def _check_sizing_math(self, cls: ast.ClassDef, spec: Any = None) -> Iterable[QualityGateResult]:
+    def _check_sizing_math(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        cls = cctx.cls
         all_submit_calls = [
             sub
             for method in _iter_strategy_methods(cls)
@@ -697,12 +735,12 @@ class CodeConformanceGate(GateResultsMixin):
     # Check 7 — no submit_order calls outside hook/helper methods
     # ------------------------------------------------------------------
     def _check_no_extra_side_effects(
-        self, tree: ast.AST, cls: ast.ClassDef
+        self, tree: ast.AST, cctx: _ConformanceCtx
     ) -> Iterable[QualityGateResult]:
         # ``_helper`` methods are only allowed when actually reachable
         # from an allowed hook — a dead ``_helper`` containing
         # ctx.submit_order would otherwise pass silently (Codex PR #588).
-        reachable_helpers = _methods_reachable_from_hooks(cls)
+        reachable_helpers = _methods_reachable_from_hooks(cctx.cls)
         offenders: List[str] = []
         for node in ast.walk(tree):
             if not _is_submit_order_call(node):

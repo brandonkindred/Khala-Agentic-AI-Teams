@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import cached_property
 from typing import ClassVar, Dict, Iterable, List, Optional
 
 from ...market_data_service import OHLCVBar
@@ -31,6 +32,30 @@ class BacktestAnomalyCtx:
     end_date: Optional[str] = None
     timeframe: Optional[str] = None
     market_data: Optional[Dict[str, List[OHLCVBar]]] = None
+
+    # Per-trade reductions multiple rules need. Computed once and memoised on
+    # the (frozen) ctx so the concentration and cost-sensitivity rules don't
+    # each re-walk every trade. ``cached_property`` writes straight into the
+    # instance ``__dict__`` — frozen-dataclass ``__setattr__`` is bypassed.
+    @cached_property
+    def total_abs_pnl(self) -> float:
+        """Sum of ``abs(net_pnl)`` over all trades (0.0 when empty)."""
+        return sum(abs(t.net_pnl) for t in self.trades)
+
+    @cached_property
+    def max_abs_pnl(self) -> float:
+        """Largest ``abs(net_pnl)`` over all trades (0.0 when empty)."""
+        return max((abs(t.net_pnl) for t in self.trades), default=0.0)
+
+    @cached_property
+    def gross_wins(self) -> float:
+        """Sum of positive ``gross_pnl`` over all trades."""
+        return sum(t.gross_pnl for t in self.trades if t.gross_pnl > 0)
+
+    @cached_property
+    def gross_losses(self) -> float:
+        """Absolute sum of non-positive ``gross_pnl`` over all trades."""
+        return abs(sum(t.gross_pnl for t in self.trades if t.gross_pnl <= 0))
 
 
 GATE = "backtest_anomaly"
@@ -314,10 +339,10 @@ class BacktestAnomalyDetector(GateResultsMixin):
         return ()
 
     def _check_trade_concentration(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
-        total_pnl = sum(abs(t.net_pnl) for t in ctx.trades)
+        total_pnl = ctx.total_abs_pnl
         if total_pnl <= 0:
             return ()
-        max_single = max(abs(t.net_pnl) for t in ctx.trades)
+        max_single = ctx.max_abs_pnl
         if max_single / total_pnl > 0.5:
             return (
                 self._warning(
@@ -534,9 +559,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
         return tuple(results)
 
     def _check_cost_sensitivity(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
-        gross_wins = sum(t.gross_pnl for t in ctx.trades if t.gross_pnl > 0)
-        gross_losses = abs(sum(t.gross_pnl for t in ctx.trades if t.gross_pnl <= 0))
-        gross_pf = gross_wins / gross_losses if gross_losses > 0 else 0.0
+        gross_pf = ctx.gross_wins / ctx.gross_losses if ctx.gross_losses > 0 else 0.0
         if gross_pf > 1.0 and ctx.metrics.profit_factor < 1.0:
             return (
                 self._warning(

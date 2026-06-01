@@ -10,7 +10,28 @@ from __future__ import annotations
 
 import ast
 import re
+from functools import lru_cache
 from typing import Dict, List, Optional
+
+
+@lru_cache(maxsize=8)
+def parse_strategy_source(code: str) -> ast.Module:
+    """Parse ``code`` into a module AST, memoised per source string.
+
+    The same generated strategy source is handed to several gates in one
+    synthesis round (code-safety, conformance, rule-probes, …). Parsing is
+    pure and deterministic, so caching the result means each distinct source
+    is parsed once across the whole gate phase rather than once per gate.
+
+    Preconditions: ``code`` is the exact source string a gate would otherwise
+    pass to ``ast.parse``.
+    Postconditions: returns the module AST for ``code``. The returned tree is
+    shared across callers and MUST be treated as read-only — gates only walk
+    it, never mutate it. Invalid source raises ``SyntaxError`` (not cached);
+    callers keep their existing try/except short-circuit.
+    """
+    return ast.parse(code)
+
 
 # Regex patterns for dangerous calls that AST analysis might miss in edge cases.
 _BANNED_CALL_PATTERNS = [
@@ -161,20 +182,38 @@ def _find_forward_access_warnings(cls: ast.ClassDef) -> List[str]:
                     "violation"
                 )
 
-    # The subscript check uses ``self.<collection>`` targets (not
-    # parameter names), so it is safe to walk the whole class without
-    # risking false positives from name collisions in helpers.
-    self_collections = _self_collection_names(cls)
+    # The subscript check uses ``self.<collection>`` targets (not parameter
+    # names), so it is safe over the whole class without risking false
+    # positives from name collisions in helpers. Collect the self-collection
+    # assignments and the candidate forward-offset subscripts in a SINGLE
+    # walk, then resolve membership afterwards — a forward read can be
+    # textually above its ``self.<name> = [...]`` assignment, so the full
+    # name set must be known before a candidate is confirmed.
+    collection_names: set[str] = set()
+    candidate_attrs: List[str] = []
+    builders = frozenset({"list", "tuple", "set"})
+    pandas_builders = frozenset({"Series", "DataFrame", "array", "asarray"})
     for node in ast.walk(cls):
-        if isinstance(node, ast.Subscript) and _subscript_is_forward_offset_on_self_collection(
-            node, self_collections
+        if (
+            isinstance(node, ast.Assign)
+            and _is_self_target_only(node.targets)
+            and _is_collection_rhs(node.value, builders, pandas_builders)
         ):
-            _add(
-                "Subscript on self.<preloaded series> with a positive offset "
-                "from an iteration variable (e.g. self._closes[i + 1]) "
-                "reads beyond the current bar — only past entries are valid "
-                "under the event-driven contract"
-            )
+            for target in node.targets:
+                if isinstance(target, ast.Attribute):
+                    collection_names.add(target.attr)
+        elif isinstance(node, ast.Subscript):
+            attr = _forward_offset_self_attr(node)
+            if attr is not None:
+                candidate_attrs.append(attr)
+
+    if any(attr in collection_names for attr in candidate_attrs):
+        _add(
+            "Subscript on self.<preloaded series> with a positive offset "
+            "from an iteration variable (e.g. self._closes[i + 1]) "
+            "reads beyond the current bar — only past entries are valid "
+            "under the event-driven contract"
+        )
     return out
 
 
@@ -254,40 +293,6 @@ def _try_block_swallows_attribute_error(node: ast.Try, receivers: frozenset[str]
     return False
 
 
-def _self_collection_names(cls: ast.ClassDef) -> frozenset[str]:
-    """Return identifiers bound on ``self`` to list/series-like literals.
-
-    Preconditions:
-      - ``cls`` is a parsed strategy class.
-    Postconditions:
-      - Returns the set of names ``n`` such that ``cls`` contains at
-        least one ``self.<n> = <collection-literal>`` assignment. A
-        collection literal is one of: ``ast.List``, ``ast.ListComp``,
-        ``ast.Tuple``, ``ast.Set``, or a call to ``list``/``tuple``/
-        ``np.array``/``np.asarray``/``pd.Series``/``pd.DataFrame``.
-      - The set is conservatively permissive — false positives at the
-        subscript check are downgraded to warnings, never criticals.
-    """
-    builders = frozenset({"list", "tuple", "set"})
-    pandas_builders = frozenset({"Series", "DataFrame", "array", "asarray"})
-    names: set[str] = set()
-    for node in ast.walk(cls):
-        if not isinstance(node, ast.Assign):
-            continue
-        if not _is_self_target_only(node.targets):
-            continue
-        if not _is_collection_rhs(node.value, builders, pandas_builders):
-            continue
-        for target in node.targets:
-            if (
-                isinstance(target, ast.Attribute)
-                and isinstance(target.value, ast.Name)
-                and target.value.id == "self"
-            ):
-                names.add(target.attr)
-    return frozenset(names)
-
-
 def _is_self_target_only(targets: List[ast.expr]) -> bool:
     """True iff every assignment target is ``self.<name>``."""
     for target in targets:
@@ -316,42 +321,36 @@ def _is_collection_rhs(
     return False
 
 
-def _subscript_is_forward_offset_on_self_collection(
-    node: ast.Subscript, self_collections: frozenset[str]
-) -> bool:
-    """True iff ``node`` is ``self.<known-collection>[<iter> + <positive-int>]``.
+def _forward_offset_self_attr(node: ast.Subscript) -> Optional[str]:
+    """Return ``<attr>`` iff ``node`` is ``self.<attr>[<iter> + <positive-int>]``.
 
-    Preconditions:
-      - ``self_collections`` is the set of collection names returned by
-        :func:`_self_collection_names`.
+    The structural half of the forward-offset look-ahead check, independent
+    of whether ``<attr>`` is a known preloaded collection. Returns ``None``
+    when the subscript doesn't match the shape. Splitting this out lets the
+    caller collect candidate subscripts in the same single AST pass that
+    gathers the self-collection names, then resolve membership afterwards —
+    avoiding a second whole-class walk.
+
     Postconditions:
-      - The receiver must be ``self.<name>`` with ``<name>`` in
-        ``self_collections``.
-      - The index expression must be ``<Name> + <positive int constant>``
-        OR ``<positive int constant> + <Name>``. The ``<Name>`` operand
-        is treated as an iteration variable — we can't statically prove
-        it's an iter, but reading ahead by a constant offset from any
-        named variable indexing a preloaded series is the look-ahead
-        pattern we want to surface.
-      - ``[i - 1]`` / ``[i]`` / ``[i + 0]`` never trigger; only strictly
-        positive forward offsets do.
+      - Receiver must be ``self.<attr>``.
+      - Index must be ``<Name> + <positive int constant>`` (either operand
+        order); ``[i - 1]`` / ``[i]`` / ``[i + 0]`` never match.
     """
     if not (
         isinstance(node.value, ast.Attribute)
         and isinstance(node.value.value, ast.Name)
         and node.value.value.id == "self"
-        and node.value.attr in self_collections
     ):
-        return False
+        return None
     index_expr = node.slice
     if not isinstance(index_expr, ast.BinOp) or not isinstance(index_expr.op, ast.Add):
-        return False
+        return None
     left, right = index_expr.left, index_expr.right
     if isinstance(left, ast.Name) and _is_positive_int_constant(right):
-        return True
+        return node.value.attr
     if isinstance(right, ast.Name) and _is_positive_int_constant(left):
-        return True
-    return False
+        return node.value.attr
+    return None
 
 
 def _is_positive_int_constant(node: ast.AST) -> bool:

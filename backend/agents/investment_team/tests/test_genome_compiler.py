@@ -317,6 +317,37 @@ def test_shared_subtrees_compile_to_a_single_helper():
     assert len(helper_defs) == 4, helper_defs
 
 
+def test_atr_breakout_reuses_shared_atr_helper():
+    """ATRBreakout and an ATR primitive of the same period collapse to one
+    ATR computation (common-sub-expression elimination).
+
+    Before CSE, ATRBreakout inlined its own true-range loop while the ATR
+    primitive emitted a second one — the same series computed twice. After
+    CSE both route through a single ``_n_<id>`` helper.
+    """
+    g = _g(
+        ATRBreakout(k=20, atr_mult=1.0, atr_period=14),
+        CompareLT(left=Price(field="close"), right=ATR(period=14)),
+    )
+    code = compile_genome(g)
+    # The true-range loop body (``return sum(_trs) / 14``) must appear exactly
+    # once — i.e. the ATR series is computed a single time.
+    assert code.count("return sum(_trs) / 14") == 1, code
+    # ATRBreakout reads ATR from the shared helper rather than inlining it.
+    assert "_atr = self._n_" in code
+
+
+def test_atr_breakout_without_separate_atr_node_still_emits_one_helper():
+    """An ATRBreakout on its own emits exactly one ATR helper and parses."""
+    g = _g(
+        ATRBreakout(k=10, atr_period=14, atr_mult=2.0),
+        CompareLT(left=SMA(period=20), right=Const(value=50)),
+    )
+    code = compile_genome(g)
+    assert code.count("return sum(_trs) / 14") == 1, code
+    ast.parse(code)  # still valid Python
+
+
 # ---------------------------------------------------------------------------
 # End-to-end execution — exec the compiled module and drive on_bar through
 # the real ``StrategyContext`` so we catch any broken contract API usage.
