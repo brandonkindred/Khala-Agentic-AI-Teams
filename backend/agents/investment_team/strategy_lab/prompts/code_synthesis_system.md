@@ -125,7 +125,22 @@ ctx.submit_order(
 from indicators import sma, ema, rsi, macd, bollinger_bands, atr, adx, stochastic, vwap
 ```
 
-These helpers accept a list/sequence of numbers (typically `[b.close for b in history]`) **or the `list[Bar]` returned by `ctx.history` directly** (the close/high/low/volume field is extracted for you) and return either a single float (for most scalar indicators) or a small named tuple. You do not need to wrap inputs in `pd.Series`.
+These helpers accept a list/sequence of numbers (typically `[b.close for b in history]`) **or the `list[Bar]` returned by `ctx.history` directly** — the needed field is extracted for you, so you do not need to wrap inputs in `pd.Series`. They return either a single float (for most scalar indicators) or a small named tuple.
+
+**Single-series helpers** — `sma`, `ema`, `rsi`, `macd`, `bollinger_bands` — take one price sequence (close by default):
+
+```python
+ema(history, 20)                       # list[Bar] → close extracted
+rsi([b.close for b in history], 14)    # or pass an explicit close list
+```
+
+**Multi-series helpers** — `atr`, `adx`, `stochastic` need `(high, low, close)` and `vwap` needs `(high, low, close, volume)` as **separate positional arguments**. Do NOT call `atr(history, ...)`; pass `history` once per slot (each slot extracts its own field) or pass explicit per-field lists:
+
+```python
+atr(history, history, history, period=14)              # high/low/close each extracted
+vwap(history, history, history, history)               # + volume
+adx([b.high for b in history], [b.low for b in history], [b.close for b in history], 14)
+```
 
 ## Allowed imports
 
