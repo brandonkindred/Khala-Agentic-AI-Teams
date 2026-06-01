@@ -38,6 +38,9 @@ import logging
 import math
 import os
 import time
+from bisect import bisect_right
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Protocol
 
 import numpy as np
@@ -152,6 +155,98 @@ def _near_miss_pct() -> float:
         )
         return _DEFAULT_NEAR_MISS_PCT
     return value
+
+
+_DEFAULT_ADJUDICATION_CONCURRENCY = 4
+
+
+def _adjudication_concurrency() -> int:
+    """Resolve ``STRATEGY_LAB_ALIGNMENT_ADJUDICATION_CONCURRENCY``.
+
+    Pre: env value, when set, parses as an ``int``.
+    Post: returns a positive integer — the maximum number of near-miss LLM
+    adjudications run concurrently per gate ``check``. Default ``4``; sub-1
+    overrides floor to ``1`` (fully serial); garbage values fall back to the
+    default. The verdict applied to each trade is independent of how many
+    run in parallel, so this knob trades cloud concurrency for wall time
+    without changing the gate's output.
+    """
+    raw = os.environ.get("STRATEGY_LAB_ALIGNMENT_ADJUDICATION_CONCURRENCY")
+    if not raw:
+        return _DEFAULT_ADJUDICATION_CONCURRENCY
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        logger.warning(
+            "Invalid STRATEGY_LAB_ALIGNMENT_ADJUDICATION_CONCURRENCY=%r; using default %d",
+            raw,
+            _DEFAULT_ADJUDICATION_CONCURRENCY,
+        )
+        return _DEFAULT_ADJUDICATION_CONCURRENCY
+
+
+@dataclass
+class _PendingNearMiss:
+    """A deferred near-miss adjudication awaiting the LLM verdict.
+
+    ``f_slot`` / ``g_slot`` are the reserved indices in the ``findings`` /
+    ``gate_results`` lists (placeholder ``None``s) that the resolved finding
+    and its gate row are written back into, so concurrent adjudication
+    preserves the exact serial ordering of the output lists.
+    """
+
+    trade: Any
+    evaluation: Dict[str, Any]
+    f_slot: int
+    g_slot: int
+
+
+def _entry_equity_by_trade(trades: List[Any], initial_capital: float) -> Dict[int, float]:
+    """Equity *realized* at each trade's entry, for sizing check #3.
+
+    Each trade's baseline is ``initial_capital + sum(prior.net_pnl for prior
+    in trades if prior.exit_date <= trade.entry_date)`` excluding the trade
+    itself. A naive left-fold over net_pnl in entry-date order would leak
+    future PnL from still-open overlapping trades into earlier entries (trade
+    A entering before B but exiting after B's entry must not contribute its
+    PnL to B's baseline), so the sum is gated on each prior's *exit* date.
+
+    Implemented as a sorted-exit-date prefix sum + binary search rather than
+    the naive per-trade rescan over all priors: one ascending exit-date
+    timeline carries a cumulative-PnL prefix, and each trade's baseline is the
+    prefix value at ``bisect_right(exit_dates, entry_date)`` — exactly the
+    priors with ``exit_date <= entry_date``. O(n log n) overall vs. the prior
+    O(n²), and value-identical to it (modulo float summation order — a prefix
+    sum and a per-trade re-sum accumulate rounding differently).
+
+    Preconditions:
+      - Every ``trade`` exposes ``trade_num``, ``entry_date``, ``exit_date``,
+        ``net_pnl``; ``entry_date``/``exit_date`` are mutually comparable.
+      - ``trade_num`` is unique across ``trades``.
+    Postconditions:
+      - Returns ``{trade_num: initial_capital + realized_prior_pnl}`` for every
+        trade. Pure: no side effects.
+    """
+    initial = float(initial_capital)
+    exit_events = sorted(
+        ((t.exit_date, float(t.net_pnl)) for t in trades),
+        key=lambda event: event[0],
+    )
+    exit_dates = [event[0] for event in exit_events]
+    prefix_pnl = [0.0]
+    for _date, pnl in exit_events:
+        prefix_pnl.append(prefix_pnl[-1] + pnl)
+
+    equity: Dict[int, float] = {}
+    for trade in trades:
+        realized_pnl = prefix_pnl[bisect_right(exit_dates, trade.entry_date)]
+        # A trade is never its own prior unless it exits on or before its own
+        # entry (degenerate same-bar fill); subtract its PnL in that case to
+        # mirror the original ``prior.trade_num != trade.trade_num`` guard.
+        if trade.exit_date <= trade.entry_date:
+            realized_pnl -= float(trade.net_pnl)
+        equity[trade.trade_num] = initial + realized_pnl
+    return equity
 
 
 def _relative_miss(computed: float, threshold: float) -> float:
@@ -380,24 +475,9 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 symbol: {} for symbol in market_data
             }
 
-            # Entry-equity tracker for sizing check #3. Each trade's
-            # expected position value is computed against the equity
-            # *realized* at the moment of entry — i.e. ``initial_capital
-            # + sum(prior.net_pnl for prior in trades if prior.exit_date
-            # <= current.entry_date)``. A naive left-fold over net_pnl
-            # in entry-date order would leak future PnL from still-open
-            # overlapping trades into earlier entries (trade A entering
-            # before trade B but exiting after B's entry must not
-            # contribute its PnL to B's equity baseline).
-            entry_equity_by_trade: Dict[int, float] = {}
-            initial = float(initial_capital)
-            for trade in trades:
-                realized_pnl = sum(
-                    float(prior.net_pnl)
-                    for prior in trades
-                    if prior.exit_date <= trade.entry_date and prior.trade_num != trade.trade_num
-                )
-                entry_equity_by_trade[trade.trade_num] = initial + realized_pnl
+            # Entry-equity baseline for sizing check #3 — see
+            # :func:`_entry_equity_by_trade` for the contract.
+            entry_equity_by_trade = _entry_equity_by_trade(trades, initial_capital)
 
             if not trades:
                 # No trades to check — the orchestrator will treat this
@@ -418,6 +498,11 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 )
 
             near_miss_pct = _near_miss_pct()
+
+            # Near-miss LLM adjudications are collected here during the trade
+            # loop and dispatched concurrently afterwards (one bounded thread
+            # pool) instead of blocking the loop one trade at a time.
+            pending_near_misses: List[_PendingNearMiss] = []
 
             for trade in trades:
                 # The six checks. Each yields zero-or-more findings
@@ -443,6 +528,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     near_miss_adjudicator,
                     findings,
                     gate_results,
+                    pending_near_misses,
                 )
                 self._check_signal_exit(
                     spec,
@@ -452,6 +538,12 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     findings,
                     gate_results,
                 )
+
+            # Fill in every deferred near-miss verdict (concurrently) before
+            # the aligned/critical roll-up reads the findings list.
+            self._resolve_pending_near_misses(
+                pending_near_misses, near_miss_adjudicator, findings, gate_results
+            )
 
             aligned = all(f.passed for f in findings if f.severity == "critical")
             rationale = (
@@ -823,6 +915,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         adjudicator: Optional[NearMissAdjudicator],
         findings: List[AlignmentFinding],
         gate_results: List[QualityGateResult],
+        pending: Optional[List[_PendingNearMiss]] = None,
     ) -> None:
         entry_rules = [
             r for r in (getattr(spec, "entry_rules", []) or []) if isinstance(r, EntryRule)
@@ -966,22 +1059,26 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         if near_miss_candidates and near_miss_pct > 0 and adjudicator is not None:
             tightest = min(near_miss_candidates, key=lambda o: o["rel_miss"])
             if tightest["rel_miss"] <= near_miss_pct:
+                if pending is not None:
+                    # Defer the LLM call: reserve the finding/gate slots now
+                    # (so output order matches the serial path) and let
+                    # ``_resolve_pending_near_misses`` adjudicate concurrently.
+                    f_slot = len(findings)
+                    g_slot = len(gate_results)
+                    findings.append(None)  # type: ignore[arg-type]
+                    gate_results.append(None)  # type: ignore[arg-type]
+                    pending.append(
+                        _PendingNearMiss(
+                            trade=trade,
+                            evaluation=tightest,
+                            f_slot=f_slot,
+                            g_slot=g_slot,
+                        )
+                    )
+                    return
+                # Serial fallback (no collector supplied).
                 verdict = self._consult_near_miss(adjudicator, tightest, trade)
-                finding = AlignmentFinding(
-                    trade_num=trade.trade_num,
-                    rule_id=tightest["rule_id"],
-                    check_name="entry_signal",
-                    passed=verdict.legitimate,
-                    severity="info" if verdict.legitimate else "critical",
-                    details=(
-                        f"Trade #{trade.trade_num} entry near-miss "
-                        f"({tightest['rel_miss'] * 100:.2f}% relative) on "
-                        f"{tightest['rule_id']}: {tightest['predicate_repr']}. "
-                        f"Adjudicator: {verdict.rationale!s}"
-                    ),
-                    computed_value=tightest["lhs"],
-                    expected_value=tightest["rhs"],
-                )
+                finding = self._build_near_miss_finding(trade, tightest, verdict)
                 findings.append(finding)
                 gate_results.append(self._emit_for_finding(finding))
                 return
@@ -1305,6 +1402,72 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             # None``.
             "rel_miss": None if is_cross else _relative_miss(lhs_value, rhs_value),
         }
+
+    def _build_near_miss_finding(
+        self,
+        trade: Any,
+        evaluation: Dict[str, Any],
+        verdict: NearMissVerdict,
+    ) -> AlignmentFinding:
+        """Construct the entry-signal finding for an adjudicated near-miss.
+
+        Shared by the serial path and the concurrent
+        :meth:`_resolve_pending_near_misses` path so both emit byte-identical
+        findings for the same ``(trade, evaluation, verdict)``.
+        """
+        return AlignmentFinding(
+            trade_num=trade.trade_num,
+            rule_id=evaluation["rule_id"],
+            check_name="entry_signal",
+            passed=verdict.legitimate,
+            severity="info" if verdict.legitimate else "critical",
+            details=(
+                f"Trade #{trade.trade_num} entry near-miss "
+                f"({evaluation['rel_miss'] * 100:.2f}% relative) on "
+                f"{evaluation['rule_id']}: {evaluation['predicate_repr']}. "
+                f"Adjudicator: {verdict.rationale!s}"
+            ),
+            computed_value=evaluation["lhs"],
+            expected_value=evaluation["rhs"],
+        )
+
+    def _resolve_pending_near_misses(
+        self,
+        pending: List[_PendingNearMiss],
+        adjudicator: Optional[NearMissAdjudicator],
+        findings: List[AlignmentFinding],
+        gate_results: List[QualityGateResult],
+    ) -> None:
+        """Adjudicate all deferred near-misses and fill their reserved slots.
+
+        Pre: each ``pending`` entry's ``f_slot``/``g_slot`` index a ``None``
+        placeholder reserved during the trade loop; ``adjudicator`` is the
+        same callable that drove deferral (non-``None`` whenever ``pending``
+        is non-empty).
+        Post: every reserved slot holds the finding/gate row produced from
+        that trade's verdict — identical to what the serial path would have
+        emitted, independent of completion order. Adjudications run on a
+        bounded :class:`ThreadPoolExecutor` (``STRATEGY_LAB_ALIGNMENT_
+        ADJUDICATION_CONCURRENCY`` workers) since the underlying adjudicator
+        is synchronous.
+        """
+        if not pending:
+            return
+        assert adjudicator is not None, "pending near-misses require an adjudicator"
+
+        max_workers = min(_adjudication_concurrency(), len(pending))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            verdicts = list(
+                pool.map(
+                    lambda item: self._consult_near_miss(adjudicator, item.evaluation, item.trade),
+                    pending,
+                )
+            )
+
+        for item, verdict in zip(pending, verdicts):
+            finding = self._build_near_miss_finding(item.trade, item.evaluation, verdict)
+            findings[item.f_slot] = finding
+            gate_results[item.g_slot] = self._emit_for_finding(finding)
 
     def _consult_near_miss(
         self,
