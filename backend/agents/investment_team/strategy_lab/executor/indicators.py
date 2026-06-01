@@ -45,16 +45,24 @@ def _coerce_series(series, field: str = "close") -> pd.Series:
         violation.
     """
     if isinstance(series, pd.Series):
-        # A numeric Series passes straight through (preserving its index). An
+        # A numeric Series passes straight through (preserving its index). A
+        # bool-dtype Series is rejected — True/False are never meaningful
+        # prices, matching the per-element bool rejection below. An
         # object-dtype Series may still hold Bar/dict/number elements — e.g. a
         # caller wrapped list[Bar] with pd.Series(...) before reaching here —
         # so coerce its values while keeping the caller's (possibly datetime)
         # index rather than rebuilding a fresh RangeIndex.
+        if pd.api.types.is_bool_dtype(series):
+            raise TypeError("indicator input must be numeric, got bool Series")
         if series.dtype != object:
             return series
         return _coerce_series(list(series), field).set_axis(series.index)
+    # Accept any non-string sequence/iterable (list, tuple, collections.deque,
+    # np.ndarray, …) by materialising it once; reject strings and scalars.
+    if isinstance(series, (str, bytes, bytearray)) or not hasattr(series, "__iter__"):
+        raise TypeError(f"indicator input must be pd.Series or a sequence, got {type(series).__name__}")
     if not isinstance(series, (list, tuple)):
-        raise TypeError(f"indicator input must be pd.Series or list, got {type(series).__name__}")
+        series = list(series)
     if not series:
         return pd.Series([], dtype=float)
     first = series[0]

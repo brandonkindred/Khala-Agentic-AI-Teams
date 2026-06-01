@@ -240,6 +240,50 @@ def test_coerce_series_rejects_bools() -> None:
         ind._coerce_series([True, False])
 
 
+def test_coerce_series_rejects_bool_dtype_series() -> None:
+    # A bool-dtype pd.Series must not slip through the numeric pass-through and
+    # be silently treated as 1.0/0.0.
+    with pytest.raises(TypeError):
+        ind._coerce_series(pd.Series([True, False, True]))
+
+
+def test_coerce_series_accepts_deque() -> None:
+    from collections import deque
+
+    out = ind._coerce_series(deque([100.0, 101.0, 102.0]))
+    assert isinstance(out, pd.Series)
+    assert out.tolist() == [100.0, 101.0, 102.0]
+
+
+def test_coerce_series_accepts_numpy_array() -> None:
+    import numpy as np
+
+    out = ind._coerce_series(np.array([100.0, 101.0, 102.0]))
+    assert out.tolist() == [100.0, 101.0, 102.0]
+
+
+def test_coerce_series_accepts_deque_of_bars() -> None:
+    from collections import deque
+
+    out = ind._coerce_series(deque(_bars(3)), "high")
+    assert out.tolist() == [101.0, 102.0, 103.0]
+
+
+def test_coerce_series_rejects_string_sequence() -> None:
+    # str is iterable but is not a valid price sequence.
+    with pytest.raises(TypeError):
+        ind._coerce_series("100,101,102")
+
+
+def test_ema_accepts_deque_like_series() -> None:
+    from collections import deque
+
+    closes = [100.0 + i for i in range(20)]
+    from_deque = ind.ema(deque(closes), 5)
+    from_series = ind.ema(pd.Series(closes), 5)
+    pd.testing.assert_series_equal(from_deque, from_series)
+
+
 def test_coerce_series_rejects_bool_after_numeric_first_element() -> None:
     # Validation covers every element, not just series[0]: a bool sneaking in
     # behind a numeric first element must still raise, not coerce to 1.0.
