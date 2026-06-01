@@ -23,6 +23,71 @@ def test_ollama_get_max_context_tokens_env_override(monkeypatch: pytest.MonkeyPa
     assert client.get_max_context_tokens() == 50000
 
 
+def _make_show_response(status_code: int, num_ctx: int | None = None) -> MagicMock:
+    """Build a mocked /api/show response: 200 with `parameters: "num_ctx N"`, or an error."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = {"parameters": f"num_ctx {num_ctx}"} if num_ctx is not None else {}
+    return resp
+
+
+def _patch_show(responses: list[MagicMock]) -> tuple[MagicMock, MagicMock]:
+    """Return (httpx.Client class mock, shared client instance) whose .post yields `responses` in order."""
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.post.side_effect = responses
+    mock_cls = MagicMock(return_value=mock_client)
+    return mock_cls, mock_client
+
+
+def test_ollama_known_default_model_skips_api_show(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default deepseek model resolves from the known table and never calls /api/show."""
+    monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
+    with patch("httpx.Client") as mock_client_cls:
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        assert client.get_max_context_tokens() == 262144
+    mock_client_cls.assert_not_called()
+
+
+def test_ollama_api_show_transient_failure_does_not_poison(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Core regression: a transient /api/show failure must not cache 16384 forever.
+
+    With the fallback TTL at 0s, the next call re-attempts /api/show and, on
+    success, resolves the model's real context size instead of staying truncated.
+    """
+    monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
+    monkeypatch.setenv("LLM_NUM_CTX_FALLBACK_TTL_S", "0")
+    mock_cls, _ = _patch_show([_make_show_response(500), _make_show_response(200, 262144)])
+    with patch("httpx.Client", mock_cls):
+        client = OllamaLLMClient(model="unknown-model", base_url="http://localhost:9999", timeout=5)
+        assert client.get_max_context_tokens() == 16384  # transient blip → provisional fallback
+        assert client.get_max_context_tokens() == 262144  # retried, resolved authoritatively
+
+
+def test_ollama_api_show_fallback_cached_within_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Within the TTL, the provisional fallback is reused without re-hammering /api/show."""
+    monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("LLM_NUM_CTX_FALLBACK_TTL_S", raising=False)  # default 300s
+    mock_cls, mock_client = _patch_show([_make_show_response(500)])
+    with patch("httpx.Client", mock_cls):
+        client = OllamaLLMClient(model="unknown-model", base_url="http://localhost:9999", timeout=5)
+        assert client.get_max_context_tokens() == 16384
+        assert client.get_max_context_tokens() == 16384
+    assert mock_client.__enter__.return_value.post.call_count == 1
+
+
+def test_ollama_api_show_success_is_cached_permanently(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resolved num_ctx is cached for the process lifetime — no repeat /api/show calls."""
+    monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
+    mock_cls, mock_client = _patch_show([_make_show_response(200, 262144)])
+    with patch("httpx.Client", mock_cls):
+        client = OllamaLLMClient(model="unknown-model", base_url="http://localhost:9999", timeout=5)
+        assert client.get_max_context_tokens() == 262144
+        assert client.get_max_context_tokens() == 262144
+    assert mock_client.__enter__.return_value.post.call_count == 1
+
+
 def _make_streaming_mock(
     status_code: int, sse_lines: list[str] | None = None, body_text: str = ""
 ) -> tuple:
