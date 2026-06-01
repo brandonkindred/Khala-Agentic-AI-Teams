@@ -683,6 +683,58 @@ def test_regression_notice_passed_to_revise(monkeypatch: pytest.MonkeyPatch) -> 
     assert record.loop_telemetry["critique_ledger"]["total_regressed"] == 1
 
 
+def test_revise_receives_accumulating_prior_critiques(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The orchestrator hands ``DesignAgent.revise`` the *accumulating* external
+    critique lineage each round (current critique included).
+
+    Combined with the DesignAgent-level test that ``_with_self_review`` threads
+    that lineage into the internal self-revision prompt, this pins that
+    prior-round fixes stay in context across rounds — the upstream half of the
+    no-regression guarantee. The lineage grows by one each round and is what the
+    self-revision uses to avoid undoing an earlier round's fix.
+    """
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "5")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "10")
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+
+    review_calls = iter(
+        [
+            SpecCritique(
+                ready=False,
+                rationale="r0",
+                issues=[CritiqueIssue(field="exit_rules", description="add take_profit")],
+            ),
+            SpecCritique(
+                ready=False,
+                rationale="r1",
+                issues=[CritiqueIssue(field="sizing", description="too aggressive")],
+            ),
+            SpecCritique(ready=True, rationale="r2 ok"),
+        ]
+    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: next(review_calls))
+
+    seen_lineage_lengths: List[int] = []
+
+    def _revise(_spec, _critique, *, prior_critiques=None, regression_notice="", **_kw):
+        seen_lineage_lengths.append(len(prior_critiques or []))
+        return _spec_dict(), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    orch.run_cycle(prior_records=[], config=_config())
+
+    # revise fires after rounds 0 and 1 (round 2 readies → no revise); the
+    # lineage accumulates and includes the just-recorded critique each round.
+    assert seen_lineage_lengths == [1, 2]
+
+
 def test_loop_telemetry_persisted_on_record(monkeypatch: pytest.MonkeyPatch) -> None:
     """A normal N-rounds-then-pass cycle persists a ``loop_telemetry`` summary
     with the round count, a ``ready`` stop reason, gate histograms, and the
