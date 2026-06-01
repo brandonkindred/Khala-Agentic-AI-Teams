@@ -13,6 +13,7 @@ skip warmup rows where indicators are NaN.
 
 from __future__ import annotations
 
+import numbers
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable, Literal, Mapping, Optional, Tuple, Union
@@ -66,9 +67,12 @@ def _coerce_series(series, field: str = "close") -> pd.Series:
     if not series:
         return pd.Series([], dtype=float)
     first = series[0]
-    if isinstance(first, (bool, int, float)):
-        # bool is a subclass of int; reject it (in any position) rather than
-        # coercing True/False to 1.0/0.0, which is never a meaningful price.
+    if isinstance(first, numbers.Real):
+        # numbers.Real covers Python int/float and numpy numeric scalars
+        # (np.int64, np.float32, …), so a non-float64 ndarray coerces correctly.
+        # Python bool is a numbers.Real subclass and numpy bools are handled in
+        # _as_price_float, which rejects both (in any position) rather than
+        # coercing True/False to 1.0/0.0 — never a meaningful price.
         return _floats(series, _as_price_float, field)
     if hasattr(first, field):
         return _floats(series, lambda b: getattr(b, field), field)
@@ -78,8 +82,12 @@ def _coerce_series(series, field: str = "close") -> pd.Series:
 
 
 def _as_price_float(value) -> float:
-    """Convert a single price element to ``float``, rejecting bool."""
-    if isinstance(value, bool):
+    """Convert a single price element to ``float``, rejecting bool.
+
+    Rejects both Python ``bool`` and numpy ``np.bool_`` (neither is a
+    meaningful price) while accepting Python and numpy numeric scalars.
+    """
+    if isinstance(value, (bool, np.bool_)):
         raise TypeError("indicator input must be numeric, got bool")
     return float(value)
 

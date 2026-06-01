@@ -262,6 +262,40 @@ def test_coerce_series_accepts_numpy_array() -> None:
     assert out.tolist() == [100.0, 101.0, 102.0]
 
 
+def test_coerce_series_accepts_int64_ndarray() -> None:
+    # list(np.array(..., dtype=int64)) yields np.int64 scalars, which are not
+    # Python int/float but are numbers.Real — must coerce, not fall to extraction.
+    import numpy as np
+
+    out = ind._coerce_series(np.array([100, 101, 102], dtype=np.int64))
+    assert out.tolist() == [100.0, 101.0, 102.0]
+    assert out.dtype == float
+
+
+def test_coerce_series_accepts_float32_ndarray() -> None:
+    import numpy as np
+
+    out = ind._coerce_series(np.array([100.0, 101.0, 102.0], dtype=np.float32))
+    assert out.tolist() == pytest.approx([100.0, 101.0, 102.0])
+
+
+def test_ema_accepts_int64_ndarray() -> None:
+    import numpy as np
+
+    closes = list(range(100, 130))
+    expected = ind.ema(pd.Series([float(c) for c in closes]), 5)
+    out = ind.ema(np.array(closes, dtype=np.int64), 5)
+    pd.testing.assert_series_equal(out, expected, check_dtype=False)
+
+
+def test_coerce_series_rejects_numpy_bool_after_numeric_first_element() -> None:
+    # np.bool_ in a later position must be rejected, not coerced to 1.0/0.0.
+    import numpy as np
+
+    with pytest.raises(TypeError):
+        ind._coerce_series([100.0, np.bool_(True), 102.0])
+
+
 def test_coerce_series_accepts_deque_of_bars() -> None:
     from collections import deque
 
