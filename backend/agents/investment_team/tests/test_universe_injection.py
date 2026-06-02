@@ -587,6 +587,31 @@ def test_later_bound_local_guard_stripped() -> None:
     compile(out, "<injected>", "exec")
 
 
+def test_duplicate_guarded_first_unguardable_last_strips_to_fail_closed() -> None:
+    """When duplicate on_bars can't all be guarded, a pre-existing guard on the
+    gate-inspected first definition is stripped so the gate fails closed instead
+    of passing while the unguarded runtime-effective last definition runs."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+
+            def on_bar(strategy, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # first guard stripped -> fail closed
+    compile(out, "<injected>", "exec")
+
+
 def test_mixed_receiver_duplicate_on_bar_fails_closed() -> None:
     """Duplicate on_bar where the runtime-effective last one has a non-self
     receiver: guard NONE (so the gate fails on the unguarded first) rather than

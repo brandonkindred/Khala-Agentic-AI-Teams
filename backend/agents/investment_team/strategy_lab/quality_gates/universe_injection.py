@@ -142,6 +142,16 @@ def inject_universe_and_guard(source: str, spec) -> str:
             bar_param = on_bar.args.args[2].arg
             on_bar.body = _strip_bar_guards(on_bar)
             on_bar.body.insert(0, _build_guard_stmt(bar_param))
+    elif on_bars:
+        # Fail closed: at least one on_bar can't be guarded, so we guard none.
+        # The conformance gate only inspects the *first* definition, so a
+        # pre-existing guard there would let it pass while the unguarded
+        # runtime-effective (last) definition processes non-target bars. Strip
+        # every gate-recognized guard from the first definition (dead code when
+        # it's a shadowed duplicate; an unguardable single method is invalid
+        # regardless) so the missing-guard critical fires and drives refinement.
+        first = on_bars[0]
+        first.body = [stmt for stmt in first.body if not _is_universe_guard_stmt(stmt)]
 
     ast.fix_missing_locations(tree)
     try:
