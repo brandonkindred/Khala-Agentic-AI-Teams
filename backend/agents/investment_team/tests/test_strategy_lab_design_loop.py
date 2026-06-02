@@ -531,6 +531,339 @@ def test_design_max_llm_calls_env_parsing(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # ---------------------------------------------------------------------------
+# Mechanical-repair pre-flight
+# ---------------------------------------------------------------------------
+
+
+def _mechanical_spec_dict() -> Dict[str, Any]:
+    """A spec whose *only* readiness criticals are mechanical: an intraday
+    timeframe on forex (Rule 7) and an over-ceiling position cap (Rule 8)."""
+    d = _spec_dict()
+    d.update(
+        {
+            "asset_class": "forex",
+            "timeframe": "1h",
+            "target_symbols": ["EURUSD=X"],
+            "hypothesis": "RSI mean reversion on FX",
+            "risk_limits": {"max_position_pct": 40, "max_drawdown_pct": 10},
+        }
+    )
+    return d
+
+
+def test_mechanical_only_spec_reaches_ready_with_zero_revise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spec with only mechanical violations is auto-repaired before any LLM
+    revise round: the reviewer runs once and readies, ``DesignAgent.revise`` is
+    never called, and a ``design_repair`` telemetry event records the edits."""
+    from investment_team.strategy_lab import mechanical_repair as mech
+
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(
+        orch.design_agent, "run", lambda **_kw: (_mechanical_spec_dict(), "scripted")
+    )
+    review_calls = {"n": 0}
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        review_calls["n"] += 1
+        return SpecCritique(ready=True, rationale="ok")
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+
+    revise_calls = {"n": 0}
+
+    def _revise(*_a, **_kw) -> Tuple[Dict[str, Any], str]:
+        revise_calls["n"] += 1
+        return _mechanical_spec_dict(), "should-not-be-used"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    # Keep the pre-flight trial compile deterministic and the synthesis phase cheap.
+    monkeypatch.setattr(mech, "compile_strategy", lambda _spec: _VALID_CODE)
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    events: list = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        on_phase=lambda phase, data: events.append((phase, data)),
+    )
+
+    # The acceptance criterion: zero LLM revise rounds for a mechanical-only spec.
+    assert revise_calls["n"] == 0
+    assert review_calls["n"] == 1
+    assert record.design_rounds == 1
+    # The repair edits were recorded on the callback and in the telemetry summary.
+    repair_events = [d for p, d in events if p == "design_repair"]
+    assert len(repair_events) == 1
+    repaired_rules = {a["rule"] for a in repair_events[0]["actions"]}
+    assert {"timeframe_data_availability", "max_position_pct_cap"} <= repaired_rules
+    assert repair_events[0]["now_ready"] is True
+    assert record.loop_telemetry["mechanical_repairs"] >= 2
+
+
+def test_mechanical_repair_then_substantive_critical_still_revises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a non-mechanical critical remains after repair (empty entry rules,
+    Rule 2), the loop still falls through to the LLM revise path — repair only
+    short-circuits the rounds it can fully resolve."""
+    from investment_team.strategy_lab import mechanical_repair as mech
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "2")
+    orch = StrategyLabOrchestrator()
+
+    def _spec_with_substantive_defect() -> Dict[str, Any]:
+        d = _mechanical_spec_dict()
+        d["entry_rules"] = []  # Rule 2 critical — the machine cannot invent entries.
+        return d
+
+    monkeypatch.setattr(
+        orch.design_agent, "run", lambda **_kw: (_spec_with_substantive_defect(), "scripted")
+    )
+
+    review_calls = {"n": 0}
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        review_calls["n"] += 1
+        return SpecCritique(ready=True, rationale="never reached")
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+
+    revise_calls = {"n": 0}
+
+    def _revise(*_a, **_kw) -> Tuple[Dict[str, Any], str]:
+        revise_calls["n"] += 1
+        return _spec_with_substantive_defect(), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    monkeypatch.setattr(mech, "compile_strategy", lambda _spec: _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    events: list = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        on_phase=lambda phase, data: events.append((phase, data)),
+    )
+
+    # The remaining (non-mechanical) critical keeps the reviewer skipped and
+    # forces at least one LLM revise round.
+    assert review_calls["n"] == 0
+    assert revise_calls["n"] >= 1
+    # The mechanical part was still repaired each round.
+    assert any(p == "design_repair" for p, _ in events)
+    assert record.backtest.status == "failed: design_not_ready"
+
+
+def test_mechanical_repair_toggle_off_skips_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED=false`` the pre-flight is
+    skipped: a mechanical-only critical falls straight through to the LLM revise
+    path and no ``design_repair`` event is emitted."""
+    monkeypatch.setenv("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", "false")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "2")
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(
+        orch.design_agent, "run", lambda **_kw: (_mechanical_spec_dict(), "scripted")
+    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True))
+
+    revise_calls = {"n": 0}
+
+    def _revise(*_a, **_kw) -> Tuple[Dict[str, Any], str]:
+        revise_calls["n"] += 1
+        return _mechanical_spec_dict(), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    _short_circuit_synthesis(monkeypatch)
+
+    events: list = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        on_phase=lambda phase, data: events.append((phase, data)),
+    )
+
+    assert revise_calls["n"] >= 1
+    assert not any(p == "design_repair" for p, _ in events)
+    assert record.loop_telemetry["mechanical_repairs"] == 0
+
+
+def test_trial_compile_runs_on_readiness_clean_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spec that *passes* readiness but is outside the deterministic-compiler
+    envelope has the custom-code path selected during the pre-flight — not
+    deferred to synthesis. ``requires_custom_code`` is flipped, a
+    ``design_repair`` event fires, and the reviewer still readies the spec with
+    zero LLM revise rounds."""
+    from investment_team.strategy_lab import mechanical_repair as mech
+    from investment_team.strategy_lab.synthesis import CompilerError
+
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+
+    review_calls = {"n": 0}
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        review_calls["n"] += 1
+        return SpecCritique(ready=True, rationale="ok")
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+
+    revise_calls = {"n": 0}
+
+    def _revise(*_a, **_kw) -> Tuple[Dict[str, Any], str]:
+        revise_calls["n"] += 1
+        return _spec_dict(), "should-not-be-used"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+
+    # _spec_dict() passes readiness (stocks/1d/cap5); force the pre-flight trial
+    # compile to reject it so the custom-code fallback fires on a clean-readiness
+    # spec. The custom-code path then routes through code_synthesis_agent.
+    def _compile_rejects(_spec: Any) -> str:
+        raise CompilerError("outside compiler envelope")
+
+    monkeypatch.setattr(mech, "compile_strategy", _compile_rejects)
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    events: list = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        on_phase=lambda phase, data: events.append((phase, data)),
+    )
+
+    assert revise_calls["n"] == 0
+    assert review_calls["n"] == 1
+    repair_events = [d for p, d in events if p == "design_repair"]
+    assert len(repair_events) == 1
+    assert any(a["rule"] == "compiler_fallback" for a in repair_events[0]["actions"])
+    # The custom-code decision was surfaced during design, not in synthesis.
+    assert record.strategy.requires_custom_code is True
+
+
+def test_budget_exhaustion_after_repair_preserves_repaired_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the budget trips on the review call that follows a mechanical repair,
+    the short-circuit record must carry the *repaired* spec (the one readiness
+    was revalidated against and a ``design_repair`` event was emitted for), not
+    the pre-loop draft."""
+    from investment_team.strategy_lab import mechanical_repair as mech
+
+    # Budget 1: design_agent.run charges 1; the round-0 review charge trips.
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "1")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "10")
+    orch = StrategyLabOrchestrator()
+
+    def _run(**_kw) -> Tuple[Dict[str, Any], str]:
+        charge_active_budget()
+        return _mechanical_spec_dict(), "scripted"
+
+    monkeypatch.setattr(orch.design_agent, "run", _run)
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        charge_active_budget()  # trips the budget after the repair
+        return SpecCritique(ready=True)
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+    monkeypatch.setattr(
+        orch.design_agent, "revise", lambda *a, **kw: (_mechanical_spec_dict(), "x")
+    )
+    monkeypatch.setattr(mech, "compile_strategy", lambda _spec: _VALID_CODE)
+
+    def _market_must_not_run(self, *_a, **_kw):
+        raise AssertionError("synthesis must not run on budget exhaustion")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert record.backtest.status == "failed: budget_exhausted"
+    # The repaired spec is preserved (forex/1h/40% draft → 1d/25% after repair).
+    assert record.strategy.timeframe == "1d"
+    assert record.strategy.risk_limits.max_position_pct == 25.0
+    # The mechanical-repair count survives the budget trip (timeframe + cap = 2),
+    # rather than defaulting to 0 in the budget-exhaustion telemetry.
+    assert record.loop_telemetry["mechanical_repairs"] == 2
+
+
+def test_trial_compile_skipped_while_readiness_critical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trial compile must not run while a readiness critical remains: a
+    malformed-but-readiness-detectable spec can make ``compile_strategy`` raise a
+    non-``CompilerError`` (e.g. ``TypeError``), which would abort the loop. With
+    the gate the loop instead reaches honest round-cap exhaustion and the
+    crashing compiler is never invoked."""
+    from investment_team.strategy_lab import mechanical_repair as mech
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "2")
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+    monkeypatch.setattr(orch.design_agent, "revise", lambda *a, **kw: (_spec_dict(), "revised"))
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True))
+
+    # A persistent readiness critical keeps deterministic_ready False every round.
+    def _always_critical(*_a, **_kw) -> List[QualityGateResult]:
+        return [
+            QualityGateResult(
+                gate_name="spec_readiness",
+                passed=False,
+                severity="critical",
+                phase="design",
+                details="forced critical for test",
+            )
+        ]
+
+    monkeypatch.setattr(orch.spec_readiness_gate, "validate", _always_critical)
+
+    # If the trial compile ran on this readiness-critical spec it would crash the
+    # whole cycle with a non-CompilerError instead of being skipped.
+    def _compile_crashes(_spec: Any) -> str:
+        raise TypeError("int() argument must be a string or a number, not 'NoneType'")
+
+    monkeypatch.setattr(mech, "compile_strategy", _compile_crashes)
+
+    def _market_must_not_run(self, *_a, **_kw):
+        raise AssertionError("synthesis must not run when design never readies")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    # The loop completed via the readiness-critique path; the trial compile was
+    # skipped, so the crashing compiler was never reached.
+    assert record.backtest.status == "failed: design_not_ready"
+    assert record.loop_telemetry["mechanical_repairs"] == 0
+
+
+def test_mechanical_repair_enabled_env_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_mechanical_repair_enabled`` defaults to True and only the recognised
+    truthy tokens enable it; everything else (including garbage) disables."""
+    from investment_team.strategy_lab.orchestrator import _mechanical_repair_enabled
+
+    monkeypatch.delenv("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", raising=False)
+    assert _mechanical_repair_enabled() is True
+
+    for truthy in ("true", "TRUE", "1", "yes", "Yes"):
+        monkeypatch.setenv("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", truthy)
+        assert _mechanical_repair_enabled() is True
+
+    for falsey in ("false", "0", "no", "garbage", ""):
+        monkeypatch.setenv("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", falsey)
+        assert _mechanical_repair_enabled() is False
+
+
+# ---------------------------------------------------------------------------
 # Stall detection + regression guard + telemetry (critique-ledger work)
 # ---------------------------------------------------------------------------
 

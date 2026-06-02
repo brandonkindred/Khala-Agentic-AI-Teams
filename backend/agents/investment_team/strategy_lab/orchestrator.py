@@ -77,6 +77,7 @@ from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
+from .mechanical_repair import RepairAction, repair_spec, select_code_path
 from .phases import (
     PHASE_TRANSITION_EVENT_NAME,
     Phase,
@@ -223,6 +224,19 @@ def _design_max_llm_calls() -> int:
         return max(int(raw), 1)
     except ValueError:
         return 120
+
+
+def _mechanical_repair_enabled() -> bool:
+    """Resolve the deterministic mechanical-repair pre-flight toggle.
+
+    Pre: none.
+    Post: returns ``True`` unless ``STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED`` is
+    set to a recognised falsey value. Accepted truthy values are
+    ``true``/``1``/``yes`` (case-insensitive); anything else disables the
+    pre-flight and restores the pure LLM-revise behaviour. Default ``true``.
+    """
+    raw = os.environ.get("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", "true")
+    return raw.strip().lower() in ("true", "1", "yes")
 
 
 def _orchestrator_runner(code, market_data, config, *, strategy=None, **kwargs):
@@ -422,13 +436,18 @@ def _emit_design_review_telemetry(
 
 
 def _design_loop_telemetry_summary(
-    ledger: CritiqueLedger, rounds: int, stop_reason: str
+    ledger: CritiqueLedger,
+    rounds: int,
+    stop_reason: str,
+    mechanical_repairs: int = 0,
 ) -> Dict[str, Any]:
     """Build the design-loop slice of the persisted telemetry summary.
 
     Pre: ``ledger`` has recorded every round of the loop; ``rounds`` is the
     authoritative round count (``len(critique_history)``); ``stop_reason`` is
-    one of ``"ready" | "round_cap" | "stalled" | "budget_exhausted"``.
+    one of ``"ready" | "round_cap" | "stalled" | "budget_exhausted"``;
+    ``mechanical_repairs`` is the cumulative count of deterministic spec edits
+    the pre-flight applied across the loop (``>= 0``).
     Post: returns the design-loop counters; gate counts and the
     compiled-vs-custom flag are merged in later by
     :meth:`StrategyLabOrchestrator._finalize_loop_telemetry`.
@@ -436,6 +455,7 @@ def _design_loop_telemetry_summary(
     return {
         "design_review_rounds": rounds,
         "stop_reason": stop_reason,
+        "mechanical_repairs": mechanical_repairs,
         "critique_ledger": {
             "total_resolved": len(ledger.ever_resolved),
             "total_regressed": ledger.total_regressed,
@@ -958,9 +978,18 @@ class StrategyLabOrchestrator:
             # Per-cycle LLM-call budget hit mid-design. Surface whatever
             # spec/critique state we reached as a not-ready outcome tagged
             # ``budget_exhausted`` so the caller short-circuits with a
-            # distinct status. ``spec`` is None only if the very first
-            # ``run()`` tripped — fall back to a defaults spec so the audit
-            # record is still well-formed.
+            # distinct status. The tuple-return assignment above only runs on a
+            # successful return, so prefer the latest in-loop spec/rationale the
+            # review-rounds helper annotated on the exception (post
+            # mechanical-repair / pre-trip) — otherwise the record would carry
+            # the pre-loop draft even though a ``design_repair`` already fired
+            # and readiness was revalidated against the repaired spec.
+            latest_spec = getattr(exc, "latest_spec", None)
+            if latest_spec is not None:
+                spec = latest_spec
+                rationale = getattr(exc, "latest_rationale", rationale)
+            # ``spec`` is None only if the very first ``run()`` tripped — fall
+            # back to a defaults spec so the audit record is still well-formed.
             if spec is None:
                 spec = self._build_spec_from_dict({}, strategy_id=strategy_id)
             emit(
@@ -971,12 +1000,15 @@ class StrategyLabOrchestrator:
                     "rounds": len(critique_history),
                 },
             )
-            # Carry forward the critique-ledger counters accumulated for the
-            # rounds completed before the budget tripped, so a budget exit
-            # after real review is distinguishable from one that never
-            # reached a review round.
+            # Carry forward the critique-ledger counters and the mechanical-
+            # repair count accumulated for the rounds completed before the budget
+            # tripped, so a budget exit after real review (or after a repair) is
+            # distinguishable from one that never reached a review round.
             budget_telemetry = _design_loop_telemetry_summary(
-                ledger, len(critique_history), "budget_exhausted"
+                ledger,
+                len(critique_history),
+                "budget_exhausted",
+                getattr(exc, "mechanical_repair_count", 0),
             )
             # Mirror the normal-exit path: emit the per-cycle ``design_loop``
             # summary so live ``on_phase`` consumers see the stop reason and
@@ -1050,6 +1082,8 @@ class StrategyLabOrchestrator:
         readiness_results: List[QualityGateResult] = []
         stall_rounds = _design_review_stall_rounds()
         stop_reason = "round_cap"
+        repair_enabled = _mechanical_repair_enabled()
+        mechanical_repair_count = 0
 
         for review_round in range(max_rounds):
             # Deterministic readiness gate. Skip re-validation when the
@@ -1067,16 +1101,105 @@ class StrategyLabOrchestrator:
                 (not r.passed) and r.severity == "critical" for r in readiness_results
             )
 
+            # Deterministic mechanical pre-flight, run before every review round
+            # regardless of the readiness verdict, in two ordered stages:
+            #   1. Repair mechanical readiness criticals (timeframe data
+            #      availability, position-cap bound) so they never cost an LLM
+            #      ``revise`` round, then re-validate.
+            #   2. Only once the spec is readiness-clean, trial-compile it and
+            #      flip ``requires_custom_code`` on ``CompilerError`` so a
+            #      readiness-clean spec that is still outside the deterministic-
+            #      compiler envelope (e.g. a ``volatility_target`` spec without an
+            #      ATR predicate — readiness only *warns* on that sizing mode)
+            #      selects the custom-code path here rather than later in
+            #      synthesis. The trial compile is *gated on readiness* because
+            #      the compiler assumes structurally valid DSL: a spec with a
+            #      residual readiness critical (e.g. an ``sma`` ref missing its
+            #      required ``period``) can make ``compile_strategy`` raise a
+            #      non-``CompilerError``, which must not abort the loop — that
+            #      defect is left to the readiness-critique / revise path.
+            if repair_enabled:
+                repair_actions: List[RepairAction] = []
+                pre_repair_spec: Optional[StrategySpec] = None
+
+                # Stage 1 — mechanical repairs (repair_spec never trial-compiles).
+                outcome = repair_spec(spec, config=config)
+                if outcome.actions:
+                    pre_repair_spec = spec.model_copy(deep=True)
+                    spec = outcome.spec
+                    repair_actions.extend(outcome.actions)
+                    # Re-validate only when a repair changed a readiness-relevant
+                    # field (mechanical repairs always do; the signature catches it).
+                    repaired_signature = _spec_readiness_signature(spec)
+                    if repaired_signature != last_readiness_signature:
+                        readiness_results = self.spec_readiness_gate.validate(
+                            spec, phase="design", backtest_config=config
+                        )
+                        self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
+                        last_readiness_signature = repaired_signature
+                        deterministic_ready = not any(
+                            (not r.passed) and r.severity == "critical" for r in readiness_results
+                        )
+
+                # Stage 2 — trial compile, only on a readiness-clean spec.
+                if deterministic_ready:
+                    compile_action = select_code_path(spec)
+                    if compile_action is not None:
+                        if pre_repair_spec is None:
+                            pre_repair_spec = spec.model_copy(deep=True)
+                        spec = spec.model_copy(update={"requires_custom_code": True})
+                        repair_actions.append(compile_action)
+
+                if repair_actions:
+                    mechanical_repair_count += len(repair_actions)
+                    emit(
+                        "design_repair",
+                        {
+                            "round": review_round,
+                            "actions": [
+                                {
+                                    "rule": a.rule,
+                                    "field": a.field,
+                                    "before": a.before,
+                                    "after": a.after,
+                                    "reason": a.reason,
+                                }
+                                for a in repair_actions
+                            ],
+                            "now_ready": deterministic_ready,
+                        },
+                    )
+                    if drift_collector is not None:
+                        drift_collector.record_spec_change(
+                            phase="design",
+                            agent="MechanicalRepair",
+                            before_spec=pre_repair_spec,
+                            after_spec=spec,
+                            reason="deterministic mechanical auto-repair",
+                        )
+
             if deterministic_ready:
                 emit(
                     "design_review",
                     {"sub_phase": "started", "round": review_round},
                 )
-                critique = self.design_review_agent.run(
-                    spec,
-                    readiness_results,
-                    prior_critiques=critique_history,
-                )
+                try:
+                    critique = self.design_review_agent.run(
+                        spec,
+                        readiness_results,
+                        prior_critiques=critique_history,
+                    )
+                except DesignBudgetExhausted as exc:
+                    # The budget handler in ``_run_design_loop`` only captures
+                    # this helper's spec/rationale/counters on the success-return
+                    # path; surface the latest in-loop spec (post mechanical-
+                    # repair) and the repair count so the short-circuit record
+                    # reflects the spec actually evaluated, not the pre-loop
+                    # draft, and its telemetry still reports the repairs applied.
+                    exc.latest_spec = spec
+                    exc.latest_rationale = rationale
+                    exc.mechanical_repair_count = mechanical_repair_count
+                    raise
                 critique.round = review_round
                 critique_history.append(critique)
                 delta = ledger.record_round(critique)
@@ -1165,12 +1288,20 @@ class StrategyLabOrchestrator:
             # the round — that risks deadlock if the model cannot avoid it).
             regression_notice = _format_regression_notice(critique, delta.regressed)
             prev_spec = spec.model_copy(deep=True)
-            strategy_dict, rationale = self.design_agent.revise(
-                spec,
-                critique,
-                prior_critiques=critique_history,
-                regression_notice=regression_notice,
-            )
+            try:
+                strategy_dict, rationale = self.design_agent.revise(
+                    spec,
+                    critique,
+                    prior_critiques=critique_history,
+                    regression_notice=regression_notice,
+                )
+            except DesignBudgetExhausted as exc:
+                # As above: revise has not yet produced a new spec, so the latest
+                # fully-realised spec is the current (post mechanical-repair) one.
+                exc.latest_spec = spec
+                exc.latest_rationale = rationale
+                exc.mechanical_repair_count = mechanical_repair_count
+                raise
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
             if drift_collector is not None:
                 drift_collector.record_spec_change(
@@ -1181,7 +1312,9 @@ class StrategyLabOrchestrator:
                     reason=critique.rationale if hasattr(critique, "rationale") else str(critique),
                 )
 
-        loop_telemetry = _design_loop_telemetry_summary(ledger, len(critique_history), stop_reason)
+        loop_telemetry = _design_loop_telemetry_summary(
+            ledger, len(critique_history), stop_reason, mechanical_repair_count
+        )
         emit("telemetry", {"scope": "design_loop", **loop_telemetry})
         return spec, rationale, ready, stop_reason, loop_telemetry
 
