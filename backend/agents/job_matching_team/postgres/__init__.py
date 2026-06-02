@@ -21,6 +21,7 @@ SCHEMA = TeamSchema(
             top_n            INTEGER NOT NULL DEFAULT 0,
             total_found      INTEGER NOT NULL DEFAULT 0,
             total_ranked     INTEGER NOT NULL DEFAULT 0,
+            seen_fingerprints JSONB NOT NULL DEFAULT '[]'::jsonb,
             error            TEXT,
             created_at       TIMESTAMPTZ NOT NULL,
             completed_at     TIMESTAMPTZ

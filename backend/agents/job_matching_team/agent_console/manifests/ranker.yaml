@@ -1,6 +1,6 @@
 schema_version: 1
 id: job_matching.ranker
-team: job_matching_team
+team: job_matching
 name: Job Matching — Ranker
 summary: Scores job postings against a job-seeker profile and ranks the best to apply for.
 description: |

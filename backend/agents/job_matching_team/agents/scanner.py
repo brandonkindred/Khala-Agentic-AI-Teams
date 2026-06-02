@@ -131,7 +131,7 @@ class JobScannerAgent:
             logger.warning("Posting extraction failed for %s", hit.url, exc_info=True)
             return None
 
-        if not isinstance(data, dict) or not data.get("is_job_posting"):
+        if not isinstance(data, dict) or not _as_bool(data.get("is_job_posting")):
             return None
 
         remote = str(data.get("remote_mode") or "unknown").lower()
@@ -151,6 +151,26 @@ class JobScannerAgent:
             description=str(data.get("description") or "").strip(),
             posted_at=(str(data["posted_at"]) if data.get("posted_at") else None),
         )
+
+
+def _as_bool(value: object) -> bool:
+    """Strictly interpret an LLM-supplied flag as a boolean.
+
+    LLM JSON frequently stringifies booleans (``"false"``), which a bare
+    truthiness check would wrongly treat as ``True``. Only genuine truthy
+    values pass.
+
+    Postconditions:
+        * Returns ``True`` only for ``True``, the strings ``"true"``/``"1"``/
+          ``"yes"`` (case-insensitive), or the number ``1``; ``False`` otherwise.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    if isinstance(value, (int, float)):
+        return value == 1
+    return False
 
 
 def _as_int(value: object) -> Optional[int]:

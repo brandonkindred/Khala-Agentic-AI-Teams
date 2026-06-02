@@ -68,6 +68,12 @@ class QueryBuilderAgent:
                 system_prompt=QUERY_BUILDER_SYSTEM_PROMPT,
             )
             raw = data.get("queries", []) if isinstance(data, dict) else []
+            # The model occasionally returns a single string instead of a list;
+            # treat that as one query rather than iterating it character-by-char.
+            if isinstance(raw, str):
+                raw = [raw]
+            elif not isinstance(raw, list):
+                raw = []
             return [str(q) for q in raw if str(q).strip()]
         except Exception:  # noqa: BLE001 - LLM is best-effort; fall back deterministically
             logger.warning("Query builder LLM call failed; using template fallback", exc_info=True)

@@ -21,6 +21,23 @@ def test_respects_max_queries(scripted_llm):
     assert len(out) == 3
 
 
+def test_string_queries_treated_as_single_query(scripted_llm):
+    # A bare string (not a list) must not be iterated character-by-character.
+    llm = scripted_llm(lambda p, s: {"queries": "python backend jobs"})
+    agent = QueryBuilderAgent(llm_client=llm)
+    out = agent.build(JobSeekerProfile(target_titles=["Eng"]), max_queries=5)
+    assert out == ["python backend jobs"]
+
+
+def test_non_list_non_str_queries_falls_back(scripted_llm):
+    # A dict/garbage value yields no LLM queries -> deterministic fallback.
+    llm = scripted_llm(lambda p, s: {"queries": {"unexpected": 1}})
+    agent = QueryBuilderAgent(llm_client=llm)
+    out = agent.build(JobSeekerProfile(target_titles=["Backend Engineer"]), max_queries=3)
+    assert out
+    assert any("Backend Engineer" in q for q in out)
+
+
 def test_fallback_when_llm_returns_nothing(scripted_llm):
     llm = scripted_llm(lambda p, s: {"queries": []})
     agent = QueryBuilderAgent(llm_client=llm)

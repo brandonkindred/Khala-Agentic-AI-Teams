@@ -17,7 +17,7 @@ from agent_registry.schema_resolver import resolve_schema
 
 MANIFESTS_DIR = Path(__file__).resolve().parent.parent / "agent_console" / "manifests"
 EXPECTED_COUNT = 2
-TEAM_KEY = "job_matching_team"
+TEAM_KEY = "job_matching"
 
 
 def _load_all_manifests() -> list[tuple[Path, AgentManifest]]:

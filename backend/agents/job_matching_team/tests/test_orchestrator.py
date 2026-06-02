@@ -39,8 +39,9 @@ class RecordingStore:
     def create_run(self, run_id, profile, request):
         self.created = (run_id, profile, request)
 
-    def save_results(self, run_id, ranked, *, total_found):
+    def save_results(self, run_id, ranked, *, total_found, scanned_fingerprints=None):
         self.saved = (run_id, ranked, total_found)
+        self.saved_scanned = scanned_fingerprints
 
     def mark_failed(self, run_id, error):
         self.failed = (run_id, error)
@@ -70,6 +71,10 @@ def test_run_persists_and_returns_top_n():
     assert store.created[0] == resp.run_id
     assert store.saved[0] == resp.run_id
     assert store.saved[2] == 5
+    # All 5 scanned postings' fingerprints are persisted for exclude_seen,
+    # even though only the top 3 are returned/stored as ranked rows.
+    assert store.saved_scanned is not None
+    assert len(store.saved_scanned) == 5
 
 
 def test_overrides_merged_into_snapshot():

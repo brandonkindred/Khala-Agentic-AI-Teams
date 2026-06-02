@@ -95,7 +95,12 @@ class JobMatchingOrchestrator:
 
             if store is not None:
                 try:
-                    store.save_results(run_id, top, total_found=len(postings))
+                    store.save_results(
+                        run_id,
+                        top,
+                        total_found=len(postings),
+                        scanned_fingerprints=[p.fingerprint for p in postings],
+                    )
                 except Exception:  # noqa: BLE001
                     logger.warning("Failed to save results for run %s", run_id, exc_info=True)
 

@@ -70,11 +70,20 @@ def test_create_run_executes_insert(monkeypatch):
 def test_save_results_inserts_rows_and_completes(monkeypatch):
     cur = FakeCursor()
     _patch_conn(monkeypatch, cur)
-    JobMatchingStore().save_results("r1", [_ranked("A"), _ranked("B")], total_found=4)
+    JobMatchingStore().save_results(
+        "r1",
+        [_ranked("A"), _ranked("B")],
+        total_found=4,
+        scanned_fingerprints=["a", "b", "c", "a", ""],
+    )
     inserts = [s for s, _ in cur.executed if "INSERT INTO job_matching_ranked_jobs" in s]
-    updates = [s for s, _ in cur.executed if "UPDATE job_matching_runs" in s]
+    updates = [s for s, p in cur.executed if "UPDATE job_matching_runs" in s]
     assert len(inserts) == 2
     assert len(updates) == 1
+    # The UPDATE persists the de-duplicated, non-empty scanned fingerprint set.
+    update_params = next(p for s, p in cur.executed if "UPDATE job_matching_runs" in s)
+    seen_json = update_params[3]
+    assert sorted(seen_json.obj) == ["a", "b", "c"]
 
 
 def test_mark_failed_truncates(monkeypatch):
@@ -137,10 +146,11 @@ def test_get_run_missing_returns_none(monkeypatch):
     assert JobMatchingStore().get_run("nope") is None
 
 
-def test_seen_fingerprints(monkeypatch):
-    cur = FakeCursor(fetchall=[[("fp1",), ("fp2",)]])
+def test_seen_fingerprints_unions_run_and_ranked(monkeypatch):
+    # First query: run-level scanned fingerprints; second: ranked-job rows.
+    cur = FakeCursor(fetchall=[[("scanned1",), ("scanned2",)], [("fp1",), ("fp2",)]])
     _patch_conn(monkeypatch, cur)
-    assert JobMatchingStore().seen_fingerprints() == {"fp1", "fp2"}
+    assert JobMatchingStore().seen_fingerprints() == {"scanned1", "scanned2", "fp1", "fp2"}
 
 
 def test_iso_helper_handles_non_datetime():

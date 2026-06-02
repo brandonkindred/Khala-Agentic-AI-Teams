@@ -1,6 +1,6 @@
 schema_version: 1
 id: job_matching.scanner
-team: job_matching_team
+team: job_matching
 name: Job Matching — Scanner
 summary: Searches the web for open roles and extracts normalized job postings.
 description: |

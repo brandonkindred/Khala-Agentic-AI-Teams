@@ -84,15 +84,35 @@ class JobMatchingStore:
             )
 
     @timed_query(store=_STORE, op="save_results")
-    def save_results(self, run_id: str, ranked: List[RankedJob], *, total_found: int) -> None:
+    def save_results(
+        self,
+        run_id: str,
+        ranked: List[RankedJob],
+        *,
+        total_found: int,
+        scanned_fingerprints: Optional[List[str]] = None,
+    ) -> None:
         """Persist ranked rows and mark the run completed.
+
+        Args:
+            ranked: The returned (top-N) ranked postings; one row each.
+            total_found: Count of all postings scanned this run.
+            scanned_fingerprints: Fingerprints of *every* posting scanned this
+                run (not just the returned top-N). Persisted on the run row so
+                ``exclude_seen`` can suppress lower-ranked roles already seen.
 
         Postconditions:
             * The run's ``status`` is ``completed`` with ``total_found`` /
               ``total_ranked`` populated and ``completed_at`` set.
             * One ``job_matching_ranked_jobs`` row exists per entry in
               ``ranked`` (rank starts at 1, in list order).
+            * The run's ``seen_fingerprints`` holds the de-duplicated set of
+              ``scanned_fingerprints`` (falling back to the ranked postings'
+              fingerprints when not supplied).
         """
+        if scanned_fingerprints is None:
+            scanned_fingerprints = [rj.posting.fingerprint for rj in ranked]
+        seen = sorted({fp for fp in scanned_fingerprints if fp})
         now = _now()
         with get_conn() as conn, conn.cursor() as cur:
             for idx, rj in enumerate(ranked, start=1):
@@ -116,8 +136,8 @@ class JobMatchingStore:
                 )
             cur.execute(
                 "UPDATE job_matching_runs SET status = %s, total_found = %s, "
-                "total_ranked = %s, completed_at = %s WHERE run_id = %s",
-                (RUN_STATUS_COMPLETED, total_found, len(ranked), now, run_id),
+                "total_ranked = %s, seen_fingerprints = %s, completed_at = %s WHERE run_id = %s",
+                (RUN_STATUS_COMPLETED, total_found, len(ranked), Json(seen), now, run_id),
             )
 
     @timed_query(store=_STORE, op="mark_failed")
@@ -191,12 +211,25 @@ class JobMatchingStore:
 
     @timed_query(store=_STORE, op="seen_fingerprints")
     def seen_fingerprints(self) -> set[str]:
-        """Return every posting fingerprint ranked in any prior run."""
+        """Return every posting fingerprint scanned in any prior run.
+
+        Postconditions:
+            * Includes fingerprints from the run-level ``seen_fingerprints``
+              arrays (every posting scanned, not just the returned top-N) as
+              well as the per-row ranked-job fingerprints, so ``exclude_seen``
+              suppresses lower-ranked roles already encountered.
+        """
         with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT jsonb_array_elements_text(seen_fingerprints) "
+                "FROM job_matching_runs"
+            )
+            seen = {r[0] for r in cur.fetchall() if r[0]}
             cur.execute(
                 "SELECT DISTINCT fingerprint FROM job_matching_ranked_jobs WHERE fingerprint <> ''"
             )
-            return {r[0] for r in cur.fetchall()}
+            seen.update(r[0] for r in cur.fetchall())
+            return seen
 
 
 # ---------------------------------------------------------------------------

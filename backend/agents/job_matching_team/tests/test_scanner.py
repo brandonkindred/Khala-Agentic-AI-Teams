@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from job_matching_team.agents.scanner import JobScannerAgent, _as_int
+from job_matching_team.agents.scanner import JobScannerAgent, _as_bool, _as_int
 from job_matching_team.tools.web_fetch import FetchedPage, WebFetchError
 from job_matching_team.tools.web_search import SearchResult
 
@@ -181,6 +181,43 @@ def test_invalid_remote_mode_coerced_to_unknown():
     )
     out = agent.scan(["q"], max_roles=10)
     assert out[0].remote_mode == "unknown"
+
+
+def test_stringified_false_flag_is_not_a_posting():
+    # LLM JSON often stringifies booleans; "false" must not create a posting.
+    agent = JobScannerAgent(
+        llm_client=_posting_llm(
+            {"http://a.com/1": {"is_job_posting": "false", "title": "Eng", "company": "Acme"}}
+        ),
+        searcher=FakeSearcher({"q": [SearchResult(title="A", url="http://a.com/1")]}),
+        fetcher=FakeFetcher(),
+    )
+    assert agent.scan(["q"], max_roles=10) == []
+
+
+def test_stringified_true_flag_creates_posting():
+    agent = JobScannerAgent(
+        llm_client=_posting_llm(
+            {"http://a.com/1": {"is_job_posting": "true", "title": "Eng", "company": "Acme"}}
+        ),
+        searcher=FakeSearcher({"q": [SearchResult(title="A", url="http://a.com/1")]}),
+        fetcher=FakeFetcher(),
+    )
+    assert len(agent.scan(["q"], max_roles=10)) == 1
+
+
+def test_as_bool_helper():
+    assert _as_bool(True) is True
+    assert _as_bool(False) is False
+    assert _as_bool("true") is True
+    assert _as_bool("TRUE") is True
+    assert _as_bool("yes") is True
+    assert _as_bool("1") is True
+    assert _as_bool("false") is False
+    assert _as_bool("no") is False
+    assert _as_bool(1) is True
+    assert _as_bool(0) is False
+    assert _as_bool(None) is False
 
 
 def test_as_int_helper():
