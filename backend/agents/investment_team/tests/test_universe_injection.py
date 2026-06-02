@@ -252,9 +252,11 @@ def test_misplaced_guard_moved_to_first_statement() -> None:
     assert _has_universe_guard_in_on_bar(_cls(out))
 
 
-def test_existing_guard_wrong_param_name_rewritten() -> None:
-    """A guard bound to the wrong receiver (``bar`` while the param is ``b``) is
-    not trusted — it is rewritten to the actual parameter so no NameError."""
+def test_wrong_param_guard_gets_canonical_added() -> None:
+    """A guard whose receiver is not the bar parameter and not a method-local
+    (e.g. ``bar`` while the param is ``b``) could resolve through globals, so it
+    is preserved rather than stripped; the canonical ``b.symbol`` guard is
+    prepended ahead of it so the bar guard is present and runs first."""
     spec = _spec(target_symbols=["QQQ"])
     src = textwrap.dedent(
         """
@@ -270,8 +272,9 @@ def test_existing_guard_wrong_param_name_rewritten() -> None:
         """
     )
     out = inject_universe_and_guard(src, spec)
-    assert "b.symbol not in self.UNIVERSE" in out
-    assert "bar.symbol not in self.UNIVERSE" not in out
+    assert _first_is_guard(out)  # canonical bar guard prepended first
+    on_bar = next(n for n in _cls(out).body if isinstance(n, ast.FunctionDef))
+    assert on_bar.body[0].test.left.value.id == "b"  # uses the actual bar param
     compile(out, "<injected>", "exec")
 
 
@@ -530,6 +533,57 @@ def test_auxiliary_symbol_guard_preserved() -> None:
     assert "ref.symbol not in self.UNIVERSE" in out  # user guard preserved
     assert "bar.symbol not in self.UNIVERSE" in out  # canonical bar guard added
     assert _first_is_guard(out)  # bar guard runs first
+    compile(out, "<injected>", "exec")
+
+
+def test_global_receiver_guard_preserved() -> None:
+    """A guard whose receiver is a module-level/global name (not a method-local)
+    can resolve through globals, so it is preserved as user logic."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        REF = object()
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if REF.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "REF.symbol not in self.UNIVERSE" in out  # global-receiver guard kept
+    assert _first_is_guard(out)  # canonical bar guard prepended first
+    compile(out, "<injected>", "exec")
+
+
+def test_later_bound_local_guard_stripped() -> None:
+    """A guard whose receiver is a method-local bound only *after* the guard
+    would UnboundLocalError; it is stripped (only names bound before the guard
+    make a different receiver safe to keep)."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if ref.symbol not in self.UNIVERSE:
+                    return
+                ref = ctx.reference(bar.symbol)
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "ref.symbol not in self.UNIVERSE" not in out  # broken guard stripped
+    assert "ref = ctx.reference" in out  # the assignment itself is preserved
+    assert _first_is_guard(out)
     compile(out, "<injected>", "exec")
 
 

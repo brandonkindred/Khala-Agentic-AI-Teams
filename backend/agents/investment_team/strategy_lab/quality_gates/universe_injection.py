@@ -140,8 +140,7 @@ def inject_universe_and_guard(source: str, spec) -> str:
     if on_bars and all(_is_guardable_on_bar(on_bar) for on_bar in on_bars):
         for on_bar in on_bars:
             bar_param = on_bar.args.args[2].arg
-            bound = _bound_names(on_bar)
-            on_bar.body = [s for s in on_bar.body if not _is_bar_guard(s, bar_param, bound)]
+            on_bar.body = _strip_bar_guards(on_bar)
             on_bar.body.insert(0, _build_guard_stmt(bar_param))
 
     ast.fix_missing_locations(tree)
@@ -310,49 +309,67 @@ def _is_strippable_guard(stmt: ast.stmt) -> bool:
     return _is_universe_guard_stmt(stmt) and not getattr(stmt, "orelse", None)
 
 
-def _is_bar_guard(stmt: ast.stmt, bar_param: str, bound_names: set[str]) -> bool:
-    """True iff ``stmt`` is the strippable universe guard being replaced.
+def _strip_bar_guards(on_bar) -> list[ast.stmt]:
+    """Return ``on_bar.body`` with the existing bar-parameter guard(s) removed,
+    so the canonical guard can be prepended without duplication.
 
-    Strips a bare universe guard whose receiver is the bar parameter, or whose
-    receiver is an *undefined* name (a misnamed bar guard — e.g. ``bar.symbol``
-    when the parameter is ``b`` — which would ``NameError`` and must be
-    rewritten). A guard whose receiver is a *different but defined* name (e.g.
-    ``ref.symbol not in self.UNIVERSE`` filtering an auxiliary symbol assigned
-    in the method) is user logic, not the bar guard, so it is preserved.
+    A bare universe guard is removed only when its receiver is the bar
+    parameter, or a method-local name that is **not yet bound** at the guard's
+    position (a misnamed bar guard that would ``UnboundLocalError`` — only names
+    bound *before* the guard make a different receiver safe). A guard whose
+    receiver is bound before it (an auxiliary symbol filtered by user logic) or
+    is not a method-local at all (a module-level/global/closure name) is
+    preserved — the injector adds the required bar guard without dropping user
+    filtering it can't prove is dead.
     """
-    if not _is_strippable_guard(stmt):
-        return False
-    receiver = stmt.test.left.value.id
-    return receiver == bar_param or receiver not in bound_names
+    bar_param = on_bar.args.args[2].arg
+    assigned = _assigned_names(on_bar)
+    bound_before = _param_names(on_bar)
+    kept: list[ast.stmt] = []
+    for stmt in on_bar.body:
+        if _is_strippable_guard(stmt):
+            receiver = stmt.test.left.value.id
+            if receiver == bar_param or (receiver in assigned and receiver not in bound_before):
+                continue
+        kept.append(stmt)
+        bound_before |= _store_names(stmt)
+    return kept
 
 
-def _bound_names(on_bar) -> set[str]:
-    """Return the names bound in ``on_bar``'s own scope (parameters + local
-    assignment targets), not descending into nested function/lambda/class
-    scopes. Used to tell a user guard on a real auxiliary variable from a
-    misnamed (undefined-receiver) bar guard.
-    """
+def _param_names(on_bar) -> set[str]:
+    """Return on_bar's parameter names (bound from entry)."""
     args = on_bar.args
-    names: set[str] = {
-        a.arg for a in (*getattr(args, "posonlyargs", []), *args.args, *args.kwonlyargs)
-    }
+    names = {a.arg for a in (*getattr(args, "posonlyargs", []), *args.args, *args.kwonlyargs)}
     if args.vararg:
         names.add(args.vararg.arg)
     if args.kwarg:
         names.add(args.kwarg.arg)
+    return names
 
-    def visit(node: ast.AST) -> None:
-        # A nested function/lambda/class is its own scope — its locals are not
-        # bound in on_bar, so don't descend into it.
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+
+def _store_names(node: ast.AST) -> set[str]:
+    """Return names bound by ``node`` in its own scope (``Store``-context names),
+    not descending into nested function/lambda/class scopes."""
+    names: set[str] = set()
+
+    def visit(n: ast.AST) -> None:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
             return
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            names.add(node.id)
-        for child in ast.iter_child_nodes(node):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            names.add(n.id)
+        for child in ast.iter_child_nodes(n):
             visit(child)
 
+    visit(node)
+    return names
+
+
+def _assigned_names(on_bar) -> set[str]:
+    """Return every method-local name assigned anywhere in ``on_bar`` (used to
+    tell a function-local receiver apart from a module-level/global one)."""
+    names: set[str] = set()
     for stmt in on_bar.body:
-        visit(stmt)
+        names |= _store_names(stmt)
     return names
 
 
