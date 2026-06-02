@@ -1,0 +1,23 @@
+schema_version: 1
+id: job_matching.scanner
+team: job_matching_team
+name: Job Matching — Scanner
+summary: Searches the web for open roles and extracts normalized job postings.
+description: |
+  Runs web search queries via the Ollama web_search API, fetches the listing
+  pages, and uses an LLM to extract structured job postings (title, company,
+  location, remote mode, salary, etc.). Requires live web access.
+tags: [jobs, search, scanning, requires-live-integration]
+inputs:
+  schema_ref: job_matching_team.models:ScannerInvokeRequest
+outputs:
+  schema_ref: job_matching_team.models:ScannerInvokeResponse
+invoke:
+  kind: http
+  method: POST
+  path: /api/job-matching/scan
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: job_matching_team.invoke_runners:invoke_scanner

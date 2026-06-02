@@ -229,6 +229,14 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         cell="core_dev",
         timeout_seconds=120.0,
     ),
+    "job_matching": TeamConfig(
+        name="Job Matching",
+        prefix="/api/job-matching",
+        description="Scans open roles matching a job-seeker profile and returns a ranked best-to-apply list",
+        tags=["jobs", "career", "matching", "search"],
+        cell="personal",
+        timeout_seconds=300.0,
+    ),
     # In-process module (not a proxy team): the unified API mounts the
     # product_delivery router directly via `app.include_router(...)`.
     # `in_process=True` so `_register_proxy_routes` skips proxy

@@ -740,6 +740,35 @@ services:
       timeout: 5s
       retries: 5
 
+  job-matching-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8111" }
+    image: khala-job-matching-service
+    container_name: khala-job-matching-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: job_matching_team.api.main
+      TEAM_NAME: job_matching_team
+      TEAM_PORT: "8111"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    volumes: *team-volumes
+    extra_hosts: *team-extra-hosts
+    ports: ["8111:8111"]
+    networks:
+      stack: { ipv4_address: 172.28.0.29, aliases: [job-matching-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8111/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   # ── Unified API (router/proxy) ──────────────────────────────────────────────
 
   khala:
@@ -772,6 +801,7 @@ services:
       agentic-team-provisioning-service: { condition: service_healthy }
       user-agent-founder-service: { condition: service_healthy }
       deepthought-service: { condition: service_healthy }
+      job-matching-service: { condition: service_healthy }
     volumes:
       - agents_workspace:/workspace
       - agents_data:/data/agents
@@ -818,6 +848,7 @@ services:
       AGENTIC_TEAM_PROVISIONING_SERVICE_URL: http://agentic-team-provisioning-service:8108
       USER_AGENT_FOUNDER_SERVICE_URL: http://user-agent-founder-service:8109
       DEEPTHOUGHT_SERVICE_URL: http://deepthought-service:8110
+      JOB_MATCHING_SERVICE_URL: http://job-matching-service:8111
     extra_hosts:
       - "postgres:172.28.0.2"
       - "temporal:172.28.0.3"
@@ -842,6 +873,7 @@ services:
       - "agentic-team-provisioning-service:172.28.0.26"
       - "user-agent-founder-service:172.28.0.27"
       - "deepthought-service:172.28.0.28"
+      - "job-matching-service:172.28.0.29"
     networks:
       stack:
         ipv4_address: 172.28.0.6

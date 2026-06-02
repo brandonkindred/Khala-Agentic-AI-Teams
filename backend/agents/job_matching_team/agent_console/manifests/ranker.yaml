@@ -1,0 +1,22 @@
+schema_version: 1
+id: job_matching.ranker
+team: job_matching_team
+name: Job Matching — Ranker
+summary: Scores job postings against a job-seeker profile and ranks the best to apply for.
+description: |
+  Given a job-seeker profile and a list of postings, scores each posting across
+  six weighted dimensions (title, seniority, location, compensation, company,
+  skills), applies deterministic hard exclusions (excluded companies, salary
+  floor, deal-breakers), and returns the postings sorted best-first with an
+  apply/maybe/skip recommendation and rationale. Pure LLM scoring — runnable in
+  a sandbox.
+tags: [jobs, ranking, matching]
+inputs:
+  schema_ref: job_matching_team.models:RankerInvokeRequest
+outputs:
+  schema_ref: job_matching_team.models:RankerInvokeResponse
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: job_matching_team.invoke_runners:invoke_ranker

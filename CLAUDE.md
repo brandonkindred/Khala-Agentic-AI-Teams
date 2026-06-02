@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It currently mounts **20 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning v3, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list lives in `backend/unified_api/config.py` (`TEAM_CONFIGS`).
+**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It currently mounts **21 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning v3, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought, job matching) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list lives in `backend/unified_api/config.py` (`TEAM_CONFIGS`).
 
 ## Repository Structure
 
@@ -34,6 +34,7 @@ backend/
     startup_advisor/
     user_agent_founder/
     deepthought/
+    job_matching_team/       # Scans open roles vs a job-seeker profile; ranks best-to-apply
     llm_service/             # Centralized LLM client (Ollama, Claude)
     agent_registry/          # Agent Console catalog: loads per-agent YAML manifests, serves /api/agents
     agent_console/           # Agent Console Phase 3: Postgres-backed saved inputs, run history, diff, pruner
@@ -285,6 +286,9 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `MARKET_DATA_FETCH_WORKERS` | Issue #376. Worker count for `MarketDataService.fetch_multi_symbol_range` and `MarketDataCache.get_or_fetch_multi`. Default `min(len(symbols), 16)`; the previous hard cap of 5 is gone. |
 | `AUTHOR_PROFILE_PATH` | Path to user/author profile YAML injected into blogging prompts. Falls back to `$AGENT_CACHE/author_profile.yaml`, then to the bundled example. See `backend/agents/blogging/author_profile/`. |
 | `AUTHOR_PROFILE_STRICT` | When `true`, missing/invalid profile raises instead of falling back to the bundled example. Recommended for production. |
+| `JOB_SEEKER_PROFILE_PATH` | Path to the job-matching team's job-seeker profile YAML (standing search criteria). Falls back to `$AGENT_CACHE/job_seeker_profile.yaml`, then to the bundled example. See `backend/agents/job_matching_team/profile/`. |
+| `JOB_SEEKER_PROFILE_STRICT` | When `true`, a missing/invalid job-seeker profile raises instead of falling back to the bundled example. |
+| `JOB_MATCHING_SERVICE_URL` | Upstream URL the unified API proxies `/api/job-matching/*` to. The job-matching team also reuses `OLLAMA_API_KEY` for live web search. |
 | `SOCIAL_MARKETING_WINNING_POSTS_TOP_K` | Max exemplars retrieved from the social marketing Winning Posts Bank per concept run (default `5`). |
 | `SOCIAL_MARKETING_WINNING_POSTS_RERANK_ENABLED` | Enable LLM rerank stage in the Winning Posts Bank retrieval (default `true`; set to `false` to disable). |
 | `SOCIAL_MARKETING_WINNING_POSTS_INGEST_THRESHOLD` | Engagement-score cutoff (0..1) above which performance observations are auto-promoted into the Winning Posts Bank (default `0.7`). |

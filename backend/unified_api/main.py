@@ -117,6 +117,7 @@ TEAM_SERVICE_URL_ENVS: dict[str, str] = {
     "startup_advisor": "STARTUP_ADVISOR_SERVICE_URL",
     "user_agent_founder": "USER_AGENT_FOUNDER_SERVICE_URL",
     "deepthought": "DEEPTHOUGHT_SERVICE_URL",
+    "job_matching": "JOB_MATCHING_SERVICE_URL",
 }
 
 # Track which teams were successfully registered (for health endpoint).
