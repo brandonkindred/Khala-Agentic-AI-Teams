@@ -539,6 +539,29 @@ class _Compiler:
         self.genome = genome
         # node_id -> (Pydantic node, left-aligned method body source)
         self._methods: Dict[str, Tuple[BaseModel, str]] = {}
+        # ``_node_id`` computes a sha256 over the canonical JSON of each node;
+        # memoise it on object identity for the compile's lifetime so a node
+        # the tree-walk revisits isn't re-serialised + re-hashed. Every node
+        # whose id we key on stays referenced for the whole compile — genome
+        # nodes via ``self.genome``, and any node synthesised during the walk
+        # via ``self._synthesized`` — so ``id()`` cannot be recycled into a
+        # false hit.
+        self._node_id_memo: Dict[int, str] = {}
+        self._synthesized: List[BaseModel] = []
+
+    def _nid(self, node: BaseModel) -> str:
+        """Memoised ``_node_id`` keyed on object identity.
+
+        Postconditions: returns ``_node_id(node)``; repeated calls for the
+        same live object return the cached value without re-hashing.
+        """
+        key = id(node)
+        cached = self._node_id_memo.get(key)
+        if cached is not None:
+            return cached
+        result = _node_id(node)
+        self._node_id_memo[key] = result
+        return result
 
     # ------------------------------------------------------------------
     # Public entry point.
@@ -561,7 +584,7 @@ class _Compiler:
     # ------------------------------------------------------------------
 
     def _visit(self, node: BaseModel) -> str:
-        node_id = _node_id(node)
+        node_id = self._nid(node)
         if node_id in self._methods:
             return node_id
 
@@ -586,7 +609,15 @@ class _Compiler:
             up = isinstance(node, CrossOver)
             body = self._cross_body(fast_id, slow_id, up)
         elif isinstance(node, ATRBreakout):
-            body = self._atr_breakout_body(node.k, node.atr_period, node.atr_mult)
+            # Common-sub-expression elimination: route the ATR computation
+            # through a shared ATR helper instead of inlining the true-range
+            # loop. When the genome also references an ``ATR(atr_period)``
+            # primitive elsewhere, ``_visit`` dedupes to a single emitted
+            # helper, so the ATR series is computed once rather than twice.
+            atr_node = ATR(period=node.atr_period)
+            self._synthesized.append(atr_node)
+            atr_id = self._visit(atr_node)
+            body = self._atr_breakout_body(node.k, node.atr_period, node.atr_mult, atr_id)
         elif isinstance(node, BoolAnd):
             child_ids = [self._visit(c) for c in node.children]
             body = self._and_body(child_ids)
@@ -682,17 +713,15 @@ class _Compiler:
         )
 
     @staticmethod
-    def _atr_breakout_body(k: int, atr_period: int, atr_mult: float) -> str:
+    def _atr_breakout_body(k: int, atr_period: int, atr_mult: float, atr_id: str) -> str:
+        # ``_atr`` is read from the shared ATR helper (``_n_<atr_id>``) rather
+        # than recomputed inline. The warmup guard still gates on
+        # ``atr_period + 1`` so the helper never returns NAN here — matching
+        # the previous inline ``sum(_trs) / atr_period`` value exactly.
         return (
             f"if len(bars) < max({k} + 1, {atr_period} + 1):\n"
             "    return False\n"
-            "_trs = []\n"
-            f"for _i in range(len(bars) - {atr_period}, len(bars)):\n"
-            "    _h = bars[_i].high\n"
-            "    _l = bars[_i].low\n"
-            "    _pc = bars[_i - 1].close\n"
-            "    _trs.append(max(_h - _l, abs(_h - _pc), abs(_l - _pc)))\n"
-            f"_atr = sum(_trs) / {atr_period}\n"
+            f"_atr = self._n_{atr_id}(bars)\n"
             f"_hw = bars[-{k} - 1:-1]\n"
             "_rh = max(b.high for b in _hw)\n"
             f"return bars[-1].close > _rh + ({atr_mult!r}) * _atr\n"
@@ -775,7 +804,7 @@ class _Compiler:
         # 4-space here at the class-body-pre-indent level).
         sizing_indented = textwrap.indent(sizing_src.rstrip("\n"), "    ")
 
-        genome_hash = _node_id(self.genome)
+        genome_hash = self._nid(self.genome)
         hypothesis = (self.genome.hypothesis or "").replace('"""', "'''")[:300]
 
         # Build the class body at column 0, then indent the whole thing 4

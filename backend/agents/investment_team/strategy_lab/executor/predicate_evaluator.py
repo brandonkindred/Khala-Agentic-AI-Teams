@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Optional, Protocol, Sequence, Tuple
+from typing import Any, Callable, Dict, Literal, Optional, Protocol, Sequence, Tuple
 
 import pandas as pd
 
@@ -235,63 +235,100 @@ def select_source_series(df: pd.DataFrame, source: str) -> pd.Series:
     return df[source]
 
 
+def _series_sma(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
+    return ind.sma(select_source_series(df, ref.source), int(ref.param("period")))
+
+
+def _series_ema(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
+    return ind.ema(select_source_series(df, ref.source), int(ref.param("period")))
+
+
+def _series_rsi(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
+    return ind.rsi(select_source_series(df, ref.source), int(ref.param("period")))
+
+
+def _series_macd(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
+    series = select_source_series(df, ref.source)
+    macd_line, signal_line, hist = ind.macd(
+        series,
+        fast=int(ref.param("fast")),
+        slow=int(ref.param("slow")),
+        signal=int(ref.param("signal")),
+    )
+    output = ref.param("output")
+    if output == "signal":
+        return signal_line
+    if output == "histogram":
+        return hist
+    return macd_line
+
+
+def _series_bollinger(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
+    series = select_source_series(df, ref.source)
+    upper, middle, lower = ind.bollinger_bands(
+        series,
+        period=int(ref.param("period")),
+        num_std=float(ref.param("num_std")),
+    )
+    band = ref.param("band")
+    if band == "upper":
+        return upper
+    if band == "lower":
+        return lower
+    return middle
+
+
+def _series_atr(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
+    return ind.atr(df["high"], df["low"], df["close"], period=int(ref.param("period")))
+
+
+def _series_adx(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
+    return ind.adx(df["high"], df["low"], df["close"], period=int(ref.param("period")))
+
+
+def _series_stochastic(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
+    pct_k, pct_d = ind.stochastic(
+        df["high"],
+        df["low"],
+        df["close"],
+        k_period=int(ref.param("k_period")),
+        d_period=int(ref.param("d_period")),
+    )
+    return pct_d if ref.param("output") == "d" else pct_k
+
+
+def _series_vwap(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
+    return ind.vwap(df["high"], df["low"], df["close"], df["volume"])
+
+
+# Module-level O(1) dispatch table — one entry per DSL ``IndicatorName``.
+# Replaces a linear if/elif chain so indicator lookup is constant-time on
+# the predicate-evaluation hot path.
+_INDICATOR_SERIES_DISPATCH: Dict[str, Callable[[IndicatorRef, pd.DataFrame], pd.Series]] = {
+    "sma": _series_sma,
+    "ema": _series_ema,
+    "rsi": _series_rsi,
+    "macd": _series_macd,
+    "bollinger": _series_bollinger,
+    "atr": _series_atr,
+    "adx": _series_adx,
+    "stochastic": _series_stochastic,
+    "vwap": _series_vwap,
+}
+
+
 def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
     """Compute the full indicator series for ``ref`` on ``df``.
 
-    Pre: ``df`` has the standard OHLCV columns.
+    Pre: ``df`` has the standard OHLCV columns; ``ref.name`` is a known
+    DSL indicator name.
     Post: returns a ``pd.Series`` aligned with ``df``'s index.
     NaN during warmup is pandas' natural behaviour.
     """
-    name = ref.name
-    if name == "sma":
-        return ind.sma(select_source_series(df, ref.source), int(ref.param("period")))
-    if name == "ema":
-        return ind.ema(select_source_series(df, ref.source), int(ref.param("period")))
-    if name == "rsi":
-        return ind.rsi(select_source_series(df, ref.source), int(ref.param("period")))
-    if name == "macd":
-        series = select_source_series(df, ref.source)
-        macd_line, signal_line, hist = ind.macd(
-            series,
-            fast=int(ref.param("fast")),
-            slow=int(ref.param("slow")),
-            signal=int(ref.param("signal")),
-        )
-        output = ref.param("output")
-        if output == "signal":
-            return signal_line
-        if output == "histogram":
-            return hist
-        return macd_line
-    if name == "bollinger":
-        series = select_source_series(df, ref.source)
-        upper, middle, lower = ind.bollinger_bands(
-            series,
-            period=int(ref.param("period")),
-            num_std=float(ref.param("num_std")),
-        )
-        band = ref.param("band")
-        if band == "upper":
-            return upper
-        if band == "lower":
-            return lower
-        return middle
-    if name == "atr":
-        return ind.atr(df["high"], df["low"], df["close"], period=int(ref.param("period")))
-    if name == "adx":
-        return ind.adx(df["high"], df["low"], df["close"], period=int(ref.param("period")))
-    if name == "stochastic":
-        pct_k, pct_d = ind.stochastic(
-            df["high"],
-            df["low"],
-            df["close"],
-            k_period=int(ref.param("k_period")),
-            d_period=int(ref.param("d_period")),
-        )
-        return pct_d if ref.param("output") == "d" else pct_k
-    if name == "vwap":
-        return ind.vwap(df["high"], df["low"], df["close"], df["volume"])
-    raise ValueError(f"unknown indicator name: {name!r}")
+    builder = _INDICATOR_SERIES_DISPATCH.get(ref.name)
+    if builder is None:
+        raise ValueError(f"unknown indicator name: {ref.name!r}")
+    return builder(ref, df)
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +355,7 @@ class PandasHistoryView:
         return float(self._df[field_name].iloc[i])
 
     def indicator(self, ref: IndicatorRef, i: int) -> Optional[float]:
-        key = ref.model_dump_json()
+        key = ref.sig_id
         if key not in self._cache:
             self._cache[key] = compute_indicator_series(ref, self._df)
         series = self._cache[key]
@@ -416,7 +453,7 @@ class StreamingHistoryView:
         if not self._bars:
             return None
         df = self._ensure_df()
-        key = ref.model_dump_json()
+        key = ref.sig_id
         series = self._indicator_cache.get(key)
         if series is None:
             series = compute_indicator_series(ref, df)
