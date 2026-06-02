@@ -790,6 +790,60 @@ def test_budget_exhaustion_after_repair_preserves_repaired_spec(
     # The repaired spec is preserved (forex/1h/40% draft → 1d/25% after repair).
     assert record.strategy.timeframe == "1d"
     assert record.strategy.risk_limits.max_position_pct == 25.0
+    # The mechanical-repair count survives the budget trip (timeframe + cap = 2),
+    # rather than defaulting to 0 in the budget-exhaustion telemetry.
+    assert record.loop_telemetry["mechanical_repairs"] == 2
+
+
+def test_trial_compile_skipped_while_readiness_critical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trial compile must not run while a readiness critical remains: a
+    malformed-but-readiness-detectable spec can make ``compile_strategy`` raise a
+    non-``CompilerError`` (e.g. ``TypeError``), which would abort the loop. With
+    the gate the loop instead reaches honest round-cap exhaustion and the
+    crashing compiler is never invoked."""
+    from investment_team.strategy_lab import mechanical_repair as mech
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "2")
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+    monkeypatch.setattr(orch.design_agent, "revise", lambda *a, **kw: (_spec_dict(), "revised"))
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True))
+
+    # A persistent readiness critical keeps deterministic_ready False every round.
+    def _always_critical(*_a, **_kw) -> List[QualityGateResult]:
+        return [
+            QualityGateResult(
+                gate_name="spec_readiness",
+                passed=False,
+                severity="critical",
+                phase="design",
+                details="forced critical for test",
+            )
+        ]
+
+    monkeypatch.setattr(orch.spec_readiness_gate, "validate", _always_critical)
+
+    # If the trial compile ran on this readiness-critical spec it would crash the
+    # whole cycle with a non-CompilerError instead of being skipped.
+    def _compile_crashes(_spec: Any) -> str:
+        raise TypeError("int() argument must be a string or a number, not 'NoneType'")
+
+    monkeypatch.setattr(mech, "compile_strategy", _compile_crashes)
+
+    def _market_must_not_run(self, *_a, **_kw):
+        raise AssertionError("synthesis must not run when design never readies")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    # The loop completed via the readiness-critique path; the trial compile was
+    # skipped, so the crashing compiler was never reached.
+    assert record.backtest.status == "failed: design_not_ready"
+    assert record.loop_telemetry["mechanical_repairs"] == 0
 
 
 def test_mechanical_repair_enabled_env_parsing(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -15,7 +15,11 @@ import pytest
 
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab import mechanical_repair as mr
-from investment_team.strategy_lab.mechanical_repair import RepairOutcome, repair_spec
+from investment_team.strategy_lab.mechanical_repair import (
+    RepairOutcome,
+    repair_spec,
+    select_code_path,
+)
 from investment_team.strategy_lab.quality_gates.spec_readiness import (
     MAX_POSITION_PCT_CEILING,
     SpecReadinessGate,
@@ -167,6 +171,35 @@ def test_attempt_compile_false_skips_trial_compile(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(mr, "compile_strategy", _boom)
     spec = _make_spec(sizing={"kind": "volatility_target", "target_annual_vol": 0.15})
     repair_spec(spec, attempt_compile=False)
+    assert called["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# select_code_path
+# ---------------------------------------------------------------------------
+
+
+def test_select_code_path_flags_uncompilable_spec() -> None:
+    spec = _make_spec(sizing={"kind": "volatility_target", "target_annual_vol": 0.15})
+    action = select_code_path(spec)
+    assert action is not None
+    assert action.rule == "compiler_fallback"
+    assert action.after is True
+
+
+def test_select_code_path_none_for_compilable_spec() -> None:
+    assert select_code_path(_make_spec()) is None
+
+
+def test_select_code_path_none_when_already_custom(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = {"n": 0}
+
+    def _boom(_spec: Any) -> str:
+        called["n"] += 1
+        raise CompilerError("should not be called")
+
+    monkeypatch.setattr(mr, "compile_strategy", _boom)
+    assert select_code_path(_make_spec(requires_custom_code=True)) is None
     assert called["n"] == 0
 
 

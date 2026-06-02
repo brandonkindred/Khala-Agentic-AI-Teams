@@ -144,24 +144,49 @@ def repair_spec(
     repaired = spec.model_copy(update=updates, deep=True) if updates else spec
 
     # --- Trial compile: select the custom-code path now rather than in synthesis.
-    if attempt_compile and not repaired.requires_custom_code:
-        try:
-            compile_strategy(repaired)
-        except CompilerError as exc:
-            actions.append(
-                RepairAction(
-                    rule="compiler_fallback",
-                    field="requires_custom_code",
-                    before=False,
-                    after=True,
-                    reason=(
-                        "spec falls outside the deterministic compiler envelope "
-                        f"({exc}); routing to the custom-code synthesis path."
-                    ),
-                )
-            )
+    if attempt_compile:
+        action = select_code_path(repaired)
+        if action is not None:
+            actions.append(action)
             repaired = repaired.model_copy(update={"requires_custom_code": True})
 
     if not actions:
         return RepairOutcome(spec=spec, actions=[])
     return RepairOutcome(spec=repaired, actions=actions)
+
+
+def select_code_path(spec: StrategySpec) -> Optional[RepairAction]:
+    """Trial-compile ``spec`` to decide whether it needs the custom-code path.
+
+    Preconditions:
+      - ``spec`` is structurally valid (readiness-clean). The deterministic
+        compiler assumes valid DSL; a spec with a readiness-detectable defect
+        (e.g. an ``sma`` ref whose required ``period`` was removed) can make
+        :func:`compile_strategy` raise a *non*-``CompilerError`` such as
+        ``TypeError``. Callers running inside the design loop must therefore only
+        invoke this once the readiness gate reports no criticals — a residual
+        critical is left to the readiness-critique / revise path.
+
+    Postconditions:
+      - Returns a ``compiler_fallback`` :class:`RepairAction` (the caller should
+        set ``requires_custom_code=True``) when the spec is outside the
+        deterministic-compiler envelope; returns ``None`` when the spec compiles
+        or already has ``requires_custom_code`` set.
+    """
+    assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
+    if spec.requires_custom_code:
+        return None
+    try:
+        compile_strategy(spec)
+    except CompilerError as exc:
+        return RepairAction(
+            rule="compiler_fallback",
+            field="requires_custom_code",
+            before=False,
+            after=True,
+            reason=(
+                "spec falls outside the deterministic compiler envelope "
+                f"({exc}); routing to the custom-code synthesis path."
+            ),
+        )
+    return None
