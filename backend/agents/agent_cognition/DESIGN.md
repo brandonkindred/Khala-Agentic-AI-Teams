@@ -211,8 +211,8 @@ sequenceDiagram
     SB-->>PX: output + cognition_writeback
     PX->>PX: check enforced postconditions on output
     alt enforced postcondition violated
-      PX->>CTX: persist sanitized blocked-run audit event only
-      CTX->>PG: append error/feedback event
+      PX->>CTX: persist sanitized tool_call/outcome records + blocked-run audit event
+      CTX->>PG: append tool_call/outcome + error event (drop rejected output & untrusted memory)
       PX-->>C: 4xx blocked
     else passed
       PX->>CTX: persist_writeback(id, events, tool_calls)
@@ -222,17 +222,23 @@ sequenceDiagram
   end
 ```
 
-> **Postcondition ordering (writeback integrity):** enforced postconditions are evaluated
-> **before** `persist_writeback`. A response that fails a postcondition must not pollute the
-> agent's durable memory/tool history, so on violation only a sanitized blocked-run audit
-> event is persisted — never the rejected `cognition_writeback`. The §11 security flow shows
-> the same ordering.
+> **Postcondition ordering & blocked-run audit:** enforced postconditions are evaluated
+> **before** persisting the rejected output/untrusted memory events — a blocked response must
+> not pollute durable cognition state. **But** tool calls the agent already executed represent
+> real side effects, so the blocked path still persists *sanitized `tool_call`/`outcome`
+> records* (preserving the "every tool call feeds memory" invariant) while dropping the
+> rejected final output and any model-asserted memory events. The §11 security flow shows the
+> same ordering.
 >
 > **Idempotent writeback (retry-safe):** `persist_writeback` keys every event on
-> `(agent_id, source_run_id, source_seq)` where `source_run_id` is the invoke `trace_id`, and
-> inserts `ON CONFLICT DO NOTHING`. A retried invoke (or a re-delivered response after a lost
-> first reply) re-persisting the same writeback is therefore a no-op — no duplicated memory or
-> tool history, no skewed rollups/rule learning.
+> `(agent_id, source_run_id, source_seq)` and inserts `ON CONFLICT DO NOTHING`.
+> `source_run_id` is a **stable idempotency key the proxy mints for the logical invoke and
+> propagates into the sandbox** — *not* the sandbox shim's `trace_id`, which is generated
+> fresh per POST (`shared_agent_invoke/shim.py`) and would differ across a retry. The proxy
+> reuses the same key when retrying a logical invoke (and accepts a caller-supplied
+> `Idempotency-Key` header when present), so a retried invoke or a re-delivered response after
+> a lost first reply re-persists as a no-op — no duplicated memory/tool history, no skewed
+> rollups/rule learning.
 
 ### 8.2 Rollup & rule-derivation (scheduler + lazy)
 
@@ -246,24 +252,36 @@ sequenceDiagram
   participant PG as Postgres
 
   SCH->>MEM: for each closed period not yet summarized
-  MEM->>PG: fetch events (day) / child summaries (week+)
+  MEM->>PG: fetch period inputs (day←events; week←days; month←days; year←months)
   MEM->>LLM: complete_validated(schema=PeriodSummary)
   LLM-->>MEM: summary + highlights
   MEM->>PG: upsert (agent_id, scale, period_start)
   MEM->>REF: after week/month rollup → reflect
   REF->>LLM: propose rule add/retire/amend from summaries + active rules
   LLM-->>REF: candidate rules
-  REF->>PG: insert rule_proposals (action, target_rule_id, status=pending)
+  REF->>PG: insert rule_proposals (action, target_rule_id, evidence+version, status=pending)
   Note over REF,PG: Nothing auto-activates — awaits operator approval
 ```
 
-> **Late-arrival handling (no stale summaries):** the rollup processes any closed period that
-> is *not yet summarized* **or** is flagged `stale`. When `persist_writeback` appends an event
-> whose `occurred_at` falls inside an already-summarized day/week/month, it sets that period's
-> summary `stale=true` and cascades the flag up the parent scales. The next lazy/scheduled
-> rollup recomputes the stale chain (upsert on the unique key) so higher-level memory and
-> learned rules never sit on stale summaries. Out-of-order events are normal: a closed period
-> is only summarized once it has *no pending stale flag*.
+> **Rollup input scoping (calendar-correct):** `month` aggregates the **days** in that
+> calendar month, and `year` aggregates the **months** in that year — months are **not** rolled
+> up from weeks. ISO weeks straddle month boundaries (e.g. Jan 29–Feb 4), so consuming whole
+> weeks would either pull February events into January or drop them; aggregating days keeps
+> each calendar period exact. `week` summaries remain a parallel reporting scale built from
+> their 7 days and are not an input to `month`.
+
+> **Late-arrival handling (no stale summaries or stale-derived rules):** the rollup processes
+> any closed period that is *not yet summarized* **or** is flagged `stale`. When
+> `persist_writeback` appends an event whose `occurred_at` falls inside an already-summarized
+> day/week/month, it sets that period's summary `stale=true`, **bumps its `version`**, and
+> cascades the flag up the parent scales. The next lazy/scheduled rollup recomputes the stale
+> chain (upsert on the unique key). Recompute alone is not enough — proposals/rules already
+> derived from the old summaries must also be revisited: each `rule_proposal` records its
+> evidence as `(summary_id, version)` refs, so when a referenced summary's version advances,
+> any **pending** proposal on stale evidence is flagged `stale_evidence` (re-evaluated on the
+> next reflection, or auto-withdrawn), and any **active derived rule** whose evidence moved is
+> surfaced to the operator review queue rather than silently left in place. Out-of-order events
+> are normal: a closed period is only summarized once it has *no pending stale flag*.
 
 ### 8.3 Rule lifecycle (state)
 
@@ -297,23 +315,29 @@ stateDiagram-v2
   (observation|action|tool_call|outcome|error|feedback), content, data JSONB, salience,
   occurred_at, source_run_id, source_seq`. Indexes `(agent_id, occurred_at DESC)`,
   `(agent_id, kind)`. **Idempotency:** unique `(agent_id, source_run_id, source_seq)` —
-  `source_run_id` is the invoke's `trace_id` and `source_seq` is the event's index within
-  that writeback, so a retried/duplicated `persist_writeback` is a no-op `ON CONFLICT DO
-  NOTHING` rather than duplicating memory and skewing rollups (see §8.1).
+  `source_run_id` is the **proxy-minted stable idempotency key for the logical invoke** (not
+  the shim's per-POST `trace_id`) and `source_seq` is the event's index within that writeback,
+  so a retried/duplicated `persist_writeback` is a no-op `ON CONFLICT DO NOTHING` rather than
+  duplicating memory and skewing rollups (see §8.1).
 - **`agent_cognition_summaries`** — rollups: `id, agent_id, scale (day|week|month|year),
-  period_start, period_end, summary, highlights JSONB, source_count, covers_through, stale,
-  created_at`. **Unique `(agent_id, scale, period_start)`** ⇒ idempotent rollups.
-  `covers_through` records the max `occurred_at` (day) / child `created_at` (week+) folded in;
+  period_start, period_end, summary, highlights JSONB, source_count, covers_through, version,
+  stale, created_at`. **Unique `(agent_id, scale, period_start)`** ⇒ idempotent rollups.
+  `covers_through` records the max input timestamp folded in (day←events; week←days;
+  month←days; year←months — see §8.2 input scoping); `version` increments on every recompute;
   `stale` is set when a **late event** lands in an already-summarized period so the rollup
   recomputes it and cascades the flag to parent scales (see §8.2 late-arrival handling).
 - **`agent_cognition_rules`** — `id, agent_id, text, mode (advisory|enforced),
   status (active|retired), predicate JSONB, rationale, source (seed|derived|operator),
-  priority, created_at, updated_at`.
+  evidence JSONB (`(summary_id, version)` refs for `derived` rules), needs_review, priority,
+  created_at, updated_at`. `needs_review` is set when a referenced summary's `version` advances
+  so a stale-evidence derived rule resurfaces in the operator queue.
 - **`agent_cognition_rule_proposals`** — HITL queue: `id, agent_id, action
   (add|retire|amend), target_rule_id (NULL for add), proposed_rule JSONB (NULL for retire),
-  evidence JSONB, status (pending|approved|rejected), decided_by, decided_at, created_at`.
-  The explicit `action` + `target_rule_id` let the approve path apply retire/amend
-  deterministically instead of mis-activating them as new rules (see §8.3).
+  evidence JSONB (`(summary_id, version)` refs), stale_evidence, status
+  (pending|approved|rejected), decided_by, decided_at, created_at`. The explicit `action` +
+  `target_rule_id` let the approve path apply retire/amend deterministically instead of
+  mis-activating them as new rules (see §8.3); `stale_evidence` flags a pending proposal whose
+  evidence summary was recomputed, for re-evaluation/auto-withdrawal (see §8.2).
 
 ## 10. Interfaces / API
 
@@ -350,14 +374,16 @@ All carry an `author` handle (reuse `agent_console.author.resolve_author`).
 > **Operator authorization (must-do, distinct from the author handle):** `resolve_author` is
 > *provenance only* — it is a documented pre-auth placeholder that can return `anonymous` and
 > must **not** be used as an access-control decision. The security gateway only scans request
-> *content*, so it does not authorize the caller either. The HITL mutation endpoints
-> (`approve`/`reject`) therefore require an explicit **operator-authorization check** before
-> they act: until real auth lands, gate them behind a required operator credential
-> (`COGNITION_OPERATOR_TOKEN`, constant-time compared) and bind decisions to the authenticated
-> principal; when platform auth exists, replace the token with an operator-role check. Without
-> this, any caller able to reach the Unified API could approve/reject learned **enforced**
-> rules and defeat the human-approval gate. The `author` handle is recorded *in addition to*
-> (never instead of) this check.
+> *content*, so it does not authorize the caller either. **All** cognition endpoints therefore
+> require an explicit **operator-authorization check** before they act — both the
+> `approve`/`reject` mutations **and the `GET` reads**, since memory, active rules, and pending
+> proposal evidence are private agent state that an unauthenticated caller must not inspect.
+> Until real auth lands, gate every route behind a required operator credential
+> (`COGNITION_OPERATOR_TOKEN`, constant-time compared) and bind mutation decisions to the
+> authenticated principal; when platform auth exists, replace the token with an operator-role
+> check. Without this, any caller able to reach the Unified API could read private cognition
+> state or approve/reject learned **enforced** rules and defeat the human-approval gate. The
+> `author` handle is recorded *in addition to* (never instead of) this check.
 
 > **Gateway coverage (must-do):** the security gateway's `_is_team_path()`
 > (`unified_api/middleware/security_gateway.py`) matches **only** the prefixes in
@@ -380,12 +406,12 @@ flowchart TB
   PRE -- pass --> ADV[Inject advisory rules into SYSTEM prompt]
   ADV --> RUN[Agent runs tools via named tool paths only]
   RUN --> OUT{Enforced rule<br/>postconditions on output}
-  OUT -- violated --> BLK
+  OUT -- violated --> BLKO[Drop rejected output<br/>persist sanitized tool_call/audit only]
   OUT -- pass --> WB[Persist writeback<br/>secrets stripped, salience bounded]
   WB --> DONE[Return envelope]
 
   classDef bad fill:#fdd,stroke:#b00
-  class R413,BLK bad
+  class R413,BLK,BLKO bad
 ```
 
 | Control | Mechanism |
@@ -395,8 +421,10 @@ flowchart TB
 | **Enforced rules are real pre/postconditions** | Deterministic predicate DSL (non-executable JSON), satisfies DbC mandate; never prompt-only |
 | **Predicate safety** | DSL is a fixed allowlist of ops (e.g. `<=`, `forbid_tool`); no arbitrary code/eval |
 | **HITL gate** | Derived rules can never self-activate; operator approval required (audited via `decided_by`) |
-| **Operator authorization** | `approve`/`reject` enforce an operator-auth check (operator token now, role later) — `resolve_author` is provenance only and must never be the authz decision (see §10) |
-| **Idempotent writeback** | Events keyed on `(agent_id, source_run_id, source_seq)` with `ON CONFLICT DO NOTHING` — invoke retries can't duplicate memory/tool history |
+| **Operator authorization** | **All** cognition routes — reads *and* `approve`/`reject` — enforce an operator-auth check (operator token now, role later); `resolve_author` is provenance only and never the authz decision (see §10) |
+| **Idempotent writeback** | Events keyed on `(agent_id, source_run_id, source_seq)` with `ON CONFLICT DO NOTHING`; `source_run_id` is a proxy-minted stable key for the logical invoke (not the shim's per-POST `trace_id`) — retries can't duplicate memory/tool history |
+| **Blocked-run tool audit** | A postcondition-blocked output still persists sanitized `tool_call`/`outcome` records (real side effects already happened) while dropping the rejected output/untrusted memory |
+| **Stale-evidence re-evaluation** | Recomputed summaries bump `version`; pending proposals on stale evidence are flagged for re-eval/withdrawal and active derived rules resurface for operator review |
 | **Secrets** | Writeback strips credentials; tool secrets via env/secure store, never logged into memory |
 | **Input/output caps** | Reuse `AGENT_INVOKE_MAX_PAYLOAD_BYTES` / `AGENT_INVOKE_MAX_OUTPUT_BYTES`; memory digest is token-budgeted |
 | **Gateway alignment** | Operator routes must be added to the gateway's matched-prefix set — `_is_team_path()` covers only `TEAM_CONFIGS` today, so `/api/agents/...` is not gated by default (see §10 note). Preferred: a dedicated gated `/api/cognition/...` prefix |

@@ -46,12 +46,15 @@ flowchart TB
 - **Files:** `agent_cognition/__init__.py`, `models.py` (Pydantic: `MemoryEvent`,
   `PeriodSummary`, `Rule`, `RuleProposal`, `ToolCall`, `CognitionContext`,
   `CognitionWriteback`, enums for `kind`/`scale`/`mode`/`status`/`source`);
-  `postgres/__init__.py` (`SCHEMA: TeamSchema` — the 4 tables, indexes, unique
-  `(agent_id, scale, period_start)`); register in `shared_postgres/registry.py`; call
+  `postgres/__init__.py` (`SCHEMA: TeamSchema` — the 4 tables, indexes, summaries unique
+  `(agent_id, scale, period_start)` **and events unique `(agent_id, source_run_id,
+  source_seq)`** so Step 2's writeback `ON CONFLICT` target exists; summaries `version`/`stale`
+  columns; proposal/rule `evidence` columns); register in `shared_postgres/registry.py`; call
   `register_team_schemas(SCHEMA)` from `unified_api/main.py` lifespan.
 - **Depends:** —
 - **✅ Acceptance:** tables created idempotently on startup; models validate/round-trip;
-  schema is pure data (no import side effects).
+  schema is pure data (no import side effects); **both unique constraints (events idempotency
+  key + summary period key) present** so dependent steps' `ON CONFLICT` clauses resolve.
 
 ### Step 2 — Memory store (DAL)
 - **Goal:** Read/write episodic events and summaries.
@@ -64,20 +67,25 @@ flowchart TB
 - **Depends:** 1
 - **✅ Acceptance:** append/fetch round-trip; `upsert_summary` idempotent on the unique key;
   **re-appending the same `(source_run_id, source_seq)` is a no-op**; a late event flags the
-  right periods stale; cross-`agent_id` isolation proven.
+  right periods stale; cross-`agent_id` isolation proven. `source_run_id` is supplied by the
+  caller (proxy/facade), never minted in the store.
 
 ### Step 3 — Rollup engine
-- **Goal:** Idempotent day→week→month→year summarization.
-- **Files:** `memory/rollup.py` — UTC closed-period detection; hierarchical rollup (day from
-  events, week from days, month from weeks, year from months); `ensure_rollups_current(
-  agent_id, now)` as the single idempotent entry point that processes periods that are **not
-  yet summarized OR flagged `stale`**, recomputing a stale period and cascading the flag to its
-  parent scales; uses `complete_validated(schema=PeriodSummary)`, `compact_text`,
+- **Goal:** Idempotent calendar-correct summarization (day/week/month/year).
+- **Files:** `memory/rollup.py` — UTC closed-period detection; rollup inputs are
+  **calendar-scoped**: day←events, week←that week's days, **month←that month's days** (NOT
+  weeks, which straddle month boundaries), year←that year's months. `ensure_rollups_current(
+  agent_id, now)` is the single idempotent entry point that processes periods **not yet
+  summarized OR flagged `stale`**, recomputing a stale period, bumping its `version`, and
+  cascading the flag to parent scales; on recompute it also flags pending proposals /
+  active derived rules whose evidence references the changed summary `version` (handing off to
+  Step 6's re-evaluation). Uses `complete_validated(schema=PeriodSummary)`, `compact_text`,
   `get_client("cognition")`.
 - **Depends:** 2
 - **✅ Acceptance:** re-running produces no duplicates; a missed day is filled on next pass;
-  **a late event in an already-summarized period triggers recompute of that period and its
-  parents** (not skipped forever); hierarchical correctness and compaction path tested with a
+  **a month spanning a partial ISO week is summarized from days, not weeks** (no cross-month
+  bleed); a late event recomputes its period + parents (not skipped) **and flags
+  evidence-dependent proposals/rules**; hierarchical correctness + compaction tested with a
   fake LLM client.
 
 ### Step 4 — Retrieval / digest builder
@@ -101,23 +109,30 @@ flowchart TB
 - **Files:** `rules/store.py` (CRUD rules + proposals; proposals carry `action`
   (add|retire|amend) + `target_rule_id`; `approve` applies the action deterministically —
   `add` inserts active, `retire` retires the target, `amend` retires the target and inserts
-  its replacement active; `reject`→archived; seed-pack install); `rules/enforcement.py`
+  its replacement active; **`reject` sets status `rejected`** (the modeled terminal state — not
+  an undocumented `archived`); seed-pack install); `rules/enforcement.py`
   (`build_rule_prompt_block(advisory_rules)`; predicate DSL evaluator with a **fixed
   allowlist** of ops — e.g. `<= >= == in forbid_tool` — exposing `evaluate_precondition(ctx)` /
   `evaluate_postcondition(output)` → allow/block+reason).
 - **Depends:** 1
 - **✅ Acceptance:** prompt-block rendering; predicate allow/block matrix; invalid/unknown-op
   predicates rejected (no eval); **approving each of add/retire/amend lands the correct rule
-  state** (retire/amend never mis-activate as new rules); `agent_id` isolation.
+  state** (retire/amend never mis-activate as new rules); **reject lands `rejected`** (matches
+  the `pending|approved|rejected` model, API filters, and §8.3 lifecycle); `agent_id` isolation.
 
 ### Step 6 — Reflection (rule learning)
 - **Goal:** Derive rule proposals from memory (HITL).
 - **Files:** `rules/reflection.py` — LLM proposes add/retire/amend from recent summaries +
   active rules; writes `pending` proposals with `action`, `target_rule_id` (for retire/amend),
-  and `evidence`. **Never activates.**
+  and `evidence` recorded as **`(summary_id, version)` refs** (so Step 3 can detect when the
+  evidence later changes). Also exposes `reevaluate_stale(agent_id)` — withdraws/re-derives
+  pending proposals flagged `stale_evidence` and marks `needs_review` derived rules — invoked
+  after a stale recompute. **Never activates.**
 - **Depends:** 3, 5
-- **✅ Acceptance:** proposals created with evidence linkage; assertion that nothing reaches
-  `active` without explicit approval.
+- **✅ Acceptance:** proposals created with versioned evidence refs; nothing reaches `active`
+  without explicit approval; **after a summary recompute, a pending proposal on the old version
+  is flagged `stale_evidence` and an approved derived rule is flagged `needs_review`** (learned
+  rules don't silently sit on stale evidence).
 
 ## Milestone C — Tools & orchestration
 
@@ -153,17 +168,22 @@ flowchart TB
 
 ### Step 10 — Invoke proxy integration
 - **Goal:** Make the contract live at the boundary.
-- **Files:** `unified_api/routes/agents.py` — lazy catch-up → load context → advisory-into-
-  system-prompt + enforced precondition gate (block → 4xx + memory event) → inject `cognition`
-  block → on return **run postcondition check first, then** persist writeback (on
-  postcondition violation persist only a sanitized blocked-run audit event, never the rejected
-  writeback). For sandboxed agents with `platform_bound` tools, drive the multi-turn SB↔PX
-  `tool_calls`/`tool_results` loop (from Step 7) instead of a single shot. Helper for
-  in-process teams (no HTTP hop).
+- **Files:** `unified_api/routes/agents.py` — **mint a stable `source_run_id` for the logical
+  invoke** (reuse a caller `Idempotency-Key` if present; reuse the same id across retries —
+  not the shim's per-POST `trace_id`) and propagate it into the sandbox/writeback. Then: lazy
+  catch-up → load context → advisory-into-system-prompt + enforced precondition gate (block →
+  4xx + memory event) → inject `cognition` block → on return **run postcondition check first,
+  then** persist writeback. On postcondition violation, persist **sanitized `tool_call`/
+  `outcome` records** (real side effects already happened) plus a blocked-run audit event, and
+  drop the rejected output/untrusted memory — never the full rejected writeback. For sandboxed
+  agents with `platform_bound` tools, drive the multi-turn SB↔PX `tool_calls`/`tool_results`
+  loop (from Step 7) instead of a single shot. Helper for in-process teams (no HTTP hop).
 - **Depends:** 8, 9
-- **✅ Acceptance:** stubbed-sandbox test shows inject + persist; precondition block → 4xx;
-  postcondition violation → 4xx **with no full writeback persisted** (only the audit event);
-  a platform-bound tool round-trips via the proxy-driven loop without sandbox secret exposure.
+- **✅ Acceptance:** stubbed-sandbox test shows inject + persist; **a retried invoke reuses the
+  same `source_run_id` and does not duplicate writeback** (deduped by the events unique key);
+  precondition block → 4xx; postcondition violation → 4xx with the rejected output **not**
+  persisted **but executed tool calls still recorded**; a platform-bound tool round-trips via
+  the proxy-driven loop without sandbox secret exposure.
 
 ## Milestone D — Automation & operations
 
@@ -183,14 +203,15 @@ flowchart TB
   `resolve_author` (provenance only). Mount under a dedicated **`/api/cognition/...`** prefix
   and add it to the security gateway's matched-prefix set (`_get_team_prefixes()` /
   `_is_team_path()` cover only `TEAM_CONFIGS` today, so these routes are not gated otherwise).
-  `approve`/`reject` additionally enforce an **operator-authorization check**
-  (`COGNITION_OPERATOR_TOKEN` now, operator role when platform auth lands) — `resolve_author`
-  must never be the access-control decision and can return `anonymous`.
+  **All** routes — the `GET` reads *and* `approve`/`reject` — enforce an **operator-authorization
+  check** (`COGNITION_OPERATOR_TOKEN` now, operator role when platform auth lands), since memory,
+  rules, and proposal evidence are private agent state; `resolve_author` must never be the
+  access-control decision and can return `anonymous`.
 - **Depends:** 2, 5
 - **✅ Acceptance:** list/approve/reject flows; author tagging; 404s for unknown ids/proposals;
-  **gateway test proving the cognition prefix is intercepted** (not bypassed); **approve/reject
-  without a valid operator credential is rejected 401/403** (HITL gate cannot be defeated by an
-  unauthenticated caller).
+  **gateway test proving the cognition prefix is intercepted** (not bypassed); **every route
+  (reads + mutations) without a valid operator credential is rejected 401/403** (private state
+  isn't readable and the HITL gate can't be defeated by an unauthenticated caller).
 
 ### Step 13 — Seed rule packs + config/env
 - **Goal:** Sensible day-one guardrails + operability.
