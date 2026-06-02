@@ -77,6 +77,7 @@ from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
+from .mechanical_repair import repair_spec
 from .phases import (
     PHASE_TRANSITION_EVENT_NAME,
     Phase,
@@ -223,6 +224,19 @@ def _design_max_llm_calls() -> int:
         return max(int(raw), 1)
     except ValueError:
         return 120
+
+
+def _mechanical_repair_enabled() -> bool:
+    """Resolve the deterministic mechanical-repair pre-flight toggle.
+
+    Pre: none.
+    Post: returns ``True`` unless ``STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED`` is
+    set to a recognised falsey value. Accepted truthy values are
+    ``true``/``1``/``yes`` (case-insensitive); anything else disables the
+    pre-flight and restores the pure LLM-revise behaviour. Default ``true``.
+    """
+    raw = os.environ.get("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", "true")
+    return raw.strip().lower() in ("true", "1", "yes")
 
 
 def _orchestrator_runner(code, market_data, config, *, strategy=None, **kwargs):
@@ -422,13 +436,18 @@ def _emit_design_review_telemetry(
 
 
 def _design_loop_telemetry_summary(
-    ledger: CritiqueLedger, rounds: int, stop_reason: str
+    ledger: CritiqueLedger,
+    rounds: int,
+    stop_reason: str,
+    mechanical_repairs: int = 0,
 ) -> Dict[str, Any]:
     """Build the design-loop slice of the persisted telemetry summary.
 
     Pre: ``ledger`` has recorded every round of the loop; ``rounds`` is the
     authoritative round count (``len(critique_history)``); ``stop_reason`` is
-    one of ``"ready" | "round_cap" | "stalled" | "budget_exhausted"``.
+    one of ``"ready" | "round_cap" | "stalled" | "budget_exhausted"``;
+    ``mechanical_repairs`` is the cumulative count of deterministic spec edits
+    the pre-flight applied across the loop (``>= 0``).
     Post: returns the design-loop counters; gate counts and the
     compiled-vs-custom flag are merged in later by
     :meth:`StrategyLabOrchestrator._finalize_loop_telemetry`.
@@ -436,6 +455,7 @@ def _design_loop_telemetry_summary(
     return {
         "design_review_rounds": rounds,
         "stop_reason": stop_reason,
+        "mechanical_repairs": mechanical_repairs,
         "critique_ledger": {
             "total_resolved": len(ledger.ever_resolved),
             "total_regressed": ledger.total_regressed,
@@ -1050,6 +1070,8 @@ class StrategyLabOrchestrator:
         readiness_results: List[QualityGateResult] = []
         stall_rounds = _design_review_stall_rounds()
         stop_reason = "round_cap"
+        repair_enabled = _mechanical_repair_enabled()
+        mechanical_repair_count = 0
 
         for review_round in range(max_rounds):
             # Deterministic readiness gate. Skip re-validation when the
@@ -1066,6 +1088,52 @@ class StrategyLabOrchestrator:
             deterministic_ready = not any(
                 (not r.passed) and r.severity == "critical" for r in readiness_results
             )
+
+            # Deterministic mechanical pre-flight: when the gate reports a
+            # critical, first attempt a fully-determined, semantics-preserving
+            # repair (timeframe data availability, position-cap bound) before
+            # spending an LLM ``revise`` round. Re-validate the repaired spec so
+            # ``deterministic_ready`` reflects the result; only criticals the
+            # machine cannot fix fall through to the LLM revise path below.
+            if not deterministic_ready and repair_enabled:
+                outcome = repair_spec(spec, config=config)
+                if outcome.actions:
+                    prev_spec = spec.model_copy(deep=True)
+                    spec = outcome.spec
+                    readiness_results = self.spec_readiness_gate.validate(
+                        spec, phase="design", backtest_config=config
+                    )
+                    self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
+                    last_readiness_signature = _spec_readiness_signature(spec)
+                    deterministic_ready = not any(
+                        (not r.passed) and r.severity == "critical" for r in readiness_results
+                    )
+                    mechanical_repair_count += len(outcome.actions)
+                    emit(
+                        "design_repair",
+                        {
+                            "round": review_round,
+                            "actions": [
+                                {
+                                    "rule": a.rule,
+                                    "field": a.field,
+                                    "before": a.before,
+                                    "after": a.after,
+                                    "reason": a.reason,
+                                }
+                                for a in outcome.actions
+                            ],
+                            "now_ready": deterministic_ready,
+                        },
+                    )
+                    if drift_collector is not None:
+                        drift_collector.record_spec_change(
+                            phase="design",
+                            agent="MechanicalRepair",
+                            before_spec=prev_spec,
+                            after_spec=spec,
+                            reason="deterministic mechanical auto-repair",
+                        )
 
             if deterministic_ready:
                 emit(
@@ -1181,7 +1249,9 @@ class StrategyLabOrchestrator:
                     reason=critique.rationale if hasattr(critique, "rationale") else str(critique),
                 )
 
-        loop_telemetry = _design_loop_telemetry_summary(ledger, len(critique_history), stop_reason)
+        loop_telemetry = _design_loop_telemetry_summary(
+            ledger, len(critique_history), stop_reason, mechanical_repair_count
+        )
         emit("telemetry", {"scope": "design_loop", **loop_telemetry})
         return spec, rationale, ready, stop_reason, loop_telemetry
 

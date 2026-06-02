@@ -68,6 +68,12 @@ _SYMBOL_REGEX = re.compile(
 # Asset classes whose intraday timeframes the data-provider chain supports.
 _FULL_TIMEFRAME_ASSET_CLASSES: frozenset[str] = frozenset({"stocks", "crypto"})
 
+# Single-position risk-budget ceiling enforced by Rule 8. Exposed as a module
+# constant so the deterministic mechanical-repair pre-flight clamps to exactly
+# the same threshold the gate rejects above — the rule and its repair cannot
+# drift apart.
+MAX_POSITION_PCT_CEILING: float = 25.0
+
 # Asset classes that trade in whole units (shares / contracts). Crypto and
 # forex accept fractional quantities, so Rule 5's whole-lot check is skipped
 # for them — the runtime contract takes ``qty: float = Field(gt=0)``.
@@ -669,11 +675,12 @@ class SpecReadinessGate(GateResultsMixin):
                     )
                 )
 
-        if ctx.spec.risk_limits.max_position_pct > 25:
+        if ctx.spec.risk_limits.max_position_pct > MAX_POSITION_PCT_CEILING:
             out.append(
                 self._critical(
                     f"max_position_pct={ctx.spec.risk_limits.max_position_pct}% "
-                    "exceeds the 25% cap for a single-position risk budget."
+                    f"exceeds the {MAX_POSITION_PCT_CEILING:g}% cap for a single-position "
+                    "risk budget."
                 )
             )
         return out
