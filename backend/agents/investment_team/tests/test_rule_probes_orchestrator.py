@@ -111,9 +111,7 @@ def test_probe_gate_runs_when_conformance_is_clean(monkeypatch):
     captured: List[dict] = []
 
     def fake_refine(*, spec, code, failure_phase, failure_details, **kw):
-        captured.append(
-            {"failure_phase": failure_phase, "failure_details": failure_details}
-        )
+        captured.append({"failure_phase": failure_phase, "failure_details": failure_details})
         return spec, code, True  # exhausted
 
     orch._refine_or_exhaust = fake_refine
@@ -151,9 +149,7 @@ def test_probe_gate_skipped_when_any_prior_validation_gate_emits_critical():
     orch = StrategyLabOrchestrator()
     # spec_readiness emits a critical — code_safety/conformance happen to
     # be clean. Probe must not run.
-    orch.spec_readiness_gate.validate = lambda spec, **kw: [
-        _critical_result("spec_readiness")
-    ]
+    orch.spec_readiness_gate.validate = lambda spec, **kw: [_critical_result("spec_readiness")]
     orch.code_safety_checker.check = lambda code, spec: [_info_result("code_safety")]
     orch.code_conformance_gate.check = lambda code, spec: [_info_result("code_conformance")]
 
@@ -304,3 +300,106 @@ def test_record_gates_captures_probe_results_with_rule_id():
     probe_results = [r for r in all_results if r.gate_name == "rule_probes"]
     assert probe_results, "rule_probes results must be recorded in all_gate_results"
     assert probe_results[0].rule_id == "entry[0]"
+
+
+# ---------------------------------------------------------------------------
+# ran_on_non_conforming_code is captured at trade-collection time, attributed
+# to the round whose backtest is persisted (not any historical demoted round)
+# ---------------------------------------------------------------------------
+
+
+def _demoted_conformance(code, spec, **kw):
+    return [
+        QualityGateResult(
+            gate_name="predicate_conformance",
+            passed=False,
+            severity="warning",
+            phase="synthesis",
+            details="rule_id=entry[0]: predicate conformance failed.",
+        )
+    ]
+
+
+def _stub_execute_path(orch: StrategyLabOrchestrator, *, exec_results) -> None:
+    """Stub fetch → execute → coverage → anomaly so the loop reaches (or passes)
+    trade collection without a sandbox or market-data service."""
+    from investment_team.market_data_service import OHLCVBar
+    from investment_team.strategy_lab import orchestrator as orch_mod
+    from investment_team.strategy_lab._orchestrator_helpers import _MarketDataFetch
+
+    bars = [
+        OHLCVBar(
+            date=f"2023-01-{i + 1:02d}", open=100.0, high=101.0, low=99.0, close=100.0, volume=1
+        )
+        for i in range(20)
+    ]
+    orch._fetch_market_data = lambda spec, config: _MarketDataFetch(
+        data={"PROBE": bars}, requested_symbols=["PROBE"], fetched_symbols=["PROBE"]
+    )
+    orch.target_symbol_coverage_gate.check_fetch = lambda *a, **k: [_info_result("coverage_fetch")]
+    orch.target_symbol_coverage_gate.check_trades = lambda *a, **k: [
+        _info_result("coverage_trades")
+    ]
+    orch.anomaly_detector.check = lambda *a, **k: [_info_result("anomaly")]
+    # Bypass the real coverage-report attachment (needs live market internals).
+    orch_mod._maybe_attach_coverage_report = lambda **kw: None
+
+    results = list(exec_results)
+    orch._cached_run_strategy_code = lambda code, md, config, *, strategy=None: results.pop(0)
+
+
+def test_demoted_conformance_with_execution_flags_outcome(monkeypatch):
+    """A demoted-conformance round that executes and collects trades flags the
+    outcome non-conforming."""
+    from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
+
+    orch = StrategyLabOrchestrator()
+    _stub_clean_gates(orch)
+    orch.rule_probes_gate.check = lambda code, spec, **kw: [_info_result("rule_probes")]
+    orch.predicate_conformance_gate.check = _demoted_conformance
+    _stub_execute_path(orch, exec_results=[StrategyRunResult(success=True, trades=[])])
+
+    outcome = orch._run_synthesis_loop(
+        spec=_minimal_spec(),
+        code=_minimal_spec().strategy_code,
+        config=_minimal_config(),
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *a, **k: None,
+    )
+
+    assert outcome.execution_succeeded is True
+    assert outcome.ran_on_non_conforming_code is True
+
+
+def test_demoted_conformance_without_execution_does_not_flag(monkeypatch):
+    """The fix's core: a demoted-conformance warning alone does NOT flag the
+    record — the flag is captured only when a round actually collects trades.
+    Here execution fails before trade collection, so the persisted (empty)
+    backtest never ran on the demoted code."""
+    from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
+
+    orch = StrategyLabOrchestrator()
+    _stub_clean_gates(orch)
+    orch.rule_probes_gate.check = lambda code, spec, **kw: [_info_result("rule_probes")]
+    orch.predicate_conformance_gate.check = _demoted_conformance
+    _stub_execute_path(
+        orch,
+        exec_results=[StrategyRunResult(success=False, error_type="runtime", stderr="boom")],
+    )
+    # Execution failure routes to refinement; exhaust immediately to end the loop.
+    orch._refine_or_exhaust = lambda **kw: (kw["spec"], kw["code"], True)
+
+    outcome = orch._run_synthesis_loop(
+        spec=_minimal_spec(),
+        code=_minimal_spec().strategy_code,
+        config=_minimal_config(),
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *a, **k: None,
+    )
+
+    assert outcome.execution_succeeded is False
+    assert outcome.ran_on_non_conforming_code is False

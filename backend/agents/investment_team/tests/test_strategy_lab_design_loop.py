@@ -1103,6 +1103,76 @@ def test_loop_telemetry_persisted_on_record(monkeypatch: pytest.MonkeyPatch) -> 
     # Gate histograms are present (readiness gate ran at least once).
     assert isinstance(telemetry["gate_pass_counts"], dict)
     assert isinstance(telemetry["gate_fail_counts"], dict)
+    # The non-conforming flag is present on the telemetry and mirrored on the
+    # record; a clean compiled cycle never ran on demoted code.
+    assert telemetry["ran_on_non_conforming_code"] is False
+    assert record.ran_on_non_conforming_code is False
+
+
+def test_record_ran_on_non_conforming_flag_round_trips() -> None:
+    """The top-level record field carries (and defaults) the non-conforming flag."""
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+    from investment_team.trade_simulator import compute_metrics
+
+    spec = StrategySpec(
+        strategy_id="s1",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="sig",
+        timeframe="1d",
+        requires_custom_code=True,
+    )
+    config = BacktestConfig(
+        start_date="2023-01-01",
+        end_date="2023-12-31",
+        initial_capital=100_000.0,
+        benchmark_symbol="SPY",
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+    backtest = BacktestRecord(
+        backtest_id="bt-1",
+        strategy_id=spec.strategy_id,
+        strategy=spec,
+        config=config,
+        submitted_by="test",
+        submitted_at="2026-06-02T00:00:00+00:00",
+        completed_at="2026-06-02T00:00:00+00:00",
+        status="completed",
+        result=compute_metrics([], config.initial_capital, config.start_date, config.end_date),
+        trades=[],
+    )
+
+    flagged = StrategyLabRecord(
+        lab_record_id="lab-1",
+        strategy=spec,
+        backtest=backtest,
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2026-06-02T00:00:00+00:00",
+        loop_telemetry={"ran_on_non_conforming_code": True},
+        ran_on_non_conforming_code=True,
+    )
+    assert flagged.ran_on_non_conforming_code is True
+
+    # Legacy / default construction leaves the flag False.
+    default = StrategyLabRecord(
+        lab_record_id="lab-2",
+        strategy=spec,
+        backtest=backtest,
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2026-06-02T00:00:00+00:00",
+    )
+    assert default.ran_on_non_conforming_code is False
 
 
 def test_telemetry_events_emitted_on_phase_callback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1252,3 +1322,102 @@ def test_finalize_loop_telemetry_marks_unsynthesized_failures() -> None:
     assert _finalize_loop_telemetry(ctx, [], _Spec(), code="   \n")["code_path"] == (
         "not_synthesized"
     )
+
+
+def _non_conforming_ctx():
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+
+    return _DesignPersistContext(
+        rounds=1,
+        critiques=[],
+        stop_reason="ready",
+        loop_telemetry={"design_review_rounds": 1, "stop_reason": "ready"},
+    )
+
+
+class _CustomSpec:
+    requires_custom_code = True
+
+
+def _pc_result(*, passed: bool, severity: str, details: str) -> QualityGateResult:
+    return QualityGateResult(
+        gate_name="predicate_conformance",
+        passed=passed,
+        severity=severity,
+        phase="synthesis",
+        details=details,
+    )
+
+
+class TestRoundDemotedConformance:
+    """`_round_demoted_conformance` attributes the verdict to a single round."""
+
+    def test_demoted_warning_is_true(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
+
+        demoted = _pc_result(
+            passed=False,
+            severity="warning",
+            details="rule_id=entry[0]: predicate conformance failed.",
+        )
+        assert _round_demoted_conformance([demoted]) is True
+
+    def test_critical_is_false(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
+
+        critical = _pc_result(
+            passed=False,
+            severity="critical",
+            details="rule_id=entry[0]: predicate conformance failed.",
+        )
+        assert _round_demoted_conformance([critical]) is False
+
+    def test_unsynthesizable_warning_is_false(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
+
+        unsynth = _pc_result(
+            passed=False,
+            severity="warning",
+            details="Fixture unsynthesizable: no forcing sequence",
+        )
+        assert _round_demoted_conformance([unsynth]) is False
+
+    def test_passing_conformance_is_false(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
+
+        ok = _pc_result(
+            passed=True, severity="info", details="Predicate conformance OK (60 bars checked)."
+        )
+        assert _round_demoted_conformance([ok]) is False
+
+    def test_no_conformance_gate_is_false(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
+
+        other = QualityGateResult(
+            gate_name="code_conformance",
+            passed=True,
+            severity="info",
+            phase="synthesis",
+            details="ok",
+        )
+        assert _round_demoted_conformance([other]) is False
+
+
+def test_finalize_loop_telemetry_stores_non_conforming_flag() -> None:
+    """`_finalize_loop_telemetry` records the loop-captured flag verbatim."""
+    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+
+    flagged = _finalize_loop_telemetry(
+        _non_conforming_ctx(),
+        [],
+        _CustomSpec(),
+        code="def on_bar(): ...",
+        ran_on_non_conforming_code=True,
+    )
+    assert flagged["ran_on_non_conforming_code"] is True
+
+    # Default (e.g. short-circuit records) is False.
+    default = _finalize_loop_telemetry(
+        _non_conforming_ctx(), [], _CustomSpec(), code="def on_bar(): ..."
+    )
+    assert default["ran_on_non_conforming_code"] is False
