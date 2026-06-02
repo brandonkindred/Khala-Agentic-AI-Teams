@@ -47,7 +47,8 @@ flowchart TB
   `PeriodSummary`, `Rule`, `RuleProposal`, `ToolCall`, `CognitionContext`,
   `CognitionWriteback`, enums — proposal `status` is `pending|approved|rejected|superseded`);
   `postgres/__init__.py` (`SCHEMA: TeamSchema` — **5 tables**: events, summaries, rules,
-  rule_proposals, **runs** (idempotency ledger, PK `(agent_id, source_run_id)`); indexes;
+  rule_proposals, **runs** (idempotency ledger, PK `(agent_id, source_run_id)`, columns
+  `status, request_hash, response, lease_expires_at`); indexes;
   summaries unique `(agent_id, scale, period_start)` **and events unique `(agent_id,
   source_run_id, source_seq)`** so Step 2's writeback `ON CONFLICT` target exists; summaries
   `version`/`stale` columns; proposal/rule `evidence` columns); register in
@@ -64,14 +65,17 @@ flowchart TB
 - **Files:** `memory/store.py` — `append_event` (idempotent: insert `ON CONFLICT
   (agent_id, source_run_id, source_seq) DO NOTHING`), `fetch_events_for_period`,
   `fetch_recent_events(top_n, by_salience)`, `upsert_summary`, `fetch_summaries(scale, …)`,
-  `get_last_summary(scale)`, and `mark_period_stale(agent_id, occurred_at)` (flags the
-  containing day/week/month/year summaries for recompute on late arrival). Reuse `get_conn`,
-  `Json`, `dict_row`, `@timed_query`. Every query filtered by `agent_id`.
+  `get_last_summary(scale)`, `mark_period_stale(agent_id, occurred_at)` (flags the containing
+  day/week/month/year summaries for recompute on late arrival), and
+  `prune_events(agent_id, retention_days)` (deletes raw events older than the cutoff **only**
+  where the containing day summary exists and is non-stale, so nothing unsummarized is lost).
+  Reuse `get_conn`, `Json`, `dict_row`, `@timed_query`. Every query filtered by `agent_id`.
 - **Depends:** 1
 - **✅ Acceptance:** append/fetch round-trip; `upsert_summary` idempotent on the unique key;
   **re-appending the same `(source_run_id, source_seq)` is a no-op**; a late event flags the
-  right periods stale; cross-`agent_id` isolation proven. `source_run_id` is supplied by the
-  caller (proxy/facade), never minted in the store.
+  right periods stale; cross-`agent_id` isolation proven; **`prune_events` deletes only
+  summarized-and-non-stale rows past the cutoff** (never unsummarized history). `source_run_id`
+  is supplied by the caller (proxy/facade), never minted in the store.
 
 ### Step 3 — Rollup engine
 - **Goal:** Idempotent calendar-correct summarization (day/week/month/year).
@@ -149,23 +153,30 @@ flowchart TB
   `tools/runner.py` (wrap `complete_json_with_tool_loop`; emit `tool_call`/`outcome` events).
   For `platform_bound` tools used by sandboxed agents, the loop is **proxy-driven** via the
   SB↔PX `tool_calls`/`tool_results` protocol (defined here, wired in Step 10) so secrets/egress
-  stay platform-side; `sandbox_local` tools run inside the sandbox. **Also extend
-  `shared_agent_invoke` (`mount_invoke_shim`/`dispatch`)** to unwrap the `{input, cognition}`
-  envelope — invoke the entrypoint with `input` only and expose `cognition` via a side channel
-  (context var / optional kwarg), with passthrough for non-enveloped bodies.
+  stay platform-side. For `sandbox_local` tools the **shim brokers/wraps the declared handlers**
+  and emits a **trusted out-of-band tool-call audit** alongside the response, so the platform
+  has a trustworthy record even when the writeback is dropped (blocked runs). **Also extend
+  `shared_agent_invoke` (`mount_invoke_shim`/`dispatch`)** to (a) unwrap only on the explicit
+  `__khala_cognition_envelope__` marker — invoke the entrypoint with `input` only, expose
+  `cognition` via a side channel, pass unmarked bodies through unchanged — and (b) carry the
+  trusted tool-audit channel.
 - **Depends:** 1, 2
 - **✅ Acceptance:** known ids resolve to the correct execution site, unknown id errors; each
-  tool call writes memory events; **a platform-bound tool for a sandboxed agent round-trips
-  through the proxy-driven loop** (stubbed sandbox) without exposing secrets to the sandbox.
+  tool call writes memory events; **a platform-bound tool round-trips through the proxy-driven
+  loop** (stubbed sandbox) without exposing secrets; **the shim unwraps only on the marker**
+  (an agent whose own schema has a top-level `input` and no marker is passed through
+  untouched); **sandbox-local tool calls appear in the shim's trusted audit** even when the
+  writeback is dropped.
 
 ### Step 8 — CognitiveContext facade
 - **Goal:** One seam wiring memory + rules + tools; defines the invoke contract.
 - **Files:** `context.py` — `ensure_rollups_current`, `load_context` (rules + digest →
   `CognitionContext`), `persist_writeback` (append events/tool calls keyed by `source_run_id`,
   **strip secrets**, bound salience), enforced pre/postcondition hooks, and the run-ledger
-  helpers `claim_run`/`complete_run`/`replay_run`. Defines the wrapper-envelope contract
-  (`{input, cognition}` in, `{output, cognition_writeback}` out) consumed by the shim (Step 7)
-  and proxy (Step 10).
+  helpers `claim_run(request_hash, lease)` / `complete_run` / `replay_run` (claim is atomic:
+  insert-or-reclaim-expired-lease, compare `request_hash`, return replay/409/claim). Defines
+  the marker-wrapped envelope contract (`{__khala_cognition_envelope__, input, cognition}` in,
+  `{output, cognition_writeback}` out) consumed by the shim (Step 7) and proxy (Step 10).
 - **Depends:** 4, 5, 7
 - **✅ Acceptance:** load/writeback round-trip; precondition-block path; secret-stripping on
   writeback; `claim_run`→`complete_run`→`replay_run` returns the stored envelope and a second
@@ -181,38 +192,43 @@ flowchart TB
 ### Step 10 — Invoke proxy integration
 - **Goal:** Make the contract live at the boundary.
 - **Files:** `unified_api/routes/agents.py` — **mint a stable `source_run_id`** (reuse a caller
-  `Idempotency-Key` if present) and **claim the `agent_cognition_runs` ledger** before any work:
-  a known `completed`/`blocked` key **replays the stored envelope without re-invoking the
-  sandbox**; an `in_progress` key returns `409`; first sight marks `in_progress`. Then: lazy
-  catch-up → load context → advisory-into-system-prompt + enforced precondition gate (block →
-  4xx + memory event) → invoke the sandbox with a **wrapper envelope `{input, cognition}`**
-  (the agent's original body under `input`; the shim unwraps so the entrypoint sees only its
-  declared input) → on return **run postcondition check first, then** persist writeback and
-  store the run-ledger envelope. On postcondition violation, persist **sanitized `tool_call`/
-  `outcome` records** plus a blocked-run audit event (drop the rejected output/untrusted
-  memory) and mark the ledger `blocked`. For sandboxed agents with `platform_bound` tools,
-  drive the multi-turn SB↔PX `tool_calls`/`tool_results` loop (from Step 7). Helper for
-  in-process teams (no HTTP hop). **Requires a `shared_agent_invoke` shim change** (Step 7/8) to
-  unwrap the envelope and expose `cognition` via a side channel.
+  `Idempotency-Key` if present) and **claim the leased `agent_cognition_runs` ledger** before
+  any work via `claim_run(request_hash, lease)`: a `completed`/`blocked` row with a **matching
+  `request_hash` replays the stored envelope without re-invoking**; a matching key with a
+  **different** `request_hash` → `409`; an `in_progress` row with a **valid lease** → `409`,
+  but an **expired lease** is reclaimed and re-executed. Then: lazy catch-up → load context →
+  enforced **precondition** gate (block → 4xx + memory event). The proxy does **not** edit
+  prompts — advisory rules travel in the `cognition` side channel for the agent runtime to
+  render (Step 14). Build the **marker-wrapped envelope** `{__khala_cognition_envelope__,
+  input, cognition}` and **re-apply `AGENT_INVOKE_MAX_PAYLOAD_BYTES` to the full envelope**
+  (digest is token-budgeted) before posting. On return → **postcondition check first, then**
+  persist writeback + store the ledger envelope (`completed`). On postcondition violation,
+  persist the **shim's trusted tool-audit** + a blocked-run event (drop model output/memory)
+  and mark the ledger `blocked`. For `platform_bound` tools, drive the SB↔PX tool loop (Step 7).
+  Helper for in-process teams (no HTTP hop). **Requires the `shared_agent_invoke` shim change**
+  (Step 7) for marker-unwrap + trusted tool-audit.
 - **Depends:** 8, 9
-- **✅ Acceptance:** stubbed-sandbox test shows envelope-unwrap (entrypoint with a strict
-  Pydantic model receives **only** its declared input, no `cognition` field) + persist;
-  **a retried invoke with the same key replays the stored envelope and does NOT re-invoke the
-  sandbox** (tool side effects run once); concurrent retry while `in_progress` → 409;
-  precondition block → 4xx; postcondition violation → 4xx with the rejected output **not**
-  persisted **but executed tool calls still recorded**; a platform-bound tool round-trips via
-  the proxy-driven loop without sandbox secret exposure.
+- **✅ Acceptance:** strict-Pydantic entrypoint receives **only** its declared input (marker
+  unwrapped); **retry with same key+body replays without re-invoking** (side effects run once);
+  **retry with same key but different body → 409**; concurrent retry while leased → 409;
+  **expired-lease retry re-executes** (no permanent wedge); near-cap request **+ cognition that
+  would exceed the cap is rejected/trimmed at the envelope** (not silently oversized);
+  precondition block → 4xx; postcondition violation → 4xx with model output **not** persisted
+  **but the shim's tool audit recorded**; platform-bound tool round-trips without secret
+  exposure.
 
 ## Milestone D — Automation & operations
 
 ### Step 11 — Central scheduler
-- **Goal:** Platform-side rollups/reflection for all agents.
-- **Files:** `scheduler.py` — async loop (`AGENT_COGNITION_TICK_S`, default hourly) calling
-  the same `ensure_rollups_current` + reflection per agent; started/cancelled in the
-  unified_api lifespan (mirror `agent_console.prune.run_pruner`).
+- **Goal:** Platform-side rollups/reflection + retention + ledger hygiene for all agents.
+- **Files:** `scheduler.py` — async loop (`AGENT_COGNITION_TICK_S`, default hourly) that per
+  agent calls `ensure_rollups_current` + reflection, then **`prune_events` for the agent's
+  `retention_days_events`** and **reclaims `agent_cognition_runs` rows with an expired lease**;
+  started/cancelled in the unified_api lifespan (mirror `agent_console.prune.run_pruner`).
 - **Depends:** 3, 6
 - **✅ Acceptance:** tick rolls up due agents; clean cancel on shutdown; shares the idempotent
-  function so it can't double-produce against the lazy path.
+  function so it can't double-produce against the lazy path; **events past retention are
+  pruned** (summaries kept); **expired-lease ledger rows are cleared** so wedged keys recover.
 
 ### Step 12 — Operator HITL API
 - **Goal:** Review/inspect endpoints.
@@ -242,11 +258,17 @@ flowchart TB
 ## Milestone E — Adoption & UX
 
 ### Step 14 — Generator wiring (Agentic team)
-- **Goal:** Every newly generated agent gets the core automatically.
+- **Goal:** Every newly generated agent gets the core automatically **and consumes it**.
 - **Files:** `agentic_team_provisioning` stamps the `cognition` manifest block onto generated
-  agents; update `AGENT_ANATOMY.md` to point §3/§4/§6 at the batteries-included core.
+  agents; the **generated agent runtime/scaffold reads the `cognition` side channel and renders
+  advisory rules + `memory_digest` into each LLM call's system prompt** (the proxy can't edit
+  prompts — advisory rules are only effective if the runtime renders them) and returns
+  `cognition_writeback`; update `AGENT_ANATOMY.md` to point §3/§4/§6 at the batteries-included
+  core and document the side-channel contract.
 - **Depends:** 9, 13
-- **✅ Acceptance:** generated manifest includes a valid `cognition` block; anatomy doc updated.
+- **✅ Acceptance:** generated manifest includes a valid `cognition` block; **the generated
+  scaffold renders advisory rules into its system prompt and emits a writeback** (a generated
+  agent demonstrably reflects an active advisory rule); anatomy doc updated.
 
 ### Step 15 — HITL review UI (Angular)
 - **Goal:** Operator surface in the Agent Console.

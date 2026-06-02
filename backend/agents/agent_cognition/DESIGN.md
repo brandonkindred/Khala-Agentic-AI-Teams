@@ -174,8 +174,13 @@ one execution site at bind time (`tools/binding.py`):
 - **In-process agents:** run the loop directly in Unified API; full access to platform tool
   handlers. No change.
 - **Sandboxed agents, sandbox-local tools** (declared in the manifest, bundled in the image —
-  e.g. `git` on the mounted repo): the loop runs **inside the sandbox**; nothing crosses the
-  boundary. This is the v1 default for sandboxed agents.
+  e.g. `git` on the mounted repo): the loop runs **inside the sandbox**, but the shim
+  **wraps/brokers the declared tool handlers** and emits a trusted tool-call audit stream back
+  across the boundary (out-of-band from the agent's self-reported writeback). This keeps the
+  blocked-run audit guarantee honest: the platform records what the shim actually brokered,
+  not what the model claims. (Tools a custom agent invokes without the shim broker are
+  unaudited and out-of-scope — called out per agent.) This is the v1 default for sandboxed
+  agents.
 - **Sandboxed agents, platform-bound tools** (need platform registries/secrets): the **proxy
   drives the loop** — instead of one shot, it exchanges multiple turns with the sandbox over a
   defined `tool_calls`/`tool_results` protocol (sandbox emits a tool request → proxy executes
@@ -198,32 +203,35 @@ sequenceDiagram
   participant SB as Sandbox agent
 
   C->>PX: POST /api/agents/{id}/invoke (body, Idempotency-Key?)
-  PX->>PG: claim run ledger (agent_id, source_run_id)
-  alt key already completed/blocked
+  PX->>PG: look up run ledger (agent_id, source_run_id)
+  alt completed/blocked AND request_hash matches
     PX-->>C: replay stored envelope (no re-invoke)
-  else key already in_progress
+  else known key BUT request_hash differs
+    PX-->>C: 409 (key reused for a different body)
+  else in_progress AND lease still valid
     PX-->>C: 409 (in flight)
-  else first sight → mark in_progress
+  else first sight OR lease expired → claim/reclaim in_progress (request_hash, lease)
     PX->>CTX: ensure_rollups_current(id)
     CTX->>PG: produce any missing closed-period summaries (idempotent upsert)
     PX->>CTX: load_context(id)
     CTX->>PG: fetch active rules + memory digest
     CTX-->>PX: CognitionContext{rules, memory_digest}
-    PX->>PX: enforce advisory→prompt, check enforced preconditions
+    PX->>PX: check enforced preconditions (deterministic, at boundary)
     alt enforced precondition violated
       PX->>PG: ledger=blocked
       PX-->>C: 4xx blocked (+ logged as memory event)
     else allowed
-      PX->>SB: invoke envelope {input: body, cognition} — shim unwraps to input only
-      SB-->>PX: output + cognition_writeback
+      PX->>PX: build {marker, input, cognition} then re-check payload cap on full envelope
+      PX->>SB: invoke envelope — shim unwraps to input, runtime renders advisory rules into prompt
+      SB-->>PX: output + cognition_writeback + shim tool-audit (trusted)
       PX->>PX: check enforced postconditions on output
       alt enforced postcondition violated
-        PX->>CTX: persist sanitized tool_call/outcome records + blocked-run audit event
-        CTX->>PG: append tool_call/outcome + error event (drop rejected output & untrusted memory)
+        PX->>CTX: persist shim tool-audit + blocked-run event (drop model output & memory)
+        CTX->>PG: append trusted tool_call/outcome + error event
         PX->>PG: ledger=blocked
         PX-->>C: 4xx blocked
       else passed
-        PX->>CTX: persist_writeback(id, events, tool_calls)
+        PX->>CTX: persist_writeback(events, tool_calls reconciled with shim audit)
         CTX->>PG: append events
         PX->>PG: ledger=completed (store envelope)
         PX-->>C: output (envelope)
@@ -232,29 +240,42 @@ sequenceDiagram
   end
 ```
 
-> **Postcondition ordering & blocked-run audit:** enforced postconditions are evaluated
-> **before** persisting the rejected output/untrusted memory events — a blocked response must
-> not pollute durable cognition state. **But** tool calls the agent already executed represent
-> real side effects, so the blocked path still persists *sanitized `tool_call`/`outcome`
-> records* (preserving the "every tool call feeds memory" invariant) while dropping the
-> rejected final output and any model-asserted memory events. The §11 security flow shows the
-> same ordering.
+> **Postcondition ordering & trusted blocked-run audit:** enforced postconditions are
+> evaluated **before** persisting the rejected output/untrusted memory — a blocked response
+> must not pollute durable cognition state. Tool calls already executed are real side effects,
+> so the blocked path still persists `tool_call`/`outcome` records. **The trusted source for
+> those records is the shim's own tool-call audit, not the model's self-reported writeback:**
+> the shim brokers every tool invocation (both the proxy-driven `platform_bound` loop *and*
+> `sandbox_local` tools, which it wraps) and emits an audit stream out-of-band from the agent
+> output. On a block we persist the shim audit (trusted) and drop the model's claims; any tool
+> a custom agent invokes *without* going through the shim broker cannot be audited and is
+> documented as out-of-scope for the guarantee.
 >
-> **Idempotent invoke (retry-safe execution, not just writeback):** the proxy mints a **stable
-> idempotency key (`source_run_id`) for the logical invoke** (honoring a caller
-> `Idempotency-Key` header) — *not* the sandbox shim's `trace_id`, which is generated fresh per
-> POST (`shared_agent_invoke/shim.py`) and would differ across a retry. Dedup happens at the
-> **execution** level via an `agent_cognition_runs` ledger keyed on `(agent_id,
-> source_run_id)`: before invoking, the proxy claims the key (`in_progress`); on completion it
-> stores the response envelope (`completed`/`blocked`). A retry with a known key **replays the
-> stored envelope without re-invoking the sandbox**, so tool side effects and memory writes run
-> at most once; a retry arriving while the first is still `in_progress` returns `409` rather
-> than double-running. `persist_writeback` additionally keys events on `(agent_id,
-> source_run_id, source_seq)` with `ON CONFLICT DO NOTHING` as defense-in-depth. The one
-> unavoidable gap — a reply lost *after* the sandbox ran but *before* the ledger committed — is
-> covered by requiring **platform-bound tool handlers to be idempotent where feasible**
-> (documented per tool); purely external side effects without tool-level idempotency are called
-> out as at-least-once.
+> **Advisory rules are rendered by the agent runtime, not the proxy:** the proxy enforces only
+> the *deterministic* enforced pre/postconditions at the boundary — it has no shared
+> system-prompt seam to edit (`dispatch.invoke_entrypoint` calls an arbitrary entrypoint).
+> Advisory rules therefore ride the `cognition` side channel and the **generated agent runtime
+> is responsible for rendering them into each LLM call's system prompt** (a generator
+> responsibility — see §12 Step 14). Advisory rules are best-effort by nature; an agent that
+> ignores the channel simply isn't steered. Only enforced rules are guaranteed.
+>
+> **Idempotent invoke (retry-safe execution, leased, body-checked):** the proxy mints a
+> **stable `source_run_id`** for the logical invoke (honoring a caller `Idempotency-Key`) —
+> *not* the shim's per-POST `trace_id`. The `agent_cognition_runs` ledger keyed `(agent_id,
+> source_run_id)` records a **`request_hash`** (canonical body) and a **lease**: a retry whose
+> hash matches a `completed`/`blocked` row **replays the stored envelope without re-invoking**;
+> a retry whose hash *differs* is rejected `409` (key reused for a different request, never
+> serve stale output); a retry while still `in_progress` with a **valid lease** returns `409`,
+> but once the **lease expires** (proxy crashed/killed mid-flight) the key is reclaimable so a
+> logical invoke is never wedged forever. `persist_writeback` also keys events on `(agent_id,
+> source_run_id, source_seq)` `ON CONFLICT DO NOTHING` as defense-in-depth. The residual
+> lost-ack and lease-reclaim windows are at-least-once, covered by requiring **platform-bound
+> tool handlers to be idempotent where feasible** (documented per tool).
+>
+> **Payload cap applies to the final envelope:** `AGENT_INVOKE_MAX_PAYLOAD_BYTES` is enforced
+> on the assembled `{marker, input, cognition}` **after** the digest/rules are added (not just
+> the caller's `input`), and the memory digest is independently token-budgeted, so a request
+> just under the cap can't become an oversized sandbox payload once cognition is attached.
 
 ### 8.2 Rollup & rule-derivation (scheduler + lazy)
 
@@ -268,7 +289,7 @@ sequenceDiagram
   participant PG as Postgres
 
   SCH->>MEM: for each closed period not yet summarized
-  MEM->>PG: fetch period inputs (day←events; week←days; month←days; year←months)
+  MEM->>PG: fetch period inputs (day from events, week from days, month from days, year from months)
   MEM->>LLM: complete_validated(schema=PeriodSummary)
   LLM-->>MEM: summary + highlights
   MEM->>PG: upsert (agent_id, scale, period_start)
@@ -277,6 +298,8 @@ sequenceDiagram
   LLM-->>REF: candidate rules
   REF->>PG: insert rule_proposals (action, target_rule_id, evidence+version, status=pending)
   Note over REF,PG: Nothing auto-activates — awaits operator approval
+  SCH->>PG: prune events older than retention_days_events (folded into a non-stale summary)
+  SCH->>PG: reclaim run-ledger rows whose lease expired
 ```
 
 > **Rollup input scoping (calendar-correct):** `month` aggregates the **days** in that
@@ -360,10 +383,12 @@ stateDiagram-v2
   decision) so it neither falsely records an operator rejection nor lingers `pending` in the
   queue (see §8.2/§8.3).
 - **`agent_cognition_runs`** — execution idempotency ledger: `agent_id, source_run_id,
-  status (in_progress|completed|blocked), response JSONB, created_at, completed_at`, **primary
-  key `(agent_id, source_run_id)`**. The proxy claims `in_progress` before invoking and stores
-  the final envelope on completion; a retry with a known key replays `response` without
-  re-invoking the sandbox (see §8.1 retry-safe execution).
+  status (in_progress|completed|blocked), request_hash, response JSONB, lease_expires_at,
+  created_at, completed_at`, **primary key `(agent_id, source_run_id)`**. The proxy claims
+  `in_progress` with a lease before invoking and stores the final envelope on completion. A
+  retry replays `response` only when `request_hash` matches (mismatched body → `409`, never
+  stale output); an `in_progress` row whose `lease_expires_at` has passed is reclaimable so a
+  crashed proxy can't wedge the key forever (see §8.1 retry-safe execution).
 
 ## 10. Interfaces / API
 
@@ -375,18 +400,32 @@ cognition:
   rule_packs: [default_guardrails]  # seed packs installed on first provision
 ```
 
+> **Retention is enforced, not just declared:** `retention_days_events` must be backed by a
+> pruning path or private memory accumulates forever. The central scheduler (§8.2 / §12 Step 11)
+> runs an events pruner — alongside the rollups — that deletes raw `agent_cognition_events`
+> older than each agent's `retention_days_events` (default 90), **after** they have been folded
+> into a non-stale day summary so history isn't lost (rollup summaries are retained long-term;
+> only raw episodic rows are pruned). Mirrors the `agent_console.prune.run_pruner` pattern.
+
 **Invoke envelope (cognition kept OUT of the user input contract):** the proxy must **not**
 add `cognition` as a sibling key to the agent's input — `shared_agent_invoke.dispatch.
 invoke_entrypoint` passes the POST body straight to the manifest entrypoint, so an extra field
-would break agents with strict request models or non-object inputs. Instead the proxy wraps:
+would break agents with strict request models or non-object inputs. Instead the proxy wraps
+the body with an **explicit, namespaced envelope marker** (not merely the presence of an
+`input` key — a real agent's schema could legitimately have its own `input` field):
 ```json
-{ "input": { /* the agent's original, unchanged request body */ },
+{ "__khala_cognition_envelope__": 1,
+  "input": { /* the agent's original, unchanged request body */ },
   "cognition": { "rules": [], "memory_digest": "" } }
 ```
-`mount_invoke_shim` (a shim change in scope here) **unwraps** this: it invokes the entrypoint
-with `input` exactly as declared, and exposes `cognition` to the agent through a separate
-accessor (context var / optional second argument), never merged into user data. Bodies without
-the envelope (`{"input"...}` absent) are passed through unchanged for backward compatibility.
+`mount_invoke_shim` (a shim change in scope here) unwraps **only** when the
+`__khala_cognition_envelope__` marker is present and well-formed (marker + `input` + `cognition`
+all validated); it then invokes the entrypoint with `input` exactly as declared and exposes
+`cognition` via a separate accessor (context var / optional kwarg), never merged into user
+data. Any body lacking the marker — including one that happens to contain an `input` key — is
+passed through to the entrypoint **unchanged**, so no existing agent contract can be
+misinterpreted. (The marker key is namespaced to make collision with real user data
+vanishingly unlikely; the proxy rejects a caller body that already contains it.)
 
 **Writeback returned by the agent** (separate envelope field, not mixed into output):
 ```json
@@ -439,10 +478,10 @@ flowchart TB
   V1 -- over --> R413[413 reject]
   V1 -- ok --> PRE{Enforced rule<br/>preconditions}
   PRE -- violated --> BLK[Block + log sanitized<br/>audit event only]
-  PRE -- pass --> ADV[Inject advisory rules into SYSTEM prompt]
-  ADV --> RUN[Agent runs tools via named tool paths only]
+  PRE -- pass --> ADV[Advisory rules → cognition side channel<br/>agent runtime renders into prompt]
+  ADV --> RUN[Agent runs tools via shim-brokered paths<br/>shim emits trusted tool audit]
   RUN --> OUT{Enforced rule<br/>postconditions on output}
-  OUT -- violated --> BLKO[Drop rejected output<br/>persist sanitized tool_call/audit only]
+  OUT -- violated --> BLKO[Drop model output/memory<br/>persist shim tool-audit only]
   OUT -- pass --> WB[Persist writeback<br/>secrets stripped, salience bounded]
   WB --> DONE[Return envelope]
 
@@ -458,7 +497,14 @@ flowchart TB
 | **Predicate safety** | DSL is a fixed allowlist of ops (e.g. `<=`, `forbid_tool`); no arbitrary code/eval |
 | **HITL gate** | Derived rules can never self-activate; operator approval required (audited via `decided_by`) |
 | **Operator authorization** | **All** cognition routes — reads *and* `approve`/`reject` — enforce an operator-auth check (operator token now, role later); `resolve_author` is provenance only and never the authz decision (see §10) |
-| **Idempotent execution** | `agent_cognition_runs` ledger keyed `(agent_id, source_run_id)` — a retry with a known key **replays the stored envelope without re-invoking the sandbox**, so tool side effects/memory writes run at most once; writeback `ON CONFLICT DO NOTHING` is defense-in-depth; the lost-ack window relies on tool-level idempotency (see §8.1) |
+| **Idempotent execution** | `agent_cognition_runs` ledger keyed `(agent_id, source_run_id)` — a retry **replays the stored envelope without re-invoking the sandbox** (run-once for side effects); writeback `ON CONFLICT DO NOTHING` is defense-in-depth; lost-ack window relies on tool-level idempotency (see §8.1) |
+| **Ledger lease / no wedge** | `in_progress` claims carry a `lease_expires_at`; an expired lease (crashed proxy) is reclaimable so a logical invoke is never stuck at `409` forever |
+| **Replay-safety** | Ledger stores a `request_hash`; a retry whose body differs from the original is rejected `409` rather than served the prior response |
+| **Trusted tool audit** | The shim brokers all tool calls (platform-bound *and* sandbox-local) and emits an out-of-band audit; blocked runs persist the **shim** audit, not the model's self-reported writeback |
+| **Advisory vs enforced** | Only enforced rules are guaranteed (deterministic gate at the proxy). Advisory rules ride the side channel and are rendered by the agent runtime — best-effort, never proxy-edited prompts |
+| **Envelope marker** | The shim unwraps only on the namespaced `__khala_cognition_envelope__` marker; unmarked bodies pass through unchanged, so no existing input contract is misread |
+| **Payload cap on envelope** | `AGENT_INVOKE_MAX_PAYLOAD_BYTES` is applied to the assembled `{marker, input, cognition}`, and the digest is token-budgeted, so cognition can't push a near-limit request over the cap |
+| **Event retention** | The scheduler prunes raw events past each agent's `retention_days_events` (after they're folded into a non-stale summary); private memory isn't kept indefinitely |
 | **Input-contract isolation** | Cognition is delivered in a wrapper envelope `{input, cognition}` that the shim unwraps — the entrypoint receives only its declared `input`, never an injected `cognition` field that would break strict/non-object request models (see §10) |
 | **Blocked-run tool audit** | A postcondition-blocked output still persists sanitized `tool_call`/`outcome` records (real side effects already happened) while dropping the rejected output/untrusted memory |
 | **Stale-evidence re-evaluation** | Recomputed summaries bump `version`; pending proposals on stale evidence are flagged for re-eval/withdrawal and active derived rules resurface for operator review |
