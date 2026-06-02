@@ -464,6 +464,35 @@ def _design_loop_telemetry_summary(
     }
 
 
+def _settled_ran_on_non_conforming(all_gate_results: List[QualityGateResult]) -> bool:
+    """Whether the *settled* round's backtest ran on demoted custom code.
+
+    Pre: ``all_gate_results`` is the cycle's full gate timeline; each
+    ``predicate_conformance`` result carries the ``refinement_round`` stamped by
+    :meth:`StrategyLabOrchestrator.record_gates`.
+    Post: returns ``True`` iff a ``predicate_conformance`` result from the
+    highest round that ran the gate did not pass and is a *demotion* warning
+    (``severity == "warning"``, excluding the ``"Fixture unsynthesizable:"``
+    "could-not-check" warning). The synthesis loop re-runs validation — and thus
+    the conformance gate — at the top of every round, so the highest-round
+    conformance result reflects the code that actually reached the persisted
+    backtest; an earlier demoted warning that a later round repaired does not
+    flag the record. Returns ``False`` when no conformance gate ran (compiled
+    path / no predicate rules).
+    """
+    pc = [g for g in all_gate_results if g.gate_name == "predicate_conformance"]
+    if not pc:
+        return False
+    final_round = max(g.refinement_round for g in pc)
+    return any(
+        g.refinement_round == final_round
+        and not g.passed
+        and g.severity == "warning"
+        and not (g.details or "").startswith("Fixture unsynthesizable:")
+        for g in pc
+    )
+
+
 def _finalize_loop_telemetry(
     design_context: "_DesignPersistContext",
     all_gate_results: List[QualityGateResult],
@@ -493,32 +522,22 @@ def _finalize_loop_telemetry(
     verbatim for backward compatibility, but it is only meaningful when
     ``code_path != "not_synthesized"``.
 
-    ``ran_on_non_conforming_code`` is ``True`` iff the gate timeline contains a
-    *demoted* predicate-conformance failure — a ``predicate_conformance`` result
-    that did not pass and carries ``severity == "warning"`` — which is exactly
-    the state reached when the conformance gate exhausted its retry budget and
-    let semantically-divergent custom code proceed to backtest. The
-    ``"Fixture unsynthesizable:"`` warning is excluded: it means the gate could
-    not *check* the rule, not that the code was checked and drifted, so it must
-    not mark the backtest non-conforming.
+    ``ran_on_non_conforming_code`` reflects the *settled* round only — see
+    :func:`_settled_ran_on_non_conforming`. The synthesis loop accumulates gate
+    results across every refinement round, so an early demoted warning may have
+    been repaired by a later round whose conforming code ran the persisted
+    backtest; deriving the flag from the highest-round conformance result avoids
+    a stale-True from a since-repaired round.
     """
     telemetry: Dict[str, Any] = dict(design_context.loop_telemetry)
     pass_counts: Dict[str, int] = {}
     fail_counts: Dict[str, int] = {}
-    ran_on_non_conforming = False
     for g in all_gate_results:
         bucket = pass_counts if g.passed else fail_counts
         bucket[g.gate_name] = bucket.get(g.gate_name, 0) + 1
-        if (
-            g.gate_name == "predicate_conformance"
-            and not g.passed
-            and g.severity == "warning"
-            and not (g.details or "").startswith("Fixture unsynthesizable:")
-        ):
-            ran_on_non_conforming = True
     telemetry["gate_pass_counts"] = pass_counts
     telemetry["gate_fail_counts"] = fail_counts
-    telemetry["ran_on_non_conforming_code"] = ran_on_non_conforming
+    telemetry["ran_on_non_conforming_code"] = _settled_ran_on_non_conforming(all_gate_results)
     requires_custom = bool(getattr(spec, "requires_custom_code", False))
     if not (code or "").strip():
         telemetry["code_path"] = "not_synthesized"

@@ -1413,3 +1413,63 @@ def test_finalize_loop_telemetry_not_flagged_compiled() -> None:
     )
     assert telemetry["ran_on_non_conforming_code"] is False
     assert telemetry["code_path"] == "compiled"
+
+
+def test_finalize_loop_telemetry_uses_settled_round_not_history() -> None:
+    """An early demoted warning repaired by a later round must NOT flag the
+    record — the persisted backtest came from the conforming settled round."""
+    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+
+    early_demoted = QualityGateResult(
+        gate_name="predicate_conformance",
+        passed=False,
+        severity="warning",
+        phase="synthesis",
+        details="rule_id=entry[0]: predicate conformance failed.",
+        refinement_round=0,
+    )
+    settled_clean = QualityGateResult(
+        gate_name="predicate_conformance",
+        passed=True,
+        severity="info",
+        phase="synthesis",
+        details="Predicate conformance OK (60 bars checked).",
+        refinement_round=2,
+    )
+    telemetry = _finalize_loop_telemetry(
+        _non_conforming_ctx(),
+        [early_demoted, settled_clean],
+        _CustomSpec(),
+        code="def on_bar(): ...",
+    )
+    assert telemetry["ran_on_non_conforming_code"] is False
+
+
+def test_finalize_loop_telemetry_flags_demoted_settled_round() -> None:
+    """A demotion in the settled (highest) round flags the record even when an
+    earlier round's conformance passed."""
+    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+
+    early_clean = QualityGateResult(
+        gate_name="predicate_conformance",
+        passed=True,
+        severity="info",
+        phase="synthesis",
+        details="Predicate conformance OK (60 bars checked).",
+        refinement_round=0,
+    )
+    settled_demoted = QualityGateResult(
+        gate_name="predicate_conformance",
+        passed=False,
+        severity="warning",
+        phase="synthesis",
+        details="rule_id=entry[0]: predicate conformance failed.",
+        refinement_round=2,
+    )
+    telemetry = _finalize_loop_telemetry(
+        _non_conforming_ctx(),
+        [early_clean, settled_demoted],
+        _CustomSpec(),
+        code="def on_bar(): ...",
+    )
+    assert telemetry["ran_on_non_conforming_code"] is True
