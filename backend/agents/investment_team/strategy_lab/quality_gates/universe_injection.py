@@ -108,25 +108,29 @@ def inject_universe_and_guard(source: str, spec) -> str:
         return source
 
     # 1. Replace the UNIVERSE constant: drop any existing class-level binding
-    #    targeting ``UNIVERSE`` (preserving sibling aliases in a chained
-    #    assignment), then prepend a fresh one populated from the spec's symbols
-    #    (canonical, sorted, de-duplicated).
-    cls.body = _strip_universe_assignments(cls.body)
+    #    targeting ``UNIVERSE``. A chained ``UNIVERSE = TARGETS = <stale>`` keeps
+    #    its sibling targets but has their shared value rewritten to the spec
+    #    universe, so an alias used as the trading universe can't silently retain
+    #    the stale symbol set. Then prepend a fresh canonical binding.
+    cls.body = _strip_universe_assignments(cls.body, expected)
     cls.body.insert(0, _build_universe_assign(expected))
 
     # 2. Guard EVERY on_bar definition whose signature supports it. The
     #    conformance gate inspects the first definition while Python runs the
     #    last, so guarding all of them keeps the gate-checked and the
-    #    runtime-effective method consistent. For each, normalize the instance
-    #    parameter to ``self`` (so the emitted ``self.UNIVERSE`` is both
-    #    runtime-correct and accepted by the gate's recognizer), strip only bare
-    #    guards (no ``else`` body, whose removal can't drop trading logic), then
-    #    prepend the canonical guard so it runs before any signal logic.
+    #    runtime-effective method consistent. The guard is only injected when the
+    #    instance parameter is ``self`` — the gate recognizer requires
+    #    ``self.UNIVERSE`` and the engine binds positionally, so for a non-``self``
+    #    receiver we inject UNIVERSE only and let the missing-guard conformance
+    #    critical drive refinement (fail closed) rather than emit a guard that
+    #    would ``NameError`` / ``UnboundLocalError`` or need scope-unsafe
+    #    renaming. Strip only bare guards (no ``else`` body, whose removal can't
+    #    drop trading logic), then prepend the canonical guard so it runs before
+    #    any signal logic.
     for on_bar in on_bars:
         bar_param = _bar_parameter_name(on_bar)
-        if bar_param is None:
+        if bar_param is None or on_bar.args.args[0].arg != "self":
             continue
-        _normalize_receiver_to_self(on_bar)
         on_bar.body = [stmt for stmt in on_bar.body if not _is_strippable_guard(stmt)]
         on_bar.body.insert(0, _build_guard_stmt(bar_param))
 
@@ -146,13 +150,16 @@ def _targets_universe(node: ast.stmt) -> bool:
     return False
 
 
-def _strip_universe_assignments(body: list[ast.stmt]) -> list[ast.stmt]:
+def _strip_universe_assignments(body: list[ast.stmt], expected: list[str]) -> list[ast.stmt]:
     """Return ``body`` with every ``UNIVERSE`` binding removed.
 
     A chained assignment such as ``UNIVERSE = TARGETS = frozenset({...})`` keeps
     its sibling targets (the node survives with ``UNIVERSE`` dropped) so aliases
-    referenced elsewhere in the class are preserved; only when ``UNIVERSE`` is
-    the sole target is the whole statement removed.
+    referenced elsewhere in the class are preserved — but its shared value is
+    rewritten to the spec universe (``expected``), so an alias that mirrored
+    ``UNIVERSE`` and is used as the trading universe can't silently retain a
+    stale symbol set. Only when ``UNIVERSE`` is the sole target is the whole
+    statement removed.
     """
     out: list[ast.stmt] = []
     for node in body:
@@ -160,6 +167,10 @@ def _strip_universe_assignments(body: list[ast.stmt]) -> list[ast.stmt]:
             kept = [t for t in node.targets if not (isinstance(t, ast.Name) and t.id == "UNIVERSE")]
             if not kept:
                 continue
+            if len(kept) != len(node.targets):
+                # The dropped target was ``UNIVERSE``; keep the chained aliases
+                # in sync with the canonical universe rather than the stale value.
+                node.value = _build_universe_assign(expected).value
             node.targets = kept
             out.append(node)
         elif (
@@ -253,31 +264,6 @@ def _find_on_bar_methods(cls: ast.ClassDef) -> list:
     ]
 
 
-def _normalize_receiver_to_self(on_bar: ast.FunctionDef) -> None:
-    """Rename on_bar's first (instance) parameter to ``self`` in place.
-
-    The engine binds positionally, so ``def on_bar(strategy, ctx, bar)`` runs
-    fine — but the guard must read ``self.UNIVERSE`` (the gate recognizer only
-    accepts ``self``/bare ``UNIVERSE``), which would ``NameError`` against an
-    undefined ``self``. Renaming the parameter and every reference to it keeps
-    the guard both gate-conformant and runtime-correct. No-op when the receiver
-    is already ``self``; skipped (left for the gate to flag) in the rare case
-    the body already binds a distinct ``self`` that a rename would shadow.
-    """
-    receiver = on_bar.args.args[0].arg
-    if receiver == "self":
-        return
-    if any(
-        isinstance(n, ast.Name) and n.id == "self" for stmt in on_bar.body for n in ast.walk(stmt)
-    ):
-        return
-    on_bar.args.args[0].arg = "self"
-    for stmt in on_bar.body:
-        for node in ast.walk(stmt):
-            if isinstance(node, ast.Name) and node.id == receiver:
-                node.id = "self"
-
-
 def _bar_parameter_name(on_bar) -> str | None:
     """Return the third positional parameter name of ``on_bar(self, ctx, bar)``.
 
@@ -323,5 +309,16 @@ def _is_canonical_on_bar(on_bar) -> bool:
         return False
     # ``_is_universe_guard_stmt`` guarantees ``first.test.left`` is
     # ``<Name>.symbol`` and the right side is ``self.UNIVERSE`` or bare
-    # ``UNIVERSE``; require the left ``<Name>`` to be the actual bar parameter.
-    return first.test.left.value.id == bar_param
+    # ``UNIVERSE``. Require the left ``<Name>`` to be the actual bar parameter
+    # AND the right side to be ``self.UNIVERSE`` specifically — a bare
+    # ``UNIVERSE`` is unresolvable inside a method and would ``NameError`` at
+    # runtime, so it must be rewritten rather than treated as canonical.
+    if first.test.left.value.id != bar_param:
+        return False
+    right = first.test.comparators[0]
+    return (
+        isinstance(right, ast.Attribute)
+        and right.attr == "UNIVERSE"
+        and isinstance(right.value, ast.Name)
+        and right.value.id == "self"
+    )

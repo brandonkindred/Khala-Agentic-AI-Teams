@@ -310,8 +310,11 @@ def test_guard_with_else_body_preserved() -> None:
     compile(out, "<injected>", "exec")
 
 
-def test_chained_assignment_alias_preserved() -> None:
-    """Rewriting a stale ``UNIVERSE = TARGETS = ...`` must keep the alias."""
+def test_chained_assignment_alias_preserved_and_synced() -> None:
+    """Rewriting a stale ``UNIVERSE = TARGETS = frozenset({'SPY'})`` must keep
+    the ``TARGETS`` alias AND bring its value in sync with the spec universe, so
+    a strategy that trades off ``self.TARGETS`` can't silently use the stale
+    symbol set."""
     spec = _spec(target_symbols=["QQQ"])
     src = _GUARDLESS.replace(
         "    def on_bar",
@@ -319,6 +322,7 @@ def test_chained_assignment_alias_preserved() -> None:
     )
     out = inject_universe_and_guard(src, spec)
     assert "TARGETS" in out  # sibling alias survives
+    assert "SPY" not in out  # but no longer bound to the stale universe
     assert "frozenset({'QQQ'})" in out
     assert _universe_assign_count(out) == 1
     compile(out, "<injected>", "exec")
@@ -377,10 +381,11 @@ def test_bare_annassign_universe_replaced() -> None:
     assert _universe_assign_count(out) == 1
 
 
-def test_non_self_receiver_normalized_to_self() -> None:
-    """A non-``self`` instance parameter is renamed to ``self`` (with its body
-    references rewritten) so the guard reads ``self.UNIVERSE`` — both
-    runtime-correct and accepted by the conformance gate's recognizer."""
+def test_non_self_receiver_injects_universe_only() -> None:
+    """A non-``self`` instance parameter is left untouched and the guard is
+    skipped (fail closed): the gate recognizer needs ``self.UNIVERSE`` and the
+    engine binds positionally, so emitting a guard here would be wrong. UNIVERSE
+    is still injected; the missing guard drives a conformance critical."""
     spec = _spec(target_symbols=["QQQ"])
     src = textwrap.dedent(
         """
@@ -393,16 +398,17 @@ def test_non_self_receiver_normalized_to_self() -> None:
         """
     )
     out = inject_universe_and_guard(src, spec)
-    assert "self.UNIVERSE" in out
-    assert "self.position(bar.symbol)" in out  # receiver reference rewritten
-    assert "strategy" not in out
-    assert _has_universe_guard_in_on_bar(_cls(out))  # gate recognizer accepts it
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # no guard for non-self
+    assert "def on_bar(strategy, ctx, bar):" in out  # signature untouched
+    assert "self.position" not in out  # body references not rewritten
     compile(out, "<injected>", "exec")
 
 
-def test_non_self_receiver_with_self_collision_left_for_gate() -> None:
-    """If the body already binds a distinct ``self``, renaming would shadow it;
-    the injector leaves the receiver alone (the gate then flags it)."""
+def test_non_self_receiver_with_self_binding_no_unbound_local() -> None:
+    """A non-``self`` receiver whose body binds ``self`` must not get a
+    ``self.UNIVERSE`` guard prepended — that would ``UnboundLocalError`` before
+    the local ``self`` is assigned. The guard is skipped entirely."""
     spec = _spec(target_symbols=["QQQ"])
     src = textwrap.dedent(
         """
@@ -410,13 +416,61 @@ def test_non_self_receiver_with_self_collision_left_for_gate() -> None:
 
         class S(Strategy):
             def on_bar(strategy, ctx, bar):
-                self = 1
+                self = strategy
                 return self
         """
     )
     out = inject_universe_and_guard(src, spec)
-    # Receiver not renamed; guard still inserted against the original receiver.
-    assert "def on_bar(strategy, ctx, bar):" in out
+    assert "not in self.UNIVERSE" not in out  # no prepended guard
+    compile(out, "<injected>", "exec")
+
+
+def test_nested_helper_receiver_not_corrupted() -> None:
+    """A non-``self`` receiver with a nested helper that reuses the name must not
+    have the helper's references rewritten (no rename happens at all)."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(strategy, ctx, bar):
+                def helper(strategy):
+                    return strategy + 1
+                return helper(1)
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "def helper(strategy):" in out
+    assert "return strategy + 1" in out
+    compile(out, "<injected>", "exec")
+
+
+def test_bare_universe_guard_rewritten_to_self() -> None:
+    """A first-statement guard using bare ``UNIVERSE`` (unresolvable inside a
+    method) is not treated as canonical — it is rewritten to ``self.UNIVERSE``."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert out != src  # not short-circuited as canonical
+    assert "not in self.UNIVERSE" in out
+    on_bar = next(n for n in _cls(out).body if isinstance(n, ast.FunctionDef))
+    # Exactly one guard, and it reads self.UNIVERSE.
+    guards = [s for s in on_bar.body if isinstance(s, ast.If)]
+    assert len(guards) == 1
+    assert _has_universe_guard_in_on_bar(_cls(out))
     compile(out, "<injected>", "exec")
 
 
