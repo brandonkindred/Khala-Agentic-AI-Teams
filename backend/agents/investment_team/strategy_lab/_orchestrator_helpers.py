@@ -110,6 +110,13 @@ class _AlignmentLoopOutcome:
     alignment_reports: List[Any] = field(default_factory=list)
     trades_aligned: bool = False
     rejection_reason: Optional[str] = None
+    # True when the persisted backtest ran on custom code whose
+    # predicate-conformance check is non-conforming. Initialised from the
+    # synthesis-loop value and re-derived whenever an alignment round commits
+    # new code (which replaces the persisted trades but is not otherwise
+    # conformance-gated), so it always tracks the code that produced the
+    # returned ``trades``/``metrics``.
+    ran_on_non_conforming_code: bool = False
 
     @property
     def alignment_rounds(self) -> int:
@@ -139,6 +146,10 @@ class _AlignmentRoundOutcome:
     trades: List[TradeRecord]
     metrics: BacktestResult
     terminate: bool
+    # Set on a committing round (``terminate=False``) to the conformance
+    # verdict of the just-committed code; ignored on terminate rounds (which
+    # carry the unchanged pre-iteration state).
+    ran_on_non_conforming_code: bool = False
 
 
 @dataclass

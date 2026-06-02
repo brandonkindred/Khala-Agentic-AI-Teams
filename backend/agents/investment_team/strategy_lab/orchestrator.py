@@ -94,7 +94,7 @@ from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.cost_stress_realism import CostStressRealismGate
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult, StrategyLabPhase
-from .quality_gates.predicate_conformance import PredicateConformanceGate
+from .quality_gates.predicate_conformance import PredicateConformanceGate, _code_conformance_retries
 from .quality_gates.realism import (
     LiquidityRealismGate,
     RegimeCoverageGate,
@@ -2015,6 +2015,7 @@ class StrategyLabOrchestrator:
         execution_succeeded: bool,
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
+        ran_on_non_conforming_code: bool = False,
         drift_collector: Optional[_DriftCollector] = None,
     ) -> _AlignmentLoopOutcome:
         """Run the trade-alignment audit loop after the synthesis loop settles.
@@ -2022,10 +2023,15 @@ class StrategyLabOrchestrator:
         Pre: synthesis loop has produced (``code``, ``spec``, ``trades``,
         ``metrics``) plus ``market_data`` was fetched at least once and
         ``execution_succeeded`` tracks whether the last execution cleared
-        the anomaly gates.
+        the anomaly gates. ``ran_on_non_conforming_code`` is the synthesis
+        loop's verdict for the incoming ``trades``.
         Post: returns an ``_AlignmentLoopOutcome`` carrying the (possibly
         updated) ``spec`` / ``code`` / ``trades`` / ``metrics`` plus the
         attempt-string history and per-round reports the caller persists.
+        ``ran_on_non_conforming_code`` is carried through unchanged when no
+        round commits, and re-derived from each committed round's code (which
+        replaces the persisted trades) so it always describes the returned
+        ``trades``.
         Mutates ``all_gate_results`` in place (gates appended with
         ``alignment_`` prefix on each commit / failure).
 
@@ -2055,6 +2061,7 @@ class StrategyLabOrchestrator:
                 alignment_attempts=alignment_attempts,
                 alignment_reports=alignment_reports,
                 trades_aligned=False,
+                ran_on_non_conforming_code=ran_on_non_conforming_code,
             )
 
         for align_round in range(MAX_ALIGNMENT_ROUNDS):
@@ -2074,6 +2081,12 @@ class StrategyLabOrchestrator:
             )
             spec, code = round_outcome.spec, round_outcome.code
             trades, metrics = round_outcome.trades, round_outcome.metrics
+            # A committing round (``terminate=False``) replaced the persisted
+            # trades with its proposed code; adopt that code's conformance
+            # verdict. Terminate rounds carry the unchanged prior state, so the
+            # flag is left as-is.
+            if not round_outcome.terminate:
+                ran_on_non_conforming_code = round_outcome.ran_on_non_conforming_code
             if round_outcome.terminate:
                 break
 
@@ -2122,6 +2135,7 @@ class StrategyLabOrchestrator:
             alignment_reports=alignment_reports,
             trades_aligned=trades_aligned_final,
             rejection_reason=rejection_reason,
+            ran_on_non_conforming_code=ran_on_non_conforming_code,
         )
 
     def _run_alignment_round(
@@ -2405,6 +2419,29 @@ class StrategyLabOrchestrator:
                 )
             return _terminate()
 
+        # The committed proposal becomes the persisted backtest, but the
+        # alignment path does not otherwise re-run predicate conformance. Re-run
+        # it here on the proposed code so the non-conforming flag tracks the
+        # code that produced the persisted trades. There is no further
+        # refinement round to repair drift at this point, so the gate runs at
+        # the demotion threshold: any drift on the committed code surfaces as a
+        # warning and flags the record (compiled / no-predicate specs return a
+        # passing "skipped" result and never flag). The flag is computed before
+        # ``record_gates`` prefixes ``gate_name`` with ``alignment_``.
+        conformance_gates = self.predicate_conformance_gate.check(
+            proposed_code,
+            proposed_spec,
+            phase="verification",
+            attempt=_code_conformance_retries(),
+        )
+        committed_non_conforming = _round_demoted_conformance(conformance_gates)
+        self.record_gates(
+            conformance_gates,
+            all_gate_results,
+            refinement_round=align_round,
+            gate_name_prefix="alignment_",
+        )
+
         # All gates passed — commit the proposal as the new known-good state.
         alignment_attempts.append(change_summary)
         if drift_collector is not None:
@@ -2437,6 +2474,7 @@ class StrategyLabOrchestrator:
             trades=new_trades,
             metrics=new_metrics,
             terminate=False,
+            ran_on_non_conforming_code=committed_non_conforming,
         )
 
     def _run_verification_phase(
@@ -3345,12 +3383,16 @@ class StrategyLabOrchestrator:
             execution_succeeded=execution_succeeded,
             all_gate_results=all_gate_results,
             emit=emit,
+            ran_on_non_conforming_code=synthesis.ran_on_non_conforming_code,
             drift_collector=drift_collector,
         )
         spec = alignment_outcome.spec
         code = alignment_outcome.code
         trades = alignment_outcome.trades
         metrics = alignment_outcome.metrics
+        # Tracks the code that produced the persisted trades — re-derived by the
+        # alignment loop whenever it committed new code.
+        ran_on_non_conforming_code = alignment_outcome.ran_on_non_conforming_code
         alignment_rounds = alignment_outcome.alignment_rounds
         trades_aligned = alignment_outcome.trades_aligned
         alignment_rejection_reason = alignment_outcome.rejection_reason
@@ -3478,7 +3520,7 @@ class StrategyLabOrchestrator:
             alignment_rounds=alignment_rounds,
             all_gate_results=all_gate_results,
             emit=emit,
-            ran_on_non_conforming_code=synthesis.ran_on_non_conforming_code,
+            ran_on_non_conforming_code=ran_on_non_conforming_code,
             design_context=design_context,
             alignment_findings=alignment_findings,
             phase_back_count=phase_back_count,
