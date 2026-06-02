@@ -8,7 +8,7 @@ fixes deterministically *before* the LLM revise path so the costly loop is
 reserved for genuinely substantive defects.
 
 Scope is deliberately minimal — only the two least-debatable, fully-determined
-repairs — plus a trial compile:
+mechanical repairs, exposed via :func:`repair_spec`:
 
 * **Timeframe data availability** (readiness Rule 7): coerce an intraday
   ``timeframe`` to ``"1d"`` for asset classes with no intraday data (anything
@@ -16,14 +16,19 @@ repairs — plus a trial compile:
 * **Position-cap bound** (readiness Rule 8): clamp
   ``risk_limits.max_position_pct`` down to
   :data:`spec_readiness.MAX_POSITION_PCT_CEILING`.
-* **Trial compile**: attempt :func:`compile_strategy`; on
-  :class:`CompilerError` set ``requires_custom_code=True`` so the custom-code
-  path is selected during design rather than discovered later in synthesis
-  (mirrors the orchestrator's existing synthesis-phase fallback).
 
-Each repair is guarded by exactly the condition its readiness rule checks,
-recomputed from the spec via the gate's own shared constants — never parsed
-from gate-message text — so the rule and its repair cannot drift apart.
+The custom-code decision is a separate, *readiness-gated* concern handled by
+:func:`select_code_path`: it trial-compiles a spec and, on :class:`CompilerError`,
+reports that ``requires_custom_code`` should be set so the custom-code path is
+selected during design rather than discovered later in synthesis (mirroring the
+orchestrator's existing synthesis-phase fallback). It is kept out of
+:func:`repair_spec` because the compiler assumes structurally valid DSL — a
+readiness-defective spec can make ``compile_strategy`` raise a *non*-``CompilerError``
+— so callers must only invoke it once the readiness gate reports no criticals.
+
+Each mechanical repair is guarded by exactly the condition its readiness rule
+checks, recomputed from the spec via the gate's own shared constants — never
+parsed from gate-message text — so the rule and its repair cannot drift apart.
 """
 
 from __future__ import annotations
@@ -74,9 +79,16 @@ def repair_spec(
     spec: StrategySpec,
     *,
     config: Optional[BacktestConfig] = None,
-    attempt_compile: bool = True,
 ) -> RepairOutcome:
-    """Apply the in-scope deterministic mechanical repairs to ``spec``.
+    """Apply the in-scope deterministic *mechanical* repairs to ``spec``.
+
+    This function only ever applies fully-determined readiness repairs
+    (timeframe data availability, position-cap bound). It deliberately does
+    **not** trial-compile: a spec may still carry a readiness-detectable
+    structural defect that would make :func:`compile_strategy` raise a
+    *non*-``CompilerError``, so the trial compile lives in
+    :func:`select_code_path`, which callers invoke only once the spec is
+    readiness-clean.
 
     Preconditions:
       - ``spec`` is a constructed :class:`StrategySpec`.
@@ -86,6 +98,8 @@ def repair_spec(
     Postconditions:
       - Returns a :class:`RepairOutcome`. When no repair applies, the input
         ``spec`` is returned unchanged and ``actions`` is empty.
+      - Never raises on the spec's compilability — only structural readiness
+        fields are touched, so this is safe to call on a readiness-critical spec.
       - Every applied repair targets exactly the condition its readiness rule
         rejects, so re-running ``repair_spec`` on the result yields
         ``actions == []`` (idempotent) — barring external state changes.
@@ -141,18 +155,9 @@ def repair_spec(
             update={"max_position_pct": MAX_POSITION_PCT_CEILING}
         )
 
-    repaired = spec.model_copy(update=updates, deep=True) if updates else spec
-
-    # --- Trial compile: select the custom-code path now rather than in synthesis.
-    if attempt_compile:
-        action = select_code_path(repaired)
-        if action is not None:
-            actions.append(action)
-            repaired = repaired.model_copy(update={"requires_custom_code": True})
-
     if not actions:
         return RepairOutcome(spec=spec, actions=[])
-    return RepairOutcome(spec=repaired, actions=actions)
+    return RepairOutcome(spec=spec.model_copy(update=updates, deep=True), actions=actions)
 
 
 def select_code_path(spec: StrategySpec) -> Optional[RepairAction]:

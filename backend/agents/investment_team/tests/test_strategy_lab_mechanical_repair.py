@@ -68,7 +68,7 @@ def _make_spec(**overrides: Any) -> StrategySpec:
 @pytest.mark.parametrize("asset_class", ["forex", "commodities", "futures"])
 def test_intraday_timeframe_coerced_to_daily_for_non_intraday_class(asset_class: str) -> None:
     spec = _make_spec(asset_class=asset_class, timeframe="1h", target_symbols=[])
-    out = repair_spec(spec, attempt_compile=False)
+    out = repair_spec(spec)
     rules = {a.rule for a in out.actions}
     assert "timeframe_data_availability" in rules
     assert out.spec.timeframe == "1d"
@@ -79,13 +79,13 @@ def test_intraday_timeframe_coerced_to_daily_for_non_intraday_class(asset_class:
 @pytest.mark.parametrize("asset_class", ["stocks", "crypto"])
 def test_intraday_timeframe_untouched_for_intraday_class(asset_class: str) -> None:
     spec = _make_spec(asset_class=asset_class, timeframe="1h", target_symbols=[])
-    out = repair_spec(spec, attempt_compile=False)
+    out = repair_spec(spec)
     assert all(a.rule != "timeframe_data_availability" for a in out.actions)
 
 
 def test_daily_timeframe_never_touched() -> None:
     spec = _make_spec(asset_class="forex", timeframe="1d", target_symbols=[])
-    out = repair_spec(spec, attempt_compile=False)
+    out = repair_spec(spec)
     assert all(a.rule != "timeframe_data_availability" for a in out.actions)
 
 
@@ -95,7 +95,7 @@ def test_unknown_asset_class_skips_timeframe_repair() -> None:
     spec = _make_spec(asset_class="stocks", timeframe="1h").model_copy(
         update={"asset_class": "bonds"}
     )
-    out = repair_spec(spec, attempt_compile=False)
+    out = repair_spec(spec)
     assert all(a.rule != "timeframe_data_availability" for a in out.actions)
     assert out.spec.timeframe == "1h"
 
@@ -107,7 +107,7 @@ def test_unknown_asset_class_skips_timeframe_repair() -> None:
 
 def test_max_position_pct_clamped_to_ceiling() -> None:
     spec = _make_spec(risk_limits={"max_position_pct": 40, "max_drawdown_pct": 10})
-    out = repair_spec(spec, attempt_compile=False)
+    out = repair_spec(spec)
     clamp = [a for a in out.actions if a.rule == "max_position_pct_cap"]
     assert len(clamp) == 1
     assert clamp[0].before == 40.0
@@ -119,64 +119,33 @@ def test_max_position_pct_clamped_to_ceiling() -> None:
 @pytest.mark.parametrize("pct", [25, 20, 5])
 def test_position_pct_at_or_below_ceiling_untouched(pct: int) -> None:
     spec = _make_spec(risk_limits={"max_position_pct": pct})
-    out = repair_spec(spec, attempt_compile=False)
+    out = repair_spec(spec)
     assert all(a.rule != "max_position_pct_cap" for a in out.actions)
 
 
 # ---------------------------------------------------------------------------
-# Trial compile
+# select_code_path — readiness-gated trial compile (separate from repair_spec)
 # ---------------------------------------------------------------------------
 
 
-def test_compiler_error_flips_requires_custom_code() -> None:
-    # volatility_target sizing without a matching atr indicator is outside the
-    # deterministic compiler envelope → CompilerError → custom-code fallback.
+def test_repair_spec_never_trial_compiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """repair_spec is purely mechanical: it must never invoke the compiler, so
+    it is safe to call on a readiness-defective spec whose compile could raise a
+    non-CompilerError. The trial compile lives only in select_code_path."""
+    called = {"n": 0}
+
+    def _boom(_spec: Any) -> str:
+        called["n"] += 1
+        raise TypeError("compiler must not be reached from repair_spec")
+
+    monkeypatch.setattr(mr, "compile_strategy", _boom)
+    # A spec the compiler would reject (volatility_target without ATR): repair_spec
+    # must not touch it and must not call the compiler.
     spec = _make_spec(sizing={"kind": "volatility_target", "target_annual_vol": 0.15})
     out = repair_spec(spec)
-    fallback = [a for a in out.actions if a.rule == "compiler_fallback"]
-    assert len(fallback) == 1
-    assert out.spec.requires_custom_code is True
-    assert spec.requires_custom_code is False  # input untouched
-
-
-def test_compilable_spec_has_no_compile_action() -> None:
-    spec = _make_spec()
-    out = repair_spec(spec)
-    assert all(a.rule != "compiler_fallback" for a in out.actions)
+    assert called["n"] == 0
     assert out.actions == []
-    assert out.spec is spec  # unchanged identity when no repair applies
-
-
-def test_already_custom_code_skips_trial_compile(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = {"n": 0}
-
-    def _boom(_spec: Any) -> str:
-        called["n"] += 1
-        raise CompilerError("should not be called")
-
-    monkeypatch.setattr(mr, "compile_strategy", _boom)
-    spec = _make_spec(requires_custom_code=True)
-    out = repair_spec(spec)
-    assert called["n"] == 0
-    assert all(a.rule != "compiler_fallback" for a in out.actions)
-
-
-def test_attempt_compile_false_skips_trial_compile(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = {"n": 0}
-
-    def _boom(_spec: Any) -> str:
-        called["n"] += 1
-        raise CompilerError("should not be called")
-
-    monkeypatch.setattr(mr, "compile_strategy", _boom)
-    spec = _make_spec(sizing={"kind": "volatility_target", "target_annual_vol": 0.15})
-    repair_spec(spec, attempt_compile=False)
-    assert called["n"] == 0
-
-
-# ---------------------------------------------------------------------------
-# select_code_path
-# ---------------------------------------------------------------------------
+    assert out.spec is spec
 
 
 def test_select_code_path_flags_uncompilable_spec() -> None:
@@ -243,6 +212,6 @@ def test_repaired_spec_clears_readiness_criticals() -> None:
     before = gate.validate(spec, phase="design")
     assert any((not r.passed) and r.severity == "critical" for r in before)
 
-    out = repair_spec(spec, attempt_compile=False)
+    out = repair_spec(spec)
     after = gate.validate(out.spec, phase="design")
     assert not any((not r.passed) and r.severity == "critical" for r in after)

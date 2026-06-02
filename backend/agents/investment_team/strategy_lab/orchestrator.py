@@ -1122,8 +1122,8 @@ class StrategyLabOrchestrator:
                 repair_actions: List[RepairAction] = []
                 pre_repair_spec: Optional[StrategySpec] = None
 
-                # Stage 1 — mechanical repairs (no trial compile yet).
-                outcome = repair_spec(spec, config=config, attempt_compile=False)
+                # Stage 1 — mechanical repairs (repair_spec never trial-compiles).
+                outcome = repair_spec(spec, config=config)
                 if outcome.actions:
                     pre_repair_spec = spec.model_copy(deep=True)
                     spec = outcome.spec
