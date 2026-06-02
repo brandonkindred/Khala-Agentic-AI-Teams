@@ -2080,3 +2080,67 @@ def test_mixed_source_indicator_pair_cross_uses_price_scale_anchor(lhs, op, rhs)
         f"mixed-source pair {lhs.name}({lhs.source}) {op} {rhs.name}({rhs.source}) "
         f"not probeable: {reason}"
     )
+
+
+@pytest.mark.parametrize(
+    "op,rhs_name,rhs_params,rhs_source",
+    [
+        ("cross_above", "sma", {"period": 20}, "volume"),
+        ("cross_below", "sma", {"period": 20}, "volume"),
+        ("cross_above", "ema", {"period": 20}, "volume"),
+        ("cross_below", "ema", {"period": 20}, "volume"),
+        ("cross_above", "vwap", {}, "close"),
+        ("cross_below", "vwap", {}, "close"),
+        ("cross_above", "sma", {"period": 10}, "close"),
+        ("cross_below", "sma", {"period": 10}, "close"),
+    ],
+)
+def test_bar_volume_priceref_crosses_volume_or_price_indicator(
+    op, rhs_name, rhs_params, rhs_source
+):
+    """``bar.volume`` is accepted by ``_PRICEREF_TO_FIELD`` but the OHLC
+    builder catalogue holds volume flat at 1e6, so the volume side could
+    never cross a volume-source indicator (also ≈ 1e6) or a price-scale
+    indicator (≈ base_close). The volume-priceref dispatcher routes to a
+    volume-varying catalogue scaled to the RHS magnitude."""
+    rhs = IndicatorRef(name=rhs_name, params=rhs_params, source=rhs_source)
+    pred = Predicate(lhs="bar.volume", op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"bar.volume {op} {rhs_name}({rhs_params}, src={rhs_source}) "
+        f"not probeable: {reason}"
+    )
+
+
+@pytest.mark.parametrize(
+    "op,rhs",
+    [
+        # cross_above was the bug — RSI saturates to 100 on flat input
+        # (zero loss), so a monotonic ramp never lifts RSI THROUGH an
+        # interior threshold from below. The regime-change builder forces
+        # RSI through 0 → N → 100 across the window.
+        ("cross_above", 30.0),
+        ("cross_above", 50.0),
+        ("cross_above", 70.0),
+        # cross_below was already covered by the falling ramp but is
+        # locked in to guard against accidental regression.
+        ("cross_below", 30.0),
+        ("cross_below", 50.0),
+        ("cross_below", 70.0),
+    ],
+)
+def test_volume_source_rsi_cross_threshold_in_either_direction(op, rhs):
+    """RSI(source=volume) cross_above N for any in-range N was unprobeable
+    because the pandas RSI saturates at 100 on flat input (zero average
+    loss → RS = ∞) and stays at 100 on a rising volume ramp (still zero
+    loss). The regime-change builder drops volume first (RSI → 0) before
+    rising (RSI sweeps up through any threshold)."""
+    pred = Predicate(
+        lhs=IndicatorRef(name="rsi", params={"period": 14}, source="volume"),
+        op=op,
+        rhs=rhs,
+    )
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"volume-RSI {op} {rhs} not probeable: {reason}"
+    )

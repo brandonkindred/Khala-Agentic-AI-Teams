@@ -1861,11 +1861,74 @@ def _synth_cross_priceref_indicator(
             return None, 0, "cross_priceref_indicator_verification_failed"
         return bars, trigger_idx, None
 
+    # bar.volume needs a volume-varying builder catalogue — the OHLC-only
+    # builders below hold volume flat at 1_000_000 so `bar.volume` (1e6)
+    # never crosses any indicator value (volume-source indicators sit at
+    # 1e6, VWAP / close-source indicators sit at base_close ≈ 100).
+    if lhs == "bar.volume":
+        builders = _builders_for_volume_priceref_cross(rhs, op, base_close, min_bars)
+        warmup = _warmup_for_indicator(rhs)
+        return _search_cross(lhs, op, rhs, base_close, min_bars, builders, warmup=warmup)
+
     # Generic path: choose a builder catalogue per indicator and let the
     # search find the first bar where the cross actually fires.
     builders = _builders_for_priceref_cross(rhs, op, base_close, min_bars)
     warmup = _warmup_for_indicator(rhs)
     return _search_cross(lhs, op, rhs, base_close, min_bars, builders, warmup=warmup)
+
+
+def _builders_for_volume_priceref_cross(
+    rhs: IndicatorRef, op: str, base_close: float, min_bars: int
+) -> List[Callable[[], List[OHLCVBar]]]:
+    """Volume-varying forcing-sequence catalogue for ``bar.volume cross_* indicator``.
+
+    The OHLC builders used by :func:`_builders_for_priceref_cross` hold volume
+    flat at 1e6, so `bar.volume` (which evaluates to that same 1e6) never
+    crosses a volume-source indicator (also ≈ 1e6) or a price-scale indicator
+    (≈ base_close). Drive volume monotonically — or through a regime change
+    so volume-RSI / volume-MACD escape the saturation trap on flat input —
+    while holding close steady so the RHS indicator behaves predictably.
+
+    Volume scale is chosen to match the RHS:
+
+    * ``source="volume"`` (volume-side SMA/EMA/RSI/...): volume in volume
+      magnitude (1e6); the indicator and the volume sit in the same range.
+    * ``vwap`` and OHLC-source indicators: close is flat at ``base_close``
+      so the indicator sits in price magnitude (~base_close). Volume must
+      straddle ``base_close`` for the cross to be visible.
+    """
+    warmup = _warmup_for_indicator(rhs)
+    n = max(min_bars, warmup + 60)
+    direction = 1.0 if op == "cross_above" else -1.0
+
+    if rhs.name != "vwap" and rhs.source == "volume":
+        base_vol = 1_000_000.0
+        slope = base_vol * 0.02
+        signed_slope = direction * slope
+        if direction > 0:
+            primary_start, secondary_start = base_vol * 0.5, base_vol * 0.1
+        else:
+            primary_start, secondary_start = base_vol * 1.5, base_vol * 3.0
+        return [
+            lambda: _volume_trend_bars(n, base_close, primary_start, signed_slope),
+            lambda: _volume_trend_bars(n, base_close, secondary_start, signed_slope),
+            lambda: _volume_regime_change_bars(n, base_close, base_vol, slope),
+            lambda: _volume_regime_change_bars(n, base_close, base_vol, slope, reverse=True),
+        ]
+
+    base_vol = float(base_close)
+    slope = base_vol * 0.05
+    signed_slope = direction * slope
+    if direction > 0:
+        primary_start, secondary_start = base_vol * 0.3, base_vol * 0.1
+    else:
+        primary_start, secondary_start = base_vol * 3.0, base_vol * 5.0
+    return [
+        lambda: _volume_trend_bars(n, base_close, primary_start, signed_slope),
+        lambda: _volume_trend_bars(n, base_close, secondary_start, signed_slope),
+        lambda: _volume_regime_change_bars(n, base_close, base_vol, slope),
+        lambda: _volume_regime_change_bars(n, base_close, base_vol, slope, reverse=True),
+    ]
 
 
 def _builders_for_priceref_cross(
@@ -2150,11 +2213,29 @@ def _builders_for_indicator_number(
             primary_start = base_vol * 1.5
             secondary_start = base_vol * 3.0
         signed_slope = direction * target_slope
-        return [
+        builders: List[Callable[[], List[OHLCVBar]]] = [
             lambda: _flat_then_volume(signed_slope, primary_start),
             lambda: _flat_then_volume(signed_slope, secondary_start),
             lambda: _volume_trend_bars(n, base_close, primary_start, signed_slope),
         ]
+        # RSI saturates to 100 on flat input (no losses → RS = ∞) and to 0
+        # on a pure rising / falling ramp once warmed in that direction —
+        # a monotonic ramp never sweeps RSI through an interior threshold
+        # from the opposite side. The volume regime-change builder drops
+        # then rises (or rises then drops with ``reverse=True``), so RSI
+        # crosses ``rhs`` on the second-half swing irrespective of the
+        # saturation it parked at during the first half.
+        if name == "rsi":
+            regime_slope = max(base_vol * 0.05, target_slope)
+            builders.extend(
+                [
+                    lambda: _volume_regime_change_bars(n, base_close, base_vol, regime_slope),
+                    lambda: _volume_regime_change_bars(
+                        n, base_close, base_vol, regime_slope, reverse=True
+                    ),
+                ]
+            )
+        return builders
 
     if name in ("rsi", "adx", "stochastic"):
         # Bounded 0-100; the price-space builders already produce the full
