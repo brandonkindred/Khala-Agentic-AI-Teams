@@ -303,11 +303,28 @@ def _bar_parameter_name(on_bar) -> str | None:
 def _is_guardable_on_bar(on_bar) -> bool:
     """True iff a canonical ``self.UNIVERSE`` guard can be injected into ``on_bar``.
 
-    Requires a sync method with exactly three positional parameters whose
-    instance parameter is ``self`` — the only shape for which ``self.UNIVERSE``
-    is both runtime-correct and accepted by the conformance recognizer.
+    Requires a sync, plain instance method with exactly three positional
+    parameters whose instance parameter is ``self`` — the only shape for which
+    ``self.UNIVERSE`` is both runtime-correct and accepted by the conformance
+    recognizer. A ``@staticmethod`` / ``@classmethod`` ``on_bar`` is rejected:
+    the harness calls ``instance.on_bar(ctx, bar)`` expecting a bound ``self``,
+    so a static/class method receives the wrong arguments and fails at runtime —
+    that must stay a validation failure, not be normalized into passing code.
     """
-    return _bar_parameter_name(on_bar) is not None and on_bar.args.args[0].arg == "self"
+    return (
+        _bar_parameter_name(on_bar) is not None
+        and on_bar.args.args[0].arg == "self"
+        and not _has_static_or_class_decorator(on_bar)
+    )
+
+
+def _has_static_or_class_decorator(func) -> bool:
+    """True iff ``func`` is decorated ``@staticmethod`` / ``@classmethod`` (the
+    builtins are always applied bare, as plain ``Name`` decorators)."""
+    return any(
+        isinstance(dec, ast.Name) and dec.id in {"staticmethod", "classmethod"}
+        for dec in func.decorator_list
+    )
 
 
 def _is_strippable_guard(stmt: ast.stmt) -> bool:
@@ -386,18 +403,26 @@ def _assigned_names(on_bar) -> set[str]:
 
 
 def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
-    """True iff ``UNIVERSE`` is bound at class-creation time in a way the strip
-    logic can't cleanly rewrite.
+    """True iff ``UNIVERSE`` is bound — at class-creation time or at runtime — in
+    a way the strip logic can't cleanly rewrite, so the injector must bail.
 
     The strip handles only a top-level ``UNIVERSE = ...`` / ``UNIVERSE: T = ...``
     (possibly chained ``UNIVERSE = X = ...``) — a direct ``Name`` target of a
-    class-body ``Assign``/``AnnAssign``. Any other class-creation-time binding —
-    nested in a compound statement (``if cond: UNIVERSE = ...``), via tuple/list
-    unpacking (``UNIVERSE, OTHER = ...``), augmented assignment, a walrus, etc. —
-    would run after the prepended canonical constant and silently override it
-    while the structural gate only sees the prepended one. We can't rewrite
-    those without changing surrounding semantics, so the injector bails. Method
-    and nested-class bodies are not class-creation-time and are not scanned.
+    class-body ``Assign``/``AnnAssign``. Anything else would leave the runtime
+    ``self.UNIVERSE`` different from the prepended canonical constant while the
+    structural gate only sees the prepended one. Flagged (→ bail):
+
+    - a class-creation-time ``UNIVERSE`` store/delete that isn't a clean
+      top-level ``Name`` target — nested in a compound statement, tuple/list
+      unpacking, augmented assignment, walrus, or ``del UNIVERSE``;
+    - a class-body ``def UNIVERSE`` / ``async def UNIVERSE`` / ``class UNIVERSE``,
+      which binds the attribute to a function/class object after the prepend;
+    - an instance-level ``self.UNIVERSE = ...`` assignment in any method, which
+      shadows the class constant at runtime.
+
+    Method and nested-class bodies are not class-creation-time, so the
+    class-creation walk does not descend into them — the instance-shadowing case
+    is handled by a separate per-method scan.
     """
     clean: set[int] = set()
     for node in cls.body:
@@ -410,19 +435,62 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
                 clean.add(id(node.target))
 
     def walk(node: ast.AST) -> bool:
-        # Nested function/lambda/class scopes are not class-creation-time.
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+        # A ``def``/``class`` named UNIVERSE binds the class attribute (to the
+        # function/class object) at class-creation time — an override of the
+        # prepended constant. Otherwise nested scopes are not class-creation-time.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return node.name == "UNIVERSE"
+        if isinstance(node, ast.Lambda):
             return False
         if (
             isinstance(node, ast.Name)
             and node.id == "UNIVERSE"
-            and isinstance(node.ctx, ast.Store)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
             and id(node) not in clean
         ):
             return True
         return any(walk(child) for child in ast.iter_child_nodes(node))
 
-    return any(walk(stmt) for stmt in cls.body)
+    if any(walk(stmt) for stmt in cls.body):
+        return True
+
+    # Instance-level shadowing: a method assigning ``<self>.UNIVERSE = ...``
+    # rebinds the attribute on the instance, so the guard reads that stale value
+    # rather than the injected class constant.
+    return any(
+        _method_shadows_universe(node)
+        for node in cls.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+
+
+def _method_shadows_universe(method) -> bool:
+    """True iff ``method`` assigns ``<instance-param>.UNIVERSE = ...`` in its own
+    scope (e.g. ``self.UNIVERSE = frozenset(...)`` in ``__init__``)."""
+    params = method.args.args
+    if not params:
+        return False
+    receiver = params[0].arg
+    found = False
+
+    def visit(node: ast.AST) -> None:
+        nonlocal found
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "UNIVERSE"
+            and isinstance(node.ctx, ast.Store)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == receiver
+        ):
+            found = True
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    for stmt in method.body:
+        visit(stmt)
+    return found
 
 
 def _is_canonical_on_bar(on_bar) -> bool:

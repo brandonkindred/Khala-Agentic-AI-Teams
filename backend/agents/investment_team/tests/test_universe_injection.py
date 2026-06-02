@@ -737,6 +737,145 @@ def test_single_four_param_on_bar_not_guarded() -> None:
     assert not _has_universe_guard_in_on_bar(_cls(out))
 
 
+def test_class_lambda_and_noarg_method_inject_normally() -> None:
+    """Odd-but-harmless members — a class-level lambda attribute and a
+    parameter-less method — don't trip the unsupported-binding bail; the class
+    is guarded normally."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            HANDLER = lambda x: x
+
+            def helper():
+                return 1
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert _has_universe_guard_in_on_bar(_cls(out))
+    assert "HANDLER" in out and "def helper" in out
+    compile(out, "<injected>", "exec")
+
+
+def test_staticmethod_on_bar_not_guarded() -> None:
+    """A ``@staticmethod`` on_bar has no bound ``self`` at runtime, so it isn't
+    guardable; UNIVERSE is injected but the guard is skipped (fail closed)."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            @staticmethod
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # not guarded -> fail closed
+    compile(out, "<injected>", "exec")
+
+
+def test_classmethod_on_bar_not_guarded() -> None:
+    """A ``@classmethod`` on_bar binds the class, not an instance — also rejected."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            @classmethod
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert not _has_universe_guard_in_on_bar(_cls(out))
+    compile(out, "<injected>", "exec")
+
+
+def test_def_universe_override_bails() -> None:
+    """A class-body ``def UNIVERSE`` binds the attribute to a function after the
+    prepend, so the injector bails rather than emit a false-green gate."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def UNIVERSE(self):
+                return frozenset({"SPY"})
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_class_universe_override_bails() -> None:
+    """A nested ``class UNIVERSE`` likewise overrides the attribute -> bail."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            class UNIVERSE:
+                pass
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_instance_universe_shadowing_bails() -> None:
+    """A ``self.UNIVERSE = ...`` assignment in a method shadows the class
+    constant at runtime, so the injector bails."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def __init__(self):
+                self.UNIVERSE = frozenset({"SPY"})
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_del_universe_bails() -> None:
+    """A class-body ``del UNIVERSE`` removes the prepended constant at runtime,
+    so the injector bails rather than pass the structural gate with no constant."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"SPY"})
+            del UNIVERSE
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
 def test_nested_conditional_universe_assignment_bails() -> None:
     """A class-creation-time UNIVERSE assignment nested in a conditional would
     override a prepended constant; the injector bails (returns source unchanged)
