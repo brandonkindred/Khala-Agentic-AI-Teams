@@ -183,7 +183,21 @@ Whenever your hypothesis or signal definition names specific tickers (e.g. "QQQ 
 
 ## `requires_custom_code`
 
-By default leave `requires_custom_code` absent or `false`. The deterministic compiler can synthesise code for any spec expressed entirely in the indicator catalogue + rule kinds above. Set `requires_custom_code: true` ONLY when your hypothesis genuinely cannot be expressed in the DSL (e.g. it needs cross-asset state the compiler does not yet model). When you set it, a separate code-synthesis step generates the Python — you still do not write code.
+**Absent / `false` is the strong default. Setting it `true` is rare.**
+
+The deterministic compiler covers the **entire** indicator catalogue, **all** comparison operators (`<`, `>`, `<=`, `>=`, `==`, `cross_above`, `cross_below`), and **all** sources above, so a strategy whose entry and exit triggers are each a single `Predicate` is almost always compilable — custom code buys you nothing there, and it does NOT unlock indicator-of-indicator, arithmetic, or multi-condition predicates (the DSL has no such forms regardless of this flag).
+
+A few coherence constraints still can't be compiled even with single-predicate rules — `volatility_target` sizing requires exactly one referenced `atr` indicator, and `macd` requires `fast < slow`. **You do not set `requires_custom_code` for these:** keep the spec honest and well-formed (give `volatility_target` its ATR; keep MACD `fast < slow`). If a spec is otherwise un-compilable the pipeline detects it and falls back to synthesis on its own — so never flip this flag just to dodge a sizing/parameter-coherence fix.
+
+Set `requires_custom_code: true` ONLY for a genuine capability gap the single-predicate DSL cannot express even after applying resolution steps 1–2 above, namely:
+
+- Multi-leg `AND` / `OR` entry logic that is the real, irreducible signal (not "I want a second filter" — that is steps 1–2, not custom code).
+- Cross-asset / pairs state (e.g. "long GLD only while USO is below its 50-day SMA").
+- Path-dependent state the engine does not model (custom trailing logic, bar-count regimes, etc.).
+
+"I want indicator-of-indicator" or "I want one more confirmation filter" is **not** a trigger — restructure per steps 1–2 instead.
+
+**Cost of choosing it:** custom code skips the deterministic compiler and must instead pass the predicate-conformance shadow gate, which shadow-runs your `on_bar` against the engine's own verdicts. If the generated code drifts from the spec, it is refined and — if it still drifts after the retry budget — demoted and the backtest is flagged as having run on non-conforming code. A compilable single-predicate spec avoids that entire failure surface. When you do set it, a separate code-synthesis step generates the Python — you still do not write code.
 
 ## Required output shape
 

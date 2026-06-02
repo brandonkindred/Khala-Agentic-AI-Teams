@@ -132,15 +132,27 @@ class StreamingHarness:
         here = os.path.dirname(__file__)
         shutil.copy2(os.path.join(here, "contract.py"), os.path.join(tmp, "contract.py"))
 
-        # Copy indicators library for parity with existing code-gen output.
-        indicators_src = os.path.join(
+        # Expose indicators to strategy code as a scalar-returning API (the
+        # same contract the predicate-conformance gate uses): each helper
+        # returns the latest value, not a pd.Series. The Series-returning
+        # implementation is copied alongside as ``_indicators_impl.py`` and the
+        # scalar wrapper (``strategy_indicators.py``) imports it under that name
+        # in the flat sandbox layout.
+        executor_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             "strategy_lab",
             "executor",
-            "indicators.py",
         )
-        if os.path.exists(indicators_src):
-            shutil.copy2(indicators_src, os.path.join(tmp, "indicators.py"))
+        indicators_impl_src = os.path.join(executor_dir, "indicators.py")
+        scalar_api_src = os.path.join(executor_dir, "strategy_indicators.py")
+        if os.path.exists(indicators_impl_src) and os.path.exists(scalar_api_src):
+            shutil.copy2(indicators_impl_src, os.path.join(tmp, "_indicators_impl.py"))
+            shutil.copy2(scalar_api_src, os.path.join(tmp, "indicators.py"))
+        elif os.path.exists(indicators_impl_src):
+            # Defensive fallback: if the scalar wrapper is somehow missing, keep
+            # the previous behaviour rather than leaving the sandbox without an
+            # ``indicators`` module at all.
+            shutil.copy2(indicators_impl_src, os.path.join(tmp, "indicators.py"))
 
         with open(os.path.join(tmp, "strategy.py"), "w", encoding="utf-8") as f:
             f.write(self._strategy_code)
@@ -651,10 +663,15 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
                            "message": f"unknown kind: {kind!r}"})
                     sys.exit(1)
             except AttributeError as exc:
-                # Most likely a look-ahead attempt that hit a non-existent
-                # attribute on Bar/StrategyContext.
+                # An AttributeError raised from inside the indicators module is
+                # a strategy-code type bug (e.g. passing a list where a Series
+                # is expected), not a look-ahead attempt — surface it as a
+                # generic runtime_error so the failure class is honest. A bare
+                # AttributeError elsewhere is most likely a look-ahead attempt
+                # that hit a non-existent attribute on Bar/StrategyContext.
                 tb = "".join(traceback.format_exception(*sys.exc_info()))
-                _emit({"kind": "error", "etype": "lookahead_violation",
+                etype = "runtime_error" if "indicators.py" in tb else "lookahead_violation"
+                _emit({"kind": "error", "etype": etype,
                        "message": f"{exc!s}\\n{tb}"})
                 sys.exit(1)
             except contract.UnsupportedOrderFeatureError as exc:

@@ -130,7 +130,12 @@ def test_benchmark_futures_routes_by_family():
 
 
 def test_benchmark_unknown_asset_class_falls_back_to_spy():
-    assert benchmark_for_strategy(_spec("widgets")) == "SPY"
+    # ``StrategySpec`` now rejects an off-vocabulary class at construction, so
+    # build a valid spec and mutate the field afterwards (assignment skips
+    # validation) to exercise the SPY fallback for an unmapped class.
+    unknown = _spec("stocks")
+    unknown.asset_class = "widgets"
+    assert benchmark_for_strategy(unknown) == "SPY"
 
 
 def test_default_benchmark_map_keys():

@@ -110,6 +110,13 @@ class _AlignmentLoopOutcome:
     alignment_reports: List[Any] = field(default_factory=list)
     trades_aligned: bool = False
     rejection_reason: Optional[str] = None
+    # True when the persisted backtest ran on custom code whose
+    # predicate-conformance check is non-conforming. Initialised from the
+    # synthesis-loop value and re-derived whenever an alignment round commits
+    # new code (which replaces the persisted trades but is not otherwise
+    # conformance-gated), so it always tracks the code that produced the
+    # returned ``trades``/``metrics``.
+    ran_on_non_conforming_code: bool = False
 
     @property
     def alignment_rounds(self) -> int:
@@ -139,6 +146,10 @@ class _AlignmentRoundOutcome:
     trades: List[TradeRecord]
     metrics: BacktestResult
     terminate: bool
+    # Set on a committing round (``terminate=False``) to the conformance
+    # verdict of the just-committed code; ignored on terminate rounds (which
+    # carry the unchanged pre-iteration state).
+    ran_on_non_conforming_code: bool = False
 
 
 @dataclass
@@ -166,6 +177,12 @@ class _AnomalyRecoveryOutcome:
     metrics: BacktestResult
     exec_result: StrategyRunResult
     exhausted: bool
+    # Set only when a zero-trade repair commits new code (which replaces the
+    # persisted trades but is not otherwise conformance-gated): the conformance
+    # verdict of the committed repair code. ``None`` on the generic-refinement
+    # path, which leaves ``trades`` unchanged so the round's existing verdict
+    # still applies and must not be overwritten.
+    ran_on_non_conforming_code: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +199,12 @@ class _DesignPersistContext:
     # ``Any`` to avoid a cycle with ``agents/design_review``; the orchestrator
     # passes a ``List[SpecCritique]`` through.
     critiques: List[Any] = field(default_factory=list)
+    # Why the design loop stopped ("ready" | "round_cap" | "stalled" |
+    # "budget_exhausted"); empty on legacy paths that bypass the loop.
+    stop_reason: str = ""
+    # Design-loop telemetry slice carried from ``_DesignLoopOutcome``; merged
+    # with gate counts at record-build time. Empty on legacy paths.
+    loop_telemetry: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -196,11 +219,55 @@ class _DriftCollector:
     Invariants:
       - ``record_spec_change`` is a no-op when before/after hashes match
         (no-op mutation). Same for ``record_code_change``.
+
+    Retry isolation:
+      The records are append-only and immutable, so isolating one retry
+      attempt does not require deep-copying history — it means handing the
+      attempt its own empty collector (``snapshot``) and folding it back into
+      the parent commit log (``merge``) once the attempt's fate is known. A
+      failed attempt's drift can then be preserved for the diagnostic record
+      without poisoning the next attempt's working collector. See
+      ``RETRY_STATE_ISOLATION.md``.
     """
 
     spec_history: list = field(default_factory=list)
     code_history: list = field(default_factory=list)
     gate_timeline: list = field(default_factory=list)
+
+    def snapshot(self) -> "_DriftCollector":
+        """Return a fresh, empty collector for an isolated retry attempt.
+
+        Records are append-only and immutable, so a clean working copy is an
+        empty collector rather than a deep copy of this one's history. The
+        attempt records into the returned child; the caller folds it back in
+        with ``merge`` once the attempt succeeds or fails.
+
+        Postconditions:
+          - The returned collector's three lists are empty.
+          - It shares no list object with ``self`` (mutating the child never
+            mutates the parent, and vice versa).
+        """
+        return _DriftCollector()
+
+    def merge(self, child: "_DriftCollector") -> None:
+        """Fold a child collector's records into this one, in order.
+
+        Used at a retry boundary to commit an attempt's drift into the parent
+        commit log (on success, so the record reflects the converged attempt;
+        or on failure, so the short-circuit diagnostic record still shows what
+        every failed attempt tried).
+
+        Preconditions:
+          - ``child`` is a ``_DriftCollector``.
+        Postconditions:
+          - ``self``'s histories contain their prior entries followed by all
+            of ``child``'s, preserving order.
+          - ``child`` is left unmodified.
+        """
+        assert isinstance(child, _DriftCollector), "merge() requires a _DriftCollector"
+        self.spec_history.extend(child.spec_history)
+        self.code_history.extend(child.code_history)
+        self.gate_timeline.extend(child.gate_timeline)
 
     def record_spec_change(
         self,
@@ -496,6 +563,14 @@ class _DesignLoopOutcome:
     # The orchestrator passes a ``List[SpecCritique]`` through.
     critique_history: List[Any]
     budget_exhausted: bool = False
+    # Why the loop stopped: "ready" | "round_cap" | "stalled" |
+    # "budget_exhausted". Disambiguates the not-ready short-circuit status
+    # (stall vs honest round-cap exhaustion).
+    stop_reason: str = ""
+    # Design-loop slice of the persisted telemetry summary (round count,
+    # stop reason, critique-ledger totals). Gate counts + the
+    # compiled-vs-custom flag are merged in at record-build time.
+    loop_telemetry: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -547,6 +622,13 @@ class _SynthesisLoopOutcome:
     # round, even when intermediate rounds tripped the trap and were
     # repaired by refinement.
     runtime_lookahead_violation: bool = False
+    # True iff the round that produced the persisted ``trades``/``metrics`` ran
+    # custom code whose predicate-conformance check was demoted (warning) past
+    # the retry budget. Captured at trade-collection time so it tracks the
+    # backtest that is actually persisted — a later round that passes
+    # conformance but fails execution before collecting new trades leaves this
+    # reflecting the earlier demoted round whose backtest still stands.
+    ran_on_non_conforming_code: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────

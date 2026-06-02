@@ -1078,6 +1078,64 @@ def test_run_alignment_round_rejects_unsafe_proposed_code(monkeypatch) -> None:
     )
 
 
+def test_run_alignment_round_rejected_proposal_preserves_known_good_state(monkeypatch) -> None:
+    """A rejected alignment proposal must leave the pre-iteration spec/code
+    intact: the outcome carries the same baseline objects (``terminate=True``)
+    and the input spec is not mutated in place. This is the snapshot/commit
+    contract for the alignment loop — known-good state survives a failed
+    attempt untouched."""
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+
+    unsafe_report = TradeAlignmentReport(
+        aligned=False,
+        rationale="off-spec",
+        issues=[AlignmentIssue(rule_type="entry_rules", description="x", severity="critical")],
+        proposed_code=(
+            "import os\n\n"
+            "from contract import Strategy\n\n"
+            "class S(Strategy):\n"
+            "    def on_bar(self, ctx, bar):\n"
+            "        os.system('rm -rf /')\n"
+        ),
+        predicted_aligned_after_fix=True,
+        changes_made="unsafe rewrite",
+    )
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_misaligned_check_result()],
+        propose_results=[unsafe_report],
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "run_strategy_code",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must not re-execute")),
+    )
+
+    baseline_spec = _spec()
+    baseline_code = "baseline-code-v0"
+    spec_dump_before = baseline_spec.model_dump()
+    _events, emit = _collect_emit()
+
+    outcome = orch._run_alignment_round(
+        spec=baseline_spec,
+        code=baseline_code,
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        align_round=0,
+        all_gate_results=[],
+        alignment_attempts=[],
+        alignment_reports=[],
+        emit=emit,
+    )
+
+    assert outcome.terminate is True
+    # Same baseline objects flow back out — nothing was swapped or mutated.
+    assert outcome.spec is baseline_spec
+    assert outcome.code is baseline_code
+    assert baseline_spec.model_dump() == spec_dump_before
+
+
 def test_run_alignment_round_handles_re_execution_failure(monkeypatch) -> None:
     """Sandbox returns ``success=False`` on the post-fix re-execution →
     round emits ``re_execution_failed``, terminates, and appends a
@@ -1531,3 +1589,132 @@ def test_alignment_veto_falls_back_to_rationale_when_no_findings() -> None:
     reason = verification.metrics.acceptance_reason or ""
     assert "some fallback reason" in reason
     assert verification.is_winning is False
+
+
+# ---------------------------------------------------------------------------
+# ran_on_non_conforming_code is re-derived when alignment commits new code
+# (the committed proposal replaces the persisted trades but is not otherwise
+# conformance-gated, so the synthesis-loop verdict can go stale either way).
+# ---------------------------------------------------------------------------
+
+
+def _commit_then_align(monkeypatch):
+    """Build an orchestrator whose alignment loop commits one fix (round 0)
+    then reports aligned (round 1). Returns (orch,) ready to drive."""
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_misaligned_check_result(), _aligned_check_result()],
+        propose_results=[_proposed_fix("conformance-relevant fix")],
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "run_strategy_code",
+        lambda code, _md, _cfg, *, strategy=None: _code_exec(
+            success=True, raw_trades=_benign_sandbox_trades()
+        ),
+    )
+    return orch
+
+
+def test_alignment_commit_clears_stale_non_conforming_flag(monkeypatch) -> None:
+    """A synthesis round was demoted (flag True), but alignment commits code
+    that passes conformance — the persisted backtest is now the conforming
+    aligned code, so the flag must clear to False."""
+    orch = _commit_then_align(monkeypatch)
+    orch.predicate_conformance_gate.check = lambda code, spec, **kw: [
+        QualityGateResult(
+            gate_name="predicate_conformance",
+            passed=True,
+            severity="info",
+            phase="verification",
+            details="Predicate conformance OK (60 bars checked).",
+        )
+    ]
+
+    _events, emit = _collect_emit()
+    outcome = orch._run_trade_alignment_loop(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        execution_succeeded=True,
+        all_gate_results=[],
+        emit=emit,
+        ran_on_non_conforming_code=True,  # synthesis said non-conforming
+    )
+
+    assert outcome.code == _FIXED_CODE
+    assert outcome.ran_on_non_conforming_code is False
+
+
+def test_alignment_commit_sets_non_conforming_flag(monkeypatch) -> None:
+    """Synthesis was clean (flag False) but the committed alignment code drifts
+    from the predicate — the persisted backtest now ran on non-conforming code,
+    so the flag must set to True."""
+    orch = _commit_then_align(monkeypatch)
+    orch.predicate_conformance_gate.check = lambda code, spec, **kw: [
+        QualityGateResult(
+            gate_name="predicate_conformance",
+            passed=False,
+            severity="warning",
+            phase="verification",
+            details="rule_id=entry[0]: predicate conformance failed.",
+        )
+    ]
+
+    _events, emit = _collect_emit()
+    outcome = orch._run_trade_alignment_loop(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        execution_succeeded=True,
+        all_gate_results=[],
+        emit=emit,
+        ran_on_non_conforming_code=False,  # synthesis was clean
+    )
+
+    assert outcome.code == _FIXED_CODE
+    assert outcome.ran_on_non_conforming_code is True
+
+
+def test_alignment_no_commit_preserves_flag(monkeypatch) -> None:
+    """When the audit reports aligned immediately (no code committed), the
+    incoming synthesis flag is carried through unchanged and the conformance
+    gate is not consulted."""
+    from investment_team.strategy_lab import orchestrator as orchestrator_module
+
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_aligned_check_result()],
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "run_strategy_code",
+        lambda code, _md, _cfg, *, strategy=None: _code_exec(success=True, raw_trades=[]),
+    )
+    conformance_calls: List[int] = []
+    orch.predicate_conformance_gate.check = lambda code, spec, **kw: (
+        conformance_calls.append(1) or []
+    )
+
+    _events, emit = _collect_emit()
+    outcome = orch._run_trade_alignment_loop(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        execution_succeeded=True,
+        all_gate_results=[],
+        emit=emit,
+        ran_on_non_conforming_code=True,
+    )
+
+    assert outcome.ran_on_non_conforming_code is True
+    assert conformance_calls == [], "no commit ⇒ conformance gate not re-run"

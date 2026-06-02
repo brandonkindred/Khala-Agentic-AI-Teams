@@ -1,0 +1,87 @@
+# Example job-seeker profile. Copy to $AGENT_CACHE/job_seeker_profile.yaml
+# (or point $JOB_SEEKER_PROFILE_PATH at your own copy) and edit to match
+# your criteria. Every field is optional; omit what you do not care about.
+
+# Roles you are targeting (used to build search queries and score title fit).
+target_titles:
+  - "Senior Software Engineer"
+  - "Staff Software Engineer"
+  - "Backend Engineer"
+
+# Seniority bands you will consider.
+seniority_levels:
+  - "Senior"
+  - "Staff"
+
+# Preferred locations (cities, regions, or countries). Leave empty for anywhere.
+locations:
+  - "San Francisco, CA"
+  - "Remote (US)"
+
+# remote | hybrid | onsite | any
+remote_preference: "remote"
+
+# Minimum acceptable base salary, in `currency`. 0 means no floor.
+salary_min: 180000
+currency: "USD"
+
+# Funding stage / company maturity you prefer.
+company_stages:
+  - "Series B"
+  - "Series C"
+  - "Public"
+
+# Headcount bands you prefer.
+company_sizes:
+  - "51-200"
+  - "201-1000"
+
+# Industries you want (or want to avoid via deal_breakers).
+industries:
+  - "Developer Tools"
+  - "AI / ML"
+  - "Fintech"
+
+# Skills that MUST appear for a strong match.
+must_have_skills:
+  - "Python"
+  - "Distributed systems"
+
+# Skills that are a plus but not required.
+nice_to_have_skills:
+  - "Kubernetes"
+  - "Go"
+  - "PostgreSQL"
+
+# Hard no's. A posting matching any of these is forced to a "skip" recommendation.
+deal_breakers:
+  - "On-call rotation more than 1 week/month"
+  - "Required relocation"
+  - "Crypto trading"
+
+# Companies you'd love to hear about (boosts company_fit).
+preferred_companies:
+  - "Anthropic"
+  - "Stripe"
+
+# Companies to exclude entirely (forced "skip").
+excluded_companies:
+  - "Example Bad Co"
+
+# Free-text note about your work authorization / visa needs.
+work_authorization: "US citizen; no sponsorship required"
+
+# Extra keywords to weave into searches.
+keywords:
+  - "platform"
+  - "infrastructure"
+
+# Relative importance of each scoring dimension. Need not sum to 1.0;
+# the ranker normalizes them. Raise a weight to make that factor matter more.
+weights:
+  title_fit: 0.25
+  seniority_fit: 0.10
+  location_fit: 0.15
+  comp_fit: 0.15
+  company_fit: 0.15
+  skills_fit: 0.20

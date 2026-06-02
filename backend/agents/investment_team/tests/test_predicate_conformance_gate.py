@@ -12,8 +12,15 @@ import textwrap
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.quality_gates.predicate_conformance import (
     PredicateConformanceGate,
+    _build_conformance_detail,
     _code_conformance_retries,
+    _enriched_trace_lines,
     _exec_strategy,
+    _format_scalar,
+    _predicate_for_rule_id,
+)
+from investment_team.strategy_lab.quality_gates.predicate_conformance_fixtures import (
+    ConformanceFixture,
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -482,3 +489,131 @@ class TestRuleIdOnResults:
         results = gate.check(_FAITHFUL_CLOSE_GT_50, spec)
         for r in results:
             assert r.rule_id is not None
+
+
+def _drift_critical(gate, spec, *, attempt=0):
+    """Return the first non-passing conformance result for the drifted entry."""
+    results = gate.check(_DRIFTED_CLOSE_GT_50, spec, attempt=attempt)
+    failing = [r for r in results if not r.passed]
+    assert failing, "expected at least one conformance failure"
+    return failing[0]
+
+
+class TestTargetedRepairTrace:
+    """Enriched failure detail (predicate + per-bar lhs/rhs/verdict)."""
+
+    def test_details_include_predicate_expression(self):
+        gate = PredicateConformanceGate()
+        spec = _spec(entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")])
+        result = _drift_critical(gate, spec, attempt=0)
+        assert result.severity == "critical"
+        # Rendered predicate ("bar.close > 50") and at least one enriched bar line.
+        assert "Predicate:" in result.details
+        # _format_predicate renders the bar-field literal without the "bar." prefix.
+        assert "close > 50" in result.details
+        assert "lhs=" in result.details
+        assert "rhs=" in result.details
+        assert "engine=" in result.details
+
+    def test_details_include_lhs_rhs_values(self):
+        gate = PredicateConformanceGate()
+        spec = _spec(entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")])
+        result = _drift_critical(gate, spec, attempt=0)
+        # The threshold (rhs) is a literal 50 — it must surface verbatim in a trace row.
+        assert "rhs=50" in result.details
+        # A directive line tells the refiner which branch to fix.
+        assert "Fix the on_bar branch implementing 'entry[0]'" in result.details
+
+    def test_repair_before_demote_attempt_sequence(self, monkeypatch):
+        """Two critical (repairable) rounds precede the demotion warning."""
+        monkeypatch.delenv("STRATEGY_LAB_CODE_CONFORMANCE_RETRIES", raising=False)
+        gate = PredicateConformanceGate()
+        spec = _spec(entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")])
+        assert _drift_critical(gate, spec, attempt=0).severity == "critical"
+        assert _drift_critical(gate, spec, attempt=1).severity == "critical"
+        # attempt == max_retries (default 2) -> demoted to warning.
+        assert _drift_critical(gate, spec, attempt=2).severity == "warning"
+
+    def test_enriched_details_bounded(self):
+        """Enriched per-bar rows are capped and the index list is retained."""
+        gate = PredicateConformanceGate()
+        spec = _spec(entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")])
+        result = _drift_critical(gate, spec, attempt=0)
+        bar_lines = [ln for ln in result.details.splitlines() if ln.strip().startswith("bar ")]
+        assert 1 <= len(bar_lines) <= 5
+        # The bare (≤10) index list is still present alongside the enriched rows.
+        assert "False positives" in result.details or "False negatives" in result.details
+
+
+class TestUnsynthesizableWarning:
+    def test_unsynthesizable_detail_prefix(self):
+        """The unsynthesizable warning carries a stable prefix the telemetry excludes."""
+        gate = PredicateConformanceGate()
+        fixture = ConformanceFixture(
+            rule_id="entry[0]",
+            rule_kind="entry",
+            side="long",
+            synthesizable=False,
+            unsynthesizable_reason="no forcing sequence",
+        )
+        with gate._using_phase("synthesis"):
+            result = gate._check_fixture(object, fixture, spec=None, demote=False)
+        assert result.severity == "warning"
+        assert result.details.startswith("Fixture unsynthesizable:")
+
+
+class TestPredicateForRuleId:
+    def test_resolves_entry_predicate(self):
+        pred = _pred_close_gt_50()
+        spec = _spec(entry_rules=[EntryRule(when=pred, side="long")])
+        fixture = ConformanceFixture(rule_id="entry[0]", rule_kind="entry", side="long")
+        assert _predicate_for_rule_id(spec, fixture) is pred
+
+    def test_resolves_signal_exit_predicate(self):
+        pred = Predicate(lhs="bar.close", op="<", rhs=90.0)
+        spec = _spec(
+            exit_rules=[StopLossRule(pct=0.05), SignalExitRule(when=pred)],
+        )
+        # exit_rules[1] is the SignalExitRule -> rule_id carries that index.
+        fixture = ConformanceFixture(rule_id="exit[1]:signal_exit", rule_kind="signal_exit")
+        assert _predicate_for_rule_id(spec, fixture) is pred
+
+    def test_malformed_rule_id_returns_none(self):
+        spec = _spec(entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")])
+        fixture = ConformanceFixture(rule_id="bogus[x]", rule_kind="entry", side="long")
+        assert _predicate_for_rule_id(spec, fixture) is None
+
+    def test_out_of_range_index_returns_none(self):
+        spec = _spec(entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")])
+        fixture = ConformanceFixture(rule_id="entry[7]", rule_kind="entry", side="long")
+        assert _predicate_for_rule_id(spec, fixture) is None
+
+    def test_none_spec_returns_none(self):
+        fixture = ConformanceFixture(rule_id="entry[0]", rule_kind="entry", side="long")
+        assert _predicate_for_rule_id(None, fixture) is None
+
+    def test_wrong_variant_at_index_returns_none(self):
+        # exit[0] points at a StopLossRule, not a SignalExitRule -> no predicate.
+        spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
+        fixture = ConformanceFixture(rule_id="exit[0]:signal_exit", rule_kind="signal_exit")
+        assert _predicate_for_rule_id(spec, fixture) is None
+
+
+class TestDetailHelpers:
+    def test_format_scalar_none_and_float(self):
+        assert _format_scalar(None) == "None"
+        assert _format_scalar(1.23456) == "1.235"
+
+    def test_enriched_trace_lines_empty_when_no_offending_bars(self):
+        fixture = ConformanceFixture(rule_id="entry[0]", rule_kind="entry", side="long")
+        assert _enriched_trace_lines(_pred_close_gt_50(), fixture, [], []) == []
+
+    def test_build_conformance_detail_falls_back_without_predicate(self):
+        # Unresolvable rule_id -> index-only detail, no "Predicate:" / directive line.
+        spec = _spec(entry_rules=[EntryRule(when=_pred_close_gt_50(), side="long")])
+        fixture = ConformanceFixture(rule_id="bogus[x]", rule_kind="entry", side="long")
+        detail = _build_conformance_detail(fixture, spec, [3], [7])
+        assert "Predicate:" not in detail
+        assert "Fix the on_bar branch" not in detail
+        assert "False positives" in detail
+        assert "False negatives" in detail

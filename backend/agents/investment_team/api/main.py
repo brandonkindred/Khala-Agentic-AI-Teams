@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from investment_team.agents import (
     AgentIdentity,
@@ -690,19 +690,31 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
     """Create a new investment strategy specification."""
     strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
 
-    strategy = StrategySpec(
-        strategy_id=strategy_id,
-        authored_by=request.authored_by,
-        asset_class=request.asset_class,
-        hypothesis=request.hypothesis,
-        signal_definition=request.signal_definition,
-        timeframe=request.timeframe,
-        entry_rules=request.entry_rules,
-        exit_rules=request.exit_rules,
-        sizing=request.sizing if request.sizing is not None else DEFAULT_SIZING_PAYLOAD,
-        risk_limits=request.risk_limits,
-        speculative=request.speculative,
-    )
+    # ``StrategySpec`` enforces its field contracts (e.g. the asset_class
+    # vocabulary) at construction. A bad value here is a client error, not a
+    # server fault, so translate the Pydantic ValidationError into a 422
+    # instead of letting it surface as an unhandled 500.
+    try:
+        strategy = StrategySpec(
+            strategy_id=strategy_id,
+            authored_by=request.authored_by,
+            asset_class=request.asset_class,
+            hypothesis=request.hypothesis,
+            signal_definition=request.signal_definition,
+            timeframe=request.timeframe,
+            entry_rules=request.entry_rules,
+            exit_rules=request.exit_rules,
+            sizing=request.sizing if request.sizing is not None else DEFAULT_SIZING_PAYLOAD,
+            risk_limits=request.risk_limits,
+            speculative=request.speculative,
+        )
+    except ValidationError as exc:
+        # ``include_context=False`` drops the raw exception object Pydantic
+        # stashes under ``ctx`` (a ValueError isn't JSON-serializable), which
+        # would otherwise make FastAPI fail to encode the 422 body and 500.
+        raise HTTPException(
+            status_code=422, detail=exc.errors(include_url=False, include_context=False)
+        ) from exc
 
     with _lock:
         _strategies[strategy_id] = strategy

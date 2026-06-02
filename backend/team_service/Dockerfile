@@ -1,7 +1,9 @@
 FROM python:3.11-slim
 
+# curl: healthcheck. libpq-dev: psycopg build. git: team services (coding/SE)
+# branch, commit and push via the `git` binary during code-generation jobs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl libpq-dev \
+    curl libpq-dev git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

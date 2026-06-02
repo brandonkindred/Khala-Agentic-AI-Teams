@@ -40,7 +40,7 @@ def _stub_backtest_result() -> BacktestResult:
     )
 
 
-def _record(asset_class: str) -> StrategyLabRecord:
+def _record(asset_class: str, *, backtest_status: str = "completed") -> StrategyLabRecord:
     suffix = uuid.uuid4().hex[:6]
     strategy = StrategySpec(
         strategy_id=f"s-{suffix}",
@@ -63,6 +63,7 @@ def _record(asset_class: str) -> StrategyLabRecord:
         submitted_by="test",
         submitted_at=now,
         completed_at=now,
+        status=backtest_status,
         result=_stub_backtest_result(),
         notes=[],
         trades=[],
@@ -104,3 +105,65 @@ def test_hint_count_includes_supported_classes() -> None:
     out = asset_class_mix_hint(records)
     for ac in ("stocks", "crypto", "forex", "futures", "commodities"):
         assert f"{ac}=" in out, f"expected '{ac}=' in counts, got: {out}"
+
+
+def test_hint_excludes_failed_short_circuit_records_from_counts() -> None:
+    """A short-circuited cycle (status ``failed: …``) never ran a backtest and
+    its recorded asset_class may be a coerced placeholder (an unsupported class
+    like ``bonds`` is canonicalized to ``stocks`` for schema validity before
+    being routed to redesign). Such records must not be counted, or a rejected,
+    never-backtested design would pollute the stock history and skew steering."""
+    completed = [_record("crypto") for _ in range(2)]
+    failed = [_record("stocks", backtest_status="failed: spec_unimplementable") for _ in range(5)]
+    out = asset_class_mix_hint(completed + failed)
+    # Only the two completed crypto runs count; the coerced-stocks failures
+    # must not register as a stocks-heavy window.
+    assert "stocks=0" in out, out
+    assert "crypto=2" in out, out
+    assert "Equities are relatively heavy" not in out, out
+
+
+def test_hint_all_failed_records_falls_back_to_neutral_menu() -> None:
+    """When every record is a short-circuit (never executed), there is no
+    history to steer from — emit the neutral no-history menu rather than a
+    misleading all-zero count derived from coerced placeholders."""
+    records = [_record("stocks", backtest_status="failed: spec_unimplementable") for _ in range(3)]
+    out = asset_class_mix_hint(records)
+    assert "No executed lab backtests yet" in out, out
+
+
+def test_hint_excludes_all_pre_backtest_short_circuit_statuses() -> None:
+    """Every status the orchestrator passes to ``_build_short_circuit_record``
+    (none of which ran a backtest) must be excluded — including
+    ``design_not_ready`` and ``budget_exhausted``, which are persisted before
+    code synthesis just like the spec/synthesis failures. Otherwise a restart
+    that rebuilds the hint from persisted ``prior_records`` would count these
+    never-executed designs as real asset-class history."""
+    for status in (
+        "failed: spec_unimplementable",
+        "failed: spec_validation",
+        "failed: code_synthesis",
+        "failed: design_not_ready",
+        "failed: budget_exhausted",
+    ):
+        records = [_record("crypto")] + [
+            _record("stocks", backtest_status=status) for _ in range(5)
+        ]
+        out = asset_class_mix_hint(records)
+        assert "stocks=0" in out, f"{status}: {out}"
+        assert "crypto=1" in out, f"{status}: {out}"
+
+
+def test_hint_counts_executed_but_losing_failed_backtests() -> None:
+    """Executed-but-losing cycles use ``failed`` / ``failed: max_refinement_rounds``
+    but DID run a backtest with a genuine canonical class — they must keep
+    counting, or repeated failed futures/forex runs would vanish from the
+    diversity steering. Only never-executed short-circuits are excluded."""
+    records = [
+        _record("futures", backtest_status="failed") for _ in range(3)
+    ] + [_record("forex", backtest_status="failed: max_refinement_rounds") for _ in range(2)]
+    out = asset_class_mix_hint(records)
+    # All five executed-but-losing records count toward the diversity history.
+    assert "futures=3" in out, out
+    assert "forex=2" in out, out
+    assert "stocks=0" in out, out

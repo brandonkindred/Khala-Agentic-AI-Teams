@@ -402,6 +402,44 @@ def test_zero_trade_repair_failed_proposal_preserves_state(
     assert all(g.gate_name.startswith("zero_trade_repair_") for g in critical_gates)
 
 
+def test_zero_trade_repair_failed_proposal_is_pure_wrt_input_code_and_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected repair leaves the caller's input ``code`` and ``spec``
+    untouched — ``try_repair`` is pure with respect to its inputs, so the
+    fallback ``RefinementAgent`` runs against the original known-good blob
+    rather than a half-mutated one."""
+    orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="NO_ORDERS_EMITTED",
+                evidence="orders_emitted=0",
+                proposed_code=_REPAIRED_CODE,
+                changes_made="attempted RSI loosen",
+            ),
+        ],
+        sandbox_results=[
+            _code_exec(success=True, raw_trades=[]),  # zero trades again → reject
+        ],
+    )
+
+    input_spec = _spec()
+    input_code = "INPUT-CODE-BLOB"
+    spec_before = input_spec.model_dump()
+
+    outcome, _events, _attempts = _drive_repair(orch, spec=input_spec, code=input_code)
+
+    assert outcome.committed is False
+    # The input objects the caller still holds are unchanged.
+    assert input_code == "INPUT-CODE-BLOB"
+    assert input_spec.model_dump() == spec_before
+    # The repairer signals "no commit" via empty/None outcome fields rather
+    # than handing back a mutated blob.
+    assert outcome.new_code == ""
+    assert outcome.new_spec is None
+
+
 def test_zero_trade_repair_unsafe_code_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1085,3 +1123,138 @@ def test_repair_agent_receives_none_when_no_coverage_attached(
 
     assert len(repair_stub.calls) == 1
     assert repair_stub.calls[0]["coverage_report"] is None
+
+
+# ---------------------------------------------------------------------------
+# _handle_critical_anomalies re-derives ran_on_non_conforming_code when a
+# zero-trade repair commits new code (which replaces the persisted trades but
+# is not otherwise conformance-gated). Generic refinement leaves it None.
+# ---------------------------------------------------------------------------
+
+
+class _StubRepairer:
+    """Returns a scripted ``ZeroTradeRepairOutcome`` from ``try_repair``."""
+
+    def __init__(self, outcome: _ZeroTradeRepairOutcome) -> None:
+        self._outcome = outcome
+
+    def try_repair(self, **_kwargs: Any) -> _ZeroTradeRepairOutcome:
+        return self._outcome
+
+
+def _committed_repair_outcome() -> _ZeroTradeRepairOutcome:
+    repair_exec = _code_exec(success=True, raw_trades=_benign_sandbox_trades())
+    return _ZeroTradeRepairOutcome(
+        committed=True,
+        new_code="# repaired code\n",
+        new_spec=_spec(),
+        new_trades=repair_exec.trades,
+        new_metrics=_metrics_for(),
+        new_exec_result=repair_exec,
+        new_gates=[],
+        changes_made="loosened entry threshold",
+    )
+
+
+def _metrics_for():
+    from investment_team.trade_simulator import compute_metrics
+
+    cfg = _config()
+    return compute_metrics([], cfg.initial_capital, cfg.start_date, cfg.end_date)
+
+
+def _critical_anomaly() -> QualityGateResult:
+    return QualityGateResult(
+        gate_name="backtest_anomaly",
+        passed=False,
+        severity="critical",
+        phase="verification",
+        details="zero trades emitted",
+    )
+
+
+def _drive_anomaly_recovery(orch: StrategyLabOrchestrator):
+    return orch._handle_critical_anomalies(
+        spec=_spec(),
+        code="# original code\n",
+        trades=[],
+        metrics=_metrics_for(),
+        exec_result=_zero_trade_exec_result(),
+        market_data=_market_data(),
+        config=_config(),
+        critical_anomalies=[_critical_anomaly()],
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        round_num=0,
+        emit=lambda *a, **k: None,
+    )
+
+
+def test_ztr_commit_flags_non_conforming_repair_code() -> None:
+    """A committed zero-trade repair whose code drifts from the predicate sets
+    the non-conforming flag on the recovery outcome."""
+    orch = StrategyLabOrchestrator()
+    orch.zero_trade_repairer = _StubRepairer(_committed_repair_outcome())  # type: ignore[assignment]
+    orch.predicate_conformance_gate.check = lambda code, spec, **kw: [
+        QualityGateResult(
+            gate_name="predicate_conformance",
+            passed=False,
+            severity="warning",
+            phase="verification",
+            details="rule_id=entry[0]: predicate conformance failed.",
+        )
+    ]
+
+    recovery = _drive_anomaly_recovery(orch)
+    assert recovery.exhausted is False
+    assert recovery.ran_on_non_conforming_code is True
+
+
+def test_ztr_commit_clears_flag_for_conforming_repair_code() -> None:
+    """A committed repair whose code conforms reports the flag as False."""
+    orch = StrategyLabOrchestrator()
+    orch.zero_trade_repairer = _StubRepairer(_committed_repair_outcome())  # type: ignore[assignment]
+    orch.predicate_conformance_gate.check = lambda code, spec, **kw: [
+        QualityGateResult(
+            gate_name="predicate_conformance",
+            passed=True,
+            severity="info",
+            phase="verification",
+            details="Predicate conformance OK (60 bars checked).",
+        )
+    ]
+
+    recovery = _drive_anomaly_recovery(orch)
+    assert recovery.ran_on_non_conforming_code is False
+
+
+def test_generic_refine_leaves_flag_unset() -> None:
+    """When no zero-trade repair commits (diagnostics carry no category), the
+    generic-refine path leaves the flag None so the caller keeps the round's
+    existing verdict (trades are unchanged)."""
+    orch = StrategyLabOrchestrator()
+    orch._refine_or_exhaust = lambda **kw: (kw["spec"], kw["code"], False)
+    conformance_calls: List[int] = []
+    orch.predicate_conformance_gate.check = lambda code, spec, **kw: (
+        conformance_calls.append(1) or []
+    )
+
+    recovery = orch._handle_critical_anomalies(
+        spec=_spec(),
+        code="# original code\n",
+        trades=[],
+        metrics=_metrics_for(),
+        # No zero_trade_category -> ZTR branch is skipped.
+        exec_result=StrategyRunResult(success=True, trades=[]),
+        market_data=_market_data(),
+        config=_config(),
+        critical_anomalies=[_critical_anomaly()],
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        round_num=0,
+        emit=lambda *a, **k: None,
+    )
+    assert recovery.ran_on_non_conforming_code is None
+    assert conformance_calls == [], "generic-refine path must not re-run conformance"

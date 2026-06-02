@@ -13,11 +13,14 @@ so consumers import a single module (mirrors ``alignment.py``).
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Set
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from strands import Agent
 
 from ...models import StrategySpec
@@ -52,6 +55,38 @@ _CRITIQUE_FIELDS: tuple[str, ...] = (
 )
 
 
+def _normalize_issue_text(text: str) -> str:
+    """Normalise critique prose so trivial rewordings map to one identity.
+
+    Pre: ``text`` is any string.
+    Post: returns a lowercased, punctuation-stripped, whitespace-collapsed
+    rendering. Two descriptions that differ only in case, punctuation, or
+    spacing produce identical output, so :func:`compute_issue_id` assigns
+    them the same id.
+    """
+    s = text.lower()
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def compute_issue_id(field_name: str, description: str) -> str:
+    """Deterministically derive a stable id for one critique issue.
+
+    Pre: ``field_name`` and ``description`` are strings.
+    Post: returns ``"{field}:{hash10}"`` where the hash is the first 10
+    hex chars of the SHA-256 of ``"{field}|{normalized(description)}"``.
+    The id is derived in code (never trusted from the LLM, which cannot
+    reliably carry ids across rounds), so the *same* defect maps to the
+    *same* id round after round — the basis for the regression guard.
+    Mirrors the canonical-hash idiom in
+    :meth:`ConvergenceTracker._strategy_signature`.
+    """
+    norm = _normalize_issue_text(description)
+    digest = hashlib.sha256(f"{field_name}|{norm}".encode("utf-8")).hexdigest()[:10]
+    return f"{field_name}:{digest}"
+
+
 class CritiqueIssue(BaseModel):
     """A single point on which the reviewer thinks the spec is not ready.
 
@@ -59,6 +94,9 @@ class CritiqueIssue(BaseModel):
     proxy when the issue is cross-cutting). ``severity`` follows the same
     ladder as :class:`QualityGateResult` so downstream consumers can mix
     deterministic findings and reviewer critiques into one timeline.
+    ``issue_id`` is a deterministic identity (see :func:`compute_issue_id`)
+    so a defect resolved in one round and reintroduced in a later one is
+    recognised as the *same* issue by :class:`CritiqueLedger`.
     """
 
     field: str = Field(
@@ -71,6 +109,26 @@ class CritiqueIssue(BaseModel):
     severity: Literal["info", "warning", "critical"] = "warning"
     description: str
     suggested_fix: str = ""
+    issue_id: str = Field(
+        default="",
+        description=(
+            "Deterministic id derived from (field, normalized description). "
+            "Auto-filled when blank so every construction site — LLM-parsed, "
+            "synthetic, and legacy-deserialized — carries a stable identity."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _ensure_issue_id(self) -> "CritiqueIssue":
+        """Invariant: every ``CritiqueIssue`` carries a non-empty ``issue_id``.
+
+        Post: ``issue_id`` is populated from ``(field, description)`` when it
+        was left blank. An explicitly supplied id is preserved verbatim so
+        persisted/legacy rows round-trip unchanged.
+        """
+        if not self.issue_id:
+            self.issue_id = compute_issue_id(self.field, self.description)
+        return self
 
 
 class SpecCritique(BaseModel):
@@ -95,12 +153,139 @@ class SpecCritique(BaseModel):
     )
     round: int = 0
 
+    @property
+    def open_issue_ids(self) -> Set[str]:
+        """The set of *blocking* issue ids this round leaves open.
+
+        Post: returns the ``issue_id`` of every issue at ``warning`` or
+        ``critical`` severity. ``info`` issues are advisory and never count
+        as "open", so they cannot keep the loop from converging. This set is
+        the unit the :class:`CritiqueLedger` tracks across rounds.
+        """
+        return {i.issue_id for i in self.issues if i.severity in ("warning", "critical")}
+
 
 class DesignReviewError(Exception):
     """Raised when the LLM call or response parsing fails inside
     :class:`DesignReviewAgent`. The orchestrator falls closed on this
     (``ready=False`` with a synthetic critical issue) so a reviewer
     transport hiccup cannot silently advance a half-validated spec."""
+
+
+@dataclass(frozen=True)
+class LedgerDelta:
+    """Per-round bookkeeping produced by :meth:`CritiqueLedger.record_round`.
+
+    All four sets partition the *change* in the blocking open-issue set:
+      * ``resolved`` — ids that were open last round and are gone now (progress).
+      * ``persisted`` — ids open both last round and this round.
+      * ``new`` — ids appearing for the first time on this lineage.
+      * ``regressed`` — ids that were previously *resolved* and have
+        reappeared (the reviser reintroduced a fixed defect, or the reviewer
+        re-raised a dropped one). This is the signal the loop escalates on.
+    """
+
+    round: int
+    resolved: Set[str] = field(default_factory=set)
+    persisted: Set[str] = field(default_factory=set)
+    new: Set[str] = field(default_factory=set)
+    regressed: Set[str] = field(default_factory=set)
+
+
+class CritiqueLedger:
+    """Monotonic open-issue tracker for one design ↔ review loop.
+
+    The reviewer emits free-text critiques; each issue carries a stable
+    :attr:`CritiqueIssue.issue_id`. The ledger watches the *blocking*
+    open-issue set (warnings + criticals) round over round so the loop can
+    (a) escalate regressions — a resolved id that reappears — and (b) detect
+    a stall — the open set unchanged for N consecutive rounds.
+
+    Invariants:
+      * ``current_open`` is exactly the open-issue set of the most recently
+        recorded round (empty before the first ``record_round``).
+      * ``ever_resolved`` only grows; an id enters it the round it leaves the
+        open set and never departs (so its later reappearance is a regression).
+    """
+
+    def __init__(self) -> None:
+        self._current_open: Set[str] = set()
+        self._ever_resolved: Set[str] = set()
+        self._open_history: List[frozenset] = []
+        self._total_regressed: int = 0
+        self._rounds: int = 0
+
+    def record_round(self, critique: "SpecCritique") -> LedgerDelta:
+        """Fold one round's critique into the ledger and return the delta.
+
+        Pre: ``critique`` is the :class:`SpecCritique` for the round being
+        recorded; rounds are recorded in loop order.
+        Post: ``current_open`` equals ``critique.open_issue_ids``;
+        ``ever_resolved`` has absorbed any ids that just left the open set;
+        the returned :class:`LedgerDelta` describes the transition. An id
+        counts as ``regressed`` only when it both reappears *and* was in
+        ``ever_resolved`` before this round.
+        """
+        new_open = critique.open_issue_ids
+        prev_open = self._current_open
+
+        resolved = prev_open - new_open
+        persisted = prev_open & new_open
+        appeared = new_open - prev_open
+        regressed = appeared & self._ever_resolved
+        genuinely_new = appeared - self._ever_resolved
+
+        # Update state: newly-resolved ids are remembered forever so a later
+        # reappearance is recognised as a regression rather than a new issue.
+        self._ever_resolved |= resolved
+        self._current_open = set(new_open)
+        self._open_history.append(frozenset(new_open))
+        self._total_regressed += len(regressed)
+        delta = LedgerDelta(
+            round=self._rounds,
+            resolved=resolved,
+            persisted=persisted,
+            new=genuinely_new,
+            regressed=regressed,
+        )
+        self._rounds += 1
+        return delta
+
+    def is_stalled(self, n: int) -> bool:
+        """True when the open set has been non-empty and unchanged for ``n`` rounds.
+
+        Pre: ``n`` is the consecutive-round threshold (sub-1 values are
+        floored to 1).
+        Post: returns True only when at least ``n`` rounds have been recorded
+        and the last ``n`` open-issue sets are all identical and non-empty.
+        An empty open set is never a stall (the loop is converging, not
+        oscillating).
+        """
+        n = max(n, 1)
+        if not self._current_open:
+            return False
+        if len(self._open_history) < n:
+            return False
+        window = self._open_history[-n:]
+        first = window[0]
+        if not first:
+            return False
+        return all(s == first for s in window)
+
+    @property
+    def current_open(self) -> Set[str]:
+        """A copy of the most recent round's blocking open-issue set."""
+        return set(self._current_open)
+
+    @property
+    def ever_resolved(self) -> Set[str]:
+        """A copy of every id that has, at some point, left the open set."""
+        return set(self._ever_resolved)
+
+    @property
+    def total_regressed(self) -> int:
+        """Cumulative count of regression events across all recorded rounds."""
+        return self._total_regressed
 
 
 # ---------------------------------------------------------------------------
@@ -268,14 +453,19 @@ def _format_readiness(results: List[QualityGateResult]) -> tuple[str, List[str]]
 
 
 def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
-    """Render past critiques so the reviewer / designer does not re-raise resolved issues.
+    """Render past critiques so the reviewer / designer does not re-raise or regress resolved issues.
 
     Pre: ``prior`` is ``None``, ``[]``, or a list of ``SpecCritique``.
-    Post: returns ``"None yet."`` when empty; otherwise one line per
-    critique (round, ready flag, issue count, truncated rationale).
-    Shared between :class:`DesignReviewAgent` (showing past rounds to
-    the reviewer) and :class:`DesignAgent.revise` (showing them to the
-    designer) so both see the same lineage view.
+    Post: returns ``"None yet."`` when empty; otherwise one block per
+    critique — a header line (round, ready flag, issue count, truncated
+    rationale) followed by one indented line per issue carrying its
+    severity, field, truncated description, and truncated ``suggested_fix``
+    (when present). Surfacing the per-issue detail — not just the rationale —
+    lets a later revision see *what* an earlier round fixed so it does not
+    silently regress it when the rationale was terse. Shared between
+    :class:`DesignReviewAgent` (showing past rounds to the reviewer) and
+    :meth:`DesignAgent.revise` / :meth:`DesignAgent._with_self_review`
+    (showing them to the designer) so all three see the same lineage view.
     """
     if not prior:
         return "None yet."
@@ -284,6 +474,11 @@ def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
         lines.append(
             f"  Round {c.round}: ready={c.ready} ({len(c.issues)} issues) — {c.rationale[:160]}"
         )
+        for issue in c.issues:
+            detail = f"      - [{issue.severity}] {issue.field}: {issue.description[:160]}"
+            if issue.suggested_fix:
+                detail += f" (fix: {issue.suggested_fix[:160]})"
+            lines.append(detail)
     return "\n".join(lines)
 
 
@@ -326,7 +521,10 @@ def _coerce_critique(
     Preconditions: ``parsed`` is a dict from a parsed LLM JSON payload;
     ``demote_min_severity`` is one of ``"warning"`` / ``"critical"``.
     Postconditions: returns a :class:`SpecCritique` whose ``ready`` is
-    ``False`` whenever a blocking issue (per the threshold) is present.
+    ``False`` whenever a blocking issue (per the threshold) is present, and
+    whose ``open_issue_ids`` is non-empty whenever ``ready`` is ``False`` (a
+    not-ready verdict always carries at least one blocking issue, synthesised
+    if the reviewer named none or only ``info`` notes).
     """
     ready = _coerce_strict_bool(parsed.get("ready"))
     rationale = str(parsed.get("rationale", "")).strip()
@@ -382,10 +580,18 @@ def _coerce_critique(
             )
         )
 
-    # Contract: ready=False but no issues is incoherent. Synthesise a
-    # placeholder so the designer's `revise()` call has something to
-    # act on, rather than looping with an empty critique.
-    if not ready and not issues:
+    # Contract: a ``ready=False`` verdict must carry at least one *blocking*
+    # (warning/critical) issue. The reviewer keeps the loop revising whenever
+    # ``ready`` is false, but ``SpecCritique.open_issue_ids`` — the unit the
+    # CritiqueLedger and stall detector track — counts only blocking issues.
+    # A not-ready critique with no issues at all, or with only ``info`` issues,
+    # would otherwise present an empty open set: the loop would churn to the
+    # hard round cap with telemetry claiming zero open issues and stall
+    # detection unable to fire. Synthesise a blocking placeholder (preserving
+    # any info notes) so the not-ready signal is always backed by a tracked
+    # open issue. ``info`` issues remain advisory and never block on their own.
+    has_blocking = any(_SEVERITY_ORDER[i.severity] >= _SEVERITY_ORDER["warning"] for i in issues)
+    if not ready and not has_blocking:
         issues.append(
             CritiqueIssue(
                 field="hypothesis",
@@ -449,8 +655,11 @@ def _fail_closed_critique(exc: Exception, readiness_findings: List[str]) -> Spec
 
 __all__ = [
     "CritiqueIssue",
+    "CritiqueLedger",
     "DesignReviewAgent",
     "DesignReviewError",
+    "LedgerDelta",
     "SpecCritique",
+    "compute_issue_id",
     "format_prior_critiques",
 ]

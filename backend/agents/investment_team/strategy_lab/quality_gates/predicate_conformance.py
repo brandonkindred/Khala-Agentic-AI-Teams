@@ -34,13 +34,16 @@ from __future__ import annotations
 import builtins
 import logging
 import math
+import re
 import statistics
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Optional, Type
 
 from ..spec_dsl import EntryRule as _EntryRule
+from ..spec_dsl import Predicate as _Predicate
 from ..spec_dsl import SignalExitRule as _SignalExitRule
+from ..spec_dsl import _format_predicate
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 from .predicate_conformance_fixtures import ConformanceFixture, generate_conformance_fixtures
 
@@ -295,6 +298,20 @@ class PredicateConformanceGate(GateResultsMixin):
         spec: Any = None,
         demote: bool = False,
     ) -> QualityGateResult:
+        """Shadow-run one fixture and classify the result.
+
+        Preconditions:
+          ``fixture`` describes a single predicate-bearing rule; ``spec`` is
+          the owning ``StrategySpec`` (or ``None`` in narrow unit tests).
+        Postconditions:
+          Returns exactly one ``QualityGateResult`` with ``rule_id`` set.
+          When the strategy's per-bar orders diverge from the engine
+          verdicts, the failure detail names the rendered predicate and a
+          bounded per-bar ``lhs``/``rhs``/verdict trace for the offending
+          bars (see :func:`_build_conformance_detail`). The critical→warning
+          demotion is governed solely by ``demote`` and is unchanged by the
+          enriched detail.
+        """
         if not fixture.synthesizable:
             return self._warning(
                 f"Fixture unsynthesizable: {fixture.unsynthesizable_reason}",
@@ -381,20 +398,152 @@ class PredicateConformanceGate(GateResultsMixin):
                 rule_id=fixture.rule_id,
             )
 
-        parts = [f"rule_id={fixture.rule_id}: predicate conformance failed."]
-        if false_positives:
-            parts.append(
-                f"  False positives (order on predicate-false bar): bars {false_positives[:10]}"
-            )
-        if false_negatives:
-            parts.append(
-                f"  False negatives (no order on predicate-true bar): bars {false_negatives[:10]}"
-            )
-        detail = "\n".join(parts)
+        detail = _build_conformance_detail(fixture, spec, false_positives, false_negatives)
 
         if demote:
             return self._warning(detail, rule_id=fixture.rule_id)
         return self._critical(detail, rule_id=fixture.rule_id)
+
+
+# ---------------------------------------------------------------------------
+# Failure-detail rendering (targeted-repair trace)
+# ---------------------------------------------------------------------------
+
+_RULE_ID_ENTRY = re.compile(r"^entry\[(\d+)\]$")
+_RULE_ID_SIGNAL_EXIT = re.compile(r"^exit\[(\d+)\]:signal_exit$")
+
+# Cap on the number of enriched per-bar trace rows appended to a failure
+# detail. The bare index lists (truncated to 10) already convey breadth; the
+# enriched rows exist to give the refinement agent concrete values for a few
+# representative bars without making the detail string unbounded.
+_MAX_TRACE_ROWS = 5
+
+
+def _predicate_for_rule_id(spec: Any, fixture: ConformanceFixture) -> Optional[_Predicate]:
+    """Recover the ``Predicate`` behind ``fixture.rule_id`` from ``spec``.
+
+    Preconditions:
+      ``fixture.rule_id`` follows the documented format emitted by
+      :mod:`predicate_conformance_fixtures` — ``entry[{idx}]`` for entry
+      rules or ``exit[{idx}]:signal_exit`` for signal-exit rules, where
+      ``idx`` indexes ``spec.entry_rules`` / ``spec.exit_rules`` respectively.
+    Postconditions:
+      Returns the matching rule's ``when`` predicate, or ``None`` when
+      ``spec`` is missing, the id does not match the format, the index is out
+      of range, or the targeted rule is not the expected variant. Never
+      raises on a malformed id.
+    """
+    if spec is None:
+        return None
+    rule_id = fixture.rule_id
+    m = _RULE_ID_ENTRY.match(rule_id)
+    if m is not None:
+        rules = getattr(spec, "entry_rules", []) or []
+        idx = int(m.group(1))
+        if 0 <= idx < len(rules) and isinstance(rules[idx], _EntryRule):
+            return rules[idx].when
+        return None
+    m = _RULE_ID_SIGNAL_EXIT.match(rule_id)
+    if m is not None:
+        rules = getattr(spec, "exit_rules", []) or []
+        idx = int(m.group(1))
+        if 0 <= idx < len(rules) and isinstance(rules[idx], _SignalExitRule):
+            return rules[idx].when
+        return None
+    return None
+
+
+def _format_scalar(v: Optional[float]) -> str:
+    """Render an evaluator scalar for a stable, bounded detail string.
+
+    Postconditions:
+      ``None`` (warmup / unresolved) renders as ``"None"``; finite floats use
+      a fixed ``%.4g`` format so the detail string is deterministic.
+    """
+    if v is None:
+        return "None"
+    return f"{v:.4g}"
+
+
+def _enriched_trace_lines(
+    pred: _Predicate,
+    fixture: ConformanceFixture,
+    false_positives: List[int],
+    false_negatives: List[int],
+) -> List[str]:
+    """Render up to :data:`_MAX_TRACE_ROWS` per-bar diagnostic lines.
+
+    Preconditions:
+      ``pred`` is the predicate behind ``fixture.rule_id``;
+      ``false_positives`` / ``false_negatives`` are valid indices into
+      ``fixture.bars``.
+    Postconditions:
+      Returns at most ``_MAX_TRACE_ROWS`` lines covering the lowest-indexed
+      offending bars, each naming the resolved ``lhs``/``rhs``, the engine
+      verdict, and whether the bar is a false positive or false negative.
+      Returns ``[]`` when there are no offending bars.
+    """
+    from ..executor.predicate_evaluator import PandasHistoryView, evaluate_predicate
+    from .rule_probes.synthesizer import _bars_to_df
+
+    fp = set(false_positives)
+    fn = set(false_negatives)
+    ordered = sorted(fp | fn)[:_MAX_TRACE_ROWS]
+    if not ordered:
+        return []
+
+    view = PandasHistoryView(_bars_to_df(fixture.bars), {})
+    lines: List[str] = []
+    for i in ordered:
+        if i in fp:
+            kind = "false positive (ordered on predicate-false bar)"
+        else:
+            kind = "false negative (no order on predicate-true bar)"
+        res = evaluate_predicate(pred, view, i)
+        lines.append(
+            f"  bar {i}: lhs={_format_scalar(res.lhs)} {pred.op} "
+            f"rhs={_format_scalar(res.rhs)} -> engine={res.status}; {kind}"
+        )
+    return lines
+
+
+def _build_conformance_detail(
+    fixture: ConformanceFixture,
+    spec: Any,
+    false_positives: List[int],
+    false_negatives: List[int],
+) -> str:
+    """Build the failure-detail string for a non-conforming fixture.
+
+    Preconditions:
+      At least one of ``false_positives`` / ``false_negatives`` is non-empty.
+    Postconditions:
+      Returns a multi-line string that always carries the ``rule_id`` header
+      and the (≤10) offending-bar index lists. When the predicate is
+      recoverable from ``spec`` (see :func:`_predicate_for_rule_id`), it also
+      carries the rendered predicate, a bounded per-bar ``lhs``/``rhs``/verdict
+      trace, and a one-line directive for the refinement agent. Falls back to
+      the index-only form when the predicate cannot be recovered.
+    """
+    parts = [f"rule_id={fixture.rule_id}: predicate conformance failed."]
+    pred = _predicate_for_rule_id(spec, fixture)
+    if pred is not None:
+        parts.append(f"  Predicate: {_format_predicate(pred)}")
+    if false_positives:
+        parts.append(
+            f"  False positives (order on predicate-false bar): bars {false_positives[:10]}"
+        )
+    if false_negatives:
+        parts.append(
+            f"  False negatives (no order on predicate-true bar): bars {false_negatives[:10]}"
+        )
+    if pred is not None:
+        parts.extend(_enriched_trace_lines(pred, fixture, false_positives, false_negatives))
+        parts.append(
+            f"  Fix the on_bar branch implementing '{fixture.rule_id}' so it submits on the "
+            "predicate-true bars above and not on predicate-false bars."
+        )
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -591,84 +740,36 @@ def _build_contract_stub():
 def _build_indicators_stub():
     """Build a shadow ``indicators`` module with real computations.
 
-    Strategy code calls ``from indicators import sma, ema, ...`` with
-    list inputs (``[b.close for b in history]``) and expects scalar
-    returns. These wrappers convert to pandas, call the real executor
-    indicators, and return the last value — matching the engine's
-    predicate evaluator so branch conditions evaluate identically.
+    Strategy code calls ``from indicators import sma, ema, ...`` and expects
+    scalar returns (the latest value), used directly in branch conditions. The
+    wrappers live in ``executor.strategy_indicators`` — the same scalar API the
+    streaming sandbox exposes — so the conformance shadow and the live sandbox
+    evaluate identical indicator values. Input coercion (``list[Bar]``,
+    ``deque``, …) is handled by the underlying ``executor.indicators`` helpers,
+    so no pre-wrapping is needed here.
+
+    Postconditions:
+        Returns a module object whose ``sma``/``ema``/``rsi``/``macd``/
+        ``bollinger_bands``/``atr``/``adx``/``stochastic``/``vwap`` attributes
+        are the scalar-returning helpers from ``executor.strategy_indicators``.
     """
     import types
 
-    import numpy as np
-    import pandas as pd
-
-    from ..executor import indicators as _real
+    from ..executor import strategy_indicators as _scalar
 
     mod = types.ModuleType("indicators")
-
-    def _last(series: pd.Series) -> float:
-        if series.empty:
-            return 0.0
-        val = series.iloc[-1]
-        if val is None or (isinstance(val, float) and np.isnan(val)):
-            return 0.0
-        return float(val)
-
-    def sma(data, period):
-        return _last(_real.sma(pd.Series(data), int(period)))
-
-    def ema(data, period):
-        return _last(_real.ema(pd.Series(data), int(period)))
-
-    def rsi(data, period=14):
-        return _last(_real.rsi(pd.Series(data), int(period)))
-
-    def macd(data, fast=12, slow=26, signal=9):
-        ml, sl, hist = _real.macd(
-            pd.Series(data), fast=int(fast), slow=int(slow), signal=int(signal)
-        )
-        return _last(ml), _last(sl), _last(hist)
-
-    def bollinger_bands(data, period=20, num_std=2.0):
-        upper, middle, lower = _real.bollinger_bands(
-            pd.Series(data), period=int(period), num_std=float(num_std)
-        )
-        return _last(upper), _last(middle), _last(lower)
-
-    def atr(high, low, close, period=14):
-        return _last(
-            _real.atr(pd.Series(high), pd.Series(low), pd.Series(close), period=int(period))
-        )
-
-    def adx(high, low, close, period=14):
-        return _last(
-            _real.adx(pd.Series(high), pd.Series(low), pd.Series(close), period=int(period))
-        )
-
-    def stochastic(high, low, close, k_period=14, d_period=3):
-        k, d = _real.stochastic(
-            pd.Series(high),
-            pd.Series(low),
-            pd.Series(close),
-            k_period=int(k_period),
-            d_period=int(d_period),
-        )
-        return _last(k), _last(d)
-
-    def vwap(high, low, close, volume):
-        return _last(
-            _real.vwap(pd.Series(high), pd.Series(low), pd.Series(close), pd.Series(volume))
-        )
-
-    mod.sma = sma
-    mod.ema = ema
-    mod.rsi = rsi
-    mod.macd = macd
-    mod.bollinger_bands = bollinger_bands
-    mod.atr = atr
-    mod.adx = adx
-    mod.stochastic = stochastic
-    mod.vwap = vwap
+    for _name in (
+        "sma",
+        "ema",
+        "rsi",
+        "macd",
+        "bollinger_bands",
+        "atr",
+        "adx",
+        "stochastic",
+        "vwap",
+    ):
+        setattr(mod, _name, getattr(_scalar, _name))
     return mod
 
 

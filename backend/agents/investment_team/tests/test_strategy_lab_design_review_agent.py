@@ -18,9 +18,11 @@ import pytest
 
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.agents.design_review import (
+    CritiqueIssue,
     DesignReviewAgent,
     SpecCritique,
     _coerce_critique,
+    format_prior_critiques,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab.spec_dsl import (
@@ -200,6 +202,44 @@ def test_prior_critiques_appear_in_prompt(monkeypatch: pytest.MonkeyPatch) -> No
     prompt = capture.calls[0]
     assert "Round 0" in prompt
     assert "Round-0 concern" in prompt
+
+
+def test_format_prior_critiques_empty_is_none_yet() -> None:
+    """Empty / ``None`` lineage renders the sentinel, not a blank block."""
+    assert format_prior_critiques(None) == "None yet."
+    assert format_prior_critiques([]) == "None yet."
+
+
+def test_format_prior_critiques_renders_per_issue_detail() -> None:
+    """Each prior critique renders a header line plus one indented line per
+    issue carrying severity, field, description, and suggested_fix — so a
+    later revision can see *what* an earlier round fixed (terse rationale and
+    all) and avoid regressing it."""
+    prior = [
+        SpecCritique(
+            ready=False,
+            rationale="terse",
+            round=0,
+            issues=[
+                CritiqueIssue(
+                    field="sizing",
+                    severity="critical",
+                    description="position too large",
+                    suggested_fix="cap fixed_fraction at 0.01",
+                ),
+                # An issue with no suggested_fix omits the "(fix: ...)" suffix.
+                CritiqueIssue(field="exit_rules", severity="warning", description="no stop"),
+            ],
+        )
+    ]
+
+    rendered = format_prior_critiques(prior)
+
+    assert "Round 0: ready=False (2 issues) — terse" in rendered
+    assert "- [critical] sizing: position too large (fix: cap fixed_fraction at 0.01)" in rendered
+    assert "- [warning] exit_rules: no stop" in rendered
+    # The fix-less issue must not render an empty "(fix: )" suffix.
+    assert "no stop (fix:" not in rendered
 
 
 # ---------------------------------------------------------------------------
@@ -522,3 +562,60 @@ def test_coerce_critique_default_threshold_demotes_warning() -> None:
     critique = _coerce_critique(parsed, [])
 
     assert critique.ready is False
+
+
+# ---------------------------------------------------------------------------
+# not-ready critiques must always carry a blocking open issue, so the
+# CritiqueLedger / stall detector and telemetry stay consistent with the
+# loop's ready=False revise behaviour.
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_critique_not_ready_info_only_gets_blocking_placeholder() -> None:
+    """A ``ready=false`` verdict carrying only ``info`` issues would present an
+    empty open set (the loop keeps revising on ready=false, but the ledger /
+    stall detector track only blocking issues). Coercion must synthesise a
+    blocking placeholder so ``open_issue_ids`` is non-empty, while keeping the
+    advisory info note."""
+    parsed = {
+        "ready": False,
+        "rationale": "not ready, minor note only",
+        "issues": [{"field": "sizing", "severity": "info", "description": "fyi"}],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False
+    # Open set (warnings + criticals) must be non-empty so stall detection and
+    # telemetry reflect that the loop has blocking work to do.
+    assert critique.open_issue_ids, critique.issues
+    # The original info note is preserved (advisory, not in the open set).
+    severities = sorted(i.severity for i in critique.issues)
+    assert "info" in severities
+    assert "warning" in severities
+
+
+def test_coerce_critique_not_ready_with_warning_unchanged() -> None:
+    """A ``ready=false`` verdict that already names a blocking issue is left
+    alone — no extra synthetic placeholder is appended."""
+    parsed = {
+        "ready": False,
+        "rationale": "needs work",
+        "issues": [{"field": "exit_rules", "severity": "warning", "description": "add tp"}],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False
+    assert len(critique.issues) == 1
+    assert critique.open_issue_ids == {critique.issues[0].issue_id}
+
+
+def test_coerce_critique_not_ready_no_issues_still_gets_placeholder() -> None:
+    """The pre-existing zero-issue not-ready contract still holds."""
+    parsed = {"ready": False, "rationale": "vague", "issues": []}
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False
+    assert len(critique.open_issue_ids) == 1
