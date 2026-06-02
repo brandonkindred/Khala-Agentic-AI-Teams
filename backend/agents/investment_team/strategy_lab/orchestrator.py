@@ -710,6 +710,48 @@ class StrategyLabOrchestrator:
             all_gate_results.extend(results)
         return results
 
+    def _committed_code_conformance_verdict(
+        self,
+        code: str,
+        spec: StrategySpec,
+        *,
+        all_gate_results: List[QualityGateResult],
+        refinement_round: int,
+        gate_name_prefix: str,
+    ) -> bool:
+        """Re-check predicate conformance on code committed *after* synthesis.
+
+        The post-synthesis commit paths — trade-alignment fixes
+        (``_run_alignment_round``) and zero-trade repair
+        (``_handle_critical_anomalies``) — replace the persisted ``code`` /
+        ``trades`` but do not otherwise re-run the predicate-conformance gate.
+        This re-runs it on the committed ``code`` / ``spec`` so the
+        ``ran_on_non_conforming_code`` flag describes the code that produced the
+        persisted backtest.
+
+        Pre: ``code`` / ``spec`` are a committed proposal that already executed
+        a real backtest; there is no further refinement round to repair drift,
+        so the gate runs at the demotion threshold (``attempt =
+        _code_conformance_retries()``) — any drift surfaces as a warning.
+        Post: appends the gate results to ``all_gate_results`` (with
+        ``gate_name_prefix``) and returns ``True`` iff the committed code is a
+        demotion-warning non-conformance. The verdict is computed *before*
+        ``record_gates`` prefixes ``gate_name`` (``_round_demoted_conformance``
+        matches the unprefixed ``"predicate_conformance"``). Compiled /
+        no-predicate specs return a passing "skipped" result and never flag.
+        """
+        results = self.predicate_conformance_gate.check(
+            code, spec, phase="verification", attempt=_code_conformance_retries()
+        )
+        verdict = _round_demoted_conformance(results)
+        self.record_gates(
+            results,
+            all_gate_results,
+            refinement_round=refinement_round,
+            gate_name_prefix=gate_name_prefix,
+        )
+        return verdict
+
     def build_orchestrator_gate(
         self,
         name: str,
@@ -1977,23 +2019,15 @@ class StrategyLabOrchestrator:
                         "via": "zero_trade_repair",
                     },
                 )
-                # The committed repair replaces the persisted trades/code, but
-                # the repairer does not re-run the predicate-conformance gate.
-                # Re-check it on the committed repair code (at the demotion
-                # threshold — there is no further repair round to fix drift) so
-                # the non-conforming flag describes the repaired backtest. The
-                # caller adopts this value only on commit; the generic-refine
-                # path below leaves it ``None`` (trades unchanged).
-                ztr_conformance = self.predicate_conformance_gate.check(
+                # The committed repair replaces the persisted trades/code;
+                # re-check predicate conformance on it so the non-conforming flag
+                # describes the repaired backtest (the repairer does not re-run
+                # the gate). The caller adopts this value only on commit; the
+                # generic-refine path below leaves it ``None`` (trades unchanged).
+                ztr_non_conforming = self._committed_code_conformance_verdict(
                     zt_outcome.new_code,
                     zt_outcome.new_spec,
-                    phase="verification",
-                    attempt=_code_conformance_retries(),
-                )
-                ztr_non_conforming = _round_demoted_conformance(ztr_conformance)
-                self.record_gates(
-                    ztr_conformance,
-                    all_gate_results,
+                    all_gate_results=all_gate_results,
                     refinement_round=round_num,
                     gate_name_prefix="zero_trade_repair_",
                 )
@@ -2446,25 +2480,13 @@ class StrategyLabOrchestrator:
                 )
             return _terminate()
 
-        # The committed proposal becomes the persisted backtest, but the
-        # alignment path does not otherwise re-run predicate conformance. Re-run
-        # it here on the proposed code so the non-conforming flag tracks the
-        # code that produced the persisted trades. There is no further
-        # refinement round to repair drift at this point, so the gate runs at
-        # the demotion threshold: any drift on the committed code surfaces as a
-        # warning and flags the record (compiled / no-predicate specs return a
-        # passing "skipped" result and never flag). The flag is computed before
-        # ``record_gates`` prefixes ``gate_name`` with ``alignment_``.
-        conformance_gates = self.predicate_conformance_gate.check(
+        # The committed proposal becomes the persisted backtest; re-check
+        # predicate conformance on it so the non-conforming flag tracks the
+        # committed code (the alignment path does not otherwise re-run the gate).
+        committed_non_conforming = self._committed_code_conformance_verdict(
             proposed_code,
             proposed_spec,
-            phase="verification",
-            attempt=_code_conformance_retries(),
-        )
-        committed_non_conforming = _round_demoted_conformance(conformance_gates)
-        self.record_gates(
-            conformance_gates,
-            all_gate_results,
+            all_gate_results=all_gate_results,
             refinement_round=align_round,
             gate_name_prefix="alignment_",
         )
