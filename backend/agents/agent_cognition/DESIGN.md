@@ -265,12 +265,17 @@ sequenceDiagram
 > source_run_id)` records a **`request_hash`** (canonical body) and a **lease**: a retry whose
 > hash matches a `completed`/`blocked` row **replays the stored envelope without re-invoking**;
 > a retry whose hash *differs* is rejected `409` (key reused for a different request, never
-> serve stale output); a retry while still `in_progress` with a **valid lease** returns `409`,
-> but once the **lease expires** (proxy crashed/killed mid-flight) the key is reclaimable so a
-> logical invoke is never wedged forever. `persist_writeback` also keys events on `(agent_id,
-> source_run_id, source_seq)` `ON CONFLICT DO NOTHING` as defense-in-depth. The residual
-> lost-ack and lease-reclaim windows are at-least-once, covered by requiring **platform-bound
-> tool handlers to be idempotent where feasible** (documented per tool).
+> serve stale output); a retry while still `in_progress` with a **valid lease** returns `409`.
+> Once the **lease expires** (proxy crashed/killed mid-flight) the row is **reclaimed in place,
+> not deleted** — `claim_run` atomically resets it to a fresh `in_progress`+lease while
+> **retaining the original `request_hash`**, so a post-expiry retry is still hash-checked (a
+> different body → `409`, the same body → re-execute). The **scheduler never deletes
+> `in_progress` rows**; it only GCs *terminal* (`completed`/`blocked`) rows after an
+> idempotency-retention TTL, so the hash needed to police retries is never dropped while a run
+> could still be retried. `persist_writeback` also keys events on `(agent_id, source_run_id,
+> source_seq)` `ON CONFLICT DO NOTHING` as defense-in-depth. The residual lost-ack and
+> lease-reclaim windows are at-least-once, covered by requiring **platform-bound tool handlers
+> to be idempotent where feasible** (documented per tool).
 >
 > **Payload cap applies to the final envelope:** `AGENT_INVOKE_MAX_PAYLOAD_BYTES` is enforced
 > on the assembled `{marker, input, cognition}` **after** the digest/rules are added (not just
@@ -299,7 +304,7 @@ sequenceDiagram
   REF->>PG: insert rule_proposals (action, target_rule_id, evidence+version, status=pending)
   Note over REF,PG: Nothing auto-activates — awaits operator approval
   SCH->>PG: prune events older than retention_days_events (folded into a non-stale summary)
-  SCH->>PG: reclaim run-ledger rows whose lease expired
+  SCH->>PG: GC terminal run-ledger rows past idempotency TTL (keep in_progress rows)
 ```
 
 > **Rollup input scoping (calendar-correct):** `month` aggregates the **days** in that
@@ -322,6 +327,18 @@ sequenceDiagram
 > whose evidence moved is
 > surfaced to the operator review queue rather than silently left in place. Out-of-order events
 > are normal: a closed period is only summarized once it has *no pending stale flag*.
+>
+> **Recompute vs. retention (two regimes):** a from-scratch recompute needs the period's raw
+> events, but retention prunes them past `retention_days_events`. So a late event is handled by
+> *which regime its period is in*: **(a) within retention** (raw rows still present) → mark
+> `stale` and **recompute from events** as above; **(b) already pruned** (raw rows gone) →
+> **never recompute from scratch** (that would rebuild the summary from only the late row and
+> destroy real history). Instead the late event is folded in by an **incremental amend**: the
+> existing summary is the base and `revise_summary(base_summary, [late_event])` produces a
+> revised summary (`version` bumped, `covers_through` extended), preserving everything already
+> captured. The same `(summary_id, version)` bump drives stale-evidence re-evaluation either
+> way. (Pruning a day's events is only permitted *after* its summary exists and is non-stale, so
+> regime (b) always has a base summary to amend.)
 
 ### 8.3 Rule lifecycle (state)
 
@@ -498,13 +515,13 @@ flowchart TB
 | **HITL gate** | Derived rules can never self-activate; operator approval required (audited via `decided_by`) |
 | **Operator authorization** | **All** cognition routes — reads *and* `approve`/`reject` — enforce an operator-auth check (operator token now, role later); `resolve_author` is provenance only and never the authz decision (see §10) |
 | **Idempotent execution** | `agent_cognition_runs` ledger keyed `(agent_id, source_run_id)` — a retry **replays the stored envelope without re-invoking the sandbox** (run-once for side effects); writeback `ON CONFLICT DO NOTHING` is defense-in-depth; lost-ack window relies on tool-level idempotency (see §8.1) |
-| **Ledger lease / no wedge** | `in_progress` claims carry a `lease_expires_at`; an expired lease (crashed proxy) is reclaimable so a logical invoke is never stuck at `409` forever |
+| **Ledger lease / no wedge** | `in_progress` claims carry a `lease_expires_at`; an expired lease (crashed proxy) is **reclaimed in place** (reset to a fresh lease, **`request_hash` retained**) so a logical invoke is never stuck at `409` forever and post-expiry retries are still hash-checked. Scheduler GCs only *terminal* rows (past an idempotency TTL), never `in_progress` ones |
 | **Replay-safety** | Ledger stores a `request_hash`; a retry whose body differs from the original is rejected `409` rather than served the prior response |
 | **Trusted tool audit** | The shim brokers all tool calls (platform-bound *and* sandbox-local) and emits an out-of-band audit; blocked runs persist the **shim** audit, not the model's self-reported writeback |
 | **Advisory vs enforced** | Only enforced rules are guaranteed (deterministic gate at the proxy). Advisory rules ride the side channel and are rendered by the agent runtime — best-effort, never proxy-edited prompts |
 | **Envelope marker** | The shim unwraps only on the namespaced `__khala_cognition_envelope__` marker; unmarked bodies pass through unchanged, so no existing input contract is misread |
 | **Payload cap on envelope** | `AGENT_INVOKE_MAX_PAYLOAD_BYTES` is applied to the assembled `{marker, input, cognition}`, and the digest is token-budgeted, so cognition can't push a near-limit request over the cap |
-| **Event retention** | The scheduler prunes raw events past each agent's `retention_days_events` (after they're folded into a non-stale summary); private memory isn't kept indefinitely |
+| **Event retention (lossless)** | The scheduler prunes raw events past `retention_days_events` only after they're in a non-stale summary; a *later* late event for an already-pruned period is folded via **incremental amend** of the existing summary, never a from-scratch recompute that would lose pruned history (see §8.2) |
 | **Input-contract isolation** | Cognition is delivered in a wrapper envelope `{input, cognition}` that the shim unwraps — the entrypoint receives only its declared `input`, never an injected `cognition` field that would break strict/non-object request models (see §10) |
 | **Blocked-run tool audit** | A postcondition-blocked output still persists sanitized `tool_call`/`outcome` records (real side effects already happened) while dropping the rejected output/untrusted memory |
 | **Stale-evidence re-evaluation** | Recomputed summaries bump `version`; pending proposals on stale evidence are flagged for re-eval/withdrawal and active derived rules resurface for operator review |

@@ -30,6 +30,7 @@ flowchart TB
   S5 --> S13[13 Seed packs + config]
   S9 --> S14[14 Generator wiring]
   S13 --> S14
+  S10 --> S14
   S12 --> S15[15 HITL review UI]
   S10 --> S16[16 Docs + e2e verification]
   S11 --> S16
@@ -66,10 +67,11 @@ flowchart TB
   (agent_id, source_run_id, source_seq) DO NOTHING`), `fetch_events_for_period`,
   `fetch_recent_events(top_n, by_salience)`, `upsert_summary`, `fetch_summaries(scale, …)`,
   `get_last_summary(scale)`, `mark_period_stale(agent_id, occurred_at)` (flags the containing
-  day/week/month/year summaries for recompute on late arrival), and
-  `prune_events(agent_id, retention_days)` (deletes raw events older than the cutoff **only**
-  where the containing day summary exists and is non-stale, so nothing unsummarized is lost).
-  Reuse `get_conn`, `Json`, `dict_row`, `@timed_query`. Every query filtered by `agent_id`.
+  summaries for recompute on late arrival; records whether the period's **raw events are still
+  retained** so Step 3 can choose recompute vs. amend), and `prune_events(agent_id,
+  retention_days)` (deletes raw events older than the cutoff **only** where the containing day
+  summary exists and is non-stale, so nothing unsummarized is lost). Reuse `get_conn`, `Json`,
+  `dict_row`, `@timed_query`. Every query filtered by `agent_id`.
 - **Depends:** 1
 - **✅ Acceptance:** append/fetch round-trip; `upsert_summary` idempotent on the unique key;
   **re-appending the same `(source_run_id, source_seq)` is a no-op**; a late event flags the
@@ -83,17 +85,21 @@ flowchart TB
   **calendar-scoped**: day←events, week←that week's days, **month←that month's days** (NOT
   weeks, which straddle month boundaries), year←that year's months. `ensure_rollups_current(
   agent_id, now)` is the single idempotent entry point that processes periods **not yet
-  summarized OR flagged `stale`**, recomputing a stale period, bumping its `version`, and
-  cascading the flag to parent scales; on recompute it also flags pending proposals /
-  active derived rules whose evidence references the changed summary `version` (handing off to
-  Step 6's re-evaluation). Uses `complete_validated(schema=PeriodSummary)`, `compact_text`,
+  summarized OR flagged `stale`**, bumping `version` and cascading staleness to parent scales.
+  **Two stale regimes** (see §8.2): if the period's **raw events are still retained**, recompute
+  from events; if they were **already pruned** (late event past retention), do an **incremental
+  amend** — `revise_summary(base_summary, [late_events])` extends the existing summary rather
+  than rebuilding from scratch (which would lose pruned history). Either way it flags pending
+  proposals / active derived rules whose evidence references the changed `version` (handing off
+  to Step 6). Uses `complete_validated(schema=PeriodSummary)`, `compact_text`,
   `get_client("cognition")`.
 - **Depends:** 2
 - **✅ Acceptance:** re-running produces no duplicates; a missed day is filled on next pass;
   **a month spanning a partial ISO week is summarized from days, not weeks** (no cross-month
-  bleed); a late event recomputes its period + parents (not skipped) **and flags
-  evidence-dependent proposals/rules**; hierarchical correctness + compaction tested with a
-  fake LLM client.
+  bleed); a late event in a **retained** period recomputes its period + parents; **a late event
+  in an already-pruned period amends the existing summary (does NOT rebuild from only the late
+  row)**; both flag evidence-dependent proposals/rules; hierarchical correctness + compaction
+  tested with a fake LLM client.
 
 ### Step 4 — Retrieval / digest builder
 - **Goal:** The compact memory block injected on invoke.
@@ -173,14 +179,18 @@ flowchart TB
 - **Files:** `context.py` — `ensure_rollups_current`, `load_context` (rules + digest →
   `CognitionContext`), `persist_writeback` (append events/tool calls keyed by `source_run_id`,
   **strip secrets**, bound salience), enforced pre/postcondition hooks, and the run-ledger
-  helpers `claim_run(request_hash, lease)` / `complete_run` / `replay_run` (claim is atomic:
-  insert-or-reclaim-expired-lease, compare `request_hash`, return replay/409/claim). Defines
-  the marker-wrapped envelope contract (`{__khala_cognition_envelope__, input, cognition}` in,
-  `{output, cognition_writeback}` out) consumed by the shim (Step 7) and proxy (Step 10).
+  helpers `claim_run(request_hash, lease)` / `complete_run` / `replay_run`. `claim_run` is a
+  single atomic statement that inserts a new row **or reclaims an expired-lease row in place
+  (resetting the lease but retaining the existing `request_hash`)**, compares `request_hash`,
+  and returns replay / 409 / claim. Defines the marker-wrapped envelope contract
+  (`{__khala_cognition_envelope__, input, cognition}` in, `{output, cognition_writeback}` out)
+  consumed by the shim (Step 7) and proxy (Step 10).
 - **Depends:** 4, 5, 7
 - **✅ Acceptance:** load/writeback round-trip; precondition-block path; secret-stripping on
   writeback; `claim_run`→`complete_run`→`replay_run` returns the stored envelope and a second
-  `claim_run` on a completed key signals replay (no re-execution).
+  `claim_run` on a completed key signals replay (no re-execution); **an expired-lease row is
+  reclaimed with its original `request_hash` intact, so a post-expiry retry with a different
+  body still returns 409** (reclaim never drops the hash).
 
 ### Step 9 — Manifest `CognitionSpec`
 - **Goal:** Declarative per-agent cognition config.
@@ -223,12 +233,16 @@ flowchart TB
 - **Goal:** Platform-side rollups/reflection + retention + ledger hygiene for all agents.
 - **Files:** `scheduler.py` — async loop (`AGENT_COGNITION_TICK_S`, default hourly) that per
   agent calls `ensure_rollups_current` + reflection, then **`prune_events` for the agent's
-  `retention_days_events`** and **reclaims `agent_cognition_runs` rows with an expired lease**;
-  started/cancelled in the unified_api lifespan (mirror `agent_console.prune.run_pruner`).
+  `retention_days_events`** and **GCs only *terminal* (`completed`/`blocked`)
+  `agent_cognition_runs` rows past an idempotency TTL**. It does **not** touch `in_progress`
+  rows — expired-lease reclaim is handled lazily by `claim_run` (Step 8) so the `request_hash`
+  survives for retry policing. Started/cancelled in the unified_api lifespan (mirror
+  `agent_console.prune.run_pruner`).
 - **Depends:** 3, 6
 - **✅ Acceptance:** tick rolls up due agents; clean cancel on shutdown; shares the idempotent
   function so it can't double-produce against the lazy path; **events past retention are
-  pruned** (summaries kept); **expired-lease ledger rows are cleared** so wedged keys recover.
+  pruned** (summaries kept); **only terminal ledger rows are GC'd** (an `in_progress` row with
+  an expired lease is left for `claim_run` to reclaim, preserving its `request_hash`).
 
 ### Step 12 — Operator HITL API
 - **Goal:** Review/inspect endpoints.
@@ -265,7 +279,8 @@ flowchart TB
   prompts — advisory rules are only effective if the runtime renders them) and returns
   `cognition_writeback`; update `AGENT_ANATOMY.md` to point §3/§4/§6 at the batteries-included
   core and document the side-channel contract.
-- **Depends:** 9, 13
+- **Depends:** 9, 10, 13 — the side channel a generated agent consumes is only delivered once
+  Step 10 wraps/unwraps the invoke envelope, so generator wiring must not land before it.
 - **✅ Acceptance:** generated manifest includes a valid `cognition` block; **the generated
   scaffold renders advisory rules into its system prompt and emits a writeback** (a generated
   agent demonstrably reflects an active advisory rule); anatomy doc updated.
