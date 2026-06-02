@@ -1089,25 +1089,35 @@ class StrategyLabOrchestrator:
                 (not r.passed) and r.severity == "critical" for r in readiness_results
             )
 
-            # Deterministic mechanical pre-flight: when the gate reports a
-            # critical, first attempt a fully-determined, semantics-preserving
-            # repair (timeframe data availability, position-cap bound) before
-            # spending an LLM ``revise`` round. Re-validate the repaired spec so
-            # ``deterministic_ready`` reflects the result; only criticals the
-            # machine cannot fix fall through to the LLM revise path below.
-            if not deterministic_ready and repair_enabled:
+            # Deterministic mechanical pre-flight, run before every review
+            # round regardless of the readiness verdict. It does two things:
+            #   * repairs mechanical readiness criticals (timeframe data
+            #     availability, position-cap bound) so they never cost an LLM
+            #     ``revise`` round; and
+            #   * trial-compiles the spec, flipping ``requires_custom_code`` on
+            #     ``CompilerError`` so a readiness-clean spec that is still
+            #     outside the deterministic-compiler envelope (e.g. a
+            #     ``volatility_target`` spec without an ATR predicate — readiness
+            #     only *warns* on that sizing mode) selects the custom-code path
+            #     here rather than being discovered later in synthesis.
+            # Re-validate only when a repair changed a readiness-relevant field
+            # (the compiler fallback flips ``requires_custom_code``, which the
+            # readiness signature does not cover, so it needs no re-validation).
+            if repair_enabled:
                 outcome = repair_spec(spec, config=config)
                 if outcome.actions:
                     prev_spec = spec.model_copy(deep=True)
                     spec = outcome.spec
-                    readiness_results = self.spec_readiness_gate.validate(
-                        spec, phase="design", backtest_config=config
-                    )
-                    self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
-                    last_readiness_signature = _spec_readiness_signature(spec)
-                    deterministic_ready = not any(
-                        (not r.passed) and r.severity == "critical" for r in readiness_results
-                    )
+                    repaired_signature = _spec_readiness_signature(spec)
+                    if repaired_signature != last_readiness_signature:
+                        readiness_results = self.spec_readiness_gate.validate(
+                            spec, phase="design", backtest_config=config
+                        )
+                        self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
+                        last_readiness_signature = repaired_signature
+                        deterministic_ready = not any(
+                            (not r.passed) and r.severity == "critical" for r in readiness_results
+                        )
                     mechanical_repair_count += len(outcome.actions)
                     emit(
                         "design_repair",

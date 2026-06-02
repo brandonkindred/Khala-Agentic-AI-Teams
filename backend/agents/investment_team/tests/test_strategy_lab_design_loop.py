@@ -694,6 +694,61 @@ def test_mechanical_repair_toggle_off_skips_preflight(
     assert record.loop_telemetry["mechanical_repairs"] == 0
 
 
+def test_trial_compile_runs_on_readiness_clean_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spec that *passes* readiness but is outside the deterministic-compiler
+    envelope has the custom-code path selected during the pre-flight — not
+    deferred to synthesis. ``requires_custom_code`` is flipped, a
+    ``design_repair`` event fires, and the reviewer still readies the spec with
+    zero LLM revise rounds."""
+    from investment_team.strategy_lab import mechanical_repair as mech
+    from investment_team.strategy_lab.synthesis import CompilerError
+
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+
+    review_calls = {"n": 0}
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        review_calls["n"] += 1
+        return SpecCritique(ready=True, rationale="ok")
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+
+    revise_calls = {"n": 0}
+
+    def _revise(*_a, **_kw) -> Tuple[Dict[str, Any], str]:
+        revise_calls["n"] += 1
+        return _spec_dict(), "should-not-be-used"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+
+    # _spec_dict() passes readiness (stocks/1d/cap5); force the pre-flight trial
+    # compile to reject it so the custom-code fallback fires on a clean-readiness
+    # spec. The custom-code path then routes through code_synthesis_agent.
+    def _compile_rejects(_spec: Any) -> str:
+        raise CompilerError("outside compiler envelope")
+
+    monkeypatch.setattr(mech, "compile_strategy", _compile_rejects)
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    events: list = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        on_phase=lambda phase, data: events.append((phase, data)),
+    )
+
+    assert revise_calls["n"] == 0
+    assert review_calls["n"] == 1
+    repair_events = [d for p, d in events if p == "design_repair"]
+    assert len(repair_events) == 1
+    assert any(a["rule"] == "compiler_fallback" for a in repair_events[0]["actions"])
+    # The custom-code decision was surfaced during design, not in synthesis.
+    assert record.strategy.requires_custom_code is True
+
+
 def test_mechanical_repair_enabled_env_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
     """``_mechanical_repair_enabled`` defaults to True and only the recognised
     truthy tokens enable it; everything else (including garbage) disables."""
