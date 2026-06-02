@@ -377,9 +377,10 @@ def test_bare_annassign_universe_replaced() -> None:
     assert _universe_assign_count(out) == 1
 
 
-def test_non_self_receiver_guard_uses_actual_receiver() -> None:
-    """When on_bar's instance parameter is not ``self``, the guard must read
-    ``<receiver>.UNIVERSE`` — hard-coding ``self`` would NameError at runtime."""
+def test_non_self_receiver_normalized_to_self() -> None:
+    """A non-``self`` instance parameter is renamed to ``self`` (with its body
+    references rewritten) so the guard reads ``self.UNIVERSE`` — both
+    runtime-correct and accepted by the conformance gate's recognizer."""
     spec = _spec(target_symbols=["QQQ"])
     src = textwrap.dedent(
         """
@@ -387,12 +388,35 @@ def test_non_self_receiver_guard_uses_actual_receiver() -> None:
 
         class S(Strategy):
             def on_bar(strategy, ctx, bar):
+                pos = strategy.position(bar.symbol)
                 ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
         """
     )
     out = inject_universe_and_guard(src, spec)
-    assert "strategy.UNIVERSE" in out
-    assert "self.UNIVERSE" not in out
+    assert "self.UNIVERSE" in out
+    assert "self.position(bar.symbol)" in out  # receiver reference rewritten
+    assert "strategy" not in out
+    assert _has_universe_guard_in_on_bar(_cls(out))  # gate recognizer accepts it
+    compile(out, "<injected>", "exec")
+
+
+def test_non_self_receiver_with_self_collision_left_for_gate() -> None:
+    """If the body already binds a distinct ``self``, renaming would shadow it;
+    the injector leaves the receiver alone (the gate then flags it)."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(strategy, ctx, bar):
+                self = 1
+                return self
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    # Receiver not renamed; guard still inserted against the original receiver.
+    assert "def on_bar(strategy, ctx, bar):" in out
     compile(out, "<injected>", "exec")
 
 
@@ -420,9 +444,13 @@ def test_duplicate_on_bar_guards_runtime_effective_method() -> None:
         for n in _cls(out).body
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "on_bar"
     ]
-    last = on_bars[-1]
-    first = last.body[0]
-    assert isinstance(first, ast.If) and any(isinstance(op, ast.NotIn) for op in first.test.ops)
+    # Every on_bar is guarded — the gate inspects the first, Python runs the
+    # last, so both must carry the guard for the gate to pass AND the runtime
+    # method to be protected.
+    for ob in on_bars:
+        first = ob.body[0]
+        assert isinstance(first, ast.If) and any(isinstance(op, ast.NotIn) for op in first.test.ops)
+    assert _has_universe_guard_in_on_bar(_cls(out))  # gate (inspects first) passes
     assert "submit_order" in out  # the runtime method's logic is preserved
 
 

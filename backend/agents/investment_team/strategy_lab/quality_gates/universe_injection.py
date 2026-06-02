@@ -89,17 +89,22 @@ def inject_universe_and_guard(source: str, spec) -> str:
     cls = classes[0]
 
     expected = sorted(set(symbols))
-    on_bar = _find_on_bar_method(cls)
-    if _existing_universe_symbols(cls) == expected and _first_stmt_is_correct_guard(on_bar):
+    on_bars = _find_on_bar_methods(cls)
+    if (
+        _existing_universe_symbols(cls) == expected
+        and len(on_bars) == 1
+        and _is_canonical_on_bar(on_bars[0])
+    ):
         # Already fully canonical: a single UNIVERSE binding listing exactly the
-        # spec's symbols, and the *first* statement of on_bar is the guard
-        # referencing the method's actual third parameter (the deterministic
-        # compiler path always is). Return the source verbatim rather than
-        # round-tripping it through ``ast.unparse``, which would reformat the
-        # module and strip comments — a needless mutation that also churns the
-        # code hash / drift log. Anything short of canonical — stale symbols, a
-        # guard buried after trading logic, a guard bound to the wrong name, or
-        # multiple UNIVERSE bindings — falls through and is rewritten below.
+        # spec's symbols, and a single on_bar whose *first* statement is the
+        # guard, bound to ``self.UNIVERSE`` and the method's actual bar
+        # parameter (the deterministic compiler path always is). Return the
+        # source verbatim rather than round-tripping it through ``ast.unparse``,
+        # which would reformat the module and strip comments — a needless
+        # mutation that also churns the code hash / drift log. Anything short of
+        # canonical — stale symbols, a guard buried after trading logic, a guard
+        # bound to the wrong name, a non-``self`` receiver, or multiple UNIVERSE
+        # / on_bar definitions — falls through and is rewritten below.
         return source
 
     # 1. Replace the UNIVERSE constant: drop any existing class-level binding
@@ -109,15 +114,21 @@ def inject_universe_and_guard(source: str, spec) -> str:
     cls.body = _strip_universe_assignments(cls.body)
     cls.body.insert(0, _build_universe_assign(expected))
 
-    # 2. Replace the on_bar guard when the signature supports it. Strip only
-    #    bare guards (no ``else`` body, whose removal can't drop trading logic),
-    #    then prepend the canonical guard so it runs before any signal logic.
-    if on_bar is not None:
+    # 2. Guard EVERY on_bar definition whose signature supports it. The
+    #    conformance gate inspects the first definition while Python runs the
+    #    last, so guarding all of them keeps the gate-checked and the
+    #    runtime-effective method consistent. For each, normalize the instance
+    #    parameter to ``self`` (so the emitted ``self.UNIVERSE`` is both
+    #    runtime-correct and accepted by the gate's recognizer), strip only bare
+    #    guards (no ``else`` body, whose removal can't drop trading logic), then
+    #    prepend the canonical guard so it runs before any signal logic.
+    for on_bar in on_bars:
         bar_param = _bar_parameter_name(on_bar)
-        if bar_param is not None:
-            receiver = on_bar.args.args[0].arg
-            on_bar.body = [stmt for stmt in on_bar.body if not _is_strippable_guard(stmt)]
-            on_bar.body.insert(0, _build_guard_stmt(bar_param, receiver))
+        if bar_param is None:
+            continue
+        _normalize_receiver_to_self(on_bar)
+        on_bar.body = [stmt for stmt in on_bar.body if not _is_strippable_guard(stmt)]
+        on_bar.body.insert(0, _build_guard_stmt(bar_param))
 
     ast.fix_missing_locations(tree)
     try:
@@ -217,29 +228,54 @@ def _build_universe_assign(symbols: list[str]) -> ast.stmt:
     return ast.parse(f"UNIVERSE = {literal}").body[0]
 
 
-def _build_guard_stmt(bar_param: str, receiver: str) -> ast.stmt:
-    """Build ``if <bar_param>.symbol not in <receiver>.UNIVERSE: return``.
+def _build_guard_stmt(bar_param: str) -> ast.stmt:
+    """Build ``if <bar_param>.symbol not in self.UNIVERSE: return``.
 
-    ``receiver`` is on_bar's actual first (instance) parameter — usually
-    ``self``, but the engine binds positionally, so ``def on_bar(strategy,
-    ctx, bar)`` is valid and the guard must read ``strategy.UNIVERSE`` to avoid
-    a runtime ``NameError`` on an undefined ``self``.
+    The receiver is always ``self`` because the injector normalizes on_bar's
+    instance parameter to ``self`` first (see ``_normalize_receiver_to_self``).
+    ``self.UNIVERSE`` is both runtime-correct and what the conformance gate's
+    ``_has_universe_guard_in_on_bar`` recognizer accepts.
     """
-    return ast.parse(f"if {bar_param}.symbol not in {receiver}.UNIVERSE:\n    return").body[0]
+    return ast.parse(f"if {bar_param}.symbol not in self.UNIVERSE:\n    return").body[0]
 
 
-def _find_on_bar_method(cls: ast.ClassDef):
-    """Return the *runtime-effective* ``on_bar`` method (sync or async), or None.
+def _find_on_bar_methods(cls: ast.ClassDef) -> list:
+    """Return every ``on_bar`` method (sync or async) defined on ``cls``.
 
-    When a class defines ``on_bar`` more than once Python keeps the **last**
-    definition, so the guard must be injected there — guarding an earlier
-    shadowed copy would leave the method that actually runs unguarded.
+    A class may erroneously define ``on_bar`` more than once: the conformance
+    gate inspects the first, Python runs the last. The injector guards all of
+    them so the gate-checked and runtime-effective methods stay consistent.
     """
-    found = None
-    for node in cls.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "on_bar":
-            found = node
-    return found
+    return [
+        node
+        for node in cls.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "on_bar"
+    ]
+
+
+def _normalize_receiver_to_self(on_bar: ast.FunctionDef) -> None:
+    """Rename on_bar's first (instance) parameter to ``self`` in place.
+
+    The engine binds positionally, so ``def on_bar(strategy, ctx, bar)`` runs
+    fine — but the guard must read ``self.UNIVERSE`` (the gate recognizer only
+    accepts ``self``/bare ``UNIVERSE``), which would ``NameError`` against an
+    undefined ``self``. Renaming the parameter and every reference to it keeps
+    the guard both gate-conformant and runtime-correct. No-op when the receiver
+    is already ``self``; skipped (left for the gate to flag) in the rare case
+    the body already binds a distinct ``self`` that a rename would shadow.
+    """
+    receiver = on_bar.args.args[0].arg
+    if receiver == "self":
+        return
+    if any(
+        isinstance(n, ast.Name) and n.id == "self" for stmt in on_bar.body for n in ast.walk(stmt)
+    ):
+        return
+    on_bar.args.args[0].arg = "self"
+    for stmt in on_bar.body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Name) and node.id == receiver:
+                node.id = "self"
 
 
 def _bar_parameter_name(on_bar) -> str | None:
@@ -268,24 +304,24 @@ def _is_strippable_guard(stmt: ast.stmt) -> bool:
     return _is_universe_guard_stmt(stmt) and not getattr(stmt, "orelse", None)
 
 
-def _first_stmt_is_correct_guard(on_bar) -> bool:
-    """True iff ``on_bar``'s first statement is the canonical universe guard.
+def _is_canonical_on_bar(on_bar) -> bool:
+    """True iff ``on_bar`` is already in canonical guarded form.
 
-    Requires the method to have a usable third parameter and its very first
-    statement to be a bare guard (no ``else``) whose receiver is exactly that
-    parameter — so non-target bars are rejected before any signal logic and the
-    guard can never raise ``NameError`` on a renamed parameter. Anything weaker
-    (guard buried later, bound to the wrong name, or carrying an ``else``) is
-    not canonical and must be rewritten.
+    Requires a ``self`` instance parameter, a usable third (bar) parameter, and
+    a first statement that is a bare guard (no ``else``) reading
+    ``<bar_param>.symbol not in self.UNIVERSE`` — so non-target bars are
+    rejected before any signal logic, the guard never raises ``NameError``, and
+    the shape matches the conformance gate's recognizer. Anything weaker (guard
+    buried later, wrong bar name, non-``self`` receiver, or an ``else``) is not
+    canonical and must be rewritten.
     """
-    if on_bar is None:
-        return False
     bar_param = _bar_parameter_name(on_bar)
-    if bar_param is None or not on_bar.body:
+    if bar_param is None or on_bar.args.args[0].arg != "self" or not on_bar.body:
         return False
     first = on_bar.body[0]
     if not _is_strippable_guard(first):
         return False
     # ``_is_universe_guard_stmt`` guarantees ``first.test.left`` is
-    # ``<Name>.symbol``; require that ``<Name>`` is the actual bar parameter.
+    # ``<Name>.symbol`` and the right side is ``self.UNIVERSE`` or bare
+    # ``UNIVERSE``; require the left ``<Name>`` to be the actual bar parameter.
     return first.test.left.value.id == bar_param
