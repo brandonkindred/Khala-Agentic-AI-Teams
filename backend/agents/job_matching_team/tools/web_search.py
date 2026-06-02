@@ -120,7 +120,7 @@ class OllamaWebSearch:
                 f"Ollama web search failed with status {resp.status_code}: {resp.text}"
             )
 
-        raw_results = (resp.json() or {}).get("results", []) or []
+        raw_results = (self._parse_json(resp) or {}).get("results", []) or []
         results: List[SearchResult] = []
         for idx, item in enumerate(raw_results[:limit], start=1):
             url_str = item.get("url")
@@ -136,3 +136,22 @@ class OllamaWebSearch:
                 )
             )
         return results
+
+    @staticmethod
+    def _parse_json(resp: httpx.Response) -> dict:
+        """Decode a 200 response body as JSON, surfacing a clean error.
+
+        Preconditions:
+            * ``resp`` is a 2xx response whose body should be JSON.
+        Postconditions:
+            * Returns the decoded object.
+        Raises:
+            WebSearchError: when the body is not valid JSON, so callers see the
+                tool's documented error type rather than a raw decode error.
+        """
+        try:
+            return resp.json() or {}
+        except ValueError as exc:
+            raise WebSearchError(
+                f"Ollama web search returned status 200 but a non-JSON body: {exc}"
+            ) from exc

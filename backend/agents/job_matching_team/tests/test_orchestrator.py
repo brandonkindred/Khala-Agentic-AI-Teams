@@ -127,6 +127,26 @@ def test_failure_marks_run_failed_and_reraises():
     assert "scan exploded" in store.failed[1]
 
 
+def test_save_failure_marks_run_failed_but_still_returns():
+    class BadSaveStore(RecordingStore):
+        def save_results(self, *a, **k):
+            raise RuntimeError("disk full")
+
+    store = BadSaveStore()
+    orch = JobMatchingOrchestrator(
+        query_builder=FakeQB(),
+        scanner=FakeScanner(_make_postings(2)),
+        ranker=FakeRanker(),
+        store=store,
+    )
+    # The scan still returns results to the caller...
+    resp = orch.run(JobMatchRequest(), profile=JobSeekerProfile())
+    assert resp.total_ranked == 2
+    # ...but the run row is marked failed rather than left stuck in RUNNING.
+    assert store.failed is not None
+    assert store.failed[0] == resp.run_id
+
+
 def test_create_run_failure_degrades_gracefully():
     class BadCreateStore(RecordingStore):
         def create_run(self, *a, **k):

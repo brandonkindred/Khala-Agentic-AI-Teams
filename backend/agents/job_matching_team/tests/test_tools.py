@@ -87,6 +87,16 @@ def test_search_non_200_raises(monkeypatch):
         OllamaWebSearch(api_key="k").search("q")
 
 
+def test_search_200_with_non_json_body_raises_websearcherror(monkeypatch):
+    # A 200 with a malformed/non-JSON body must surface as WebSearchError,
+    # not a raw JSONDecodeError, per the method's documented contract.
+    _patch_client(
+        monkeypatch, web_search, lambda req: httpx.Response(200, text="<html>not json</html>")
+    )
+    with pytest.raises(WebSearchError, match="non-JSON body"):
+        OllamaWebSearch(api_key="k").search("q")
+
+
 def test_search_validates_args():
     s = OllamaWebSearch(api_key="k")
     with pytest.raises(AssertionError):

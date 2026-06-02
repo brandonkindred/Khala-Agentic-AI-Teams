@@ -103,6 +103,14 @@ class JobMatchingOrchestrator:
                     )
                 except Exception:  # noqa: BLE001
                     logger.warning("Failed to save results for run %s", run_id, exc_info=True)
+                    # Don't leave the run stuck in RUNNING; record the persistence
+                    # failure so it isn't mistaken for an in-flight scan.
+                    try:
+                        store.mark_failed(run_id, "persisting results failed")
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to mark run %s failed after save error", run_id, exc_info=True
+                        )
 
             return JobMatchResponse(
                 run_id=run_id,
