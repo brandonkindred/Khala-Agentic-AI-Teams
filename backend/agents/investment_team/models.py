@@ -1125,6 +1125,16 @@ class StrategyLabRecord(BaseModel):
             "rows and on paths that bypass the design loop."
         ),
     )
+    ran_on_non_conforming_code: bool = Field(
+        default=False,
+        description=(
+            "True when the cycle's backtest executed custom code that failed "
+            "the predicate-conformance gate and was demoted to a warning past "
+            "the configured retry budget rather than being repaired. False on "
+            "legacy rows, compiled-path rows, and conforming custom-code rows. "
+            "Mirrors loop_telemetry['ran_on_non_conforming_code']."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

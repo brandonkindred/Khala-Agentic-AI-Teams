@@ -110,6 +110,13 @@ class _AlignmentLoopOutcome:
     alignment_reports: List[Any] = field(default_factory=list)
     trades_aligned: bool = False
     rejection_reason: Optional[str] = None
+    # True when the persisted backtest ran on custom code whose
+    # predicate-conformance check is non-conforming. Initialised from the
+    # synthesis-loop value and re-derived whenever an alignment round commits
+    # new code (which replaces the persisted trades but is not otherwise
+    # conformance-gated), so it always tracks the code that produced the
+    # returned ``trades``/``metrics``.
+    ran_on_non_conforming_code: bool = False
 
     @property
     def alignment_rounds(self) -> int:
@@ -139,6 +146,10 @@ class _AlignmentRoundOutcome:
     trades: List[TradeRecord]
     metrics: BacktestResult
     terminate: bool
+    # Set on a committing round (``terminate=False``) to the conformance
+    # verdict of the just-committed code; ignored on terminate rounds (which
+    # carry the unchanged pre-iteration state).
+    ran_on_non_conforming_code: bool = False
 
 
 @dataclass
@@ -166,6 +177,12 @@ class _AnomalyRecoveryOutcome:
     metrics: BacktestResult
     exec_result: StrategyRunResult
     exhausted: bool
+    # Set only when a zero-trade repair commits new code (which replaces the
+    # persisted trades but is not otherwise conformance-gated): the conformance
+    # verdict of the committed repair code. ``None`` on the generic-refinement
+    # path, which leaves ``trades`` unchanged so the round's existing verdict
+    # still applies and must not be overwritten.
+    ran_on_non_conforming_code: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -605,6 +622,13 @@ class _SynthesisLoopOutcome:
     # round, even when intermediate rounds tripped the trap and were
     # repaired by refinement.
     runtime_lookahead_violation: bool = False
+    # True iff the round that produced the persisted ``trades``/``metrics`` ran
+    # custom code whose predicate-conformance check was demoted (warning) past
+    # the retry budget. Captured at trade-collection time so it tracks the
+    # backtest that is actually persisted — a later round that passes
+    # conformance but fails execution before collecting new trades leaves this
+    # reflecting the earlier demoted round whose backtest still stands.
+    ran_on_non_conforming_code: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────
