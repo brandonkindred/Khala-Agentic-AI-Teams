@@ -978,9 +978,18 @@ class StrategyLabOrchestrator:
             # Per-cycle LLM-call budget hit mid-design. Surface whatever
             # spec/critique state we reached as a not-ready outcome tagged
             # ``budget_exhausted`` so the caller short-circuits with a
-            # distinct status. ``spec`` is None only if the very first
-            # ``run()`` tripped — fall back to a defaults spec so the audit
-            # record is still well-formed.
+            # distinct status. The tuple-return assignment above only runs on a
+            # successful return, so prefer the latest in-loop spec/rationale the
+            # review-rounds helper annotated on the exception (post
+            # mechanical-repair / pre-trip) — otherwise the record would carry
+            # the pre-loop draft even though a ``design_repair`` already fired
+            # and readiness was revalidated against the repaired spec.
+            latest_spec = getattr(exc, "latest_spec", None)
+            if latest_spec is not None:
+                spec = latest_spec
+                rationale = getattr(exc, "latest_rationale", rationale)
+            # ``spec`` is None only if the very first ``run()`` tripped — fall
+            # back to a defaults spec so the audit record is still well-formed.
             if spec is None:
                 spec = self._build_spec_from_dict({}, strategy_id=strategy_id)
             emit(
@@ -1150,11 +1159,21 @@ class StrategyLabOrchestrator:
                     "design_review",
                     {"sub_phase": "started", "round": review_round},
                 )
-                critique = self.design_review_agent.run(
-                    spec,
-                    readiness_results,
-                    prior_critiques=critique_history,
-                )
+                try:
+                    critique = self.design_review_agent.run(
+                        spec,
+                        readiness_results,
+                        prior_critiques=critique_history,
+                    )
+                except DesignBudgetExhausted as exc:
+                    # The budget handler in ``_run_design_loop`` only captures
+                    # this helper's spec/rationale on the success-return path;
+                    # surface the latest in-loop spec (post mechanical-repair) so
+                    # the short-circuit record reflects the spec actually
+                    # evaluated, not the pre-loop draft.
+                    exc.latest_spec = spec
+                    exc.latest_rationale = rationale
+                    raise
                 critique.round = review_round
                 critique_history.append(critique)
                 delta = ledger.record_round(critique)
@@ -1243,12 +1262,19 @@ class StrategyLabOrchestrator:
             # the round — that risks deadlock if the model cannot avoid it).
             regression_notice = _format_regression_notice(critique, delta.regressed)
             prev_spec = spec.model_copy(deep=True)
-            strategy_dict, rationale = self.design_agent.revise(
-                spec,
-                critique,
-                prior_critiques=critique_history,
-                regression_notice=regression_notice,
-            )
+            try:
+                strategy_dict, rationale = self.design_agent.revise(
+                    spec,
+                    critique,
+                    prior_critiques=critique_history,
+                    regression_notice=regression_notice,
+                )
+            except DesignBudgetExhausted as exc:
+                # As above: revise has not yet produced a new spec, so the latest
+                # fully-realised spec is the current (post mechanical-repair) one.
+                exc.latest_spec = spec
+                exc.latest_rationale = rationale
+                raise
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
             if drift_collector is not None:
                 drift_collector.record_spec_change(

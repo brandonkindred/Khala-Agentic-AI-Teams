@@ -749,6 +749,49 @@ def test_trial_compile_runs_on_readiness_clean_spec(monkeypatch: pytest.MonkeyPa
     assert record.strategy.requires_custom_code is True
 
 
+def test_budget_exhaustion_after_repair_preserves_repaired_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the budget trips on the review call that follows a mechanical repair,
+    the short-circuit record must carry the *repaired* spec (the one readiness
+    was revalidated against and a ``design_repair`` event was emitted for), not
+    the pre-loop draft."""
+    from investment_team.strategy_lab import mechanical_repair as mech
+
+    # Budget 1: design_agent.run charges 1; the round-0 review charge trips.
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "1")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "10")
+    orch = StrategyLabOrchestrator()
+
+    def _run(**_kw) -> Tuple[Dict[str, Any], str]:
+        charge_active_budget()
+        return _mechanical_spec_dict(), "scripted"
+
+    monkeypatch.setattr(orch.design_agent, "run", _run)
+
+    def _review(*_a, **_kw) -> SpecCritique:
+        charge_active_budget()  # trips the budget after the repair
+        return SpecCritique(ready=True)
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+    monkeypatch.setattr(
+        orch.design_agent, "revise", lambda *a, **kw: (_mechanical_spec_dict(), "x")
+    )
+    monkeypatch.setattr(mech, "compile_strategy", lambda _spec: _VALID_CODE)
+
+    def _market_must_not_run(self, *_a, **_kw):
+        raise AssertionError("synthesis must not run on budget exhaustion")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert record.backtest.status == "failed: budget_exhausted"
+    # The repaired spec is preserved (forex/1h/40% draft → 1d/25% after repair).
+    assert record.strategy.timeframe == "1d"
+    assert record.strategy.risk_limits.max_position_pct == 25.0
+
+
 def test_mechanical_repair_enabled_env_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
     """``_mechanical_repair_enabled`` defaults to True and only the recognised
     truthy tokens enable it; everything else (including garbage) disables."""
