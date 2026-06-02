@@ -605,6 +605,13 @@ class _SynthesisLoopOutcome:
     # round, even when intermediate rounds tripped the trap and were
     # repaired by refinement.
     runtime_lookahead_violation: bool = False
+    # True iff the round that produced the persisted ``trades``/``metrics`` ran
+    # custom code whose predicate-conformance check was demoted (warning) past
+    # the retry budget. Captured at trade-collection time so it tracks the
+    # backtest that is actually persisted — a later round that passes
+    # conformance but fails execution before collecting new trades leaves this
+    # reflecting the earlier demoted round whose backtest still stands.
+    ran_on_non_conforming_code: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────

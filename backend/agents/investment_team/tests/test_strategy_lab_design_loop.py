@@ -1339,137 +1339,85 @@ class _CustomSpec:
     requires_custom_code = True
 
 
-def _demoted_conformance_gate(
-    details: str = "rule_id=entry[0]: predicate conformance failed.\n  ...",
-):
+def _pc_result(*, passed: bool, severity: str, details: str) -> QualityGateResult:
     return QualityGateResult(
         gate_name="predicate_conformance",
-        passed=False,
-        severity="warning",
+        passed=passed,
+        severity=severity,
         phase="synthesis",
         details=details,
     )
 
 
-def test_finalize_loop_telemetry_flags_non_conforming() -> None:
-    """A demoted predicate-conformance warning marks the backtest non-conforming."""
-    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+class TestRoundDemotedConformance:
+    """`_round_demoted_conformance` attributes the verdict to a single round."""
 
-    telemetry = _finalize_loop_telemetry(
-        _non_conforming_ctx(),
-        [_demoted_conformance_gate()],
-        _CustomSpec(),
-        code="def on_bar(): ...",
-    )
-    assert telemetry["ran_on_non_conforming_code"] is True
+    def test_demoted_warning_is_true(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
 
+        demoted = _pc_result(
+            passed=False,
+            severity="warning",
+            details="rule_id=entry[0]: predicate conformance failed.",
+        )
+        assert _round_demoted_conformance([demoted]) is True
 
-def test_finalize_loop_telemetry_not_flagged_when_critical() -> None:
-    """An un-demoted critical conformance failure never reached a settled backtest."""
-    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+    def test_critical_is_false(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
 
-    critical = QualityGateResult(
-        gate_name="predicate_conformance",
-        passed=False,
-        severity="critical",
-        phase="synthesis",
-        details="rule_id=entry[0]: predicate conformance failed.",
-    )
-    telemetry = _finalize_loop_telemetry(
-        _non_conforming_ctx(), [critical], _CustomSpec(), code="def on_bar(): ..."
-    )
-    assert telemetry["ran_on_non_conforming_code"] is False
+        critical = _pc_result(
+            passed=False,
+            severity="critical",
+            details="rule_id=entry[0]: predicate conformance failed.",
+        )
+        assert _round_demoted_conformance([critical]) is False
 
+    def test_unsynthesizable_warning_is_false(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
 
-def test_finalize_loop_telemetry_not_flagged_for_unsynthesizable_warning() -> None:
-    """A 'could not check' warning must NOT mark the backtest non-conforming."""
-    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+        unsynth = _pc_result(
+            passed=False,
+            severity="warning",
+            details="Fixture unsynthesizable: no forcing sequence",
+        )
+        assert _round_demoted_conformance([unsynth]) is False
 
-    unsynth = _demoted_conformance_gate(details="Fixture unsynthesizable: no forcing sequence")
-    telemetry = _finalize_loop_telemetry(
-        _non_conforming_ctx(), [unsynth], _CustomSpec(), code="def on_bar(): ..."
-    )
-    assert telemetry["ran_on_non_conforming_code"] is False
+    def test_passing_conformance_is_false(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
 
+        ok = _pc_result(
+            passed=True, severity="info", details="Predicate conformance OK (60 bars checked)."
+        )
+        assert _round_demoted_conformance([ok]) is False
 
-def test_finalize_loop_telemetry_not_flagged_compiled() -> None:
-    """The compiled path runs no conformance gate, so the flag stays False."""
-    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+    def test_no_conformance_gate_is_false(self) -> None:
+        from investment_team.strategy_lab.orchestrator import _round_demoted_conformance
 
-    class _CompiledSpec:
-        requires_custom_code = False
-
-    gates = [
-        QualityGateResult(
+        other = QualityGateResult(
             gate_name="code_conformance",
             passed=True,
             severity="info",
             phase="synthesis",
             details="ok",
         )
-    ]
-    telemetry = _finalize_loop_telemetry(
-        _non_conforming_ctx(), gates, _CompiledSpec(), code="def on_bar(): ..."
-    )
-    assert telemetry["ran_on_non_conforming_code"] is False
-    assert telemetry["code_path"] == "compiled"
+        assert _round_demoted_conformance([other]) is False
 
 
-def test_finalize_loop_telemetry_uses_settled_round_not_history() -> None:
-    """An early demoted warning repaired by a later round must NOT flag the
-    record — the persisted backtest came from the conforming settled round."""
+def test_finalize_loop_telemetry_stores_non_conforming_flag() -> None:
+    """`_finalize_loop_telemetry` records the loop-captured flag verbatim."""
     from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
 
-    early_demoted = QualityGateResult(
-        gate_name="predicate_conformance",
-        passed=False,
-        severity="warning",
-        phase="synthesis",
-        details="rule_id=entry[0]: predicate conformance failed.",
-        refinement_round=0,
-    )
-    settled_clean = QualityGateResult(
-        gate_name="predicate_conformance",
-        passed=True,
-        severity="info",
-        phase="synthesis",
-        details="Predicate conformance OK (60 bars checked).",
-        refinement_round=2,
-    )
-    telemetry = _finalize_loop_telemetry(
+    flagged = _finalize_loop_telemetry(
         _non_conforming_ctx(),
-        [early_demoted, settled_clean],
+        [],
         _CustomSpec(),
         code="def on_bar(): ...",
+        ran_on_non_conforming_code=True,
     )
-    assert telemetry["ran_on_non_conforming_code"] is False
+    assert flagged["ran_on_non_conforming_code"] is True
 
-
-def test_finalize_loop_telemetry_flags_demoted_settled_round() -> None:
-    """A demotion in the settled (highest) round flags the record even when an
-    earlier round's conformance passed."""
-    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
-
-    early_clean = QualityGateResult(
-        gate_name="predicate_conformance",
-        passed=True,
-        severity="info",
-        phase="synthesis",
-        details="Predicate conformance OK (60 bars checked).",
-        refinement_round=0,
+    # Default (e.g. short-circuit records) is False.
+    default = _finalize_loop_telemetry(
+        _non_conforming_ctx(), [], _CustomSpec(), code="def on_bar(): ..."
     )
-    settled_demoted = QualityGateResult(
-        gate_name="predicate_conformance",
-        passed=False,
-        severity="warning",
-        phase="synthesis",
-        details="rule_id=entry[0]: predicate conformance failed.",
-        refinement_round=2,
-    )
-    telemetry = _finalize_loop_telemetry(
-        _non_conforming_ctx(),
-        [early_clean, settled_demoted],
-        _CustomSpec(),
-        code="def on_bar(): ...",
-    )
-    assert telemetry["ran_on_non_conforming_code"] is True
+    assert default["ran_on_non_conforming_code"] is False

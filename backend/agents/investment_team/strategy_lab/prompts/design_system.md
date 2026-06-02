@@ -185,7 +185,9 @@ Whenever your hypothesis or signal definition names specific tickers (e.g. "QQQ 
 
 **Absent / `false` is the strong default. Setting it `true` is rare.**
 
-The deterministic compiler covers the **entire** indicator catalogue, **all** comparison operators (`<`, `>`, `<=`, `>=`, `==`, `cross_above`, `cross_below`), and **all** sources above. Any strategy whose entry and exit triggers are each a single `Predicate` is **always** compilable — custom code buys you nothing there, and it does NOT unlock indicator-of-indicator, arithmetic, or multi-condition predicates (the DSL has no such forms regardless of this flag).
+The deterministic compiler covers the **entire** indicator catalogue, **all** comparison operators (`<`, `>`, `<=`, `>=`, `==`, `cross_above`, `cross_below`), and **all** sources above, so a strategy whose entry and exit triggers are each a single `Predicate` is almost always compilable — custom code buys you nothing there, and it does NOT unlock indicator-of-indicator, arithmetic, or multi-condition predicates (the DSL has no such forms regardless of this flag).
+
+A few coherence constraints still can't be compiled even with single-predicate rules — `volatility_target` sizing requires exactly one referenced `atr` indicator, and `macd` requires `fast < slow`. **You do not set `requires_custom_code` for these:** keep the spec honest and well-formed (give `volatility_target` its ATR; keep MACD `fast < slow`). If a spec is otherwise un-compilable the pipeline detects it and falls back to synthesis on its own — so never flip this flag just to dodge a sizing/parameter-coherence fix.
 
 Set `requires_custom_code: true` ONLY for a genuine capability gap the single-predicate DSL cannot express even after applying resolution steps 1–2 above, namely:
 
