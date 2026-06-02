@@ -212,6 +212,171 @@ def test_universe_call_with_non_display_arg_replaced() -> None:
     assert _has_universe_constant(_cls(out))
 
 
+def _on_bar(out: str):
+    return next(
+        n
+        for n in _cls(out).body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "on_bar"
+    )
+
+
+def _first_is_guard(out: str) -> bool:
+    first = _on_bar(out).body[0]
+    return (
+        isinstance(first, ast.If)
+        and isinstance(first.test, ast.Compare)
+        and any(isinstance(op, ast.NotIn) for op in first.test.ops)
+    )
+
+
+def test_misplaced_guard_moved_to_first_statement() -> None:
+    """A matching UNIVERSE plus a guard that sits *after* signal logic is not
+    canonical — the guard is rewritten to run before any trading."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+                if bar.symbol not in self.UNIVERSE:
+                    return
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert out != src
+    assert _first_is_guard(out)  # guard now precedes submit_order
+    assert _has_universe_guard_in_on_bar(_cls(out))
+
+
+def test_existing_guard_wrong_param_name_rewritten() -> None:
+    """A guard bound to the wrong receiver (``bar`` while the param is ``b``) is
+    not trusted — it is rewritten to the actual parameter so no NameError."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, b):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=b.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "b.symbol not in self.UNIVERSE" in out
+    assert "bar.symbol not in self.UNIVERSE" not in out
+    compile(out, "<injected>", "exec")
+
+
+def test_multiple_universe_bindings_collapsed() -> None:
+    """With two UNIVERSE bindings, Python keeps the last; matching only the
+    first must not short-circuit — both are collapsed to one canonical binding."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = _CONFORMANT.replace(
+        '    UNIVERSE = frozenset({"QQQ"})',
+        '    UNIVERSE = frozenset({"QQQ"})\n    UNIVERSE = frozenset({"SPY"})',
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _universe_assign_count(out) == 1
+    assert "QQQ" in out and "SPY" not in out
+
+
+def test_guard_with_else_body_preserved() -> None:
+    """A guard nesting trading logic under ``else`` is not stripped (which would
+    delete that logic); the canonical guard is prepended ahead of it."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                else:
+                    ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "submit_order" in out  # else-body logic survives
+    assert _first_is_guard(out)
+    compile(out, "<injected>", "exec")
+
+
+def test_chained_assignment_alias_preserved() -> None:
+    """Rewriting a stale ``UNIVERSE = TARGETS = ...`` must keep the alias."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = _GUARDLESS.replace(
+        "    def on_bar",
+        "    UNIVERSE = TARGETS = frozenset({'SPY'})\n\n    def on_bar",
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "TARGETS" in out  # sibling alias survives
+    assert "frozenset({'QQQ'})" in out
+    assert _universe_assign_count(out) == 1
+    compile(out, "<injected>", "exec")
+
+
+def test_matching_universe_but_no_on_bar_injects() -> None:
+    """A class whose UNIVERSE matches the spec but has no on_bar is not
+    canonical (no guard); injection still runs without crashing."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def helper(self):
+                return 1
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert _universe_assign_count(out) == 1
+
+
+def test_matching_universe_async_on_bar_not_short_circuited() -> None:
+    """A matching UNIVERSE with an async on_bar (no usable bar param) is not
+    canonical; injection runs and does not add a guard to the async method."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            async def on_bar(self, ctx, bar):
+                pass
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert "not in self.UNIVERSE" not in out
+
+
+def test_bare_annassign_universe_replaced() -> None:
+    """A value-less ``UNIVERSE: frozenset`` annotation cannot be matched and is
+    replaced with the canonical literal."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = _GUARDLESS.replace(
+        "    def on_bar",
+        "    UNIVERSE: frozenset\n\n    def on_bar",
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "frozenset({'QQQ'})" in out
+    assert _universe_assign_count(out) == 1
+
+
 def test_annassign_universe_stripped() -> None:
     spec = _spec(target_symbols=["TSLA"])
     src = _GUARDLESS.replace(
