@@ -46,14 +46,21 @@ class JobRankerAgent:
               ``score`` (stable for ties).
         """
         weights = profile.weights.normalized()
-        ranked = [self._score_one(p, profile, weights) for p in postings]
+        # Serialize the profile once: it's identical for every posting, so
+        # re-dumping it per posting is wasted work in the scoring loop.
+        profile_json = profile.model_dump_json(indent=2)
+        ranked = [self._score_one(p, profile, weights, profile_json) for p in postings]
         ranked.sort(key=lambda r: r.score, reverse=True)
         return ranked
 
     def _score_one(
-        self, posting: JobPosting, profile: JobSeekerProfile, weights: dict[str, float]
+        self,
+        posting: JobPosting,
+        profile: JobSeekerProfile,
+        weights: dict[str, float],
+        profile_json: str,
     ) -> RankedJob:
-        sub, recommendation, rationale, concerns = self._judge(posting, profile)
+        sub, recommendation, rationale, concerns = self._judge(posting, profile_json)
         score = sum(weights[f] * getattr(sub, f) for f in WEIGHT_FIELDS)
         score = max(0.0, min(1.0, score))
 
@@ -74,12 +81,12 @@ class JobRankerAgent:
         )
 
     def _judge(
-        self, posting: JobPosting, profile: JobSeekerProfile
+        self, posting: JobPosting, profile_json: str
     ) -> tuple[SubScores, str, str, List[str]]:
         """Ask the LLM for per-dimension sub-scores; default to neutral on failure."""
         try:
             prompt = (
-                f"Job seeker criteria (JSON):\n{profile.model_dump_json(indent=2)}\n\n"
+                f"Job seeker criteria (JSON):\n{profile_json}\n\n"
                 f"Job posting (JSON):\n{posting.model_dump_json(indent=2)}"
             )
             data = self._client().complete_json(

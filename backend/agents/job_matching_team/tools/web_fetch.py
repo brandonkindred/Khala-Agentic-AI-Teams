@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from html import unescape as html_unescape
 
 import httpx
 
@@ -81,12 +82,14 @@ class WebFetcher:
 
         Postconditions:
             * ``title`` is the ``<title>`` content (whitespace-collapsed) or "".
-            * ``text`` has script/style/nav/footer/header blocks removed and
-              whitespace collapsed.
+            * ``text`` has script/style/nav/footer/header blocks removed,
+              HTML entities decoded, and whitespace collapsed.
         """
         title_match = _TITLE_RE.search(html)
-        title = _WS_RE.sub(" ", title_match.group(1)).strip() if title_match else ""
+        title = _WS_RE.sub(" ", html_unescape(title_match.group(1))).strip() if title_match else ""
         body = _SCRIPT_STYLE_RE.sub(" ", html)
         body = _TAG_RE.sub(" ", body)
-        text = _WS_RE.sub(" ", body).strip()
+        # Decode entities (&amp;, &nbsp;, &#39;, …) after stripping tags so the
+        # extraction LLM sees real text rather than raw entity codes.
+        text = _WS_RE.sub(" ", html_unescape(body)).strip()
         return title, text

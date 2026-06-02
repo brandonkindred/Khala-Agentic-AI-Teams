@@ -139,19 +139,29 @@ class OllamaWebSearch:
 
     @staticmethod
     def _parse_json(resp: httpx.Response) -> dict:
-        """Decode a 200 response body as JSON, surfacing a clean error.
+        """Decode a 200 response body as a JSON object, surfacing a clean error.
 
         Preconditions:
-            * ``resp`` is a 2xx response whose body should be JSON.
+            * ``resp`` is a 2xx response whose body should be a JSON object.
         Postconditions:
-            * Returns the decoded object.
+            * Returns a ``dict`` (``{}`` for an empty body). A non-object body
+              (list, scalar, ``null``) raises ``WebSearchError`` rather than
+              letting a downstream ``.get`` raise ``AttributeError``.
         Raises:
-            WebSearchError: when the body is not valid JSON, so callers see the
-                tool's documented error type rather than a raw decode error.
+            WebSearchError: when the body is not valid JSON, or decodes to
+                something other than an object, so callers see the tool's
+                documented error type rather than a raw decode/attribute error.
         """
         try:
-            return resp.json() or {}
+            body = resp.json()
         except ValueError as exc:
             raise WebSearchError(
                 f"Ollama web search returned status 200 but a non-JSON body: {exc}"
             ) from exc
+        if body is None:
+            return {}
+        if not isinstance(body, dict):
+            raise WebSearchError(
+                f"Ollama web search returned a non-object JSON body: {type(body).__name__}"
+            )
+        return body

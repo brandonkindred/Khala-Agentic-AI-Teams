@@ -97,6 +97,26 @@ def test_search_200_with_non_json_body_raises_websearcherror(monkeypatch):
         OllamaWebSearch(api_key="k").search("q")
 
 
+def test_search_200_with_non_object_json_raises_websearcherror(monkeypatch):
+    # A valid-JSON-but-not-an-object body (e.g. a top-level array) must surface
+    # as WebSearchError rather than an AttributeError from a later .get().
+    _patch_client(monkeypatch, web_search, lambda req: httpx.Response(200, json=[{"url": "x"}]))
+    with pytest.raises(WebSearchError, match="non-object JSON body"):
+        OllamaWebSearch(api_key="k").search("q")
+
+
+def test_search_200_with_null_body_returns_empty(monkeypatch):
+    # A JSON `null` body decodes to None -> treated as no results, not a crash.
+    _patch_client(
+        monkeypatch,
+        web_search,
+        lambda req: httpx.Response(
+            200, content=b"null", headers={"content-type": "application/json"}
+        ),
+    )
+    assert OllamaWebSearch(api_key="k").search("q") == []
+
+
 def test_search_validates_args():
     s = OllamaWebSearch(api_key="k")
     with pytest.raises(AssertionError):
@@ -115,6 +135,20 @@ def test_extract_strips_markup_and_title():
     assert title == "My Job"
     assert "Hello world" in text
     assert "x=1" not in text
+
+
+def test_extract_decodes_html_entities():
+    f = WebFetcher()
+    html = "<html><head><title>R&amp;D Lead</title></head><body><p>Senior&nbsp;Engineer &#8212; we&#39;re hiring</p></body></html>"
+    title, text = f._extract(html)
+    assert title == "R&D Lead"
+    assert "Senior Engineer" in text  # &nbsp; -> space, collapsed
+    assert "we're hiring" in text  # &#39; -> apostrophe
+    # Raw entity codes are gone (the decoded "&" in "R&D" is expected, though).
+    assert "&amp;" not in text
+    assert "&nbsp;" not in text
+    assert "&#39;" not in text
+    assert "&#8212;" not in text
 
 
 def test_fetch_truncates_content(monkeypatch):
