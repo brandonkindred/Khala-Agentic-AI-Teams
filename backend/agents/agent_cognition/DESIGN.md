@@ -101,7 +101,7 @@ graph TB
 | UC3 | Agent | Runs a registered tool; the call is logged as memory |
 | UC4 | Scheduler | Closed-period summaries produced idempotently |
 | UC5 | Scheduler | Candidate rules created as `pending` proposals |
-| UC6 | Operator | Approves → rule becomes `active`; rejects → archived |
+| UC6 | Operator | Approves → rule becomes `active`; rejects → proposal `rejected` |
 | UC7 | Operator | Reads memory/rules via API |
 | UC8 | Operator | Adjusts retention / installs seed rule packs |
 
@@ -365,7 +365,7 @@ cognition:
 | `GET /api/cognition/agents/{id}/rules` | active/retired rules |
 | `GET /api/cognition/agents/{id}/rule-proposals?status=pending` | review queue |
 | `POST /api/cognition/agents/{id}/rule-proposals/{pid}/approve` | activate proposal |
-| `POST /api/cognition/agents/{id}/rule-proposals/{pid}/reject` | archive proposal |
+| `POST /api/cognition/agents/{id}/rule-proposals/{pid}/reject` | reject proposal (status → `rejected`) |
 
 (Dedicated `/api/cognition` prefix — see the gateway note below.)
 
