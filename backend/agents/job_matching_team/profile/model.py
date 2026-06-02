@@ -108,6 +108,9 @@ class JobSeekerProfile(BaseModel):
         Postconditions:
             * Returns a new validated profile; ``self`` is not mutated.
             * Keys mapping to ``None`` are ignored (the standing value wins).
+            * A partial ``weights`` override is merged onto the standing
+              weights, so omitted weight components keep their configured
+              values instead of resetting to class defaults.
         """
         if not overrides:
             return self.model_copy(deep=True)
@@ -117,5 +120,12 @@ class JobSeekerProfile(BaseModel):
             if k in JobSeekerProfile.model_fields and v is not None
         }
         base = self.model_dump()
+        # Deep-merge the nested ``weights`` mapping so a caller can tune a
+        # single component without discarding the others (a shallow update
+        # would replace the whole sub-object).
+        weights_override = valid.get("weights")
+        if isinstance(weights_override, dict):
+            merged_weights = {**base.get("weights", {}), **weights_override}
+            valid = {**valid, "weights": merged_weights}
         base.update(valid)
         return JobSeekerProfile.model_validate(base)

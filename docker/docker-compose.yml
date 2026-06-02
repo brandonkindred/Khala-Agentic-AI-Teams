@@ -761,7 +761,7 @@ services:
     extra_hosts: *team-extra-hosts
     ports: ["8111:8111"]
     networks:
-      stack: { ipv4_address: 172.28.0.29, aliases: [job-matching-service] }
+      stack: { ipv4_address: 172.28.0.31, aliases: [job-matching-service] }
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8111/health"]
@@ -873,7 +873,7 @@ services:
       - "agentic-team-provisioning-service:172.28.0.26"
       - "user-agent-founder-service:172.28.0.27"
       - "deepthought-service:172.28.0.28"
-      - "job-matching-service:172.28.0.29"
+      - "job-matching-service:172.28.0.31"
     networks:
       stack:
         ipv4_address: 172.28.0.6

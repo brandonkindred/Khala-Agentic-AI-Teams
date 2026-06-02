@@ -113,6 +113,19 @@ def test_merged_with_none_returns_copy():
     assert merged is not base
 
 
+def test_merged_with_partial_weights_preserves_other_components():
+    base = JobSeekerProfile(weights=RankingWeights(title_fit=0.4, skills_fit=0.3, comp_fit=0.05))
+    merged = base.merged_with({"weights": {"title_fit": 0.9}})
+    # Overridden component takes the new value...
+    assert merged.weights.title_fit == 0.9
+    # ...while omitted components keep the standing profile's values
+    # (not the class defaults).
+    assert merged.weights.skills_fit == 0.3
+    assert merged.weights.comp_fit == 0.05
+    # Original is untouched.
+    assert base.weights.title_fit == 0.4
+
+
 def test_weights_normalize_to_one():
     w = RankingWeights()
     norm = w.normalized()
