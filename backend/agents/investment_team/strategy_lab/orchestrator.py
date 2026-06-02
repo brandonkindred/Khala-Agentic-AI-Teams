@@ -105,6 +105,7 @@ from .quality_gates.rule_probes import RuleProbesGate
 from .quality_gates.spec_readiness import SpecReadinessGate
 from .quality_gates.strategy_validator import StrategySpecValidator
 from .quality_gates.target_symbol_coverage import TargetSymbolCoverageGate
+from .quality_gates.universe_injection import inject_universe_and_guard
 from .spec_dsl import DEFAULT_SIZING_PAYLOAD
 from .synthesis import CompilerError, compile_strategy
 from .zero_trade_repair import ZeroTradeRepairer
@@ -1653,6 +1654,24 @@ class StrategyLabOrchestrator:
 
         for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
+
+            # Deterministic post-synthesis normalization: guarantee the
+            # ``UNIVERSE`` constant and the ``on_bar`` symbol guard are present
+            # and conformant before any gate sees the code, so the conformance
+            # symbol gate never burns a refinement round on boilerplate that is
+            # fully determined by ``spec.target_symbols``. Idempotent (strips
+            # then reinserts), so it is a no-op on already-conformant code and
+            # safe to apply to both the initial and every refined code variant.
+            before_inject = code
+            code = inject_universe_and_guard(code, spec)
+            if drift_collector is not None and code != before_inject:
+                drift_collector.record_code_change(
+                    phase="synthesis",
+                    agent="universe_injector",
+                    before_code=before_inject,
+                    after_code=code,
+                    reason="deterministic UNIVERSE + symbol-guard injection",
+                )
 
             # ── 2a: VALIDATE (code safety + spec readiness on round 0) ───
             emit("coding", {"sub_phase": "started", "refinement_round": round_num})
