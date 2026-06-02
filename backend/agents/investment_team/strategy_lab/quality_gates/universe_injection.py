@@ -29,7 +29,11 @@ from __future__ import annotations
 
 import ast
 
-from .code_safety_ast import _find_strategy_subclasses, _is_universe_guard_stmt
+from .code_safety_ast import (
+    _COLLECTION_BUILDERS,
+    _find_strategy_subclasses,
+    _is_universe_guard_stmt,
+)
 
 __all__ = ["inject_universe_and_guard"]
 
@@ -227,7 +231,7 @@ def _existing_universe_symbols(cls: ast.ClassDef) -> list[str] | None:
     elif (
         isinstance(value, ast.Call)
         and isinstance(value.func, ast.Name)
-        and value.func.id in {"frozenset", "set", "tuple", "list"}
+        and value.func.id in _COLLECTION_BUILDERS
     ):
         if not value.args:
             elts = []
@@ -261,10 +265,10 @@ def _build_universe_assign(symbols: list[str]) -> ast.stmt:
 def _build_guard_stmt(bar_param: str) -> ast.stmt:
     """Build ``if <bar_param>.symbol not in self.UNIVERSE: return``.
 
-    The receiver is always ``self`` because the injector normalizes on_bar's
-    instance parameter to ``self`` first (see ``_normalize_receiver_to_self``).
-    ``self.UNIVERSE`` is both runtime-correct and what the conformance gate's
-    ``_has_universe_guard_in_on_bar`` recognizer accepts.
+    The receiver is hard-coded to ``self``: the guard is only ever injected for
+    a method whose instance parameter is ``self`` (``_is_guardable_on_bar``
+    requires it), so ``self.UNIVERSE`` is both runtime-correct and what the
+    conformance gate's ``_has_universe_guard_in_on_bar`` recognizer accepts.
     """
     return ast.parse(f"if {bar_param}.symbol not in self.UNIVERSE:\n    return").body[0]
 
