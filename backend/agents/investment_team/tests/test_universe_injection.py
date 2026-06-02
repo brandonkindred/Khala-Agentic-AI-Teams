@@ -895,6 +895,78 @@ def test_class_universe_override_bails() -> None:
     assert inject_universe_and_guard(src, spec) == src
 
 
+def test_global_universe_declaration_bails() -> None:
+    """A class-body ``global UNIVERSE`` would make a prepended ``UNIVERSE =``
+    a compile-time SyntaxError, so the injector bails (returns valid source)."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            global UNIVERSE
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert out == src
+    compile(out, "<injected>", "exec")  # still valid Python
+
+
+def test_locals_subscript_universe_mutation_bails() -> None:
+    """A dynamic ``locals()["UNIVERSE"] = ...`` class-namespace mutation rebinds
+    the attribute after the prepend -> bail."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            locals()["UNIVERSE"] = frozenset({"SPY"})
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_vars_update_universe_mutation_bails() -> None:
+    """A dynamic ``vars().update(UNIVERSE=...)`` class-namespace mutation -> bail."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            vars().update(UNIVERSE=frozenset({"SPY"}))
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_vars_update_dict_universe_mutation_bails() -> None:
+    """The ``vars().update({"UNIVERSE": ...})`` dict-literal form also bails."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            vars().update({"UNIVERSE": frozenset({"SPY"})})
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
 def test_import_alias_universe_bails() -> None:
     """A class-body ``import x as UNIVERSE`` rebinds the attribute after the
     prepend, so the injector bails."""

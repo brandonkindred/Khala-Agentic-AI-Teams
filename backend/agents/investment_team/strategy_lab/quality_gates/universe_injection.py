@@ -432,6 +432,10 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
       which binds the attribute to a function/class object after the prepend;
     - a class-body ``import``/``from ... import`` whose bound name is ``UNIVERSE``
       (``import x as UNIVERSE``, ``from m import UNIVERSE``);
+    - a class-body ``global UNIVERSE`` / ``nonlocal UNIVERSE`` (prepending the
+      assignment ahead of it is a compile-time SyntaxError);
+    - a dynamic class-namespace mutation — ``locals()["UNIVERSE"] = ...`` or
+      ``vars().update(UNIVERSE=...)``;
     - a ``__slots__`` naming ``UNIVERSE`` (a slot conflicts with the prepended
       class variable, raising ``ValueError`` at class definition);
     - an instance-level shadow in any method — ``self.UNIVERSE = ...``,
@@ -474,6 +478,17 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
             and id(node) not in clean
         ):
             return True
+        # ``global UNIVERSE`` / ``nonlocal UNIVERSE`` — prepending ``UNIVERSE =``
+        # ahead of a ``global`` declaration is a compile-time SyntaxError, and a
+        # ``global`` binding doesn't live on the class anyway.
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and "UNIVERSE" in node.names:
+            return True
+        # Dynamic namespace mutation of the class body — ``locals()["UNIVERSE"]``
+        # / ``vars().update(UNIVERSE=...)`` rebinds the attribute after the
+        # prepend. (Truly arbitrary forms — ``exec``, metaclass hooks — remain
+        # out of scope; these are the realistic named ones.)
+        if _is_namespace_universe_mutation(node):
+            return True
         return any(walk(child) for child in ast.iter_child_nodes(node))
 
     if any(walk(stmt) for stmt in cls.body):
@@ -493,6 +508,46 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
         for node in cls.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     )
+
+
+def _is_namespace_call(node: ast.AST) -> bool:
+    """True iff ``node`` is a call to ``locals()`` / ``vars()`` / ``globals()``
+    (the class namespace at class-creation time)."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"locals", "vars", "globals"}
+    )
+
+
+def _is_namespace_universe_mutation(node: ast.AST) -> bool:
+    """True iff ``node`` rebinds ``UNIVERSE`` by mutating the class namespace
+    dynamically — ``locals()["UNIVERSE"] = ...`` or
+    ``vars().update(UNIVERSE=...)`` / ``.update({"UNIVERSE": ...})``."""
+    # locals()/vars()/globals()["UNIVERSE"] = ...
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.ctx, ast.Store)
+        and _is_namespace_call(node.value)
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value == "UNIVERSE"
+    ):
+        return True
+    # locals()/vars()/globals().update(UNIVERSE=...) or .update({"UNIVERSE": ...})
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "update"
+        and _is_namespace_call(node.func.value)
+    ):
+        if any(kw.arg == "UNIVERSE" for kw in node.keywords):
+            return True
+        for arg in node.args:
+            if isinstance(arg, ast.Dict) and any(
+                isinstance(k, ast.Constant) and k.value == "UNIVERSE" for k in arg.keys
+            ):
+                return True
+    return False
 
 
 def _has_universe_slot(cls: ast.ClassDef) -> bool:
