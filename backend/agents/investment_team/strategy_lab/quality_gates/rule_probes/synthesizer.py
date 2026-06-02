@@ -1876,11 +1876,134 @@ def _synth_cross_priceref_indicator(
         warmup = _warmup_for_indicator(rhs)
         return _search_cross(lhs, op, rhs, base_close, min_bars, builders, warmup=warmup)
 
+    # bar.high / bar.low against close-tracking indicators (Bollinger bands,
+    # VWAP, ATR) need a forcing sequence that decouples LHS from close — the
+    # OHLC catalogue holds high = close + 0.5 and low = close - 0.5, so any
+    # close-tracking RHS moves in lockstep with LHS and the cross never
+    # fires. Prepend a high-spike / low-drop catalogue that holds close flat
+    # (RHS anchored at base_close) and spikes the LHS column at the trigger.
+    # The OHLC catalogue is still tried as a fallback for indicators that
+    # already cross naturally with close-correlated high/low (e.g. SMA, RSI).
+    if lhs in ("bar.high", "bar.low"):
+        builders = _builders_for_high_low_priceref_cross(
+            rhs, op, base_close, min_bars, lhs
+        )
+        warmup = _warmup_for_indicator(rhs)
+        return _search_cross(lhs, op, rhs, base_close, min_bars, builders, warmup=warmup)
+
     # Generic path: choose a builder catalogue per indicator and let the
     # search find the first bar where the cross actually fires.
     builders = _builders_for_priceref_cross(rhs, op, base_close, min_bars)
     warmup = _warmup_for_indicator(rhs)
     return _search_cross(lhs, op, rhs, base_close, min_bars, builders, warmup=warmup)
+
+
+def _high_low_spike_bars(
+    n: int,
+    base_close: float,
+    spike_idx: int,
+    field: str,
+    spike_value: float,
+) -> List[OHLCVBar]:
+    """Flat-close, narrow-range bars where ``field`` (``"high"`` or ``"low"``)
+    sits anchored at ``base_close`` throughout warmup and steps to
+    ``spike_value`` only at ``spike_idx``.
+
+    Holding close flat at ``base_close`` keeps every close-derived RHS
+    indicator value anchored:
+    - SMA(close,N) = base_close.
+    - Bollinger middle = base_close; σ = 0; upper/lower = base_close.
+    - VWAP = base_close (cumsum(close * volume) / cumsum(volume) collapses).
+    - ATR is built from true-range = max(high-low, |high-prev_close|,
+      |low-prev_close|); narrow flat ranges keep ATR near zero until the
+      spike, where it jumps but the LHS spike still dominates.
+
+    For ``field="high"``: warmup high = base_close (so prev_high ≤ any
+    indicator value ≥ base_close); cur_high = ``spike_value`` (≥
+    base_close * 2 in the catalogue below). For ``field="low"``: mirror.
+
+    Used exclusively from :func:`_builders_for_high_low_priceref_cross`.
+    """
+    # Every non-spike bar is a doji at exactly ``base_close`` — high == low
+    # == open == close. This keeps the typical-price-based RHS (VWAP, which
+    # averages (H + L + C) / 3) anchored at exactly base_close instead of
+    # base_close - epsilon, so the prev edge of the cross (prev_high ≤
+    # prev_vwap or prev_low ≥ prev_vwap) is satisfied. ATR / Bollinger σ
+    # also stay at zero rather than a small positive margin from a ±0.01
+    # range.
+    bars: List[OHLCVBar] = []
+    for i in range(n):
+        if i == spike_idx and field == "high":
+            bars.append(
+                OHLCVBar(
+                    date="placeholder",
+                    open=base_close,
+                    high=max(spike_value, base_close),
+                    low=base_close,
+                    close=base_close,
+                    volume=1_000_000.0,
+                )
+            )
+        elif i == spike_idx and field == "low":
+            bars.append(
+                OHLCVBar(
+                    date="placeholder",
+                    open=base_close,
+                    high=base_close,
+                    low=max(_MIN_PRICE, min(spike_value, base_close)),
+                    close=base_close,
+                    volume=1_000_000.0,
+                )
+            )
+        else:
+            bars.append(
+                OHLCVBar(
+                    date="placeholder",
+                    open=base_close,
+                    high=base_close,
+                    low=base_close,
+                    close=base_close,
+                    volume=1_000_000.0,
+                )
+            )
+    return bars
+
+
+def _builders_for_high_low_priceref_cross(
+    rhs: IndicatorRef,
+    op: str,
+    base_close: float,
+    min_bars: int,
+    lhs: str,
+) -> List[Callable[[], List[OHLCVBar]]]:
+    """Forcing-sequence catalogue for ``bar.high cross_* indicator`` and
+    ``bar.low cross_* indicator``.
+
+    The OHLC catalogue in :func:`_builders_for_priceref_cross` couples high
+    and low to close (``high = close + 0.5``, ``low = close - 0.5``), so for
+    indicators that track close (Bollinger bands, VWAP, ATR on quiet data)
+    the LHS moves in lockstep with the RHS and the cross never fires. The
+    spike builder below holds close flat so the RHS stays anchored at
+    ``base_close``, then jumps LHS independently at the trigger bar.
+
+    The OHLC builders are appended as fallbacks for indicators (SMA, RSI)
+    that *do* cross naturally with close-correlated high/low — those probes
+    already work without the spike shape.
+    """
+    warmup = _warmup_for_indicator(rhs)
+    n = max(min_bars, warmup + 30)
+    trigger_idx = n - _BARS_AFTER_TRIGGER - 1
+    field = "high" if lhs == "bar.high" else "low"
+
+    if (op == "cross_above" and field == "high") or (op == "cross_below" and field == "low"):
+        spike_value = base_close * 2.0 if field == "high" else max(_MIN_PRICE, base_close * 0.5)
+    else:
+        spike_value = max(_MIN_PRICE, base_close * 0.5) if field == "low" else base_close * 2.0
+
+    return [
+        lambda: _high_low_spike_bars(n, base_close, trigger_idx, field, spike_value),
+        *_builders_for_priceref_cross(rhs, op, base_close, min_bars),
+    ]
 
 
 def _builders_for_volume_priceref_cross(

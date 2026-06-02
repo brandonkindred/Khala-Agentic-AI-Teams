@@ -2189,3 +2189,63 @@ def test_priceref_cross_ma_respects_indicator_source(op, rhs_name, period, sourc
         f"verifier rejected synthesizer trigger for "
         f"bar.close {op} {rhs_name}({period}, src={source})"
     )
+
+
+@pytest.mark.parametrize(
+    "op,lhs,rhs_name,rhs_params",
+    [
+        # Bollinger bands — Codex's primary example. Bands open from
+        # SMA(close,20) + 2σ*close — the OHLC builders move close (which
+        # moves σ and the band centre) in lockstep with high/low, so the
+        # cross never fires. The high-spike builder holds close flat (σ=0,
+        # band collapsed to base_close) and jumps high independently.
+        ("cross_above", "bar.high", "bollinger", {"period": 20, "num_std": 2.0, "band": "upper"}),
+        ("cross_above", "bar.high", "bollinger", {"period": 20, "num_std": 2.0, "band": "middle"}),
+        ("cross_above", "bar.high", "bollinger", {"period": 20, "num_std": 2.0, "band": "lower"}),
+        ("cross_below", "bar.low", "bollinger", {"period": 20, "num_std": 2.0, "band": "upper"}),
+        ("cross_below", "bar.low", "bollinger", {"period": 20, "num_std": 2.0, "band": "middle"}),
+        ("cross_below", "bar.low", "bollinger", {"period": 20, "num_std": 2.0, "band": "lower"}),
+        # VWAP averages typical price (H+L+C)/3 — the doji bars in the
+        # spike builder keep VWAP exactly at base_close so prev_high ==
+        # base_close == prev_vwap satisfies the prev edge of cross_above.
+        ("cross_above", "bar.high", "vwap", {}),
+        ("cross_below", "bar.low", "vwap", {}),
+        # SMA / EMA — already crossable through the OHLC fallback that the
+        # spike builder appends. Locked in to confirm the new ordering
+        # doesn't break naturally-crossing predicates.
+        ("cross_above", "bar.high", "sma", {"period": 20}),
+        ("cross_below", "bar.low", "sma", {"period": 20}),
+        ("cross_above", "bar.high", "ema", {"period": 20}),
+        ("cross_below", "bar.low", "ema", {"period": 20}),
+        # RSI(close) — close-driven oscillator; the spike builder doesn't
+        # move RSI (close is flat), but the OHLC fallback regime-change
+        # builder makes RSI sweep and high/low track close.
+        ("cross_above", "bar.high", "rsi", {"period": 14}),
+        ("cross_below", "bar.low", "rsi", {"period": 14}),
+    ],
+)
+def test_bar_high_low_priceref_crosses_close_tracking_indicator(
+    op, lhs, rhs_name, rhs_params
+):
+    """``bar.high / bar.low cross_* <close-tracking indicator>`` was
+    unprobeable for Bollinger / VWAP because the OHLC builders couple
+    high and low to close (high = close + 0.5, low = close - 0.5), so
+    the indicator and the LHS moved in lockstep and never crossed.
+
+    The high-spike / low-drop builder holds close flat at ``base_close``
+    (RHS anchored, σ = 0 for Bollinger, typical price = base_close for
+    VWAP) and jumps the LHS column independently at the trigger.
+    """
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    rhs = IndicatorRef(name=rhs_name, params=rhs_params, source="close")
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"{lhs} {op} {rhs_name}({rhs_params}) not probeable: {reason}"
+    )
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for {lhs} {op} {rhs_name}({rhs_params})"
+    )
