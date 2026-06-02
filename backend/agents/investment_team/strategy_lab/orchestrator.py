@@ -492,15 +492,33 @@ def _finalize_loop_telemetry(
     telemetry exists to explain. ``requires_custom_code`` is also retained
     verbatim for backward compatibility, but it is only meaningful when
     ``code_path != "not_synthesized"``.
+
+    ``ran_on_non_conforming_code`` is ``True`` iff the gate timeline contains a
+    *demoted* predicate-conformance failure — a ``predicate_conformance`` result
+    that did not pass and carries ``severity == "warning"`` — which is exactly
+    the state reached when the conformance gate exhausted its retry budget and
+    let semantically-divergent custom code proceed to backtest. The
+    ``"Fixture unsynthesizable:"`` warning is excluded: it means the gate could
+    not *check* the rule, not that the code was checked and drifted, so it must
+    not mark the backtest non-conforming.
     """
     telemetry: Dict[str, Any] = dict(design_context.loop_telemetry)
     pass_counts: Dict[str, int] = {}
     fail_counts: Dict[str, int] = {}
+    ran_on_non_conforming = False
     for g in all_gate_results:
         bucket = pass_counts if g.passed else fail_counts
         bucket[g.gate_name] = bucket.get(g.gate_name, 0) + 1
+        if (
+            g.gate_name == "predicate_conformance"
+            and not g.passed
+            and g.severity == "warning"
+            and not (g.details or "").startswith("Fixture unsynthesizable:")
+        ):
+            ran_on_non_conforming = True
     telemetry["gate_pass_counts"] = pass_counts
     telemetry["gate_fail_counts"] = fail_counts
+    telemetry["ran_on_non_conforming_code"] = ran_on_non_conforming
     requires_custom = bool(getattr(spec, "requires_custom_code", False))
     if not (code or "").strip():
         telemetry["code_path"] = "not_synthesized"
@@ -2930,6 +2948,7 @@ class StrategyLabOrchestrator:
         ]
         rule_impl_map = _build_rule_implementation_map(spec, list(alignment_findings or []), code)
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
+        loop_telemetry = _finalize_loop_telemetry(design_context, all_gate_results, spec, code)
         record = StrategyLabRecord(
             lab_record_id=lab_record_id,
             strategy=spec,
@@ -2950,7 +2969,10 @@ class StrategyLabOrchestrator:
             code_history=list(dc.code_history),
             gate_timeline=gate_timeline,
             rule_implementation_map=rule_impl_map,
-            loop_telemetry=_finalize_loop_telemetry(design_context, all_gate_results, spec, code),
+            loop_telemetry=loop_telemetry,
+            ran_on_non_conforming_code=bool(
+                loop_telemetry.get("ran_on_non_conforming_code", False)
+            ),
         )
 
         self.convergence_tracker.record(spec, all_gate_results)
@@ -3786,6 +3808,7 @@ class StrategyLabOrchestrator:
             for g in all_gate_results
         ]
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
+        loop_telemetry = _finalize_loop_telemetry(design_context, all_gate_results, spec, code)
         record = StrategyLabRecord(
             lab_record_id=lab_record_id,
             strategy=spec,
@@ -3805,7 +3828,10 @@ class StrategyLabOrchestrator:
             spec_history=list(dc.spec_history),
             code_history=list(dc.code_history),
             gate_timeline=gate_timeline,
-            loop_telemetry=_finalize_loop_telemetry(design_context, all_gate_results, spec, code),
+            loop_telemetry=loop_telemetry,
+            ran_on_non_conforming_code=bool(
+                loop_telemetry.get("ran_on_non_conforming_code", False)
+            ),
         )
 
         # Short-circuited cycles never reached a backtest, and ``spec`` may

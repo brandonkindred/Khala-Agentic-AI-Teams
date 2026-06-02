@@ -1103,6 +1103,76 @@ def test_loop_telemetry_persisted_on_record(monkeypatch: pytest.MonkeyPatch) -> 
     # Gate histograms are present (readiness gate ran at least once).
     assert isinstance(telemetry["gate_pass_counts"], dict)
     assert isinstance(telemetry["gate_fail_counts"], dict)
+    # The non-conforming flag is present on the telemetry and mirrored on the
+    # record; a clean compiled cycle never ran on demoted code.
+    assert telemetry["ran_on_non_conforming_code"] is False
+    assert record.ran_on_non_conforming_code is False
+
+
+def test_record_ran_on_non_conforming_flag_round_trips() -> None:
+    """The top-level record field carries (and defaults) the non-conforming flag."""
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+    from investment_team.trade_simulator import compute_metrics
+
+    spec = StrategySpec(
+        strategy_id="s1",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="sig",
+        timeframe="1d",
+        requires_custom_code=True,
+    )
+    config = BacktestConfig(
+        start_date="2023-01-01",
+        end_date="2023-12-31",
+        initial_capital=100_000.0,
+        benchmark_symbol="SPY",
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+    backtest = BacktestRecord(
+        backtest_id="bt-1",
+        strategy_id=spec.strategy_id,
+        strategy=spec,
+        config=config,
+        submitted_by="test",
+        submitted_at="2026-06-02T00:00:00+00:00",
+        completed_at="2026-06-02T00:00:00+00:00",
+        status="completed",
+        result=compute_metrics([], config.initial_capital, config.start_date, config.end_date),
+        trades=[],
+    )
+
+    flagged = StrategyLabRecord(
+        lab_record_id="lab-1",
+        strategy=spec,
+        backtest=backtest,
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2026-06-02T00:00:00+00:00",
+        loop_telemetry={"ran_on_non_conforming_code": True},
+        ran_on_non_conforming_code=True,
+    )
+    assert flagged.ran_on_non_conforming_code is True
+
+    # Legacy / default construction leaves the flag False.
+    default = StrategyLabRecord(
+        lab_record_id="lab-2",
+        strategy=spec,
+        backtest=backtest,
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2026-06-02T00:00:00+00:00",
+    )
+    assert default.ran_on_non_conforming_code is False
 
 
 def test_telemetry_events_emitted_on_phase_callback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1252,3 +1322,94 @@ def test_finalize_loop_telemetry_marks_unsynthesized_failures() -> None:
     assert _finalize_loop_telemetry(ctx, [], _Spec(), code="   \n")["code_path"] == (
         "not_synthesized"
     )
+
+
+def _non_conforming_ctx():
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+
+    return _DesignPersistContext(
+        rounds=1,
+        critiques=[],
+        stop_reason="ready",
+        loop_telemetry={"design_review_rounds": 1, "stop_reason": "ready"},
+    )
+
+
+class _CustomSpec:
+    requires_custom_code = True
+
+
+def _demoted_conformance_gate(
+    details: str = "rule_id=entry[0]: predicate conformance failed.\n  ...",
+):
+    return QualityGateResult(
+        gate_name="predicate_conformance",
+        passed=False,
+        severity="warning",
+        phase="synthesis",
+        details=details,
+    )
+
+
+def test_finalize_loop_telemetry_flags_non_conforming() -> None:
+    """A demoted predicate-conformance warning marks the backtest non-conforming."""
+    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+
+    telemetry = _finalize_loop_telemetry(
+        _non_conforming_ctx(),
+        [_demoted_conformance_gate()],
+        _CustomSpec(),
+        code="def on_bar(): ...",
+    )
+    assert telemetry["ran_on_non_conforming_code"] is True
+
+
+def test_finalize_loop_telemetry_not_flagged_when_critical() -> None:
+    """An un-demoted critical conformance failure never reached a settled backtest."""
+    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+
+    critical = QualityGateResult(
+        gate_name="predicate_conformance",
+        passed=False,
+        severity="critical",
+        phase="synthesis",
+        details="rule_id=entry[0]: predicate conformance failed.",
+    )
+    telemetry = _finalize_loop_telemetry(
+        _non_conforming_ctx(), [critical], _CustomSpec(), code="def on_bar(): ..."
+    )
+    assert telemetry["ran_on_non_conforming_code"] is False
+
+
+def test_finalize_loop_telemetry_not_flagged_for_unsynthesizable_warning() -> None:
+    """A 'could not check' warning must NOT mark the backtest non-conforming."""
+    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+
+    unsynth = _demoted_conformance_gate(details="Fixture unsynthesizable: no forcing sequence")
+    telemetry = _finalize_loop_telemetry(
+        _non_conforming_ctx(), [unsynth], _CustomSpec(), code="def on_bar(): ..."
+    )
+    assert telemetry["ran_on_non_conforming_code"] is False
+
+
+def test_finalize_loop_telemetry_not_flagged_compiled() -> None:
+    """The compiled path runs no conformance gate, so the flag stays False."""
+    from investment_team.strategy_lab.orchestrator import _finalize_loop_telemetry
+
+    class _CompiledSpec:
+        requires_custom_code = False
+
+    gates = [
+        QualityGateResult(
+            gate_name="code_conformance",
+            passed=True,
+            severity="info",
+            phase="synthesis",
+            details="ok",
+        )
+    ]
+    telemetry = _finalize_loop_telemetry(
+        _non_conforming_ctx(), gates, _CompiledSpec(), code="def on_bar(): ..."
+    )
+    assert telemetry["ran_on_non_conforming_code"] is False
+    assert telemetry["code_path"] == "compiled"
