@@ -189,12 +189,24 @@ sequenceDiagram
   else allowed
     PX->>SB: invoke(body + cognition block)
     SB-->>PX: output + cognition_writeback
-    PX->>CTX: persist_writeback(id, events, tool_calls)
-    CTX->>PG: append events
     PX->>PX: check enforced postconditions on output
-    PX-->>C: output (envelope)
+    alt enforced postcondition violated
+      PX->>CTX: persist sanitized blocked-run audit event only
+      CTX->>PG: append error/feedback event
+      PX-->>C: 4xx blocked
+    else passed
+      PX->>CTX: persist_writeback(id, events, tool_calls)
+      CTX->>PG: append events
+      PX-->>C: output (envelope)
+    end
   end
 ```
+
+> **Postcondition ordering (writeback integrity):** enforced postconditions are evaluated
+> **before** `persist_writeback`. A response that fails a postcondition must not pollute the
+> agent's durable memory/tool history, so on violation only a sanitized blocked-run audit
+> event is persisted — never the rejected `cognition_writeback`. The §11 security flow shows
+> the same ordering.
 
 ### 8.2 Rollup & rule-derivation (scheduler + lazy)
 
@@ -273,13 +285,25 @@ cognition:
 **Operator endpoints** (`unified_api/routes/cognition.py`):
 | Method & path | Purpose |
 |---|---|
-| `GET /api/agents/{id}/memory` | recent events + summaries (paged) |
-| `GET /api/agents/{id}/rules` | active/retired rules |
-| `GET /api/agents/{id}/rule-proposals?status=pending` | review queue |
-| `POST /api/agents/{id}/rule-proposals/{pid}/approve` | activate proposal |
-| `POST /api/agents/{id}/rule-proposals/{pid}/reject` | archive proposal |
+| `GET /api/cognition/agents/{id}/memory` | recent events + summaries (paged) |
+| `GET /api/cognition/agents/{id}/rules` | active/retired rules |
+| `GET /api/cognition/agents/{id}/rule-proposals?status=pending` | review queue |
+| `POST /api/cognition/agents/{id}/rule-proposals/{pid}/approve` | activate proposal |
+| `POST /api/cognition/agents/{id}/rule-proposals/{pid}/reject` | archive proposal |
+
+(Dedicated `/api/cognition` prefix — see the gateway note below.)
 
 All carry an `author` handle (reuse `agent_console.author.resolve_author`).
+
+> **Gateway coverage (must-do):** the security gateway's `_is_team_path()`
+> (`unified_api/middleware/security_gateway.py`) matches **only** the prefixes in
+> `TEAM_CONFIGS` (`_get_team_prefixes()`), and `/api/agents/...` is **not** one of them — so
+> these mutation routes are *not* gated by default. The implementation must close this gap by
+> either (a) mounting the operator routes under a dedicated **`/api/cognition/...`** prefix
+> and adding it to the gateway's matched-prefix set, or (b) extending `_get_team_prefixes()`
+> to include `/api/agents`. Option (a) is preferred so gating is explicit and decoupled from
+> the (currently un-gated) invoke-proxy surface. Whichever is chosen, the route prefixes
+> above change accordingly.
 
 ## 11. Security & guardrails
 
@@ -288,7 +312,7 @@ flowchart TB
   IN[Invoke request] --> V1{Payload cap<br/>AGENT_INVOKE_MAX_PAYLOAD_BYTES}
   V1 -- over --> R413[413 reject]
   V1 -- ok --> PRE{Enforced rule<br/>preconditions}
-  PRE -- violated --> BLK[Block + log error event]
+  PRE -- violated --> BLK[Block + log sanitized<br/>audit event only]
   PRE -- pass --> ADV[Inject advisory rules into SYSTEM prompt]
   ADV --> RUN[Agent runs tools via named tool paths only]
   RUN --> OUT{Enforced rule<br/>postconditions on output}
@@ -309,7 +333,8 @@ flowchart TB
 | **HITL gate** | Derived rules can never self-activate; operator approval required (audited via `decided_by`) |
 | **Secrets** | Writeback strips credentials; tool secrets via env/secure store, never logged into memory |
 | **Input/output caps** | Reuse `AGENT_INVOKE_MAX_PAYLOAD_BYTES` / `AGENT_INVOKE_MAX_OUTPUT_BYTES`; memory digest is token-budgeted |
-| **Gateway alignment** | All new routes sit behind the existing security gateway |
+| **Gateway alignment** | Operator routes must be added to the gateway's matched-prefix set — `_is_team_path()` covers only `TEAM_CONFIGS` today, so `/api/agents/...` is not gated by default (see §10 note). Preferred: a dedicated gated `/api/cognition/...` prefix |
+| **Writeback integrity** | Enforced postconditions run **before** `persist_writeback`; a blocked response persists only a sanitized audit event, never the rejected writeback (see §8.1) |
 
 ## 12. Reused building blocks (do not reinvent)
 

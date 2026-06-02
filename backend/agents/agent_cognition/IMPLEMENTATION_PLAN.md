@@ -131,11 +131,12 @@ flowchart TB
 - **Goal:** Make the contract live at the boundary.
 - **Files:** `unified_api/routes/agents.py` — lazy catch-up → load context → advisory-into-
   system-prompt + enforced precondition gate (block → 4xx + memory event) → inject `cognition`
-  block → on return persist writeback + postcondition check. Helper for in-process teams (no
-  HTTP hop).
+  block → on return **run postcondition check first, then** persist writeback (on
+  postcondition violation persist only a sanitized blocked-run audit event, never the rejected
+  writeback). Helper for in-process teams (no HTTP hop).
 - **Depends:** 8, 9
 - **✅ Acceptance:** stubbed-sandbox test shows inject + persist; precondition block → 4xx;
-  postcondition path covered.
+  postcondition violation → 4xx **with no full writeback persisted** (only the audit event).
 
 ## Milestone D — Automation & operations
 
@@ -152,9 +153,12 @@ flowchart TB
 - **Goal:** Review/inspect endpoints.
 - **Files:** `unified_api/routes/cognition.py` — `GET …/memory`, `GET …/rules`,
   `GET …/rule-proposals?status=pending`, `POST …/approve`, `POST …/reject`; author via
-  `resolve_author`; behind the security gateway.
+  `resolve_author`. Mount under a dedicated **`/api/cognition/...`** prefix and add it to the
+  security gateway's matched-prefix set (`_get_team_prefixes()` / `_is_team_path()` cover only
+  `TEAM_CONFIGS` today, so these routes are not gated otherwise).
 - **Depends:** 2, 5
-- **✅ Acceptance:** list/approve/reject flows; author tagging; 404s for unknown ids/proposals.
+- **✅ Acceptance:** list/approve/reject flows; author tagging; 404s for unknown ids/proposals;
+  **gateway test proving the cognition prefix is intercepted** (not bypassed).
 
 ### Step 13 — Seed rule packs + config/env
 - **Goal:** Sensible day-one guardrails + operability.
