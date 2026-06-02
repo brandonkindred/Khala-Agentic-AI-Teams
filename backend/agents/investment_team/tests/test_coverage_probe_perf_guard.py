@@ -30,7 +30,14 @@ from ._coverage_probe_test_helpers import (
 
 _ITERATIONS = 200
 _RUNTIME_RATIO_BOUND = 1.1
-_WORKLOAD_OPS = 2000
+# Sized so the baseline workload (~ms scale) dominates the helper's fixed
+# success-path cost (one ``should_run_probes`` call + a branch, ~tens of µs).
+# A small workload made that fixed overhead a double-digit fraction of the
+# baseline, so ordinary CI scheduler noise tipped the P25 ratio past 1.1× and
+# flaked. With the workload an order of magnitude larger than the helper cost,
+# the ratio is stable while the bound still trips if the success path ever
+# starts doing real (sub-millisecond+) work.
+_WORKLOAD_OPS = 20000
 
 
 def _fresh_metrics() -> BacktestResult:
@@ -156,8 +163,8 @@ def test_success_path_runtime_within_ten_percent_of_unprobed(
     baseline_p25 = sorted(baseline_samples)[quartile_index]
     probed_p25 = sorted(probed_samples)[quartile_index]
     # Floor the denominator at 1µs to defang the unlikely zero-baseline
-    # corner case; real samples on any CI machine sit in the 50–500µs
-    # band given _WORKLOAD_OPS=2000.
+    # corner case; real samples sit in the low-millisecond band given
+    # _WORKLOAD_OPS=20000, well above the helper's fixed success-path cost.
     baseline_floor = max(baseline_p25, 1e-6)
 
     assert probed_p25 <= _RUNTIME_RATIO_BOUND * baseline_floor, (
