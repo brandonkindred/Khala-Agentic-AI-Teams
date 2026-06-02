@@ -1835,9 +1835,15 @@ def _synth_cross_priceref_indicator(
     if lhs not in _PRICEREF_TO_FIELD:
         return None, 0, f"cross_against_unsupported_priceref:{lhs}"
 
-    if rhs.name in ("sma", "ema") and lhs == "bar.close":
-        # Preserved exactly: long flat history + one trigger bar that pushes
-        # the close above / below the moving average.
+    if rhs.name in ("sma", "ema") and lhs == "bar.close" and rhs.source == "close":
+        # Preserved exactly when the MA reads close (the default source):
+        # long flat history + one trigger bar that pushes the close above
+        # / below the moving average. For non-close sources the trigger
+        # bar's close jump doesn't move the indicator (e.g. SMA(volume,N)
+        # stays pinned at 1e6 because volume is held flat), so the
+        # post-clamp verifier rejects the candidate trigger and the rule
+        # is silently marked unprobeable. Fall through to the source-aware
+        # generic search below in that case.
         n = max(min_bars, int(rhs.param("period")) + 30)
         trigger_idx = n - _BARS_AFTER_TRIGGER - 1
         bars = _flat_bars(base_close, n)

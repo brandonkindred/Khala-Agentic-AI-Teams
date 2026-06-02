@@ -2144,3 +2144,48 @@ def test_volume_source_rsi_cross_threshold_in_either_direction(op, rhs):
     assert reason is None and bars is not None and trigger > 0, (
         f"volume-RSI {op} {rhs} not probeable: {reason}"
     )
+
+
+@pytest.mark.parametrize(
+    "op,rhs_name,period,source",
+    [
+        # high / low / open are close-adjacent series (high = close + 0.5,
+        # low = close - 0.5, open = base_close); the previous fast path
+        # computed the MA over df["close"] regardless of rhs.source, so the
+        # trigger satisfied close-vs-close-MA but the post-clamp verifier
+        # (rightly computing MA over the configured source) rejected it.
+        # The fix restricts the fast path to source="close" and routes
+        # other sources through the source-aware generic search.
+        ("cross_above", "sma", 20, "high"),
+        ("cross_below", "sma", 20, "low"),
+        ("cross_above", "sma", 20, "open"),
+        ("cross_above", "ema", 50, "high"),
+        ("cross_below", "ema", 50, "low"),
+        ("cross_above", "ema", 50, "open"),
+        # source=close — the original fast-path case, still hit.
+        ("cross_above", "sma", 20, "close"),
+        ("cross_below", "sma", 20, "close"),
+        ("cross_above", "ema", 50, "close"),
+    ],
+)
+def test_priceref_cross_ma_respects_indicator_source(op, rhs_name, period, source):
+    """``bar.close cross_* SMA/EMA(source=X)`` must compute the MA over the
+    configured source. The fast-path optimization only runs for
+    ``source="close"``; other sources delegate to the generic search so
+    the trigger agrees with the source-aware post-clamp verifier."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    rhs = IndicatorRef(name=rhs_name, params={"period": period}, source=source)
+    pred = Predicate(lhs="bar.close", op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"bar.close {op} {rhs_name}({period}, src={source}) not probeable: {reason}"
+    )
+    # The crucial regression — verifier (source-aware) must agree with the
+    # synthesizer trigger. Pre-fix this returned False for non-close sources.
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for "
+        f"bar.close {op} {rhs_name}({period}, src={source})"
+    )
