@@ -88,6 +88,16 @@ def inject_universe_and_guard(source: str, spec) -> str:
         return source
     cls = classes[0]
 
+    if _has_nested_universe_assignment(cls):
+        # A class-creation-time ``UNIVERSE`` assignment nested inside a compound
+        # statement (e.g. ``if cond: UNIVERSE = frozenset({...})``) would run
+        # after a prepended canonical binding and silently override it, while
+        # the structural gate only sees the prepended top-level constant. We
+        # can't strip a conditional binding without dropping its branch, so bail
+        # — leave the source for the existing gates to evaluate rather than
+        # produce code that passes the gate but has a stale runtime universe.
+        return source
+
     expected = sorted(set(symbols))
     on_bars = _find_on_bar_methods(cls)
     if (
@@ -107,32 +117,32 @@ def inject_universe_and_guard(source: str, spec) -> str:
         # / on_bar definitions — falls through and is rewritten below.
         return source
 
-    # 1. Replace the UNIVERSE constant: drop any existing class-level binding
-    #    targeting ``UNIVERSE``. A chained ``UNIVERSE = TARGETS = <stale>`` keeps
-    #    its sibling targets but has their shared value rewritten to the spec
-    #    universe, so an alias used as the trading universe can't silently retain
-    #    the stale symbol set. Then prepend a fresh canonical binding.
+    # 1. Replace the UNIVERSE constant: drop any existing top-level class-body
+    #    binding targeting ``UNIVERSE``. A chained ``UNIVERSE = TARGETS = <stale>``
+    #    keeps its sibling targets but has their shared value rewritten to the
+    #    spec universe, so an alias used as the trading universe can't silently
+    #    retain the stale symbol set. Then prepend a fresh canonical binding.
     cls.body = _strip_universe_assignments(cls.body, expected)
     cls.body.insert(0, _build_universe_assign(expected))
 
-    # 2. Guard EVERY on_bar definition whose signature supports it. The
-    #    conformance gate inspects the first definition while Python runs the
-    #    last, so guarding all of them keeps the gate-checked and the
-    #    runtime-effective method consistent. The guard is only injected when the
-    #    instance parameter is ``self`` — the gate recognizer requires
-    #    ``self.UNIVERSE`` and the engine binds positionally, so for a non-``self``
-    #    receiver we inject UNIVERSE only and let the missing-guard conformance
-    #    critical drive refinement (fail closed) rather than emit a guard that
-    #    would ``NameError`` / ``UnboundLocalError`` or need scope-unsafe
-    #    renaming. Strip only bare guards (no ``else`` body, whose removal can't
-    #    drop trading logic), then prepend the canonical guard so it runs before
-    #    any signal logic.
-    for on_bar in on_bars:
-        bar_param = _bar_parameter_name(on_bar)
-        if bar_param is None or on_bar.args.args[0].arg != "self":
-            continue
-        on_bar.body = [stmt for stmt in on_bar.body if not _is_strippable_guard(stmt)]
-        on_bar.body.insert(0, _build_guard_stmt(bar_param))
+    # 2. Guard the on_bar definition(s). The conformance gate inspects the first
+    #    definition while Python runs the last, and the guard is only valid for a
+    #    ``self`` receiver (the recognizer requires ``self.UNIVERSE`` and the
+    #    engine binds positionally). To avoid a green gate over an unguarded
+    #    runtime method, guard ALL definitions or NONE: only when every on_bar is
+    #    guardable (sync, three params, ``self`` receiver) do we guard them;
+    #    otherwise we inject UNIVERSE only and let the missing-guard conformance
+    #    critical drive refinement (fail closed). For each, strip only the
+    #    existing *bar-parameter* guard (a guard on a different symbol is user
+    #    logic and is preserved) — and only when it is bare (no ``else`` body,
+    #    whose removal can't drop trading logic) — then prepend the canonical
+    #    guard so it runs before any signal logic.
+    if on_bars and all(_is_guardable_on_bar(on_bar) for on_bar in on_bars):
+        for on_bar in on_bars:
+            bar_param = on_bar.args.args[2].arg
+            bound = _bound_names(on_bar)
+            on_bar.body = [s for s in on_bar.body if not _is_bar_guard(s, bar_param, bound)]
+            on_bar.body.insert(0, _build_guard_stmt(bar_param))
 
     ast.fix_missing_locations(tree)
     try:
@@ -279,6 +289,16 @@ def _bar_parameter_name(on_bar) -> str | None:
     return args[2].arg
 
 
+def _is_guardable_on_bar(on_bar) -> bool:
+    """True iff a canonical ``self.UNIVERSE`` guard can be injected into ``on_bar``.
+
+    Requires a sync method with at least three positional parameters whose
+    instance parameter is ``self`` — the only shape for which ``self.UNIVERSE``
+    is both runtime-correct and accepted by the conformance recognizer.
+    """
+    return _bar_parameter_name(on_bar) is not None and on_bar.args.args[0].arg == "self"
+
+
 def _is_strippable_guard(stmt: ast.stmt) -> bool:
     """True iff ``stmt`` is a universe guard whose removal cannot drop logic.
 
@@ -288,6 +308,80 @@ def _is_strippable_guard(stmt: ast.stmt) -> bool:
     preserving the original branch's body.
     """
     return _is_universe_guard_stmt(stmt) and not getattr(stmt, "orelse", None)
+
+
+def _is_bar_guard(stmt: ast.stmt, bar_param: str, bound_names: set[str]) -> bool:
+    """True iff ``stmt`` is the strippable universe guard being replaced.
+
+    Strips a bare universe guard whose receiver is the bar parameter, or whose
+    receiver is an *undefined* name (a misnamed bar guard — e.g. ``bar.symbol``
+    when the parameter is ``b`` — which would ``NameError`` and must be
+    rewritten). A guard whose receiver is a *different but defined* name (e.g.
+    ``ref.symbol not in self.UNIVERSE`` filtering an auxiliary symbol assigned
+    in the method) is user logic, not the bar guard, so it is preserved.
+    """
+    if not _is_strippable_guard(stmt):
+        return False
+    receiver = stmt.test.left.value.id
+    return receiver == bar_param or receiver not in bound_names
+
+
+def _bound_names(on_bar) -> set[str]:
+    """Return the names bound in ``on_bar``'s own scope (parameters + local
+    assignment targets), not descending into nested function/lambda/class
+    scopes. Used to tell a user guard on a real auxiliary variable from a
+    misnamed (undefined-receiver) bar guard.
+    """
+    args = on_bar.args
+    names: set[str] = {
+        a.arg for a in (*getattr(args, "posonlyargs", []), *args.args, *args.kwonlyargs)
+    }
+    if args.vararg:
+        names.add(args.vararg.arg)
+    if args.kwarg:
+        names.add(args.kwarg.arg)
+
+    def visit(node: ast.AST) -> None:
+        # A nested function/lambda/class is its own scope — its locals are not
+        # bound in on_bar, so don't descend into it.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    for stmt in on_bar.body:
+        visit(stmt)
+    return names
+
+
+def _has_nested_universe_assignment(cls: ast.ClassDef) -> bool:
+    """True iff a class-creation-time ``UNIVERSE`` assignment is nested inside a
+    compound statement rather than being a direct top-level class-body binding.
+
+    Such a binding (``if cond: UNIVERSE = ...``) runs after a prepended
+    canonical constant and would silently override it. Method and nested-class
+    bodies are *not* class-creation-time, so the walk does not descend into
+    them.
+    """
+
+    def walk(stmts: list[ast.stmt], *, top_level: bool) -> bool:
+        for node in stmts:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if not top_level and _targets_universe(node):
+                return True
+            for attr in ("body", "orelse", "finalbody"):
+                block = getattr(node, attr, None)
+                if block and walk(block, top_level=False):
+                    return True
+            for handler in getattr(node, "handlers", []):
+                if walk(handler.body, top_level=False):
+                    return True
+        return False
+
+    return walk(cls.body, top_level=True)
 
 
 def _is_canonical_on_bar(on_bar) -> bool:

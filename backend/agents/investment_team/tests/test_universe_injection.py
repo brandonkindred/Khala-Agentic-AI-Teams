@@ -508,6 +508,116 @@ def test_duplicate_on_bar_guards_runtime_effective_method() -> None:
     assert "submit_order" in out  # the runtime method's logic is preserved
 
 
+def test_auxiliary_symbol_guard_preserved() -> None:
+    """A guard on a different *defined* variable (filtering an auxiliary symbol)
+    is user logic and must not be stripped — only the bar guard is replaced."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                ref = ctx.reference(bar.symbol)
+                if ref.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "ref.symbol not in self.UNIVERSE" in out  # user guard preserved
+    assert "bar.symbol not in self.UNIVERSE" in out  # canonical bar guard added
+    assert _first_is_guard(out)  # bar guard runs first
+    compile(out, "<injected>", "exec")
+
+
+def test_mixed_receiver_duplicate_on_bar_fails_closed() -> None:
+    """Duplicate on_bar where the runtime-effective last one has a non-self
+    receiver: guard NONE (so the gate fails on the unguarded first) rather than
+    guard only the first and let the gate pass over an unguarded runtime method."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+
+            def on_bar(strategy, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # no guard -> gate fails closed
+    compile(out, "<injected>", "exec")
+
+
+def test_on_bar_with_varargs_and_nested_helper() -> None:
+    """A guardable on_bar with ``*args``/``**kwargs`` and a nested helper is
+    guarded; the helper (a nested scope) is not scanned for bound names."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar, *args, **kwargs):
+                def helper(x):
+                    return x + 1
+                ctx.submit_order(symbol=bar.symbol, qty=helper(1), side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_guard_in_on_bar(_cls(out))
+    assert "def helper(x):" in out
+    compile(out, "<injected>", "exec")
+
+
+def test_nested_universe_in_try_handler_bails() -> None:
+    """A UNIVERSE assignment nested in an except handler at class-creation time
+    is detected and the injector bails."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            try:
+                pass
+            except Exception:
+                UNIVERSE = frozenset({"SPY"})
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_nested_conditional_universe_assignment_bails() -> None:
+    """A class-creation-time UNIVERSE assignment nested in a conditional would
+    override a prepended constant; the injector bails (returns source unchanged)
+    rather than produce code that passes the gate with a stale runtime universe."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            if True:
+                UNIVERSE = frozenset({"SPY"})
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
 def test_annassign_universe_stripped() -> None:
     spec = _spec(target_symbols=["TSLA"])
     src = _GUARDLESS.replace(
