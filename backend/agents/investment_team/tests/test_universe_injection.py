@@ -652,6 +652,66 @@ def test_nested_universe_in_try_handler_bails() -> None:
     assert inject_universe_and_guard(src, spec) == src
 
 
+def test_unpacking_universe_assignment_bails() -> None:
+    """A destructured ``UNIVERSE, OTHER = (...)`` binding can't be cleanly
+    stripped (it would change the unpack), so the injector bails rather than
+    let the unpacking override a prepended constant."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE, OTHER = (frozenset({"SPY"}), 1)
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_extra_param_on_bar_overload_fails_closed() -> None:
+    """A duplicate on_bar whose runtime-effective definition has 4 parameters is
+    invalid (the harness calls it with 3); guard none and fail closed rather
+    than guard a method that can't run."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+
+            def on_bar(self, ctx, bar, extra):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # no guard -> fail closed
+    compile(out, "<injected>", "exec")
+
+
+def test_single_four_param_on_bar_not_guarded() -> None:
+    """A lone 4-parameter on_bar is not the harness arity; UNIVERSE is injected
+    but the guard is skipped (the safety/conformance gates own the arity error)."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar, extra):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))
+
+
 def test_nested_conditional_universe_assignment_bails() -> None:
     """A class-creation-time UNIVERSE assignment nested in a conditional would
     override a prepended constant; the injector bails (returns source unchanged)

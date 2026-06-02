@@ -88,14 +88,14 @@ def inject_universe_and_guard(source: str, spec) -> str:
         return source
     cls = classes[0]
 
-    if _has_nested_universe_assignment(cls):
-        # A class-creation-time ``UNIVERSE`` assignment nested inside a compound
-        # statement (e.g. ``if cond: UNIVERSE = frozenset({...})``) would run
-        # after a prepended canonical binding and silently override it, while
-        # the structural gate only sees the prepended top-level constant. We
-        # can't strip a conditional binding without dropping its branch, so bail
-        # — leave the source for the existing gates to evaluate rather than
-        # produce code that passes the gate but has a stale runtime universe.
+    if _has_unsupported_universe_binding(cls):
+        # ``UNIVERSE`` is bound at class-creation time in a way the strip can't
+        # cleanly rewrite (nested in a compound statement, tuple/list unpacking,
+        # etc.). Such a binding would run after a prepended canonical constant
+        # and silently override it, while the structural gate only sees the
+        # prepended one. Bail — leave the source for the existing gates to
+        # evaluate rather than produce code that passes the gate but has a stale
+        # runtime universe.
         return source
 
     expected = sorted(set(symbols))
@@ -274,16 +274,18 @@ def _find_on_bar_methods(cls: ast.ClassDef) -> list:
 
 
 def _bar_parameter_name(on_bar) -> str | None:
-    """Return the third positional parameter name of ``on_bar(self, ctx, bar)``.
+    """Return the bar parameter name of ``on_bar(self, ctx, bar)``.
 
-    Returns None when the method is async or has fewer than three positional
-    parameters — in both cases code_safety independently flags the malformed
-    signature, and we must not emit a guard referencing a nonexistent name.
+    Returns None when the method is async or does not have *exactly* three
+    positional parameters — the harness requires the precise
+    ``on_bar(self, ctx, bar)`` arity (code_safety enforces ``== 3``), so a
+    4+-parameter overload is invalid and must not be guarded (fail closed; the
+    safety/conformance gates own that critical).
     """
     if isinstance(on_bar, ast.AsyncFunctionDef):
         return None
     args = on_bar.args.args
-    if len(args) < 3:
+    if len(args) != 3:
         return None
     return args[2].arg
 
@@ -291,7 +293,7 @@ def _bar_parameter_name(on_bar) -> str | None:
 def _is_guardable_on_bar(on_bar) -> bool:
     """True iff a canonical ``self.UNIVERSE`` guard can be injected into ``on_bar``.
 
-    Requires a sync method with at least three positional parameters whose
+    Requires a sync method with exactly three positional parameters whose
     instance parameter is ``self`` — the only shape for which ``self.UNIVERSE``
     is both runtime-correct and accepted by the conformance recognizer.
     """
@@ -373,32 +375,44 @@ def _assigned_names(on_bar) -> set[str]:
     return names
 
 
-def _has_nested_universe_assignment(cls: ast.ClassDef) -> bool:
-    """True iff a class-creation-time ``UNIVERSE`` assignment is nested inside a
-    compound statement rather than being a direct top-level class-body binding.
+def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
+    """True iff ``UNIVERSE`` is bound at class-creation time in a way the strip
+    logic can't cleanly rewrite.
 
-    Such a binding (``if cond: UNIVERSE = ...``) runs after a prepended
-    canonical constant and would silently override it. Method and nested-class
-    bodies are *not* class-creation-time, so the walk does not descend into
-    them.
+    The strip handles only a top-level ``UNIVERSE = ...`` / ``UNIVERSE: T = ...``
+    (possibly chained ``UNIVERSE = X = ...``) — a direct ``Name`` target of a
+    class-body ``Assign``/``AnnAssign``. Any other class-creation-time binding —
+    nested in a compound statement (``if cond: UNIVERSE = ...``), via tuple/list
+    unpacking (``UNIVERSE, OTHER = ...``), augmented assignment, a walrus, etc. —
+    would run after the prepended canonical constant and silently override it
+    while the structural gate only sees the prepended one. We can't rewrite
+    those without changing surrounding semantics, so the injector bails. Method
+    and nested-class bodies are not class-creation-time and are not scanned.
     """
+    clean: set[int] = set()
+    for node in cls.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "UNIVERSE":
+                    clean.add(id(target))
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == "UNIVERSE":
+                clean.add(id(node.target))
 
-    def walk(stmts: list[ast.stmt], *, top_level: bool) -> bool:
-        for node in stmts:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue
-            if not top_level and _targets_universe(node):
-                return True
-            for attr in ("body", "orelse", "finalbody"):
-                block = getattr(node, attr, None)
-                if block and walk(block, top_level=False):
-                    return True
-            for handler in getattr(node, "handlers", []):
-                if walk(handler.body, top_level=False):
-                    return True
-        return False
+    def walk(node: ast.AST) -> bool:
+        # Nested function/lambda/class scopes are not class-creation-time.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return False
+        if (
+            isinstance(node, ast.Name)
+            and node.id == "UNIVERSE"
+            and isinstance(node.ctx, ast.Store)
+            and id(node) not in clean
+        ):
+            return True
+        return any(walk(child) for child in ast.iter_child_nodes(node))
 
-    return walk(cls.body, top_level=True)
+    return any(walk(stmt) for stmt in cls.body)
 
 
 def _is_canonical_on_bar(on_bar) -> bool:
