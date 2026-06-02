@@ -1993,3 +1993,90 @@ def test_trigger_accepted_by_post_clamp_verifier(lhs, op, rhs):
         f"post-clamp verifier (pandas helpers) rejected the synthesized "
         f"trigger={trigger} for {lhs.name} {op} {rhs}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Volume polarity + mixed-source pair (PR #708 review iteration 7)
+# ---------------------------------------------------------------------------
+#
+# Two volume-source coverage gaps surfaced after the iteration-6 revert:
+#
+# 1. Volume indicator-vs-number ``cross_below`` returned
+#    ``cross_not_found_in_window`` because the catalogue mirrored
+#    ``direction*slope`` against ``-direction*slope`` instead of varying
+#    starting positions. For ``cross_below``, the "high start" builder
+#    used ``+slope`` and ramped further upward.
+# 2. Mixed-source pair crosses (one side close, one side volume)
+#    anchored volume at 1e6 while close stayed at base_close=100 — the
+#    two series never approached each other.
+
+
+@pytest.mark.parametrize(
+    "op,rhs",
+    [
+        # Volume cross_below at various thresholds — the polarity bug
+        # made all of these unprobeable.
+        ("cross_below", 1000.0),
+        ("cross_below", 500_000.0),
+        ("cross_below", 1_500_000.0),
+        # cross_above regressions
+        ("cross_above", 5000.0),
+        ("cross_above", 500_000.0),
+        ("cross_above", 1_500_000.0),
+    ],
+)
+def test_volume_source_indicator_number_cross_polarity(op, rhs):
+    """Volume-source SMA cross threshold in either direction. The earlier
+    catalogue paired ``direction*slope`` with ``-direction*slope`` as if
+    they were mirrors, but for ``cross_below`` the "high start" builder
+    ramped further upward and never crossed the threshold."""
+    pred = Predicate(
+        lhs=IndicatorRef(name="sma", params={"period": 20}, source="volume"),
+        op=op,
+        rhs=rhs,
+    )
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"volume-source SMA {op} {rhs} not probeable: {reason}"
+    )
+
+
+@pytest.mark.parametrize(
+    "lhs,op,rhs",
+    [
+        # Mixed-source pairs — one side reads close, one side reads volume.
+        # Anchoring volume at 1e6 while close sits at ~100 made these
+        # impossible to probe; volume now anchors at base_close for mixed
+        # pairs.
+        (
+            IndicatorRef(name="sma", params={"period": 5}, source="close"),
+            "cross_below",
+            IndicatorRef(name="sma", params={"period": 20}, source="volume"),
+        ),
+        (
+            IndicatorRef(name="sma", params={"period": 5}, source="close"),
+            "cross_above",
+            IndicatorRef(name="sma", params={"period": 20}, source="volume"),
+        ),
+        (
+            IndicatorRef(name="ema", params={"period": 12}, source="close"),
+            "cross_above",
+            IndicatorRef(name="ema", params={"period": 26}, source="volume"),
+        ),
+        (
+            IndicatorRef(name="ema", params={"period": 12}, source="close"),
+            "cross_below",
+            IndicatorRef(name="ema", params={"period": 26}, source="volume"),
+        ),
+    ],
+)
+def test_mixed_source_indicator_pair_cross_uses_price_scale_anchor(lhs, op, rhs):
+    """Mixed-source pair (one close, one volume) must anchor volume near
+    base_close so the two indicator series live in the same magnitude
+    range and the cross can fire."""
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"mixed-source pair {lhs.name}({lhs.source}) {op} {rhs.name}({rhs.source}) "
+        f"not probeable: {reason}"
+    )

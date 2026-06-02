@@ -2136,10 +2136,24 @@ def _builders_for_indicator_number(
             ]
             return flat + trend
 
+        # For ANY cross we want the volume series to start on the opposite
+        # side of ``rhs`` from the cross direction, then ramp THROUGH it:
+        # cross_above ⇒ start below ``rhs``, slope up; cross_below ⇒ start
+        # above, slope down. The earlier code paired `direction*slope` with
+        # `-direction*slope` as if they were mirror builders, but for
+        # cross_below the second variant started ABOVE the threshold and
+        # then ramped further UP — never crossing back down.
+        if direction > 0:
+            primary_start = base_vol * 0.5
+            secondary_start = base_vol * 0.1
+        else:
+            primary_start = base_vol * 1.5
+            secondary_start = base_vol * 3.0
+        signed_slope = direction * target_slope
         return [
-            lambda: _flat_then_volume(direction * target_slope, base_vol * 0.5),
-            lambda: _flat_then_volume(-direction * target_slope, base_vol * 1.5),
-            lambda: _volume_trend_bars(n, base_close, base_vol * 0.5, direction * target_slope),
+            lambda: _flat_then_volume(signed_slope, primary_start),
+            lambda: _flat_then_volume(signed_slope, secondary_start),
+            lambda: _volume_trend_bars(n, base_close, primary_start, signed_slope),
         ]
 
     if name in ("rsi", "adx", "stochastic"):
@@ -2311,8 +2325,16 @@ def _synth_cross_indicator_indicator(
     # so both series stay flat. Drive volume monotonically with
     # different polarities so the shorter-period indicator crosses the
     # longer-period one (mirror of the close regime-change shape).
+    #
+    # Anchor selection: when BOTH sides are volume-source, anchor volume
+    # at the realistic 1e6 scale. When ONLY ONE side is volume, the
+    # other side reads close — anchoring volume at 1e6 keeps the two
+    # series orders of magnitude apart and the cross can never fire.
+    # Drop the anchor to ``base_close`` so the close-side indicator and
+    # the volume-side indicator live in the same value range.
     if lhs.source == "volume" or rhs.source == "volume":
-        base_vol = 1_000_000.0
+        both_volume = lhs.source == "volume" and rhs.source == "volume"
+        base_vol = 1_000_000.0 if both_volume else float(base_close)
         volume_slope = base_vol * 0.02
         builders: List[Callable[[], List[OHLCVBar]]] = [
             lambda: _volume_regime_change_bars(n, base_close, base_vol, volume_slope),
