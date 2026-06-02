@@ -1664,14 +1664,22 @@ class StrategyLabOrchestrator:
             # safe to apply to both the initial and every refined code variant.
             before_inject = code
             code = inject_universe_and_guard(code, spec)
-            if drift_collector is not None and code != before_inject:
-                drift_collector.record_code_change(
-                    phase="synthesis",
-                    agent="universe_injector",
-                    before_code=before_inject,
-                    after_code=code,
-                    reason="deterministic UNIVERSE + symbol-guard injection",
-                )
+            if code != before_inject:
+                # Keep ``spec.strategy_code`` in lockstep with the code that is
+                # actually executed/gated this round (refinement maintains the
+                # same invariant via ``_apply_updates``). Downstream consumers
+                # such as ``_maybe_attach_coverage_report`` re-run probes off
+                # ``spec.strategy_code`` and would otherwise analyse stale,
+                # pre-injection source.
+                spec.strategy_code = code
+                if drift_collector is not None:
+                    drift_collector.record_code_change(
+                        phase="synthesis",
+                        agent="universe_injector",
+                        before_code=before_inject,
+                        after_code=code,
+                        reason="deterministic UNIVERSE + symbol-guard injection",
+                    )
 
             # ── 2a: VALIDATE (code safety + spec readiness on round 0) ───
             emit("coding", {"sub_phase": "started", "refinement_round": round_num})

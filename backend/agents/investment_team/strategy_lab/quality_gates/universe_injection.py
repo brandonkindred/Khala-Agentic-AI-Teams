@@ -115,8 +115,9 @@ def inject_universe_and_guard(source: str, spec) -> str:
     if on_bar is not None:
         bar_param = _bar_parameter_name(on_bar)
         if bar_param is not None:
+            receiver = on_bar.args.args[0].arg
             on_bar.body = [stmt for stmt in on_bar.body if not _is_strippable_guard(stmt)]
-            on_bar.body.insert(0, _build_guard_stmt(bar_param))
+            on_bar.body.insert(0, _build_guard_stmt(bar_param, receiver))
 
     ast.fix_missing_locations(tree)
     try:
@@ -216,17 +217,29 @@ def _build_universe_assign(symbols: list[str]) -> ast.stmt:
     return ast.parse(f"UNIVERSE = {literal}").body[0]
 
 
-def _build_guard_stmt(bar_param: str) -> ast.stmt:
-    """Build ``if <bar_param>.symbol not in self.UNIVERSE: return``."""
-    return ast.parse(f"if {bar_param}.symbol not in self.UNIVERSE:\n    return").body[0]
+def _build_guard_stmt(bar_param: str, receiver: str) -> ast.stmt:
+    """Build ``if <bar_param>.symbol not in <receiver>.UNIVERSE: return``.
+
+    ``receiver`` is on_bar's actual first (instance) parameter — usually
+    ``self``, but the engine binds positionally, so ``def on_bar(strategy,
+    ctx, bar)`` is valid and the guard must read ``strategy.UNIVERSE`` to avoid
+    a runtime ``NameError`` on an undefined ``self``.
+    """
+    return ast.parse(f"if {bar_param}.symbol not in {receiver}.UNIVERSE:\n    return").body[0]
 
 
 def _find_on_bar_method(cls: ast.ClassDef):
-    """Return the ``on_bar`` method node (sync or async) on ``cls``, or None."""
+    """Return the *runtime-effective* ``on_bar`` method (sync or async), or None.
+
+    When a class defines ``on_bar`` more than once Python keeps the **last**
+    definition, so the guard must be injected there — guarding an earlier
+    shadowed copy would leave the method that actually runs unguarded.
+    """
+    found = None
     for node in cls.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "on_bar":
-            return node
-    return None
+            found = node
+    return found
 
 
 def _bar_parameter_name(on_bar) -> str | None:

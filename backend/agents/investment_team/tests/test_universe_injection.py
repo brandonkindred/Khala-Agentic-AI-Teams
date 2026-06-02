@@ -377,6 +377,55 @@ def test_bare_annassign_universe_replaced() -> None:
     assert _universe_assign_count(out) == 1
 
 
+def test_non_self_receiver_guard_uses_actual_receiver() -> None:
+    """When on_bar's instance parameter is not ``self``, the guard must read
+    ``<receiver>.UNIVERSE`` — hard-coding ``self`` would NameError at runtime."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(strategy, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "strategy.UNIVERSE" in out
+    assert "self.UNIVERSE" not in out
+    compile(out, "<injected>", "exec")
+
+
+def test_duplicate_on_bar_guards_runtime_effective_method() -> None:
+    """Python keeps the last on_bar; the guard must land in that one, not an
+    earlier shadowed copy that never runs."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                pass
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    on_bars = [
+        n
+        for n in _cls(out).body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "on_bar"
+    ]
+    last = on_bars[-1]
+    first = last.body[0]
+    assert isinstance(first, ast.If) and any(isinstance(op, ast.NotIn) for op in first.test.ops)
+    assert "submit_order" in out  # the runtime method's logic is preserved
+
+
 def test_annassign_universe_stripped() -> None:
     spec = _spec(target_symbols=["TSLA"])
     src = _GUARDLESS.replace(
