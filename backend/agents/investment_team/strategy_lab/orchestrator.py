@@ -1832,6 +1832,12 @@ class StrategyLabOrchestrator:
                 )
                 spec, code = recovery.spec, recovery.code
                 trades, metrics = recovery.trades, recovery.metrics
+                # A committed zero-trade repair replaced the persisted trades
+                # with new code; adopt its conformance verdict. The generic
+                # refine path leaves the trades (and so the verdict) unchanged
+                # and signals that with ``None``.
+                if recovery.ran_on_non_conforming_code is not None:
+                    ran_on_non_conforming_code = recovery.ran_on_non_conforming_code
                 exec_result = recovery.exec_result
                 runtime_lookahead_violation = exec_result.error_type == "lookahead_violation"
                 if recovery.exhausted:
@@ -1971,6 +1977,26 @@ class StrategyLabOrchestrator:
                         "via": "zero_trade_repair",
                     },
                 )
+                # The committed repair replaces the persisted trades/code, but
+                # the repairer does not re-run the predicate-conformance gate.
+                # Re-check it on the committed repair code (at the demotion
+                # threshold — there is no further repair round to fix drift) so
+                # the non-conforming flag describes the repaired backtest. The
+                # caller adopts this value only on commit; the generic-refine
+                # path below leaves it ``None`` (trades unchanged).
+                ztr_conformance = self.predicate_conformance_gate.check(
+                    zt_outcome.new_code,
+                    zt_outcome.new_spec,
+                    phase="verification",
+                    attempt=_code_conformance_retries(),
+                )
+                ztr_non_conforming = _round_demoted_conformance(ztr_conformance)
+                self.record_gates(
+                    ztr_conformance,
+                    all_gate_results,
+                    refinement_round=round_num,
+                    gate_name_prefix="zero_trade_repair_",
+                )
                 return _AnomalyRecoveryOutcome(
                     spec=zt_outcome.new_spec,
                     code=zt_outcome.new_code,
@@ -1978,6 +2004,7 @@ class StrategyLabOrchestrator:
                     metrics=zt_outcome.new_metrics,
                     exec_result=zt_outcome.new_exec_result,
                     exhausted=False,
+                    ran_on_non_conforming_code=ztr_non_conforming,
                 )
 
         # ── 3: Generic refinement (or exhaust the round budget) ──

@@ -177,6 +177,12 @@ class _AnomalyRecoveryOutcome:
     metrics: BacktestResult
     exec_result: StrategyRunResult
     exhausted: bool
+    # Set only when a zero-trade repair commits new code (which replaces the
+    # persisted trades but is not otherwise conformance-gated): the conformance
+    # verdict of the committed repair code. ``None`` on the generic-refinement
+    # path, which leaves ``trades`` unchanged so the round's existing verdict
+    # still applies and must not be overwritten.
+    ran_on_non_conforming_code: Optional[bool] = None
 
 
 @dataclass(frozen=True)
