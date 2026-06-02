@@ -165,6 +165,53 @@ def test_malformed_universe_replaced() -> None:
     assert _universe_assign_count(out) == 1
 
 
+def test_stale_universe_symbols_replaced() -> None:
+    """A structurally valid but stale UNIVERSE (symbols != spec) is rewritten
+    to the spec's symbols, even though a guard is already present."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = _CONFORMANT.replace('frozenset({"QQQ"})', 'frozenset({"SPY"})')
+    out = inject_universe_and_guard(src, spec)
+    assert out != src  # not returned verbatim — the stale constant is fixed
+    assert "QQQ" in out and "SPY" not in out
+    assert _universe_assign_count(out) == 1
+    assert _has_universe_constant(_cls(out))
+    assert _symbol_gate_criticals(out, spec) == []
+
+
+def test_non_literal_universe_replaced() -> None:
+    """A UNIVERSE built from a non-string-constant member cannot be matched
+    against the spec, so it is replaced with the canonical literal."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = _GUARDLESS.replace(
+        "    def on_bar",
+        "    _SYM = 'QQQ'\n    UNIVERSE = frozenset({_SYM})\n\n    def on_bar",
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "frozenset({'QQQ'})" in out
+    assert _has_universe_constant(_cls(out))
+
+
+def test_bare_set_display_universe_matched() -> None:
+    """A bare set-display UNIVERSE (``{"QQQ"}``) whose symbols match the spec
+    is recognised and returned verbatim."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = _CONFORMANT.replace('frozenset({"QQQ"})', '{"QQQ"}')
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_universe_call_with_non_display_arg_replaced() -> None:
+    """``frozenset(<name>)`` (arg is not a literal display) cannot be matched
+    against the spec, so the constant is replaced with the canonical literal."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = _GUARDLESS.replace(
+        "    def on_bar",
+        "    _SYMS = ('QQQ',)\n    UNIVERSE = frozenset(_SYMS)\n\n    def on_bar",
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert "frozenset({'QQQ'})" in out
+    assert _has_universe_constant(_cls(out))
+
+
 def test_annassign_universe_stripped() -> None:
     spec = _spec(target_symbols=["TSLA"])
     src = _GUARDLESS.replace(

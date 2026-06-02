@@ -31,7 +31,6 @@ import ast
 
 from .code_safety_ast import (
     _find_strategy_subclasses,
-    _has_universe_constant,
     _has_universe_guard_in_on_bar,
     _is_universe_guard_stmt,
 )
@@ -93,17 +92,23 @@ def inject_universe_and_guard(source: str, spec) -> str:
         return source
     cls = classes[0]
 
-    if _has_universe_constant(cls) and _has_universe_guard_in_on_bar(cls):
-        # Already structurally conformant (the deterministic compiler always
-        # is). Return the source verbatim rather than round-tripping it through
-        # ``ast.unparse``, which would reformat the module and strip comments —
-        # a needless mutation that also churns the code hash / drift log.
+    expected = sorted(set(symbols))
+    if _existing_universe_symbols(cls) == expected and _has_universe_guard_in_on_bar(cls):
+        # Already conformant *and* the UNIVERSE already lists exactly the spec's
+        # symbols (the deterministic compiler path always is). Return the source
+        # verbatim rather than round-tripping it through ``ast.unparse``, which
+        # would reformat the module and strip comments — a needless mutation
+        # that also churns the code hash / drift log. A structurally valid but
+        # stale UNIVERSE (e.g. ``frozenset({"SPY"})`` while the spec targets
+        # ``QQQ``) does NOT match, so it falls through and is rewritten to the
+        # spec-derived symbols below.
         return source
 
     # 1. Replace the UNIVERSE constant: drop any existing class-level binding
-    #    (Assign or AnnAssign targeting ``UNIVERSE``), then prepend a fresh one.
+    #    (Assign or AnnAssign targeting ``UNIVERSE``), then prepend a fresh one
+    #    populated from the spec's symbols (canonical, sorted, de-duplicated).
     cls.body = [node for node in cls.body if not _is_universe_assignment(node)]
-    cls.body.insert(0, _build_universe_assign(symbols))
+    cls.body.insert(0, _build_universe_assign(expected))
 
     # 2. Replace the on_bar guard when the signature supports it.
     on_bar = _find_on_bar_method(cls)
@@ -127,6 +132,57 @@ def _is_universe_assignment(node: ast.stmt) -> bool:
     if isinstance(node, ast.AnnAssign):
         return isinstance(node.target, ast.Name) and node.target.id == "UNIVERSE"
     return False
+
+
+def _existing_universe_symbols(cls: ast.ClassDef) -> list[str] | None:
+    """Return the sorted, de-duplicated string symbols of the class-level
+    ``UNIVERSE`` literal, or ``None`` when there is no ``UNIVERSE`` binding or
+    its members are not all string constants.
+
+    ``None`` (rather than an empty list) signals "cannot be matched against the
+    spec" so the caller falls through to canonical injection — e.g. a malformed
+    ``UNIVERSE = "QQQ"`` (a string, not a collection) or a computed expression.
+    An empty but well-formed literal (``frozenset()``) returns ``[]``.
+    """
+    value: ast.expr | None = None
+    for node in cls.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "UNIVERSE" for t in node.targets
+        ):
+            value = node.value
+            break
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "UNIVERSE"
+        ):
+            value = node.value
+            break
+    if value is None:
+        return None
+
+    if isinstance(value, (ast.Set, ast.List, ast.Tuple)):
+        elts = value.elts
+    elif (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in {"frozenset", "set", "tuple", "list"}
+    ):
+        if not value.args:
+            elts = []
+        elif len(value.args) == 1 and isinstance(value.args[0], (ast.Set, ast.List, ast.Tuple)):
+            elts = value.args[0].elts
+        else:
+            return None
+    else:
+        return None
+
+    symbols: set[str] = set()
+    for elt in elts:
+        if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+            return None
+        symbols.add(elt.value)
+    return sorted(symbols)
 
 
 def _build_universe_assign(symbols: list[str]) -> ast.stmt:
