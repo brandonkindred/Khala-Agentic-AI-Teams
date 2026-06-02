@@ -49,11 +49,11 @@ def test_same_bar_returns_cached_series() -> None:
         view.append(_bar(i))
     ref = IndicatorRef(name="ema", params={"period": 5}, source="close")
     view.indicator(ref, 19)
-    cached_series = view._indicator_cache[ref.model_dump_json()]
+    cached_series = view._indicator_cache[ref.sig_id]
     cached_df = view._df
     # No append → caches reused as-is.
     same = view.indicator(ref, 19)
-    assert view._indicator_cache[ref.model_dump_json()] is cached_series
+    assert view._indicator_cache[ref.sig_id] is cached_series
     assert view._df is cached_df
     assert same is not None
 
@@ -180,5 +180,5 @@ def test_multi_indicator_share_dataframe() -> None:
     view.indicator(ema_ref, 19)
     # Both indicators computed against the same shared DataFrame.
     assert len(view._df) == 20
-    assert sma_ref.model_dump_json() in view._indicator_cache
-    assert ema_ref.model_dump_json() in view._indicator_cache
+    assert sma_ref.sig_id in view._indicator_cache
+    assert ema_ref.sig_id in view._indicator_cache

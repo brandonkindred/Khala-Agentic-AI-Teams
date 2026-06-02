@@ -221,6 +221,29 @@ class IndicatorRef(_SpecNode):
 
         return self
 
+    @property
+    def sig_id(self) -> str:
+        """Cheap, current-configuration cache key for the indicator cache.
+
+        Replaces ``model_dump_json()`` on the indicator-cache hot path: the
+        JSON encoder walked the whole model on every lookup, whereas this is a
+        single ``str`` built from the live fields. ``repr`` on each value keeps
+        int 14, float 14.0 and str "14" distinct keys — matching the type
+        fidelity the previous key provided.
+
+        Derived from the **current** ``name`` / ``source`` / ``params`` on
+        every access (these models are mutable), so a ref whose ``params`` or
+        ``source`` is changed after construction keys a different cache entry —
+        matching the old per-call ``model_dump_json()`` semantics. Not cached
+        on the instance for that reason.
+
+        Postconditions: returns a non-empty string; equal current
+        configurations return equal ``sig_id``.
+        """
+        return "|".join(
+            [self.name, self.source, *(f"{k}={v!r}" for k, v in sorted(self.params.items()))]
+        )
+
     def param(self, key: str, default: Any = None) -> Any:
         """Return ``params[key]`` if set, else the registry default, else ``default``."""
         if key in self.params:
