@@ -18,6 +18,7 @@ flowchart TB
   S5 --> S6
   S1 --> S7[7 Tools layer]
   S2 --> S7
+  S5 --> S7
   S4 --> S8[8 CognitiveContext facade]
   S5 --> S8
   S7 --> S8
@@ -125,13 +126,18 @@ flowchart TB
   its replacement active; **`reject` sets status `rejected`** (the modeled terminal state — not
   an undocumented `archived`); seed-pack install); `rules/enforcement.py`
   (`build_rule_prompt_block(advisory_rules)`; predicate DSL evaluator with a **fixed
-  allowlist** of ops — e.g. `<= >= == in forbid_tool` — exposing `evaluate_precondition(ctx)` /
-  `evaluate_postcondition(output)` → allow/block+reason).
+  allowlist** of ops — e.g. `<= >= == in forbid_tool` — exposing `evaluate_precondition(ctx)`,
+  `evaluate_postcondition(output)`, **and `evaluate_tool_call(tool_id, args)` for pre-dispatch
+  `forbid_tool` gating** (consumed by the Step 7 broker) → allow/block+reason). The full
+  proposal status set the store and `?status=` filter handle is
+  **`pending|approved|rejected|superseded`** (Step 6 produces `superseded`).
 - **Depends:** 1
-- **✅ Acceptance:** prompt-block rendering; predicate allow/block matrix; invalid/unknown-op
-  predicates rejected (no eval); **approving each of add/retire/amend lands the correct rule
-  state** (retire/amend never mis-activate as new rules); **reject lands `rejected`** (matches
-  the `pending|approved|rejected` model, API filters, and §8.3 lifecycle); `agent_id` isolation.
+- **✅ Acceptance:** prompt-block rendering; predicate allow/block matrix incl. a `forbid_tool`
+  pre-dispatch case; invalid/unknown-op predicates rejected (no eval); **approving each of
+  add/retire/amend lands the correct rule state** (retire/amend never mis-activate as new
+  rules); **reject lands `rejected`**; **`superseded` is a valid, filterable status** (matches
+  the `pending|approved|rejected|superseded` model, API filters, and §8.3 lifecycle);
+  `agent_id` isolation.
 
 ### Step 6 — Reflection (rule learning)
 - **Goal:** Derive rule proposals from memory (HITL).
@@ -157,19 +163,25 @@ flowchart TB
   `LlmToolsService` + `IntegrationRegistry` + `agent_git_tools` → `(definitions, handlers)`,
   tagging each tool's **execution site**: `in_process`, `sandbox_local`, or `platform_bound`);
   `tools/runner.py` (wrap `complete_json_with_tool_loop`; emit `tool_call`/`outcome` events).
-  For `platform_bound` tools used by sandboxed agents, the loop is **proxy-driven** via the
-  SB↔PX `tool_calls`/`tool_results` protocol (defined here, wired in Step 10) so secrets/egress
-  stay platform-side. For `sandbox_local` tools the **shim brokers/wraps the declared handlers**
-  and emits a **trusted out-of-band tool-call audit** alongside the response, so the platform
-  has a trustworthy record even when the writeback is dropped (blocked runs). **Also extend
-  `shared_agent_invoke` (`mount_invoke_shim`/`dispatch`)** to (a) unwrap only on the explicit
-  `__khala_cognition_envelope__` marker — invoke the entrypoint with `input` only, expose
-  `cognition` via a side channel, pass unmarked bodies through unchanged — and (b) carry the
-  trusted tool-audit channel.
-- **Depends:** 1, 2
+  The **shim broker wraps every declared handler** (both `platform_bound` and `sandbox_local`)
+  and, before dispatching each call, **evaluates the active enforced `forbid_tool` predicates
+  (`evaluate_tool_call`, Step 5) and refuses a disallowed call pre-dispatch** — so a forbidden
+  tool never runs its side effect — while emitting a **trusted out-of-band tool-call audit** so
+  the platform has a record even when the writeback is dropped. For `platform_bound` tools the
+  loop is **proxy-driven** via the SB↔PX `tool_calls`/`tool_results` protocol so secrets/egress
+  stay platform-side; this requires the **multi-turn runtime protocol** (agent pauses, emits a
+  tool request, resumes) — which the current single-shot entrypoint path lacks, so this step
+  lands the protocol + a **stubbed-runtime** test and live `platform_bound` use for *generated*
+  agents is gated on the Step 14 runtime scaffold. `sandbox_local` tools (v1 default) need no
+  turn protocol. **Also extend `shared_agent_invoke` (`mount_invoke_shim`/`dispatch`)** to (a)
+  unwrap only on the explicit `__khala_cognition_envelope__` marker — invoke the entrypoint with
+  `input` only, expose `cognition` via a side channel, pass unmarked bodies through unchanged —
+  and (b) carry the trusted tool-audit channel.
+- **Depends:** 1, 2, 5
 - **✅ Acceptance:** known ids resolve to the correct execution site, unknown id errors; each
-  tool call writes memory events; **a platform-bound tool round-trips through the proxy-driven
-  loop** (stubbed sandbox) without exposing secrets; **the shim unwraps only on the marker**
+  tool call writes memory events; **a `forbid_tool`-restricted call is refused before the
+  handler runs** (no side effect); **a platform-bound tool round-trips through the proxy-driven
+  loop** (stubbed runtime) without exposing secrets; **the shim unwraps only on the marker**
   (an agent whose own schema has a top-level `input` and no marker is passed through
   untouched); **sandbox-local tool calls appear in the shim's trusted audit** even when the
   writeback is dropped.
@@ -195,37 +207,42 @@ flowchart TB
 ### Step 9 — Manifest `CognitionSpec`
 - **Goal:** Declarative per-agent cognition config.
 - **Files:** add optional `CognitionSpec` to `agent_registry/models.py` (memory retention,
-  tools, rule_packs); loader tolerates its absence (lazy, like `InvokeSpec`/`SandboxSpec`).
+  tools, rule_packs, `requires_idempotency_key`); loader tolerates its absence (lazy, like
+  `InvokeSpec`/`SandboxSpec`).
 - **Depends:** 1
 - **✅ Acceptance:** manifests with and without the block parse; sample manifest added.
 
 ### Step 10 — Invoke proxy integration
 - **Goal:** Make the contract live at the boundary.
-- **Files:** `unified_api/routes/agents.py` — **mint a stable `source_run_id`** (reuse a caller
-  `Idempotency-Key` if present) and **claim the leased `agent_cognition_runs` ledger** before
-  any work via `claim_run(request_hash, lease)`: a `completed`/`blocked` row with a **matching
-  `request_hash` replays the stored envelope without re-invoking**; a matching key with a
-  **different** `request_hash` → `409`; an `in_progress` row with a **valid lease** → `409`,
-  but an **expired lease** is reclaimed and re-executed. Then: lazy catch-up → load context →
-  enforced **precondition** gate (block → 4xx + memory event). The proxy does **not** edit
-  prompts — advisory rules travel in the `cognition` side channel for the agent runtime to
-  render (Step 14). Build the **marker-wrapped envelope** `{__khala_cognition_envelope__,
-  input, cognition}` and **re-apply `AGENT_INVOKE_MAX_PAYLOAD_BYTES` to the full envelope**
-  (digest is token-budgeted) before posting. On return → **postcondition check first, then**
-  persist writeback + store the ledger envelope (`completed`). On postcondition violation,
-  persist the **shim's trusted tool-audit** + a blocked-run event (drop model output/memory)
-  and mark the ledger `blocked`. For `platform_bound` tools, drive the SB↔PX tool loop (Step 7).
-  Helper for in-process teams (no HTTP hop). **Requires the `shared_agent_invoke` shim change**
-  (Step 7) for marker-unwrap + trusted tool-audit.
+- **Files:** `unified_api/routes/agents.py` — derive a stable `source_run_id`: a caller
+  `Idempotency-Key` if present, else the `request_hash` (byte-identical retries still dedup). If
+  the manifest sets `requires_idempotency_key: true` (side-effecting), **reject `400` when no
+  caller key is supplied** — without a key the call is documented at-least-once, not run-once.
+  **Claim the leased `agent_cognition_runs` ledger** via `claim_run(request_hash, lease)`: a
+  `completed`/`blocked` row with a **matching `request_hash` replays the stored envelope without
+  re-invoking** (replay covers **blocked** too); a matching key with a **different**
+  `request_hash` → `409`; an `in_progress` row with a **valid lease** → `409`; an **expired
+  lease** is reclaimed in place (hash retained) and re-executed. Then: lazy catch-up → load
+  context → enforced **precondition** gate (block → 4xx + memory event **+ store the 4xx
+  envelope in the ledger as `blocked`** so a retried block replays). The proxy does **not** edit
+  prompts — advisory rules travel in the `cognition` side channel for the runtime to render
+  (Step 14). Build the **marker-wrapped envelope** and **re-apply `AGENT_INVOKE_MAX_PAYLOAD_BYTES`
+  to the full envelope** before posting. On return → **postcondition check first, then** persist
+  writeback + store the ledger envelope (`completed`); enforce the **per-field output cap**
+  (`AGENT_INVOKE_MAX_OUTPUT_BYTES` on `output`, `AGENT_COGNITION_WRITEBACK_MAX_BYTES` on the
+  writeback with truncate+flag). On postcondition violation, persist the **shim's trusted
+  tool-audit** + a blocked-run event (drop model output/memory) and **store the 4xx envelope as
+  `blocked`**. For `platform_bound` tools, drive the SB↔PX tool loop (Step 7). Helper for
+  in-process teams (no HTTP hop). **Requires the `shared_agent_invoke` shim change** (Step 7).
 - **Depends:** 8, 9
-- **✅ Acceptance:** strict-Pydantic entrypoint receives **only** its declared input (marker
-  unwrapped); **retry with same key+body replays without re-invoking** (side effects run once);
-  **retry with same key but different body → 409**; concurrent retry while leased → 409;
-  **expired-lease retry re-executes** (no permanent wedge); near-cap request **+ cognition that
-  would exceed the cap is rejected/trimmed at the envelope** (not silently oversized);
-  precondition block → 4xx; postcondition violation → 4xx with model output **not** persisted
-  **but the shim's tool audit recorded**; platform-bound tool round-trips without secret
-  exposure.
+- **✅ Acceptance:** strict-Pydantic entrypoint receives **only** its declared input; **retry
+  with same key+body replays without re-invoking** (side effects run once); **retry with same
+  key but different body → 409**; **a retried precondition/postcondition block replays the same
+  4xx** (blocked envelope stored); concurrent retry while leased → 409; **expired-lease retry
+  re-executes**; **`requires_idempotency_key` agent rejects a keyless invoke 400**; near-cap
+  request + cognition is capped at the envelope; **a near-cap `output` plus writeback does not
+  drop memory** (per-field caps); postcondition violation → 4xx with model output **not**
+  persisted **but the shim's tool audit recorded**.
 
 ## Milestone D — Automation & operations
 
@@ -264,8 +281,8 @@ flowchart TB
 ### Step 13 — Seed rule packs + config/env
 - **Goal:** Sensible day-one guardrails + operability.
 - **Files:** ship `default_guardrails` seed pack; document env (`AGENT_COGNITION_TICK_S`,
-  event retention, digest token budget, `LLM_MODEL_cognition`, `COGNITION_OPERATOR_TOKEN`) in
-  `CLAUDE.md` + package README.
+  event retention, digest token budget, `LLM_MODEL_cognition`, `COGNITION_OPERATOR_TOKEN`,
+  `AGENT_COGNITION_WRITEBACK_MAX_BYTES`, ledger idempotency TTL) in `CLAUDE.md` + package README.
 - **Depends:** 5
 - **✅ Acceptance:** seed pack installs on first provision of an agent; env defaults documented.
 

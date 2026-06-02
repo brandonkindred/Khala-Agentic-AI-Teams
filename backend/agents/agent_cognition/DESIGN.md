@@ -189,6 +189,15 @@ one execution site at bind time (`tools/binding.py`):
   specified as part of Step 10 (invoke proxy) and Step 7 (tools layer); without it, sandboxed
   agents are restricted to sandbox-local tools.
 
+  **Runtime prerequisite:** the proxy-driven loop only works if the *agent runtime* can pause,
+  emit a tool request, receive the result, and continue — but the current sandbox path
+  (`dispatch.invoke_entrypoint`) calls an entrypoint **once** and returns a final envelope. So
+  `platform_bound` tools for sandboxed agents depend on the **multi-turn runtime protocol**
+  shipping in the generated scaffold (the Step 14 runtime work), and Steps 7/10 land the
+  protocol + a stubbed-runtime test rather than claiming live platform-bound tools for
+  generated agents. **v1 default for sandboxed agents is `sandbox_local` tools**, which need no
+  turn protocol; `platform_bound` is gated on the runtime protocol being present.
+
 ## 8. Logic flows
 
 ### 8.1 Invoke path (inject-on-invoke / writeback-on-return)
@@ -218,17 +227,18 @@ sequenceDiagram
     CTX-->>PX: CognitionContext{rules, memory_digest}
     PX->>PX: check enforced preconditions (deterministic, at boundary)
     alt enforced precondition violated
-      PX->>PG: ledger=blocked
+      PX->>PG: ledger=blocked (store blocked envelope)
       PX-->>C: 4xx blocked (+ logged as memory event)
     else allowed
       PX->>PX: build {marker, input, cognition} then re-check payload cap on full envelope
       PX->>SB: invoke envelope — shim unwraps to input, runtime renders advisory rules into prompt
+      SB->>SB: shim broker gates each tool call vs enforced forbid_tool BEFORE dispatch
       SB-->>PX: output + cognition_writeback + shim tool-audit (trusted)
       PX->>PX: check enforced postconditions on output
       alt enforced postcondition violated
         PX->>CTX: persist shim tool-audit + blocked-run event (drop model output & memory)
         CTX->>PG: append trusted tool_call/outcome + error event
-        PX->>PG: ledger=blocked
+        PX->>PG: ledger=blocked (store blocked envelope)
         PX-->>C: 4xx blocked
       else passed
         PX->>CTX: persist_writeback(events, tool_calls reconciled with shim audit)
@@ -259,6 +269,21 @@ sequenceDiagram
 > responsibility — see §12 Step 14). Advisory rules are best-effort by nature; an agent that
 > ignores the channel simply isn't steered. Only enforced rules are guaranteed.
 >
+> **Enforced tool restrictions gate *before* dispatch (not just postcondition):** an enforced
+> rule that restricts tools (e.g. the `forbid_tool` op) must be evaluated by the shim's tool
+> broker **before each handler runs** — a postcondition on the final output is too late, since a
+> forbidden tool would already have caused irreversible side effects. The proxy therefore passes
+> the active enforced tool-restriction predicates into the broker (both the proxy-driven
+> `platform_bound` loop and the wrapped `sandbox_local` handlers); a disallowed call is refused
+> pre-dispatch and recorded as a blocked `tool_call` audit event. Output postconditions remain
+> for value/shape checks that can only be judged after the fact.
+>
+> **Blocked runs store their envelope for replay:** the replay contract covers `blocked` as well
+> as `completed`, so the blocked transition **persists the 4xx response envelope** into the
+> ledger (not just `status=blocked`). A retried precondition/postcondition-blocked request with
+> the same key+hash replays the identical 4xx rather than re-running or re-blocking — the
+> idempotency guarantee holds for rejections too.
+>
 > **Idempotent invoke (retry-safe execution, leased, body-checked):** the proxy mints a
 > **stable `source_run_id`** for the logical invoke (honoring a caller `Idempotency-Key`) —
 > *not* the shim's per-POST `trace_id`. The `agent_cognition_runs` ledger keyed `(agent_id,
@@ -276,6 +301,14 @@ sequenceDiagram
 > source_seq)` `ON CONFLICT DO NOTHING` as defense-in-depth. The residual lost-ack and
 > lease-reclaim windows are at-least-once, covered by requiring **platform-bound tool handlers
 > to be idempotent where feasible** (documented per tool).
+>
+> **Run-once requires a stable key (else at-least-once):** the replay/run-once guarantee holds
+> **only when a stable idempotency key exists** — a caller-supplied `Idempotency-Key`, or, when
+> absent, the proxy keys on the `request_hash` so byte-identical retries still dedup. A manifest
+> flag (`cognition.requires_idempotency_key`) lets a **side-effecting** agent *require* a
+> caller-supplied key (reject the call `400` without one), because hashing can't distinguish two
+> legitimately distinct identical requests. Without a key and without that flag, the call is
+> explicitly **at-least-once** (best-effort dedup on identical bodies), not run-once.
 >
 > **Payload cap applies to the final envelope:** `AGENT_INVOKE_MAX_PAYLOAD_BYTES` is enforced
 > on the assembled `{marker, input, cognition}` **after** the digest/rules are added (not just
@@ -402,10 +435,12 @@ stateDiagram-v2
 - **`agent_cognition_runs`** — execution idempotency ledger: `agent_id, source_run_id,
   status (in_progress|completed|blocked), request_hash, response JSONB, lease_expires_at,
   created_at, completed_at`, **primary key `(agent_id, source_run_id)`**. The proxy claims
-  `in_progress` with a lease before invoking and stores the final envelope on completion. A
-  retry replays `response` only when `request_hash` matches (mismatched body → `409`, never
-  stale output); an `in_progress` row whose `lease_expires_at` has passed is reclaimable so a
-  crashed proxy can't wedge the key forever (see §8.1 retry-safe execution).
+  `in_progress` with a lease before invoking and stores the final envelope on **both terminal
+  outcomes — `completed` and `blocked`** (the 4xx body is stored too) so retries replay either
+  identically. A retry replays `response` only when `request_hash` matches (mismatched body →
+  `409`, never stale output); an `in_progress` row whose `lease_expires_at` has passed is
+  reclaimed in place (hash retained) so a crashed proxy can't wedge the key forever (see §8.1
+  retry-safe execution).
 
 ## 10. Interfaces / API
 
@@ -415,6 +450,7 @@ cognition:
   memory: { retention_days_events: 90 }
   tools: [git, http_api]            # ids from agent_llm_tools_service / IntegrationRegistry
   rule_packs: [default_guardrails]  # seed packs installed on first provision
+  requires_idempotency_key: false   # true ⇒ side-effecting; reject invokes without a caller key
 ```
 
 > **Retention is enforced, not just declared:** `retention_days_events` must be backed by a
@@ -449,6 +485,15 @@ vanishingly unlikely; the proxy rejects a caller body that already contains it.)
 { "output": { /* the agent's normal result */ },
   "cognition_writeback": { "events": [], "tool_calls": [] } }
 ```
+> **Output cap is per-field, not on the combined response:** because `cognition_writeback`
+> (and the shim tool-audit) ride the *same* sandbox response as `output`, applying a single
+> `AGENT_INVOKE_MAX_OUTPUT_BYTES` to the whole body would let control data compete with user
+> output — an agent whose normal `output` is near the cap could have its response rejected or
+> truncated *before* the proxy persists memory. The cap is therefore applied to the user
+> **`output`** field on its own; `cognition_writeback` has its **own** bound
+> (`AGENT_COGNITION_WRITEBACK_MAX_BYTES`, with `events`/`tool_calls` truncated and a
+> `truncated: true` flag rather than failing the whole call). Memory persistence never starves
+> user output and vice-versa.
 
 **Operator endpoints** (`unified_api/routes/cognition.py`):
 | Method & path | Purpose |
@@ -496,7 +541,7 @@ flowchart TB
   V1 -- ok --> PRE{Enforced rule<br/>preconditions}
   PRE -- violated --> BLK[Block + log sanitized<br/>audit event only]
   PRE -- pass --> ADV[Advisory rules → cognition side channel<br/>agent runtime renders into prompt]
-  ADV --> RUN[Agent runs tools via shim-brokered paths<br/>shim emits trusted tool audit]
+  ADV --> RUN[Tools via shim broker<br/>forbid_tool gated BEFORE dispatch + trusted audit]
   RUN --> OUT{Enforced rule<br/>postconditions on output}
   OUT -- violated --> BLKO[Drop model output/memory<br/>persist shim tool-audit only]
   OUT -- pass --> WB[Persist writeback<br/>secrets stripped, salience bounded]
@@ -516,7 +561,9 @@ flowchart TB
 | **Operator authorization** | **All** cognition routes — reads *and* `approve`/`reject` — enforce an operator-auth check (operator token now, role later); `resolve_author` is provenance only and never the authz decision (see §10) |
 | **Idempotent execution** | `agent_cognition_runs` ledger keyed `(agent_id, source_run_id)` — a retry **replays the stored envelope without re-invoking the sandbox** (run-once for side effects); writeback `ON CONFLICT DO NOTHING` is defense-in-depth; lost-ack window relies on tool-level idempotency (see §8.1) |
 | **Ledger lease / no wedge** | `in_progress` claims carry a `lease_expires_at`; an expired lease (crashed proxy) is **reclaimed in place** (reset to a fresh lease, **`request_hash` retained**) so a logical invoke is never stuck at `409` forever and post-expiry retries are still hash-checked. Scheduler GCs only *terminal* rows (past an idempotency TTL), never `in_progress` ones |
-| **Replay-safety** | Ledger stores a `request_hash`; a retry whose body differs from the original is rejected `409` rather than served the prior response |
+| **Replay-safety** | Ledger stores a `request_hash`; a retry whose body differs from the original is rejected `409` rather than served the prior response. **Blocked runs store their 4xx envelope too**, so a retried rejection replays identically (replay covers `blocked`, not just `completed`) |
+| **Run-once needs a key** | The run-once guarantee holds only with a stable idempotency key (caller `Idempotency-Key`, else the `request_hash` for byte-identical retries). A side-effecting agent can set `cognition.requires_idempotency_key` to *require* a caller key (else `400`); without a key it's documented **at-least-once**, not run-once |
+| **Forbidden-tool pre-gate** | Enforced tool restrictions (`forbid_tool`) are evaluated by the shim broker **before each handler dispatches**, not just as an output postcondition — a forbidden call never executes its side effect |
 | **Trusted tool audit** | The shim brokers all tool calls (platform-bound *and* sandbox-local) and emits an out-of-band audit; blocked runs persist the **shim** audit, not the model's self-reported writeback |
 | **Advisory vs enforced** | Only enforced rules are guaranteed (deterministic gate at the proxy). Advisory rules ride the side channel and are rendered by the agent runtime — best-effort, never proxy-edited prompts |
 | **Envelope marker** | The shim unwraps only on the namespaced `__khala_cognition_envelope__` marker; unmarked bodies pass through unchanged, so no existing input contract is misread |
@@ -526,7 +573,7 @@ flowchart TB
 | **Blocked-run tool audit** | A postcondition-blocked output still persists sanitized `tool_call`/`outcome` records (real side effects already happened) while dropping the rejected output/untrusted memory |
 | **Stale-evidence re-evaluation** | Recomputed summaries bump `version`; pending proposals on stale evidence are flagged for re-eval/withdrawal and active derived rules resurface for operator review |
 | **Secrets** | Writeback strips credentials; tool secrets via env/secure store, never logged into memory |
-| **Input/output caps** | Reuse `AGENT_INVOKE_MAX_PAYLOAD_BYTES` / `AGENT_INVOKE_MAX_OUTPUT_BYTES`; memory digest is token-budgeted |
+| **Per-field output cap** | `AGENT_INVOKE_MAX_OUTPUT_BYTES` is applied to the user **`output`** field alone; `cognition_writeback` has its own bound (`AGENT_COGNITION_WRITEBACK_MAX_BYTES`, truncate + flag), so control data never competes with user output and memory persistence isn't starved (see §10) |
 | **Gateway alignment** | Operator routes must be added to the gateway's matched-prefix set — `_is_team_path()` covers only `TEAM_CONFIGS` today, so `/api/agents/...` is not gated by default (see §10 note). Preferred: a dedicated gated `/api/cognition/...` prefix |
 | **Writeback integrity** | Enforced postconditions run **before** `persist_writeback`; a blocked response persists only a sanitized audit event, never the rejected writeback (see §8.1) |
 
