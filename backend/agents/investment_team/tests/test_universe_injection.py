@@ -838,6 +838,42 @@ def test_class_universe_override_bails() -> None:
     assert inject_universe_and_guard(src, spec) == src
 
 
+def test_import_alias_universe_bails() -> None:
+    """A class-body ``import x as UNIVERSE`` rebinds the attribute after the
+    prepend, so the injector bails."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            from math import inf as UNIVERSE
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_import_name_universe_bails() -> None:
+    """A class-body ``from m import UNIVERSE`` (bound name UNIVERSE, no alias)
+    likewise rebinds the attribute -> bail."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            from contract import UNIVERSE
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
 def test_universe_in_slots_bails() -> None:
     """A ``__slots__`` naming UNIVERSE would conflict with the prepended class
     variable at class-definition time, so the injector bails."""

@@ -421,6 +421,8 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
       unpacking, augmented assignment, walrus, or ``del UNIVERSE``;
     - a class-body ``def UNIVERSE`` / ``async def UNIVERSE`` / ``class UNIVERSE``,
       which binds the attribute to a function/class object after the prepend;
+    - a class-body ``import``/``from ... import`` whose bound name is ``UNIVERSE``
+      (``import x as UNIVERSE``, ``from m import UNIVERSE``);
     - a ``__slots__`` naming ``UNIVERSE`` (a slot conflicts with the prepended
       class variable, raising ``ValueError`` at class definition);
     - an instance-level shadow in any method — ``self.UNIVERSE = ...``,
@@ -449,6 +451,13 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
             return node.name == "UNIVERSE"
         if isinstance(node, ast.Lambda):
             return False
+        # A class-body ``import``/``from ... import`` whose bound name is
+        # UNIVERSE (``import x as UNIVERSE``, ``from m import UNIVERSE``) likewise
+        # rebinds the attribute after the prepend.
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return any(
+                (alias.asname or alias.name.split(".")[0]) == "UNIVERSE" for alias in node.names
+            )
         if (
             isinstance(node, ast.Name)
             and node.id == "UNIVERSE"
