@@ -33,6 +33,8 @@ from .code_safety_ast import (
     _COLLECTION_BUILDERS,
     _find_strategy_subclasses,
     _is_universe_guard_stmt,
+    _iter_method_body_in_source_order,
+    _iter_method_body_nodes,
 )
 
 __all__ = ["inject_universe_and_guard"]
@@ -409,10 +411,11 @@ def _store_names(node: ast.AST) -> set[str]:
 def _assigned_names(on_bar) -> set[str]:
     """Return every method-local name assigned anywhere in ``on_bar`` (used to
     tell a function-local receiver apart from a module-level/global one)."""
-    names: set[str] = set()
-    for stmt in on_bar.body:
-        names |= _store_names(stmt)
-    return names
+    return {
+        node.id
+        for node in _iter_method_body_nodes(on_bar)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
 
 
 def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
@@ -456,42 +459,10 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
             if isinstance(node.target, ast.Name) and node.target.id == "UNIVERSE":
                 clean.add(id(node.target))
 
-    def walk(node: ast.AST) -> bool:
-        # A ``def``/``class`` named UNIVERSE binds the class attribute (to the
-        # function/class object) at class-creation time — an override of the
-        # prepended constant. Otherwise nested scopes are not class-creation-time.
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            return node.name == "UNIVERSE"
-        if isinstance(node, ast.Lambda):
-            return False
-        # A class-body ``import``/``from ... import`` whose bound name is
-        # UNIVERSE (``import x as UNIVERSE``, ``from m import UNIVERSE``) likewise
-        # rebinds the attribute after the prepend.
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            return any(
-                (alias.asname or alias.name.split(".")[0]) == "UNIVERSE" for alias in node.names
-            )
-        if (
-            isinstance(node, ast.Name)
-            and node.id == "UNIVERSE"
-            and isinstance(node.ctx, (ast.Store, ast.Del))
-            and id(node) not in clean
-        ):
-            return True
-        # ``global UNIVERSE`` / ``nonlocal UNIVERSE`` — prepending ``UNIVERSE =``
-        # ahead of a ``global`` declaration is a compile-time SyntaxError, and a
-        # ``global`` binding doesn't live on the class anyway.
-        if isinstance(node, (ast.Global, ast.Nonlocal)) and "UNIVERSE" in node.names:
-            return True
-        # Dynamic namespace mutation of the class body — ``locals()["UNIVERSE"]``
-        # / ``vars().update(UNIVERSE=...)`` rebinds the attribute after the
-        # prepend. (Truly arbitrary forms — ``exec``, metaclass hooks — remain
-        # out of scope; these are the realistic named ones.)
-        if _is_namespace_universe_mutation(node):
-            return True
-        return any(walk(child) for child in ast.iter_child_nodes(node))
-
-    if any(walk(stmt) for stmt in cls.body):
+    # Scan every class-creation-time node in source order (the shared iterator
+    # yields class-body statements and their descendants but does NOT descend
+    # into nested ``def``/``class``/``lambda`` bodies, which are separate scopes).
+    if any(_node_rebinds_universe(node, clean) for node in _iter_method_body_in_source_order(cls)):
         return True
 
     # A ``__slots__`` naming UNIVERSE would conflict with the prepended class
@@ -508,6 +479,36 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
         for node in cls.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     )
+
+
+def _node_rebinds_universe(node: ast.AST, clean: set[int]) -> bool:
+    """True iff a single class-creation-time ``node`` rebinds ``UNIVERSE`` in a
+    way the strip can't cleanly handle (``clean`` holds the ``id()``s of the
+    clean top-level ``Name`` targets the strip owns)."""
+    # A ``def``/``class`` named UNIVERSE binds the class attribute to the
+    # function/class object after the prepended constant.
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name == "UNIVERSE"
+    # A class-body ``import x as UNIVERSE`` / ``from m import UNIVERSE``.
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return any((a.asname or a.name.split(".")[0]) == "UNIVERSE" for a in node.names)
+    # A ``UNIVERSE`` store/delete that isn't a clean top-level ``Name`` target
+    # (nested in a compound, unpacking, augmented assignment, walrus, ``del``).
+    if (
+        isinstance(node, ast.Name)
+        and node.id == "UNIVERSE"
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        and id(node) not in clean
+    ):
+        return True
+    # ``global UNIVERSE`` / ``nonlocal UNIVERSE`` — prepending ``UNIVERSE =``
+    # ahead of a ``global`` declaration is a compile-time SyntaxError.
+    if isinstance(node, (ast.Global, ast.Nonlocal)) and "UNIVERSE" in node.names:
+        return True
+    # Dynamic namespace mutation — ``locals()["UNIVERSE"] = ...`` /
+    # ``vars().update(UNIVERSE=...)``. (Arbitrary forms — ``exec``, metaclass
+    # hooks — remain out of scope; these are the realistic named ones.)
+    return _is_namespace_universe_mutation(node)
 
 
 def _is_namespace_call(node: ast.AST) -> bool:
@@ -589,15 +590,11 @@ def _method_shadows_universe(method) -> bool:
     if not params:
         return False
     receiver = params[0].arg
-    found = False
 
     def _is_receiver(node: ast.AST) -> bool:
         return isinstance(node, ast.Name) and node.id == receiver
 
-    def visit(node: ast.AST) -> None:
-        nonlocal found
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-            return
+    for node in _iter_method_body_nodes(method):
         # self.UNIVERSE = ...
         if (
             isinstance(node, ast.Attribute)
@@ -605,7 +602,7 @@ def _method_shadows_universe(method) -> bool:
             and isinstance(node.ctx, ast.Store)
             and _is_receiver(node.value)
         ):
-            found = True
+            return True
         # self.__dict__["UNIVERSE"] = ...
         if (
             isinstance(node, ast.Subscript)
@@ -616,7 +613,7 @@ def _method_shadows_universe(method) -> bool:
             and isinstance(node.slice, ast.Constant)
             and node.slice.value == "UNIVERSE"
         ):
-            found = True
+            return True
         # setattr(self, "UNIVERSE", ...)
         if (
             isinstance(node, ast.Call)
@@ -627,13 +624,8 @@ def _method_shadows_universe(method) -> bool:
             and isinstance(node.args[1], ast.Constant)
             and node.args[1].value == "UNIVERSE"
         ):
-            found = True
-        for child in ast.iter_child_nodes(node):
-            visit(child)
-
-    for stmt in method.body:
-        visit(stmt)
-    return found
+            return True
+    return False
 
 
 def _is_canonical_on_bar(on_bar) -> bool:
