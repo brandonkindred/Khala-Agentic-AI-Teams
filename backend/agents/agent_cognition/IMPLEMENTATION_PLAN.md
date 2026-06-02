@@ -55,47 +55,66 @@ flowchart TB
 
 ### Step 2 — Memory store (DAL)
 - **Goal:** Read/write episodic events and summaries.
-- **Files:** `memory/store.py` — `append_event`, `fetch_events_for_period`,
+- **Files:** `memory/store.py` — `append_event` (idempotent: insert `ON CONFLICT
+  (agent_id, source_run_id, source_seq) DO NOTHING`), `fetch_events_for_period`,
   `fetch_recent_events(top_n, by_salience)`, `upsert_summary`, `fetch_summaries(scale, …)`,
-  `get_last_summary(scale)`. Reuse `get_conn`, `Json`, `dict_row`, `@timed_query`. Every
-  query filtered by `agent_id`.
+  `get_last_summary(scale)`, and `mark_period_stale(agent_id, occurred_at)` (flags the
+  containing day/week/month/year summaries for recompute on late arrival). Reuse `get_conn`,
+  `Json`, `dict_row`, `@timed_query`. Every query filtered by `agent_id`.
 - **Depends:** 1
 - **✅ Acceptance:** append/fetch round-trip; `upsert_summary` idempotent on the unique key;
-  cross-`agent_id` isolation proven.
+  **re-appending the same `(source_run_id, source_seq)` is a no-op**; a late event flags the
+  right periods stale; cross-`agent_id` isolation proven.
 
 ### Step 3 — Rollup engine
 - **Goal:** Idempotent day→week→month→year summarization.
 - **Files:** `memory/rollup.py` — UTC closed-period detection; hierarchical rollup (day from
   events, week from days, month from weeks, year from months); `ensure_rollups_current(
-  agent_id, now)` as the single idempotent entry point; uses
-  `complete_validated(schema=PeriodSummary)`, `compact_text`, `get_client("cognition")`.
+  agent_id, now)` as the single idempotent entry point that processes periods that are **not
+  yet summarized OR flagged `stale`**, recomputing a stale period and cascading the flag to its
+  parent scales; uses `complete_validated(schema=PeriodSummary)`, `compact_text`,
+  `get_client("cognition")`.
 - **Depends:** 2
 - **✅ Acceptance:** re-running produces no duplicates; a missed day is filled on next pass;
-  hierarchical correctness and compaction path tested with a fake LLM client.
+  **a late event in an already-summarized period triggers recompute of that period and its
+  parents** (not skipped forever); hierarchical correctness and compaction path tested with a
+  fake LLM client.
 
 ### Step 4 — Retrieval / digest builder
 - **Goal:** The compact memory block injected on invoke.
-- **Files:** `memory/retrieval.py` — `build_memory_digest(agent_id, token_budget)` =
-  latest day + current week/month summaries + top-N salient recent events, trimmed.
+- **Files:** `memory/retrieval.py` — `build_memory_digest(agent_id, token_budget)`. Because
+  rollups only exist for **closed** periods, the digest uses the most recent **closed** day /
+  week / month summaries (`get_last_summary(scale)`) for stable long-range context, and
+  represents the **in-progress** period directly from recent raw events (top-N by salience) —
+  no dependency on a summary that doesn't exist yet mid-week/month. (A cheap on-the-fly partial
+  rollup of the in-progress period is an optional future enhancement, explicitly out of v1.)
+  Trimmed to `token_budget` via `compact_text`.
 - **Depends:** 3
-- **✅ Acceptance:** budget respected; salience/recency ordering; empty history → empty digest.
+- **✅ Acceptance:** budget respected; salience/recency ordering; **mid-period invoke returns
+  the latest closed week/month summary plus in-progress events (never empty solely because the
+  current period isn't closed)**; empty history → empty digest.
 
 ## Milestone B — Rules engine
 
 ### Step 5 — Rules store, predicate DSL, enforcement
 - **Goal:** Store rules/proposals and enforce them.
-- **Files:** `rules/store.py` (CRUD rules + proposals; `approve`→active, `reject`→archived;
-  seed-pack install); `rules/enforcement.py` (`build_rule_prompt_block(advisory_rules)`;
-  predicate DSL evaluator with a **fixed allowlist** of ops — e.g. `<= >= == in forbid_tool` —
-  exposing `evaluate_precondition(ctx)` / `evaluate_postcondition(output)` → allow/block+reason).
+- **Files:** `rules/store.py` (CRUD rules + proposals; proposals carry `action`
+  (add|retire|amend) + `target_rule_id`; `approve` applies the action deterministically —
+  `add` inserts active, `retire` retires the target, `amend` retires the target and inserts
+  its replacement active; `reject`→archived; seed-pack install); `rules/enforcement.py`
+  (`build_rule_prompt_block(advisory_rules)`; predicate DSL evaluator with a **fixed
+  allowlist** of ops — e.g. `<= >= == in forbid_tool` — exposing `evaluate_precondition(ctx)` /
+  `evaluate_postcondition(output)` → allow/block+reason).
 - **Depends:** 1
 - **✅ Acceptance:** prompt-block rendering; predicate allow/block matrix; invalid/unknown-op
-  predicates rejected (no eval); `agent_id` isolation.
+  predicates rejected (no eval); **approving each of add/retire/amend lands the correct rule
+  state** (retire/amend never mis-activate as new rules); `agent_id` isolation.
 
 ### Step 6 — Reflection (rule learning)
 - **Goal:** Derive rule proposals from memory (HITL).
 - **Files:** `rules/reflection.py` — LLM proposes add/retire/amend from recent summaries +
-  active rules; writes `pending` proposals with `evidence`. **Never activates.**
+  active rules; writes `pending` proposals with `action`, `target_rule_id` (for retire/amend),
+  and `evidence`. **Never activates.**
 - **Depends:** 3, 5
 - **✅ Acceptance:** proposals created with evidence linkage; assertion that nothing reaches
   `active` without explicit approval.
@@ -105,11 +124,16 @@ flowchart TB
 ### Step 7 — Tools layer
 - **Goal:** Per-agent toolset, executed and logged to memory.
 - **Files:** `tools/binding.py` (resolve manifest `cognition.tools` ids against
-  `LlmToolsService` + `IntegrationRegistry` + `agent_git_tools` → `(definitions, handlers)`);
+  `LlmToolsService` + `IntegrationRegistry` + `agent_git_tools` → `(definitions, handlers)`,
+  tagging each tool's **execution site**: `in_process`, `sandbox_local`, or `platform_bound`);
   `tools/runner.py` (wrap `complete_json_with_tool_loop`; emit `tool_call`/`outcome` events).
+  For `platform_bound` tools used by sandboxed agents, the loop is **proxy-driven** via the
+  SB↔PX `tool_calls`/`tool_results` protocol (defined here, wired in Step 10) so secrets/egress
+  stay platform-side; `sandbox_local` tools run inside the sandbox.
 - **Depends:** 1, 2
-- **✅ Acceptance:** known ids resolve, unknown id errors; each tool call writes memory events
-  (fake registry/loop).
+- **✅ Acceptance:** known ids resolve to the correct execution site, unknown id errors; each
+  tool call writes memory events; **a platform-bound tool for a sandboxed agent round-trips
+  through the proxy-driven loop** (stubbed sandbox) without exposing secrets to the sandbox.
 
 ### Step 8 — CognitiveContext facade
 - **Goal:** One seam wiring memory + rules + tools; defines the invoke contract.
@@ -133,10 +157,13 @@ flowchart TB
   system-prompt + enforced precondition gate (block → 4xx + memory event) → inject `cognition`
   block → on return **run postcondition check first, then** persist writeback (on
   postcondition violation persist only a sanitized blocked-run audit event, never the rejected
-  writeback). Helper for in-process teams (no HTTP hop).
+  writeback). For sandboxed agents with `platform_bound` tools, drive the multi-turn SB↔PX
+  `tool_calls`/`tool_results` loop (from Step 7) instead of a single shot. Helper for
+  in-process teams (no HTTP hop).
 - **Depends:** 8, 9
 - **✅ Acceptance:** stubbed-sandbox test shows inject + persist; precondition block → 4xx;
-  postcondition violation → 4xx **with no full writeback persisted** (only the audit event).
+  postcondition violation → 4xx **with no full writeback persisted** (only the audit event);
+  a platform-bound tool round-trips via the proxy-driven loop without sandbox secret exposure.
 
 ## Milestone D — Automation & operations
 
@@ -153,17 +180,23 @@ flowchart TB
 - **Goal:** Review/inspect endpoints.
 - **Files:** `unified_api/routes/cognition.py` — `GET …/memory`, `GET …/rules`,
   `GET …/rule-proposals?status=pending`, `POST …/approve`, `POST …/reject`; author via
-  `resolve_author`. Mount under a dedicated **`/api/cognition/...`** prefix and add it to the
-  security gateway's matched-prefix set (`_get_team_prefixes()` / `_is_team_path()` cover only
-  `TEAM_CONFIGS` today, so these routes are not gated otherwise).
+  `resolve_author` (provenance only). Mount under a dedicated **`/api/cognition/...`** prefix
+  and add it to the security gateway's matched-prefix set (`_get_team_prefixes()` /
+  `_is_team_path()` cover only `TEAM_CONFIGS` today, so these routes are not gated otherwise).
+  `approve`/`reject` additionally enforce an **operator-authorization check**
+  (`COGNITION_OPERATOR_TOKEN` now, operator role when platform auth lands) — `resolve_author`
+  must never be the access-control decision and can return `anonymous`.
 - **Depends:** 2, 5
 - **✅ Acceptance:** list/approve/reject flows; author tagging; 404s for unknown ids/proposals;
-  **gateway test proving the cognition prefix is intercepted** (not bypassed).
+  **gateway test proving the cognition prefix is intercepted** (not bypassed); **approve/reject
+  without a valid operator credential is rejected 401/403** (HITL gate cannot be defeated by an
+  unauthenticated caller).
 
 ### Step 13 — Seed rule packs + config/env
 - **Goal:** Sensible day-one guardrails + operability.
 - **Files:** ship `default_guardrails` seed pack; document env (`AGENT_COGNITION_TICK_S`,
-  event retention, digest token budget, `LLM_MODEL_cognition`) in `CLAUDE.md` + package README.
+  event retention, digest token budget, `LLM_MODEL_cognition`, `COGNITION_OPERATOR_TOKEN`) in
+  `CLAUDE.md` + package README.
 - **Depends:** 5
 - **✅ Acceptance:** seed pack installs on first provision of an agent; env defaults documented.
 

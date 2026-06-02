@@ -164,6 +164,26 @@ backend/agents/agent_cognition/
   DESIGN.md  README.md
 ```
 
+**Tool execution topology (where the tool loop runs).** The tools layer
+(`complete_json_with_tool_loop`) is an **in-process** loop, so a platform-bound tool handler
+must execute where the platform's registries/secrets live. The single-shot
+inject/writeback contract above only carries the *final* output, so a sandboxed agent cannot
+reach a platform tool handler through it. Resolution — each agent's tools resolve to exactly
+one execution site at bind time (`tools/binding.py`):
+
+- **In-process agents:** run the loop directly in Unified API; full access to platform tool
+  handlers. No change.
+- **Sandboxed agents, sandbox-local tools** (declared in the manifest, bundled in the image —
+  e.g. `git` on the mounted repo): the loop runs **inside the sandbox**; nothing crosses the
+  boundary. This is the v1 default for sandboxed agents.
+- **Sandboxed agents, platform-bound tools** (need platform registries/secrets): the **proxy
+  drives the loop** — instead of one shot, it exchanges multiple turns with the sandbox over a
+  defined `tool_calls`/`tool_results` protocol (sandbox emits a tool request → proxy executes
+  the handler platform-side → returns the result → repeat until final output). Secrets and
+  egress stay on the platform; the sandbox never holds them. This SB↔PX tool-call channel is
+  specified as part of Step 10 (invoke proxy) and Step 7 (tools layer); without it, sandboxed
+  agents are restricted to sandbox-local tools.
+
 ## 8. Logic flows
 
 ### 8.1 Invoke path (inject-on-invoke / writeback-on-return)
@@ -207,6 +227,12 @@ sequenceDiagram
 > agent's durable memory/tool history, so on violation only a sanitized blocked-run audit
 > event is persisted — never the rejected `cognition_writeback`. The §11 security flow shows
 > the same ordering.
+>
+> **Idempotent writeback (retry-safe):** `persist_writeback` keys every event on
+> `(agent_id, source_run_id, source_seq)` where `source_run_id` is the invoke `trace_id`, and
+> inserts `ON CONFLICT DO NOTHING`. A retried invoke (or a re-delivered response after a lost
+> first reply) re-persisting the same writeback is therefore a no-op — no duplicated memory or
+> tool history, no skewed rollups/rule learning.
 
 ### 8.2 Rollup & rule-derivation (scheduler + lazy)
 
@@ -227,9 +253,17 @@ sequenceDiagram
   MEM->>REF: after week/month rollup → reflect
   REF->>LLM: propose rule add/retire/amend from summaries + active rules
   LLM-->>REF: candidate rules
-  REF->>PG: insert rule_proposals (status=pending)
+  REF->>PG: insert rule_proposals (action, target_rule_id, status=pending)
   Note over REF,PG: Nothing auto-activates — awaits operator approval
 ```
+
+> **Late-arrival handling (no stale summaries):** the rollup processes any closed period that
+> is *not yet summarized* **or** is flagged `stale`. When `persist_writeback` appends an event
+> whose `occurred_at` falls inside an already-summarized day/week/month, it sets that period's
+> summary `stale=true` and cascades the flag up the parent scales. The next lazy/scheduled
+> rollup recomputes the stale chain (upsert on the unique key) so higher-level memory and
+> learned rules never sit on stale summaries. Out-of-order events are normal: a closed period
+> is only summarized once it has *no pending stale flag*.
 
 ### 8.3 Rule lifecycle (state)
 
@@ -247,21 +281,39 @@ stateDiagram-v2
   end note
 ```
 
+> **Approve semantics per proposal action:** a proposal carries an explicit `action` and (for
+> retire/amend) a `target_rule_id`, so approval is deterministic — `add` inserts a new
+> `active` rule from `proposed_rule`; `retire` flips `target_rule_id` to `retired`; `amend`
+> retires `target_rule_id` and inserts its `proposed_rule` replacement as `active` (preserving
+> lineage via `rationale`). Approval of an `enforced` add/amend still requires a valid
+> `predicate`. This removes the ambiguity where retire/amend proposals would otherwise be
+> mis-activated as brand-new rules.
+
 ## 9. Data model
 
 `shared_postgres` `TeamSchema` (team=`agent_cognition`), all rows keyed by `agent_id`.
 
 - **`agent_cognition_events`** — append-only episodic memory: `id, agent_id, kind
   (observation|action|tool_call|outcome|error|feedback), content, data JSONB, salience,
-  occurred_at`. Indexes `(agent_id, occurred_at DESC)`, `(agent_id, kind)`.
+  occurred_at, source_run_id, source_seq`. Indexes `(agent_id, occurred_at DESC)`,
+  `(agent_id, kind)`. **Idempotency:** unique `(agent_id, source_run_id, source_seq)` —
+  `source_run_id` is the invoke's `trace_id` and `source_seq` is the event's index within
+  that writeback, so a retried/duplicated `persist_writeback` is a no-op `ON CONFLICT DO
+  NOTHING` rather than duplicating memory and skewing rollups (see §8.1).
 - **`agent_cognition_summaries`** — rollups: `id, agent_id, scale (day|week|month|year),
-  period_start, period_end, summary, highlights JSONB, source_count, created_at`.
-  **Unique `(agent_id, scale, period_start)`** ⇒ idempotent rollups.
+  period_start, period_end, summary, highlights JSONB, source_count, covers_through, stale,
+  created_at`. **Unique `(agent_id, scale, period_start)`** ⇒ idempotent rollups.
+  `covers_through` records the max `occurred_at` (day) / child `created_at` (week+) folded in;
+  `stale` is set when a **late event** lands in an already-summarized period so the rollup
+  recomputes it and cascades the flag to parent scales (see §8.2 late-arrival handling).
 - **`agent_cognition_rules`** — `id, agent_id, text, mode (advisory|enforced),
   status (active|retired), predicate JSONB, rationale, source (seed|derived|operator),
   priority, created_at, updated_at`.
-- **`agent_cognition_rule_proposals`** — HITL queue: `id, agent_id, proposed_rule JSONB,
+- **`agent_cognition_rule_proposals`** — HITL queue: `id, agent_id, action
+  (add|retire|amend), target_rule_id (NULL for add), proposed_rule JSONB (NULL for retire),
   evidence JSONB, status (pending|approved|rejected), decided_by, decided_at, created_at`.
+  The explicit `action` + `target_rule_id` let the approve path apply retire/amend
+  deterministically instead of mis-activating them as new rules (see §8.3).
 
 ## 10. Interfaces / API
 
@@ -294,6 +346,18 @@ cognition:
 (Dedicated `/api/cognition` prefix — see the gateway note below.)
 
 All carry an `author` handle (reuse `agent_console.author.resolve_author`).
+
+> **Operator authorization (must-do, distinct from the author handle):** `resolve_author` is
+> *provenance only* — it is a documented pre-auth placeholder that can return `anonymous` and
+> must **not** be used as an access-control decision. The security gateway only scans request
+> *content*, so it does not authorize the caller either. The HITL mutation endpoints
+> (`approve`/`reject`) therefore require an explicit **operator-authorization check** before
+> they act: until real auth lands, gate them behind a required operator credential
+> (`COGNITION_OPERATOR_TOKEN`, constant-time compared) and bind decisions to the authenticated
+> principal; when platform auth exists, replace the token with an operator-role check. Without
+> this, any caller able to reach the Unified API could approve/reject learned **enforced**
+> rules and defeat the human-approval gate. The `author` handle is recorded *in addition to*
+> (never instead of) this check.
 
 > **Gateway coverage (must-do):** the security gateway's `_is_team_path()`
 > (`unified_api/middleware/security_gateway.py`) matches **only** the prefixes in
@@ -331,6 +395,8 @@ flowchart TB
 | **Enforced rules are real pre/postconditions** | Deterministic predicate DSL (non-executable JSON), satisfies DbC mandate; never prompt-only |
 | **Predicate safety** | DSL is a fixed allowlist of ops (e.g. `<=`, `forbid_tool`); no arbitrary code/eval |
 | **HITL gate** | Derived rules can never self-activate; operator approval required (audited via `decided_by`) |
+| **Operator authorization** | `approve`/`reject` enforce an operator-auth check (operator token now, role later) — `resolve_author` is provenance only and must never be the authz decision (see §10) |
+| **Idempotent writeback** | Events keyed on `(agent_id, source_run_id, source_seq)` with `ON CONFLICT DO NOTHING` — invoke retries can't duplicate memory/tool history |
 | **Secrets** | Writeback strips credentials; tool secrets via env/secure store, never logged into memory |
 | **Input/output caps** | Reuse `AGENT_INVOKE_MAX_PAYLOAD_BYTES` / `AGENT_INVOKE_MAX_OUTPUT_BYTES`; memory digest is token-budgeted |
 | **Gateway alignment** | Operator routes must be added to the gateway's matched-prefix set — `_is_team_path()` covers only `TEAM_CONFIGS` today, so `/api/agents/...` is not gated by default (see §10 note). Preferred: a dedicated gated `/api/cognition/...` prefix |
