@@ -417,8 +417,11 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
       unpacking, augmented assignment, walrus, or ``del UNIVERSE``;
     - a class-body ``def UNIVERSE`` / ``async def UNIVERSE`` / ``class UNIVERSE``,
       which binds the attribute to a function/class object after the prepend;
-    - an instance-level ``self.UNIVERSE = ...`` assignment in any method, which
-      shadows the class constant at runtime.
+    - a ``__slots__`` naming ``UNIVERSE`` (a slot conflicts with the prepended
+      class variable, raising ``ValueError`` at class definition);
+    - an instance-level shadow in any method — ``self.UNIVERSE = ...``,
+      ``self.__dict__["UNIVERSE"] = ...``, or ``setattr(self, "UNIVERSE", ...)`` —
+      which rebinds the attribute on the instance at runtime.
 
     Method and nested-class bodies are not class-creation-time, so the
     class-creation walk does not descend into them — the instance-shadowing case
@@ -454,9 +457,15 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
     if any(walk(stmt) for stmt in cls.body):
         return True
 
-    # Instance-level shadowing: a method assigning ``<self>.UNIVERSE = ...``
-    # rebinds the attribute on the instance, so the guard reads that stale value
-    # rather than the injected class constant.
+    # A ``__slots__`` naming UNIVERSE would conflict with the prepended class
+    # variable (``ValueError`` at class definition) — bail rather than move that
+    # failure to runtime.
+    if _has_universe_slot(cls):
+        return True
+
+    # Instance-level shadowing: a method rebinding ``UNIVERSE`` on the instance
+    # (directly or indirectly) makes the guard read that stale value rather than
+    # the injected class constant.
     return any(
         _method_shadows_universe(node)
         for node in cls.body
@@ -464,25 +473,82 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
     )
 
 
+def _has_universe_slot(cls: ast.ClassDef) -> bool:
+    """True iff the class declares ``__slots__`` containing ``"UNIVERSE"``.
+
+    A slot named UNIVERSE conflicts with a class-level ``UNIVERSE = ...`` (Python
+    raises ``ValueError: 'UNIVERSE' in __slots__ conflicts with class variable``),
+    so the prepended constant can't coexist with it.
+    """
+    for node in cls.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "__slots__" for t in targets):
+            continue
+        if node.value is not None and any(
+            isinstance(sub, ast.Constant) and sub.value == "UNIVERSE"
+            for sub in ast.walk(node.value)
+        ):
+            return True
+    return False
+
+
 def _method_shadows_universe(method) -> bool:
-    """True iff ``method`` assigns ``<instance-param>.UNIVERSE = ...`` in its own
-    scope (e.g. ``self.UNIVERSE = frozenset(...)`` in ``__init__``)."""
+    """True iff ``method`` rebinds ``UNIVERSE`` on its instance parameter — in
+    its own scope — so the guard would read that stale value rather than the
+    injected class constant.
+
+    Catches the direct ``self.UNIVERSE = ...`` attribute store and the common
+    indirect forms ``self.__dict__["UNIVERSE"] = ...`` and
+    ``setattr(self, "UNIVERSE", ...)``. (Truly arbitrary metaprogramming —
+    ``object.__setattr__``, ``vars(self)[...]`` — is out of scope; the realistic
+    generated-code forms fail closed.)
+    """
     params = method.args.args
     if not params:
         return False
     receiver = params[0].arg
     found = False
 
+    def _is_receiver(node: ast.AST) -> bool:
+        return isinstance(node, ast.Name) and node.id == receiver
+
     def visit(node: ast.AST) -> None:
         nonlocal found
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
             return
+        # self.UNIVERSE = ...
         if (
             isinstance(node, ast.Attribute)
             and node.attr == "UNIVERSE"
             and isinstance(node.ctx, ast.Store)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == receiver
+            and _is_receiver(node.value)
+        ):
+            found = True
+        # self.__dict__["UNIVERSE"] = ...
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.ctx, ast.Store)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "__dict__"
+            and _is_receiver(node.value.value)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == "UNIVERSE"
+        ):
+            found = True
+        # setattr(self, "UNIVERSE", ...)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "setattr"
+            and len(node.args) >= 2
+            and _is_receiver(node.args[0])
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "UNIVERSE"
         ):
             found = True
         for child in ast.iter_child_nodes(node):

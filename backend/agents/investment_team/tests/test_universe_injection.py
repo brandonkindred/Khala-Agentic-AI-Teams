@@ -838,6 +838,60 @@ def test_class_universe_override_bails() -> None:
     assert inject_universe_and_guard(src, spec) == src
 
 
+def test_universe_in_slots_bails() -> None:
+    """A ``__slots__`` naming UNIVERSE would conflict with the prepended class
+    variable at class-definition time, so the injector bails."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            __slots__ = ("UNIVERSE", "_state")
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_dict_subscript_universe_shadowing_bails() -> None:
+    """An indirect ``self.__dict__["UNIVERSE"] = ...`` shadow is detected -> bail."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def __init__(self):
+                self.__dict__["UNIVERSE"] = frozenset({"SPY"})
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_setattr_universe_shadowing_bails() -> None:
+    """An indirect ``setattr(self, "UNIVERSE", ...)`` shadow is detected -> bail."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def __init__(self):
+                setattr(self, "UNIVERSE", frozenset({"SPY"}))
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
 def test_instance_universe_shadowing_bails() -> None:
     """A ``self.UNIVERSE = ...`` assignment in a method shadows the class
     constant at runtime, so the injector bails."""
