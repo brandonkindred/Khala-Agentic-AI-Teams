@@ -290,18 +290,23 @@ def _find_on_bar_methods(cls: ast.ClassDef) -> list:
 def _bar_parameter_name(on_bar) -> str | None:
     """Return the bar parameter name of ``on_bar(self, ctx, bar)``.
 
-    Returns None when the method is async or does not have *exactly* three
-    positional parameters — the harness requires the precise
-    ``on_bar(self, ctx, bar)`` arity (code_safety enforces ``== 3``), so a
-    4+-parameter overload is invalid and must not be guarded (fail closed; the
-    safety/conformance gates own that critical).
+    Returns None when the method is async, does not have *exactly* three
+    positional parameters, or has a *required* keyword-only parameter — the
+    harness requires the precise ``on_bar(self, ctx, bar)`` arity (code_safety
+    enforces ``== 3`` positionals) and calls ``instance.on_bar(ctx, bar)``, so a
+    4+-parameter overload or a required keyword-only param is invalid and must
+    not be guarded (fail closed; the safety/conformance gates own that critical).
     """
     if isinstance(on_bar, ast.AsyncFunctionDef):
         return None
-    args = on_bar.args.args
-    if len(args) != 3:
+    args = on_bar.args
+    if len(args.args) != 3:
         return None
-    return args[2].arg
+    # A keyword-only parameter with no default (``kw_defaults`` entry is None) is
+    # required, so ``instance.on_bar(ctx, bar)`` would raise ``TypeError``.
+    if any(default is None for default in args.kw_defaults):
+        return None
+    return args.args[2].arg
 
 
 def _is_guardable_on_bar(on_bar) -> bool:
@@ -323,12 +328,16 @@ def _is_guardable_on_bar(on_bar) -> bool:
 
 
 def _has_static_or_class_decorator(func) -> bool:
-    """True iff ``func`` is decorated ``@staticmethod`` / ``@classmethod`` (the
-    builtins are always applied bare, as plain ``Name`` decorators)."""
-    return any(
-        isinstance(dec, ast.Name) and dec.id in {"staticmethod", "classmethod"}
-        for dec in func.decorator_list
-    )
+    """True iff ``func`` is decorated ``@staticmethod`` / ``@classmethod``,
+    whether bare (``ast.Name``) or qualified (``ast.Attribute`` such as
+    ``@builtins.staticmethod``)."""
+    targets = {"staticmethod", "classmethod"}
+    for dec in func.decorator_list:
+        if isinstance(dec, ast.Name) and dec.id in targets:
+            return True
+        if isinstance(dec, ast.Attribute) and dec.attr in targets:
+            return True
+    return False
 
 
 def _is_strippable_guard(stmt: ast.stmt) -> bool:

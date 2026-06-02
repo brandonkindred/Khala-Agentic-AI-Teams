@@ -763,6 +763,63 @@ def test_class_lambda_and_noarg_method_inject_normally() -> None:
     compile(out, "<injected>", "exec")
 
 
+def test_required_kwonly_on_bar_not_guarded() -> None:
+    """A required keyword-only param makes ``instance.on_bar(ctx, bar)`` raise
+    TypeError, so the method is not guardable -> fail closed."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar, *, threshold):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # not guarded -> fail closed
+    compile(out, "<injected>", "exec")
+
+
+def test_kwonly_with_default_on_bar_guarded() -> None:
+    """A keyword-only param *with* a default is harness-callable, so the method
+    is still guarded normally."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar, *, threshold=1.0):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert _has_universe_guard_in_on_bar(_cls(out))
+    compile(out, "<injected>", "exec")
+
+
+def test_qualified_staticmethod_on_bar_not_guarded() -> None:
+    """A qualified ``@builtins.staticmethod`` on_bar is rejected like the bare
+    ``@staticmethod`` form."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            @builtins.staticmethod
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # not guarded -> fail closed
+    compile(out, "<injected>", "exec")
+
+
 def test_staticmethod_on_bar_not_guarded() -> None:
     """A ``@staticmethod`` on_bar has no bound ``self`` at runtime, so it isn't
     guardable; UNIVERSE is injected but the guard is skipped (fail closed)."""
