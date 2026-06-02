@@ -45,16 +45,19 @@ flowchart TB
 - **Goal:** Establish the package and durable storage.
 - **Files:** `agent_cognition/__init__.py`, `models.py` (Pydantic: `MemoryEvent`,
   `PeriodSummary`, `Rule`, `RuleProposal`, `ToolCall`, `CognitionContext`,
-  `CognitionWriteback`, enums for `kind`/`scale`/`mode`/`status`/`source`);
-  `postgres/__init__.py` (`SCHEMA: TeamSchema` — the 4 tables, indexes, summaries unique
-  `(agent_id, scale, period_start)` **and events unique `(agent_id, source_run_id,
-  source_seq)`** so Step 2's writeback `ON CONFLICT` target exists; summaries `version`/`stale`
-  columns; proposal/rule `evidence` columns); register in `shared_postgres/registry.py`; call
-  `register_team_schemas(SCHEMA)` from `unified_api/main.py` lifespan.
+  `CognitionWriteback`, enums — proposal `status` is `pending|approved|rejected|superseded`);
+  `postgres/__init__.py` (`SCHEMA: TeamSchema` — **5 tables**: events, summaries, rules,
+  rule_proposals, **runs** (idempotency ledger, PK `(agent_id, source_run_id)`); indexes;
+  summaries unique `(agent_id, scale, period_start)` **and events unique `(agent_id,
+  source_run_id, source_seq)`** so Step 2's writeback `ON CONFLICT` target exists; summaries
+  `version`/`stale` columns; proposal/rule `evidence` columns); register in
+  `shared_postgres/registry.py`; call `register_team_schemas(SCHEMA)` from
+  `unified_api/main.py` lifespan.
 - **Depends:** —
 - **✅ Acceptance:** tables created idempotently on startup; models validate/round-trip;
-  schema is pure data (no import side effects); **both unique constraints (events idempotency
-  key + summary period key) present** so dependent steps' `ON CONFLICT` clauses resolve.
+  schema is pure data (no import side effects); **events idempotency key, summary period key,
+  and runs PK all present** so dependent steps' `ON CONFLICT`/claim clauses resolve;
+  proposal-status enum includes `superseded`.
 
 ### Step 2 — Memory store (DAL)
 - **Goal:** Read/write episodic events and summaries.
@@ -125,14 +128,16 @@ flowchart TB
 - **Files:** `rules/reflection.py` — LLM proposes add/retire/amend from recent summaries +
   active rules; writes `pending` proposals with `action`, `target_rule_id` (for retire/amend),
   and `evidence` recorded as **`(summary_id, version)` refs** (so Step 3 can detect when the
-  evidence later changes). Also exposes `reevaluate_stale(agent_id)` — withdraws/re-derives
-  pending proposals flagged `stale_evidence` and marks `needs_review` derived rules — invoked
+  evidence later changes). Also exposes `reevaluate_stale(agent_id)` — moves stale-evidence
+  pending proposals to the **`superseded`** terminal status (the system auto-withdraw state,
+  not `rejected`, so it neither fabricates an operator decision nor lingers in the queue) and
+  optionally re-derives a fresh proposal, and marks `needs_review` derived rules — invoked
   after a stale recompute. **Never activates.**
 - **Depends:** 3, 5
 - **✅ Acceptance:** proposals created with versioned evidence refs; nothing reaches `active`
-  without explicit approval; **after a summary recompute, a pending proposal on the old version
-  is flagged `stale_evidence` and an approved derived rule is flagged `needs_review`** (learned
-  rules don't silently sit on stale evidence).
+  without explicit approval; **after a summary recompute, a stale-evidence pending proposal
+  moves to `superseded` (never `rejected`, never left `pending`) and an approved derived rule
+  is flagged `needs_review`** (learned rules don't silently sit on stale evidence).
 
 ## Milestone C — Tools & orchestration
 
@@ -144,7 +149,10 @@ flowchart TB
   `tools/runner.py` (wrap `complete_json_with_tool_loop`; emit `tool_call`/`outcome` events).
   For `platform_bound` tools used by sandboxed agents, the loop is **proxy-driven** via the
   SB↔PX `tool_calls`/`tool_results` protocol (defined here, wired in Step 10) so secrets/egress
-  stay platform-side; `sandbox_local` tools run inside the sandbox.
+  stay platform-side; `sandbox_local` tools run inside the sandbox. **Also extend
+  `shared_agent_invoke` (`mount_invoke_shim`/`dispatch`)** to unwrap the `{input, cognition}`
+  envelope — invoke the entrypoint with `input` only and expose `cognition` via a side channel
+  (context var / optional kwarg), with passthrough for non-enveloped bodies.
 - **Depends:** 1, 2
 - **✅ Acceptance:** known ids resolve to the correct execution site, unknown id errors; each
   tool call writes memory events; **a platform-bound tool for a sandboxed agent round-trips
@@ -153,11 +161,15 @@ flowchart TB
 ### Step 8 — CognitiveContext facade
 - **Goal:** One seam wiring memory + rules + tools; defines the invoke contract.
 - **Files:** `context.py` — `ensure_rollups_current`, `load_context` (rules + digest →
-  `CognitionContext`), `persist_writeback` (append events/tool calls, **strip secrets**, bound
-  salience), enforced pre/postcondition hooks.
+  `CognitionContext`), `persist_writeback` (append events/tool calls keyed by `source_run_id`,
+  **strip secrets**, bound salience), enforced pre/postcondition hooks, and the run-ledger
+  helpers `claim_run`/`complete_run`/`replay_run`. Defines the wrapper-envelope contract
+  (`{input, cognition}` in, `{output, cognition_writeback}` out) consumed by the shim (Step 7)
+  and proxy (Step 10).
 - **Depends:** 4, 5, 7
 - **✅ Acceptance:** load/writeback round-trip; precondition-block path; secret-stripping on
-  writeback.
+  writeback; `claim_run`→`complete_run`→`replay_run` returns the stored envelope and a second
+  `claim_run` on a completed key signals replay (no re-execution).
 
 ### Step 9 — Manifest `CognitionSpec`
 - **Goal:** Declarative per-agent cognition config.
@@ -168,19 +180,25 @@ flowchart TB
 
 ### Step 10 — Invoke proxy integration
 - **Goal:** Make the contract live at the boundary.
-- **Files:** `unified_api/routes/agents.py` — **mint a stable `source_run_id` for the logical
-  invoke** (reuse a caller `Idempotency-Key` if present; reuse the same id across retries —
-  not the shim's per-POST `trace_id`) and propagate it into the sandbox/writeback. Then: lazy
+- **Files:** `unified_api/routes/agents.py` — **mint a stable `source_run_id`** (reuse a caller
+  `Idempotency-Key` if present) and **claim the `agent_cognition_runs` ledger** before any work:
+  a known `completed`/`blocked` key **replays the stored envelope without re-invoking the
+  sandbox**; an `in_progress` key returns `409`; first sight marks `in_progress`. Then: lazy
   catch-up → load context → advisory-into-system-prompt + enforced precondition gate (block →
-  4xx + memory event) → inject `cognition` block → on return **run postcondition check first,
-  then** persist writeback. On postcondition violation, persist **sanitized `tool_call`/
-  `outcome` records** (real side effects already happened) plus a blocked-run audit event, and
-  drop the rejected output/untrusted memory — never the full rejected writeback. For sandboxed
-  agents with `platform_bound` tools, drive the multi-turn SB↔PX `tool_calls`/`tool_results`
-  loop (from Step 7) instead of a single shot. Helper for in-process teams (no HTTP hop).
+  4xx + memory event) → invoke the sandbox with a **wrapper envelope `{input, cognition}`**
+  (the agent's original body under `input`; the shim unwraps so the entrypoint sees only its
+  declared input) → on return **run postcondition check first, then** persist writeback and
+  store the run-ledger envelope. On postcondition violation, persist **sanitized `tool_call`/
+  `outcome` records** plus a blocked-run audit event (drop the rejected output/untrusted
+  memory) and mark the ledger `blocked`. For sandboxed agents with `platform_bound` tools,
+  drive the multi-turn SB↔PX `tool_calls`/`tool_results` loop (from Step 7). Helper for
+  in-process teams (no HTTP hop). **Requires a `shared_agent_invoke` shim change** (Step 7/8) to
+  unwrap the envelope and expose `cognition` via a side channel.
 - **Depends:** 8, 9
-- **✅ Acceptance:** stubbed-sandbox test shows inject + persist; **a retried invoke reuses the
-  same `source_run_id` and does not duplicate writeback** (deduped by the events unique key);
+- **✅ Acceptance:** stubbed-sandbox test shows envelope-unwrap (entrypoint with a strict
+  Pydantic model receives **only** its declared input, no `cognition` field) + persist;
+  **a retried invoke with the same key replays the stored envelope and does NOT re-invoke the
+  sandbox** (tool side effects run once); concurrent retry while `in_progress` → 409;
   precondition block → 4xx; postcondition violation → 4xx with the rejected output **not**
   persisted **but executed tool calls still recorded**; a platform-bound tool round-trips via
   the proxy-driven loop without sandbox secret exposure.
