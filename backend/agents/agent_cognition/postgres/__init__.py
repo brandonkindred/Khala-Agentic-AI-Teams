@@ -63,8 +63,16 @@ SCHEMA: TeamSchema = TeamSchema(
             covers_through  TIMESTAMPTZ,
             version         INTEGER NOT NULL DEFAULT 1,
             stale           BOOLEAN NOT NULL DEFAULT FALSE,
+            events_pruned   BOOLEAN NOT NULL DEFAULT FALSE,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
+        # ``events_pruned`` is the durable recompute-vs-amend marker: the memory
+        # store latches it TRUE on a day summary when retention deletes that
+        # day's raw events, so a later late arrival is amended onto the existing
+        # summary (not recomputed from an incomplete set) even across a restart.
+        # ALTER form is idempotent and back-fills clusters provisioned before it.
+        """ALTER TABLE agent_cognition_summaries
+            ADD COLUMN IF NOT EXISTS events_pruned BOOLEAN NOT NULL DEFAULT FALSE""",
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_cognition_summaries_period
             ON agent_cognition_summaries(agent_id, scale, period_start)""",
         # -----------------------------------------------------------------

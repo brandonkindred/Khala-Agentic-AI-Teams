@@ -230,6 +230,18 @@ def test_upsert_summary_insert_then_update_idempotent() -> None:
     assert row.created_at == _CREATED
 
 
+def test_upsert_summary_does_not_regress_version() -> None:
+    # mark_period_stale (or a prior recompute) can leave version ahead of a
+    # freshly-built summary; the GREATEST guard keeps the higher stored value.
+    store.upsert_summary("a", _summary("a", window=_DAY, version=5, summary="v1"))
+    store.upsert_summary("a", _summary("a", window=_DAY, version=1, summary="v2"))
+
+    row = store.get_last_summary("a", Scale.DAY)
+    assert row is not None
+    assert row.summary == "v2"
+    assert row.version == 5  # not regressed to 1
+
+
 def test_upsert_summary_agent_id_mismatch_raises() -> None:
     with pytest.raises(AssertionError):
         store.upsert_summary("a", _summary("b"))
@@ -292,17 +304,12 @@ def test_get_last_summary_returns_newest_or_none() -> None:
 # mark_period_stale
 # ---------------------------------------------------------------------------
 def test_mark_period_stale_flags_containing_summaries_retained() -> None:
-    # Day summary folded 2 events and both originals are still present.
-    # mark_period_stale is called *before* the late event is appended, so the
-    # retained-count reflects the surviving originals only.
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY, source_count=2))
+    # Day/week/month summaries exist and the day was never pruned → retained.
+    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY))
     store.upsert_summary("a", _summary("a", scale=Scale.WEEK, window=_WEEK))
     store.upsert_summary("a", _summary("a", scale=Scale.MONTH, window=_MONTH))
-    store.append_event("a", _event("a", run_id="r1", seq=1, occurred_at=_MID_DAY))
-    store.append_event("a", _event("a", run_id="r2", seq=2, occurred_at=_MID_DAY))
 
-    retained = store.mark_period_stale("a", _MID_DAY)
-    assert retained is True
+    assert store.mark_period_stale("a", _MID_DAY) is True
 
     for scale in (Scale.DAY, Scale.WEEK, Scale.MONTH):
         s = store.get_last_summary("a", scale)
@@ -310,16 +317,31 @@ def test_mark_period_stale_flags_containing_summaries_retained() -> None:
         assert s.version == 2  # bumped from 1
 
 
-def test_mark_period_stale_pruned_period_returns_false() -> None:
-    # Regression guard for the late-event-inflation bug: a partially-pruned
-    # day folded 2 events, one was pruned, one original survives. The mark
-    # runs before the late event is appended, so the count is 1 < 2 → pruned.
-    # (Had we counted the in-flight late event, the count would be 2 == 2 and
-    # this would wrongly report the period as retained.)
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY, source_count=2))
-    store.append_event("a", _event("a", run_id="survivor", occurred_at=_MID_DAY))
+def test_mark_period_stale_is_idempotent_on_version() -> None:
+    # The non-stale → stale latch means a second late event into the same
+    # already-stale period must not re-bump version (which would spuriously
+    # move the (summary_id, version) evidence refs).
+    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY))
 
-    assert store.mark_period_stale("a", _MID_DAY) is False
+    assert store.mark_period_stale("a", _MID_DAY) is True
+    first = store.get_last_summary("a", Scale.DAY)
+    assert first is not None and first.stale is True and first.version == 2
+
+    assert store.mark_period_stale("a", _MID_DAY) is True
+    second = store.get_last_summary("a", Scale.DAY)
+    assert second is not None and second.version == 2  # not bumped again
+
+
+def test_mark_period_stale_pruned_period_returns_false() -> None:
+    # A real prune latches events_pruned on the day summary; a later late event
+    # into that (now event-less) day must amend, not recompute. The regime is
+    # read from the durable flag, so it is correct regardless of whether the
+    # late event has been appended.
+    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1))
+    store.append_event("a", _event("a", occurred_at=_OLD))
+    assert store.prune_events("a", retention_days=30) == 1
+
+    assert store.mark_period_stale("a", _OLD) is False
 
 
 def test_mark_period_stale_no_summary_returns_true_and_flags_nothing() -> None:
@@ -386,9 +408,41 @@ def test_cross_agent_isolation() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Preconditions
+# ---------------------------------------------------------------------------
+def test_empty_agent_id_raises() -> None:
+    with pytest.raises(AssertionError):
+        store.append_event("", _event("", run_id="r"))
+    with pytest.raises(AssertionError):
+        store.fetch_events_for_period("", _DAY[0], _DAY[1])
+    with pytest.raises(AssertionError):
+        store.fetch_recent_events("", top_n=5)
+    with pytest.raises(AssertionError):
+        store.upsert_summary("", _summary(""))
+    with pytest.raises(AssertionError):
+        store.fetch_summaries("", Scale.DAY)
+    with pytest.raises(AssertionError):
+        store.get_last_summary("", Scale.DAY)
+    with pytest.raises(AssertionError):
+        store.mark_period_stale("", _MID_DAY)
+    with pytest.raises(AssertionError):
+        store.prune_events("", retention_days=30)
+
+
+# ---------------------------------------------------------------------------
 # Storage-unavailable guard
 # ---------------------------------------------------------------------------
 def test_storage_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: False)
     with pytest.raises(store.AgentCognitionStorageUnavailable):
         store.fetch_recent_events("a", top_n=5)
+
+
+def test_conn_propagates_body_errors_unwrapped() -> None:
+    # An error raised inside the connection body must propagate unchanged
+    # (and roll back) — it must NOT be masked as a storage-unavailable error,
+    # which would hide genuine query bugs as infra outages.
+    with pytest.raises(ValueError):
+        with store._conn() as conn:
+            assert conn is not None
+            raise ValueError("boom")
