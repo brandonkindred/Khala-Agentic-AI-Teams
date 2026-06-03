@@ -187,7 +187,7 @@ def test_non_literal_universe_replaced() -> None:
         "    _SYM = 'QQQ'\n    UNIVERSE = frozenset({_SYM})\n\n    def on_bar",
     )
     out = inject_universe_and_guard(src, spec)
-    assert "{'QQQ'}" in out
+    assert "('QQQ',)" in out
     assert _has_universe_constant(_cls(out))
 
 
@@ -208,7 +208,7 @@ def test_universe_call_with_non_display_arg_replaced() -> None:
         "    _SYMS = ('QQQ',)\n    UNIVERSE = frozenset(_SYMS)\n\n    def on_bar",
     )
     out = inject_universe_and_guard(src, spec)
-    assert "{'QQQ'}" in out
+    assert "('QQQ',)" in out
     assert _has_universe_constant(_cls(out))
 
 
@@ -326,7 +326,7 @@ def test_chained_assignment_alias_preserved_and_synced() -> None:
     out = inject_universe_and_guard(src, spec)
     assert "TARGETS" in out  # sibling alias survives
     assert "SPY" not in out  # but no longer bound to the stale universe
-    assert "{'QQQ'}" in out
+    assert "('QQQ',)" in out
     assert _universe_assign_count(out) == 1
     compile(out, "<injected>", "exec")
 
@@ -380,7 +380,7 @@ def test_bare_annassign_universe_replaced() -> None:
         "    UNIVERSE: frozenset\n\n    def on_bar",
     )
     out = inject_universe_and_guard(src, spec)
-    assert "{'QQQ'}" in out
+    assert "('QQQ',)" in out
     assert _universe_assign_count(out) == 1
 
 
@@ -691,10 +691,47 @@ def test_fail_closed_only_bare_guard_backfills_pass() -> None:
     compile(out, "<injected>", "exec")
 
 
-def test_injected_universe_is_unshadowable_set_display() -> None:
-    """The injected ``UNIVERSE`` is a set-*display* literal, not ``frozenset(...)``
-    — so a module that rebound ``frozenset`` before the class can't make the
-    class-creation-time constant resolve to the wrong collection."""
+def test_fail_closed_recursively_strips_guard_nested_in_hoisted_else() -> None:
+    """When the fail-closed strip hoists an ``else`` body that itself contains a
+    recognized universe guard, that nested guard must not survive at the new top
+    level — otherwise the first definition would still satisfy
+    ``_has_universe_guard_in_on_bar`` and the gate would go green while the
+    unguardable runtime-effective (last) on_bar processes non-target bars."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+                else:
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    ctx.submit_order(symbol=bar.symbol, qty=2, side="LONG")
+
+            def on_bar(strategy, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=3, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    # The runtime-effective (last, non-self) on_bar is unguardable -> fail closed.
+    # The nested guard hoisted out of the first method's else must be stripped too,
+    # so no top-level guard remains on the gate-inspected first definition.
+    assert not _has_universe_guard_in_on_bar(_cls(out))
+    assert "qty=2" in out  # the genuine post-guard logic is preserved
+    compile(out, "<injected>", "exec")
+
+
+def test_injected_universe_is_unshadowable_immutable_tuple() -> None:
+    """The injected ``UNIVERSE`` is an immutable tuple-*display* literal, not
+    ``frozenset(...)`` or a mutable set — so a module that rebound ``frozenset``
+    before the class can't make the class-creation-time constant resolve to the
+    wrong collection, and in-place mutation (``self.UNIVERSE.add(...)``) raises
+    rather than silently changing the universe behind a passing gate."""
     spec = _spec(target_symbols=["QQQ"])
     src = textwrap.dedent(
         """
@@ -710,7 +747,7 @@ def test_injected_universe_is_unshadowable_set_display() -> None:
     out = inject_universe_and_guard(src, spec)
     cls = _cls(out)
     assert _has_universe_constant(cls)
-    # The injected constant is a bare set display bound to exactly the spec
+    # The injected constant is a tuple display bound to exactly the spec
     # symbols, with no dependence on the shadowed ``frozenset`` name.
     value = next(
         node.value
@@ -718,9 +755,9 @@ def test_injected_universe_is_unshadowable_set_display() -> None:
         if isinstance(node, ast.Assign)
         and any(isinstance(t, ast.Name) and t.id == "UNIVERSE" for t in node.targets)
     )
-    assert isinstance(value, ast.Set)
+    assert isinstance(value, ast.Tuple)
     assert {elt.value for elt in value.elts} == {"QQQ"}
-    assert "UNIVERSE = {'QQQ'}" in out
+    assert "UNIVERSE = ('QQQ',)" in out
 
 
 def test_on_bar_with_varargs_and_nested_helper() -> None:
@@ -1064,6 +1101,35 @@ def test_warmup_gate_with_else_body_not_treated_as_canonical() -> None:
     assert out != src  # rewritten, not verbatim
     assert _first_is_guard(out)  # canonical guard hoisted ahead of signal logic
     assert _has_universe_guard_in_on_bar(_cls(out))
+
+
+def test_non_ctx_warmup_guard_not_exempt_forces_rewrite() -> None:
+    """A leading warm-up-shaped guard on a receiver other than the ``ctx``
+    parameter (here ``bar.is_warmup``) is real executable code ahead of the
+    symbol filter, not the engine's ``ctx.is_warmup`` flag, so the method is
+    NOT canonical: the canonical universe guard is injected ahead of everything
+    so non-target bars are rejected before that statement runs."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({'QQQ'})
+
+            def on_bar(self, ctx, bar):
+                if bar.is_warmup:
+                    return
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert out != src  # warm-up guard is on bar, not ctx -> not canonical
+    assert _first_is_guard(out)  # canonical guard hoisted ahead of bar.is_warmup
+    assert _has_universe_guard_in_on_bar(_cls(out))
+    compile(out, "<injected>", "exec")
 
 
 def test_on_bar_only_warmup_gate_gets_guard_injected() -> None:
@@ -1500,7 +1566,7 @@ def test_custom_param_name() -> None:
 def test_symbols_sorted_and_deduped() -> None:
     spec = _spec(target_symbols=["MSFT", "AAPL", "AAPL"])
     out = inject_universe_and_guard(_GUARDLESS, spec)
-    assert "{'AAPL', 'MSFT'}" in out
+    assert "('AAPL', 'MSFT')" in out
 
 
 def test_requires_custom_code_still_injects() -> None:

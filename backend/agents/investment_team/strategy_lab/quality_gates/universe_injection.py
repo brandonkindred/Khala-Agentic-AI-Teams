@@ -279,27 +279,35 @@ def _existing_universe_symbols(cls: ast.ClassDef) -> list[str] | None:
 
 
 def _build_universe_assign(symbols: list[str]) -> ast.stmt:
-    """Build ``UNIVERSE = {<sorted-deduped symbols>}`` as a set-display literal.
+    """Build ``UNIVERSE = (<sorted-deduped symbols>,)`` as a tuple-display literal.
 
-    A set *display* is used deliberately rather than ``frozenset({...})`` (the
-    deterministic compiler's form). The injected statement executes at
-    class-creation time, and a ``frozenset(...)`` call resolves the name
-    ``frozenset`` in the enclosing module scope — so if the generated module
-    rebound ``frozenset`` before the strategy class, the call would build the
-    wrong collection and the runtime guard would silently filter on the wrong
-    symbols, turning guardless code into passing-but-wrong code. A set display
-    depends on no rebindable name, so the injected universe is always exactly
-    ``symbols``. The conformance recognizer (``_has_universe_constant`` via
+    A tuple *display* is used deliberately rather than ``frozenset({...})`` (the
+    deterministic compiler's form) or a set display. Two properties matter:
+
+    - **Unshadowable.** The injected statement executes at class-creation time,
+      and a ``frozenset(...)`` call resolves the name ``frozenset`` in the
+      enclosing module scope — so if the generated module rebound ``frozenset``
+      before the strategy class, the call would build the wrong collection and
+      the runtime guard would silently filter on the wrong symbols. A display
+      depends on no rebindable name, so the injected universe is always exactly
+      ``symbols``.
+    - **Immutable.** Unlike a set display, a tuple cannot be mutated in place
+      (``self.UNIVERSE.add(...)`` / ``.clear()`` raise ``AttributeError`` rather
+      than silently changing the universe behind a passing gate). The guard only
+      needs ``in`` membership, for which a tuple is sufficient.
+
+    The conformance recognizer (``_has_universe_constant`` via
     ``_is_collection_literal_expr``) accepts a set/list/tuple display, so the
     output stays gate-conformant.
 
-    Preconditions: ``symbols`` is non-empty (an empty set display ``{}`` would
-    be a dict; callers short-circuit on an empty universe before reaching here).
+    Preconditions: ``symbols`` is non-empty (callers short-circuit on an empty
+    universe before reaching here).
     """
     ordered = sorted(set(symbols))
     assert ordered, "UNIVERSE injection requires at least one symbol"
-    literal = "{" + ", ".join(repr(s) for s in ordered) + "}"
-    return ast.parse(f"UNIVERSE = {literal}").body[0]
+    # ``repr(tuple(...))`` yields a valid tuple display with the mandatory
+    # trailing comma for the single-element case (``('QQQ',)``).
+    return ast.parse(f"UNIVERSE = {repr(tuple(ordered))}").body[0]
 
 
 def _build_guard_stmt(bar_param: str) -> ast.stmt:
@@ -378,17 +386,24 @@ def _is_guardable_on_bar(on_bar) -> bool:
     )
 
 
-def _is_warmup_guard_stmt(stmt: ast.stmt) -> bool:
-    """True iff ``stmt`` is a bare warm-up early-return ``if <name>.is_warmup: return``.
+def _is_warmup_guard_stmt(stmt: ast.stmt, ctx_name: str) -> bool:
+    """True iff ``stmt`` is a bare warm-up early-return ``if <ctx>.is_warmup: return``
+    on the *actual* ``ctx`` parameter (``ctx_name``).
 
     Matches the deterministic compiler's leading warm-up gate exactly: an ``if``
-    with no ``else`` whose test is an attribute access ``<Name>.is_warmup`` and
-    whose body is a single bare ``return``. Such a guard is symbol-agnostic, so a
-    universe guard placed *after* it still rejects non-target bars before any
-    signal logic — letting ``_is_canonical_on_bar`` treat the compiled
-    ``warm-up → universe-guard`` preamble as already canonical.
+    with no ``else`` whose test is ``<ctx_name>.is_warmup`` and whose body is a
+    single bare ``return``. The receiver is pinned to the method's ``ctx``
+    parameter on purpose — ``ctx.is_warmup`` is the engine-provided, symbol-
+    agnostic warm-up flag, so a universe guard placed *after* it still rejects
+    non-target bars before any signal logic, letting ``_is_canonical_on_bar``
+    treat the compiled ``warm-up → universe-guard`` preamble as canonical. A
+    leading ``if <other>.is_warmup: return`` (e.g. ``bar.is_warmup`` or an
+    undefined helper) is *not* exempt: it is real executable code ahead of the
+    symbol filter that could run or raise on a non-target bar, so it must force
+    the canonical guard to be injected ahead of it rather than be skipped.
 
-    Preconditions: ``stmt`` is an ``ast.stmt``.
+    Preconditions: ``stmt`` is an ``ast.stmt``; ``ctx_name`` is the on_bar ctx
+    parameter name.
     Postconditions: returns a ``bool``; never mutates ``stmt``; never raises.
     """
     if not isinstance(stmt, ast.If) or stmt.orelse:
@@ -398,6 +413,7 @@ def _is_warmup_guard_stmt(stmt: ast.stmt) -> bool:
         isinstance(test, ast.Attribute)
         and test.attr == "is_warmup"
         and isinstance(test.value, ast.Name)
+        and test.value.id == ctx_name
     ):
         return False
     return (
@@ -405,33 +421,52 @@ def _is_warmup_guard_stmt(stmt: ast.stmt) -> bool:
     )
 
 
+def _strip_recognized_guards(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Return ``body`` with every top-level gate-recognized universe guard
+    removed, preserving any trading logic the guard nested under ``else``.
+
+    A bare guard (no ``else``) is dropped outright — there is nothing to
+    preserve. A guard with a non-empty ``else`` body holds the strategy's logic,
+    so the guard *statement* is removed but its ``orelse`` statements are hoisted
+    in place. The hoisted statements are themselves run through this function so
+    a guard nested inside the ``else`` can't survive at the new top level (where
+    ``_has_universe_guard_in_on_bar`` would still recognize it and let the gate
+    pass). Non-guard statements pass through untouched — a guard buried inside a
+    non-guard ``if``/loop is already invisible to the top-level recognizer.
+
+    Preconditions: ``body`` is a list of ``ast.stmt``.
+    Postconditions: no statement in the returned list satisfies
+    ``_is_universe_guard_stmt``; never mutates ``body``'s elements; never raises.
+    """
+    out: list[ast.stmt] = []
+    for stmt in body:
+        if _is_strippable_guard(stmt):
+            continue
+        if _is_universe_guard_stmt(stmt):
+            # Guard with an ``else`` body: drop the guard, keep the logic — but
+            # recursively strip the hoisted statements so a nested guard isn't
+            # promoted into a top-level (gate-recognized) position.
+            out.extend(_strip_recognized_guards(stmt.orelse))
+            continue
+        out.append(stmt)
+    return out
+
+
 def _strip_guards_fail_closed(body: list[ast.stmt]) -> list[ast.stmt]:
     """Return ``body`` with every gate-recognized universe guard removed, so the
     conformance recognizer no longer matches (fail closed) without discarding
     any trading logic the guard nested under ``else``.
 
-    Used only on the first ``on_bar`` of the fail-closed path. A bare guard (no
-    ``else``) is dropped outright — there is nothing to preserve. A guard with a
-    non-empty ``else`` body holds the strategy's logic, so the guard *statement*
-    is removed but its ``orelse`` statements are hoisted in place, keeping that
-    logic in the refinement input. Non-guard statements pass through untouched.
-    A resulting empty body is back-filled with ``pass`` so the unparse stays
-    valid Python.
+    Used only on the first ``on_bar`` of the fail-closed path. Delegates the
+    guard removal (including the recursive hoist of ``else`` bodies) to
+    ``_strip_recognized_guards``; a resulting empty body is back-filled with
+    ``pass`` so the unparse stays valid Python.
 
     Preconditions: ``body`` is a list of ``ast.stmt`` (an ``on_bar`` body).
     Postconditions: the returned list contains no statement for which
     ``_is_universe_guard_stmt`` is True; it is non-empty; never raises.
     """
-    out: list[ast.stmt] = []
-    for stmt in body:
-        if _is_strippable_guard(stmt):
-            # Bare guard: drop it (no nested logic to keep).
-            continue
-        if _is_universe_guard_stmt(stmt):
-            # Guard with an ``else`` body: drop the guard, keep the logic.
-            out.extend(stmt.orelse)
-            continue
-        out.append(stmt)
+    out = _strip_recognized_guards(body)
     if not out:
         out.append(ast.Pass())
     return out
@@ -739,9 +774,14 @@ def _is_canonical_on_bar(on_bar) -> bool:
     # rejects non-target bars before any signal logic, and the shape is
     # canonical. Skip a leading run of such warm-up guards before locating the
     # universe guard, so compiled strategies are returned verbatim rather than
-    # round-tripped through ``ast.unparse`` and logged as spurious drift.
+    # round-tripped through ``ast.unparse`` and logged as spurious drift. The
+    # exemption is pinned to the actual ``ctx`` parameter (the second positional,
+    # guaranteed present by ``_bar_parameter_name``'s ``== 3`` arity check); a
+    # warm-up-shaped guard on any other receiver is real code ahead of the symbol
+    # filter and forces a rewrite.
+    ctx_name = on_bar.args.args[1].arg
     idx = 0
-    while idx < len(on_bar.body) and _is_warmup_guard_stmt(on_bar.body[idx]):
+    while idx < len(on_bar.body) and _is_warmup_guard_stmt(on_bar.body[idx], ctx_name):
         idx += 1
     if idx >= len(on_bar.body):
         return False
