@@ -1350,6 +1350,57 @@ def _volume_trend_bars(
     ]
 
 
+def _volume_peak_then_trough_bars(
+    n: int,
+    base_close: float,
+    base_volume: float,
+    amplitude: float,
+    reverse: bool = False,
+) -> List[OHLCVBar]:
+    """Symmetric two-phase volume sequence: first half ramps from
+    ``base_volume`` to ``base_volume + amplitude``, second half ramps from
+    ``base_volume + amplitude`` to ``base_volume - amplitude``. With
+    ``reverse=True``: first half drops to ``base_volume - amplitude``, then
+    rises to ``base_volume + amplitude``.
+
+    Drives EMA-difference indicators (MACD line, signal, histogram) through
+    BOTH a positive peak and a negative trough, so cross thresholds on
+    either side of zero are reachable from the appropriate side.
+
+    Used by the MACD branch of :func:`_builders_for_indicator_number` —
+    :func:`_volume_regime_change_bars` is asymmetric (the rise phase under
+    ``reverse=True`` only adds 1.0/bar because its offset clamps at the
+    floor for negative `i - midpoint`), so MACD never reaches a meaningful
+    positive peak from that helper.
+    """
+    midpoint = max(1, n // 2)
+    second_half = max(1, n - midpoint)
+    volumes: List[float] = []
+    for i in range(n):
+        if i < midpoint:
+            frac = i / midpoint
+            delta = amplitude * frac if not reverse else -amplitude * frac
+        else:
+            j = i - midpoint
+            frac = j / second_half
+            if not reverse:
+                delta = amplitude - 2.0 * amplitude * frac
+            else:
+                delta = -amplitude + 2.0 * amplitude * frac
+        volumes.append(max(1.0, base_volume + delta))
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=base_close,
+            high=base_close + 0.5,
+            low=max(_MIN_PRICE, base_close - 0.5),
+            close=base_close,
+            volume=v,
+        )
+        for v in volumes
+    ]
+
+
 def _step_bars(
     n: int, low_level: float, high_level: float, step_frac: float = 0.5
 ) -> List[OHLCVBar]:
@@ -2361,6 +2412,48 @@ def _builders_for_indicator_number(
                     lambda: _volume_regime_change_bars(n, base_close, base_vol, regime_slope),
                     lambda: _volume_regime_change_bars(
                         n, base_close, base_vol, regime_slope, reverse=True
+                    ),
+                ]
+            )
+        if name == "macd":
+            # MACD on flat input = 0; a monotonic volume ramp drifts MACD in
+            # one direction (positive for rising volume, negative for
+            # falling). That covers `cross_above N` for positive N reached
+            # by a rising ramp, and `cross_below N` for negative N reached
+            # by a falling ramp — but never the *opposite* side:
+            #   - `cross_below N` for N > 0 needs MACD ≥ N first (a peak
+            #     above N), then a fall back through N.
+            #   - `cross_above N` for N < 0 needs MACD ≤ N first (a trough
+            #     below N), then a rise back through N.
+            #   - `cross_below N` for N < 0 needs MACD to actually visit
+            #     below N (flat-warmup MACD = 0 ≥ N, so prev≥N is free;
+            #     the monotonic falling ramp's trough may not reach N if
+            #     |N| > peak |MACD| from that builder).
+            #
+            # ``_volume_peak_then_trough_bars`` drives volume up to
+            # ``base_volume + amplitude`` then down to
+            # ``base_volume - amplitude`` (or the reverse), producing a
+            # MACD trajectory with BOTH a positive peak and a negative
+            # trough. Sizing: peak |MACD| under EMA(fast)-EMA(slow) scales
+            # with the volume swing; empirically peak |MACD line| ≈ 0.15 ×
+            # amplitude for the default 12/26 EMAs over the warmup-bounded
+            # window the search scans. The histogram (line − signal) and
+            # the signal track at a smaller magnitude — peak |histogram| ≈
+            # 0.03 × amplitude — so they need ~5× more amplitude than the
+            # line to reach the same threshold. Overshoot |rhs| by a
+            # generous factor so peaks comfortably clear thresholds across
+            # the supported parameter range.
+            output = lhs.param("output")
+            magnitude_multiplier = 50.0 if output == "histogram" else 10.0
+            peak_amplitude = max(base_vol, magnitude_multiplier * abs(rhs), 200.0)
+            anchor = max(base_vol, peak_amplitude)
+            builders.extend(
+                [
+                    lambda: _volume_peak_then_trough_bars(
+                        n, base_close, anchor, peak_amplitude
+                    ),
+                    lambda: _volume_peak_then_trough_bars(
+                        n, base_close, anchor, peak_amplitude, reverse=True
                     ),
                 ]
             )

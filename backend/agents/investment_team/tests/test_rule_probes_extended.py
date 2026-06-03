@@ -2249,3 +2249,56 @@ def test_bar_high_low_priceref_crosses_close_tracking_indicator(
     assert _eval_predicate_at(pred, bars, trigger), (
         f"verifier rejected synthesizer trigger for {lhs} {op} {rhs_name}({rhs_params})"
     )
+
+
+@pytest.mark.parametrize(
+    "op,rhs,output",
+    [
+        # cross_below positive_N — needs MACD to first peak ABOVE N then
+        # fall back through N. A monotonic falling-volume ramp only ever
+        # drives MACD below 0 (never above), so this was unprobeable.
+        ("cross_below", 10.0, "macd"),
+        ("cross_below", 5.0, "macd"),
+        ("cross_below", 100.0, "macd"),
+        # cross_above negative_N — symmetric: needs MACD to trough BELOW N
+        # then rise back through N.
+        ("cross_above", -10.0, "macd"),
+        ("cross_above", -5.0, "macd"),
+        ("cross_above", -100.0, "macd"),
+        # cross_below negative_N where |N| exceeds the monotonic ramp's
+        # trough magnitude — flat-warmup MACD=0 ≥ N so prev≥N is free, but
+        # the ramp's trough may not reach N. The peak-then-trough builder
+        # produces a deep trough that exceeds N.
+        ("cross_below", -10.0, "macd"),
+        # cross_above positive_N — already worked but locked in to confirm
+        # the new builder doesn't regress.
+        ("cross_above", 10.0, "macd"),
+        # Histogram has smaller magnitude than the line — needs ~5× more
+        # volume amplitude per unit threshold.
+        ("cross_below", 10.0, "histogram"),
+        ("cross_above", -10.0, "histogram"),
+        ("cross_below", 100.0, "histogram"),
+        ("cross_above", -100.0, "histogram"),
+        # Signal output
+        ("cross_below", 10.0, "signal"),
+        ("cross_above", -10.0, "signal"),
+    ],
+)
+def test_volume_source_macd_cross_threshold_in_either_direction(op, rhs, output):
+    """MACD(source=volume) cross thresholds away from zero require both a
+    peak above and a trough below the threshold so the cross fires from
+    the opposite side. The peak-then-trough volume builder produces that
+    trajectory with amplitude scaled to clear |rhs|."""
+    pred = Predicate(
+        lhs=IndicatorRef(
+            name="macd",
+            params={"fast": 12, "slow": 26, "signal": 9, "output": output},
+            source="volume",
+        ),
+        op=op,
+        rhs=rhs,
+    )
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"volume-MACD({output}) {op} {rhs} not probeable: {reason}"
+    )
