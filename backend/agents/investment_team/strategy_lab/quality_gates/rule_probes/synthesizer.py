@@ -2941,6 +2941,77 @@ def _synth_indicator_vs_indicator(
     return None, 0, "indicator_vs_indicator_no_satisfying_bar"
 
 
+def _synth_indicator_vs_bar_volume(
+    lhs: IndicatorRef, op: str, base_close: float, min_bars: int
+) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
+    """`SMA/EMA op bar.volume`: drive the bar's volume column so the MA's
+    value sits on the correct side of the current bar's volume at the
+    trigger.
+
+    For close-source MA: the MA value equals ``base_close`` (close is held
+    flat); set the trigger bar's volume below or above base_close so the
+    inequality with the MA value holds.
+
+    For volume-source MA: trend the volume column so the MA lags the
+    current bar's volume — falling volume → MA averages older higher
+    volumes → MA > current; rising volume → MA averages older lower
+    volumes → MA < current.
+
+    Volumes are anchored in price magnitude (around base_close) so the
+    MA value and bar.volume are directly comparable. The trigger bar's
+    volume is the divergence point: at warmup-1, the MA has just become
+    valid and the inequality is tightest, giving a stable trigger index.
+    """
+    if lhs.name not in ("sma", "ema"):
+        return None, 0, f"indicator_vs_priceref_unsupported:{lhs.name}_bar.volume"
+
+    period = int(lhs.param("period"))
+    n = max(min_bars, _required_bars_for_indicator(lhs))
+    trigger_idx = max(period, n - _BARS_AFTER_TRIGGER - 1)
+
+    want_ma_greater = op in (">", ">=")
+
+    if lhs.source == "volume":
+        # Trend volume in price magnitude. Anchor large enough that the
+        # ramp doesn't hit _MIN_PRICE inside the visible window.
+        anchor = max(base_close * 2.0, float(n) + 50.0)
+        vol_slope = -1.0 if want_ma_greater else 1.0
+        midpoint = n // 2
+        volumes = [max(_MIN_PRICE, anchor + (i - midpoint) * vol_slope) for i in range(n)]
+    else:
+        # Close-source MA: MA value ≈ base_close. Set trigger bar's volume
+        # to the opposite side of base_close. All other bars keep volume
+        # at base_close so the MA-vs-volume inequality only holds at the
+        # trigger — deterministic single-bar trigger.
+        target_vol = base_close * 0.1 if want_ma_greater else base_close * 10.0
+        volumes = [float(base_close)] * n
+        volumes[trigger_idx] = max(_MIN_PRICE, target_vol)
+
+    bars = [
+        OHLCVBar(
+            date="placeholder",
+            open=base_close,
+            high=base_close + 0.5,
+            low=max(_MIN_PRICE, base_close - 0.5),
+            close=base_close,
+            volume=v,
+        )
+        for v in volumes
+    ]
+    df = _bars_to_df(bars)
+    source_series = _series_for_source(df, lhs.source)
+    ma_series = (sma if lhs.name == "sma" else ema)(source_series, period)
+    max_trigger = max(period, n - _BARS_AFTER_TRIGGER - 1)
+    for tidx in range(period, max_trigger + 1):
+        lv = ma_series.iloc[tidx]
+        if not (isinstance(lv, float) and math.isfinite(lv)):
+            continue
+        rv = bars[tidx].volume
+        if _compare(float(lv), op, float(rv)):
+            return bars, tidx, None
+    return None, 0, f"indicator_vs_priceref_unsupported:{lhs.name}_bar.volume"
+
+
 def _synth_indicator_vs_priceref(
     lhs: IndicatorRef, op: str, rhs: str, base_close: float, min_bars: int
 ) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
@@ -2960,15 +3031,19 @@ def _synth_indicator_vs_priceref(
     inequality can actually hold; the runtime's source-aware
     ``_compute_indicator_at`` agrees because it also reads volume.
 
-    Volume-rhs (`MA op bar.volume`) is still rejected — volume rhs ≈ 1e6
-    while close-source MA ≈ 100 is a magnitude mismatch no flat-bars
-    catalogue can satisfy.
+    Volume-rhs (`MA op bar.volume`) is handled by a separate branch — the
+    synthesizer controls the volume column and can drive it independently
+    of the MA (close-source MA stays anchored at ``base_close`` while
+    bar.volume jumps to a target; volume-source MA lags a trending volume
+    so it sits above/below the current bar's volume).
     """
     if lhs.name not in ("sma", "ema"):
         return None, 0, f"indicator_vs_priceref_unsupported:{lhs.name}_{rhs}"
     rhs_field = rhs.split(".", 1)[1] if rhs.startswith("bar.") else None
-    if rhs_field is None or rhs_field == "volume":
+    if rhs_field is None:
         return None, 0, f"indicator_vs_priceref_unsupported:{lhs.name}_{rhs}"
+    if rhs_field == "volume":
+        return _synth_indicator_vs_bar_volume(lhs, op, base_close, min_bars)
 
     period = int(lhs.param("period"))
     n = max(min_bars, _required_bars_for_indicator(lhs))

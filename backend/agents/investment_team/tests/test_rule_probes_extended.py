@@ -2686,3 +2686,47 @@ def test_indicator_vs_indicator_identical_sides_rejected():
     bars, _trigger, reason = _synthesise_for_predicate(pred)
     assert bars is None
     assert reason == "indicator_vs_indicator_identical_sides"
+
+
+@pytest.mark.parametrize(
+    "op,lhs_name,source",
+    [
+        # MA op bar.volume was rejected unconditionally as
+        # ``indicator_vs_priceref_unsupported`` even though the
+        # synthesizer controls the volume column. Close-source MA stays
+        # at base_close while bar.volume jumps to a target; volume-source
+        # MA lags a trending volume so it sits above/below current.
+        (">", "sma", "close"),
+        ("<", "sma", "close"),
+        (">=", "sma", "close"),
+        ("<=", "sma", "close"),
+        (">", "ema", "close"),
+        ("<", "ema", "close"),
+        (">", "sma", "volume"),
+        ("<", "sma", "volume"),
+        (">", "ema", "volume"),
+        ("<", "ema", "volume"),
+        (">", "sma", "high"),
+        ("<", "sma", "high"),
+        (">", "sma", "low"),
+        ("<", "sma", "low"),
+    ],
+)
+def test_ma_vs_bar_volume_supported(op, lhs_name, source):
+    """`SMA/EMA op bar.volume` for all sources. The synthesizer drives
+    the volume column independently of close, so close-source MA
+    (anchored at base_close) and volume-source MA (lagging trending
+    volume) both reach a valid trigger."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    lhs = IndicatorRef(name=lhs_name, params={"period": 20}, source=source)
+    pred = Predicate(lhs=lhs, op=op, rhs="bar.volume")
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is not None and trigger > 0, (
+        f"{lhs_name}({source},20) {op} bar.volume not probeable: {reason}"
+    )
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for {lhs_name}({source},20) {op} bar.volume"
+    )
