@@ -204,6 +204,21 @@ def test_indicator_value_ohlc_indicator_rejects_source_override(name) -> None:
     assert indicator_value(name, bars) is not None
 
 
+def test_indicator_value_rejects_unexpected_param() -> None:
+    bars = _make_bars()
+    # An unknown/typo'd param must raise rather than silently using defaults —
+    # matching IndicatorRef strictness for reads that reach runtime (e.g. via
+    # **kwargs the static gate cannot inspect).
+    with pytest.raises(ValueError, match="unexpected param"):
+        indicator_value("rsi", bars, perod=14)
+    with pytest.raises(ValueError, match="unexpected param"):
+        indicator_value("vwap", bars, period=14)  # vwap takes no params
+    with pytest.raises(ValueError, match="unexpected param"):
+        indicator_value("macd", bars, fast=12, slo=26)
+    # Correctly-spelled params still compute.
+    assert indicator_value("rsi", bars, period=14) is not None
+
+
 # ---------------------------------------------------------------------------
 # StrategyContext.indicator
 # ---------------------------------------------------------------------------
@@ -606,3 +621,36 @@ def test_check1_skips_validation_for_dynamic_ctx_indicator_args() -> None:
     )
     results = CodeConformanceGate().check(code, _ema_rsi_spec())
     assert _critical_details(results) == [], _critical_details(results)
+
+
+def test_check1_validates_params_when_symbol_is_dynamic() -> None:
+    # A dynamic `symbol` must not stop static param validation: it is not part of
+    # the indicator contract, so ctx.indicator('ema', symbol=bar.symbol) is still
+    # caught as missing `period`, while a well-formed rsi read with a dynamic
+    # symbol is not flagged.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', symbol=bar.symbol)
+                r = ctx.indicator('rsi', period=14, symbol=bar.symbol)
+                if trend is None or r is None:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    malformed = [d for d in _critical_details(results) if "not a valid indicator read" in d]
+    assert malformed and "ema" in malformed[0]
+    assert all("rsi" not in d for d in malformed)

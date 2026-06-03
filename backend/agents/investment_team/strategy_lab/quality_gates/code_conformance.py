@@ -175,13 +175,15 @@ def _ctx_indicator_arg_name(node: ast.Call) -> Optional[str]:
 
 
 def _ctx_indicator_literal_kwargs(node: ast.Call) -> Optional[tuple[dict, str]]:
-    """Extract ``(params, source)`` from a ``ctx.indicator`` call when *every*
-    argument is a literal; return ``None`` if any argument is dynamic.
+    """Extract ``(params, source)`` from a ``ctx.indicator`` call when every
+    *indicator* argument is a literal; return ``None`` if one is dynamic.
 
-    Returning ``None`` (dynamic args present) means the call cannot be validated
-    statically and is left to runtime — so a legitimate ``period=self.WINDOW``
-    is never falsely flagged. ``name`` and ``symbol`` are not indicator params
-    and are excluded from ``params``.
+    ``name`` and ``symbol`` are not part of the indicator contract, so their
+    dynamic-ness does not block validation — only a dynamic indicator param or
+    ``source`` (or ``**kwargs`` unpacking) leaves the call un-validatable and is
+    deferred to runtime, so a legitimate ``period=self.WINDOW`` is never falsely
+    flagged while ``ctx.indicator('ema', symbol=bar.symbol)`` (missing period)
+    is still caught.
     """
     # The only expected positional is the indicator name; extra positionals are
     # a runtime error this static check does not attempt to characterise.
@@ -190,10 +192,12 @@ def _ctx_indicator_literal_kwargs(node: ast.Call) -> Optional[tuple[dict, str]]:
     params: dict = {}
     source = "close"
     for kw in node.keywords:
-        if kw.arg is None or not isinstance(kw.value, ast.Constant):
-            return None  # **kwargs unpack or a dynamic value → cannot validate
+        if kw.arg is None:
+            return None  # **kwargs unpack → indicator params are not visible
         if kw.arg in ("name", "symbol"):
-            continue
+            continue  # not indicator params; ignore regardless of literal-ness
+        if not isinstance(kw.value, ast.Constant):
+            return None  # a dynamic indicator param/source → cannot validate
         if kw.arg == "source":
             source = kw.value.value
         else:

@@ -130,6 +130,24 @@ _VALID_SOURCES: frozenset[str] = frozenset(
     {"close", "open", "high", "low", "volume", "hl2", "ohlc4"}
 )
 
+# Allowed param keys per indicator (mirrors spec_dsl's _INDICATOR_PARAM_SPECS:
+# required ∪ optional, excluding ``source`` which is a dedicated argument). Kept
+# literal so the flat sandbox copy needs no spec_dsl import. Used to reject an
+# unexpected/typo'd kwarg (e.g. ``perod=14``) rather than silently trading on
+# defaults — matching IndicatorRef's strictness for reads the static gate cannot
+# see through (e.g. ``**kwargs`` unpacking).
+_INDICATOR_PARAM_KEYS: dict[str, frozenset[str]] = {
+    "sma": frozenset({"period"}),
+    "ema": frozenset({"period"}),
+    "rsi": frozenset({"period"}),
+    "macd": frozenset({"fast", "slow", "signal", "output"}),
+    "bollinger": frozenset({"period", "num_std", "band"}),
+    "atr": frozenset({"period"}),
+    "adx": frozenset({"period"}),
+    "stochastic": frozenset({"k_period", "d_period", "output"}),
+    "vwap": frozenset(),
+}
+
 
 def _last_or_none(series: pd.Series) -> Optional[float]:
     """Latest finite value of ``series``, or ``None`` when warm-up/empty.
@@ -213,6 +231,14 @@ def indicator_value(
     """
     if name not in _VALID_INDICATORS:
         raise ValueError(f"unknown indicator {name!r}; allowed: {sorted(_VALID_INDICATORS)}")
+    # Reject unexpected/typo'd param keys up front (independent of warm-up) so a
+    # mis-parameterized read raises rather than silently trading on defaults.
+    unexpected = set(params) - _INDICATOR_PARAM_KEYS[name]
+    if unexpected:
+        raise ValueError(
+            f"indicator {name!r} got unexpected param(s) {sorted(unexpected)}; "
+            f"allowed: {sorted(_INDICATOR_PARAM_KEYS[name])}"
+        )
     if not history:
         return None
 
