@@ -1957,9 +1957,7 @@ def _synth_cross_priceref_indicator(
     # The OHLC catalogue is still tried as a fallback for indicators that
     # already cross naturally with close-correlated high/low (e.g. SMA, RSI).
     if lhs in ("bar.high", "bar.low"):
-        builders = _builders_for_high_low_priceref_cross(
-            rhs, op, base_close, min_bars, lhs
-        )
+        builders = _builders_for_high_low_priceref_cross(rhs, op, base_close, min_bars, lhs)
         warmup = _warmup_for_indicator(rhs)
         return _search_cross(lhs, op, rhs, base_close, min_bars, builders, warmup=warmup)
 
@@ -2495,9 +2493,7 @@ def _builders_for_indicator_number(
             anchor = max(base_vol, peak_amplitude)
             builders.extend(
                 [
-                    lambda: _volume_peak_then_trough_bars(
-                        n, base_close, anchor, peak_amplitude
-                    ),
+                    lambda: _volume_peak_then_trough_bars(n, base_close, anchor, peak_amplitude),
                     lambda: _volume_peak_then_trough_bars(
                         n, base_close, anchor, peak_amplitude, reverse=True
                     ),
@@ -2822,9 +2818,7 @@ def _synth_indicator_vs_indicator(
     if {lhs.name, rhs.name} - {"sma", "ema"}:
         return None, 0, f"indicator_vs_indicator_unsupported:{lhs.name}_{rhs.name}"
     if lhs.source != rhs.source:
-        return None, 0, (
-            f"indicator_vs_indicator_mismatched_source:{lhs.source}_{rhs.source}"
-        )
+        return None, 0, (f"indicator_vs_indicator_mismatched_source:{lhs.source}_{rhs.source}")
     source = lhs.source
     lhs_period = int(lhs.param("period"))
     rhs_period = int(rhs.param("period"))

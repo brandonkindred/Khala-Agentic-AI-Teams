@@ -1660,8 +1660,9 @@ def test_priceref_to_field_covers_all_bar_fields():
     predicate reach _resolve_side_series; ``_bar_with_field`` has no
     matching branch and produces degenerate doji bars whose values can
     never satisfy the predicate, silently downgrading the probe."""
-    from investment_team.strategy_lab.spec_dsl import PriceRefLiteral
     from typing import get_args
+
+    from investment_team.strategy_lab.spec_dsl import PriceRefLiteral
 
     dsl_literals = set(get_args(PriceRefLiteral))
     assert set(_PRICEREF_TO_FIELD.keys()) == dsl_literals
@@ -2137,8 +2138,7 @@ def test_bar_volume_priceref_crosses_volume_or_price_indicator(
     pred = Predicate(lhs="bar.volume", op=op, rhs=rhs)
     bars, trigger, reason = _synthesise_for_predicate(pred)
     assert reason is None and bars is not None and trigger > 0, (
-        f"bar.volume {op} {rhs_name}({rhs_params}, src={rhs_source}) "
-        f"not probeable: {reason}"
+        f"bar.volume {op} {rhs_name}({rhs_params}, src={rhs_source}) not probeable: {reason}"
     )
 
 
@@ -2254,9 +2254,7 @@ def test_priceref_cross_ma_respects_indicator_source(op, rhs_name, period, sourc
         ("cross_below", "bar.low", "rsi", {"period": 14}),
     ],
 )
-def test_bar_high_low_priceref_crosses_close_tracking_indicator(
-    op, lhs, rhs_name, rhs_params
-):
+def test_bar_high_low_priceref_crosses_close_tracking_indicator(op, lhs, rhs_name, rhs_params):
     """``bar.high / bar.low cross_* <close-tracking indicator>`` was
     unprobeable for Bollinger / VWAP because the OHLC builders couple
     high and low to close (high = close + 0.5, low = close - 0.5), so
@@ -2359,9 +2357,7 @@ def test_volume_source_macd_cross_threshold_in_either_direction(op, rhs, output)
         ("<", 20, 5, "close"),
     ],
 )
-def test_indicator_vs_indicator_respects_source_and_period_asymmetry(
-    op, lhs_p, rhs_p, source
-):
+def test_indicator_vs_indicator_respects_source_and_period_asymmetry(op, lhs_p, rhs_p, source):
     """`SMA/EMA op SMA/EMA` synthesis must drive the series corresponding
     to ``source`` and must satisfy the requested ``op`` regardless of which
     side has the shorter period."""
@@ -2425,9 +2421,7 @@ def test_indicator_vs_priceref_clamp_direction(op, rhs_field):
     lhs = IndicatorRef(name="sma", params={"period": 20})
     pred = Predicate(lhs=lhs, op=op, rhs=rhs_field)
     bars, trigger, reason = _synthesise_for_predicate(pred)
-    assert bars is not None and trigger > 0, (
-        f"SMA(20) {op} {rhs_field} not probeable: {reason}"
-    )
+    assert bars is not None and trigger > 0, f"SMA(20) {op} {rhs_field} not probeable: {reason}"
     assert _eval_predicate_at(pred, bars, trigger), (
         f"verifier rejected synthesizer trigger for SMA(20) {op} {rhs_field}"
     )
@@ -2459,9 +2453,7 @@ def test_rsi_indicator_vs_number_in_either_direction(op, rhs):
     lhs = IndicatorRef(name="rsi", params={"period": 14})
     pred = Predicate(lhs=lhs, op=op, rhs=rhs)
     bars, trigger, reason = _synthesise_for_predicate(pred)
-    assert bars is not None and trigger > 0, (
-        f"RSI(14) {op} {rhs} not probeable: {reason}"
-    )
+    assert bars is not None and trigger > 0, f"RSI(14) {op} {rhs} not probeable: {reason}"
     assert _eval_predicate_at(pred, bars, trigger), (
         f"verifier rejected synthesizer trigger for RSI(14) {op} {rhs}"
     )
@@ -2502,8 +2494,7 @@ def test_bar_high_low_priceref_cross_inverse_direction(op, lhs, rhs_name, rhs_pa
         f"{lhs} {op} {rhs_name}({rhs_params}) not probeable: {reason}"
     )
     assert _eval_predicate_at(pred, bars, trigger), (
-        f"verifier rejected synthesizer trigger for "
-        f"{lhs} {op} {rhs_name}({rhs_params})"
+        f"verifier rejected synthesizer trigger for {lhs} {op} {rhs_name}({rhs_params})"
     )
 
 
@@ -2515,8 +2506,8 @@ def test_search_cross_prefers_resolved_failure_over_unresolved_diagnostic():
     unresolved) masked the more diagnostic 'resolved but no cross' for any
     catalogue that included unknown-indicator fallbacks."""
     from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
-        _search_cross,
         _flat_bars,
+        _search_cross,
     )
 
     # Build a catalogue where builder 0 produces a flat-close sequence
