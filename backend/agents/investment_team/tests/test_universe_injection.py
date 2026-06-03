@@ -895,6 +895,27 @@ def test_class_universe_override_bails() -> None:
     assert inject_universe_and_guard(src, spec) == src
 
 
+def test_match_capture_universe_bails() -> None:
+    """A ``match``/``case UNIVERSE`` capture binds UNIVERSE at class-creation
+    time with no ``Name``-Store node — the symbol-table check catches it where a
+    plain AST store-scan would miss it, so the injector bails."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            match 1:
+                case UNIVERSE:
+                    pass
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
 def test_global_universe_declaration_bails() -> None:
     """A class-body ``global UNIVERSE`` would make a prepended ``UNIVERSE =``
     a compile-time SyntaxError, so the injector bails (returns valid source)."""

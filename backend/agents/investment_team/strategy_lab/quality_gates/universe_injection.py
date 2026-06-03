@@ -28,6 +28,8 @@ unchanged on a no-op or malformed input).
 from __future__ import annotations
 
 import ast
+import copy
+import symtable
 
 from .code_safety_ast import (
     _COLLECTION_BUILDERS,
@@ -93,8 +95,9 @@ def inject_universe_and_guard(source: str, spec) -> str:
         # has nowhere unambiguous to inject.
         return source
     cls = classes[0]
+    expected = sorted(set(symbols))
 
-    if _has_unsupported_universe_binding(cls):
+    if _has_unsupported_universe_binding(cls, expected):
         # ``UNIVERSE`` is bound at class-creation time in a way the strip can't
         # cleanly rewrite (nested in a compound statement, tuple/list unpacking,
         # etc.). Such a binding would run after a prepended canonical constant
@@ -104,7 +107,6 @@ def inject_universe_and_guard(source: str, spec) -> str:
         # runtime universe.
         return source
 
-    expected = sorted(set(symbols))
     on_bars = _find_on_bar_methods(cls)
     if (
         _existing_universe_symbols(cls) == expected
@@ -418,62 +420,45 @@ def _assigned_names(on_bar) -> set[str]:
     }
 
 
-def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
+def _has_unsupported_universe_binding(cls: ast.ClassDef, expected: list[str]) -> bool:
     """True iff ``UNIVERSE`` is bound — at class-creation time or at runtime — in
     a way the strip logic can't cleanly rewrite, so the injector must bail.
 
     The strip handles only a top-level ``UNIVERSE = ...`` / ``UNIVERSE: T = ...``
     (possibly chained ``UNIVERSE = X = ...``) — a direct ``Name`` target of a
-    class-body ``Assign``/``AnnAssign``. Anything else would leave the runtime
+    class-body ``Assign``/``AnnAssign``. Anything else leaves the runtime
     ``self.UNIVERSE`` different from the prepended canonical constant while the
-    structural gate only sees the prepended one. Flagged (→ bail):
+    structural gate only sees the prepended one. Two kinds are flagged (→ bail):
 
-    - a class-creation-time ``UNIVERSE`` store/delete that isn't a clean
-      top-level ``Name`` target — nested in a compound statement, tuple/list
-      unpacking, augmented assignment, walrus, or ``del UNIVERSE``;
-    - a class-body ``def UNIVERSE`` / ``async def UNIVERSE`` / ``class UNIVERSE``,
-      which binds the attribute to a function/class object after the prepend;
-    - a class-body ``import``/``from ... import`` whose bound name is ``UNIVERSE``
-      (``import x as UNIVERSE``, ``from m import UNIVERSE``);
-    - a class-body ``global UNIVERSE`` / ``nonlocal UNIVERSE`` (prepending the
-      assignment ahead of it is a compile-time SyntaxError);
-    - a dynamic class-namespace mutation — ``locals()["UNIVERSE"] = ...`` or
-      ``vars().update(UNIVERSE=...)``;
-    - a ``__slots__`` naming ``UNIVERSE`` (a slot conflicts with the prepended
-      class variable, raising ``ValueError`` at class definition);
-    - an instance-level shadow in any method — ``self.UNIVERSE = ...``,
-      ``self.__dict__["UNIVERSE"] = ...``, or ``setattr(self, "UNIVERSE", ...)`` —
-      which rebinds the attribute on the instance at runtime.
+    1. **Syntactic** bindings other than a clean top-level ``Name`` assignment —
+       ``def``/``class`` ``UNIVERSE``, ``import ... as UNIVERSE``,
+       ``global``/``nonlocal UNIVERSE``, ``del UNIVERSE``, tuple/list unpacking,
+       augmented assignment, walrus, a ``for``/``with`` target, or a binding
+       nested in a compound statement. Rather than enumerate every grammar form,
+       this is answered authoritatively by Python's symbol table
+       (``_class_binds_universe_beyond_clean``), which knows the complete
+       name-binding model and stays correct as the grammar evolves.
 
-    Method and nested-class bodies are not class-creation-time, so the
-    class-creation walk does not descend into them — the instance-shadowing case
-    is handled by a separate per-method scan.
+    2. **Dynamic / runtime** rebindings the symbol table cannot see — a
+       ``__slots__`` naming ``UNIVERSE`` (``ValueError`` at class definition), a
+       class-namespace mutation (``locals()["UNIVERSE"] = ...`` /
+       ``vars().update(UNIVERSE=...)``), or an instance-level shadow in any
+       method (``self.UNIVERSE = ...`` / ``self.__dict__["UNIVERSE"] = ...`` /
+       ``setattr(self, "UNIVERSE", ...)``).
     """
-    clean: set[int] = set()
-    for node in cls.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "UNIVERSE":
-                    clean.add(id(target))
-        elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and node.target.id == "UNIVERSE":
-                clean.add(id(node.target))
-
-    # Scan every class-creation-time node in source order (the shared iterator
-    # yields class-body statements and their descendants but does NOT descend
-    # into nested ``def``/``class``/``lambda`` bodies, which are separate scopes).
-    if any(_node_rebinds_universe(node, clean) for node in _iter_method_body_in_source_order(cls)):
+    # 1. Syntactic bindings — authoritative via the symbol table.
+    if _class_binds_universe_beyond_clean(cls, expected):
         return True
 
-    # A ``__slots__`` naming UNIVERSE would conflict with the prepended class
-    # variable (``ValueError`` at class definition) — bail rather than move that
-    # failure to runtime.
+    # 2. Dynamic / runtime forms the symbol table can't see.
     if _has_universe_slot(cls):
         return True
-
-    # Instance-level shadowing: a method rebinding ``UNIVERSE`` on the instance
-    # (directly or indirectly) makes the guard read that stale value rather than
-    # the injected class constant.
+    # Class-namespace mutation at class-creation time (not inside method scopes).
+    if any(
+        _is_namespace_universe_mutation(node) for node in _iter_method_body_in_source_order(cls)
+    ):
+        return True
+    # Instance-level shadowing in any method.
     return any(
         _method_shadows_universe(node)
         for node in cls.body
@@ -481,34 +466,36 @@ def _has_unsupported_universe_binding(cls: ast.ClassDef) -> bool:
     )
 
 
-def _node_rebinds_universe(node: ast.AST, clean: set[int]) -> bool:
-    """True iff a single class-creation-time ``node`` rebinds ``UNIVERSE`` in a
-    way the strip can't cleanly handle (``clean`` holds the ``id()``s of the
-    clean top-level ``Name`` targets the strip owns)."""
-    # A ``def``/``class`` named UNIVERSE binds the class attribute to the
-    # function/class object after the prepended constant.
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return node.name == "UNIVERSE"
-    # A class-body ``import x as UNIVERSE`` / ``from m import UNIVERSE``.
-    if isinstance(node, (ast.Import, ast.ImportFrom)):
-        return any((a.asname or a.name.split(".")[0]) == "UNIVERSE" for a in node.names)
-    # A ``UNIVERSE`` store/delete that isn't a clean top-level ``Name`` target
-    # (nested in a compound, unpacking, augmented assignment, walrus, ``del``).
-    if (
-        isinstance(node, ast.Name)
-        and node.id == "UNIVERSE"
-        and isinstance(node.ctx, (ast.Store, ast.Del))
-        and id(node) not in clean
-    ):
+def _class_binds_universe_beyond_clean(cls: ast.ClassDef, expected: list[str]) -> bool:
+    """True iff the class scope syntactically binds ``UNIVERSE`` by any form
+    *other* than the clean top-level ``Name`` assignments the strip replaces.
+
+    Strips the clean ``UNIVERSE`` assignments from a copy of the class and asks
+    Python's symbol table whether ``UNIVERSE`` is still bound (``is_local`` — any
+    of assign/def/class/import/del/for/with/walrus/unpack/nested) or declared
+    ``global``/``nonlocal`` in the class scope. This replaces a hand-maintained
+    enumeration of grammar forms with the language's own binding model. An
+    un-analysable copy (parse/unparse failure) conservatively bails.
+    """
+    stripped = copy.deepcopy(cls)
+    stripped.body = _strip_universe_assignments(stripped.body, expected)
+    module = ast.Module(body=[stripped], type_ignores=[])
+    ast.fix_missing_locations(module)
+    try:
+        table = symtable.symtable(ast.unparse(module), "<universe_injection>", "exec")
+    except (SyntaxError, ValueError):  # pragma: no cover - unparse is robust on parsed trees
         return True
-    # ``global UNIVERSE`` / ``nonlocal UNIVERSE`` — prepending ``UNIVERSE =``
-    # ahead of a ``global`` declaration is a compile-time SyntaxError.
-    if isinstance(node, (ast.Global, ast.Nonlocal)) and "UNIVERSE" in node.names:
-        return True
-    # Dynamic namespace mutation — ``locals()["UNIVERSE"] = ...`` /
-    # ``vars().update(UNIVERSE=...)``. (Arbitrary forms — ``exec``, metaclass
-    # hooks — remain out of scope; these are the realistic named ones.)
-    return _is_namespace_universe_mutation(node)
+    class_table = next(
+        (c for c in table.get_children() if c.get_type() == "class" and c.get_name() == cls.name),
+        None,
+    )
+    if class_table is None:  # pragma: no cover - the stripped class is always present
+        return False
+    try:
+        sym = class_table.lookup("UNIVERSE")
+    except KeyError:
+        return False
+    return sym.is_local() or sym.is_declared_global()
 
 
 def _is_namespace_call(node: ast.AST) -> bool:
