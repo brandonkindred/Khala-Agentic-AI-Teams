@@ -135,6 +135,13 @@ class PeriodSummary(BaseModel):
     covers_through: datetime | None = None
     version: int = 1
     stale: bool = False
+    # Store-managed retention regime marker: set TRUE by the memory store's
+    # prune_events when a day's raw events are deleted, so a reader that
+    # rediscovers a stale summary knows it must be *amended* (regime b) rather
+    # than recomputed from the now-incomplete raw events (regime a). Read-only
+    # for callers — upsert_summary never writes it, so a recompute cannot clear
+    # it. Defaults to FALSE.
+    events_pruned: bool = False
     created_at: datetime
 
 

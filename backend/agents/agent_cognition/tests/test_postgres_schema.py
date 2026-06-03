@@ -78,6 +78,27 @@ def test_summaries_have_version_and_stale_columns() -> None:
     assert "covers_through" in summaries_ddl
 
 
+def test_summaries_have_events_pruned_column() -> None:
+    # Durable recompute-vs-amend marker owned by the memory store. Present in
+    # the CREATE for fresh clusters and back-filled via an idempotent ALTER.
+    joined = "".join(SCHEMA.statements)
+    assert "events_pruned" in joined
+    assert (
+        "ALTER TABLE agent_cognition_summaries" in joined
+        and "ADD COLUMN IF NOT EXISTS events_pruned" in joined
+    )
+
+
+def test_retention_guard_columns_present() -> None:
+    # Arrival-time guard for prune_events: events.recorded_at +
+    # summaries.computed_at, each in its CREATE and a back-filling ALTER.
+    joined = "".join(SCHEMA.statements)
+    assert "recorded_at" in joined
+    assert "ADD COLUMN IF NOT EXISTS recorded_at" in joined
+    assert "computed_at" in joined
+    assert "ADD COLUMN IF NOT EXISTS computed_at" in joined
+
+
 def test_evidence_columns_present_on_rules_and_proposals() -> None:
     rules_ddl = next(
         s for s in SCHEMA.statements if "CREATE TABLE IF NOT EXISTS agent_cognition_rules" in s
