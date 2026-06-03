@@ -256,9 +256,14 @@ def indicator_value(
         )
         return _last_or_none(chosen)
 
-    # OHLC-sourced indicators read their fields directly and take no `source`
+    # OHLC-sourced indicators read their fields directly and forbid a `source`
     # override (mirrors spec_dsl's allow_source=False for these names); each
-    # `_impl` arg slot extracts its own field from the bar sequence.
+    # `_impl` arg slot extracts its own field from the bar sequence. Reject a
+    # non-default source rather than silently computing a different indicator
+    # than the caller requested — otherwise check #1 would credit the read by
+    # name and the strategy would run mis-sourced instead of being refined.
+    if source != "close":
+        raise ValueError(f"indicator {name!r} does not accept a 'source' override")
     if name == "atr":
         return _last_or_none(
             _impl.atr(history, history, history, period=int(params.get("period", 14)))

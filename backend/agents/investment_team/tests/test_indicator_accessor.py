@@ -193,6 +193,17 @@ def test_indicator_value_bad_source_raises() -> None:
         indicator_value("sma", _make_bars(), period=10, source="median")
 
 
+@pytest.mark.parametrize("name", ["atr", "adx", "stochastic", "vwap"])
+def test_indicator_value_ohlc_indicator_rejects_source_override(name) -> None:
+    bars = _make_bars()
+    # A non-default source on an OHLC indicator is a contract violation (these
+    # read OHLC directly), so it must raise rather than silently mis-source.
+    with pytest.raises(ValueError, match="does not accept a 'source' override"):
+        indicator_value(name, bars, source="high")
+    # The default (no source override) still computes normally.
+    assert indicator_value(name, bars) is not None
+
+
 # ---------------------------------------------------------------------------
 # StrategyContext.indicator
 # ---------------------------------------------------------------------------
