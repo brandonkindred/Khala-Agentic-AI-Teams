@@ -300,6 +300,25 @@ def test_upsert_summary_preserves_concurrently_set_stale() -> None:
     assert store.get_last_summary("a", Scale.DAY).stale is False
 
 
+def test_upsert_summary_older_snapshot_is_skipped() -> None:
+    # Out-of-order rollups: a fresher snapshot (T2) writes, then a staler one
+    # (T1 < T2) commits last. The older write must be ignored wholesale — it
+    # can't regress content, computed_at, version, or stale.
+    _upsert("a", _summary("a", window=_DAY, version=1, summary="t1"), computed_at=_PRECOMPUTED_AT)
+    _upsert("a", _summary("a", window=_DAY, version=2, summary="t2"), computed_at=_FOLDED_AT)
+    assert store.get_last_summary("a", Scale.DAY).summary == "t2"
+
+    # Staler rollup (snapshot T1) committing last is a no-op on conflict.
+    _upsert(
+        "a",
+        _summary("a", window=_DAY, version=99, summary="t1-late"),
+        computed_at=_PRECOMPUTED_AT,
+    )
+    row = store.get_last_summary("a", Scale.DAY)
+    assert row.summary == "t2"  # not clobbered by the older snapshot
+    assert row.version == 2  # skipped update never reached the GREATEST bump
+
+
 def test_fetch_summaries_filters_scale_and_paginates() -> None:
     months = [
         _summary(

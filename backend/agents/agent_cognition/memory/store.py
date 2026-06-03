@@ -213,6 +213,12 @@ def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: dateti
           stale flag raised after its read, so the late event is still folded
           on the next recompute. ``stale_since`` is preserved while stale stays
           set and reset to NULL when it is cleared.
+        * ``computed_at`` is monotonic: an update whose ``computed_at`` is older
+          than the stored row's is **skipped entirely** (no field changes), so
+          two rollups finishing out of order can't let the staler one overwrite
+          the fresher summary, regress ``computed_at``, or reset ``stale`` /
+          ``version``. A first recompute of a back-filled row (stored
+          ``computed_at IS NULL``) is always allowed.
     """
     assert agent_id, "upsert_summary: agent_id must be non-empty"
     assert summary.agent_id == agent_id, "upsert_summary: summary.agent_id must match agent_id"
@@ -249,7 +255,9 @@ def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: dateti
                         THEN agent_cognition_summaries.stale_since
                         ELSE NULL
                     END,
-                    computed_at = EXCLUDED.computed_at""",
+                    computed_at = EXCLUDED.computed_at
+                WHERE agent_cognition_summaries.computed_at IS NULL
+                    OR EXCLUDED.computed_at >= agent_cognition_summaries.computed_at""",
             (
                 summary.id,
                 summary.agent_id,
