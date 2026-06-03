@@ -412,6 +412,39 @@ def test_prune_events_deletes_only_summarized_nonstale_past_cutoff() -> None:
     assert remaining == {b.id, c.id, d.id}
 
 
+def test_pruned_regime_visible_on_summary_reads() -> None:
+    # After a prune latches events_pruned, a reader that rediscovers the stale
+    # summary (e.g. the rollup after a restart) must see the regime on the row
+    # itself — not only via mark_period_stale's return.
+    store.append_event("a", _event("a", occurred_at=_OLD))
+    _upsert("a", _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1))
+    assert store.prune_events("a", retention_days=30) == 1
+
+    last = store.get_last_summary("a", Scale.DAY)
+    assert last is not None and last.events_pruned is True
+    assert store.fetch_summaries("a", Scale.DAY)[0].events_pruned is True
+
+    # A non-pruned summary reads back events_pruned == False.
+    _upsert("b", _summary("b", scale=Scale.DAY, window=_DAY))
+    assert store.get_last_summary("b", Scale.DAY).events_pruned is False
+
+
+def test_fetch_events_for_period_snapshot_bound() -> None:
+    # The snapshot bound excludes events recorded after the rollup's read time,
+    # keeping the fold-input read consistent with the prune recorded/computed
+    # comparison.
+    ev = _event("a", occurred_at=_MID_DAY)
+    store.append_event("a", ev)
+
+    # Snapshot before the append → event excluded.
+    assert store.fetch_events_for_period("a", _DAY[0], _DAY[1], snapshot=_PRECOMPUTED_AT) == []
+    # Snapshot after the append → event included.
+    got = store.fetch_events_for_period("a", _DAY[0], _DAY[1], snapshot=_FOLDED_AT)
+    assert [e.id for e in got] == [ev.id]
+    # No snapshot → plain window read still returns it.
+    assert [e.id for e in store.fetch_events_for_period("a", _DAY[0], _DAY[1])] == [ev.id]
+
+
 def test_prune_skips_late_event_not_yet_folded() -> None:
     # Race guard: the day summary was computed BEFORE the late event arrived
     # (computed_at < recorded_at), so the event isn't folded yet. Even though it

@@ -45,15 +45,20 @@ logger = logging.getLogger(__name__)
 _STORE = "agent_cognition"
 
 # Full column lists so ``SELECT`` results round-trip straight into the models.
-# Store-managed retention bookkeeping columns are intentionally absent from
-# these lists (not part of the domain models): ``events.recorded_at`` (set by
-# its DEFAULT NOW() on append), and ``summaries.events_pruned`` / ``computed_at``
-# (managed by prune_events / upsert_summary). The models never see them.
+# ``events.recorded_at`` and ``summaries.computed_at`` are store-managed write
+# bookkeeping (set by append's DEFAULT NOW() and by upsert_summary) and stay out
+# of these lists. ``summaries.events_pruned`` *is* surfaced to readers (it is the
+# durable recompute-vs-amend regime, see _SUMMARY_READ_COLS) but is never written
+# by upsert_summary — only prune_events latches it.
 _EVENT_COLS = "id, agent_id, kind, content, data, salience, occurred_at, source_run_id, source_seq"
 _SUMMARY_COLS = (
     "id, agent_id, scale, period_start, period_end, summary, highlights, "
     "source_count, covers_through, version, stale, created_at"
 )
+# Read projection: the write columns plus the store-managed regime flag, so a
+# rollup that rediscovers a stale summary can tell pruned (amend) from retained
+# (recompute) without re-calling mark_period_stale.
+_SUMMARY_READ_COLS = f"{_SUMMARY_COLS}, events_pruned"
 
 
 class AgentCognitionStorageUnavailable(RuntimeError):
@@ -100,25 +105,41 @@ def append_event(agent_id: str, event: MemoryEvent) -> None:
 
 @timed_query(store=_STORE, op="fetch_events_for_period")
 def fetch_events_for_period(
-    agent_id: str, period_start: datetime, period_end: datetime
+    agent_id: str,
+    period_start: datetime,
+    period_end: datetime,
+    *,
+    snapshot: datetime | None = None,
 ) -> list[MemoryEvent]:
     """Return this agent's events in the half-open window ``[start, end)``.
+
+    Args:
+        snapshot: Optional arrival-time bound. When set, only events with
+            ``recorded_at <= snapshot`` are returned. A rollup folding this
+            period **must** pass the same value it gives ``upsert_summary``'s
+            ``computed_at``, so it never folds an event the prune guard would
+            then consider not-yet-folded (``recorded_at > computed_at``) — i.e.
+            the read and the recorded/computed prune comparison stay consistent.
+            Omit it for plain time-window reads.
 
     Preconditions:
         * ``agent_id`` is non-empty.
     Postconditions:
         * Ordered by ``(occurred_at, id)`` ascending (stable); only rows owned
-          by ``agent_id`` with ``period_start <= occurred_at < period_end``.
+          by ``agent_id`` with ``period_start <= occurred_at < period_end`` and,
+          when ``snapshot`` is given, ``recorded_at <= snapshot``.
     """
     assert agent_id, "fetch_events_for_period: agent_id must be non-empty"
+    sql = f"""SELECT {_EVENT_COLS}
+              FROM agent_cognition_events
+              WHERE agent_id = %s AND occurred_at >= %s AND occurred_at < %s"""
+    params: list[object] = [agent_id, period_start, period_end]
+    if snapshot is not None:
+        sql += " AND recorded_at <= %s"
+        params.append(snapshot)
+    sql += " ORDER BY occurred_at ASC, id ASC"
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            f"""SELECT {_EVENT_COLS}
-                FROM agent_cognition_events
-                WHERE agent_id = %s AND occurred_at >= %s AND occurred_at < %s
-                ORDER BY occurred_at ASC, id ASC""",
-            (agent_id, period_start, period_end),
-        )
+        cur.execute(sql, params)
         return [MemoryEvent.model_validate(row) for row in cur.fetchall()]
 
 
@@ -239,7 +260,7 @@ def fetch_summaries(
     assert agent_id, "fetch_summaries: agent_id must be non-empty"
     assert offset >= 0, "fetch_summaries: offset must be non-negative"
     assert limit is None or limit >= 0, "fetch_summaries: limit must be non-negative"
-    sql = f"""SELECT {_SUMMARY_COLS}
+    sql = f"""SELECT {_SUMMARY_READ_COLS}
               FROM agent_cognition_summaries
               WHERE agent_id = %s AND scale = %s
               ORDER BY period_start DESC"""
@@ -270,7 +291,7 @@ def get_last_summary(agent_id: str, scale: Scale) -> PeriodSummary | None:
     assert agent_id, "get_last_summary: agent_id must be non-empty"
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            f"""SELECT {_SUMMARY_COLS}
+            f"""SELECT {_SUMMARY_READ_COLS}
                 FROM agent_cognition_summaries
                 WHERE agent_id = %s AND scale = %s
                 ORDER BY period_start DESC
