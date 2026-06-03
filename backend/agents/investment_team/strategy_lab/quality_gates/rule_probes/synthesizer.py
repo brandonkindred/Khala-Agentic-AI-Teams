@@ -1405,6 +1405,33 @@ def _volume_peak_then_trough_bars(
     ]
 
 
+def _close_ramp_with_priced_volume(n: int, base_close: float, close_slope: float) -> List[OHLCVBar]:
+    """Bars where the volume column is anchored at ``base_close`` (price
+    magnitude, NOT typical 1e6 scale) and close trends linearly at
+    ``close_slope`` from ``base_close - n*|slope|/2``.
+
+    Used by the volume-source SMA/EMA branch of
+    :func:`_builders_for_priceref_cross`: when ``bar.close cross_*
+    SMA(source="volume")`` the runtime indicator reads df["volume"] —
+    holding volume at 1e6 anchors SMA(volume) at 1e6 forever and close
+    (~base_close) can never cross it. Putting volume in price-magnitude
+    range gives SMA(volume) ≈ base_close while close ramps through it.
+    """
+    midpoint = n // 2
+    closes = [max(_MIN_PRICE, base_close + (i - midpoint) * close_slope) for i in range(n)]
+    return [
+        OHLCVBar(
+            date="placeholder",
+            open=c,
+            high=c + 0.5,
+            low=max(_MIN_PRICE, c - 0.5),
+            close=c,
+            volume=base_close,
+        )
+        for c in closes
+    ]
+
+
 def _step_bars(
     n: int, low_level: float, high_level: float, step_frac: float = 0.5
 ) -> List[OHLCVBar]:
@@ -2294,11 +2321,22 @@ def _builders_for_priceref_cross(
             lambda: _monotonic_trend_bars(n, base_close, -0.5),
         ]
     if name in ("sma", "ema"):
+        n = max(min_bars, int(rhs.param("period")) + 30)
+        if rhs.source == "volume":
+            # Volume-source SMA/EMA — the indicator reads the volume column,
+            # so close-varying builders keep SMA(volume) pinned at 1e6 and
+            # bar.close (~base_close) never crosses it. Anchor volume in
+            # price magnitude (~base_close) so SMA(volume) lives in the
+            # same range as close, then ramp close through it.
+            close_slope = 0.5 if op == "cross_above" else -0.5
+            return [
+                lambda: _close_ramp_with_priced_volume(n, base_close, close_slope),
+                lambda: _close_ramp_with_priced_volume(n, base_close, close_slope * 2),
+            ]
         # Fallback when lhs isn't bar.close (e.g. bar.high vs SMA). The SMA
         # is computed over closes (default source); a regime change makes
         # close drift below then above the lagged SMA so bar-derived fields
         # (high / low / open) cross too.
-        n = max(min_bars, int(rhs.param("period")) + 30)
         if op == "cross_above":
             return [
                 lambda: _regime_change_bars(n, base_close, drop_rate=0.97, rise_rate=1.03),
@@ -2881,18 +2919,24 @@ def _synth_indicator_vs_priceref(
     lhs: IndicatorRef, op: str, rhs: str, base_close: float, min_bars: int
 ) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
     """Indicator-vs-PriceRef: drive the indicator value relative to the bar's
-    price field by trending the close so SMA/EMA lags the current bar.
+    price field by trending the column corresponding to ``lhs.source`` so
+    SMA/EMA lags the current bar.
 
     The previous flat-bars + single-trigger-bar approach used
     ``max(bar.high, target)`` to clamp high — which silently did nothing
     when ``target < bar.high`` (the ``op in (">", ">=")`` case), so
     ``SMA > bar.high`` was always returned as unprobeable. Trending the
-    close avoids that class of clamp bug entirely: with close rising at
-    +0.5/bar the MA lags below current close (and so below close+0.5 =
-    bar.high), satisfying ``MA < bar.high``; with close falling the
-    MA lags above and ``MA > bar.high`` holds. Volume-rhs is rejected
-    explicitly (price-scale MA vs ~1e6 volume is a magnitude mismatch
-    no flat-bars catalogue can satisfy).
+    source column avoids that clamp bug entirely.
+
+    For source=close/high/low/open: trend close; high/low/open track close.
+    For source=volume: trend the volume column in price magnitude so the
+    volume-source MA lives in the same range as bar.<priceref> and the
+    inequality can actually hold; the runtime's source-aware
+    ``_compute_indicator_at`` agrees because it also reads volume.
+
+    Volume-rhs (`MA op bar.volume`) is still rejected — volume rhs ≈ 1e6
+    while close-source MA ≈ 100 is a magnitude mismatch no flat-bars
+    catalogue can satisfy.
     """
     if lhs.name not in ("sma", "ema"):
         return None, 0, f"indicator_vs_priceref_unsupported:{lhs.name}_{rhs}"
@@ -2904,23 +2948,50 @@ def _synth_indicator_vs_priceref(
     n = max(min_bars, _required_bars_for_indicator(lhs))
 
     # For `MA > bar.<field>` we want the MA above the current bar — so the
-    # MA must average OLDER higher closes, i.e. close is trending DOWN now.
-    # For `MA < bar.<field>` mirror — close trending UP.
-    close_slope = -0.5 if op in (">", ">=") else 0.5
-    closes = [max(_MIN_PRICE, base_close + i * close_slope) for i in range(n)]
-    bars = [
-        OHLCVBar(
-            date="placeholder",
-            open=c,
-            high=c + 0.5,
-            low=max(_MIN_PRICE, c - 0.5),
-            close=c,
-            volume=1_000_000.0,
-        )
-        for c in closes
-    ]
+    # MA must average OLDER higher source values, i.e. the source is
+    # trending DOWN now. For `MA < bar.<field>` mirror — source trending UP.
+    source_slope = -0.5 if op in (">", ">=") else 0.5
+
+    if lhs.source == "volume":
+        # Trend the volume column in price magnitude so SMA(volume) and
+        # bar.<priceref> live in the same range. Close stays at
+        # ``base_close`` (bar.<priceref> = base_close on every bar), and
+        # volume straddles base_close so SMA(volume) starts on one side
+        # of bar.<priceref> and sweeps through. The midpoint offset is
+        # what makes the inequality hold at the early-warmup trigger:
+        # for op="<" volume ramps UP through base_close so early SMAs
+        # (averaging values below base_close) satisfy MA < bar.close;
+        # for op=">" volume ramps DOWN through base_close so early SMAs
+        # sit above base_close.
+        midpoint = n // 2
+        volumes = [max(_MIN_PRICE, base_close + (i - midpoint) * source_slope) for i in range(n)]
+        bars = [
+            OHLCVBar(
+                date="placeholder",
+                open=base_close,
+                high=base_close + 0.5,
+                low=max(_MIN_PRICE, base_close - 0.5),
+                close=base_close,
+                volume=v,
+            )
+            for v in volumes
+        ]
+    else:
+        closes = [max(_MIN_PRICE, base_close + i * source_slope) for i in range(n)]
+        bars = [
+            OHLCVBar(
+                date="placeholder",
+                open=c,
+                high=c + 0.5,
+                low=max(_MIN_PRICE, c - 0.5),
+                close=c,
+                volume=1_000_000.0,
+            )
+            for c in closes
+        ]
     df = _bars_to_df(bars)
-    ma_series = (sma if lhs.name == "sma" else ema)(df["close"], period)
+    source_series = _series_for_source(df, lhs.source)
+    ma_series = (sma if lhs.name == "sma" else ema)(source_series, period)
     # Walk forward from the first valid MA bar; pick the earliest trigger
     # that leaves at least `_BARS_AFTER_TRIGGER` bars for engine evaluation.
     max_trigger = max(period, n - _BARS_AFTER_TRIGGER - 1)

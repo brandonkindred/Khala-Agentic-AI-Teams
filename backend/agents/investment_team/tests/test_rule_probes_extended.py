@@ -2533,3 +2533,71 @@ def test_search_cross_prefers_resolved_failure_over_unresolved_diagnostic():
         warmup=20,
     )
     assert reason == "cross_not_found_in_window"
+
+
+@pytest.mark.parametrize(
+    "op,rhs_field",
+    [
+        # SMA(volume,20) vs bar.<priceref> across both inequality
+        # directions. The previous implementation hardcoded
+        # ``df["close"]`` regardless of source, so the synthesizer reported
+        # a trigger where close-based SMA satisfied the predicate, but the
+        # source-aware post-clamp verifier (using SMA(volume) ≈ 1e6)
+        # rejected it. Fix routes lhs.source="volume" through a
+        # volume-varying builder anchored at base_close so SMA(volume) and
+        # bar.<priceref> live in the same magnitude range.
+        ("<", "bar.close"),
+        (">", "bar.close"),
+        ("<=", "bar.close"),
+        (">=", "bar.close"),
+        ("<", "bar.high"),
+        (">", "bar.low"),
+    ],
+)
+def test_volume_source_ma_vs_priceref_respects_source(op, rhs_field):
+    """SMA(source='volume') vs bar.<priceref> must produce a trigger the
+    source-aware post-clamp verifier accepts. Prior code computed the MA
+    over df['close'] so the trigger was a false positive against runtime."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    lhs = IndicatorRef(name="sma", params={"period": 20}, source="volume")
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs_field)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is not None and trigger > 0, f"SMA(vol,20) {op} {rhs_field} not probeable: {reason}"
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for SMA(vol,20) {op} {rhs_field}"
+    )
+
+
+@pytest.mark.parametrize(
+    "op,lhs_pr,name",
+    [
+        # bar.close cross_* SMA/EMA(source='volume') was silently
+        # unprobeable. The OHLC builders kept volume flat at 1e6, so
+        # SMA(volume) stayed at 1e6 forever and bar.close (~100) never
+        # crossed it. The new ``_close_ramp_with_priced_volume`` builder
+        # anchors volume at base_close so SMA(volume) ≈ base_close, then
+        # ramps close through it.
+        ("cross_above", "bar.close", "sma"),
+        ("cross_below", "bar.close", "sma"),
+        ("cross_above", "bar.close", "ema"),
+        ("cross_below", "bar.close", "ema"),
+    ],
+)
+def test_bar_close_cross_volume_source_ma(op, lhs_pr, name):
+    """`bar.close cross_* SMA/EMA(source='volume')` now produces a trigger
+    that the source-aware verifier accepts. Prior to the fix the cross
+    catalogue only varied close so SMA(volume) stayed pinned at 1e6."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    rhs = IndicatorRef(name=name, params={"period": 20}, source="volume")
+    pred = Predicate(lhs=lhs_pr, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is not None and trigger > 0, f"{lhs_pr} {op} {name}(vol,20) not probeable: {reason}"
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for {lhs_pr} {op} {name}(vol,20)"
+    )
