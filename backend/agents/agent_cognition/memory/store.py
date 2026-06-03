@@ -335,6 +335,147 @@ def get_last_summary(agent_id: str, scale: Scale) -> PeriodSummary | None:
         return PeriodSummary.model_validate(row) if row else None
 
 
+@timed_query(store=_STORE, op="get_existing_summary")
+def get_existing_summary(
+    agent_id: str, scale: Scale, period_start: datetime
+) -> PeriodSummary | None:
+    """Return the summary for one exact ``(scale, period_start)`` key, or None.
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * The unique row for ``(agent_id, scale, period_start)`` or ``None``;
+          the store-managed ``events_pruned`` regime flag is surfaced so the
+          rollup engine can choose recompute vs. amend.
+    """
+    assert agent_id, "get_existing_summary: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""SELECT {_SUMMARY_READ_COLS}
+                FROM agent_cognition_summaries
+                WHERE agent_id = %s AND scale = %s AND period_start = %s""",
+            (agent_id, scale.value, period_start),
+        )
+        row = cur.fetchone()
+        return PeriodSummary.model_validate(row) if row else None
+
+
+@timed_query(store=_STORE, op="fetch_stale_summaries")
+def fetch_stale_summaries(agent_id: str, scale: Scale) -> list[PeriodSummary]:
+    """Return this agent's ``stale`` summaries at ``scale``, oldest period first.
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * Only rows owned by ``agent_id`` at ``scale`` with ``stale = TRUE``,
+          ordered by ``period_start`` ascending so a bottom-up rollup processes
+          children before parents.
+    """
+    assert agent_id, "fetch_stale_summaries: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""SELECT {_SUMMARY_READ_COLS}
+                FROM agent_cognition_summaries
+                WHERE agent_id = %s AND scale = %s AND stale = TRUE
+                ORDER BY period_start ASC""",
+            (agent_id, scale.value),
+        )
+        return [PeriodSummary.model_validate(row) for row in cur.fetchall()]
+
+
+@timed_query(store=_STORE, op="fetch_summaries_in_window")
+def fetch_summaries_in_window(
+    agent_id: str, scale: Scale, window_start: datetime, window_end: datetime
+) -> list[PeriodSummary]:
+    """Return summaries at ``scale`` whose period_start is in ``[start, end)``.
+
+    Used to gather the calendar-correct child inputs of an aggregate rollup
+    (a week/month reads its day summaries; a year reads its month summaries).
+
+    Preconditions:
+        * ``agent_id`` is non-empty; the window is half-open.
+    Postconditions:
+        * Only rows owned by ``agent_id`` at ``scale`` with ``window_start <=
+          period_start < window_end``, ordered by ``period_start`` ascending.
+    """
+    assert agent_id, "fetch_summaries_in_window: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""SELECT {_SUMMARY_READ_COLS}
+                FROM agent_cognition_summaries
+                WHERE agent_id = %s AND scale = %s
+                  AND period_start >= %s AND period_start < %s
+                ORDER BY period_start ASC""",
+            (agent_id, scale.value, window_start, window_end),
+        )
+        return [PeriodSummary.model_validate(row) for row in cur.fetchall()]
+
+
+@timed_query(store=_STORE, op="flag_stale_proposals")
+def flag_stale_proposals(agent_id: str, summary_id: str, new_version: int) -> int:
+    """Flag pending proposals whose evidence cites an outdated summary version.
+
+    Evidence is a JSONB array of ``{"summary_id": <str>, "version": <int>}``
+    refs (the cross-step cognition contract). A recompute that advances a
+    summary's ``version`` leaves any proposal citing the older version stale.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; ``new_version >= 1``.
+    Postconditions:
+        * Every ``pending`` proposal owned by ``agent_id`` whose ``evidence``
+          references ``summary_id`` at a version below ``new_version`` has
+          ``stale_evidence = TRUE`` (idempotent — re-flagging is a no-op).
+          Returns the number of rows updated.
+    """
+    assert agent_id, "flag_stale_proposals: agent_id must be non-empty"
+    assert new_version >= 1, "flag_stale_proposals: new_version must be >= 1"
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE agent_cognition_rule_proposals
+               SET stale_evidence = TRUE
+               WHERE agent_id = %s AND status = 'pending' AND stale_evidence = FALSE
+                 AND EXISTS (
+                     SELECT 1 FROM jsonb_array_elements(evidence) e
+                     WHERE e->>'summary_id' = %s AND (e->>'version')::int < %s
+                 )""",
+            (agent_id, summary_id, new_version),
+        )
+        return cur.rowcount
+
+
+@timed_query(store=_STORE, op="flag_rules_needing_review")
+def flag_rules_needing_review(agent_id: str, summary_id: str, new_version: int) -> int:
+    """Flag active derived rules whose evidence cites an outdated version.
+
+    Companion to :func:`flag_stale_proposals` for already-active rules: an
+    ``active`` rule with ``source = 'derived'`` that cited the recomputed
+    summary at an older version resurfaces in the operator review queue.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; ``new_version >= 1``.
+    Postconditions:
+        * Every ``active`` ``derived`` rule owned by ``agent_id`` whose
+          ``evidence`` references ``summary_id`` at a version below
+          ``new_version`` has ``needs_review = TRUE`` (idempotent). Returns the
+          number of rows updated.
+    """
+    assert agent_id, "flag_rules_needing_review: agent_id must be non-empty"
+    assert new_version >= 1, "flag_rules_needing_review: new_version must be >= 1"
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE agent_cognition_rules
+               SET needs_review = TRUE
+               WHERE agent_id = %s AND status = 'active' AND source = 'derived'
+                 AND needs_review = FALSE
+                 AND EXISTS (
+                     SELECT 1 FROM jsonb_array_elements(evidence) e
+                     WHERE e->>'summary_id' = %s AND (e->>'version')::int < %s
+                 )""",
+            (agent_id, summary_id, new_version),
+        )
+        return cur.rowcount
+
+
 @timed_query(store=_STORE, op="mark_period_stale")
 def mark_period_stale(agent_id: str, occurred_at: datetime) -> bool:
     """Flag every summary that contains ``occurred_at`` for recompute.
