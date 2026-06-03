@@ -229,8 +229,13 @@ def fetch_summaries(
               ORDER BY period_start DESC"""
     params: list[object] = [agent_id, scale.value]
     if limit is not None:
-        sql += " LIMIT %s OFFSET %s"
-        params.extend([limit, offset])
+        sql += " LIMIT %s"
+        params.append(limit)
+    # OFFSET is independent of LIMIT — apply it whenever the caller skips rows,
+    # so offset-only pagination doesn't silently return the first page again.
+    if offset:
+        sql += " OFFSET %s"
+        params.append(offset)
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
         return [PeriodSummary.model_validate(row) for row in cur.fetchall()]

@@ -267,6 +267,10 @@ def test_fetch_summaries_filters_scale_and_paginates() -> None:
     page = store.fetch_summaries("a", Scale.MONTH, limit=1, offset=1)
     assert [r.period_start.month for r in page] == [2]
 
+    # offset without limit must still skip rows (not silently return page one).
+    offset_only = store.fetch_summaries("a", Scale.MONTH, offset=1)
+    assert [r.period_start.month for r in offset_only] == [2, 1]
+
 
 def test_fetch_summaries_negative_offset_raises() -> None:
     with pytest.raises(AssertionError):
