@@ -38,7 +38,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Any, ClassVar, Iterable, List, Optional
+from typing import Any, ClassVar, Iterable, List, Optional, get_args
 
 from ..spec_dsl import (
     _INDICATOR_PARAM_SPECS,
@@ -47,6 +47,7 @@ from ..spec_dsl import (
     IndicatorRef,
     Predicate,
     SignalExitRule,
+    Source,
 )
 from .code_safety_ast import (
     _find_strategy_subclasses,
@@ -90,6 +91,9 @@ assert set(_INDICATOR_ALLOWED_CALL_NAMES) == set(IndicatorName.__args__), (
 
 # Names recognised as the position-snapshot receiver in exit branches.
 _POSITION_RECEIVER_NAMES: frozenset[str] = frozenset({"position", "pos"})
+
+# Valid ``source`` values for source-aware indicators (mirrors spec_dsl.Source).
+_VALID_SOURCES: frozenset[str] = frozenset(get_args(Source))
 
 
 def _indicators_in_predicate(p: Predicate) -> set[str]:
@@ -204,8 +208,13 @@ def _ctx_indicator_call_errors(node: ast.Call) -> list[str]:
             f"ctx.indicator({label}, ...) gives the indicator name both positionally and as "
             "name=; that is a runtime TypeError."
         ]
-    if name is None or name not in _INDICATOR_PARAM_SPECS:
-        return []  # dynamic/unknown name — the presence check handles absence
+    if name is None:
+        return []  # dynamic name — the presence check handles absence
+    if name not in _INDICATOR_PARAM_SPECS:
+        return [
+            f"ctx.indicator({name!r}, ...): unknown indicator '{name}'; "
+            f"allowed: {sorted(_INDICATOR_PARAM_SPECS)}."
+        ]
     spec = _INDICATOR_PARAM_SPECS[name]
     allowed = set(spec["required"]) | set(spec["optional"])
     errors: list[str] = []
@@ -215,14 +224,19 @@ def _ctx_indicator_call_errors(node: ast.Call) -> list[str]:
         if kw.arg is None or kw.arg in ("name", "symbol"):
             continue
         if kw.arg == "source":
-            if (
-                not spec["allow_source"]
-                and isinstance(kw.value, ast.Constant)
-                and kw.value.value != "close"
-            ):
-                errors.append(
-                    f"ctx.indicator('{name}', ...): '{name}' does not accept a 'source' override."
-                )
+            if isinstance(kw.value, ast.Constant):
+                src = kw.value.value
+                if not spec["allow_source"]:
+                    if src != "close":
+                        errors.append(
+                            f"ctx.indicator('{name}', ...): '{name}' does not accept a "
+                            "'source' override."
+                        )
+                elif src not in _VALID_SOURCES:
+                    errors.append(
+                        f"ctx.indicator('{name}', ...): invalid source {src!r}; "
+                        f"allowed: {sorted(_VALID_SOURCES)}."
+                    )
             continue
         seen.add(kw.arg)
         if kw.arg not in allowed:

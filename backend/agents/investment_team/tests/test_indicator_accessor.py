@@ -760,3 +760,65 @@ def test_check1_flags_typo_param_even_with_dynamic_sibling_value() -> None:
     results = CodeConformanceGate().check(code, _ema_rsi_spec())
     unexpected = [d for d in _critical_details(results) if "perod" in d]
     assert unexpected and "unexpected param" in unexpected[0]
+
+
+def test_check1_flags_unknown_ctx_indicator_name() -> None:
+    # An extra read of an unknown indicator is a runtime ValueError; flag it
+    # statically even when the required spec indicators are read correctly.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', period=20)
+                r = ctx.indicator('rsi', period=14)
+                custom = ctx.indicator('supertrend', period=10)
+                if trend is None or r is None or custom is None:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    unknown = [d for d in _critical_details(results) if "unknown indicator" in d]
+    assert unknown and "supertrend" in unknown[0]
+
+
+def test_check1_flags_invalid_source_literal() -> None:
+    # A source-aware indicator with an invalid literal source raises at runtime;
+    # flag it statically. (A valid source like 'high' must NOT be flagged — see
+    # test_check1_flags_malformed_ctx_indicator_call.)
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', period=20, source='median')
+                r = ctx.indicator('rsi', period=14)
+                if trend is None or r is None:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    bad_source = [d for d in _critical_details(results) if "invalid source" in d]
+    assert bad_source and "median" in bad_source[0]
