@@ -178,7 +178,7 @@
         </div>
       } @else {
         <div class="github-issues-list">
-          @for (issue of issues; track issue.number) {
+          @for (issue of pagedIssues; track issue.number) {
             <button
               class="github-issue-row"
               type="button"
@@ -195,6 +195,16 @@
             </button>
           }
         </div>
+        @if (issues.length > PAGE_SIZE_OPTIONS[0]) {
+          <mat-paginator
+            class="github-issues-paginator"
+            [length]="issues.length"
+            [pageSize]="pageSize"
+            [pageIndex]="pageIndex"
+            [pageSizeOptions]="PAGE_SIZE_OPTIONS"
+            (page)="onPageChange($event)"
+          ></mat-paginator>
+        }
       }
     }
   </section>
