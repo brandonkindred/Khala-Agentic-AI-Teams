@@ -292,7 +292,9 @@ def test_get_last_summary_returns_newest_or_none() -> None:
 # mark_period_stale
 # ---------------------------------------------------------------------------
 def test_mark_period_stale_flags_containing_summaries_retained() -> None:
-    # Day summary reports 2 events; both are still present → retained.
+    # Day summary folded 2 events and both originals are still present.
+    # mark_period_stale is called *before* the late event is appended, so the
+    # retained-count reflects the surviving originals only.
     store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY, source_count=2))
     store.upsert_summary("a", _summary("a", scale=Scale.WEEK, window=_WEEK))
     store.upsert_summary("a", _summary("a", scale=Scale.MONTH, window=_MONTH))
@@ -309,15 +311,19 @@ def test_mark_period_stale_flags_containing_summaries_retained() -> None:
 
 
 def test_mark_period_stale_pruned_period_returns_false() -> None:
-    # Day summary claims 5 source events, but only the late one remains.
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY, source_count=5))
-    store.append_event("a", _event("a", occurred_at=_MID_DAY))
+    # Regression guard for the late-event-inflation bug: a partially-pruned
+    # day folded 2 events, one was pruned, one original survives. The mark
+    # runs before the late event is appended, so the count is 1 < 2 → pruned.
+    # (Had we counted the in-flight late event, the count would be 2 == 2 and
+    # this would wrongly report the period as retained.)
+    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY, source_count=2))
+    store.append_event("a", _event("a", run_id="survivor", occurred_at=_MID_DAY))
 
     assert store.mark_period_stale("a", _MID_DAY) is False
 
 
 def test_mark_period_stale_no_summary_returns_true_and_flags_nothing() -> None:
-    store.append_event("a", _event("a", occurred_at=_MID_DAY))
+    # No summary covers the timestamp → never summarized → trivially retained.
     assert store.mark_period_stale("a", _MID_DAY) is True
     assert store.fetch_summaries("a", Scale.DAY) == []
 

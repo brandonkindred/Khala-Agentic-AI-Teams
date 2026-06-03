@@ -244,6 +244,15 @@ def mark_period_stale(agent_id: str, occurred_at: datetime) -> bool:
     (and year) rows at once, so the staleness cascade up the scales is
     implicit.
 
+    Preconditions:
+        * **Call this before persisting the triggering late event.** The
+          retained-count below counts the events currently stored in the
+          period; it must reflect only the events the day summary folded
+          (plus any earlier, not-yet-rolled-up arrivals) and *not* the
+          in-flight late event. Counting the late event would let a
+          partially-pruned day read back up to ``source_count`` and wrongly
+          report the period as retained, so the rollup engine would recompute
+          from an incomplete raw set and silently drop the pruned history.
     Postconditions:
         * All containing summaries (any scale) are now ``stale`` with
           ``version`` incremented by one.
