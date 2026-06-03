@@ -882,6 +882,12 @@ async def medium_clear_session() -> MediumConfigResponse:
 
 _GITHUB_SERVICE = "github"
 _GITHUB_API_BASE = "https://api.github.com"
+# GitHub's issues endpoint returns at most 100 items per page; we request the max
+# and follow the Link header so the panel shows every open issue, not just page one.
+_GITHUB_ISSUES_PER_PAGE = 100
+# Safety bound against a pathological repo or a redirect loop in the Link header.
+# 100 issues/page * 50 pages = 5000 open issues, far beyond any realistic repo.
+_GITHUB_MAX_ISSUE_PAGES = 50
 
 
 class GitHubConfigResponse(BaseModel):
@@ -961,7 +967,20 @@ async def delete_github() -> GitHubConfigResponse:
 
 @router.get("/github/issues", response_model=list[GitHubIssueItem])
 async def list_github_issues(label: str | None = Query(default=None)) -> list[GitHubIssueItem]:
-    """List open issues from the configured GitHub repository."""
+    """List every open issue from the configured GitHub repository.
+
+    Follows GitHub's ``Link``-header pagination so the panel shows the complete set
+    of open issues rather than only the first page.
+
+    Preconditions:
+        - The GitHub integration is enabled and a PAT, owner and repo are configured;
+          each missing prerequisite raises ``HTTPException(400)``.
+    Postconditions:
+        - Returns every open issue (pull requests excluded) across all result pages,
+          in GitHub's response order, bounded by ``_GITHUB_MAX_ISSUE_PAGES`` pages of
+          ``_GITHUB_ISSUES_PER_PAGE`` items. Hitting that bound logs a warning and
+          returns the issues gathered so far rather than failing.
+    """
     cfg = get_github_config()
     if not cfg["enabled"]:
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
@@ -973,7 +992,7 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
     if not owner or not repo:
         raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
 
-    params: dict[str, Any] = {"state": "open", "per_page": 30}
+    params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
     use_label = label or cfg["default_label"]
     if use_label:
         params["labels"] = use_label
@@ -985,34 +1004,50 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
         "User-Agent": "khala-integrations",
     }
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(
-            f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues",
-            headers=headers,
-            params=params,
-        )
-
-    if resp.status_code == 401:
-        raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
-    if resp.status_code == 404:
-        raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
-
     items: list[GitHubIssueItem] = []
-    for raw in resp.json():
-        if "pull_request" in raw:
-            continue
-        body = (raw.get("body") or "")[:200]
-        labels = [lbl["name"] for lbl in (raw.get("labels") or []) if isinstance(lbl, dict) and lbl.get("name")]
-        items.append(
-            GitHubIssueItem(
-                number=raw["number"],
-                title=raw.get("title") or "",
-                body_preview=body,
-                labels=labels,
-                html_url=raw.get("html_url") or "",
-            )
+    next_url: str | None = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
+    # Query params ride only on the first request; GitHub's "next" Link URL already
+    # carries state/per_page/labels forward, so we must not re-append them.
+    request_params: dict[str, Any] | None = params
+    pages = 0
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while next_url and pages < _GITHUB_MAX_ISSUE_PAGES:
+            resp = await client.get(next_url, headers=headers, params=request_params)
+
+            if resp.status_code == 401:
+                raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
+
+            for raw in resp.json():
+                if "pull_request" in raw:
+                    continue
+                body = (raw.get("body") or "")[:200]
+                labels = [lbl["name"] for lbl in (raw.get("labels") or []) if isinstance(lbl, dict) and lbl.get("name")]
+                items.append(
+                    GitHubIssueItem(
+                        number=raw["number"],
+                        title=raw.get("title") or "",
+                        body_preview=body,
+                        labels=labels,
+                        html_url=raw.get("html_url") or "",
+                    )
+                )
+
+            pages += 1
+            next_url = resp.links.get("next", {}).get("url")
+            request_params = None  # subsequent pages use the Link URL verbatim
+
+    if next_url:
+        logger.warning(
+            "list_github_issues hit the %d-page cap for %s/%s; returning the first %d open issues only",
+            _GITHUB_MAX_ISSUE_PAGES,
+            owner,
+            repo,
+            len(items),
         )
     return items
 
