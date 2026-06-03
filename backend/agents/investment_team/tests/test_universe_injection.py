@@ -972,6 +972,45 @@ def test_on_bar_only_warmup_gate_gets_guard_injected() -> None:
     assert _has_universe_guard_in_on_bar(_cls(out))
 
 
+def test_property_decorated_on_bar_not_guarded() -> None:
+    """A ``@property`` (or any other descriptor) on ``on_bar`` is not a plain
+    bound instance method — ``instance.on_bar`` raises on attribute access
+    before ``ctx``/``bar`` arrive — so the guard is not injected (fail closed)
+    rather than normalized into a strategy that crashes at runtime."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            @property
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # not guarded -> fail closed
+
+
+def test_arbitrary_decorator_on_bar_not_guarded() -> None:
+    """An unrecognized wrapper decorator (e.g. ``@functools.lru_cache``) changes
+    the call contract in ways the injector can't verify, so it fails closed."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            @functools.lru_cache
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # not guarded -> fail closed
+
+
 def test_def_universe_override_bails() -> None:
     """A class-body ``def UNIVERSE`` binds the attribute to a function after the
     prepend, so the injector bails rather than emit a false-green gate."""

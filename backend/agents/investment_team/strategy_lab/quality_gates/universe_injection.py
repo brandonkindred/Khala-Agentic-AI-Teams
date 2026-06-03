@@ -330,42 +330,30 @@ def _bar_parameter_name(on_bar) -> str | None:
 def _is_guardable_on_bar(on_bar) -> bool:
     """True iff a canonical ``self.UNIVERSE`` guard can be injected into ``on_bar``.
 
-    Requires a sync, plain instance method with exactly three positional
-    parameters whose instance parameter is ``self`` — the only shape for which
-    ``self.UNIVERSE`` is both runtime-correct and accepted by the conformance
-    recognizer. A ``@staticmethod`` / ``@classmethod`` ``on_bar`` is rejected:
-    the harness calls ``instance.on_bar(ctx, bar)`` expecting a bound ``self``,
-    so a static/class method receives the wrong arguments and fails at runtime —
-    that must stay a validation failure, not be normalized into passing code.
+    Requires a sync, plain, **undecorated** instance method with exactly three
+    positional parameters whose instance parameter is ``self`` — the only shape
+    for which ``self.UNIVERSE`` is both runtime-correct and accepted by the
+    conformance recognizer. The harness invokes ``instance.on_bar(ctx, bar)``
+    expecting a bound ``self``, and the deterministic compiler never decorates
+    ``on_bar``, so *any* decorator is rejected:
+
+    - ``@staticmethod`` / ``@classmethod`` receive the wrong positional
+      arguments;
+    - a non-callable descriptor such as ``@property`` raises on plain attribute
+      access, before ``ctx`` / ``bar`` are ever passed;
+    - any other wrapper changes the call contract in ways we can't verify.
+
+    Injecting a guard into such a method would satisfy the symbol gate while
+    leaving a strategy that crashes at runtime. We fail closed instead — inject
+    the ``UNIVERSE`` constant only and let the missing-guard conformance
+    critical drive refinement — rather than normalize a decorated ``on_bar``
+    into passing-but-crashing code.
     """
     return (
         _bar_parameter_name(on_bar) is not None
         and on_bar.args.args[0].arg == "self"
-        and not _has_static_or_class_decorator(on_bar)
+        and not on_bar.decorator_list
     )
-
-
-def _has_static_or_class_decorator(func) -> bool:
-    """True iff ``func`` is decorated ``@staticmethod`` / ``@classmethod``,
-    whether bare (``ast.Name``), qualified (``ast.Attribute`` such as
-    ``@builtins.staticmethod``), or called (``@staticmethod()`` /
-    ``@classmethod()``).
-
-    The called form is treated identically to the bare form: even though it
-    would raise at class-creation time, the decorated method is not a plain
-    bound instance method, so a ``self.UNIVERSE`` guard must not be injected —
-    fail closed and leave the malformed signature to the safety/conformance
-    gates rather than normalizing it into passing-but-crashing code.
-    """
-    targets = {"staticmethod", "classmethod"}
-    for dec in func.decorator_list:
-        # Unwrap a called decorator (``@staticmethod()``) to its callee.
-        node = dec.func if isinstance(dec, ast.Call) else dec
-        if isinstance(node, ast.Name) and node.id in targets:
-            return True
-        if isinstance(node, ast.Attribute) and node.attr in targets:
-            return True
-    return False
 
 
 def _is_warmup_guard_stmt(stmt: ast.stmt) -> bool:
