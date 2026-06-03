@@ -235,31 +235,47 @@ def _collect_ctx_indicator_names(cls: ast.ClassDef, method_names: frozenset[str]
 def _invalid_ctx_indicator_reads(cls: ast.ClassDef, method_names: frozenset[str]) -> list[str]:
     """Return messages for ``ctx.indicator(...)`` calls that are statically invalid.
 
-    Only fully-literal calls (literal name + literal kwargs) are checked, reusing
-    :class:`IndicatorRef` as the single source of truth — so a missing required
-    ``period``, an unknown/typo param, an invalid selector value, or a forbidden
-    ``source`` override is caught here and refined, rather than raising at
-    runtime (where the shadow gate swallows the exception). Calls with any
-    dynamic argument are skipped to avoid false positives.
+    Positional params (anything after the name) are always flagged — the real
+    accessor is keyword-only past ``name``, so they are a guaranteed runtime
+    TypeError. Otherwise only fully-literal calls (literal name + literal kwargs)
+    are checked, reusing :class:`IndicatorRef` as the single source of truth — so
+    a missing required ``period``, an unknown/typo param, an invalid selector
+    value, or a forbidden ``source`` override is caught here and refined, rather
+    than raising at runtime (where the shadow gate swallows the exception). Calls
+    with a dynamic kwarg are skipped to avoid false positives.
     """
     errors: list[str] = []
     seen: set[str] = set()
+
+    def _record(msg: str) -> None:
+        if msg not in seen:
+            seen.add(msg)
+            errors.append(msg)
+
     for node in _iter_ctx_indicator_calls(cls, method_names):
         name = _ctx_indicator_arg_name(node)
+        if len(node.args) > 1:
+            # Every argument after the indicator name is keyword-only on the
+            # real accessor, so positional params are a guaranteed runtime
+            # TypeError — flag here rather than letting it reach the sandbox.
+            label = repr(name) if name else "..."
+            _record(
+                f"ctx.indicator({label}, ...) passes indicator params positionally; "
+                "every argument after the name is keyword-only "
+                "(use e.g. ctx.indicator('ema', period=20))."
+            )
+            continue
         if name is None:
             continue  # dynamic name — cannot validate; presence check handles absence
         parsed = _ctx_indicator_literal_kwargs(node)
         if parsed is None:
-            continue  # a dynamic arg is present — leave validation to runtime
+            continue  # a dynamic kwarg is present — leave validation to runtime
         params, source = parsed
         try:
             IndicatorRef(name=name, params=params, source=source)
         except (ValueError, ValidationError) as exc:
             summary = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
-            msg = f"ctx.indicator({name!r}, ...) is not a valid indicator read: {summary}"
-            if msg not in seen:
-                seen.add(msg)
-                errors.append(msg)
+            _record(f"ctx.indicator({name!r}, ...) is not a valid indicator read: {summary}")
     return errors
 
 

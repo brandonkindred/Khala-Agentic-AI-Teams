@@ -184,7 +184,7 @@ def test_indicator_value_missing_required_period_raises() -> None:
     ],
 )
 def test_indicator_value_bad_selector_raises(kwargs) -> None:
-    with pytest.raises(ValueError, match="invalid selector"):
+    with pytest.raises(ValueError, match="expected one of"):
         indicator_value(history=_make_bars(), **kwargs)
 
 
@@ -217,6 +217,22 @@ def test_indicator_value_rejects_unexpected_param() -> None:
         indicator_value("macd", bars, fast=12, slo=26)
     # Correctly-spelled params still compute.
     assert indicator_value("rsi", bars, period=14) is not None
+
+
+def test_indicator_value_validates_param_types_and_ranges() -> None:
+    bars = _make_bars()
+    # Out-of-DSL values are contract violations even for dynamic params the
+    # static gate cannot inspect — they must raise rather than coerce via int().
+    for bad in (1.5, "20", 1, 9999):  # non-int / str / below-min / above-max
+        with pytest.raises(ValueError):
+            indicator_value("sma", bars, period=bad)
+    with pytest.raises(ValueError):
+        indicator_value("bollinger", bars, num_std=0)  # must be > 0
+    with pytest.raises(ValueError):
+        indicator_value("macd", bars, output="nope")  # invalid selector
+    # Valid params still compute.
+    assert indicator_value("sma", bars, period=20) is not None
+    assert indicator_value("bollinger", bars, num_std=2.5, band="upper") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -654,3 +670,33 @@ def test_check1_validates_params_when_symbol_is_dynamic() -> None:
     malformed = [d for d in _critical_details(results) if "not a valid indicator read" in d]
     assert malformed and "ema" in malformed[0]
     assert all("rsi" not in d for d in malformed)
+
+
+def test_check1_flags_positional_ctx_indicator_param() -> None:
+    # ctx.indicator(...) is keyword-only after the name; ctx.indicator('ema', 20)
+    # is a guaranteed runtime TypeError and must be flagged, not credited.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', 20)
+                r = ctx.indicator('rsi', period=14)
+                if trend is None or r is None:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    positional = [d for d in _critical_details(results) if "positionally" in d]
+    assert positional and "ema" in positional[0]
