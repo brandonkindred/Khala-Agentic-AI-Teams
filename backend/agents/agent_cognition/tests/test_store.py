@@ -42,6 +42,14 @@ _WEEK = (datetime(2026, 6, 1, tzinfo=_UTC), datetime(2026, 6, 8, tzinfo=_UTC))
 _MONTH = (datetime(2026, 6, 1, tzinfo=_UTC), datetime(2026, 7, 1, tzinfo=_UTC))
 _CREATED = datetime(2026, 6, 2, tzinfo=_UTC)
 
+# Rollup snapshot times for prune tests. Events are appended in real time, so
+# their store-set ``recorded_at`` is ~now (2026). _FOLDED_AT (far future) marks
+# a summary computed *after* those events arrived (they count as folded, so
+# prunable); _PRECOMPUTED_AT (far past) marks a summary computed *before* the
+# events arrived (not yet folded, so prune must leave them).
+_FOLDED_AT = datetime(2099, 1, 1, tzinfo=_UTC)
+_PRECOMPUTED_AT = datetime(2000, 1, 1, tzinfo=_UTC)
+
 # Far-past windows for prune tests (always older than any sane cutoff).
 _OLD = datetime(2020, 1, 1, 12, 0, tzinfo=_UTC)
 _OLD_DAY = (datetime(2020, 1, 1, tzinfo=_UTC), datetime(2020, 1, 2, tzinfo=_UTC))
@@ -340,9 +348,12 @@ def test_mark_period_stale_pruned_period_returns_false() -> None:
     # A real prune latches events_pruned on the day summary; a later late event
     # into that (now event-less) day must amend, not recompute. The regime is
     # read from the durable flag, so it is correct regardless of whether the
-    # late event has been appended.
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1))
+    # late event has been appended. computed_at=_FOLDED_AT marks the original
+    # event as folded so prune is allowed to delete it.
     store.append_event("a", _event("a", occurred_at=_OLD))
+    store.upsert_summary(
+        "a", _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1), computed_at=_FOLDED_AT
+    )
     assert store.prune_events("a", retention_days=30) == 1
 
     assert store.mark_period_stale("a", _OLD) is False
@@ -358,26 +369,50 @@ def test_mark_period_stale_no_summary_returns_true_and_flags_nothing() -> None:
 # prune_events
 # ---------------------------------------------------------------------------
 def test_prune_events_deletes_only_summarized_nonstale_past_cutoff() -> None:
-    # A: old, day summary exists non-stale → deleted.
-    a = _event("a", run_id="a", occurred_at=_OLD)
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1))
-    # B: old, no day summary → kept.
-    b = _event("a", run_id="b", occurred_at=_OLD2)
-    # C: old, day summary is stale → kept.
-    c = _event("a", run_id="c", occurred_at=_OLD3)
-    store.upsert_summary(
-        "a", _summary("a", scale=Scale.DAY, window=_OLD3_DAY, source_count=1, stale=True)
-    )
-    # D: recent (newer than cutoff), summary exists → kept.
-    d = _event("a", run_id="d", occurred_at=_MID_DAY)
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY, source_count=1))
+    # Append all events first, then compute their day summaries (computed_at in
+    # the future ⇒ every event is folded), so prune is purely gated on the
+    # summary state below.
+    a = _event("a", run_id="a", occurred_at=_OLD)  # day summary non-stale → deleted
+    b = _event("a", run_id="b", occurred_at=_OLD2)  # no day summary → kept
+    c = _event("a", run_id="c", occurred_at=_OLD3)  # day summary stale → kept
+    d = _event("a", run_id="d", occurred_at=_MID_DAY)  # newer than cutoff → kept
     for ev in (a, b, c, d):
         store.append_event("a", ev)
+    store.upsert_summary(
+        "a", _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1), computed_at=_FOLDED_AT
+    )
+    store.upsert_summary(
+        "a",
+        _summary("a", scale=Scale.DAY, window=_OLD3_DAY, source_count=1, stale=True),
+        computed_at=_FOLDED_AT,
+    )
+    store.upsert_summary(
+        "a", _summary("a", scale=Scale.DAY, window=_DAY, source_count=1), computed_at=_FOLDED_AT
+    )
 
     deleted = store.prune_events("a", retention_days=30)
     assert deleted == 1
     remaining = {e.id for e in _all_events("a")}
     assert remaining == {b.id, c.id, d.id}
+
+
+def test_prune_skips_late_event_not_yet_folded() -> None:
+    # Race guard: the day summary was computed BEFORE the late event arrived
+    # (computed_at < recorded_at), so the event isn't folded yet. Even though it
+    # is old and the day summary is non-stale, prune must leave it — otherwise
+    # it would be lost before the rollup could amend it in.
+    store.upsert_summary(
+        "a",
+        _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1),
+        computed_at=_PRECOMPUTED_AT,
+    )
+    late = _event("a", occurred_at=_OLD)  # recorded_at = now ≫ _PRECOMPUTED_AT
+    store.append_event("a", late)
+
+    assert store.prune_events("a", retention_days=30) == 0
+    assert [e.id for e in _all_events("a")] == [late.id]
+    # …and the regime stays "retained" since nothing was actually pruned.
+    assert store.mark_period_stale("a", _OLD) is True
 
 
 def test_prune_events_negative_retention_raises() -> None:

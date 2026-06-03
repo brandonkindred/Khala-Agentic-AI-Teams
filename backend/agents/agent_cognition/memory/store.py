@@ -45,9 +45,10 @@ logger = logging.getLogger(__name__)
 _STORE = "agent_cognition"
 
 # Full column lists so ``SELECT`` results round-trip straight into the models.
-# ``events_pruned`` is store-managed retention bookkeeping (see prune_events /
-# mark_period_stale) and is intentionally not part of the PeriodSummary model,
-# so it is absent here — upsert_summary never writes it and reads never need it.
+# Store-managed retention bookkeeping columns are intentionally absent from
+# these lists (not part of the domain models): ``events.recorded_at`` (set by
+# its DEFAULT NOW() on append), and ``summaries.events_pruned`` / ``computed_at``
+# (managed by prune_events / upsert_summary). The models never see them.
 _EVENT_COLS = "id, agent_id, kind, content, data, salience, occurred_at, source_run_id, source_seq"
 _SUMMARY_COLS = (
     "id, agent_id, scale, period_start, period_end, summary, highlights, "
@@ -154,8 +155,18 @@ def fetch_recent_events(agent_id: str, top_n: int, by_salience: bool = True) -> 
 # Rollup summaries
 # ---------------------------------------------------------------------------
 @timed_query(store=_STORE, op="upsert_summary")
-def upsert_summary(agent_id: str, summary: PeriodSummary) -> None:
+def upsert_summary(
+    agent_id: str, summary: PeriodSummary, *, computed_at: datetime | None = None
+) -> None:
     """Insert or replace one rollup, idempotent on the period unique key.
+
+    Args:
+        computed_at: When this rollup folded its inputs — i.e. the snapshot
+            time up to which events are incorporated. ``prune_events`` only
+            deletes events with ``recorded_at <= computed_at``, so the rollup
+            should pass the timestamp of the event snapshot it summarized
+            (defaults to "now", which is safe when no events are appended
+            concurrently with the recompute).
 
     Preconditions:
         * ``agent_id`` is non-empty and ``summary.agent_id == agent_id``.
@@ -163,7 +174,7 @@ def upsert_summary(agent_id: str, summary: PeriodSummary) -> None:
         * Exactly one row exists for ``(agent_id, scale, period_start)``; a
           second call with the same key updates the mutable columns in place
           rather than inserting a duplicate. ``id`` and ``created_at`` of the
-          original row are preserved on update.
+          original row are preserved on update; ``computed_at`` is refreshed.
         * ``version`` is monotonic non-decreasing: an update carrying a lower
           ``version`` than the stored row (e.g. a freshly-built summary after
           ``mark_period_stale`` bumped it) keeps the higher stored value, so a
@@ -175,10 +186,11 @@ def upsert_summary(agent_id: str, summary: PeriodSummary) -> None:
     """
     assert agent_id, "upsert_summary: agent_id must be non-empty"
     assert summary.agent_id == agent_id, "upsert_summary: summary.agent_id must match agent_id"
+    stamped = computed_at or _now()
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
-            f"""INSERT INTO agent_cognition_summaries ({_SUMMARY_COLS})
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            f"""INSERT INTO agent_cognition_summaries ({_SUMMARY_COLS}, computed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (agent_id, scale, period_start) DO UPDATE SET
                     period_end = EXCLUDED.period_end,
                     summary = EXCLUDED.summary,
@@ -188,7 +200,8 @@ def upsert_summary(agent_id: str, summary: PeriodSummary) -> None:
                     version = GREATEST(
                         agent_cognition_summaries.version, EXCLUDED.version
                     ),
-                    stale = EXCLUDED.stale""",
+                    stale = EXCLUDED.stale,
+                    computed_at = EXCLUDED.computed_at""",
             (
                 summary.id,
                 summary.agent_id,
@@ -202,6 +215,7 @@ def upsert_summary(agent_id: str, summary: PeriodSummary) -> None:
                 summary.version,
                 summary.stale,
                 summary.created_at,
+                stamped,
             ),
         )
 
@@ -327,10 +341,14 @@ def mark_period_stale(agent_id: str, occurred_at: datetime) -> bool:
 def prune_events(agent_id: str, retention_days: int) -> int:
     """Delete raw events older than the cutoff, losslessly.
 
-    An event is only deleted when the **day** summary containing it exists and
-    is non-stale — so nothing that hasn't been folded into a current summary is
-    ever lost, and the rollup engine always has a base summary to amend if a
-    still-later event arrives for that day.
+    An event is only deleted when the **day** summary containing it exists, is
+    non-stale, **and the event was already folded into that summary** —
+    detected by ``recorded_at <= computed_at`` (the event arrived at or before
+    the summary's last recompute). This closes the race where a late event is
+    appended into an already-summarized day and the pruner runs before the
+    period is marked stale: such an event has ``recorded_at > computed_at`` and
+    is left in place, so it can be amended into the summary later rather than
+    silently dropped. Nothing unsummarized is ever lost.
 
     Before deleting, the affected day summaries are latched
     ``events_pruned = TRUE``. That flag is the durable recompute-vs-amend
@@ -342,10 +360,12 @@ def prune_events(agent_id: str, retention_days: int) -> int:
         * ``agent_id`` is non-empty and ``retention_days >= 0``.
     Postconditions:
         * Only this agent's events with ``occurred_at < now - retention_days``
-          whose containing day summary exists and is non-stale are removed, and
-          exactly those day summaries are marked ``events_pruned``.
-        * Events with no day summary, or under a ``stale`` day summary, or
-          newer than the cutoff, are retained.
+          whose containing day summary exists, is non-stale, and has
+          ``computed_at >= the event's recorded_at`` are removed, and exactly
+          those day summaries are marked ``events_pruned``.
+        * Events with no day summary, under a ``stale`` day summary, newer than
+          the cutoff, or not yet folded into the summary (``recorded_at >
+          computed_at``, incl. a NULL ``computed_at``) are retained.
     Returns:
         The number of events deleted.
     """
@@ -354,18 +374,20 @@ def prune_events(agent_id: str, retention_days: int) -> int:
     cutoff = _now() - timedelta(days=retention_days)
     with _conn() as conn, conn.cursor() as cur:
         # Latch the durable regime marker on every non-stale day summary that
-        # is about to lose events. Done before the DELETE — afterwards the
-        # raw rows are gone and we could no longer tell which days were hit.
+        # is about to lose (folded) events. Done before the DELETE — afterwards
+        # the raw rows are gone and we could no longer tell which days were hit.
         cur.execute(
             """UPDATE agent_cognition_summaries s
                SET events_pruned = TRUE
                WHERE s.agent_id = %s AND s.scale = %s AND s.stale = FALSE
+                 AND s.computed_at IS NOT NULL
                  AND EXISTS (
                      SELECT 1 FROM agent_cognition_events e
                      WHERE e.agent_id = s.agent_id
                        AND e.occurred_at < %s
                        AND e.occurred_at >= s.period_start
                        AND e.occurred_at < s.period_end
+                       AND e.recorded_at <= s.computed_at
                  )""",
             (agent_id, Scale.DAY.value, cutoff),
         )
@@ -378,8 +400,10 @@ def prune_events(agent_id: str, retention_days: int) -> int:
                      WHERE s.agent_id = e.agent_id
                        AND s.scale = %s
                        AND s.stale = FALSE
+                       AND s.computed_at IS NOT NULL
                        AND e.occurred_at >= s.period_start
                        AND e.occurred_at < s.period_end
+                       AND e.recorded_at <= s.computed_at
                  )""",
             (agent_id, cutoff, Scale.DAY.value),
         )
