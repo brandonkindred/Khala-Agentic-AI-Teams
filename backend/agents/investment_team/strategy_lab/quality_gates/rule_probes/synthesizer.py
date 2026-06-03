@@ -1087,12 +1087,16 @@ def _rsi_search_bars(
                 )
                 for c in closes
             ]
-        if target_below:
-            lo = mid  # Need stronger decline.
-        else:
-            hi = mid  # Already above; try gentler step.
-    # Last-chance: use the steepest step and check anyway.
-    closes = closes_for(hi if target_below else lo)
+        # Miss → push the step LARGER (steeper movement in the chosen
+        # direction). For target_below=True a bigger step deepens the
+        # decline and drops RSI further; for target_below=False a bigger
+        # step steepens the rise and lifts RSI further. The previous
+        # branch did `hi = mid` for target_below=False, contracting toward
+        # the smallest step — exactly the wrong direction — so high RSI
+        # thresholds (op `>`) were systematically unreachable.
+        lo = mid
+    # Last-chance: use the steepest step (hi) regardless of direction.
+    closes = closes_for(hi)
     series = pd.Series(closes)
     if _compare(rsi(series, period=int(ref.param("period"))).iloc[trigger_idx], op, rhs):
         return [
@@ -1583,14 +1587,25 @@ def _earliest_indicator_satisfying_index(
     holds. Used to align the probe's ``trigger_bar_index`` with the bar a
     correctly-built strategy would actually open on (the rule's first-fire
     bar). Returns ``None`` if no bar satisfies the predicate.
+
+    Computes the indicator as a single pandas batch via
+    :func:`_compute_indicator_series` and walks the resulting series — O(n)
+    pandas work + O(n) Python iteration. The earlier per-bar
+    :func:`_compute_indicator_at` rebuild rebuilt the full DataFrame and
+    recomputed the full indicator series on every iteration (O(n²) pandas
+    work) and contributed measurably to the synthesis-loop hot path under
+    multi-rule specs with slow indicators.
     """
-    for i in range(len(bars)):
-        value = _compute_indicator_at(ref, bars, i)
+    series = _compute_indicator_series(ref, bars)
+    if series is None:
+        return None
+    for i, value in enumerate(series.tolist()):
         if value is None:
             continue
-        if not math.isfinite(value):
+        f = float(value)
+        if not math.isfinite(f):
             continue
-        if _compare(value, op, rhs):
+        if _compare(f, op, rhs):
             return i
     return None
 
@@ -1647,7 +1662,6 @@ def _compute_indicator_series(ref: IndicatorRef, bars: List[OHLCVBar]) -> Option
 
 _PRICEREF_TO_FIELD = {
     "bar.close": "close",
-    "bar.open": "open",
     "bar.high": "high",
     "bar.low": "low",
     "bar.volume": "volume",
@@ -1709,9 +1723,15 @@ def _search_cross(
     the first index where ``lhs op rhs`` crosses according to :func:`_verify_cross`.
 
     Returns ``(bars, trigger_idx, None)`` on the first hit. If no builder
-    produces a cross, returns ``(None, 0, "cross_not_found_in_window:...")``
-    so the gate emits a deterministic ``unprobeable`` reason instead of
-    silently failing.
+    produces a cross, returns ``(None, 0, reason)`` — the bare string
+    ``"cross_not_found_in_window"`` when at least one builder successfully
+    resolved both sides and exhausted the scan, otherwise
+    ``"cross_side_unresolved"`` when every builder failed at the resolve
+    stage (an unknown indicator name or unmapped priceref). The "resolved
+    but no cross" diagnostic is preferred over "side unresolved" — earlier
+    versions overwrote the former with the latter when the spike builder
+    succeeded and the OHLC fallback failed resolution, masking the
+    informative diagnosis.
 
     Indicator values are resolved through :func:`_resolve_side_series` which
     uses the same pandas helpers ``predicate_evaluator.evaluate_entry_rules``
@@ -1722,15 +1742,15 @@ def _search_cross(
     otherwise fire at bar 1).
     """
     runtime_warmup = max(warmup, _COMPILER_MIN_WINDOW)
-    last_reason = "cross_not_found_in_window"
+    any_resolved = False
     for builder in builders:
         bars = builder()
         df = _bars_to_df(bars)
         lhs_series = _resolve_side_series(lhs, bars, df)
         rhs_series = _resolve_side_series(rhs, bars, df)
         if lhs_series is None or rhs_series is None:
-            last_reason = "cross_side_unresolved"
             continue
+        any_resolved = True
         n = min(len(lhs_series), len(rhs_series))
         for idx in range(max(runtime_warmup, 1), n):
             if _verify_cross(
@@ -1741,7 +1761,8 @@ def _search_cross(
                 op,
             ):
                 return bars, idx, None
-    return None, 0, last_reason
+    reason = "cross_not_found_in_window" if any_resolved else "cross_side_unresolved"
+    return None, 0, reason
 
 
 def _compute_indicator_at(ref: IndicatorRef, bars: List[OHLCVBar], idx: int) -> Optional[float]:
@@ -1985,24 +2006,42 @@ def _high_low_spike_bars(
     bars: List[OHLCVBar] = []
     for i in range(n):
         if i == spike_idx and field == "high":
+            # Honour the caller's spike direction. For cross_above spike_value
+            # is > base_close (upward spike); for cross_below it is <
+            # base_close (downward spike), so set high to spike_value
+            # directly — the older `max(spike_value, base_close)` clamp made
+            # cross_below structurally impossible by floor-clamping high.
+            close_at_spike = (
+                min(base_close, spike_value) if spike_value < base_close else base_close
+            )
+            high_at_spike = max(spike_value, close_at_spike)
+            low_at_spike = max(_MIN_PRICE, min(close_at_spike, spike_value))
             bars.append(
                 OHLCVBar(
                     date="placeholder",
-                    open=base_close,
-                    high=max(spike_value, base_close),
-                    low=base_close,
-                    close=base_close,
+                    open=close_at_spike,
+                    high=high_at_spike,
+                    low=low_at_spike,
+                    close=close_at_spike,
                     volume=1_000_000.0,
                 )
             )
         elif i == spike_idx and field == "low":
+            # Same fix for low — honour the spike direction. The older
+            # `min(spike_value, base_close)` clamp made cross_above
+            # structurally impossible by ceiling-clamping low.
+            close_at_spike = (
+                max(base_close, spike_value) if spike_value > base_close else base_close
+            )
+            low_at_spike = max(_MIN_PRICE, min(spike_value, close_at_spike))
+            high_at_spike = max(spike_value, close_at_spike)
             bars.append(
                 OHLCVBar(
                     date="placeholder",
-                    open=base_close,
-                    high=base_close,
-                    low=max(_MIN_PRICE, min(spike_value, base_close)),
-                    close=base_close,
+                    open=close_at_spike,
+                    high=high_at_spike,
+                    low=low_at_spike,
+                    close=close_at_spike,
                     volume=1_000_000.0,
                 )
             )
@@ -2046,10 +2085,17 @@ def _builders_for_high_low_priceref_cross(
     trigger_idx = n - _BARS_AFTER_TRIGGER - 1
     field = "high" if lhs == "bar.high" else "low"
 
-    if (op == "cross_above" and field == "high") or (op == "cross_below" and field == "low"):
-        spike_value = base_close * 2.0 if field == "high" else max(_MIN_PRICE, base_close * 0.5)
+    # Pick the spike direction by op + field so the LHS column actually
+    # moves AWAY from the indicator's anchor (≈ base_close) in the cross
+    # direction. The previous else-branch returned the wrong-direction spike
+    # for (cross_below + bar.high) and (cross_above + bar.low):
+    #   - cross_below requires LHS to drop UNDER the indicator → spike DOWN.
+    #   - cross_above requires LHS to rise OVER the indicator → spike UP.
+    # That's the same direction regardless of which field carries the LHS.
+    if op == "cross_above":
+        spike_value = base_close * 2.0
     else:
-        spike_value = max(_MIN_PRICE, base_close * 0.5) if field == "low" else base_close * 2.0
+        spike_value = max(_MIN_PRICE, base_close * 0.5)
 
     return [
         lambda: _high_low_spike_bars(n, base_close, trigger_idx, field, spike_value),
@@ -2650,7 +2696,7 @@ def _synth_cross_indicator_indicator(
         )
         if bars is not None:
             return bars, trigger, None
-        return None, 0, reason or "indicator_indicator_cross_not_found_in_window"
+        return None, 0, reason
 
     builders = [
         lambda: _regime_change_bars(n, base_close),
@@ -2760,31 +2806,71 @@ def _synth_indicator_vs_indicator(
     lhs: IndicatorRef, op: str, rhs: IndicatorRef, base_close: float, min_bars: int
 ) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
     """For non-cross comparisons: build a series where both indicators are
-    computable and the inequality holds at the trigger bar."""
+    computable and the inequality holds at the trigger bar.
+
+    Drives the series corresponding to ``lhs.source`` (which must equal
+    ``rhs.source`` — mismatched sources are semantically odd and rejected
+    explicitly rather than producing a misleading trigger). For
+    ``source="volume"`` varies the volume column; for any close-derived
+    source varies close. Indicator computation goes through the same
+    source-aware path the engine uses, so a fast/slow asymmetry is
+    handled correctly: with close trending up at slope +0.5, the
+    shorter-period MA leads the longer; so ``slope_sign`` is chosen to
+    make the requested inequality hold at the right edge, irrespective
+    of which side is the faster MA.
+    """
     if {lhs.name, rhs.name} - {"sma", "ema"}:
         return None, 0, f"indicator_vs_indicator_unsupported:{lhs.name}_{rhs.name}"
+    if lhs.source != rhs.source:
+        return None, 0, (
+            f"indicator_vs_indicator_mismatched_source:{lhs.source}_{rhs.source}"
+        )
+    source = lhs.source
     lhs_period = int(lhs.param("period"))
     rhs_period = int(rhs.param("period"))
     longest = max(lhs_period, rhs_period)
     n = max(min_bars, longest + 30)
-    # Trending series produces lhs-fast > rhs-slow at the right edge.
-    closes = [base_close + i * 0.5 for i in range(n)]
-    if op in ("<", "<="):
-        closes = list(reversed(closes))
-    bars = [
-        OHLCVBar(
-            date="placeholder",
-            open=c,
-            high=c + 0.5,
-            low=c - 0.5,
-            close=c,
-            volume=1_000_000.0,
-        )
-        for c in closes
-    ]
+
+    # For monotonic trends, SMA(short) leads SMA(long) — short MA's value
+    # is closer to the current bar. So shorter-period > longer-period iff
+    # the trend is rising. Pick the slope sign that makes the requested
+    # `lhs op rhs` hold given which side is shorter.
+    want_lhs_greater = op in (">", ">=")
+    lhs_is_shorter = lhs_period < rhs_period
+    slope_sign = 1.0 if (want_lhs_greater == lhs_is_shorter) else -1.0
+
+    if source == "volume":
+        base_vol = 1_000_000.0
+        volume_slope = base_vol * 0.02 * slope_sign
+        bars = [
+            OHLCVBar(
+                date="placeholder",
+                open=base_close,
+                high=base_close + 0.5,
+                low=max(_MIN_PRICE, base_close - 0.5),
+                close=base_close,
+                volume=max(1.0, base_vol + volume_slope * i),
+            )
+            for i in range(n)
+        ]
+    else:
+        close_slope = 0.5 * slope_sign
+        closes = [max(_MIN_PRICE, base_close + i * close_slope) for i in range(n)]
+        bars = [
+            OHLCVBar(
+                date="placeholder",
+                open=c,
+                high=c + 0.5,
+                low=max(_MIN_PRICE, c - 0.5),
+                close=c,
+                volume=1_000_000.0,
+            )
+            for c in closes
+        ]
     df = _bars_to_df(bars)
-    lhs_series = (sma if lhs.name == "sma" else ema)(df["close"], lhs_period)
-    rhs_series = (sma if rhs.name == "sma" else ema)(df["close"], rhs_period)
+    source_series = _series_for_source(df, source)
+    lhs_series = (sma if lhs.name == "sma" else ema)(source_series, lhs_period)
+    rhs_series = (sma if rhs.name == "sma" else ema)(source_series, rhs_period)
     for idx in range(longest, n):
         lv = lhs_series.iloc[idx]
         rv = rhs_series.iloc[idx]
@@ -2800,31 +2886,56 @@ def _synth_indicator_vs_indicator(
 def _synth_indicator_vs_priceref(
     lhs: IndicatorRef, op: str, rhs: str, base_close: float, min_bars: int
 ) -> Tuple[Optional[List[OHLCVBar]], int, Optional[str]]:
-    """Indicator-vs-PriceRef: drive the indicator value relative to the bar's price field."""
+    """Indicator-vs-PriceRef: drive the indicator value relative to the bar's
+    price field by trending the close so SMA/EMA lags the current bar.
+
+    The previous flat-bars + single-trigger-bar approach used
+    ``max(bar.high, target)`` to clamp high — which silently did nothing
+    when ``target < bar.high`` (the ``op in (">", ">=")`` case), so
+    ``SMA > bar.high`` was always returned as unprobeable. Trending the
+    close avoids that class of clamp bug entirely: with close rising at
+    +0.5/bar the MA lags below current close (and so below close+0.5 =
+    bar.high), satisfying ``MA < bar.high``; with close falling the
+    MA lags above and ``MA > bar.high`` holds. Volume-rhs is rejected
+    explicitly (price-scale MA vs ~1e6 volume is a magnitude mismatch
+    no flat-bars catalogue can satisfy).
+    """
+    if lhs.name not in ("sma", "ema"):
+        return None, 0, f"indicator_vs_priceref_unsupported:{lhs.name}_{rhs}"
+    rhs_field = rhs.split(".", 1)[1] if rhs.startswith("bar.") else None
+    if rhs_field is None or rhs_field == "volume":
+        return None, 0, f"indicator_vs_priceref_unsupported:{lhs.name}_{rhs}"
+
+    period = int(lhs.param("period"))
     n = max(min_bars, _required_bars_for_indicator(lhs))
-    if lhs.name in ("sma", "ema"):
-        # Make the MA equal to ``rhs_field`` level minus/plus a delta.
-        ma_level = base_close
-        bars = _flat_bars(ma_level, n)
-        # Adjust the last bar's price field to satisfy the predicate.
-        rhs_field = rhs.split(".", 1)[1]
-        trigger_idx = n - _BARS_AFTER_TRIGGER - 1
-        target_field_value = ma_level - 2.0 if op in (">", ">=") else ma_level + 2.0
-        bar = bars[trigger_idx]
-        bars[trigger_idx] = OHLCVBar(
+
+    # For `MA > bar.<field>` we want the MA above the current bar — so the
+    # MA must average OLDER higher closes, i.e. close is trending DOWN now.
+    # For `MA < bar.<field>` mirror — close trending UP.
+    close_slope = -0.5 if op in (">", ">=") else 0.5
+    closes = [max(_MIN_PRICE, base_close + i * close_slope) for i in range(n)]
+    bars = [
+        OHLCVBar(
             date="placeholder",
-            open=bar.open,
-            high=max(bar.high, target_field_value) if rhs_field == "high" else bar.high,
-            low=min(bar.low, target_field_value) if rhs_field == "low" else bar.low,
-            close=target_field_value if rhs_field == "close" else bar.close,
-            volume=target_field_value if rhs_field == "volume" else bar.volume,
+            open=c,
+            high=c + 0.5,
+            low=max(_MIN_PRICE, c - 0.5),
+            close=c,
+            volume=1_000_000.0,
         )
-        # Verify.
-        df = _bars_to_df(bars)
-        ma_series = (sma if lhs.name == "sma" else ema)(df["close"], int(lhs.param("period")))
+        for c in closes
+    ]
+    df = _bars_to_df(bars)
+    ma_series = (sma if lhs.name == "sma" else ema)(df["close"], period)
+    # Walk forward from the first valid MA bar; pick the earliest trigger
+    # that leaves at least `_BARS_AFTER_TRIGGER` bars for engine evaluation.
+    max_trigger = max(period, n - _BARS_AFTER_TRIGGER - 1)
+    for trigger_idx in range(period, max_trigger + 1):
         lv = ma_series.iloc[trigger_idx]
+        if not (isinstance(lv, float) and math.isfinite(lv)):
+            continue
         rv = getattr(bars[trigger_idx], rhs_field)
-        if isinstance(lv, float) and math.isfinite(lv) and _compare(float(lv), op, float(rv)):
+        if _compare(float(lv), op, float(rv)):
             return bars, trigger_idx, None
     return None, 0, f"indicator_vs_priceref_unsupported:{lhs.name}_{rhs}"
 

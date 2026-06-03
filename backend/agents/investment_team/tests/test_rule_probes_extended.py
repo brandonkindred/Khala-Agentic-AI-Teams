@@ -270,9 +270,18 @@ def test_stop_loss_short_position_targets_ceiling():
     stop = StopLossRule(pct=0.05)
     [_e, exit_probe] = generate_rule_probe_runs(_spec_with(entry_rules=[entry], exit_rules=[stop]))
     assert exit_probe.synthesizable
-    # For shorts the recipe sets a high above entry_close * (1 + pct).
+    # For shorts the stop-loss fires when bar.high reaches
+    # ``entry_close * (1 + pct)``. Verify the trigger bar's high actually
+    # crosses that ceiling — previously this test only asserted
+    # ``high > low`` (a trivial OHLC validity invariant), so a sign error
+    # in the short-side stop-loss tail would still pass.
+    entry_bar = exit_probe.market_data[exit_probe.trigger_bar_index - 1]
     trigger_bar = exit_probe.market_data[exit_probe.trigger_bar_index]
-    assert trigger_bar.high > trigger_bar.low
+    ceiling = entry_bar.close * (1.0 + stop.pct)
+    assert trigger_bar.high >= ceiling, (
+        f"stop-loss short trigger high={trigger_bar.high} did not reach "
+        f"ceiling={ceiling} (entry_close={entry_bar.close}, pct={stop.pct})"
+    )
 
 
 def test_take_profit_short_position_targets_floor():
@@ -283,8 +292,18 @@ def test_take_profit_short_position_targets_floor():
     tp = TakeProfitRule(pct=0.05)
     [_e, exit_probe] = generate_rule_probe_runs(_spec_with(entry_rules=[entry], exit_rules=[tp]))
     assert exit_probe.synthesizable
+    # For shorts the take-profit fires when bar.low reaches
+    # ``entry_close * (1 - pct)``. Verify the trigger bar's low actually
+    # crosses that floor — previously this test only asserted
+    # ``low < high`` (a trivial OHLC validity invariant), so a sign error
+    # in the short-side take-profit tail would still pass.
+    entry_bar = exit_probe.market_data[exit_probe.trigger_bar_index - 1]
     trigger_bar = exit_probe.market_data[exit_probe.trigger_bar_index]
-    assert trigger_bar.low < trigger_bar.high
+    floor = entry_bar.close * (1.0 - tp.pct)
+    assert trigger_bar.low <= floor, (
+        f"take-profit short trigger low={trigger_bar.low} did not reach "
+        f"floor={floor} (entry_close={entry_bar.close}, pct={tp.pct})"
+    )
 
 
 def test_stop_loss_trailing_low_on_long_is_unprobeable():
@@ -1233,12 +1252,20 @@ def test_post_clamp_verifier_marks_probe_unprobeable_when_clamping_breaks_predic
     spec = _spec_with(entry_rules=[rule])
     [probe] = generate_rule_probe_runs(spec)
     assert probe.synthesizable is False
-    assert (
-        probe.unprobeable_reason == "post_clamp_predicate_violation"
-        # Recipe may also bail earlier with its own pre-clamp signal.
-        or "below_clamp_floor" in (probe.unprobeable_reason or "")
-        or "verification_failed" in (probe.unprobeable_reason or "")
-        or "unreachable" in (probe.unprobeable_reason or "")
+    # The post-clamp verifier (in ``_stamp_dates``) is what we're
+    # exercising. Pre-clamp recipe bailouts (below_clamp_floor,
+    # verification_failed, unreachable) are separate code paths that this
+    # test should NOT silently accept — accepting any of them lets a
+    # broken post-clamp verifier pass under the disguise of a recipe
+    # bailout. If a future recipe change shifts this predicate into a
+    # pre-clamp bailout, that should fail this test and force us to
+    # rewrite the predicate so the post-clamp verifier path is what
+    # actually fires.
+    assert probe.unprobeable_reason == "post_clamp_predicate_violation", (
+        f"expected post_clamp_predicate_violation, got "
+        f"{probe.unprobeable_reason!r} — if a recipe change made this "
+        f"predicate bail pre-clamp, pick a different predicate that "
+        f"reaches the post-clamp verifier path"
     )
 
 
@@ -1627,14 +1654,17 @@ def test_resolve_side_series_handles_indicator_priceref_and_constant():
 
 
 def test_priceref_to_field_covers_all_bar_fields():
-    """The bar-field mapping must mirror every priceref literal the DSL accepts."""
-    assert set(_PRICEREF_TO_FIELD.keys()) >= {
-        "bar.close",
-        "bar.open",
-        "bar.high",
-        "bar.low",
-        "bar.volume",
-    }
+    """The bar-field mapping must mirror every priceref literal the DSL
+    accepts and must NOT extend it. Including a field the DSL rejects
+    (e.g. the historical ``bar.open`` entry) lets a JSON-bypassed
+    predicate reach _resolve_side_series; ``_bar_with_field`` has no
+    matching branch and produces degenerate doji bars whose values can
+    never satisfy the predicate, silently downgrading the probe."""
+    from investment_team.strategy_lab.spec_dsl import PriceRefLiteral
+    from typing import get_args
+
+    dsl_literals = set(get_args(PriceRefLiteral))
+    assert set(_PRICEREF_TO_FIELD.keys()) == dsl_literals
 
 
 # ---------------------------------------------------------------------------
@@ -2302,3 +2332,213 @@ def test_volume_source_macd_cross_threshold_in_either_direction(op, rhs, output)
     assert reason is None and bars is not None and trigger > 0, (
         f"volume-MACD({output}) {op} {rhs} not probeable: {reason}"
     )
+
+
+@pytest.mark.parametrize(
+    "op,lhs_p,rhs_p,source",
+    [
+        # source="volume" — both MAs computed over the volume column. The
+        # earlier implementation hardcoded df["close"] regardless of source,
+        # producing a probe whose trigger reflected close-based SMAs but
+        # whose runtime predicate evaluation used volume-based SMAs that
+        # were both flat at 1e6 → critical false positive against a correct
+        # strategy.
+        (">", 5, 20, "volume"),
+        ("<", 5, 20, "volume"),
+        (">", 20, 5, "volume"),
+        ("<", 20, 5, "volume"),
+        # source="close" baseline — locked in to confirm no regression.
+        (">", 5, 20, "close"),
+        ("<", 5, 20, "close"),
+        # Asymmetric periods with lhs=slow, rhs=fast — the old code only
+        # considered op direction not which side was faster, so e.g.
+        # ``SMA(20) > SMA(5)`` with the up-trend produced fast>slow but the
+        # check returned False. Now the slope sign is chosen by both op and
+        # which side is shorter.
+        (">", 20, 5, "close"),
+        ("<", 20, 5, "close"),
+    ],
+)
+def test_indicator_vs_indicator_respects_source_and_period_asymmetry(
+    op, lhs_p, rhs_p, source
+):
+    """`SMA/EMA op SMA/EMA` synthesis must drive the series corresponding
+    to ``source`` and must satisfy the requested ``op`` regardless of which
+    side has the shorter period."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    lhs = IndicatorRef(name="sma", params={"period": lhs_p}, source=source)
+    rhs = IndicatorRef(name="sma", params={"period": rhs_p}, source=source)
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is not None and trigger > 0, (
+        f"SMA({lhs_p},{source}) {op} SMA({rhs_p},{source}) not probeable: {reason}"
+    )
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for "
+        f"SMA({lhs_p},{source}) {op} SMA({rhs_p},{source})"
+    )
+
+
+def test_indicator_vs_indicator_mismatched_source_rejected_explicitly():
+    """Mixed sources (one close, one volume) are semantically odd — the
+    series live in different magnitudes. Rather than silently produce a
+    trigger that the runtime won't match, the recipe rejects with an
+    explicit reason so the operator sees the predicate is unsupported."""
+    lhs = IndicatorRef(name="sma", params={"period": 5}, source="close")
+    rhs = IndicatorRef(name="sma", params={"period": 20}, source="volume")
+    pred = Predicate(lhs=lhs, op=">", rhs=rhs)
+    bars, _trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is None
+    assert reason == "indicator_vs_indicator_mismatched_source:close_volume"
+
+
+@pytest.mark.parametrize(
+    "op,rhs_field",
+    [
+        # The old fast-path used `max(bar.high, target_field_value)` for the
+        # high case, which clamped UP when we needed to clamp DOWN — so
+        # `SMA > bar.high` was always unprobeable. The trending-close
+        # rewrite makes MA lag the trend, naturally satisfying the
+        # inequality for all op + field combinations.
+        (">", "bar.high"),
+        ("<", "bar.high"),
+        (">=", "bar.high"),
+        ("<=", "bar.high"),
+        (">", "bar.low"),
+        ("<", "bar.low"),
+        (">", "bar.close"),
+        ("<", "bar.close"),
+    ],
+)
+def test_indicator_vs_priceref_clamp_direction(op, rhs_field):
+    """`SMA op bar.<field>` for all op/field combos. The old recipe used
+    `max(bar.high, target)` for the high case which silently no-op'd when
+    target was below bar.high — making ``SMA > bar.high`` always
+    unprobeable. The trending-close rewrite handles every op symmetrically."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    lhs = IndicatorRef(name="sma", params={"period": 20})
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs_field)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is not None and trigger > 0, (
+        f"SMA(20) {op} {rhs_field} not probeable: {reason}"
+    )
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for SMA(20) {op} {rhs_field}"
+    )
+
+
+@pytest.mark.parametrize(
+    "op,rhs",
+    [
+        # The binary-search `hi = mid` update for target_below=False made
+        # large RSI thresholds (>70) systematically unreachable. The
+        # corrected `lo = mid` update converges toward the steepest step
+        # in both directions.
+        (">", 70.0),
+        (">", 80.0),
+        (">=", 70.0),
+        ("<", 30.0),
+        ("<", 20.0),
+        ("<=", 30.0),
+    ],
+)
+def test_rsi_indicator_vs_number_in_either_direction(op, rhs):
+    """RSI threshold predicates across both inequality directions —
+    previously the binary search converged toward the SMALLEST step for
+    `>` ops, making high overbought thresholds unsynthesisable."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    lhs = IndicatorRef(name="rsi", params={"period": 14})
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is not None and trigger > 0, (
+        f"RSI(14) {op} {rhs} not probeable: {reason}"
+    )
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for RSI(14) {op} {rhs}"
+    )
+
+
+@pytest.mark.parametrize(
+    "op,lhs,rhs_name,rhs_params",
+    [
+        # bar.high cross_below + bar.low cross_above were broken: the
+        # else-branch in _builders_for_high_low_priceref_cross set
+        # spike_value in the wrong direction, AND _high_low_spike_bars
+        # clamped via max() / min() in a way that made the right direction
+        # structurally impossible.
+        ("cross_below", "bar.high", "bollinger", {"period": 20, "num_std": 2.0, "band": "upper"}),
+        ("cross_below", "bar.high", "bollinger", {"period": 20, "num_std": 2.0, "band": "middle"}),
+        ("cross_above", "bar.low", "bollinger", {"period": 20, "num_std": 2.0, "band": "lower"}),
+        ("cross_above", "bar.low", "bollinger", {"period": 20, "num_std": 2.0, "band": "middle"}),
+        ("cross_below", "bar.high", "sma", {"period": 20}),
+        ("cross_above", "bar.low", "sma", {"period": 20}),
+        ("cross_below", "bar.high", "vwap", {}),
+        ("cross_above", "bar.low", "vwap", {}),
+    ],
+)
+def test_bar_high_low_priceref_cross_inverse_direction(op, lhs, rhs_name, rhs_params):
+    """`bar.high cross_below` and `bar.low cross_above` must fire. The
+    spike value must move LHS *toward* the cross direction — the previous
+    else-branch returned a spike in the wrong direction, compounded by
+    spike-bar clamps that floor-clamped high (or ceiling-clamped low)
+    against the desired spike direction."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    rhs = IndicatorRef(name=rhs_name, params=rhs_params, source="close")
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert reason is None and bars is not None and trigger > 0, (
+        f"{lhs} {op} {rhs_name}({rhs_params}) not probeable: {reason}"
+    )
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for "
+        f"{lhs} {op} {rhs_name}({rhs_params})"
+    )
+
+
+def test_search_cross_prefers_resolved_failure_over_unresolved_diagnostic():
+    """When at least one builder successfully resolves both sides and
+    exhausts the scan without finding a cross, the reason must be
+    ``cross_not_found_in_window`` — even if a *later* builder fails at
+    side resolution. The earlier overwrite (last_reason ← cross_side_
+    unresolved) masked the more diagnostic 'resolved but no cross' for any
+    catalogue that included unknown-indicator fallbacks."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _search_cross,
+        _flat_bars,
+    )
+
+    # Build a catalogue where builder 0 produces a flat-close sequence
+    # (close and 'bar.close' both resolved, but no cross fires) and
+    # builder 1 produces the same flat sequence. The dispatcher uses
+    # bar-field strings; an unrecognised priceref like "bar.unknown"
+    # returns None from _resolve_side_series, simulating the
+    # cross_side_unresolved path.
+    builders_resolved_then_unresolved = [
+        lambda: _flat_bars(100.0, 50),
+        lambda: _flat_bars(100.0, 50),
+    ]
+    # Both builders successfully resolve "bar.close" but no cross fires
+    # (the series are flat). Reason should be cross_not_found_in_window,
+    # NOT cross_side_unresolved.
+    _bars, _idx, reason = _search_cross(
+        "bar.close",
+        "cross_above",
+        "bar.close",
+        100.0,
+        50,
+        builders_resolved_then_unresolved,
+        warmup=20,
+    )
+    assert reason == "cross_not_found_in_window"
