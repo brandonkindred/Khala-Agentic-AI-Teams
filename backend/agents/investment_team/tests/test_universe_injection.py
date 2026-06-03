@@ -858,6 +858,120 @@ def test_classmethod_on_bar_not_guarded() -> None:
     compile(out, "<injected>", "exec")
 
 
+def test_called_staticmethod_on_bar_not_guarded() -> None:
+    """A *called* ``@staticmethod()`` decorator is treated like the bare form:
+    the method is not a plain bound instance method, so the guard is not
+    injected (fail closed) rather than normalized into passing-but-crashing
+    code."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            @staticmethod()
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # not guarded -> fail closed
+
+
+def test_called_qualified_classmethod_on_bar_not_guarded() -> None:
+    """A called qualified ``@builtins.classmethod()`` decorator is also rejected."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            @builtins.classmethod()
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # not guarded -> fail closed
+
+
+def test_compiler_shaped_warmup_then_guard_returned_verbatim() -> None:
+    """The deterministic compiler emits ``on_bar`` with a leading warm-up gate
+    (``if ctx.is_warmup: return``) ahead of the universe guard. That shape is
+    already canonical, so the injector must return it verbatim — no
+    round-trip through ``ast.unparse`` and no spurious drift/code-hash churn."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({'QQQ'})
+
+            def on_bar(self, ctx, bar):
+                if ctx.is_warmup:
+                    return
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                history = ctx.history(bar.symbol, 200)
+                if len(history) < 200:
+                    return
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_warmup_gate_with_else_body_not_treated_as_canonical() -> None:
+    """A warm-up ``if`` that nests logic under ``else`` is *not* the bare
+    compiler preamble, so the guard after it is not recognized as canonical and
+    the source is rewritten (guard hoisted to the first statement)."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({'QQQ'})
+
+            def on_bar(self, ctx, bar):
+                if ctx.is_warmup:
+                    return
+                else:
+                    ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+                if bar.symbol not in self.UNIVERSE:
+                    return
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert out != src  # rewritten, not verbatim
+    assert _first_is_guard(out)  # canonical guard hoisted ahead of signal logic
+    assert _has_universe_guard_in_on_bar(_cls(out))
+
+
+def test_on_bar_only_warmup_gate_gets_guard_injected() -> None:
+    """An ``on_bar`` whose body is *only* a warm-up gate (no universe guard at
+    all) is not canonical, so after skipping the warm-up preamble there is no
+    guard to find — the injector hoists a canonical guard ahead of it."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({'QQQ'})
+
+            def on_bar(self, ctx, bar):
+                if ctx.is_warmup:
+                    return
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert out != src
+    assert _first_is_guard(out)  # guard hoisted ahead of the warm-up gate
+    assert _has_universe_guard_in_on_bar(_cls(out))
+
+
 def test_def_universe_override_bails() -> None:
     """A class-body ``def UNIVERSE`` binds the attribute to a function after the
     prepend, so the injector bails rather than emit a false-green gate."""

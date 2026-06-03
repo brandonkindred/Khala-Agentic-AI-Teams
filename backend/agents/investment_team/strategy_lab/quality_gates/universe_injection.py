@@ -347,15 +347,52 @@ def _is_guardable_on_bar(on_bar) -> bool:
 
 def _has_static_or_class_decorator(func) -> bool:
     """True iff ``func`` is decorated ``@staticmethod`` / ``@classmethod``,
-    whether bare (``ast.Name``) or qualified (``ast.Attribute`` such as
-    ``@builtins.staticmethod``)."""
+    whether bare (``ast.Name``), qualified (``ast.Attribute`` such as
+    ``@builtins.staticmethod``), or called (``@staticmethod()`` /
+    ``@classmethod()``).
+
+    The called form is treated identically to the bare form: even though it
+    would raise at class-creation time, the decorated method is not a plain
+    bound instance method, so a ``self.UNIVERSE`` guard must not be injected —
+    fail closed and leave the malformed signature to the safety/conformance
+    gates rather than normalizing it into passing-but-crashing code.
+    """
     targets = {"staticmethod", "classmethod"}
     for dec in func.decorator_list:
-        if isinstance(dec, ast.Name) and dec.id in targets:
+        # Unwrap a called decorator (``@staticmethod()``) to its callee.
+        node = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(node, ast.Name) and node.id in targets:
             return True
-        if isinstance(dec, ast.Attribute) and dec.attr in targets:
+        if isinstance(node, ast.Attribute) and node.attr in targets:
             return True
     return False
+
+
+def _is_warmup_guard_stmt(stmt: ast.stmt) -> bool:
+    """True iff ``stmt`` is a bare warm-up early-return ``if <name>.is_warmup: return``.
+
+    Matches the deterministic compiler's leading warm-up gate exactly: an ``if``
+    with no ``else`` whose test is an attribute access ``<Name>.is_warmup`` and
+    whose body is a single bare ``return``. Such a guard is symbol-agnostic, so a
+    universe guard placed *after* it still rejects non-target bars before any
+    signal logic — letting ``_is_canonical_on_bar`` treat the compiled
+    ``warm-up → universe-guard`` preamble as already canonical.
+
+    Preconditions: ``stmt`` is an ``ast.stmt``.
+    Postconditions: returns a ``bool``; never mutates ``stmt``; never raises.
+    """
+    if not isinstance(stmt, ast.If) or stmt.orelse:
+        return False
+    test = stmt.test
+    if not (
+        isinstance(test, ast.Attribute)
+        and test.attr == "is_warmup"
+        and isinstance(test.value, ast.Name)
+    ):
+        return False
+    return (
+        len(stmt.body) == 1 and isinstance(stmt.body[0], ast.Return) and stmt.body[0].value is None
+    )
 
 
 def _is_strippable_guard(stmt: ast.stmt) -> bool:
@@ -643,7 +680,20 @@ def _is_canonical_on_bar(on_bar) -> bool:
     bar_param = _bar_parameter_name(on_bar)
     if bar_param is None or on_bar.args.args[0].arg != "self" or not on_bar.body:
         return False
-    first = on_bar.body[0]
+    # The deterministic compiler emits a leading warm-up gate
+    # (``if ctx.is_warmup: return``) *ahead* of the universe guard. That gate is
+    # symbol-agnostic — it returns for every symbol during warm-up and falls
+    # through afterwards — so the universe guard immediately after it still
+    # rejects non-target bars before any signal logic, and the shape is
+    # canonical. Skip a leading run of such warm-up guards before locating the
+    # universe guard, so compiled strategies are returned verbatim rather than
+    # round-tripped through ``ast.unparse`` and logged as spurious drift.
+    idx = 0
+    while idx < len(on_bar.body) and _is_warmup_guard_stmt(on_bar.body[idx]):
+        idx += 1
+    if idx >= len(on_bar.body):
+        return False
+    first = on_bar.body[idx]
     if not _is_strippable_guard(first):
         return False
     # ``_is_universe_guard_stmt`` guarantees ``first.test.left`` is
