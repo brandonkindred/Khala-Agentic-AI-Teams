@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, ClassVar, Iterable, List, Optional
 
+from pydantic import ValidationError
+
 from ..spec_dsl import (
     EntryRule,
     IndicatorName,
@@ -135,6 +137,22 @@ def _collect_called_names_in_methods(cls: ast.ClassDef, method_names: frozenset[
     return out
 
 
+def _is_ctx_indicator_call(node: ast.AST) -> bool:
+    """True iff ``node`` is a ``ctx.indicator(...)`` call.
+
+    The receiver must be the literal ``ctx`` parameter — ``self.indicator(...)``
+    or ``foo.indicator(...)`` is **not** the engine-backed accessor and must not
+    be credited as one (it could compute values that drift from the engine).
+    """
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "indicator"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "ctx"
+    )
+
+
 def _ctx_indicator_arg_name(node: ast.Call) -> Optional[str]:
     """Return the string indicator name of a ``ctx.indicator('<name>', ...)`` call.
 
@@ -156,6 +174,43 @@ def _ctx_indicator_arg_name(node: ast.Call) -> Optional[str]:
     return None
 
 
+def _ctx_indicator_literal_kwargs(node: ast.Call) -> Optional[tuple[dict, str]]:
+    """Extract ``(params, source)`` from a ``ctx.indicator`` call when *every*
+    argument is a literal; return ``None`` if any argument is dynamic.
+
+    Returning ``None`` (dynamic args present) means the call cannot be validated
+    statically and is left to runtime — so a legitimate ``period=self.WINDOW``
+    is never falsely flagged. ``name`` and ``symbol`` are not indicator params
+    and are excluded from ``params``.
+    """
+    # The only expected positional is the indicator name; extra positionals are
+    # a runtime error this static check does not attempt to characterise.
+    if len(node.args) > 1:
+        return None
+    params: dict = {}
+    source = "close"
+    for kw in node.keywords:
+        if kw.arg is None or not isinstance(kw.value, ast.Constant):
+            return None  # **kwargs unpack or a dynamic value → cannot validate
+        if kw.arg in ("name", "symbol"):
+            continue
+        if kw.arg == "source":
+            source = kw.value.value
+        else:
+            params[kw.arg] = kw.value.value
+    return params, source
+
+
+def _iter_ctx_indicator_calls(cls: ast.ClassDef, method_names: frozenset[str]):
+    """Yield ``ctx.indicator(...)`` calls inside the on_bar-reachable methods."""
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if _is_ctx_indicator_call(node):
+                yield node
+
+
 def _collect_ctx_indicator_names(cls: ast.ClassDef, method_names: frozenset[str]) -> set[str]:
     """Return DSL indicator names read via ``ctx.indicator('<name>', ...)``.
 
@@ -163,23 +218,45 @@ def _collect_ctx_indicator_names(cls: ast.ClassDef, method_names: frozenset[str]
     mandates, scanning the same on_bar-reachable methods as
     :func:`_collect_called_names_in_methods` so a literal name passed to
     ``ctx.indicator`` satisfies check #1 exactly like a named ``sma(...)`` call.
-    Matches any ``*.indicator(...)`` attribute call (the receiver is ``ctx``);
-    non-literal names are skipped.
+    Only ``ctx``-receiver calls with a literal name are credited.
     """
     out: set[str] = set()
-    for method in _iter_strategy_methods(cls):
-        if method.name not in method_names:
-            continue
-        for node in _iter_method_body_nodes(method):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "indicator"
-            ):
-                name = _ctx_indicator_arg_name(node)
-                if name:
-                    out.add(name)
+    for node in _iter_ctx_indicator_calls(cls, method_names):
+        name = _ctx_indicator_arg_name(node)
+        if name:
+            out.add(name)
     return out
+
+
+def _invalid_ctx_indicator_reads(cls: ast.ClassDef, method_names: frozenset[str]) -> list[str]:
+    """Return messages for ``ctx.indicator(...)`` calls that are statically invalid.
+
+    Only fully-literal calls (literal name + literal kwargs) are checked, reusing
+    :class:`IndicatorRef` as the single source of truth — so a missing required
+    ``period``, an unknown/typo param, an invalid selector value, or a forbidden
+    ``source`` override is caught here and refined, rather than raising at
+    runtime (where the shadow gate swallows the exception). Calls with any
+    dynamic argument are skipped to avoid false positives.
+    """
+    errors: list[str] = []
+    seen: set[str] = set()
+    for node in _iter_ctx_indicator_calls(cls, method_names):
+        name = _ctx_indicator_arg_name(node)
+        if name is None:
+            continue  # dynamic name — cannot validate; presence check handles absence
+        parsed = _ctx_indicator_literal_kwargs(node)
+        if parsed is None:
+            continue  # a dynamic arg is present — leave validation to runtime
+        params, source = parsed
+        try:
+            IndicatorRef(name=name, params=params, source=source)
+        except (ValueError, ValidationError) as exc:
+            summary = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+            msg = f"ctx.indicator({name!r}, ...) is not a valid indicator read: {summary}"
+            if msg not in seen:
+                seen.add(msg)
+                errors.append(msg)
+    return errors
 
 
 def _is_submit_order_call(node: ast.AST) -> bool:
@@ -548,35 +625,43 @@ class CodeConformanceGate(GateResultsMixin):
     # Check 1 — indicator presence
     # ------------------------------------------------------------------
     def _check_indicator_presence(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        results: List[QualityGateResult] = []
+        # A malformed ``ctx.indicator(...)`` read fails at runtime regardless of
+        # whether the spec requires that indicator — flag it here (with a precise
+        # message) so it is refined, rather than raising in a sandbox where the
+        # shadow gate would swallow the exception into a confusing no-trade run.
+        for detail in _invalid_ctx_indicator_reads(cctx.cls, cctx.reachable):
+            results.append(self._critical(detail))
+
         required = _collect_required_indicators(cctx.spec)
-        if not required:
-            return ()
-        # Indicator reads only count when they are actually executed at
-        # runtime: walk methods reachable from on_bar (Codex PR #588 P1). Two
-        # recognised forms — the engine-backed ``ctx.indicator('<name>', ...)``
-        # accessor (preferred) and the legacy named call (e.g. ``sma(...)``,
-        # which the deterministic compiler still emits).
-        called = _collect_called_names_in_methods(cctx.cls, cctx.reachable)
-        called |= _collect_ctx_indicator_names(cctx.cls, cctx.reachable)
-        missing: List[str] = []
-        for name in sorted(required):
-            # The named-call allow-list always contains the DSL name itself, and
-            # ``_collect_ctx_indicator_names`` keys ``ctx.indicator`` reads by
-            # that same DSL name, so one intersection test covers both forms.
-            allowed = _INDICATOR_ALLOWED_CALL_NAMES.get(name, frozenset({name}))
-            if not (called & allowed):
-                missing.append(name)
-        if not missing:
-            return ()
-        return (
-            self._critical(
-                f"Spec references indicator(s) {missing} but no method "
-                "reachable from on_bar reads them. Use the engine-backed "
-                "accessor ``ctx.indicator('<name>', ...)`` (preferred) or the "
-                "named-call form (e.g. ``sma(bars, 50)``); inline equivalents "
-                "and calls in unreachable helpers are not recognised."
-            ),
-        )
+        if required:
+            # Indicator reads only count when they are actually executed at
+            # runtime: walk methods reachable from on_bar (Codex PR #588 P1). Two
+            # recognised forms — the engine-backed ``ctx.indicator('<name>', ...)``
+            # accessor (preferred) and the legacy named call (e.g. ``sma(...)``,
+            # which the deterministic compiler still emits).
+            called = _collect_called_names_in_methods(cctx.cls, cctx.reachable)
+            called |= _collect_ctx_indicator_names(cctx.cls, cctx.reachable)
+            missing: List[str] = []
+            for name in sorted(required):
+                # The named-call allow-list always contains the DSL name itself,
+                # and ``_collect_ctx_indicator_names`` keys ``ctx.indicator``
+                # reads by that same DSL name, so one intersection test covers
+                # both forms.
+                allowed = _INDICATOR_ALLOWED_CALL_NAMES.get(name, frozenset({name}))
+                if not (called & allowed):
+                    missing.append(name)
+            if missing:
+                results.append(
+                    self._critical(
+                        f"Spec references indicator(s) {missing} but no method "
+                        "reachable from on_bar reads them. Use the engine-backed "
+                        "accessor ``ctx.indicator('<name>', ...)`` (preferred) or the "
+                        "named-call form (e.g. ``sma(bars, 50)``); inline equivalents "
+                        "and calls in unreachable helpers are not recognised."
+                    )
+                )
+        return results
 
     # ------------------------------------------------------------------
     # Check 2 — symbol/universe gate (defense-in-depth with code_safety)

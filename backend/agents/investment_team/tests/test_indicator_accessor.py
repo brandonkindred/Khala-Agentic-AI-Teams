@@ -502,3 +502,107 @@ def test_check1_still_accepts_legacy_named_call_form() -> None:
     results = CodeConformanceGate().check(code, _ema_rsi_spec())
     indicator_criticals = [d for d in _critical_details(results) if "indicator(s)" in d]
     assert indicator_criticals == []
+
+
+def test_check1_requires_ctx_receiver_for_indicator_credit() -> None:
+    # self.indicator(...) / foo.indicator(...) are NOT the engine-backed accessor
+    # and must not satisfy the presence check.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = self.indicator('ema', period=20)
+                r = self.indicator('rsi', period=14)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    missing = [d for d in _critical_details(results) if "indicator(s)" in d]
+    assert missing and "ema" in missing[0] and "rsi" in missing[0]
+
+
+@pytest.mark.parametrize(
+    "ema_call",
+    [
+        "ctx.indicator('ema')",  # missing required period
+        "ctx.indicator('ema', perod=20)",  # typo'd param
+        "ctx.indicator('ema', period=20, source='high')",  # valid — ema accepts source
+    ],
+)
+def test_check1_flags_malformed_ctx_indicator_call(ema_call) -> None:
+    # A fully-literal, statically-invalid ctx.indicator read is a critical here,
+    # so it is refined rather than raising at runtime. (The third case is valid
+    # — ema accepts source — and must NOT be flagged.)
+    code = textwrap.dedent(
+        f"""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({{"QQQ"}})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = {ema_call}
+                r = ctx.indicator('rsi', period=14)
+                if trend is None or r is None:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+                elif pos is not None and bar.close < pos.entry_price * 0.95:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    malformed = [d for d in _critical_details(results) if "not a valid indicator read" in d]
+    if "source='high'" in ema_call:
+        assert malformed == []  # ema accepts a source override → valid
+    else:
+        assert malformed and "ema" in malformed[0]
+
+
+def test_check1_skips_validation_for_dynamic_ctx_indicator_args() -> None:
+    # A dynamic param (period=self.WINDOW) cannot be validated statically, so it
+    # must not be falsely flagged — and the read is still credited for presence.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+            WINDOW = 20
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', period=self.WINDOW)
+                r = ctx.indicator('rsi', period=14)
+                if trend is None or r is None:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+                elif pos is not None and bar.close < pos.entry_price * 0.95:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    assert _critical_details(results) == [], _critical_details(results)
