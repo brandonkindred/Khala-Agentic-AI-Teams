@@ -309,6 +309,14 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("agent_console postgres schema registration failed")
 
+    try:
+        from agent_cognition.postgres import SCHEMA as AGENT_COGNITION_SCHEMA
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(AGENT_COGNITION_SCHEMA)
+    except Exception:
+        logger.exception("agent_cognition postgres schema registration failed")
+
     # Gate the entire product_delivery startup block on the team's
     # `enabled` flag. Disabling the team must also disable its startup
     # side effects (schema DDL, failure logs, health markers) — not
