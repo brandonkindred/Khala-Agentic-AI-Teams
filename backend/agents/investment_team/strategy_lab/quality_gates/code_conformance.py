@@ -177,7 +177,7 @@ def _ctx_indicator_arg_name(node: ast.Call) -> Optional[str]:
     return None
 
 
-def _ctx_indicator_call_errors(node: ast.Call) -> list[str]:
+def _ctx_indicator_call_errors(node: ast.Call, target_symbols: frozenset[str]) -> list[str]:
     """Static-validation errors for one ``ctx.indicator(...)`` call (``[]`` when
     valid or not statically determinable).
 
@@ -190,11 +190,14 @@ def _ctx_indicator_call_errors(node: ast.Call) -> list[str]:
     * an unexpected/typo'd param key — matched by *name*, so a dynamic sibling
       value (e.g. ``period=self.WINDOW``) does not suppress it;
     * an out-of-DSL literal value, a forbidden ``source`` override, or a missing
-      required param.
+      required param;
+    * a literal ``symbol=`` outside the spec's ``target_symbols`` (it would read
+      a symbol that never receives data, so the value is ``None`` forever).
 
     Validation reuses spec_dsl's ``_INDICATOR_PARAM_SPECS`` as the single source
     of truth. Dynamic values are validated by key name only; the missing-required
     and unexpected-key checks are skipped when ``**kwargs`` unpacking hides keys.
+    ``target_symbols`` is the spec universe (empty = open universe → not checked).
     """
     name = _ctx_indicator_arg_name(node)
     label = repr(name) if name else "..."
@@ -220,6 +223,20 @@ def _ctx_indicator_call_errors(node: ast.Call) -> list[str]:
     errors: list[str] = []
     has_kwargs_unpack = any(kw.arg is None for kw in node.keywords)
     seen: set[str] = set()
+    # A literal symbol outside the spec universe never receives bars, so the
+    # read returns None forever — credited by name but not actually implemented.
+    if target_symbols:
+        for kw in node.keywords:
+            if (
+                kw.arg == "symbol"
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+                and kw.value.value not in target_symbols
+            ):
+                errors.append(
+                    f"ctx.indicator('{name}', ...): symbol {kw.value.value!r} is not in the "
+                    f"spec's target_symbols {sorted(target_symbols)}; it never receives data."
+                )
     for kw in node.keywords:
         if kw.arg is None or kw.arg in ("name", "symbol"):
             continue
@@ -289,13 +306,15 @@ def _collect_ctx_indicator_names(cls: ast.ClassDef, method_names: frozenset[str]
     return out
 
 
-def _invalid_ctx_indicator_reads(cls: ast.ClassDef, method_names: frozenset[str]) -> list[str]:
+def _invalid_ctx_indicator_reads(
+    cls: ast.ClassDef, method_names: frozenset[str], target_symbols: frozenset[str]
+) -> list[str]:
     """De-duplicated static-validation messages for every on_bar-reachable
     ``ctx.indicator(...)`` call (see :func:`_ctx_indicator_call_errors`)."""
     errors: list[str] = []
     seen: set[str] = set()
     for node in _iter_ctx_indicator_calls(cls, method_names):
-        for msg in _ctx_indicator_call_errors(node):
+        for msg in _ctx_indicator_call_errors(node, target_symbols):
             if msg not in seen:
                 seen.add(msg)
                 errors.append(msg)
@@ -673,7 +692,8 @@ class CodeConformanceGate(GateResultsMixin):
         # whether the spec requires that indicator — flag it here (with a precise
         # message) so it is refined, rather than raising in a sandbox where the
         # shadow gate would swallow the exception into a confusing no-trade run.
-        for detail in _invalid_ctx_indicator_reads(cctx.cls, cctx.reachable):
+        target_symbols = frozenset(getattr(cctx.spec, "target_symbols", None) or [])
+        for detail in _invalid_ctx_indicator_reads(cctx.cls, cctx.reachable, target_symbols):
             results.append(self._critical(detail))
 
         required = _collect_required_indicators(cctx.spec)

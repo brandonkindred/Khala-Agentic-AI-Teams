@@ -146,7 +146,7 @@ Names and parameters (pass the same `params` your spec's `IndicatorRef` uses; `o
 | `'stochastic'` | `k_period=14, d_period=3, output='k'` | `output` ∈ `k`/`d` |
 | `'vwap'` | — | cumulative VWAP |
 
-`source` accepts `close`/`open`/`high`/`low`/`hl2`/`ohlc4`, but only where the indicator allows it — `atr`, `adx`, `stochastic`, and `vwap` read OHLC(V) directly and take no `source`.
+`source` accepts `close`/`open`/`high`/`low`/`volume`/`hl2`/`ohlc4`, but only where the indicator allows it — `atr`, `adx`, `stochastic`, and `vwap` read OHLC(V) directly and take no `source`.
 
 ```python
 hist = ctx.indicator('macd', fast=12, slow=26, signal=9, output='histogram')

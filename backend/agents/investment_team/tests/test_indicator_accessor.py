@@ -833,3 +833,43 @@ def test_check1_flags_invalid_source_literal() -> None:
     results = CodeConformanceGate().check(code, _ema_rsi_spec())
     bad_source = [d for d in _critical_details(results) if "invalid source" in d]
     assert bad_source and "median" in bad_source[0]
+
+
+def _spec_code_reading(symbol_literal: str) -> str:
+    return textwrap.dedent(
+        f"""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({{"QQQ"}})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', period=20, symbol={symbol_literal!r})
+                r = ctx.indicator('rsi', period=14)
+                if trend is None or r is None:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+
+
+def test_check1_flags_foreign_symbol_literal() -> None:
+    # A literal symbol outside the spec's target_symbols (QQQ) never receives
+    # data, so the indicator read is dead — flag it, don't credit presence.
+    results = CodeConformanceGate().check(_spec_code_reading("SPY"), _ema_rsi_spec())
+    foreign = [d for d in _critical_details(results) if "target_symbols" in d and "SPY" in d]
+    assert foreign
+
+
+def test_check1_allows_in_universe_symbol_literal() -> None:
+    # A literal symbol that IS in target_symbols is fine.
+    results = CodeConformanceGate().check(_spec_code_reading("QQQ"), _ema_rsi_spec())
+    foreign = [d for d in _critical_details(results) if "target_symbols" in d]
+    assert foreign == []
