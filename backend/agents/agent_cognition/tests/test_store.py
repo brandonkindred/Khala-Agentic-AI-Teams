@@ -271,6 +271,35 @@ def test_upsert_summary_requires_computed_at() -> None:
         store.upsert_summary("a", _summary("a"))
 
 
+def test_upsert_summary_preserves_concurrently_set_stale() -> None:
+    # Lost-update race: a rollup reads the period (snapshot T0), a late event
+    # then marks it stale (stale_since = now ≫ T0), and the slow rollup's write
+    # (computed_at = T0) must NOT clear that stale flag — else the late event
+    # is never folded.
+    _upsert("a", _summary("a", window=_DAY, version=1), computed_at=_PRECOMPUTED_AT)
+    store.mark_period_stale("a", _MID_DAY)
+    assert store.get_last_summary("a", Scale.DAY).stale is True
+
+    # Slow rollup that read at T0 finishes and writes a non-stale recompute.
+    _upsert(
+        "a",
+        _summary("a", window=_DAY, version=2, stale=False, summary="stale-read"),
+        computed_at=_PRECOMPUTED_AT,
+    )
+    kept = store.get_last_summary("a", Scale.DAY)
+    assert kept.stale is True  # stale_since (now) > computed_at (T0) → preserved
+    assert kept.summary == "stale-read"  # content still updated
+
+    # A rollup that read *after* the staleness (snapshot in the far future)
+    # legitimately clears the flag.
+    _upsert(
+        "a",
+        _summary("a", window=_DAY, version=3, stale=False, summary="fresh"),
+        computed_at=_FOLDED_AT,
+    )
+    assert store.get_last_summary("a", Scale.DAY).stale is False
+
+
 def test_fetch_summaries_filters_scale_and_paginates() -> None:
     months = [
         _summary(

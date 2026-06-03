@@ -75,6 +75,7 @@ SCHEMA: TeamSchema = TeamSchema(
             stale           BOOLEAN NOT NULL DEFAULT FALSE,
             events_pruned   BOOLEAN NOT NULL DEFAULT FALSE,
             computed_at     TIMESTAMPTZ,
+            stale_since     TIMESTAMPTZ,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
         # ``events_pruned`` is the durable recompute-vs-amend marker: the memory
@@ -92,6 +93,14 @@ SCHEMA: TeamSchema = TeamSchema(
         # until the next recompute, which conservatively prunes nothing).
         """ALTER TABLE agent_cognition_summaries
             ADD COLUMN IF NOT EXISTS computed_at TIMESTAMPTZ""",
+        # ``stale_since`` is the time the most recent late arrival flagged this
+        # period stale (refreshed by mark_period_stale). upsert_summary refuses
+        # to clear ``stale`` when ``stale_since > computed_at`` — i.e. a slow
+        # rollup that read before the late event must not overwrite the stale
+        # flag set after its read, which would drop the late event. Idempotent
+        # ALTER back-fills existing clusters.
+        """ALTER TABLE agent_cognition_summaries
+            ADD COLUMN IF NOT EXISTS stale_since TIMESTAMPTZ""",
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_cognition_summaries_period
             ON agent_cognition_summaries(agent_id, scale, period_start)""",
         # -----------------------------------------------------------------

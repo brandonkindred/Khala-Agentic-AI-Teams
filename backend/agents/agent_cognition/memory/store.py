@@ -207,6 +207,12 @@ def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: dateti
         * The store-managed ``events_pruned`` flag is not touched here (it is
           owned solely by ``prune_events``), so a recompute can never silently
           clear it.
+        * ``stale`` is **not** cleared if the period was flagged stale after
+          this rollup's ``computed_at`` snapshot (``stale_since > computed_at``)
+          — a slow rollup that read before a late arrival cannot clobber the
+          stale flag raised after its read, so the late event is still folded
+          on the next recompute. ``stale_since`` is preserved while stale stays
+          set and reset to NULL when it is cleared.
     """
     assert agent_id, "upsert_summary: agent_id must be non-empty"
     assert summary.agent_id == agent_id, "upsert_summary: summary.agent_id must match agent_id"
@@ -223,7 +229,26 @@ def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: dateti
                     version = GREATEST(
                         agent_cognition_summaries.version, EXCLUDED.version
                     ),
-                    stale = EXCLUDED.stale,
+                    -- Don't clear a stale flag raised *after* this rollup read
+                    -- its inputs: if the stored period went stale at a time the
+                    -- caller's computed_at snapshot doesn't cover, keep it stale
+                    -- (and keep stale_since) so the late event is folded next.
+                    stale = (
+                        EXCLUDED.stale
+                        OR (
+                            agent_cognition_summaries.stale_since IS NOT NULL
+                            AND agent_cognition_summaries.stale_since > EXCLUDED.computed_at
+                        )
+                    ),
+                    stale_since = CASE
+                        WHEN EXCLUDED.stale
+                            OR (
+                                agent_cognition_summaries.stale_since IS NOT NULL
+                                AND agent_cognition_summaries.stale_since > EXCLUDED.computed_at
+                            )
+                        THEN agent_cognition_summaries.stale_since
+                        ELSE NULL
+                    END,
                     computed_at = EXCLUDED.computed_at""",
             (
                 summary.id,
@@ -313,19 +338,22 @@ def mark_period_stale(agent_id: str, occurred_at: datetime) -> bool:
     rows at once, so the staleness cascade up the scales is implicit.
 
     Idempotency: only the non-stale → stale transition bumps ``version`` (the
-    ``stale = FALSE`` guard). A retried writeback, or a second distinct late
-    event into a period already pending recompute, re-affirms ``stale`` as a
-    no-op and never advances ``version`` a second time — so the
+    ``CASE`` guard). A retried writeback, or a second distinct late event into a
+    period already pending recompute, re-affirms ``stale`` as a no-op for
+    ``version`` and never advances it a second time — so the
     ``(summary_id, version)`` evidence refs that proposals/rules depend on are
-    not spuriously invalidated. The regime result is order-independent: it does
-    not matter whether the triggering late event has already been appended.
+    not spuriously invalidated. ``stale_since`` *is* refreshed on every late
+    arrival (it tracks the latest unfolded staleness, which ``upsert_summary``
+    compares against a rollup's ``computed_at``). The regime result is
+    order-independent: it does not matter whether the triggering late event has
+    already been appended.
 
     Preconditions:
         * ``agent_id`` is non-empty.
     Postconditions:
-        * Each containing summary that was not already ``stale`` is now
-          ``stale`` with ``version`` incremented by one; already-stale
-          summaries are untouched.
+        * Each containing summary is now ``stale`` with ``stale_since`` set to
+          now; ``version`` is incremented by one only for summaries that were
+          not already stale (already-stale summaries keep their ``version``).
     Returns:
         Whether the period's **raw events are still retained** — the durable
         regime signal the rollup engine uses to choose recompute-from-events
@@ -342,9 +370,10 @@ def mark_period_stale(agent_id: str, occurred_at: datetime) -> bool:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """UPDATE agent_cognition_summaries
-               SET stale = TRUE, version = version + 1
-               WHERE agent_id = %s AND stale = FALSE
-                 AND period_start <= %s AND %s < period_end""",
+               SET stale = TRUE,
+                   stale_since = NOW(),
+                   version = version + (CASE WHEN stale THEN 0 ELSE 1 END)
+               WHERE agent_id = %s AND period_start <= %s AND %s < period_end""",
             (agent_id, occurred_at, occurred_at),
         )
         cur.execute(
