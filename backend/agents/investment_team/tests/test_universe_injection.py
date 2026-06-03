@@ -1098,8 +1098,31 @@ def test_instance_universe_shadowing_bails() -> None:
 
 
 def test_del_universe_bails() -> None:
-    """A class-body ``del UNIVERSE`` removes the prepended constant at runtime,
-    so the injector bails rather than pass the structural gate with no constant."""
+    """A class-body ``del UNIVERSE`` removes the constant at runtime, so the
+    injector bails. The existing constant matches the spec (not stale), so the
+    bail returns the source unchanged."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+            del UNIVERSE
+
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    assert inject_universe_and_guard(src, spec) == src
+
+
+def test_stale_constant_with_unsupported_binding_fails_closed() -> None:
+    """When the injector bails on an unsupported binding (here an instance-level
+    ``self.UNIVERSE`` shadow) but the class already carries a recognized but
+    STALE class-level UNIVERSE constant, the stale constant is stripped so the
+    structure-only conformance gate can't pass it — the missing-constant
+    critical fires and drives refinement instead of trading the wrong universe."""
     spec = _spec(target_symbols=["QQQ"])
     src = textwrap.dedent(
         """
@@ -1107,9 +1130,43 @@ def test_del_universe_bails() -> None:
 
         class S(Strategy):
             UNIVERSE = frozenset({"SPY"})
-            del UNIVERSE
+
+            def __init__(self):
+                self.UNIVERSE = frozenset({"SPY"})
 
             def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert out != src  # not handed back verbatim
+    # The stale class-level constant is stripped, so the structural gate's
+    # missing-constant critical fires. (The instance-shadow assignment can't be
+    # rewritten, so its symbols may remain in the body — that's fine; the gate
+    # failing is what drives refinement.)
+    assert not _has_universe_constant(_cls(out))
+    compile(out, "<injected>", "exec")
+
+
+def test_matching_constant_with_unsupported_binding_returns_source() -> None:
+    """If the recognized class-level constant already matches the spec, the bail
+    returns the source unchanged (nothing stale to strip)."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def __init__(self):
+                self.UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
                 ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
         """
     )

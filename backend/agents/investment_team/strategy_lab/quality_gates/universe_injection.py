@@ -98,13 +98,27 @@ def inject_universe_and_guard(source: str, spec) -> str:
     expected = sorted(set(symbols))
 
     if _has_unsupported_universe_binding(cls, expected):
-        # ``UNIVERSE`` is bound at class-creation time in a way the strip can't
-        # cleanly rewrite (nested in a compound statement, tuple/list unpacking,
-        # etc.). Such a binding would run after a prepended canonical constant
-        # and silently override it, while the structural gate only sees the
-        # prepended one. Bail — leave the source for the existing gates to
-        # evaluate rather than produce code that passes the gate but has a stale
-        # runtime universe.
+        # ``UNIVERSE`` is bound at class-creation time / at runtime in a way the
+        # strip can't cleanly rewrite (nested binding, unpacking, instance
+        # shadow, etc.). We can't inject a constant that the binding would
+        # silently override, so we don't.
+        #
+        # Normally we hand the source back unchanged for the existing gates to
+        # judge. But the structural conformance gate only checks that *a*
+        # collection-shaped ``UNIVERSE`` + a guard are present, not that the
+        # symbols match the spec. So if the class already carries a recognized
+        # class-level ``UNIVERSE`` constant whose symbols are STALE (!= spec),
+        # returning it verbatim would let that stale universe pass validation.
+        # Strip the stale constant instead, so the missing-constant critical
+        # fires and drives refinement rather than trading the wrong universe.
+        existing = _existing_universe_symbols(cls)
+        if existing is not None and existing != expected:
+            cls.body = _strip_universe_assignments(cls.body, expected)
+            ast.fix_missing_locations(tree)
+            try:
+                return ast.unparse(tree)
+            except Exception:  # pragma: no cover - ast.unparse is robust on parsed trees
+                return source
         return source
 
     on_bars = _find_on_bar_methods(cls)
