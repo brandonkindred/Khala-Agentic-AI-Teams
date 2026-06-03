@@ -600,7 +600,7 @@ def test_check1_flags_malformed_ctx_indicator_call(ema_call) -> None:
         """
     )
     results = CodeConformanceGate().check(code, _ema_rsi_spec())
-    malformed = [d for d in _critical_details(results) if "not a valid indicator read" in d]
+    malformed = [d for d in _critical_details(results) if "ctx.indicator(" in d]
     if "source='high'" in ema_call:
         assert malformed == []  # ema accepts a source override → valid
     else:
@@ -667,7 +667,7 @@ def test_check1_validates_params_when_symbol_is_dynamic() -> None:
         """
     )
     results = CodeConformanceGate().check(code, _ema_rsi_spec())
-    malformed = [d for d in _critical_details(results) if "not a valid indicator read" in d]
+    malformed = [d for d in _critical_details(results) if "ctx.indicator(" in d]
     assert malformed and "ema" in malformed[0]
     assert all("rsi" not in d for d in malformed)
 
@@ -700,3 +700,63 @@ def test_check1_flags_positional_ctx_indicator_param() -> None:
     results = CodeConformanceGate().check(code, _ema_rsi_spec())
     positional = [d for d in _critical_details(results) if "positionally" in d]
     assert positional and "ema" in positional[0]
+
+
+def test_check1_flags_duplicate_indicator_name() -> None:
+    # ctx.indicator('ema', name='ema', ...) gives `name` twice → runtime TypeError.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', name='ema', period=20)
+                r = ctx.indicator('rsi', period=14)
+                if trend is None or r is None:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    dup = [d for d in _critical_details(results) if "as name=" in d]
+    assert dup and "ema" in dup[0]
+
+
+def test_check1_flags_typo_param_even_with_dynamic_sibling_value() -> None:
+    # A dynamic value (period=self.WINDOW) must not suppress detection of the
+    # statically-known typo'd key `perod`.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+            WINDOW = 20
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', period=self.WINDOW, perod=20)
+                r = ctx.indicator('rsi', period=14)
+                if trend is None or r is None:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    unexpected = [d for d in _critical_details(results) if "perod" in d]
+    assert unexpected and "unexpected param" in unexpected[0]

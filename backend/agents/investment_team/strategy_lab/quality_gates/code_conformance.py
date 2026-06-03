@@ -40,9 +40,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, ClassVar, Iterable, List, Optional
 
-from pydantic import ValidationError
-
 from ..spec_dsl import (
+    _INDICATOR_PARAM_SPECS,
     EntryRule,
     IndicatorName,
     IndicatorRef,
@@ -174,35 +173,79 @@ def _ctx_indicator_arg_name(node: ast.Call) -> Optional[str]:
     return None
 
 
-def _ctx_indicator_literal_kwargs(node: ast.Call) -> Optional[tuple[dict, str]]:
-    """Extract ``(params, source)`` from a ``ctx.indicator`` call when every
-    *indicator* argument is a literal; return ``None`` if one is dynamic.
+def _ctx_indicator_call_errors(node: ast.Call) -> list[str]:
+    """Static-validation errors for one ``ctx.indicator(...)`` call (``[]`` when
+    valid or not statically determinable).
 
-    ``name`` and ``symbol`` are not part of the indicator contract, so their
-    dynamic-ness does not block validation — only a dynamic indicator param or
-    ``source`` (or ``**kwargs`` unpacking) leaves the call un-validatable and is
-    deferred to runtime, so a legitimate ``period=self.WINDOW`` is never falsely
-    flagged while ``ctx.indicator('ema', symbol=bar.symbol)`` (missing period)
-    is still caught.
+    Catches call shapes that are a guaranteed runtime error, so the conformance
+    gate refines them rather than letting them fail in the sandbox:
+
+    * indicator params passed positionally (the accessor is keyword-only past
+      ``name``);
+    * the name given both positionally and as ``name=`` (a ``TypeError``);
+    * an unexpected/typo'd param key — matched by *name*, so a dynamic sibling
+      value (e.g. ``period=self.WINDOW``) does not suppress it;
+    * an out-of-DSL literal value, a forbidden ``source`` override, or a missing
+      required param.
+
+    Validation reuses spec_dsl's ``_INDICATOR_PARAM_SPECS`` as the single source
+    of truth. Dynamic values are validated by key name only; the missing-required
+    and unexpected-key checks are skipped when ``**kwargs`` unpacking hides keys.
     """
-    # The only expected positional is the indicator name; extra positionals are
-    # a runtime error this static check does not attempt to characterise.
+    name = _ctx_indicator_arg_name(node)
+    label = repr(name) if name else "..."
     if len(node.args) > 1:
-        return None
-    params: dict = {}
-    source = "close"
+        return [
+            f"ctx.indicator({label}, ...) passes indicator params positionally; every "
+            "argument after the name is keyword-only (use e.g. ctx.indicator('ema', period=20))."
+        ]
+    if node.args and any(kw.arg == "name" for kw in node.keywords):
+        return [
+            f"ctx.indicator({label}, ...) gives the indicator name both positionally and as "
+            "name=; that is a runtime TypeError."
+        ]
+    if name is None or name not in _INDICATOR_PARAM_SPECS:
+        return []  # dynamic/unknown name — the presence check handles absence
+    spec = _INDICATOR_PARAM_SPECS[name]
+    allowed = set(spec["required"]) | set(spec["optional"])
+    errors: list[str] = []
+    has_kwargs_unpack = any(kw.arg is None for kw in node.keywords)
+    seen: set[str] = set()
     for kw in node.keywords:
-        if kw.arg is None:
-            return None  # **kwargs unpack → indicator params are not visible
-        if kw.arg in ("name", "symbol"):
-            continue  # not indicator params; ignore regardless of literal-ness
-        if not isinstance(kw.value, ast.Constant):
-            return None  # a dynamic indicator param/source → cannot validate
+        if kw.arg is None or kw.arg in ("name", "symbol"):
+            continue
         if kw.arg == "source":
-            source = kw.value.value
-        else:
-            params[kw.arg] = kw.value.value
-    return params, source
+            if (
+                not spec["allow_source"]
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value != "close"
+            ):
+                errors.append(
+                    f"ctx.indicator('{name}', ...): '{name}' does not accept a 'source' override."
+                )
+            continue
+        seen.add(kw.arg)
+        if kw.arg not in allowed:
+            errors.append(
+                f"ctx.indicator('{name}', ...): unexpected param '{kw.arg}'; "
+                f"allowed: {sorted(allowed)}."
+            )
+            continue
+        if isinstance(kw.value, ast.Constant):
+            checker = spec["required"].get(kw.arg) or spec["optional"][kw.arg][1]
+            try:
+                checker(kw.value.value)
+            except ValueError as exc:
+                errors.append(
+                    f"ctx.indicator('{name}', ...): invalid {kw.arg}={kw.value.value!r} ({exc})."
+                )
+    if not has_kwargs_unpack:
+        for required_key in spec["required"]:
+            if required_key not in seen:
+                errors.append(
+                    f"ctx.indicator('{name}', ...): missing required param '{required_key}'."
+                )
+    return errors
 
 
 def _iter_ctx_indicator_calls(cls: ast.ClassDef, method_names: frozenset[str]):
@@ -233,49 +276,15 @@ def _collect_ctx_indicator_names(cls: ast.ClassDef, method_names: frozenset[str]
 
 
 def _invalid_ctx_indicator_reads(cls: ast.ClassDef, method_names: frozenset[str]) -> list[str]:
-    """Return messages for ``ctx.indicator(...)`` calls that are statically invalid.
-
-    Positional params (anything after the name) are always flagged — the real
-    accessor is keyword-only past ``name``, so they are a guaranteed runtime
-    TypeError. Otherwise only fully-literal calls (literal name + literal kwargs)
-    are checked, reusing :class:`IndicatorRef` as the single source of truth — so
-    a missing required ``period``, an unknown/typo param, an invalid selector
-    value, or a forbidden ``source`` override is caught here and refined, rather
-    than raising at runtime (where the shadow gate swallows the exception). Calls
-    with a dynamic kwarg are skipped to avoid false positives.
-    """
+    """De-duplicated static-validation messages for every on_bar-reachable
+    ``ctx.indicator(...)`` call (see :func:`_ctx_indicator_call_errors`)."""
     errors: list[str] = []
     seen: set[str] = set()
-
-    def _record(msg: str) -> None:
-        if msg not in seen:
-            seen.add(msg)
-            errors.append(msg)
-
     for node in _iter_ctx_indicator_calls(cls, method_names):
-        name = _ctx_indicator_arg_name(node)
-        if len(node.args) > 1:
-            # Every argument after the indicator name is keyword-only on the
-            # real accessor, so positional params are a guaranteed runtime
-            # TypeError — flag here rather than letting it reach the sandbox.
-            label = repr(name) if name else "..."
-            _record(
-                f"ctx.indicator({label}, ...) passes indicator params positionally; "
-                "every argument after the name is keyword-only "
-                "(use e.g. ctx.indicator('ema', period=20))."
-            )
-            continue
-        if name is None:
-            continue  # dynamic name — cannot validate; presence check handles absence
-        parsed = _ctx_indicator_literal_kwargs(node)
-        if parsed is None:
-            continue  # a dynamic kwarg is present — leave validation to runtime
-        params, source = parsed
-        try:
-            IndicatorRef(name=name, params=params, source=source)
-        except (ValueError, ValidationError) as exc:
-            summary = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
-            _record(f"ctx.indicator({name!r}, ...) is not a valid indicator read: {summary}")
+        for msg in _ctx_indicator_call_errors(node):
+            if msg not in seen:
+                seen.add(msg)
+                errors.append(msg)
     return errors
 
 
