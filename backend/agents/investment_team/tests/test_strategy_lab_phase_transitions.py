@@ -21,6 +21,7 @@ These tests drive a real ``StrategyLabOrchestrator`` through
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
 import pytest
@@ -37,6 +38,9 @@ from investment_team.strategy_lab.phases import (
     hash_spec,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.quality_gates.universe_injection import (
+    inject_universe_and_guard,
+)
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     IndicatorRef,
@@ -239,15 +243,20 @@ def test_code_hash_at_synthesis_exit_matches_synthesised_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The ``code_hash`` on the ``CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION``
-    transition must equal :func:`hash_code` of the code the deterministic
-    compiler / synthesis agent produced."""
+    transition must equal :func:`hash_code` of the code that actually proceeds
+    to backtest. ``_VALID_CODE`` lacks the ``UNIVERSE`` constant and ``on_bar``
+    symbol guard that the spec's non-empty ``target_symbols`` require, so the
+    synthesis loop's deterministic injector normalizes it before any gate or
+    the backtest runs — the transition therefore carries the injected hash."""
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
 
     _events, transitions, _record = _drive_cycle_capturing_transitions(orch)
 
+    expected_code = inject_universe_and_guard(_VALID_CODE, SimpleNamespace(target_symbols=["QQQ"]))
+    assert expected_code != _VALID_CODE  # the injector must have changed it
     synthesis_exit = next(t for t in transitions if t["from_phase"] == Phase.CODE_SYNTHESIS.value)
-    assert synthesis_exit["code_hash"] == hash_code(_VALID_CODE)
+    assert synthesis_exit["code_hash"] == hash_code(expected_code)
 
     # The two transitions before ``CODE_SYNTHESIS`` exit carry the
     # empty-string SHA-256 (no code synthesised yet).
