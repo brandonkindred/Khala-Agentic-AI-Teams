@@ -2766,12 +2766,16 @@ def _synth_cross_indicator_number(
     indicator to settle, then a sustained burst at a wider distance so
     the moving average pulls past ``rhs`` over several bars.
     """
-    # SMA/EMA on close: use the original deterministic step-regime shape
-    # so the trigger index stays stable for existing tests. Other sources
-    # (volume, hl2, ohlc4) fall through to the source-aware catalogue at
-    # the bottom of this function — the close-only shape would otherwise
-    # produce a flat indicator for non-close sources.
-    if lhs.name in ("sma", "ema") and lhs.source == "close":
+    # SMA/EMA on any close-derived source (close/high/low/open/hl2/ohlc4):
+    # use the deterministic step-regime shape. The source columns all
+    # track close in lockstep (high = close + 0.5, low = close - 0.5,
+    # open = close, hl2 = close, ohlc4 = close + 0.125), so a step in
+    # close sweeps SMA(<source>) through the threshold the same way as
+    # SMA(close). The fast-path is anchored to ``rhs`` rather than
+    # ``base_close``, so it works for arbitrarily-positioned thresholds.
+    # Volume source falls through to the source-aware catalogue below
+    # since the volume column doesn't track close.
+    if lhs.name in ("sma", "ema") and lhs.source != "volume":
         period = int(lhs.param("period"))
         n = max(min_bars, period * 3 + 30)
         # Quiet regime + spike regime; spike magnitude needs to be large
@@ -2796,8 +2800,9 @@ def _synth_cross_indicator_number(
             for c in closes
         ]
         df = _bars_to_df(bars)
-        ma_series = (sma if lhs.name == "sma" else ema)(df["close"], int(lhs.param("period")))
-        for idx in range(int(lhs.param("period")) + 1, n):
+        source_series = _series_for_source(df, lhs.source)
+        ma_series = (sma if lhs.name == "sma" else ema)(source_series, period)
+        for idx in range(period + 1, n):
             if _verify_cross(ma_series.iloc[idx - 1], ma_series.iloc[idx], rhs, rhs, op):
                 return bars, idx, None
         return None, 0, "indicator_number_cross_not_found"
@@ -2863,13 +2868,34 @@ def _synth_indicator_vs_indicator(
     longest = max(lhs_period, rhs_period)
     n = max(min_bars, longest + 30)
 
-    # For monotonic trends, SMA(short) leads SMA(long) — short MA's value
-    # is closer to the current bar. So shorter-period > longer-period iff
-    # the trend is rising. Pick the slope sign that makes the requested
-    # `lhs op rhs` hold given which side is shorter.
+    # Reject same-name same-period pairs — both indicators produce
+    # identical values on every bar, so no strict inequality can hold
+    # and no satisfying trigger exists.
+    if lhs.name == rhs.name and lhs_period == rhs_period and op in (">", "<"):
+        return None, 0, "indicator_vs_indicator_identical_sides"
+
+    # For monotonic trends the FASTER MA leads — its value is closer to
+    # the current bar. So lhs_is_faster (lhs leads rhs) implies that, on
+    # a rising trend, lhs > rhs; on a falling trend, lhs < rhs. Pick the
+    # slope sign that makes the requested `lhs op rhs` hold.
+    #
+    # Effective period orders MA types: at the same period, EMA reacts
+    # faster than SMA (weight on recent values; half-life ≈ N/2). So
+    # `EMA(10) > SMA(10)` holds on a *rising* trend, while
+    # `SMA(10) > EMA(10)` holds on a *falling* trend — the same period
+    # alone doesn't determine ordering, the indicator name does. The
+    # earlier code only consulted period and reported these same-period
+    # cases as unprobeable in one direction.
+    def _effective_period(name: str, period: int) -> float:
+        if name == "ema":
+            return period * 0.5
+        return float(period)
+
+    lhs_eff = _effective_period(lhs.name, lhs_period)
+    rhs_eff = _effective_period(rhs.name, rhs_period)
     want_lhs_greater = op in (">", ">=")
-    lhs_is_shorter = lhs_period < rhs_period
-    slope_sign = 1.0 if (want_lhs_greater == lhs_is_shorter) else -1.0
+    lhs_is_faster = lhs_eff < rhs_eff
+    slope_sign = 1.0 if (want_lhs_greater == lhs_is_faster) else -1.0
 
     if source == "volume":
         base_vol = 1_000_000.0

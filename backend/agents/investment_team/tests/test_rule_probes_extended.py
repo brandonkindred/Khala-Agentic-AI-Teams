@@ -2601,3 +2601,88 @@ def test_bar_close_cross_volume_source_ma(op, lhs_pr, name):
     assert _eval_predicate_at(pred, bars, trigger), (
         f"verifier rejected synthesizer trigger for {lhs_pr} {op} {name}(vol,20)"
     )
+
+
+@pytest.mark.parametrize(
+    "op,rhs,source",
+    [
+        # SMA/EMA over non-close non-volume sources (high, low, open,
+        # hl2, ohlc4) threshold crosses. The previous fast-path gated on
+        # `lhs.source == "close"` and fell through to a base_close-anchored
+        # catalogue for other sources, so any rhs distant from base_close
+        # (e.g. cross_above 1000) was unprobeable. The relaxed fast-path
+        # works for every close-derived source because they all track
+        # close in lockstep (high=close+0.5, etc).
+        ("cross_above", 100.0, "high"),
+        ("cross_below", 100.0, "high"),
+        ("cross_above", 100.0, "low"),
+        ("cross_below", 100.0, "low"),
+        ("cross_above", 100.0, "open"),
+        ("cross_above", 1000.0, "high"),
+        ("cross_below", 50.0, "high"),
+        ("cross_above", 100.0, "hl2"),
+        ("cross_above", 100.0, "ohlc4"),
+    ],
+)
+def test_sma_ema_threshold_cross_non_close_source(op, rhs, source):
+    """SMA/EMA over close-derived sources (high/low/open/hl2/ohlc4) must
+    cross arbitrary thresholds. Previously only ``source="close"`` reached
+    the rhs-anchored fast-path."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    lhs = IndicatorRef(name="sma", params={"period": 20}, source=source)
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is not None and trigger > 0, f"SMA({source},20) {op} {rhs} not probeable: {reason}"
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for SMA({source},20) {op} {rhs}"
+    )
+
+
+@pytest.mark.parametrize(
+    "op,lhs_name,rhs_name",
+    [
+        # Same-period EMA vs SMA. EMA at period N reacts faster than
+        # SMA(N), so `EMA > SMA` holds on rising data and `SMA > EMA`
+        # holds on falling data. The earlier slope-sign logic only
+        # consulted period and reported the EMA-on-LHS direction as
+        # unprobeable. Effective-period ordering (EMA(N) ≈ SMA(N/2))
+        # picks the right trend.
+        (">", "ema", "sma"),
+        ("<", "ema", "sma"),
+        (">", "sma", "ema"),
+        ("<", "sma", "ema"),
+    ],
+)
+def test_same_period_ema_sma_ordering(op, lhs_name, rhs_name):
+    """`EMA(N) op SMA(N)` and `SMA(N) op EMA(N)` must produce a trigger
+    in both inequality directions. EMA reacts faster than SMA at the same
+    period; the slope sign must account for that."""
+    from investment_team.strategy_lab.quality_gates.rule_probes.synthesizer import (
+        _eval_predicate_at,
+    )
+
+    lhs = IndicatorRef(name=lhs_name, params={"period": 10})
+    rhs = IndicatorRef(name=rhs_name, params={"period": 10})
+    pred = Predicate(lhs=lhs, op=op, rhs=rhs)
+    bars, trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is not None and trigger > 0, (
+        f"{lhs_name}(10) {op} {rhs_name}(10) not probeable: {reason}"
+    )
+    assert _eval_predicate_at(pred, bars, trigger), (
+        f"verifier rejected synthesizer trigger for {lhs_name}(10) {op} {rhs_name}(10)"
+    )
+
+
+def test_indicator_vs_indicator_identical_sides_rejected():
+    """`SMA(10) > SMA(10)` is identically False — both sides produce
+    identical values on every bar. The recipe rejects with an explicit
+    reason rather than scanning indefinitely."""
+    lhs = IndicatorRef(name="sma", params={"period": 10})
+    rhs = IndicatorRef(name="sma", params={"period": 10})
+    pred = Predicate(lhs=lhs, op=">", rhs=rhs)
+    bars, _trigger, reason = _synthesise_for_predicate(pred)
+    assert bars is None
+    assert reason == "indicator_vs_indicator_identical_sides"
