@@ -120,6 +120,15 @@ def _all_events(agent_id: str) -> list[MemoryEvent]:
     )
 
 
+def _upsert(agent_id: str, summary: PeriodSummary, *, computed_at: datetime = _FOLDED_AT) -> None:
+    """upsert_summary with a required computed_at, defaulting to "folded".
+
+    Most tests don't prune, so the default _FOLDED_AT (a snapshot after every
+    real append) marks events as folded; prune tests pass an explicit snapshot.
+    """
+    store.upsert_summary(agent_id, summary, computed_at=computed_at)
+
+
 # ---------------------------------------------------------------------------
 # Events: round-trip + idempotency
 # ---------------------------------------------------------------------------
@@ -220,11 +229,11 @@ def test_fetch_recent_events_negative_top_n_raises() -> None:
 # ---------------------------------------------------------------------------
 def test_upsert_summary_insert_then_update_idempotent() -> None:
     s = _summary("a", source_count=3, summary="v1")
-    store.upsert_summary("a", s)
+    _upsert("a", s)
 
     # Same (agent_id, scale, period_start) → update in place, not a new row.
     updated = _summary("a", window=_DAY, source_count=9, version=2, stale=True, summary="v2")
-    store.upsert_summary("a", updated)
+    _upsert("a", updated)
 
     rows = store.fetch_summaries("a", Scale.DAY)
     assert len(rows) == 1
@@ -241,8 +250,8 @@ def test_upsert_summary_insert_then_update_idempotent() -> None:
 def test_upsert_summary_does_not_regress_version() -> None:
     # mark_period_stale (or a prior recompute) can leave version ahead of a
     # freshly-built summary; the GREATEST guard keeps the higher stored value.
-    store.upsert_summary("a", _summary("a", window=_DAY, version=5, summary="v1"))
-    store.upsert_summary("a", _summary("a", window=_DAY, version=1, summary="v2"))
+    _upsert("a", _summary("a", window=_DAY, version=5, summary="v1"))
+    _upsert("a", _summary("a", window=_DAY, version=1, summary="v2"))
 
     row = store.get_last_summary("a", Scale.DAY)
     assert row is not None
@@ -252,7 +261,14 @@ def test_upsert_summary_does_not_regress_version() -> None:
 
 def test_upsert_summary_agent_id_mismatch_raises() -> None:
     with pytest.raises(AssertionError):
-        store.upsert_summary("a", _summary("b"))
+        _upsert("a", _summary("b"))
+
+
+def test_upsert_summary_requires_computed_at() -> None:
+    # computed_at is a required keyword arg (the rollup's input-read snapshot),
+    # so the unsafe "default to write time" footgun can't happen.
+    with pytest.raises(TypeError):
+        store.upsert_summary("a", _summary("a"))
 
 
 def test_fetch_summaries_filters_scale_and_paginates() -> None:
@@ -265,8 +281,8 @@ def test_fetch_summaries_filters_scale_and_paginates() -> None:
         for m in (1, 2, 3)
     ]
     for m in months:
-        store.upsert_summary("a", m)
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY))
+        _upsert("a", m)
+    _upsert("a", _summary("a", scale=Scale.DAY))
 
     month_rows = store.fetch_summaries("a", Scale.MONTH)
     assert [r.period_start.month for r in month_rows] == [3, 2, 1]  # newest first
@@ -293,13 +309,13 @@ def test_fetch_summaries_negative_limit_raises() -> None:
 def test_get_last_summary_returns_newest_or_none() -> None:
     assert store.get_last_summary("a", Scale.DAY) is None
 
-    store.upsert_summary(
+    _upsert(
         "a",
         _summary(
             "a", window=(datetime(2026, 6, 1, tzinfo=_UTC), datetime(2026, 6, 2, tzinfo=_UTC))
         ),
     )
-    store.upsert_summary(
+    _upsert(
         "a",
         _summary(
             "a",
@@ -317,9 +333,9 @@ def test_get_last_summary_returns_newest_or_none() -> None:
 # ---------------------------------------------------------------------------
 def test_mark_period_stale_flags_containing_summaries_retained() -> None:
     # Day/week/month summaries exist and the day was never pruned → retained.
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY))
-    store.upsert_summary("a", _summary("a", scale=Scale.WEEK, window=_WEEK))
-    store.upsert_summary("a", _summary("a", scale=Scale.MONTH, window=_MONTH))
+    _upsert("a", _summary("a", scale=Scale.DAY, window=_DAY))
+    _upsert("a", _summary("a", scale=Scale.WEEK, window=_WEEK))
+    _upsert("a", _summary("a", scale=Scale.MONTH, window=_MONTH))
 
     assert store.mark_period_stale("a", _MID_DAY) is True
 
@@ -333,7 +349,7 @@ def test_mark_period_stale_is_idempotent_on_version() -> None:
     # The non-stale → stale latch means a second late event into the same
     # already-stale period must not re-bump version (which would spuriously
     # move the (summary_id, version) evidence refs).
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY))
+    _upsert("a", _summary("a", scale=Scale.DAY, window=_DAY))
 
     assert store.mark_period_stale("a", _MID_DAY) is True
     first = store.get_last_summary("a", Scale.DAY)
@@ -351,7 +367,7 @@ def test_mark_period_stale_pruned_period_returns_false() -> None:
     # late event has been appended. computed_at=_FOLDED_AT marks the original
     # event as folded so prune is allowed to delete it.
     store.append_event("a", _event("a", occurred_at=_OLD))
-    store.upsert_summary(
+    _upsert(
         "a", _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1), computed_at=_FOLDED_AT
     )
     assert store.prune_events("a", retention_days=30) == 1
@@ -378,15 +394,15 @@ def test_prune_events_deletes_only_summarized_nonstale_past_cutoff() -> None:
     d = _event("a", run_id="d", occurred_at=_MID_DAY)  # newer than cutoff → kept
     for ev in (a, b, c, d):
         store.append_event("a", ev)
-    store.upsert_summary(
+    _upsert(
         "a", _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1), computed_at=_FOLDED_AT
     )
-    store.upsert_summary(
+    _upsert(
         "a",
         _summary("a", scale=Scale.DAY, window=_OLD3_DAY, source_count=1, stale=True),
         computed_at=_FOLDED_AT,
     )
-    store.upsert_summary(
+    _upsert(
         "a", _summary("a", scale=Scale.DAY, window=_DAY, source_count=1), computed_at=_FOLDED_AT
     )
 
@@ -401,7 +417,7 @@ def test_prune_skips_late_event_not_yet_folded() -> None:
     # (computed_at < recorded_at), so the event isn't folded yet. Even though it
     # is old and the day summary is non-stale, prune must leave it — otherwise
     # it would be lost before the rollup could amend it in.
-    store.upsert_summary(
+    _upsert(
         "a",
         _summary("a", scale=Scale.DAY, window=_OLD_DAY, source_count=1),
         computed_at=_PRECOMPUTED_AT,
@@ -428,8 +444,8 @@ def test_cross_agent_isolation() -> None:
     b_ev = _event("b", run_id="shared", seq=1, occurred_at=_OLD)
     store.append_event("a", a_ev)
     store.append_event("b", b_ev)
-    store.upsert_summary("a", _summary("a", scale=Scale.DAY, window=_DAY))
-    store.upsert_summary("b", _summary("b", scale=Scale.DAY, window=_OLD_DAY, source_count=1))
+    _upsert("a", _summary("a", scale=Scale.DAY, window=_DAY))
+    _upsert("b", _summary("b", scale=Scale.DAY, window=_OLD_DAY, source_count=1))
 
     # Readers never cross agents.
     assert [e.id for e in _all_events("a")] == [a_ev.id]
@@ -457,7 +473,7 @@ def test_empty_agent_id_raises() -> None:
     with pytest.raises(AssertionError):
         store.fetch_recent_events("", top_n=5)
     with pytest.raises(AssertionError):
-        store.upsert_summary("", _summary(""))
+        _upsert("", _summary(""))
     with pytest.raises(AssertionError):
         store.fetch_summaries("", Scale.DAY)
     with pytest.raises(AssertionError):

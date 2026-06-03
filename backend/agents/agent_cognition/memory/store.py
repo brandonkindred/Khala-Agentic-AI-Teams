@@ -155,18 +155,21 @@ def fetch_recent_events(agent_id: str, top_n: int, by_salience: bool = True) -> 
 # Rollup summaries
 # ---------------------------------------------------------------------------
 @timed_query(store=_STORE, op="upsert_summary")
-def upsert_summary(
-    agent_id: str, summary: PeriodSummary, *, computed_at: datetime | None = None
-) -> None:
+def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: datetime) -> None:
     """Insert or replace one rollup, idempotent on the period unique key.
 
     Args:
-        computed_at: When this rollup folded its inputs — i.e. the snapshot
-            time up to which events are incorporated. ``prune_events`` only
-            deletes events with ``recorded_at <= computed_at``, so the rollup
-            should pass the timestamp of the event snapshot it summarized
-            (defaults to "now", which is safe when no events are appended
-            concurrently with the recompute).
+        computed_at: **Required.** The snapshot time up to which this rollup
+            folded its inputs — i.e. the instant the caller read the event set
+            it summarized, *not* the time of this write. ``prune_events`` only
+            deletes events with ``recorded_at <= computed_at``, so this must be
+            the read time: an event appended after the snapshot (even if before
+            this upsert commits) then has ``recorded_at > computed_at`` and is
+            correctly treated as not-yet-folded, so it survives pruning until a
+            later recompute amends it in. The rollup should therefore capture
+            ``computed_at`` before reading events and bound its read by it.
+            Passing the post-generation/write time instead would let a
+            concurrently-appended late event be pruned before it is folded.
 
     Preconditions:
         * ``agent_id`` is non-empty and ``summary.agent_id == agent_id``.
@@ -186,7 +189,6 @@ def upsert_summary(
     """
     assert agent_id, "upsert_summary: agent_id must be non-empty"
     assert summary.agent_id == agent_id, "upsert_summary: summary.agent_id must match agent_id"
-    stamped = computed_at or _now()
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""INSERT INTO agent_cognition_summaries ({_SUMMARY_COLS}, computed_at)
@@ -215,7 +217,7 @@ def upsert_summary(
                 summary.version,
                 summary.stale,
                 summary.created_at,
-                stamped,
+                computed_at,
             ),
         )
 
