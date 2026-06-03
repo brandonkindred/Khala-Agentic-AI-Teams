@@ -290,6 +290,21 @@ def test_shadow_context_indicator_warmup_and_no_bar() -> None:
     assert shadow.indicator("sma", period=20) is None  # warm-up
 
 
+def test_shadow_context_indicator_explicit_unknown_symbol_returns_none() -> None:
+    shadow = _ShadowContext()
+    for i, b in enumerate(_shadow_bars(10)):
+        shadow._ingest_bar(b, i)
+    assert shadow.indicator("sma", period=5, symbol="ZZZ") is None
+
+
+def test_last_or_none_handles_empty_series() -> None:
+    import pandas as pd
+
+    from investment_team.strategy_lab.executor.strategy_indicators import _last_or_none
+
+    assert _last_or_none(pd.Series([], dtype=float)) is None
+
+
 # ---------------------------------------------------------------------------
 # CodeConformanceGate check #1 — ctx.indicator recognition (additive)
 # ---------------------------------------------------------------------------
