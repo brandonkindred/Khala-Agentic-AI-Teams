@@ -25,6 +25,7 @@ none of them returns a ``pd.Series``.
 
 from __future__ import annotations
 
+import math
 import numbers
 from typing import Optional, Sequence
 
@@ -154,8 +155,10 @@ def _float_gt(lo: float):
     def check(value) -> None:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"expected a number > {lo}, got {value!r}")
-        if not (float(value) > lo):
-            raise ValueError(f"expected a number > {lo}, got {value}")
+        # Non-finite values (inf/nan) are rejected to match spec_dsl's float
+        # validator — they otherwise produce infinite/NaN indicator output.
+        if not (math.isfinite(float(value)) and float(value) > lo):
+            raise ValueError(f"expected a finite number > {lo}, got {value}")
 
     return check
 

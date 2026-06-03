@@ -158,7 +158,11 @@ class _ShadowContext:
         """
         sym = symbol if symbol is not None else self._current_symbol
         if sym is None:
-            return None
+            # Mirror the real StrategyContext.indicator: calling it before any
+            # bar is dispatched (e.g. from on_start) with no explicit symbol is
+            # a contract error, not a None — so shadow execution takes the same
+            # branch the live runtime would.
+            raise ValueError("indicator() needs a symbol when no bar has been dispatched yet")
         bars = self._history.get(sym, [])
         if not bars:
             return None

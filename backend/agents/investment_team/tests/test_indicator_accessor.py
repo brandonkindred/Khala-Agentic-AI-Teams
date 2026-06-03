@@ -235,6 +235,15 @@ def test_indicator_value_validates_param_types_and_ranges() -> None:
     assert indicator_value("bollinger", bars, num_std=2.5, band="upper") is not None
 
 
+def test_indicator_value_rejects_non_finite_num_std() -> None:
+    # inf/nan pass a naive `> 0` check but are DSL contract violations (the spec
+    # requires finite floats); they must raise rather than yield infinite bands.
+    bars = _make_bars()
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValueError):
+            indicator_value("bollinger", bars, num_std=bad)
+
+
 # ---------------------------------------------------------------------------
 # StrategyContext.indicator
 # ---------------------------------------------------------------------------
@@ -325,9 +334,11 @@ def test_shadow_context_indicator_matches_real_context() -> None:
     assert shadow.indicator("ema", period=10) == pytest.approx(real.indicator("ema", period=10))
 
 
-def test_shadow_context_indicator_warmup_and_no_bar() -> None:
+def test_shadow_context_indicator_no_bar_raises_then_warmup_none() -> None:
     shadow = _ShadowContext()
-    assert shadow.indicator("sma", period=20) is None  # no bar ingested yet
+    # No bar dispatched yet → mirror the real StrategyContext.indicator ValueError.
+    with pytest.raises(ValueError, match="no bar has been dispatched"):
+        shadow.indicator("sma", period=20)
     shadow._ingest_bar(_shadow_bars(1)[0], 0)
     assert shadow.indicator("sma", period=20) is None  # warm-up
 
