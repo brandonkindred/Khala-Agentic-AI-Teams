@@ -908,6 +908,35 @@ def test_qualified_staticmethod_on_bar_not_guarded() -> None:
     compile(out, "<injected>", "exec")
 
 
+def test_decorated_but_otherwise_canonical_on_bar_not_returned_verbatim() -> None:
+    """An ``on_bar`` that already has the matching ``UNIVERSE`` and a correct
+    guard but is decorated (here ``@staticmethod``) must NOT be treated as
+    canonical and handed back verbatim — the decorator check in
+    ``_is_canonical_on_bar`` forces it through the inject path, where the guard
+    is stripped (fail closed) so the structural gate can't green-light a method
+    the harness can only call as ``instance.on_bar(ctx, bar)``."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            @staticmethod
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert out != src  # not handed back verbatim
+    assert _has_universe_constant(_cls(out))
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # guard stripped -> fail closed
+    compile(out, "<injected>", "exec")
+
+
 def test_staticmethod_on_bar_not_guarded() -> None:
     """A ``@staticmethod`` on_bar has no bound ``self`` at runtime, so it isn't
     guardable; UNIVERSE is injected but the guard is skipped (fail closed)."""
@@ -1338,10 +1367,12 @@ def test_instance_universe_shadowing_bails() -> None:
     assert inject_universe_and_guard(src, spec) == src
 
 
-def test_del_universe_bails() -> None:
-    """A class-body ``del UNIVERSE`` removes the constant at runtime, so the
-    injector bails. The existing constant matches the spec (not stale), so the
-    bail returns the source unchanged."""
+def test_del_universe_fails_closed() -> None:
+    """A class-body ``del UNIVERSE`` removes the constant at runtime even though
+    the (matching) top-level literal would otherwise satisfy the structural
+    gate. The ``del`` is an unsupported binding, so the recognized literal is
+    stripped to fail closed rather than handed back — the missing-constant
+    critical fires instead of green-lighting a class with no runtime universe."""
     spec = _spec(target_symbols=["QQQ"])
     src = textwrap.dedent(
         """
@@ -1355,7 +1386,10 @@ def test_del_universe_bails() -> None:
                 ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
         """
     )
-    assert inject_universe_and_guard(src, spec) == src
+    out = inject_universe_and_guard(src, spec)
+    assert out != src
+    assert not _has_universe_constant(_cls(out))  # stripped -> fail closed
+    compile(out, "<injected>", "exec")
 
 
 def test_stale_constant_with_unsupported_binding_fails_closed() -> None:
@@ -1391,9 +1425,12 @@ def test_stale_constant_with_unsupported_binding_fails_closed() -> None:
     compile(out, "<injected>", "exec")
 
 
-def test_matching_constant_with_unsupported_binding_returns_source() -> None:
-    """If the recognized class-level constant already matches the spec, the bail
-    returns the source unchanged (nothing stale to strip)."""
+def test_matching_constant_with_unsupported_binding_fails_closed() -> None:
+    """Even when the recognized class-level constant already matches the spec, an
+    unsupported binding means the runtime universe is unreliable, so the
+    recognized literal is stripped to fail closed rather than handed back —
+    a matching top-level literal must not green-light a class whose runtime
+    ``UNIVERSE`` an unsupported binding may have changed or removed."""
     spec = _spec(target_symbols=["QQQ"])
     src = textwrap.dedent(
         """
@@ -1411,7 +1448,10 @@ def test_matching_constant_with_unsupported_binding_returns_source() -> None:
                 ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
         """
     )
-    assert inject_universe_and_guard(src, spec) == src
+    out = inject_universe_and_guard(src, spec)
+    assert out != src  # not handed back verbatim
+    assert not _has_universe_constant(_cls(out))  # stripped -> gate fails closed
+    compile(out, "<injected>", "exec")
 
 
 def test_nested_conditional_universe_assignment_bails() -> None:

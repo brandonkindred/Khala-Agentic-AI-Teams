@@ -106,13 +106,19 @@ def inject_universe_and_guard(source: str, spec) -> str:
         # Normally we hand the source back unchanged for the existing gates to
         # judge. But the structural conformance gate only checks that *a*
         # collection-shaped ``UNIVERSE`` + a guard are present, not that the
-        # symbols match the spec. So if the class already carries a recognized
-        # class-level ``UNIVERSE`` constant whose symbols are STALE (!= spec),
-        # returning it verbatim would let that stale universe pass validation.
-        # Strip the stale constant instead, so the missing-constant critical
-        # fires and drives refinement rather than trading the wrong universe.
+        # binding is reliable at runtime. So if the class carries a recognized
+        # class-level ``UNIVERSE`` literal, returning it verbatim would let the
+        # gate pass on that literal even though the unsupported binding may
+        # delete or overwrite ``UNIVERSE`` at class-creation / run time (e.g.
+        # ``UNIVERSE = {'QQQ'}; del UNIVERSE`` or a later nested rebind) — a
+        # missing or different runtime universe behind a green gate. This holds
+        # whether the literal's symbols match the spec or are stale, so strip
+        # the recognized literal in *both* cases, forcing the missing-constant
+        # critical to fire and drive refinement. When there is no recognized
+        # top-level literal (``existing is None``) the gate already fails on the
+        # absent constant, so we hand the source back untouched.
         existing = _existing_universe_symbols(cls)
-        if existing is not None and existing != expected:
+        if existing is not None:
             cls.body = _strip_universe_assignments(cls.body, expected)
             ast.fix_missing_locations(tree)
             try:
@@ -705,16 +711,26 @@ def _method_shadows_universe(method) -> bool:
 def _is_canonical_on_bar(on_bar) -> bool:
     """True iff ``on_bar`` is already in canonical guarded form.
 
-    Requires a ``self`` instance parameter, a usable third (bar) parameter, and
-    a first statement that is a bare guard (no ``else``) reading
-    ``<bar_param>.symbol not in self.UNIVERSE`` — so non-target bars are
+    Requires an **undecorated**, ``self`` instance parameter, a usable third
+    (bar) parameter, and a first statement that is a bare guard (no ``else``)
+    reading ``<bar_param>.symbol not in self.UNIVERSE`` — so non-target bars are
     rejected before any signal logic, the guard never raises ``NameError``, and
     the shape matches the conformance gate's recognizer. Anything weaker (guard
-    buried later, wrong bar name, non-``self`` receiver, or an ``else``) is not
-    canonical and must be rewritten.
+    buried later, wrong bar name, non-``self`` receiver, an ``else``, or a
+    decorator) is not canonical and must be rewritten. The decorator check
+    mirrors ``_is_guardable_on_bar``: a ``@staticmethod`` / ``@classmethod`` /
+    ``@property`` / other-wrapper ``on_bar`` is not a plain bound instance
+    method, so returning it verbatim past this no-op path would let the
+    structural gate pass over code the harness can only call as
+    ``instance.on_bar(ctx, bar)`` — a runtime ``TypeError`` behind a green gate.
     """
     bar_param = _bar_parameter_name(on_bar)
-    if bar_param is None or on_bar.args.args[0].arg != "self" or not on_bar.body:
+    if (
+        bar_param is None
+        or on_bar.args.args[0].arg != "self"
+        or on_bar.decorator_list
+        or not on_bar.body
+    ):
         return False
     # The deterministic compiler emits a leading warm-up gate
     # (``if ctx.is_warmup: return``) *ahead* of the universe guard. That gate is
