@@ -160,7 +160,7 @@ def test_malformed_universe_replaced() -> None:
     )
     out = inject_universe_and_guard(src, spec)
     cls = _cls(out)
-    assert _has_universe_constant(cls)  # str replaced by a real frozenset
+    assert _has_universe_constant(cls)  # str replaced by a real collection literal
     assert "TSLA" in out and '"AAPL"' not in out and "'AAPL'" not in out
     assert _universe_assign_count(out) == 1
 
@@ -187,7 +187,7 @@ def test_non_literal_universe_replaced() -> None:
         "    _SYM = 'QQQ'\n    UNIVERSE = frozenset({_SYM})\n\n    def on_bar",
     )
     out = inject_universe_and_guard(src, spec)
-    assert "frozenset({'QQQ'})" in out
+    assert "{'QQQ'}" in out
     assert _has_universe_constant(_cls(out))
 
 
@@ -208,7 +208,7 @@ def test_universe_call_with_non_display_arg_replaced() -> None:
         "    _SYMS = ('QQQ',)\n    UNIVERSE = frozenset(_SYMS)\n\n    def on_bar",
     )
     out = inject_universe_and_guard(src, spec)
-    assert "frozenset({'QQQ'})" in out
+    assert "{'QQQ'}" in out
     assert _has_universe_constant(_cls(out))
 
 
@@ -326,7 +326,7 @@ def test_chained_assignment_alias_preserved_and_synced() -> None:
     out = inject_universe_and_guard(src, spec)
     assert "TARGETS" in out  # sibling alias survives
     assert "SPY" not in out  # but no longer bound to the stale universe
-    assert "frozenset({'QQQ'})" in out
+    assert "{'QQQ'}" in out
     assert _universe_assign_count(out) == 1
     compile(out, "<injected>", "exec")
 
@@ -380,7 +380,7 @@ def test_bare_annassign_universe_replaced() -> None:
         "    UNIVERSE: frozenset\n\n    def on_bar",
     )
     out = inject_universe_and_guard(src, spec)
-    assert "frozenset({'QQQ'})" in out
+    assert "{'QQQ'}" in out
     assert _universe_assign_count(out) == 1
 
 
@@ -633,6 +633,94 @@ def test_mixed_receiver_duplicate_on_bar_fails_closed() -> None:
     assert _has_universe_constant(_cls(out))
     assert not _has_universe_guard_in_on_bar(_cls(out))  # no guard -> gate fails closed
     compile(out, "<injected>", "exec")
+
+
+def test_fail_closed_preserves_guarded_else_body() -> None:
+    """An unguardable on_bar whose universe guard nests the trading logic under
+    ``else`` must fail closed (guard removed so the recognizer doesn't match)
+    WITHOUT discarding that logic — the ``else`` body is hoisted so refinement
+    still sees it."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            async def on_bar(self, ctx, bar):
+                lookback = 200
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                else:
+                    ctx.submit_order(symbol=bar.symbol, qty=7, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    # Async on_bar is unguardable -> fail closed: the recognizer no longer matches.
+    assert not _has_universe_guard_in_on_bar(_cls(out))
+    # ...but the strategy logic from the else body survives for the next round,
+    # and the leading non-guard statement passes through untouched.
+    assert "qty=7" in out
+    assert "lookback = 200" in out
+    assert "not in self.UNIVERSE" not in out  # the guard test itself is gone
+    compile(out, "<injected>", "exec")
+
+
+def test_fail_closed_only_bare_guard_backfills_pass() -> None:
+    """An unguardable on_bar whose entire body is a single bare guard strips to
+    an empty body; it must be back-filled with ``pass`` so the unparse stays
+    valid Python."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            async def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    assert not _has_universe_guard_in_on_bar(_cls(out))  # fail closed
+    on_bar = _on_bar(out)
+    assert len(on_bar.body) == 1 and isinstance(on_bar.body[0], ast.Pass)
+    compile(out, "<injected>", "exec")
+
+
+def test_injected_universe_is_unshadowable_set_display() -> None:
+    """The injected ``UNIVERSE`` is a set-*display* literal, not ``frozenset(...)``
+    — so a module that rebound ``frozenset`` before the class can't make the
+    class-creation-time constant resolve to the wrong collection."""
+    spec = _spec(target_symbols=["QQQ"])
+    src = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        frozenset = lambda *a: {"SPY"}
+
+        class S(Strategy):
+            def on_bar(self, ctx, bar):
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+        """
+    )
+    out = inject_universe_and_guard(src, spec)
+    cls = _cls(out)
+    assert _has_universe_constant(cls)
+    # The injected constant is a bare set display bound to exactly the spec
+    # symbols, with no dependence on the shadowed ``frozenset`` name.
+    value = next(
+        node.value
+        for node in cls.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "UNIVERSE" for t in node.targets)
+    )
+    assert isinstance(value, ast.Set)
+    assert {elt.value for elt in value.elts} == {"QQQ"}
+    assert "UNIVERSE = {'QQQ'}" in out
 
 
 def test_on_bar_with_varargs_and_nested_helper() -> None:
@@ -1372,7 +1460,7 @@ def test_custom_param_name() -> None:
 def test_symbols_sorted_and_deduped() -> None:
     spec = _spec(target_symbols=["MSFT", "AAPL", "AAPL"])
     out = inject_universe_and_guard(_GUARDLESS, spec)
-    assert "frozenset({'AAPL', 'MSFT'})" in out
+    assert "{'AAPL', 'MSFT'}" in out
 
 
 def test_requires_custom_code_still_injects() -> None:

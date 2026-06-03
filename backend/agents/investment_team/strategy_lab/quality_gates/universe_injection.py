@@ -168,12 +168,16 @@ def inject_universe_and_guard(source: str, spec) -> str:
         # Fail closed: at least one on_bar can't be guarded, so we guard none.
         # The conformance gate only inspects the *first* definition, so a
         # pre-existing guard there would let it pass while the unguarded
-        # runtime-effective (last) definition processes non-target bars. Strip
-        # every gate-recognized guard from the first definition (dead code when
-        # it's a shadowed duplicate; an unguardable single method is invalid
-        # regardless) so the missing-guard critical fires and drives refinement.
+        # runtime-effective (last) definition processes non-target bars. Remove
+        # every gate-recognized guard from the first definition so the
+        # missing-guard critical fires and drives refinement — but a guard with
+        # an ``else`` body holds the strategy's trading logic, so deleting the
+        # whole ``if`` would strip that logic from the refinement input and make
+        # repair far harder. Drop the guard *test* while hoisting any ``else``
+        # body, so the recognizer no longer matches (fail closed) yet the
+        # trading logic survives for the next round.
         first = on_bars[0]
-        first.body = [stmt for stmt in first.body if not _is_universe_guard_stmt(stmt)]
+        first.body = _strip_guards_fail_closed(first.body)
 
     ast.fix_missing_locations(tree)
     try:
@@ -269,14 +273,26 @@ def _existing_universe_symbols(cls: ast.ClassDef) -> list[str] | None:
 
 
 def _build_universe_assign(symbols: list[str]) -> ast.stmt:
-    """Build ``UNIVERSE = frozenset({<sorted-deduped symbols>})``.
+    """Build ``UNIVERSE = {<sorted-deduped symbols>}`` as a set-display literal.
 
-    Mirrors the deterministic compiler's literal form
-    (``frozenset({repr(s), ...})``) so injected and compiled code are
-    structurally identical.
+    A set *display* is used deliberately rather than ``frozenset({...})`` (the
+    deterministic compiler's form). The injected statement executes at
+    class-creation time, and a ``frozenset(...)`` call resolves the name
+    ``frozenset`` in the enclosing module scope — so if the generated module
+    rebound ``frozenset`` before the strategy class, the call would build the
+    wrong collection and the runtime guard would silently filter on the wrong
+    symbols, turning guardless code into passing-but-wrong code. A set display
+    depends on no rebindable name, so the injected universe is always exactly
+    ``symbols``. The conformance recognizer (``_has_universe_constant`` via
+    ``_is_collection_literal_expr``) accepts a set/list/tuple display, so the
+    output stays gate-conformant.
+
+    Preconditions: ``symbols`` is non-empty (an empty set display ``{}`` would
+    be a dict; callers short-circuit on an empty universe before reaching here).
     """
     ordered = sorted(set(symbols))
-    literal = "frozenset({" + ", ".join(repr(s) for s in ordered) + "})"
+    assert ordered, "UNIVERSE injection requires at least one symbol"
+    literal = "{" + ", ".join(repr(s) for s in ordered) + "}"
     return ast.parse(f"UNIVERSE = {literal}").body[0]
 
 
@@ -381,6 +397,38 @@ def _is_warmup_guard_stmt(stmt: ast.stmt) -> bool:
     return (
         len(stmt.body) == 1 and isinstance(stmt.body[0], ast.Return) and stmt.body[0].value is None
     )
+
+
+def _strip_guards_fail_closed(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Return ``body`` with every gate-recognized universe guard removed, so the
+    conformance recognizer no longer matches (fail closed) without discarding
+    any trading logic the guard nested under ``else``.
+
+    Used only on the first ``on_bar`` of the fail-closed path. A bare guard (no
+    ``else``) is dropped outright — there is nothing to preserve. A guard with a
+    non-empty ``else`` body holds the strategy's logic, so the guard *statement*
+    is removed but its ``orelse`` statements are hoisted in place, keeping that
+    logic in the refinement input. Non-guard statements pass through untouched.
+    A resulting empty body is back-filled with ``pass`` so the unparse stays
+    valid Python.
+
+    Preconditions: ``body`` is a list of ``ast.stmt`` (an ``on_bar`` body).
+    Postconditions: the returned list contains no statement for which
+    ``_is_universe_guard_stmt`` is True; it is non-empty; never raises.
+    """
+    out: list[ast.stmt] = []
+    for stmt in body:
+        if _is_strippable_guard(stmt):
+            # Bare guard: drop it (no nested logic to keep).
+            continue
+        if _is_universe_guard_stmt(stmt):
+            # Guard with an ``else`` body: drop the guard, keep the logic.
+            out.extend(stmt.orelse)
+            continue
+        out.append(stmt)
+    if not out:
+        out.append(ast.Pass())
+    return out
 
 
 def _is_strippable_guard(stmt: ast.stmt) -> bool:
