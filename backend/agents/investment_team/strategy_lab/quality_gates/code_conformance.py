@@ -15,13 +15,14 @@ Critical failures route back to synthesis via the orchestrator's
 ``_refine_or_exhaust(failure_phase="validation")`` path (same routing as
 ``CodeSafetyChecker``).
 
-Scope choices (issue #541, v1):
+Scope choices:
 
-* Check #1 (indicator presence) requires **named calls only** — inline
-  equivalents (e.g. ``sum(x)/len(x)`` as a hand-rolled SMA) are not
-  recognised and will fail. Recognising inline patterns is a future
-  enhancement; the deterministic compiler track (#538) makes it
-  unnecessary on the compiled path.
+* Check #1 (indicator presence) recognises two forms: the engine-backed
+  ``ctx.indicator('<name>', ...)`` accessor (the form the synthesis prompt now
+  mandates) and the legacy named call (e.g. ``sma(bars, 50)``, still emitted by
+  the deterministic compiler). Inline equivalents (e.g. ``sum(x)/len(x)`` as a
+  hand-rolled SMA) are deliberately not recognised and will fail — the prompt
+  steers generated code onto the engine's indicator computation instead.
 * Check #5 (bar-counting exit rejection) scans generated code for
   bar-counting exit patterns (variables like ``bars_held``,
   ``hold_count``, ``days_held`` and ``if counter >= N: close``
@@ -129,6 +130,53 @@ def _collect_called_names_in_methods(cls: ast.ClassDef, method_names: frozenset[
         for node in _iter_method_body_nodes(method):
             if isinstance(node, ast.Call):
                 name = _get_call_name(node)
+                if name:
+                    out.add(name)
+    return out
+
+
+def _ctx_indicator_arg_name(node: ast.Call) -> Optional[str]:
+    """Return the string indicator name of a ``ctx.indicator('<name>', ...)`` call.
+
+    Accepts the first positional argument or the ``name=`` keyword when it is a
+    string literal; returns ``None`` for a non-literal name (which cannot be
+    statically matched to a spec indicator).
+    """
+    if node.args:
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return first.value
+    for kw in node.keywords:
+        if (
+            kw.arg == "name"
+            and isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, str)
+        ):
+            return kw.value.value
+    return None
+
+
+def _collect_ctx_indicator_names(cls: ast.ClassDef, method_names: frozenset[str]) -> set[str]:
+    """Return DSL indicator names read via ``ctx.indicator('<name>', ...)``.
+
+    Recognises the prescriptive single-call accessor the synthesis prompt now
+    mandates, scanning the same on_bar-reachable methods as
+    :func:`_collect_called_names_in_methods` so a literal name passed to
+    ``ctx.indicator`` satisfies check #1 exactly like a named ``sma(...)`` call.
+    Matches any ``*.indicator(...)`` attribute call (the receiver is ``ctx``);
+    non-literal names are skipped.
+    """
+    out: set[str] = set()
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "indicator"
+            ):
+                name = _ctx_indicator_arg_name(node)
                 if name:
                     out.add(name)
     return out
@@ -503,11 +551,18 @@ class CodeConformanceGate(GateResultsMixin):
         required = _collect_required_indicators(cctx.spec)
         if not required:
             return ()
-        # Indicator calls only count when they are actually executed at
-        # runtime: walk methods reachable from on_bar (Codex PR #588 P1).
+        # Indicator reads only count when they are actually executed at
+        # runtime: walk methods reachable from on_bar (Codex PR #588 P1). Two
+        # recognised forms — the engine-backed ``ctx.indicator('<name>', ...)``
+        # accessor (preferred) and the legacy named call (e.g. ``sma(...)``,
+        # which the deterministic compiler still emits).
         called = _collect_called_names_in_methods(cctx.cls, cctx.reachable)
+        called |= _collect_ctx_indicator_names(cctx.cls, cctx.reachable)
         missing: List[str] = []
         for name in sorted(required):
+            # The named-call allow-list always contains the DSL name itself, and
+            # ``_collect_ctx_indicator_names`` keys ``ctx.indicator`` reads by
+            # that same DSL name, so one intersection test covers both forms.
             allowed = _INDICATOR_ALLOWED_CALL_NAMES.get(name, frozenset({name}))
             if not (called & allowed):
                 missing.append(name)
@@ -516,10 +571,10 @@ class CodeConformanceGate(GateResultsMixin):
         return (
             self._critical(
                 f"Spec references indicator(s) {missing} but no method "
-                "reachable from on_bar calls any of their named "
-                "implementations. v1 requires the named-call form "
-                "(e.g. ``sma(bars, 50)``); inline equivalents and calls "
-                "in unreachable helpers are not recognised."
+                "reachable from on_bar reads them. Use the engine-backed "
+                "accessor ``ctx.indicator('<name>', ...)`` (preferred) or the "
+                "named-call form (e.g. ``sma(bars, 50)``); inline equivalents "
+                "and calls in unreachable helpers are not recognised."
             ),
         )
 
