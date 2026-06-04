@@ -248,6 +248,8 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `LLM_BASE_URL` | LLM server URL |
 | `LLM_MODEL` | Model name |
 | `LLM_NUM_CTX_FALLBACK_TTL_S` | TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's context size is not in `KNOWN_MODEL_CONTEXT` / `LLM_CONTEXT_SIZE` and `/api/show` fails, the client degrades to a 16384-token context but only caches it for this window before re-attempting — a transient `/api/show` outage can no longer poison the process into silently truncating large prompts for its whole lifetime. A successfully-resolved (or known/env) context size is still cached permanently. Garbage values fall back to the default; negative floors to `0` (retry on next call). |
+| `LLM_ENABLE_THINKING` | Global thinking default for all LLM calls that don't specify `think` explicitly (default enabled; set `false`/`0`/`no` to disable). When enabled, models registered in `KNOWN_MODEL_THINKING_LEVELS` (e.g. `deepseek-v4-pro:cloud`: low/medium/high) think at their **highest** level; unregistered models get boolean `think: true`. Explicit per-call `think=False` always wins. |
+| `LLM_THINKING_LEVEL` | Overrides the thinking level chosen for models with registered levels (e.g. `medium`). Values that aren't a registered level for the model fall back to the max level with a warning; ignored for models that only support boolean think. |
 | `TEMPORAL_ADDRESS` | Enables Temporal mode when set |
 | `TEMPORAL_NAMESPACE` | Temporal namespace |
 | `TEMPORAL_TASK_QUEUE` | Temporal task queue name |
