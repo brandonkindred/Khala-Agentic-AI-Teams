@@ -46,7 +46,7 @@ def test_ollama_known_default_model_skips_api_show(monkeypatch: pytest.MonkeyPat
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        assert client.get_max_context_tokens() == 262144
+        assert client.get_max_context_tokens() == 1_000_000
     mock_client_cls.assert_not_called()
 
 
@@ -365,3 +365,12 @@ def test_ollama_chat_round_returns_tool_calls_when_tools_present(
     assert isinstance(result, dict)
     assert "__tool_calls__" in result
     assert result["__tool_calls__"][0]["function"]["name"] == "do_thing"
+
+
+def test_ollama_get_max_context_tokens_deepseek_v4_pro(monkeypatch: pytest.MonkeyPatch) -> None:
+    """deepseek-v4-pro:cloud has a 1M-token context window; the registry must
+    reflect it so context-sizing scales prompts to the real budget instead of
+    a quarter of it."""
+    monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
+    client = OllamaLLMClient(model="deepseek-v4-pro:cloud")
+    assert client.get_max_context_tokens() == 1_000_000
