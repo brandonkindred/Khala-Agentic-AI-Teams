@@ -815,9 +815,12 @@ class SpecReadinessGate(GateResultsMixin):
     #      (``sizing.fraction`` × ``stop_loss.pct``) must not exceed the declared
     #      per-trade loss tolerance (``max_loss_per_trade_pct`` when set) —
     #      critical. ``max_loss_per_trade_pct`` is the most you can lose on a
-    #      trade, governed by the stop. Skipped when the tolerance is unset, the
-    #      deployed fraction is unknown (``volatility_target`` / unconfigured
-    #      ``fixed_notional``), or the spec declares no ``stop_loss`` rule.
+    #      trade, governed by the stop. Skipped when the tolerance is unset or
+    #      the deployed fraction is unknown (``volatility_target`` / unconfigured
+    #      ``fixed_notional``). When the tolerance is set and deployment is known
+    #      but there is NO ``stop_loss`` rule, the realised loss is unbounded —
+    #      a declared limit with no mechanism to honour it — so that is its own
+    #      critical (``risk_limits:loss_tolerance_no_stop``) rather than a skip.
     #   C. A prose-stated per-trade deployment % must agree with the ACTUAL
     #      deployed fraction (``sizing.fraction``) when it is known — warning
     #      (prose hygiene). The cap is an upper bound, not the deployed amount,
@@ -881,10 +884,13 @@ class SpecReadinessGate(GateResultsMixin):
         # account (e.g. 10% deployed × 5% stop = 0.5%). Critical when that
         # realised loss exceeds the tolerance. Hard limit → strict.
         #
-        # Skipped (cannot compute a realised loss) when: the tolerance is unset;
-        # the deployed fraction is unknown (volatility_target / unconfigured
-        # fixed_notional); or the spec declares no stop_loss rule (the realised
-        # loss is then unbounded and other gates own that concern).
+        # Skipped (cannot compute a realised loss) when the tolerance is unset
+        # or the deployed fraction is unknown (volatility_target / unconfigured
+        # fixed_notional). When the tolerance is set and the deployed fraction is
+        # known but the spec declares NO stop_loss rule, the realised loss is
+        # unbounded — a declared per-trade loss limit with no mechanism to honour
+        # it — so that is flagged as its own critical (see Check B-no-stop below)
+        # rather than silently passing.
         max_loss_pct = ctx.spec.risk_limits.max_loss_per_trade_pct
         stop_pcts = [r.pct for r in ctx.spec.exit_rules if isinstance(r, StopLossRule)]
         if max_loss_pct is not None and pos_fraction is not None and stop_pcts:
@@ -906,6 +912,23 @@ class SpecReadinessGate(GateResultsMixin):
                         rule_id="risk_limits:loss_tolerance",
                     )
                 )
+        elif max_loss_pct is not None and pos_fraction is not None and not stop_pcts:
+            # Check B-no-stop — a declared per-trade loss tolerance is meaningless
+            # without a stop: a position deploying ``pos_fraction`` can lose its
+            # entire deployed amount, so the spec cannot honour the limit. The
+            # exit-completeness rule only requires *some* exit, not a stop, so
+            # this is the gate that catches the unenforceable-tolerance case.
+            out.append(
+                self._critical(
+                    f"max_loss_per_trade_pct={float(max_loss_pct):.2f}% is declared but the "
+                    f"spec has no stop_loss rule — a position deploying "
+                    f"{pos_fraction * 100.0:.2f}% per trade can lose the full deployed amount, "
+                    "so the per-trade loss limit cannot be enforced. Add a stop_loss rule "
+                    "sized so sizing.fraction × stop_loss.pct "
+                    f"<={float(max_loss_pct):.2f}%, OR remove max_loss_per_trade_pct.",
+                    rule_id="risk_limits:loss_tolerance_no_stop",
+                )
+            )
 
         # Check C — prose claim vs ACTUAL deployment. "risk/deploy X% per trade"
         # denotes capital deployed, which the engine computes from the sizing

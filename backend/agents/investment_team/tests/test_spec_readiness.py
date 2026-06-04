@@ -1227,15 +1227,48 @@ def test_rule9_check_b_skipped_for_volatility_target_sizing() -> None:
     assert not any(r.rule_id == "risk_limits:loss_tolerance" for r in results if not r.passed)
 
 
-def test_rule9_check_b_skipped_when_no_stop_loss_rule() -> None:
-    """Without a stop the realised loss is unbounded and cannot be computed, so
-    Check B abstains even when sizing and a tolerance are both declared."""
+def test_rule9_check_b_no_stop_with_tolerance_is_critical() -> None:
+    """A declared per-trade loss tolerance with a known deployed fraction but NO
+    stop is unenforceable (realised loss unbounded) — flag it as critical so the
+    spec cannot pass readiness with a limit it has no mechanism to honour."""
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.50),  # default exit is signal-only
         risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    assert not any(r.rule_id == "risk_limits:loss_tolerance" for r in results if not r.passed)
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
+    ]
+    assert crit, _critical(results)
+    assert "no stop_loss rule" in crit[0] and "50.00%" in crit[0]
+
+
+def test_rule9_check_b_no_stop_without_tolerance_is_silent() -> None:
+    """No stop and no declared tolerance — there is no limit to enforce, so the
+    no-stop critical must not fire."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.50),
+        risk_limits={"max_position_pct": 50, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    )
+
+
+def test_rule9_check_b_no_stop_volatility_target_is_silent() -> None:
+    """Vol-target deployment is unknown, so even with a tolerance and no stop the
+    no-stop critical abstains (no deployed fraction to reason about)."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    )
 
 
 def test_rule9_check_a_small_overage_is_critical_not_tolerated() -> None:
