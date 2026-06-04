@@ -949,14 +949,19 @@ class SpecReadinessGate(GateResultsMixin):
                     )
                 )
             else:
-                # Every entry side is covered; worst-case realised loss uses the
-                # widest stop effective for some entry side.
-                effective_pcts = [
-                    r.pct
-                    for r in stop_rules
-                    if any(_stop_caps_side(r.basis, s) for s in entry_sides)
-                ]
-                worst_stop_pct = max(float(p) for p in effective_pcts)
+                # Each entry side is capped by the stop that fires FIRST against
+                # it. ``evaluate_exit_rules`` closes a position on the first
+                # triggered rule, and the tightest (smallest-pct) stop triggers
+                # on the earliest adverse bar — so it is the TIGHTEST effective
+                # stop per side that bounds the realised loss, not the widest. A
+                # looser catastrophic stop behind a tight one never sets the
+                # realised loss. The spec's worst per-trade loss is then the
+                # loosest of those per-side caps.
+                per_side_stop_pct = {
+                    s: min(float(r.pct) for r in stop_rules if _stop_caps_side(r.basis, s))
+                    for s in entry_sides
+                }
+                worst_stop_pct = max(per_side_stop_pct.values())
                 realised_loss_pct = pos_fraction * worst_stop_pct * 100.0
                 if realised_loss_pct > max_loss_pct * (1.0 + _HARD_LIMIT_REL_EPS):
                     out.append(

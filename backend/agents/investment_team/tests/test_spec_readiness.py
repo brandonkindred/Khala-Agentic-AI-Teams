@@ -1297,6 +1297,25 @@ def test_rule9_check_b_side_incompatible_stop_is_critical() -> None:
     assert "long" in crit[0] and "no stop_loss rule that can cap" in crit[0]
 
 
+def test_rule9_check_b_uses_tightest_stop_not_widest() -> None:
+    """When a side has multiple effective stops, the position exits on the first
+    (tightest) one, so the realised loss uses the tightest stop. A 5% entry_price
+    stop behind a 20% catastrophic stop at 10% sizing realises 0.5%, not 2%, so a
+    1% tolerance passes — using the widest stop would falsely reject it."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        exit_=[
+            StopLossRule(basis="entry_price", pct=0.05),
+            StopLossRule(basis="entry_price", pct=0.20),
+        ],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    )
+
+
 def test_rule9_check_b_side_compatible_short_stop_is_covered() -> None:
     """A short spec with a ``trailing_low`` stop IS covered (the executor fires
     trailing_low for shorts), so the realised-loss check runs and a coherent spec
