@@ -420,6 +420,70 @@ def test_pruned_day_marked_stale_without_surviving_events_is_a_no_op(canned: Can
 
 
 @pg
+def test_second_amend_excludes_already_folded_events(canned: CannedLLM) -> None:
+    # A second late event arriving before the next prune must NOT re-fold the
+    # first late event (which still lingers in the table post-amend): the amend
+    # bounds its input by the summary's fold point.
+    agent = "a"
+    day_start = _dt(2026, 5, 4, 0)
+    now = _dt(2026, 5, 10)
+    store.append_event(agent, _event(agent, _dt(2026, 5, 4), content="ORIGINAL"))
+    rollup.ensure_rollups_current(agent, now)
+    assert store.prune_events(agent, 0) == 1  # ORIGINAL pruned; events_pruned latched
+
+    # First late event → first amend (source_count 1 → 2). It is NOT pruned.
+    store.append_event(agent, _event(agent, _dt(2026, 5, 4, 12), seq=2, content="SECOND"))
+    store.mark_period_stale(agent, _dt(2026, 5, 4, 12))
+    rollup.ensure_rollups_current(agent, now)
+    assert store.get_existing_summary(agent, Scale.DAY, day_start).source_count == 2
+
+    # Second late event arrives before any prune; SECOND still sits in the table.
+    store.append_event(agent, _event(agent, _dt(2026, 5, 4, 14), seq=3, content="THIRD"))
+    store.mark_period_stale(agent, _dt(2026, 5, 4, 14))
+    canned.json_calls.clear()
+    rollup.ensure_rollups_current(agent, now)
+
+    revised = store.get_existing_summary(agent, Scale.DAY, day_start)
+    assert revised.source_count == 3  # 2 + THIRD only, NOT 4 (SECOND not re-folded)
+    amend_prompt = next(c["prompt"] for c in canned.json_calls if "BASE SUMMARY" in c["prompt"])
+    assert "THIRD" in amend_prompt and "SECOND" not in amend_prompt
+
+
+@pg
+def test_fetch_unfolded_events_bounds_by_fold_point() -> None:
+    # Direct store-level check: an event counts as unfolded only when its
+    # (real-time) recorded_at is after the summary's computed_at fold point.
+    day = (_dt(2026, 5, 4, 0), _dt(2026, 5, 5, 0))
+    snapshot = _dt(2100, 1, 1)
+
+    def _summary_row(agent: str) -> PeriodSummary:
+        return PeriodSummary(
+            id=str(uuid4()),
+            agent_id=agent,
+            scale=Scale.DAY,
+            period_start=day[0],
+            period_end=day[1],
+            created_at=_dt(2026, 5, 20),
+        )
+
+    # Folded: fold point in the future → recorded_at <= computed_at → excluded.
+    store.append_event("folded", _event("folded", _dt(2026, 5, 4), content="x"))
+    store.upsert_summary("folded", _summary_row("folded"), computed_at=_dt(2099, 1, 1))
+    assert store.fetch_unfolded_events("folded", Scale.DAY, day[0], day[1], snapshot=snapshot) == []
+
+    # Unfolded: fold point in the past → recorded_at > computed_at → returned.
+    store.append_event("unfolded", _event("unfolded", _dt(2026, 5, 4), content="x"))
+    store.upsert_summary("unfolded", _summary_row("unfolded"), computed_at=_dt(2000, 1, 1))
+    got = store.fetch_unfolded_events("unfolded", Scale.DAY, day[0], day[1], snapshot=snapshot)
+    assert len(got) == 1
+
+    # No summary → fold point is -infinity (COALESCE), so every event qualifies.
+    store.append_event("nosummary", _event("nosummary", _dt(2026, 5, 4), content="x"))
+    got2 = store.fetch_unfolded_events("nosummary", Scale.DAY, day[0], day[1], snapshot=snapshot)
+    assert len(got2) == 1
+
+
+@pg
 def test_hierarchical_day_week_month_year(
     canned: CannedLLM, monkeypatch: pytest.MonkeyPatch
 ) -> None:

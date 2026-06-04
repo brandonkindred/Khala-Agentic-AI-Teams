@@ -172,6 +172,54 @@ def fetch_recent_events(agent_id: str, top_n: int, by_salience: bool = True) -> 
         return [MemoryEvent.model_validate(row) for row in cur.fetchall()]
 
 
+@timed_query(store=_STORE, op="fetch_unfolded_events")
+def fetch_unfolded_events(
+    agent_id: str,
+    scale: Scale,
+    period_start: datetime,
+    period_end: datetime,
+    *,
+    snapshot: datetime,
+) -> list[MemoryEvent]:
+    """Return events in ``[start, end)`` not yet folded into the period summary.
+
+    For the incremental-amend path on a pruned period: an event is *unfolded*
+    when it arrived (``recorded_at``) **after** the matching summary's last
+    ``computed_at`` fold point and at or before ``snapshot``. This is the exact
+    complement of :func:`prune_events`' folded set (``recorded_at <=
+    computed_at``), so an event already amended in on a previous pass — but not
+    yet pruned — is never re-folded, which would otherwise double-count
+    ``source_count`` and duplicate digest content.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; the window is half-open; ``snapshot`` is
+          the rollup's read-time.
+    Postconditions:
+        * Ordered by ``(occurred_at, id)`` ascending; only this agent's events
+          with ``period_start <= occurred_at < period_end`` and ``fold_point <
+          recorded_at <= snapshot``, where ``fold_point`` is the matching
+          summary's ``computed_at`` (treated as ``-infinity`` when the summary
+          is absent or never computed, so every event qualifies).
+    """
+    assert agent_id, "fetch_unfolded_events: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""SELECT {_EVENT_COLS}
+                FROM agent_cognition_events e
+                WHERE e.agent_id = %s
+                  AND e.occurred_at >= %s AND e.occurred_at < %s
+                  AND e.recorded_at <= %s
+                  AND e.recorded_at > COALESCE(
+                      (SELECT s.computed_at FROM agent_cognition_summaries s
+                       WHERE s.agent_id = e.agent_id AND s.scale = %s
+                         AND s.period_start = %s),
+                      '-infinity'::timestamptz)
+                ORDER BY e.occurred_at ASC, e.id ASC""",
+            (agent_id, period_start, period_end, snapshot, scale.value, period_start),
+        )
+        return [MemoryEvent.model_validate(row) for row in cur.fetchall()]
+
+
 # ---------------------------------------------------------------------------
 # Rollup summaries
 # ---------------------------------------------------------------------------

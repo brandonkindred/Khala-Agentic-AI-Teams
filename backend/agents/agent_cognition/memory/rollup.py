@@ -307,9 +307,13 @@ def _rollup_one_period(
     # the amend path is day-scale only; aggregates always recompute (regime a)
     # from their retained child summaries.
     if existing is not None and existing.events_pruned:
-        # Everything still physically present on a pruned day is, by the
-        # pruner's contract, exactly the not-yet-folded late arrivals.
-        late = store.fetch_events_for_period(agent_id, period_start, period_end, snapshot=snapshot)
+        # Fold only events that arrived after this summary's last fold point.
+        # Events amended in on a previous pass linger in the table until the
+        # next prune, so reading the whole window would re-fold them and
+        # double-count; ``fetch_unfolded_events`` bounds by ``computed_at``.
+        late = store.fetch_unfolded_events(
+            agent_id, scale, period_start, period_end, snapshot=snapshot
+        )
         if not late:
             return
         revised = revise_summary(existing, late, llm=llm, snapshot=snapshot)
