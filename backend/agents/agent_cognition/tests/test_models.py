@@ -109,6 +109,7 @@ def test_period_summary_round_trip_and_defaults() -> None:
     )
     assert s.version == 1
     assert s.stale is False
+    assert s.events_pruned is False
     assert s.source_count == 0
     assert s.covers_through is None
     assert s.highlights == []
